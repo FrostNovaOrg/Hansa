@@ -2002,6 +2002,11 @@ class UpTest(unittest.TestCase):
             "XDG_STATE_HOME": str(self.tmp / "state")}, clear=True)
         env.start()
         self.addCleanup(env.stop)
+        # nor the Claude Code session the tests may run in, which hansa took out as it was imported: hansa serve
+        # would say it was started inside one
+        session = unittest.mock.patch.dict(hansa.SESSION, clear=True)
+        session.start()
+        self.addCleanup(session.stop)
         self.desk = Desk(self.tmp / "desk with spaces")
         self.desk.root.mkdir()
         self.desk.tasks_dir.mkdir()
@@ -2011,6 +2016,11 @@ class UpTest(unittest.TestCase):
         self.options = types.SimpleNamespace(host="127.0.0.2", port=9123, every=1.25)
         self.gone = {"state": "gone", "pid": None, "answers": False}
         self.running = {"state": "up", "pid": 123, "answers": True}
+        if type(self) is UpTest:  # the server's part alone: the coordinator's has tests of its own
+            from hansa import up
+            coordinator = unittest.mock.patch.object(up, "coordinator_up", return_value=True)
+            coordinator.start()
+            self.addCleanup(coordinator.stop)
 
     @contextlib.contextmanager
     def outside_desk(self):
@@ -2565,6 +2575,375 @@ class UpTest(unittest.TestCase):
         self.assertIn("hansa up", event[1])
         items, _, _ = notify.server_news({"server": self.gone}, [], True, 0, 0)
         self.assertIn("hansa up", items[0]["line"])
+
+
+class CoordinatorUpTest(unittest.TestCase):
+    """How the coordinator's session is recorded (hansa notify on, notify-launch) and started again (hansa up),
+    with the process readers, tmux and exec faked: the tests run with neither tmux nor claude."""
+    setUp, say = UpTest.setUp, UpTest.say  # UpTest's desk and environment, the coordinator's part not faked
+
+    SESS = {"pid": 4242, "start": "boot:77"}
+    KEY = "sk-desk-secret-123456"
+    IDENTITY = "session-identity-0123456789"
+
+    def own_folder(self):
+        folder = self.tmp / "own folder"
+        folder.mkdir(exist_ok=True)
+        return folder
+
+    def notify_on(self, argv, folder=None, sess=None, **env):
+        """hansa notify on from a session (SESS unless given) whose claude ran with argv in folder: what it printed,
+        what it recorded, and whether it read the session's process."""
+        folder = str(self.own_folder()) if folder is None else folder
+        os.environ.update(env)
+        from hansa import up
+        with unittest.mock.patch.object(notify, "turn_on", return_value="hansa now posts to this session"), \
+                unittest.mock.patch.object(notify, "session_here", return_value=dict(sess or self.SESS)), \
+                unittest.mock.patch.object(up, "proc_args", return_value=argv) as args, \
+                unittest.mock.patch.object(up, "proc_cwd", return_value=folder), \
+                unittest.mock.patch.object(up, "record_tmux", return_value={"server": ["-L", "default"],
+                                                                            "session": "work"}):
+            said = self.say("notify", "on")
+        return said, up.read_coordinator(self.desk), args
+
+    def test_notify_on_records_the_sessions_exact_start_without_its_conversation_or_identity(self):
+        argv = ["claude", "--continue", "--name", "desk b", "--model", "opus[1m]", "--effort", "max",
+                "--permission-mode", "auto", "--session-id", "u-1", "--messaging-socket-path", "/run/x.sock",
+                "-r", "abc", "--fork-session", "--append-system-prompt", ""]
+        said, rec, args = self.notify_on(argv, PATH="/saved/bin:/usr/bin", LANG="C", HANSA_CLAUDE="/opt/claude",
+                                         ANTHROPIC_API_KEY="caller-key", CLAUDE_CODE_SESSION_ID=self.IDENTITY,
+                                         UNRELATED="omit")
+        args.assert_called_once_with(4242)
+        self.assertEqual(rec["kind"], "notify")
+        self.assertEqual(rec["argv"], ["claude", "--name", "desk b", "--model", "opus[1m]", "--effort", "max",
+                                       "--permission-mode", "auto", "--append-system-prompt", ""])
+        self.assertEqual(rec["folder"], str(self.own_folder()))
+        self.assertEqual(rec["tmux"], {"server": ["-L", "default"], "session": "work"})
+        self.assertEqual(rec["env"], {"PATH": "/saved/bin:/usr/bin", "LANG": "C", "HANSA_CLAUDE": "/opt/claude",
+                                      "XDG_STATE_HOME": str(self.tmp / "state")})
+        self.assertEqual(rec["session"], self.SESS)
+        from hansa import up
+        self.assertEqual(rec["hansa"], up.hansa_command())
+        text = (self.desk.state_dir / "coordinator-start.json").read_text()
+        for secret in ("caller-key", self.IDENTITY, "u-1", "abc", "x.sock"):
+            self.assertNotIn(secret, text)
+        lines = said.splitlines()
+        self.assertEqual(lines[0], "hansa now posts to this session")
+        self.assertEqual(lines[1], f"After a restart, hansa up starts this session again in {self.own_folder()} with "
+                         + shlex.join([*rec["argv"], "--continue"]) + ".")
+
+    def test_notify_on_records_nothing_for_a_key_the_identity_or_what_it_cannot_read(self):
+        (self.desk.secrets_dir / "provider.key").write_text(self.KEY)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = self.IDENTITY
+        cases = {"one of the desk's keys": (["claude", "--append-system-prompt", "use " + self.KEY], None),
+                 "the session's identity": (["claude", "--settings", '{"id": "%s"}' % self.IDENTITY], None),
+                 "arguments of its claude process cannot be read": (None, None),
+                 "folder of its claude process cannot be read": (["claude"], "")}
+        for why, (argv, folder) in cases.items():
+            with self.subTest(why=why):
+                said, rec, _ = self.notify_on(argv, folder)
+                self.assertIn("hansa up will not start this session again after a restart", said)
+                self.assertIn(why, said)
+                self.assertIn("nothing was recorded", said)
+                self.assertEqual(rec["kind"], "unrecorded")  # no older command is started instead
+                self.assertIn(why, rec["why"])
+                self.assertEqual(set(rec), {"kind", "why", "session", "at"})
+                self.assertNotIn(self.KEY, (self.desk.state_dir / "coordinator-start.json").read_text())
+        # a session already recorded keeps its record when it cannot be read now
+        self.notify_on(["claude", "--name", "n"])
+        said, rec, _ = self.notify_on(None)
+        self.assertEqual(rec["argv"], ["claude", "--name", "n"])
+        self.assertIn("nothing new was recorded", said)
+        self.assertIn("After a restart, hansa up starts this session again", said)
+        # a session hansa coordinator started keeps that record: notify on reads nothing
+        from hansa import up
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "coordinator", "words": ["--model", "opus"], "session": self.SESS})
+        said, rec, args = self.notify_on(["claude", "--other"], HANSA_ROLE="coordinator")
+        args.assert_not_called()
+        self.assertEqual(rec["kind"], "coordinator")
+        self.assertIn(shlex.join([up.hansa_command(), "--desk", str(self.desk.root), "coordinator", "--model", "opus",
+                                  "--continue"]), said)
+
+    def test_the_words_continue_replaces_refuse_nothing_though_they_hold_the_sessions_identity(self):
+        from hansa import up
+        for words in (["--resume", self.IDENTITY], ["-r", self.IDENTITY], ["--resume=" + self.IDENTITY],
+                      ["--session-id", self.IDENTITY]):
+            with self.subTest(words=words):
+                said, rec, _ = self.notify_on(["claude", *words, "--name", "n"], CLAUDE_CODE_SESSION_ID=self.IDENTITY)
+                self.assertNotIn("will not start", said)
+                self.assertEqual((rec["kind"], rec["argv"]), ("notify", ["claude", "--name", "n"]))
+                self.assertNotIn(self.IDENTITY, (self.desk.state_dir / "coordinator-start.json").read_text())
+                self.assertIn("After a restart, hansa up starts this session again", said)
+        # hansa coordinator's record too; a word that is kept still refuses it
+        with unittest.mock.patch.object(up, "record_tmux", return_value={}):
+            self.assertEqual(up.record_coordinator(self.desk, "", ["--session-id", self.IDENTITY, "--model", "o"]), "")
+            self.assertEqual(up.read_coordinator(self.desk)["words"], ["--model", "o"])
+            self.assertIn("the session's identity",
+                          up.record_coordinator(self.desk, "", ["--resume", self.IDENTITY, "--name", self.IDENTITY]))
+        self.assertEqual(up.read_coordinator(self.desk)["kind"], "unrecorded")
+
+    def test_a_session_the_launcher_started_keeps_its_record_when_it_runs_notify_on(self):
+        """Recorded, started again by hansa up through the launcher, hansa notify on in that session (whose words
+        and environment carry the inbox the launcher gave it), and hansa up after a restart: the same start."""
+        from hansa import up
+        folder = str(self.own_folder())
+        self.notify_on(["claude", "--name", "desk b", "--continue"])
+        _, calls, _ = self.coordinator_up()
+        pane = self.pane_words(calls[1])
+        launched = pane[pane.index("notify-launch") + 1:]
+        self.assertEqual(launched, ["claude", "--name", "desk b", "--continue"])
+        started, sock = {}, str(self.tmp / "hansa-501" / "c4242.sock")
+        with unittest.mock.patch.object(notify, "socket_path", return_value=sock), \
+                unittest.mock.patch.object(notify, "start", return_value="started"), \
+                unittest.mock.patch.object(up, "record_tmux", return_value={}), \
+                unittest.mock.patch("os.execvpe", lambda prog, argv, env: started.update(argv=argv)):
+            self.say("notify-launch", *launched)
+        self.assertIn(sock, started["argv"])
+        me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}  # the launcher's process: claude's
+        said, rec, _ = self.notify_on(started["argv"], folder, me, CLAUDE_CODE_MESSAGING_SOCKET=sock,
+                                      CLAUDE_CODE_SESSION_ID=self.IDENTITY)
+        self.assertNotIn("will not start", said)
+        self.assertEqual((rec["kind"], rec["argv"], rec["folder"], rec["session"]),
+                         ("notify", ["claude", "--name", "desk b"], folder, me))
+        self.assertNotIn(sock, (self.desk.state_dir / "coordinator-start.json").read_text())
+        with unittest.mock.patch.object(up, "alive", return_value=False):  # after a restart: that process is gone
+            said, calls, ok = self.coordinator_up()
+        self.assertTrue(ok, said)
+        self.assertEqual(self.pane_words(calls[1]), pane)
+        self.assertEqual(calls[1].args[0][calls[1].args[0].index("-c") + 1], folder)
+
+    def test_a_processs_exact_words_and_folder_are_read(self):
+        from hansa import run
+        if not (os.path.isdir("/proc/self") or sys.platform == "darwin"):
+            self.skipTest("neither /proc nor macOS: hansa has no reader of a process's arguments here")
+        folder = self.own_folder()
+        words = ["--model", "opus[1m]", "", "a b"]
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()", *words], cwd=folder,
+                                 stdin=subprocess.PIPE)
+        self.addCleanup(child.wait, 10)
+        self.addCleanup(child.stdin.close)
+        end, seen = time.monotonic() + 30, None
+        while time.monotonic() < end and (seen is None or seen[-4:] != words):  # until its exec is done
+            seen = run.proc_args(child.pid)
+            time.sleep(0.05)
+        self.assertIsNotNone(seen, "the reader of a process's arguments read none")
+        self.assertEqual(seen[-4:], words)
+        self.assertTrue(os.path.samefile(run.proc_cwd(child.pid), folder))
+
+    def test_words_that_pick_a_conversation_are_replaced_by_continue_and_print_is_no_session(self):
+        from hansa import up
+        cases = [(["-c", "--model", "x"], ["--model", "x", "--continue"]),
+                 (["--resume", "abc", "--name", "n"], ["--name", "n", "--continue"]),
+                 (["-r", "--name", "n"], ["--name", "n", "--continue"]),  # --resume's value may be left out
+                 (["--resume=abc", "--continue"], ["--continue"]),
+                 (["--session-id", "-u-", "--fork-session", "--messaging-socket-path", "/s", "-v"], ["-v", "--continue"]),
+                 (["--name", "n", "--", "-c"], ["--name", "n", "--continue", "--", "-c"]),  # after --: claude's text
+                 ([], ["--continue"])]
+        for words, again in cases:
+            with self.subTest(words=words):
+                self.assertEqual(up.resumed(words), again)
+        self.assertTrue(up.prints(["--model", "x", "-p"]))
+        self.assertTrue(up.prints(["--print", "hello"]))
+        self.assertFalse(up.prints(["--", "-p"]))
+        self.assertFalse(up.prints(["--name", "n"]))
+
+    def coordinator_up(self, rec=None, tmux="/tools/tmux", answers=(1, "%5\n", "0\n"), hearing=()):
+        """hansa up's coordinator part with this record: what it said, the tmux calls it made, and its answer."""
+        from hansa import up
+        if rec is not None:
+            write_json(self.desk.state_dir / "coordinator-start.json", rec)
+        replies = [a if isinstance(a, subprocess.CompletedProcess) else subprocess.CompletedProcess([], a, "", "")
+                   if isinstance(a, int) else subprocess.CompletedProcess([], 0, a, "") for a in answers]
+        if answers[2:] and answers[2] == "ended":
+            replies[2] = subprocess.CompletedProcess([], 1, "", "can't find pane: %5")
+        with unittest.mock.patch.object(up, "program", return_value=tmux), \
+                unittest.mock.patch.object(up, "COORDINATOR_WAIT", 0), \
+                unittest.mock.patch.object(notify, "names", return_value=list(hearing)), \
+                unittest.mock.patch.object(up.subprocess, "run", side_effect=replies) as ran, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            ok = up.coordinator_up(self.desk)
+        return out.getvalue(), ran.call_args_list, ok
+
+    @staticmethod
+    def pane_words(call) -> list:
+        """The command a new pane runs, after the clean environment it is given."""
+        pane = shlex.split(call.args[0][-1])
+        return pane[pane.index("COLORTERM=${COLORTERM-}") + 1:]
+
+    def test_up_starts_nothing_while_a_session_hears_or_the_recorded_one_still_runs(self):
+        said, calls, ok = self.coordinator_up({"kind": "notify", "argv": ["claude"], "folder": str(self.tmp)},
+                                              hearing=["pid 42 (desk-b)"])
+        self.assertEqual((calls, ok), ([], True))
+        self.assertIn("hansa posts to pid 42 (desk-b); nothing started", said)
+        here = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
+        for kind in ("notify", "coordinator", "unrecorded"):
+            with self.subTest(kind=kind):
+                said, calls, ok = self.coordinator_up({"kind": kind, "argv": ["claude"], "folder": str(self.tmp),
+                                                       "session": here})
+                self.assertEqual((calls, ok), ([], True))
+                self.assertIn(f"pid {os.getpid()} still runs", said)
+                self.assertIn("hansa notify on", said)
+
+    def test_up_starts_a_hansa_coordinator_record_again_in_its_tmux_with_continue(self):
+        from hansa import up
+        rec = {"kind": "coordinator", "hansa": "/opt/old hansa/bin/hansa", "clear_daily": "04-09",
+               "words": ["--model", "opus", "--resume", "abc"], "folder": str(self.desk.root),
+               "tmux": {"server": ["-L", "work"], "session": "main"},
+               "env": {"PATH": "/saved/bin:/bin", "LANG": "C", "ANTHROPIC_API_KEY": "stale-key"},
+               # the same pid, started at another time: a later process, not the session
+               "session": {"pid": os.getpid(), "start": "another-start"}}
+        os.environ.update(UNRELATED="caller", HANSA_CLAUDE="/caller/claude")
+        said, calls, ok = self.coordinator_up(rec, answers=(0, "%5\n", "0\n"))
+        self.assertTrue(ok)
+        check, create, look = calls
+        self.assertEqual(check.args[0], ["/tools/tmux", "-L", "work", "has-session", "-t", "=main"])
+        argv = create.args[0]
+        self.assertEqual(argv[:8], ["/tools/tmux", "-L", "work", "new-window", "-d", "-t", "=main", "-n"])
+        self.assertEqual(argv[argv.index("-c") + 1], str(self.desk.root))
+        self.assertEqual(self.pane_words(create), ["/opt/old hansa/bin/hansa", "--desk", str(self.desk.root),
+                                                   "coordinator", "--clear-daily", "04-09", "--model", "opus",
+                                                   "--continue"])
+        account_name = pwd.getpwuid(os.getuid()).pw_name
+        self.assertEqual(create.kwargs["env"], {"HOME": str(self.tmp), "USER": account_name, "LOGNAME": account_name,
+                                                "SHELL": "/bin/sh", "TERM": "dumb", "PATH": "/saved/bin:/bin",
+                                                "LANG": "C"})
+        self.assertEqual(look.args[0], ["/tools/tmux", "-L", "work", "display-message", "-p", "-t", "%5",
+                                        "#{pane_dead}"])
+        self.assertIn("coordinator started in tmux", said)
+        self.assertIn("attach: /tools/tmux -L work attach -t main", said)
+        self.assertEqual(up.attach_command("/tools/tmux", ["-L", "default"], "main", {}),
+                         "/tools/tmux attach -t main")  # tmux's default server
+
+    def test_up_starts_a_notify_on_record_through_the_launcher_in_its_folder(self):
+        folder = self.own_folder()
+        rec = {"kind": "notify", "hansa": "/saved/bin/hansa", "argv": ["claude", "--resume", "abc", "--name", "desk b"],
+               "folder": str(folder), "tmux": {}, "env": {"PATH": "/saved/bin:/bin"}, "session": {"pid": 0}}
+        said, calls, ok = self.coordinator_up(rec)
+        self.assertTrue(ok)
+        check, create, _ = calls
+        # none recorded: the desk's tmux server from hansa up, and a session of its own
+        self.assertEqual(check.args[0], ["/tools/tmux", "-L", "hansa-desk-with-spaces", "has-session", "-t",
+                                         "=coordinator"])
+        self.assertEqual(create.args[0][:7], ["/tools/tmux", "-L", "hansa-desk-with-spaces", "new-session", "-d",
+                                              "-s", "coordinator"])
+        self.assertEqual(create.args[0][create.args[0].index("-c") + 1], str(folder))
+        self.assertEqual(self.pane_words(create), ["/saved/bin/hansa", "--desk", str(self.desk.root), "notify-launch",
+                                                   "claude", "--name", "desk b", "--continue"])
+        self.assertIn("-L hansa-desk-with-spaces attach -t coordinator", said)
+        # the pane ended: the start failed, and the command to run by hand
+        said, _, ok = self.coordinator_up(answers=(1, "%5\n", "ended"))
+        self.assertFalse(ok)
+        self.assertIn("coordinator failed to start", said)
+        self.assertIn(shlex.join(["cd", str(folder)]) + " && claude --name 'desk b' --continue, then hansa notify on",
+                      said)
+        # tmux could not make its server's socket: it exits 0, and starts no pane
+        refused = subprocess.CompletedProcess([], 0, "", "error creating /tmp/tmux-1/x (Operation not permitted)\n")
+        said, calls, ok = self.coordinator_up(answers=(1, refused))
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("coordinator failed to start: error creating /tmp/tmux-1/x (Operation not permitted). Run it "
+                      "by hand: ", said)
+
+    def test_up_refuses_a_print_record_and_without_tmux_prints_the_command(self):
+        said, calls, ok = self.coordinator_up({"kind": "notify", "argv": ["claude", "-p", "hello"],
+                                               "folder": str(self.tmp)})
+        self.assertEqual((calls, ok), ([], False))
+        self.assertIn("--print, which is not an interactive session; nothing started", said)
+        said, calls, ok = self.coordinator_up({"kind": "coordinator", "words": ["--model", "opus"]}, tmux="")
+        self.assertEqual(calls, [])
+        self.assertIn("nothing started", said)
+        self.assertIn("In a terminal of your own: " + shlex.join(["cd", str(self.desk.root)]) + " && ", said)
+        self.assertIn("coordinator --model opus --continue", said)
+
+    def test_up_without_a_record_starts_hansa_coordinator_and_says_to_answer_the_trust_question(self):
+        from hansa import up
+        os.environ["HANSA_CLAUDE"] = "/initial/claude"
+        said, calls, ok = self.coordinator_up()
+        self.assertTrue(ok)
+        _, create, _ = calls
+        self.assertEqual(self.pane_words(create), [up.hansa_command(), "--desk", str(self.desk.root), "coordinator"])
+        self.assertEqual(create.kwargs["env"]["HANSA_CLAUDE"], "/initial/claude")
+        self.assertIn("No recorded coordinator start", said)
+        self.assertIn("trust", said)
+        self.assertIn("attach and answer", said)
+        # with tmux or without, a desk that had a coordinator before starts were recorded starts nothing
+        for had in ("a task", "a follower"):
+            with self.subTest(had=had):
+                made = self.desk.tasks_dir / "t0001" if had == "a task" else \
+                    notify.register_dir(self.desk) / ("a" * 16 + ".json")
+                made.parent.mkdir(parents=True, exist_ok=True)
+                made.mkdir() if had == "a task" else made.write_text("{}")
+                for tmux in ("/tools/tmux", ""):
+                    said, calls, ok = self.coordinator_up(tmux=tmux)
+                    self.assertEqual((calls, ok), ([], False))
+                    self.assertIn("not recorded yet", said)
+                    self.assertIn("nothing started", said)
+                    self.assertIn("hansa notify on in it", said)
+                    self.assertIn("start it with hansa coordinator", said)
+                    self.assertNotIn("trust", said)
+                shutil.rmtree(made) if had == "a task" else made.unlink()
+        # a record that says why the last start was not recorded starts nothing, and says why
+        said, calls, ok = self.coordinator_up({"kind": "unrecorded", "why": "a word of its command holds one of the "
+                                               "desk's keys", "session": {"pid": 0}})
+        self.assertEqual((calls, ok), ([], False))
+        self.assertIn("not recorded (a word of its command holds one of the desk's keys); nothing started", said)
+
+    def test_up_runs_the_server_then_the_coordinator_and_neither_on_another_accounts_desk(self):
+        from hansa import up
+        with unittest.mock.patch.object(up, "server_up", return_value=False) as server, \
+                unittest.mock.patch.object(up, "coordinator_up", return_value=True) as coordinator, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(up.desk_up(self.desk))
+            with unittest.mock.patch.object(account, "desk_account", return_value="desk-owner"):
+                self.assertFalse(up.desk_up(self.desk))
+        server.assert_called_once_with(self.desk)
+        coordinator.assert_called_once_with(self.desk)
+
+    def test_the_launcher_starts_the_follower_records_and_execs_claude_with_the_inbox(self):
+        from hansa import up
+        started, ran = {}, []
+        sock = str(self.tmp / "c.sock")
+        with unittest.mock.patch.object(notify, "socket_path", return_value=sock), \
+                unittest.mock.patch.object(notify, "start", lambda desk, sess, s, **k: ran.append((sess, s, k))), \
+                unittest.mock.patch.object(up, "record_tmux", return_value={"server": ["-L", "x"], "session": "s"}), \
+                unittest.mock.patch("os.execvpe", lambda prog, argv, env: started.update(prog=prog, argv=argv)):
+            self.say("notify-launch", "claude", "--name", "desk b", "--continue")
+        me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
+        self.assertEqual(ran, [(me, sock, {"wait": False})])
+        self.assertEqual(started, {"prog": "claude", "argv": ["claude", "--messaging-socket-path", sock, "--name",
+                                                              "desk b", "--continue"]})
+        rec = up.read_coordinator(self.desk)
+        self.assertEqual((rec["kind"], rec["argv"], rec["folder"], rec["session"]),
+                         ("notify", ["claude", "--name", "desk b"], os.getcwd(), me))
+        self.assertNotIn("notify-launch", self.say("help"))  # not listed
+
+    def test_the_status_line_says_how_hansa_up_starts_the_session_again_or_why_not(self):
+        from hansa import up
+        folder = self.own_folder()
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "notify", "argv": ["claude", "--name", "n"], "folder": str(folder), "session": {"pid": 0}})
+        line = up.coordinator_line(self.desk)
+        self.assertIn("hansa up starts the coordinator's session again", line)
+        self.assertIn(f"in {folder} with claude --name n --continue", line)
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "notify", "argv": ["claude", "-p"], "folder": str(folder), "session": {"pid": 0}})
+        self.assertIn("--print", up.coordinator_line(self.desk))
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "notify", "argv": ["claude"], "folder": str(self.tmp / "gone"), "session": {"pid": 0}})
+        self.assertEqual(up.coordinator_line(self.desk),
+                         f"hansa up starts no coordinator's session: its folder {self.tmp / 'gone'} is not there")
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "notify", "argv": ["claude"], "folder": str(folder),
+                    "session": {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}})
+        self.assertIn("still runs", up.coordinator_line(self.desk))
+        (self.desk.state_dir / "coordinator-start.json").unlink()
+        self.assertEqual(up.coordinator_line(self.desk), "")  # a new desk: hansa up starts a first one
+        (self.desk.tasks_dir / "t0001").mkdir()
+        line = up.coordinator_line(self.desk)
+        self.assertIn("hansa up starts no coordinator's session", line)
+        self.assertIn("not recorded yet", line)
+        self.assertIn("hansa notify on in it", line)
 
 
 class DeskTest(unittest.TestCase):
@@ -14405,6 +14784,48 @@ class DeskTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as e:
             main(["--desk", str(self.desk.root), "coordinator", "--clear-daily", "9am"])
         self.assertIn("such as 04-09", str(e.exception.code))
+
+    def test_coordinator_records_its_start_for_hansa_up_without_a_key_or_its_conversation(self):
+        from hansa import up
+        tmux = {"server": ["-L", "work"], "session": "main"}
+        with unittest.mock.patch.object(up, "record_tmux", return_value=tmux):
+            argv, _, said = self.start_with_mod("--clear-daily", "04-09", "--model", "opus", "-c", "--resume", "abc",
+                                                "--name", "desk b", env={"ANTHROPIC_API_KEY": "caller-key",
+                                                                         "LANG": "C"})
+        rec = up.read_coordinator(self.desk)
+        self.assertEqual(rec["kind"], "coordinator")
+        self.assertEqual(rec["clear_daily"], "04-09")
+        self.assertEqual(rec["words"], ["--model", "opus", "--name", "desk b"])
+        self.assertEqual(rec["folder"], str(self.desk.root))
+        self.assertEqual(rec["tmux"], tmux)
+        self.assertEqual(rec["hansa"], up.hansa_command())
+        self.assertEqual(rec["session"], {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())})
+        self.assertEqual(rec["env"]["LANG"], "C")
+        self.assertTrue(set(rec["env"]) <= {*up.START_ENV} | {k for k in rec["env"] if k.startswith("LC_")})
+        self.assertNotIn("caller-key", json.dumps(rec))
+        self.assertNotIn("hansa up will not start", said)
+        self.assertIn("--resume", argv)  # claude itself gets the words as given
+        # a word holding a key: nothing recorded, and the start says so
+        key = "sk-desk-secret-123456"
+        (self.desk.secrets_dir / "claude.key").write_text(key)
+        _, _, said = self.start_with_mod("--append-system-prompt", key)
+        self.assertIn("hansa up will not start this session again after a restart: a word of its command holds one "
+                      "of the desk's keys; nothing was recorded", said)
+        self.assertEqual(up.read_coordinator(self.desk)["kind"], "unrecorded")
+        self.assertNotIn(key, (self.desk.state_dir / "coordinator-start.json").read_text())
+
+    def test_status_says_how_hansa_up_starts_the_coordinators_session_while_none_hears(self):
+        folder = self.tmp / "own folder"
+        folder.mkdir()
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "notify", "argv": ["claude", "--name", "n"], "folder": str(folder), "session": {"pid": 0}})
+        line = f"hansa up starts the coordinator's session again, in tmux, in {folder} with claude --name n --continue"
+        self.assertIn("hansa posts to no session (hansa notify on, from the coordinator's session)\n" + line + "\n",
+                      self.hansa_out("status"))
+        with unittest.mock.patch.object(notify, "names", return_value=["pid 1 (desk-b)"]):
+            said = self.hansa_out("status")
+        self.assertIn("hansa posts to: pid 1 (desk-b)", said)
+        self.assertNotIn("hansa up starts the coordinator's session", said)
 
     # -- the coordinator's mod (hansa/plugin.py, hansa/mod/) ------------------------------------------------------
 

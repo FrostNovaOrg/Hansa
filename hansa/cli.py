@@ -71,7 +71,8 @@ TOPICS = {
     "states": ("tasks.md", "Task states", "a task's states and what each means"),
     "inbox": ("desk.md", "Hearing from hansa", "how hansa posts to the coordinator's session, hansa wait, and the "
               "daily clear"),
-    "bringing-up": ("desk.md", "Starting the server again", "hansa up, the saved server start and this account's desk list"),
+    "bringing-up": ("desk.md", "Starting the server and the coordinator again", "hansa up, the saved starts of the "
+                    "server and the coordinator's session, and this account's desk list"),
     "free-space": ("desk.md", "Free space", "the floor of free space under which hansa serve starts nothing new"),
     "desk-files": ("desk.md", "A desk's files", "where a desk's files are (keys, settings, notes/, PROJECT.md) and "
                    "where they grow"),
@@ -1231,8 +1232,28 @@ def cmd_release(a):
 
 def cmd_notify(a):
     desk = Desk.find(a.desk)
-    print(notify.turn_on(desk) if a.action == "on" else notify.turn_off(desk)
-          if a.action == "off" else notify.list_text(desk))
+    if a.action == "on":  # and how hansa up starts this session again after a restart
+        print("\n".join(x for x in (notify.turn_on(desk), up.notify_on_line(desk)) if x))
+        return
+    print(notify.turn_off(desk) if a.action == "off" else notify.list_text(desk))
+
+
+def cmd_notify_launch(a):
+    """hansa up's start of a session hansa notify on recorded: the follower for this process, which becomes the
+    session as it execs claude (as hansa coordinator does), the start recorded again, then claude with the inbox
+    the follower posts to, so the session hears from hansa without hansa notify on."""
+    desk = Desk.find(a.desk)
+    if not a.rest:
+        raise SystemExit("hansa: notify-launch starts claude's command given after it; none was given")
+    unrecorded = up.record_session(desk, {"pid": os.getpid(), "start": proc_start(os.getpid())}, a.rest, os.getcwd())
+    if unrecorded:
+        print(f"hansa: hansa up will not start this session again after a restart: {unrecorded}; nothing was "
+              "recorded", file=sys.stderr)
+    argv = [a.rest[0], *_notified(desk, a.rest), *a.rest[1:]]
+    try:
+        os.execvpe(argv[0], argv, os.environ)
+    except OSError as e:
+        raise SystemExit(f"hansa: {argv[0]} did not start: {e}")
 
 
 def cmd_notify_follow(a):
@@ -1518,6 +1539,12 @@ def cmd_coordinator(a):
     unrecorded = _record_roots_mod(theirs, desk, rec) if theirs else plugin.record(desk, rec)
     if unrecorded:
         print(f"hansa: {unrecorded}", file=sys.stderr)
+    # how hansa up starts this session again; root on the account's desk writes nothing there, and hansa up runs
+    # as the account
+    unrecorded = "" if theirs else up.record_coordinator(desk, clear, rest)
+    if unrecorded:
+        print(f"hansa: hansa up will not start this session again after a restart: {unrecorded}; nothing was "
+              "recorded", file=sys.stderr)
     os.chdir(desk.root)
     os.execvpe(argv[0], argv + rest, env)
 
@@ -2647,9 +2674,9 @@ def cmd_help(a):
 
 
 def _split_claude_args(argv: list):
-    """Everything after `coordinator` belongs to claude, even when it looks like an option."""
+    """Everything after `coordinator` (or hansa up's launcher) belongs to claude, even when it looks like an option."""
     for i, x in enumerate(argv):
-        if x == "coordinator":
+        if x in ("coordinator", up.LAUNCHER):
             return argv[:i + 1], argv[i + 1:]
         if not x.startswith("-") and (i == 0 or argv[i - 1] != "--desk"):
             break
@@ -3103,7 +3130,8 @@ def main(argv=None):
     p.epilog = see_more("cost-figures")
     p = add("ping", cmd_ping, "send one tiny request through a provider (or all)")
     p.add_argument("provider", nargs="?")
-    p = add("up", cmd_up, "start this desk's server again as it last ran; outside a desk, start this account's desks")
+    p = add("up", cmd_up, "start this desk's server and the coordinator's session again as they last ran; outside "
+            "a desk, start this account's desks")
     p.epilog = see_more("bringing-up")
     p = add("serve", cmd_serve, "run the dispatcher and the web page in the foreground (what hansa up starts)")
     p.add_argument("--host", default=up.DEFAULTS["host"])
@@ -3148,6 +3176,8 @@ def main(argv=None):
     p.add_argument("--name", default="")
     p = sub.add_parser("notify-feed")  # hidden: a follower's request to the desk, as the desk's owner
     p.set_defaults(fn=cmd_notify_feed)
+    p = sub.add_parser(up.LAUNCHER)  # hidden: hansa up's start of a session hansa notify on recorded; claude's after it
+    p.set_defaults(fn=cmd_notify_launch)
 
     argv, rest = _split_claude_args(sys.argv[1:] if argv is None else list(argv))
     a, extra = ap.parse_known_args(argv)

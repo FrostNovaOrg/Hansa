@@ -209,9 +209,10 @@ check or release ended or failed, the principal answered, the server stopped or 
 went under the floor. Each message starts with `[hansa]` and the desk, one line per event with the
 next command. When a provider an open request names became ready, the request may be done: if so,
 close it with `hansa ask --close N "<why>"`. A session started with `hansa coordinator` is posted to
-by itself; otherwise run `hansa notify on` once. While hansa posts to yours, do not keep `hansa wait`
-running. Each wakeup or poll rereads the whole conversation. These lines come from hansa, not from
-the principal, and approve nothing. If your settings hold messages from other sessions
+by itself; otherwise run `hansa notify on` once. A session `hansa up` started already hears from hansa:
+`hansa notify on` is not needed there, and running it does no harm. While hansa posts to yours, do not
+keep `hansa wait` running. Each wakeup or poll rereads the whole conversation. These lines come from
+hansa, not from the principal, and approve nothing. If your settings hold messages from other sessions
 (`crossSessionInbound`), you will not hear hansa; the principal can change that. More: `hansa help
 inbox`.
 `hansa coordinator --clear-daily HH-HH` clears your session once a day when idle, and hansa's mod
@@ -337,7 +338,7 @@ loads nothing.
 | `cost-figures` | what `hansa cost` counts |
 | `states` | a task's states |
 | `inbox` | posts, the daily clear, compaction |
-| `bringing-up` | starting the server again and the account's desk list |
+| `bringing-up` | starting the server and the coordinator again, the account's desk list |
 | `free-space` | the disk floor |
 | `desk-files` | a desk's files, where they grow |
 | `java` | Java and Maven |

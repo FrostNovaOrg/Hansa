@@ -1,14 +1,14 @@
 # The desk: files, keys and notes
 
-## Starting the server again
+## Starting the server and the coordinator again
 
 Run `hansa up` in a desk, or name it with `hansa --desk DIR up` or `HANSA_DESK`.
 If the named folder is not a desk, hansa refuses it and starts nothing; it does
 not fall back to the account's desk list.
-It starts the server as it last ran. A running server, including a busy or stuck
-one, is left running and its pid is shown. `hansa up` starts only the server;
-start the coordinator separately with `hansa coordinator`. It does not arrange
-startup at boot or stop or restart a running server.
+It starts the server as it last ran, then the coordinator's session as it last
+started ([below](#the-coordinators-session)). A running server, including a busy or stuck
+one, is left running and its pid is shown. It does not arrange startup at boot,
+or stop or restart a running server or session.
 
 Each `hansa serve` start saves `.hansa/serve-start.json`: the absolute path of
 its installation's `bin/hansa`, `--host`, `--port`, `--every`, and the variables
@@ -61,12 +61,94 @@ for each. Each is started by its own installation with
 to have `up`, nothing starts there and hansa prints the last server command
 instead. A new desk gets on the list when its server starts once.
 
+### The coordinator's session
+
+Each start of the coordinator's session saves `.hansa/coordinator-start.json`;
+the latest start wins.
+
+- `hansa coordinator [words]` saves hansa's own option (`--clear-daily`), the
+  words it gave claude, the folder (the desk), the tmux server and session when
+  it runs in tmux, and the launch variables listed above.
+- A session hansa did not start (in a folder of its owner's, with its own
+  `CLAUDE.md` and memory) saves its start when it runs `hansa notify on`: the
+  exact argument list of its claude process (the `CLAUDE_PID` process; read
+  through sysctl on macOS, `/proc/PID/cmdline` on Linux), that process's
+  folder, the tmux server and session (`TMUX` and `TMUX_PANE` reach the command
+  from the session), and the launch variables of the command's own
+  environment, which it has from the session. `hansa notify on` then adds one
+  line: after a restart, `hansa up` starts this session again in FOLDER with
+  COMMAND. Run in a session `hansa coordinator` started, it saves nothing: that
+  start's record stands.
+- Both save the session's process: its pid with its start time, as hansa tells
+  sessions apart.
+
+The record never holds a key or a session's identity. The words that pick a
+conversation or give an inbox are left out with their values: `-c`,
+`--continue`, `-r`/`--resume`, `--session-id`, `--fork-session` and
+`--messaging-socket-path`. So a session started with `--resume <its id>` or
+`--session-id <its id>` is recorded, and so is one `hansa up`'s launcher
+started (it carries its inbox) when it runs `hansa notify on`: it hears from
+hansa already, and running it does no harm. When a word that is kept holds
+one of the desk's keys or the session's identity, or the argument list or the
+folder cannot be read, no command is saved and the start says why. The record
+then holds only that and the session's process, so `hansa up` starts no older
+command and says why; only a session already recorded keeps its record when a
+later `hansa notify on` cannot read it. As root on an account's desk nothing
+is saved: root writes nothing there, and `hansa up` runs as the account.
+
+After the server, `hansa up` starts nothing when a session hears from hansa,
+and names it (pid and name). It starts nothing either when the recorded
+session's process still runs (the same pid, started at the same time), even
+one that does not hear from hansa: it says to run `hansa notify on` in it,
+since a second session would continue the same conversation. A process name
+does not find that process: Claude Code's shows its version as its name. A
+record whose words hold `-p` or `--print` is not an interactive session:
+nothing starts, and `hansa up` says so.
+
+Otherwise it starts the session in tmux: in the recorded tmux server and
+session, or, with none recorded, the server `hansa up` uses for the desk's
+server and a session `coordinator`; when that session exists, in a new window.
+The pane gets the server's clean environment (above), with the recorded
+variables, and runs in the recorded folder:
+
+- a `hansa coordinator` record: `<hansa> --desk <desk> coordinator <recorded words> --continue`;
+- a `hansa notify on` record: the recorded argument list, with `--continue`,
+  through hansa's launcher (`hansa notify-launch`, not listed in help). The
+  launcher starts the follower for its own process, as `hansa coordinator`
+  does, records the start again, then execs claude with
+  `--messaging-socket-path`, so the session hears from hansa without
+  `hansa notify on`.
+
+`--continue` continues the most recent conversation in that folder. hansa's own
+`claude -p` runs (`hansa ping`) use a temporary folder, so they leave none
+there. A prompt given on the recorded command line is given again.
+
+With no record on a new desk (no task, and nothing under `.hansa/followers/`,
+as after `hansa init`), it starts `hansa coordinator` in the desk, without
+`--continue`, and says that the first start in a folder asks whether to trust
+it: attach and answer. With no record on any other desk, it starts nothing:
+that desk had a coordinator before hansa recorded its start, maybe a session
+in another folder that ran `hansa notify on`, and a fresh `hansa coordinator`
+would be a second coordinator, in the wrong folder, with a new conversation.
+It says that the start is not recorded yet, and what to do: start the
+coordinator as before and run `hansa notify on` in it, or start it with
+`hansa coordinator`; from then on `hansa up` starts it again. After a start, it waits
+three seconds and prints that the session started, with the attach command
+(`tmux -L NAME attach -t SESSION`, or `tmux attach -t SESSION` for tmux's
+default server); if the pane ended, it says that the start failed, with the
+command to run by hand. Without tmux it starts no coordinator, and prints the
+command to run in a terminal of one's own. On another account's desk it starts
+nothing, as for the server. While no session hears from hansa, `hansa status`
+says in one line that `hansa up` starts the session again, and how, or why it
+does not, including a start not recorded yet and what to do about it, and a
+recorded folder that is not there.
+
 ## A desk's files
 
 ### Where a desk's files are
 
 The desk's files are under its directory; see the top of [`hansa/desk.py`](../hansa/desk.py).
-The account's desk list lives outside it, as described [above](#starting-the-server-again).
+The account's desk list lives outside it, as described [above](#starting-the-server-and-the-coordinator-again).
 A write that fails leaves the previous file, with its permissions, and no temporary file.
 The event log is only appended to. Readers skip a damaged line, and the next event starts
 on a line of its own. Keys live
