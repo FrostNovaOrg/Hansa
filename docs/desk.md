@@ -77,8 +77,11 @@ the latest start wins.
   from the session), and the launch variables of the command's own
   environment, which it has from the session. `hansa notify on` then adds one
   line: after a restart, `hansa up` starts this session again in FOLDER with
-  COMMAND. Run in a session `hansa coordinator` started, it saves nothing: that
-  start's record stands.
+  COMMAND. Run in the session the record says `hansa coordinator` started (the
+  same pid and start time), it saves nothing: that start's record stands.
+  `HANSA_ROLE` does not decide this: a desk owner's wrapper script commonly sets
+  `HANSA_ROLE=coordinator` on every hansa command, so a session it runs
+  `hansa notify on` for is recorded like any other.
 - Both save the session's process: its pid with its start time, as hansa tells
   sessions apart.
 

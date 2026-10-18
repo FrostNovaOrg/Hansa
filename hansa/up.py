@@ -361,10 +361,11 @@ def notify_on_line(desk: Desk) -> str:
     theirs = account.desk_account(desk.root)
     if theirs:  # root's session on the account's desk: root writes nothing there, and hansa up runs as the account
         return f"hansa up does not start this session again after a restart: it is root's, on {theirs}'s desk"
-    if os.environ.get("HANSA_ROLE") == "coordinator":  # hansa coordinator started it, and recorded that itself
-        rec = read_coordinator(desk)
-        same = rec.get("kind") == "coordinator" and notify.same(rec.get("session"), sess)
-        return f"After a restart, hansa up starts this session again {restart_line(desk, rec)}." if same else ""
+    rec = read_coordinator(desk)
+    # hansa coordinator started this same session and recorded that itself. By the record, not HANSA_ROLE: a desk
+    # owner's wrapper sets that on every hansa command, so a session it did not start runs notify on with it too
+    if rec.get("kind") == "coordinator" and notify.same(rec.get("session"), sess):
+        return f"After a restart, hansa up starts this session again {restart_line(desk, rec)}."
     why = record_session(desk, sess)
     rec = read_coordinator(desk)
     kept = rec.get("kind") == "notify" and notify.same(rec.get("session"), sess)
