@@ -2116,7 +2116,8 @@ class UpTest(unittest.TestCase):
             self.assertEqual(argv[:3], ["/tools/tmux", "-L", "saved-server"])
             self.assertIn("new-window" if exists == 0 else "new-session", argv)
             self.assertIn("=saved-session" if exists == 0 else "saved-session", argv)
-            self.assertEqual(env, {"HOME": str(self.tmp), "USER": "desk-user", "LOGNAME": "desk-user",
+            account_name = pwd.getpwuid(os.getuid()).pw_name
+            self.assertEqual(env, {"HOME": str(self.tmp), "USER": account_name, "LOGNAME": account_name,
                                   "SHELL": "/bin/sh", "TERM": "dumb", "PATH": rec["env"]["PATH"], "LANG": "C",
                                   "HANSA_CLAUDE": "/saved/adapter", "LC_TIME": "C"})
             pane = shlex.split(argv[-1])
@@ -2207,6 +2208,31 @@ class UpTest(unittest.TestCase):
             switched.assert_not_called()
         spawned.assert_not_called()
         ran.assert_not_called()
+
+    def test_up_uses_account_identity(self):
+        from hansa import up
+        self.record(env={"PATH": os.environ["PATH"], "USER": "saved-user", "LOGNAME": "saved-name"})
+        os.environ.update(USER="remote-user", LOGNAME="root")
+        pw = types.SimpleNamespace(pw_name="desk-account", pw_dir="/account/home", pw_shell="/bin/sh")
+        (self.desk.state_dir / "web-port").write_text("9123")
+        for tmux in ("/tools/tmux", ""):
+            with self.subTest(tmux=bool(tmux)), \
+                    unittest.mock.patch.object(up.pwd, "getpwuid", return_value=pw) as password, \
+                    unittest.mock.patch.object(up, "program", return_value=tmux), \
+                    unittest.mock.patch.object(up, "server_state", side_effect=[self.gone, self.running]), \
+                    unittest.mock.patch.object(up.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as ran, \
+                    unittest.mock.patch.object(up.subprocess, "Popen") as spawned:
+                self.say("up")
+            password.assert_called_once_with(os.getuid())
+            launched = ran if tmux else spawned
+            env = launched.call_args.kwargs["env"]
+            self.assertEqual(env["USER"], "desk-account")
+            self.assertEqual(env["LOGNAME"], "desk-account")
+            self.assertEqual(env["HOME"], str(self.tmp))
+            if tmux:
+                pane = shlex.split(ran.call_args.args[0][-1])
+                self.assertIn("USER=desk-account", pane)
+                self.assertIn("LOGNAME=desk-account", pane)
 
     def test_detached_server_really_holds_the_lock_in_its_own_session_and_appends_output(self):
         from hansa import up
@@ -2409,6 +2435,40 @@ class UpTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertTrue(up.all_desks_up())
         self.assertIn("server starts once", out.getvalue())
+
+    def test_up_refuses_non_desks(self):
+        from hansa import up
+        roots = [self.tmp / name for name in ("missing", "empty", "settings-only", "tasks-only")]
+        for root in roots[1:]:
+            root.mkdir()
+        write_json(roots[2] / "settings.json", {})
+        (roots[3] / "tasks").mkdir()
+        here = os.getcwd()
+        os.chdir(self.desk.root)
+        self.addCleanup(os.chdir, here)
+        with unittest.mock.patch.object(up, "desk_up", return_value=True) as one, \
+                unittest.mock.patch.object(up, "all_desks_up", return_value=True) as all_desks:
+            for root in roots:
+                for source in ("--desk", "HANSA_DESK"):
+                    with self.subTest(root=root.name, source=source), unittest.mock.patch.dict(os.environ):
+                        os.environ["HANSA_DESK"] = str(root) if source == "HANSA_DESK" else str(self.desk.root)
+                        argv = ["--desk", str(root), "up"] if source == "--desk" else ["up"]
+                        with self.assertRaises(SystemExit) as failed:
+                            main(argv)
+                        self.assertNotEqual(failed.exception.code, 0)
+                        self.assertIn(str(root), str(failed.exception))
+                        self.assertIn("not a desk", str(failed.exception))
+                    self.assertFalse((root / ".hansa").exists())
+            one.assert_not_called()
+            all_desks.assert_not_called()
+
+    def test_up_does_not_treat_a_lookup_error_as_no_desk(self):
+        from hansa import up
+        with unittest.mock.patch.object(Desk, "find", side_effect=SystemExit("lookup failed")), \
+                unittest.mock.patch.object(up, "all_desks_up", return_value=True) as all_desks, \
+                self.assertRaisesRegex(SystemExit, "lookup failed"):
+            main(["up"])
+        all_desks.assert_not_called()
 
     def test_stopped_server_texts_name_hansa_up(self):
         from hansa import run

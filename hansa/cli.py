@@ -1377,11 +1377,12 @@ def cmd_serve(a):
 
 
 def cmd_up(a):
-    try:
-        desk = Desk.find(a.desk)
-    except SystemExit:
+    desk = Desk.find(a.desk, optional=True)
+    if desk is None:
         ok = up.all_desks_up()
     else:
+        if not (desk.settings_path.is_file() and desk.tasks_dir.is_dir()):
+            raise SystemExit(f"hansa: {desk.root} is not a desk; nothing started")
         ok = up.desk_up(desk)
     if not ok:
         raise SystemExit(1)

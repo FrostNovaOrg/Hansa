@@ -2452,13 +2452,16 @@ class Desk:
         self.failed_starts = {}  # stopped launches whose failed-start record may still need disk space
 
     @classmethod
-    def find(cls, explicit: str | None = None) -> "Desk":
+    def find(cls, explicit: str | None = None, *, optional: bool = False) -> Desk | None:
+        """Find a named or enclosing desk; optional returns None only when neither is given or found."""
         if explicit or os.environ.get("HANSA_DESK"):
             return cls(explicit or os.environ["HANSA_DESK"])
         here = Path.cwd().resolve()
         for d in (here, *here.parents):
             if (d / "settings.json").is_file() and (d / "tasks").is_dir():
                 return cls(d)
+        if optional:
+            return None
         raise SystemExit("hansa: no desk here. Run inside a desk, pass --desk DIR, or set HANSA_DESK.")
 
     # -- settings ---------------------------------------------------------

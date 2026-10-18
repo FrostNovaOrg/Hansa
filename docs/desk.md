@@ -3,6 +3,8 @@
 ## Starting the server again
 
 Run `hansa up` in a desk, or name it with `hansa --desk DIR up` or `HANSA_DESK`.
+If the named folder is not a desk, hansa refuses it and starts nothing; it does
+not fall back to the account's desk list.
 It starts the server as it last ran. A running server, including a busy or stuck
 one, is left running and its pid is shown. `hansa up` starts only the server;
 start the coordinator separately with `hansa coordinator`. It does not arrange
@@ -22,7 +24,9 @@ The record never includes `ANTHROPIC_*`, other key variables, values holding
 one of the desk's keys, or a Claude Code session's identity or messaging
 variables. hansa removes the session's identity before recording the start.
 The restarted server gets only `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM` and
-the recorded variables, plus tmux's own pane variables when in tmux. It does
+the recorded variables, plus tmux's own pane variables when in tmux. `USER` and
+`LOGNAME` come from the current account's password entry, regardless of the
+calling shell's values. `HOME` keeps the shell's value when set. It does
 not inherit the other variables from the shell running `hansa up` or from an
 existing tmux server.
 

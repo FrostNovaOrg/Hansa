@@ -91,8 +91,8 @@ def serve_command(desk: Desk, rec: dict) -> list:
 
 def clean_env(desk: Desk, recorded: dict) -> dict:
     pw = pwd.getpwuid(os.getuid())
-    env = {"HOME": os.environ.get("HOME", pw.pw_dir), "USER": os.environ.get("USER", pw.pw_name),
-           "LOGNAME": os.environ.get("LOGNAME", pw.pw_name), "SHELL": os.environ.get("SHELL", pw.pw_shell),
+    env = {"HOME": os.environ.get("HOME", pw.pw_dir), "USER": pw.pw_name,
+           "LOGNAME": pw.pw_name, "SHELL": os.environ.get("SHELL", pw.pw_shell),
            "TERM": os.environ.get("TERM", "dumb")}
     env.update(start_env(desk, recorded))
     return env
