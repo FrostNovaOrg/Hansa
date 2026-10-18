@@ -1992,6 +1992,434 @@ class TrySrtTest(unittest.TestCase):
                 self.assertEqual(run.srt_record(self.desk)["said"], said)
 
 
+class UpTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        env = unittest.mock.patch.dict(os.environ, {
+            "HOME": str(self.tmp), "USER": "desk-user", "LOGNAME": "desk-user", "SHELL": "/bin/sh",
+            "TERM": "dumb", "PATH": os.path.dirname(sys.executable) + os.pathsep + os.defpath,
+            "XDG_STATE_HOME": str(self.tmp / "state")}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        self.desk = Desk(self.tmp / "desk with spaces")
+        self.desk.root.mkdir()
+        self.desk.tasks_dir.mkdir()
+        self.desk.secrets_dir.mkdir()
+        self.desk.state_dir.mkdir()
+        write_json(self.desk.settings_path, {})
+        self.options = types.SimpleNamespace(host="127.0.0.2", port=9123, every=1.25)
+        self.gone = {"state": "gone", "pid": None, "answers": False}
+        self.running = {"state": "up", "pid": 123, "answers": True}
+
+    def say(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), *args])
+        return out.getvalue()
+
+    def record(self, **fields):
+        from hansa import up
+        rec = {"hansa": up.hansa_command(), "options": vars(self.options), "env": {"PATH": os.environ["PATH"]}}
+        rec.update(fields)
+        write_json(self.desk.state_dir / "serve-start.json", rec)
+        return rec
+
+    def test_serve_records_launch_before_starting_the_page_without_keys_or_session_identity(self):
+        from hansa import up, web
+        key = "sk-desk-secret-123456"
+        (self.desk.secrets_dir / "provider.key").write_text(key)
+        settings = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8", "LC_ALL": "C", "LC_TIME": "C",
+                    "HANSA_CLAUDE": "/opt/adapter/claude", "HANSA_TMUX": "/opt/tools/tmux",
+                    "CLAUDE_CONFIG_DIR": "/home/me/claude", "TMPDIR": str(self.tmp),
+                    "XDG_RUNTIME_DIR": "/run/user/1000", "XDG_STATE_HOME": str(self.tmp / "state"),
+                    "TMUX_TMPDIR": str(self.tmp / "sockets")}
+        os.environ.update(settings)
+        os.environ.update(ANTHROPIC_API_KEY="other-secret", ANTHROPIC_AUTH_TOKEN="also-secret",
+                          LC_SECRET=key, LC_EMBEDDED="prefix:" + key, UNRELATED="omit",
+                          CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="session-secret",
+                          CLAUDE_CODE_MESSAGING_TOKEN="messaging-secret")
+        with cli.hold_server_lock(self.desk) as held, \
+                unittest.mock.patch.object(cli, "hold_server_lock", return_value=held), \
+                unittest.mock.patch.object(cli, "desk_paths_problem", return_value=""), \
+                unittest.mock.patch.object(web, "start_web", side_effect=RuntimeError("after record")), \
+                self.assertRaisesRegex(RuntimeError, "after record"):
+            main(["--desk", str(self.desk.root), "serve", "--host", self.options.host,
+                  "--port", str(self.options.port), "--every", str(self.options.every)])
+        rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
+        self.assertEqual(rec["hansa"], up.hansa_command())
+        self.assertTrue(Path(rec["hansa"]).is_absolute())
+        self.assertEqual(rec["options"], vars(self.options))
+        self.assertEqual(rec["env"], settings)
+        self.assertEqual(rec["tmux"], {})
+        for secret in (key, "other-secret", "also-secret", "session-secret", "messaging-secret"):
+            self.assertNotIn(secret, json.dumps(rec))
+        self.assertFalse(any(hansa.session_var(k) for k in rec["env"]))
+        entries = json.loads(up.desks_file().read_text())
+        self.assertEqual(entries, [{"desk": str(self.desk.root), "hansa": rec["hansa"], "at": rec["at"]}])
+
+    def test_registry_updates_one_desk_preserves_others_and_uses_xdg_or_home(self):
+        from hansa import up
+        up.record_start(self.desk, self.options)
+        other = Desk(self.tmp / "other")
+        other.root.mkdir()
+        other.state_dir.mkdir()
+        up.record_start(other, self.options)
+        with unittest.mock.patch.object(up, "hansa_command", return_value="/new/bin/hansa"), \
+                unittest.mock.patch.object(up, "now", return_value="later"):
+            up.record_start(self.desk, self.options)
+        entries = json.loads(up.desks_file().read_text())
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[-1], {"desk": str(self.desk.root), "hansa": "/new/bin/hansa", "at": "later"})
+        del os.environ["XDG_STATE_HOME"]
+        self.assertEqual(up.desks_file(), self.tmp / ".local/state/hansa/desks.json")
+
+    def test_tmux_record_uses_names_for_rebootable_sockets_and_paths_for_custom_ones(self):
+        from hansa import up
+        sockets = [(f"/tmp/tmux-{os.getuid()}/desk", ["-L", "desk"]),
+                   (str(self.tmp / f"tmux-{os.getuid()}/custom"), ["-L", "custom"]),
+                   (str(self.tmp / "special.sock"), ["-S", str(self.tmp / "special.sock")])]
+        os.environ["TMUX_TMPDIR"] = str(self.tmp)
+        for socket_path, server in sockets:
+            with self.subTest(socket=socket_path):
+                os.environ.update(TMUX=socket_path + ",123,0", TMUX_PANE="%7")
+                answer = subprocess.CompletedProcess([], 0, socket_path + "|desk session\n", "")
+                with unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                        unittest.mock.patch.object(up.subprocess, "run", return_value=answer) as called:
+                    up.record_start(self.desk, self.options)
+                args = called.call_args[0][0]
+                self.assertEqual(args[:3], ["/tools/tmux", "-S", socket_path])
+                self.assertIn("%7", args)
+                rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
+                self.assertEqual(rec["tmux"], {"server": server, "session": "desk session"})
+                self.assertNotIn("TMUX", rec["env"])
+                self.assertNotIn("TMUX_PANE", rec["env"])
+
+    def test_up_tmux_restores_command_location_clean_environment_and_pane_logging(self):
+        from hansa import up
+        rec = self.record(hansa="/opt/old hansa/bin/hansa", env={"PATH": "/saved/bin:/usr/bin:/bin", "LANG": "C",
+                         "HANSA_CLAUDE": "/saved/adapter", "LC_TIME": "C", "CLAUDE_CODE_SESSION_ID": "stale",
+                         "ANTHROPIC_API_KEY": "stale-key"},
+                         tmux={"server": ["-L", "saved-server"], "session": "saved-session"})
+        os.environ.update(UNRELATED="caller", ANTHROPIC_API_KEY="caller-key", CLAUDE_CODE_SESSION_ID="caller-id")
+        (self.desk.state_dir / "web-port").write_text("9123")
+        for exists in (0, 1):
+            with self.subTest(existing_session=exists), \
+                    unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                    unittest.mock.patch.object(up, "server_state", side_effect=[self.gone, self.running]), \
+                    unittest.mock.patch.object(up.subprocess, "run", side_effect=[
+                        subprocess.CompletedProcess([], exists, "", ""), subprocess.CompletedProcess([], 0, "", "")]) as ran:
+                said = self.say("up")
+            check, create = ran.call_args_list
+            self.assertEqual(check.args[0], ["/tools/tmux", "-L", "saved-server", "has-session", "-t", "=saved-session"])
+            argv, env = create.args[0], create.kwargs["env"]
+            self.assertEqual(argv[:3], ["/tools/tmux", "-L", "saved-server"])
+            self.assertIn("new-window" if exists == 0 else "new-session", argv)
+            self.assertIn("=saved-session" if exists == 0 else "saved-session", argv)
+            self.assertEqual(env, {"HOME": str(self.tmp), "USER": "desk-user", "LOGNAME": "desk-user",
+                                  "SHELL": "/bin/sh", "TERM": "dumb", "PATH": rec["env"]["PATH"], "LANG": "C",
+                                  "HANSA_CLAUDE": "/saved/adapter", "LC_TIME": "C"})
+            pane = shlex.split(argv[-1])
+            self.assertEqual(pane[:3], ["exec", "/usr/bin/env", "-i"])
+            self.assertIn("TMUX=$TMUX", pane)
+            script = pane[-1]
+            self.assertEqual(shlex.split(script.split(" 2>&1 | ")[0]), up.serve_command(self.desk, rec))
+            self.assertEqual(shlex.split(script.split(" 2>&1 | ")[1]),
+                             ["/usr/bin/tee", "-a", str(self.desk.state_dir / "serve.log")])
+            self.assertIn("started (pid 123)", said)
+            self.assertIn("port 9123", said)
+            self.assertIn("/tools/tmux -L saved-server attach-session -t =saved-session", said)
+
+    def test_up_without_record_uses_defaults_and_a_safe_tmux_name(self):
+        from hansa import up
+        os.environ["HANSA_CLAUDE"] = "/initial/claude"
+        (self.desk.state_dir / "web-port").write_text("8765")
+        with unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                unittest.mock.patch.object(up, "server_state", side_effect=[self.gone, self.running]), \
+                unittest.mock.patch.object(up.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess([], 1, "", ""), subprocess.CompletedProcess([], 0, "", "")]) as ran:
+            said = self.say("up")
+        self.assertIn("No recorded server start", said)
+        argv = ran.call_args.args[0]
+        self.assertEqual(argv[:6], ["/tools/tmux", "-L", "hansa-desk-with-spaces", "new-session", "-d", "-s"])
+        self.assertEqual(argv[6], "serve")
+        self.assertEqual(ran.call_args.kwargs["env"]["HANSA_CLAUDE"], "/initial/claude")
+        script = shlex.split(argv[-1])[-1]
+        self.assertEqual(shlex.split(script.split(" 2>&1 | ")[0]), up.serve_command(self.desk, {}))
+
+    def test_up_finds_tmux_in_the_saved_environment_and_keeps_its_socket_directory_in_watch(self):
+        from hansa import up
+        tools = self.tmp / "saved-bin"
+        tools.mkdir()
+        saved_tmux = tools / "tmux"
+        saved_tmux.write_text("#!/bin/sh\n")
+        saved_tmux.chmod(0o755)
+        callers_tmux = self.tmp / "callers-tmux"
+        callers_tmux.write_text("#!/bin/sh\n")
+        callers_tmux.chmod(0o755)
+        os.environ["HANSA_TMUX"] = str(callers_tmux)
+        (self.desk.state_dir / "web-port").write_text("9123")
+        for saved_env in ({"HANSA_TMUX": str(saved_tmux), "PATH": "/usr/bin:/bin"}, {"PATH": str(tools)}):
+            saved_env["TMUX_TMPDIR"] = str(self.tmp / "saved-sockets")
+            self.record(env=saved_env)
+            with self.subTest(saved_env=saved_env), \
+                    unittest.mock.patch.object(up, "server_state", side_effect=[self.gone, self.running]), \
+                    unittest.mock.patch.object(up.subprocess, "run", side_effect=[
+                        subprocess.CompletedProcess([], 1, "", ""), subprocess.CompletedProcess([], 0, "", "")]) as ran:
+                said = self.say("up")
+            self.assertEqual(ran.call_args.args[0][0], str(saved_tmux))
+            self.assertIn("TMUX_TMPDIR=", said)
+            self.assertIn("saved-sockets", said)
+
+    def test_up_without_tmux_detaches_stdin_and_logs_with_only_saved_environment(self):
+        from hansa import up
+        rec = self.record()
+        os.environ.update(UNRELATED="caller", HANSA_CLAUDE="caller-adapter")
+        (self.desk.state_dir / "web-port").write_text("9123")
+        with unittest.mock.patch.object(up, "program", return_value=""), \
+                unittest.mock.patch.object(up, "server_state", side_effect=[self.gone, self.running]), \
+                unittest.mock.patch.object(up.subprocess, "Popen") as launched:
+            said = self.say("up")
+        args, kw = launched.call_args
+        self.assertEqual(args[0], up.serve_command(self.desk, rec))
+        self.assertTrue(kw["start_new_session"])
+        self.assertEqual(kw["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kw["stderr"], subprocess.STDOUT)
+        self.assertEqual(kw["stdout"].name, str(self.desk.state_dir / "serve.log"))
+        self.assertEqual(kw["stdout"].mode, "ab")
+        self.assertEqual(set(kw["env"]), {"HOME", "USER", "LOGNAME", "SHELL", "TERM", "PATH"})
+        self.assertIn("tmux gives a pane", said)
+        self.assertIn("tail -f", said)
+
+    def test_up_starts_nothing_for_any_running_state_or_another_account(self):
+        from hansa import up
+        with unittest.mock.patch.object(up.subprocess, "Popen") as spawned, \
+                unittest.mock.patch.object(up.subprocess, "run") as ran:
+            for state in ("up", "busy", "stuck"):
+                with unittest.mock.patch.object(up, "server_state", return_value={**self.running, "state": state}):
+                    self.assertIn("already running (pid 123)", self.say("up"))
+            with unittest.mock.patch.object(account, "desk_account", return_value="desk-owner"), \
+                    unittest.mock.patch.object(account, "switch") as switched, \
+                    contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+                main(["--desk", str(self.desk.root), "up"])
+            self.assertIn("run as desk-owner", out.getvalue())
+            self.assertIn(shlex.join([up.hansa_command(), "--desk", str(self.desk.root), "up"]), out.getvalue())
+            switched.assert_not_called()
+        spawned.assert_not_called()
+        ran.assert_not_called()
+
+    def test_detached_server_really_holds_the_lock_in_its_own_session_and_appends_output(self):
+        from hansa import up
+        executable = self.tmp / "stand-in-hansa"
+        observed = self.tmp / "observed.json"
+        executable.write_text("#!" + sys.executable + "\n" + textwrap.dedent(f"""\
+            import fcntl, json, os, pathlib, signal, sys, time
+            root = pathlib.Path(sys.argv[sys.argv.index('--desk') + 1]) / '.hansa'
+            held = open(root / 'serve.lock', 'a')
+            fcntl.flock(held, fcntl.LOCK_EX)
+            held.write(str(os.getpid()))
+            held.flush()
+            with open({str(observed)!r}, 'w') as f:
+                json.dump({{'env': dict(os.environ), 'sid': os.getsid(0), 'pid': os.getpid(),
+                           'input': sys.stdin.read()}}, f)
+            print('server ready', flush=True)
+            (root / 'web-port').write_text('9123')
+            (root / 'heartbeat').write_text(str(time.time()))
+            (root / 'pulse').write_text(json.dumps({{'at': time.time(), 'pid': os.getpid()}}))
+            signal.pause()
+            """))
+        executable.chmod(0o755)
+        self.record(hansa=str(executable), env={"PATH": os.environ["PATH"], "LANG": "C"})
+        os.environ.update(ANTHROPIC_API_KEY="caller-key", UNRELATED="caller", CLAUDE_CODE_SESSION_ID="session")
+        (self.desk.state_dir / "serve.log").write_text("previous start\n")
+        real_popen, children = subprocess.Popen, []
+
+        def spawn(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            return child
+
+        try:
+            with unittest.mock.patch.object(up, "program", return_value=""), \
+                    unittest.mock.patch.object(up.subprocess, "Popen", side_effect=spawn):
+                said = self.say("up")
+            self.assertIn(f"started (pid {children[0].pid})", said)
+            seen = json.loads(observed.read_text())
+            self.assertEqual(seen["sid"], seen["pid"])
+            self.assertEqual(seen["input"], "")
+            added = {"LC_CTYPE"}  # Python may coerce its own C locale; macOS may add its encoding variable
+            if sys.platform == "darwin":
+                added.add("__CF_USER_TEXT_ENCODING")
+            self.assertEqual(set(seen["env"]) - added,
+                             {"HOME", "USER", "LOGNAME", "SHELL", "TERM", "PATH", "LANG"})
+            self.assertEqual((self.desk.state_dir / "serve.log").read_text(), "previous start\nserver ready\n")
+        finally:
+            for child in children:
+                child.terminate()
+                child.wait(timeout=10)
+
+    def test_pane_command_clears_an_existing_tmux_servers_environment(self):
+        from hansa import up
+        capture = self.tmp / "pane-env.json"
+        emit = self.tmp / "emit-env"
+        emit.write_text("#!" + sys.executable + "\nimport json, os\n"
+                        "print(json.dumps(dict(os.environ)), flush=True)\n")
+        emit.chmod(0o755)
+        with unittest.mock.patch.object(up.subprocess, "run", side_effect=[
+                subprocess.CompletedProcess([], 1, "", ""), subprocess.CompletedProcess([], 0, "", "")]) as ran:
+            env = up.clean_env(self.desk, {"PATH": os.environ["PATH"], "LANG": "C", "HANSA_CLAUDE": "/saved/claude"})
+            watch = up.launch_tmux(self.desk, {"tmux": {"server": ["-L", "saved"], "session": "serve"}},
+                                   [str(emit)], env, "/fake/tmux", capture)
+        pane = ran.call_args.args[0][-1]
+        dirty = {**os.environ, "UNRELATED": "tmux-server", "ANTHROPIC_API_KEY": "tmux-key",
+                 "CLAUDE_CODE_SESSION_ID": "tmux-session", "HANSA_CLAUDE": "/stale/claude",
+                 "TMUX": "/tmp/socket,123,0", "TMUX_PANE": "%7", "TERM": "tmux-256color"}
+        r = subprocess.run(["/bin/sh", "-c", pane], env=dirty, capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        seen = json.loads(capture.read_text())
+        self.assertEqual(seen["HANSA_CLAUDE"], "/saved/claude")
+        self.assertEqual(seen["TMUX_PANE"], "%7")
+        self.assertEqual(seen["TERM"], "tmux-256color")
+        self.assertFalse({"UNRELATED", "ANTHROPIC_API_KEY", "CLAUDE_CODE_SESSION_ID"} & set(seen))
+        self.assertEqual(json.loads(r.stdout), seen)  # tee sends the same output to the pane and the log
+        self.assertIn("attach-session", watch)
+
+    def test_up_waits_for_the_page_then_reports_timeout_or_tmux_failure(self):
+        from hansa import up
+        self.record()
+        with unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                unittest.mock.patch.object(up, "launch_tmux", return_value="watch"), \
+                unittest.mock.patch.object(up, "server_state", side_effect=[self.gone, {**self.running, "answers": False}]), \
+                unittest.mock.patch.object(up.time, "monotonic", side_effect=[0, up.START_WAIT + 1]), \
+                contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "up"])
+        self.assertIn("server failed", out.getvalue())
+        self.assertNotIn("server started", out.getvalue())
+        (self.desk.state_dir / "serve.log").write_text("last server error\n")
+        with unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                unittest.mock.patch.object(up, "server_state", return_value=self.gone), \
+                unittest.mock.patch.object(up, "launch_tmux", side_effect=subprocess.CalledProcessError(
+                    1, ["tmux"], stderr="cannot create session")), \
+                contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "up"])
+        self.assertIn("cannot create session", out.getvalue())
+        self.assertIn("last server error", out.getvalue())
+
+    def test_up_failure_shows_log_tail_and_redacts_keys(self):
+        from hansa import up
+        self.record()
+        key = "sk-secret-in-log-1234"
+        (self.desk.secrets_dir / "provider.key").write_text(key)
+        (self.desk.state_dir / "serve.log").write_text("old line\n" * 20 + "port in use " + key + "\n")
+        child = types.SimpleNamespace(poll=lambda: 1)
+        with unittest.mock.patch.object(up, "program", return_value=""), \
+                unittest.mock.patch.object(up, "server_state", return_value=self.gone), \
+                unittest.mock.patch.object(up.subprocess, "Popen", return_value=child), \
+                contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "up"])
+        self.assertIn("server failed", out.getvalue())
+        self.assertIn("port in use", out.getvalue())
+        self.assertNotIn(key, out.getvalue())
+        self.assertEqual(out.getvalue().count("old line"), 11)
+
+    def test_log_rotates_only_over_twenty_mb_and_replaces_previous_backup(self):
+        from hansa import up
+        log = self.desk.state_dir / "serve.log"
+        backup = self.desk.state_dir / "serve.log.1"
+        backup.write_bytes(b"old backup")
+        for size in (up.LOG_LIMIT, up.LOG_LIMIT + 1):
+            with open(log, "wb") as f:
+                f.write(b"latest log")
+                f.truncate(size)
+            up.rotate_log(self.desk)
+            if size == up.LOG_LIMIT:
+                self.assertTrue(log.exists())
+                self.assertEqual(backup.read_bytes(), b"old backup")
+            else:
+                self.assertFalse(log.exists())
+                self.assertEqual(backup.stat().st_size, size)
+                with open(backup, "rb") as f:
+                    self.assertEqual(f.read(10), b"latest log")
+
+    def test_outside_a_desk_uses_each_installation_and_reports_missing_and_old_hansa(self):
+        from hansa import up
+        calls = self.tmp / "calls.jsonl"
+        entries = []
+        for name in ("first", "second", "missing", "old", "removed"):
+            root = self.tmp / name
+            root.mkdir()
+            if name != "removed":
+                (root / "tasks").mkdir()
+                write_json(root / "settings.json", {})
+            executable = self.tmp / (name + "-hansa")
+            if name != "missing":
+                executable.write_text("#!" + sys.executable + "\n" + textwrap.dedent(f"""\
+                    import json, sys
+                    with open({str(calls)!r}, 'a') as f:
+                        f.write(json.dumps([sys.argv[0], *sys.argv[1:]]) + '\\n')
+                    if {name!r} == 'old':
+                        sys.exit(2)
+                    if '--help' not in sys.argv:
+                        print('own installation: {name}')
+                    """))
+                executable.chmod(0o755)
+            entries.append({"desk": str(root), "hansa": str(executable), "at": "then"})
+            (root / ".hansa").mkdir()
+            write_json(root / ".hansa/serve-start.json", {"options": vars(self.options)})
+        up.desks_file().parent.mkdir(parents=True)
+        write_json(up.desks_file(), entries)
+        here = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, here)
+        with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            main(["up"])
+        said = out.getvalue()
+        rows = [json.loads(x) for x in calls.read_text().splitlines()]
+        for name in ("first", "second"):
+            self.assertIn([str(self.tmp / (name + "-hansa")), "--desk", str(self.tmp / name), "up"], rows)
+            self.assertIn("own installation: " + name, said)
+        self.assertEqual(sum("--desk" in row for row in rows), 2)
+        self.assertEqual(said.count("Desk "), 4)
+        self.assertNotIn("removed-hansa", said)
+        self.assertEqual(said.count("Last server command:"), 2)
+        self.assertIn("--host 127.0.0.2 --port 9123 --every 1.25", said)
+
+    def test_desk_lookup_uses_environment_or_parent_before_the_account_list(self):
+        from hansa import up
+        with unittest.mock.patch.object(up, "desk_up", return_value=True) as one, \
+                unittest.mock.patch.object(up, "all_desks_up", return_value=True) as all_desks:
+            os.environ["HANSA_DESK"] = str(self.desk.root)
+            main(["up"])
+            self.assertEqual(one.call_args.args[0].root, self.desk.root)
+            del os.environ["HANSA_DESK"]
+            here = os.getcwd()
+            child = self.desk.root / "subfolder"
+            child.mkdir()
+            os.chdir(child)
+            self.addCleanup(os.chdir, here)
+            main(["up"])
+            self.assertEqual(one.call_count, 2)
+            all_desks.assert_not_called()
+            os.chdir(self.tmp)
+            main(["up"])
+            all_desks.assert_called_once()
+
+    def test_empty_desk_list_explains_how_to_register_one(self):
+        from hansa import up
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertTrue(up.all_desks_up())
+        self.assertIn("server starts once", out.getvalue())
+
+    def test_stopped_server_texts_name_hansa_up(self):
+        from hansa import run
+        self.assertIn("hansa up", run.server_text(self.gone))
+        self.assertIn("hansa up", views.explain_text(self.desk, "server"))
+        event = notify._item(self.desk, {"event": "server_stopped"})
+        self.assertIn("hansa up", event[1])
+        items, _, _ = notify.server_news({"server": self.gone}, [], True, 0, 0)
+        self.assertIn("hansa up", items[0]["line"])
+
+
 class DeskTest(unittest.TestCase):
     def setUp(self):
         started = time.time()
@@ -2033,6 +2461,7 @@ class DeskTest(unittest.TestCase):
         self.addCleanup(session.stop)
         os.environ.update(HANSA_NOTIFY_CAPTURE=str(self.tmp / "posted.jsonl"), HANSA_NOTIFY_POLL="0.2",
                           HANSA_NOTIFY_GATHER="0.5",
+                          XDG_STATE_HOME=str(self.tmp / "state"),  # serve never writes the account's real desk list
                           XDG_RUNTIME_DIR=str(self.tmp))  # the inboxes' folder (notify.socket_path), not the account's
         self.desk = init_desk(self.tmp / "desk", str(self.repo), "a")
         # free space as the tests set it (self.free, in bytes, or by path: self.free_at), never the machine's: hansa
@@ -12946,7 +13375,7 @@ class DeskTest(unittest.TestCase):
         srv.wait()  # its heartbeat is fresh, but the process serve.lock names is gone
         told = self.soon(lambda: "not running" in self.server_posts(sock) and self.server_posts(sock))
         self.assertIn("hansa serve is not running (it stopped without a word): no task starts or ends until it runs "
-                      "again · next: hansa explain server", told)
+                      "again · next: hansa up", told)
         self.assertFalse(views.status(self.desk)["server_up"])
         self.assertIn("server NOT running", self.hansa_out("status"))
         self.assertIn("now: server NOT running", self.hansa_out("explain", "server"))

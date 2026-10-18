@@ -1,10 +1,63 @@
 # The desk: files, keys and notes
 
+## Starting the server again
+
+Run `hansa up` in a desk, or name it with `hansa --desk DIR up` or `HANSA_DESK`.
+It starts the server as it last ran. A running server, including a busy or stuck
+one, is left running and its pid is shown. `hansa up` starts only the server;
+start the coordinator separately with `hansa coordinator`. It does not arrange
+startup at boot or stop or restart a running server.
+
+Each `hansa serve` start saves `.hansa/serve-start.json`: the absolute path of
+its installation's `bin/hansa`, `--host`, `--port`, `--every`, and the variables
+that were set: `PATH`, `LANG`, every `LC_*` (including `LC_ALL`), `HANSA_CLAUDE`,
+`HANSA_TMUX`, `CLAUDE_CONFIG_DIR`, `TMPDIR`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`
+and `TMUX_TMPDIR`. In tmux it also saves the server and session. A socket in
+tmux's own directory is saved by server name (`-L`), so tmux can recreate the
+directory after a reboot; a custom socket keeps its path (`-S`). A manual
+foreground `hansa serve --port N` works as before and updates this record.
+`hansa serve` is the dispatcher and web server that `hansa up` runs.
+
+The record never includes `ANTHROPIC_*`, other key variables, values holding
+one of the desk's keys, or a Claude Code session's identity or messaging
+variables. hansa removes the session's identity before recording the start.
+The restarted server gets only `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM` and
+the recorded variables, plus tmux's own pane variables when in tmux. It does
+not inherit the other variables from the shell running `hansa up` or from an
+existing tmux server.
+
+With tmux installed (found by hansa's usual lookup, including `HANSA_TMUX`),
+`hansa up` starts a detached pane in the saved server and session. If that
+session already exists, it adds a window there. Without a saved tmux location,
+it uses a server named `hansa-<desk folder name>` (made safe) and session
+`serve`. Output stays in the pane and is also appended to `.hansa/serve.log`.
+Without tmux it starts a background process in its own session, with input
+from `/dev/null` and output appended to that log. Before either start, a log
+over 20 MB moves to `serve.log.1`, replacing the previous backup.
+
+With no saved start, hansa says so and uses the defaults and the current
+shell's allowed launch variables. After starting it waits up to eight seconds
+for the server's lock and page to be ready, then prints the pid, page port and
+tmux attach command (or a command to follow the log). A failed start shows the
+log's last lines. On another account's desk, it starts nothing and gives the
+command to run as that account, so the server uses that account's tmux and home.
+
+Each server start also adds or updates one entry for its desk in this account's
+`$XDG_STATE_HOME/hansa/desks.json`, or `~/.local/state/hansa/desks.json` when
+`XDG_STATE_HOME` is unset. That list holds the desk folder, the absolute hansa
+command and when it started. Outside any desk, with no `--desk` or `HANSA_DESK`,
+`hansa up` visits every listed folder that is still a desk, printing a block
+for each. Each is started by its own installation with
+`<saved hansa> --desk <folder> up`. If that installation is missing or too old
+to have `up`, nothing starts there and hansa prints the last server command
+instead. A new desk gets on the list when its server starts once.
+
 ## A desk's files
 
 ### Where a desk's files are
 
-Everything is under the desk directory; see the top of [`hansa/desk.py`](../hansa/desk.py).
+The desk's files are under its directory; see the top of [`hansa/desk.py`](../hansa/desk.py).
+The account's desk list lives outside it, as described [above](#starting-the-server-again).
 A write that fails leaves the previous file, with its permissions, and no temporary file.
 The event log is only appended to. Readers skip a damaged line, and the next event starts
 on a line of its own. Keys live
@@ -51,6 +104,7 @@ Enter on what looks like an empty box: it may send the guess as if they wrote it
 | What a task's processes printed | `tasks/<id>/run.err` (the worker's errors), `setup.log`, `check.log`, `merge-check.log`, `merge-setup.log`, `merge-check.err` | whatever the lane's setup, check and merge check print: not capped while the task is open (a verbose build can print hundreds of MB) |
 | A lane's last try | `lanes/<lane>/try.log`, `merge-check-try.log` | at most 4 MB per step (its first and last 2 MB), replaced by the next try |
 | The event log | `events.jsonl` | a few hundred bytes per event, append-only; never trimmed |
+| Server output from `hansa up` | `.hansa/serve.log`, `serve.log.1` | the log rotates on the next start when over 20 MB; one backup |
 | A release's output | `.hansa/releases/<id>.log` | whatever its command prints; kept |
 | A running task's output | `.hansa/runs/<id>/` | moved into `tasks/<id>/` when it ends |
 | Each lane's worktree | `worktrees/<lane>/` | the repository's checkout, and what builds leave in it (see [Free space](#free-space)) |

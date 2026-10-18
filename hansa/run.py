@@ -6235,7 +6235,7 @@ def not_looking(desk: Desk, st: dict | None = None) -> str:
 def server_text(st: dict) -> str:
     """What server_state says, in words, for hansa status and hansa explain server."""
     if st["state"] == "gone":
-        return "server NOT running: start it with `hansa serve` (see hansa explain server)"
+        return "server NOT running: start it with `hansa up` (see hansa explain server)"
     if st["state"] == "up":
         return "server up"
     quiet = quiet_text(st["quiet"])

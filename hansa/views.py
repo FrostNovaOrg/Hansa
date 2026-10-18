@@ -1509,6 +1509,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "`hansa serve` starts queued tasks, finishes ended ones and serves the web page. It runs on the "
             "desk's machine, usually in a terminal multiplexer. Without it, tasks stay queued. One runs per "
             "desk: a second one refuses to start.",
+            "`hansa up` starts it again as it last ran, detached in tmux when installed, or in the background. "
+            "It starts nothing while the server runs. More: hansa help bringing-up.",
             f"  now: {server_text(server)}",
             f"  {page_text(page_of(desk, server))}",
             "What it starts outside a worker's sandbox (a release's command, the alert command, "

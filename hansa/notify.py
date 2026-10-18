@@ -300,7 +300,7 @@ def _item(desk: Desk, e: dict):
                                   if e.get("places") else "hansa serve can look at free space again"), None, True, None
     if kind == "server_stopped":
         return ("server",), ("hansa serve stopped: no task starts or ends until it runs again · next: "
-                             "hansa explain server"), None, True, None
+                             "hansa up"), None, True, None
     if kind == "srt_tried" and not e.get("ran") and srt_needed(desk.settings()):
         said = ("found, but it could not run: " + str(e.get("said") or "")[:200]) if e.get("found") \
             else "not found on its PATH"
@@ -956,7 +956,7 @@ def server_news(r: dict, items: list, was_up, told_down: float, told_stuck: floa
         if was_up and not told_down:
             items.append({"key": ["server"], "line": "hansa serve is not running (it stopped without a word): "
                                                      "no task starts or ends until it runs again · next: "
-                                                     "hansa explain server"})
+                                                     "hansa up"})
             told_down = time.time()
     elif st["state"] == "stuck":
         if not told_stuck and not told_down:

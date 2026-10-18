@@ -60,7 +60,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 ## Commands
 | command | what it does |
 |---|---|
-| `hansa status` | whether `hansa serve` runs; what runs, waits (and why) or failed; lanes, providers, usage |
+| `hansa status` | whether `hansa serve` runs; when it is not running, `hansa up` starts it again as it last ran; what runs, waits (and why) or failed; lanes, providers, usage |
 | `hansa add "<task>" [--lane L] [--effort E] [--model M] [--title T] [--max-turns N] [--file PATH]` | queue a task |
 | `hansa show <id> [--full \| --report \| --check \| --check-log \| --merge-check-log]` | report, changes, refused calls, check (failing tests, last lines), next step |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base; `--new`: only what a follow-up added |
@@ -337,6 +337,7 @@ loads nothing.
 | `cost-figures` | what `hansa cost` counts |
 | `states` | a task's states |
 | `inbox` | posts, the daily clear, compaction |
+| `bringing-up` | starting the server again and the account's desk list |
 | `free-space` | the disk floor |
 | `desk-files` | a desk's files, where they grow |
 | `java` | Java and Maven |
