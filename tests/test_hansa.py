@@ -2074,6 +2074,69 @@ class UpTest(unittest.TestCase):
         del os.environ["XDG_STATE_HOME"]
         self.assertEqual(up.desks_file(), self.tmp / ".local/state/hansa/desks.json")
 
+    def test_serve_survives_desk_list_errors(self):
+        from hansa import up, web
+        write = up.write_json
+
+        def write_without_list(path, value):
+            if path == up.desks_file():
+                raise PermissionError(errno.EACCES, "desk list is unwritable", str(path))
+            write(path, value)
+
+        for failure in ("directory", "lock", "write"):
+            with self.subTest(failure=failure), contextlib.ExitStack() as patches:
+                os.environ["XDG_STATE_HOME"] = str(self.tmp / failure)
+                listed = up.desks_file()
+                if failure == "directory":
+                    Path(os.environ["XDG_STATE_HOME"]).write_text("not a directory")
+                else:
+                    listed.parent.mkdir(parents=True)
+                    if failure == "lock":
+                        listed.with_suffix(".lock").mkdir()
+                    else:
+                        patches.enter_context(unittest.mock.patch.object(up, "write_json", side_effect=write_without_list))
+                self.record(hansa="stale")
+                err = io.StringIO()
+                dispatcher = types.SimpleNamespace(tick=unittest.mock.Mock(side_effect=KeyboardInterrupt))
+                with cli.hold_server_lock(self.desk) as held, \
+                        unittest.mock.patch.object(cli, "hold_server_lock", return_value=held), \
+                        unittest.mock.patch.object(cli, "desk_paths_problem", return_value=""), \
+                        unittest.mock.patch.object(web, "start_web", return_value=types.SimpleNamespace(
+                            server_address=(self.options.host, self.options.port))), \
+                        unittest.mock.patch.object(cli, "Dispatcher", return_value=dispatcher), \
+                        unittest.mock.patch.object(cli, "try_srt_at_start", return_value={}), \
+                        unittest.mock.patch.object(views, "srt_problem", return_value=""), \
+                        unittest.mock.patch.object(cli.alert, "start_thread"), \
+                        unittest.mock.patch.object(cli.signal, "signal"), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    main(["--desk", str(self.desk.root), "serve", "--host", self.options.host,
+                          "--port", str(self.options.port), "--every", str(self.options.every)])
+                dispatcher.tick.assert_called_once_with()
+                rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
+                self.assertEqual(rec["hansa"], up.hansa_command())
+                self.assertEqual(rec["options"], vars(self.options))
+                self.assertEqual(len(err.getvalue().splitlines()), 1, err.getvalue())
+                self.assertIn("desk list", err.getvalue())
+
+    def test_record_keeps_install_link(self):
+        from hansa import up
+        link = self.tmp / "current hansa"
+        link.symlink_to(Path(__file__).resolve().parent.parent, target_is_directory=True)
+        script = ("import sys, types; from hansa import up; from hansa.desk import Desk; "
+                  f"up.record_start(Desk(sys.argv[1]), types.SimpleNamespace(**{vars(self.options)!r}))")
+        r = subprocess.run([sys.executable, "-c", script, str(self.desk.root)], cwd=self.tmp,
+                           env={**os.environ, "PYTHONPATH": str(link)}, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
+        self.assertEqual(rec["hansa"], str(link / "bin/hansa"))
+        self.assertEqual(json.loads(up.desks_file().read_text())[0]["hansa"], rec["hansa"])
+        updated = self.tmp / "updated hansa"
+        (updated / "bin").mkdir(parents=True)
+        (updated / "bin/hansa").write_text("new installation")
+        link.unlink()
+        link.symlink_to(updated, target_is_directory=True)
+        self.assertEqual(Path(up.serve_command(self.desk, rec)[0]).read_text(), "new installation")
+
     def test_tmux_record_uses_names_for_rebootable_sockets_and_paths_for_custom_ones(self):
         from hansa import up
         sockets = [(f"/tmp/tmux-{os.getuid()}/desk", ["-L", "desk"]),
@@ -2094,6 +2157,21 @@ class UpTest(unittest.TestCase):
                 self.assertEqual(rec["tmux"], {"server": server, "session": "desk session"})
                 self.assertNotIn("TMUX", rec["env"])
                 self.assertNotIn("TMUX_PANE", rec["env"])
+
+    def test_tmux_uses_explicit_sh(self):
+        from hansa import up
+        env = up.clean_env(self.desk, {"PATH": os.environ["PATH"]})
+        env["SHELL"] = "/usr/local/bin/fish"
+        for exists in (0, 1):
+            with self.subTest(existing_session=exists), \
+                    unittest.mock.patch.object(up.subprocess, "run", side_effect=[
+                        subprocess.CompletedProcess([], exists, "", ""), subprocess.CompletedProcess([], 0, "", "")]) as ran:
+                up.launch_tmux(self.desk, {}, ["/saved/bin/hansa", "serve"], env, "/tools/tmux",
+                               self.desk.state_dir / "serve.log")
+            argv = ran.call_args.args[0]
+            self.assertIn("new-window" if exists == 0 else "new-session", argv)
+            self.assertEqual(argv[-3:-1], ["/bin/sh", "-c"])
+            self.assertTrue(argv[-1].startswith("exec "))
 
     def test_up_tmux_restores_command_location_clean_environment_and_pane_logging(self):
         from hansa import up
@@ -2296,11 +2374,11 @@ class UpTest(unittest.TestCase):
             env = up.clean_env(self.desk, {"PATH": os.environ["PATH"], "LANG": "C", "HANSA_CLAUDE": "/saved/claude"})
             watch = up.launch_tmux(self.desk, {"tmux": {"server": ["-L", "saved"], "session": "serve"}},
                                    [str(emit)], env, "/fake/tmux", capture)
-        pane = ran.call_args.args[0][-1]
+        pane_command = ran.call_args.args[0][-3:]
         dirty = {**os.environ, "UNRELATED": "tmux-server", "ANTHROPIC_API_KEY": "tmux-key",
                  "CLAUDE_CODE_SESSION_ID": "tmux-session", "HANSA_CLAUDE": "/stale/claude",
                  "TMUX": "/tmp/socket,123,0", "TMUX_PANE": "%7", "TERM": "tmux-256color"}
-        r = subprocess.run(["/bin/sh", "-c", pane], env=dirty, capture_output=True, text=True, timeout=10)
+        r = subprocess.run(pane_command, env=dirty, capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
         seen = json.loads(capture.read_text())
         self.assertEqual(seen["HANSA_CLAUDE"], "/saved/claude")

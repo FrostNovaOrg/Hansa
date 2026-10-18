@@ -7,6 +7,7 @@ import pwd
 import re
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -22,7 +23,8 @@ START_WAIT = 8.0
 
 
 def hansa_command() -> str:
-    return str(Path(__file__).resolve().parent.parent / "bin" / "hansa")
+    # Keep installation links, as bin/hansa does, so switching one changes future starts.
+    return str(Path(__file__).absolute().parent.parent / "bin" / "hansa")
 
 
 def desks_file() -> Path:
@@ -72,15 +74,18 @@ def record_start(desk: Desk, options) -> None:
            "env": start_env(desk, os.environ), "tmux": record_tmux(), "at": now()}
     write_json(desk.state_dir / "serve-start.json", rec)
     listed = desks_file()
-    listed.parent.mkdir(parents=True, exist_ok=True)
-    # Different desks may start together. Lock the stable inode, replace just the JSON.
-    with open(listed.with_suffix(".lock"), "a") as held:
-        fcntl.flock(held, fcntl.LOCK_EX)
-        entries = read_json(listed, [])
-        entries = [x for x in entries if isinstance(x, dict) and x.get("desk") != str(desk.root)] \
-            if isinstance(entries, list) else []
-        entries.append({"desk": str(desk.root), "hansa": rec["hansa"], "at": rec["at"]})
-        write_json(listed, entries)
+    try:
+        listed.parent.mkdir(parents=True, exist_ok=True)
+        # Different desks may start together. Lock the stable inode, replace just the JSON.
+        with open(listed.with_suffix(".lock"), "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            entries = read_json(listed, [])
+            entries = [x for x in entries if isinstance(x, dict) and x.get("desk") != str(desk.root)] \
+                if isinstance(entries, list) else []
+            entries.append({"desk": str(desk.root), "hansa": rec["hansa"], "at": rec["at"]})
+            write_json(listed, entries)
+    except OSError as e:
+        print(desk.redact(f"hansa serve: could not update account's desk list: {e}"), file=sys.stderr, flush=True)
 
 
 def serve_command(desk: Desk, rec: dict) -> list:
@@ -129,7 +134,7 @@ def launch_tmux(desk: Desk, rec: dict, cmd: list, env: dict, tmux: str, log: Pat
                             capture_output=True, text=True, timeout=5)
     create = ["new-window", "-d", "-t", "=" + session, "-n", "serve"] if exists.returncode == 0 else \
         ["new-session", "-d", "-s", session]
-    subprocess.run([*prefix, *create, "-c", str(desk.root), pane], env=env, cwd=desk.root,
+    subprocess.run([*prefix, *create, "-c", str(desk.root), "/bin/sh", "-c", pane], env=env, cwd=desk.root,
                    capture_output=True, text=True, timeout=10, check=True)
     attach = [*prefix, "attach-session", "-t", "=" + session]
     if env.get("TMUX_TMPDIR") and server[0] == "-L":

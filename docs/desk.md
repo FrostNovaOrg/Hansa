@@ -19,6 +19,8 @@ tmux's own directory is saved by server name (`-L`), so tmux can recreate the
 directory after a reboot; a custom socket keeps its path (`-S`). A manual
 foreground `hansa serve --port N` works as before and updates this record.
 `hansa serve` is the dispatcher and web server that `hansa up` runs.
+The command path keeps links to the installation, so switching such a link
+makes future starts use the new installation.
 
 The record never includes `ANTHROPIC_*`, other key variables, values holding
 one of the desk's keys, or a Claude Code session's identity or messaging
@@ -34,7 +36,8 @@ With tmux installed (found by hansa's usual lookup, including `HANSA_TMUX`),
 `hansa up` starts a detached pane in the saved server and session. If that
 session already exists, it adds a window there. Without a saved tmux location,
 it uses a server named `hansa-<desk folder name>` (made safe) and session
-`serve`. Output stays in the pane and is also appended to `.hansa/serve.log`.
+`serve`. The pane command uses `/bin/sh`, regardless of the account's shell.
+Output stays in the pane and is also appended to `.hansa/serve.log`.
 Without tmux it starts a background process in its own session, with input
 from `/dev/null` and output appended to that log. Before either start, a log
 over 20 MB moves to `serve.log.1`, replacing the previous backup.
@@ -49,7 +52,9 @@ command to run as that account, so the server uses that account's tmux and home.
 Each server start also adds or updates one entry for its desk in this account's
 `$XDG_STATE_HOME/hansa/desks.json`, or `~/.local/state/hansa/desks.json` when
 `XDG_STATE_HOME` is unset. That list holds the desk folder, the absolute hansa
-command and when it started. Outside any desk, with no `--desk` or `HANSA_DESK`,
+command and when it started. If the list cannot be updated, `hansa serve`
+warns on stderr and keeps serving; the desk's own start record is still saved.
+Outside any desk, with no `--desk` or `HANSA_DESK`,
 `hansa up` visits every listed folder that is still a desk, printing a block
 for each. Each is started by its own installation with
 `<saved hansa> --desk <folder> up`. If that installation is missing or too old
