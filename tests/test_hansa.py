@@ -2012,6 +2012,16 @@ class UpTest(unittest.TestCase):
         self.gone = {"state": "gone", "pid": None, "answers": False}
         self.running = {"state": "up", "pid": 123, "answers": True}
 
+    @contextlib.contextmanager
+    def outside_desk(self):
+        # TMPDIR may be inside a real desk. Let find inspect only our own non-desk folder,
+        # never the folders above it, while still exercising its optional lookup.
+        with unittest.mock.patch.dict(os.environ), \
+                unittest.mock.patch.object(Path, "cwd", return_value=self.tmp), \
+                unittest.mock.patch.object(Path, "parents", new_callable=unittest.mock.PropertyMock, return_value=()):
+            os.environ.pop("HANSA_DESK", None)
+            yield
+
     def say(self, *args):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -2472,10 +2482,7 @@ class UpTest(unittest.TestCase):
             write_json(root / ".hansa/serve-start.json", {"options": vars(self.options)})
         up.desks_file().parent.mkdir(parents=True)
         write_json(up.desks_file(), entries)
-        here = os.getcwd()
-        os.chdir(self.tmp)
-        self.addCleanup(os.chdir, here)
-        with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+        with self.outside_desk(), contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
             main(["up"])
         said = out.getvalue()
         rows = [json.loads(x) for x in calls.read_text().splitlines()]
@@ -2503,10 +2510,12 @@ class UpTest(unittest.TestCase):
             self.addCleanup(os.chdir, here)
             main(["up"])
             self.assertEqual(one.call_count, 2)
+            self.assertEqual(one.call_args.args[0].root, self.desk.root)
             all_desks.assert_not_called()
-            os.chdir(self.tmp)
-            main(["up"])
+            with self.outside_desk():
+                main(["up"])
             all_desks.assert_called_once()
+            self.assertEqual(one.call_count, 2)
 
     def test_empty_desk_list_explains_how_to_register_one(self):
         from hansa import up
