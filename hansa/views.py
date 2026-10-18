@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, plugin, release
+from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, plugin, release, up
 from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
@@ -552,7 +552,8 @@ def status(desk: Desk) -> dict:
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
-        "notifying": notify.names(desk),  # the sessions hansa posts to (hansa notify)
+        "notifying": (hearing := notify.names(desk)),  # the sessions hansa posts to (hansa notify)
+        "coordinator_start": "" if hearing else up.coordinator_line(desk),  # what hansa up does about the session
         "unreached": alert.coordinator_lines(desk, s),  # the coordinator alert's cases that hold now
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "mod": (mod := plugin.status(desk)),  # what hansa did at the coordinator's start: the mod loaded or not, and why
@@ -651,6 +652,7 @@ def status_text(st: dict) -> str:
     out += [st["disk"]["line"]] if st.get("disk") else []
     out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                "hansa posts to no session (hansa notify on, from the coordinator's session)")
+    out += [st["coordinator_start"]] if st.get("coordinator_start") and not st.get("notifying") else []
     out += st.get("unreached") or []
     out += [x for x in (f"{st['mod_line']} {plugin.HELP}", st.get("clear_line"), st["compact_line"]) if x] \
         if st.get("mod_line") else []
@@ -1509,8 +1511,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "`hansa serve` starts queued tasks, finishes ended ones and serves the web page. It runs on the "
             "desk's machine, usually in a terminal multiplexer. Without it, tasks stay queued. One runs per "
             "desk: a second one refuses to start.",
-            "`hansa up` starts it again as it last ran, detached in tmux when installed, or in the background. "
-            "It starts nothing while the server runs. More: hansa help bringing-up.",
+            "`hansa up` starts it again as it last ran, detached in tmux when installed, or in the background, "
+            "then the coordinator's session. It starts no server while one runs. More: hansa help bringing-up.",
             f"  now: {server_text(server)}",
             f"  {page_text(page_of(desk, server))}",
             "What it starts outside a worker's sandbox (a release's command, the alert command, "

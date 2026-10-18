@@ -3267,6 +3267,44 @@ def _args(pid) -> list:
     return [a.decode(errors="replace") for a in got[0]] if got else []
 
 
+def proc_args(pid):
+    """A process's exact argument list, empty words kept: what started it, to start it again (up.py). None when it
+    cannot be read whole, or holds a word that is not UTF-8."""
+    try:
+        data = Path(f"/proc/{pid}/cmdline").read_bytes()
+        words = (data[:-1] if data.endswith(b"\0") else data).split(b"\0") if data else []
+    except OSError:
+        got = _mac_procargs(pid) if _ON_MAC else None
+        words = got[0] if got and got[2] else []
+    try:
+        return [w.decode("utf-8") for w in words] or None
+    except UnicodeDecodeError:
+        return None
+
+
+def proc_cwd(pid) -> str:
+    """A process's working folder; '' when it cannot be read. On macOS through libproc (as working_in), else lsof."""
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        if not _ON_MAC:
+            return ""
+    try:
+        import ctypes
+        lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        buf = ctypes.create_string_buffer(_VNODEPATHINFO_SIZE)
+        if lib.proc_pidinfo(int(pid), _PROC_PIDVNODEPATHINFO, 0, buf, _VNODEPATHINFO_SIZE) == _VNODEPATHINFO_SIZE:
+            return buf.raw[152:152 + 1024].split(b"\0")[0].decode()
+    except (ImportError, OSError, ValueError, UnicodeDecodeError):
+        pass
+    try:
+        r = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True,
+                           timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return next((x[1:] for x in r.stdout.splitlines() if x.startswith("n")), "")
+
+
 def sweep(desk: Desk, tid: str) -> list:
     """Stop what a task's processes left running once nothing of the task should run any more: a server or
     watcher that left the process group hansa stops, in a session of its own. Never hansa serve itself, nor

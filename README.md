@@ -116,7 +116,7 @@ hansa's code from the path it was started by, without following links, so throug
 
 ```sh
 hansa init ~/desk --repo ~/code/myproject   # the first lane, "a", on the checkout's current branch
-cd ~/desk && hansa up                     # starts the server and keeps it running; tmux when installed
+cd ~/desk && hansa up                     # starts the server, then the coordinator (step 5); tmux when installed
 ```
 
 The repository needs a first commit: `hansa init` and `hansa lane add` refuse one without. hansa also
@@ -152,8 +152,13 @@ browser's language: English, or Chinese.
 
 ### 5. Start the coordinator
 
+`hansa up` starts the coordinator's session too, in tmux, and prints how to attach to it; after a restart it
+starts the session again as it last started, continuing its conversation. `hansa coordinator` stays the way
+to run it in the current terminal instead (one or the other: both would be two coordinators):
+
 ```sh
-cd ~/desk && hansa coordinator
+tmux -L hansa-desk attach -t coordinator    # the session hansa up started, as it printed
+cd ~/desk && hansa coordinator              # or run it in this terminal
 ```
 
 The first time Claude Code opens in a new desk, it asks whether you trust the folder: choose yes. Claude

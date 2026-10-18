@@ -337,7 +337,7 @@ loads nothing.
 | `cost-figures` | what `hansa cost` counts |
 | `states` | a task's states |
 | `inbox` | posts, the daily clear, compaction |
-| `bringing-up` | starting the server again and the account's desk list |
+| `bringing-up` | starting the server and the coordinator again, the account's desk list |
 | `free-space` | the disk floor |
 | `desk-files` | a desk's files, where they grow |
 | `java` | Java and Maven |
