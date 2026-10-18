@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, alert, build, cost, installed_text, notes, notify, plugin, release, session_vars, views, without_session
+from . import account, alert, build, cost, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
@@ -71,6 +71,7 @@ TOPICS = {
     "states": ("tasks.md", "Task states", "a task's states and what each means"),
     "inbox": ("desk.md", "Hearing from hansa", "how hansa posts to the coordinator's session, hansa wait, and the "
               "daily clear"),
+    "bringing-up": ("desk.md", "Starting the server again", "hansa up, the saved server start and this account's desk list"),
     "free-space": ("desk.md", "Free space", "the floor of free space under which hansa serve starts nothing new"),
     "desk-files": ("desk.md", "A desk's files", "where a desk's files are (keys, settings, notes/, PROJECT.md) and "
                    "where they grow"),
@@ -91,7 +92,7 @@ TOPICS = {
 COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
                   ("watching", ("status", "wait", "notify", "ask", "explain", "notes", "cost")),
                   ("lanes and releases", ("lane", "release", "hide", "concurrency", "disk-floor", "pause", "resume")),
-                  ("the desk", ("init", "serve", "web", "coordinator", "ping", "help")))
+                  ("the desk", ("init", "up", "serve", "web", "coordinator", "ping", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
@@ -293,7 +294,7 @@ def cmd_init(a):
         _init_for(a)
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base or "")
     print(f"desk ready at {desk.root}")
-    print("next: start `hansa serve` there, open the page with `hansa web` and add providers and keys; "
+    print("next: run `hansa up` there, open the page with `hansa web` and add providers and keys; "
           "the coordinator adds lanes with `hansa lane add` and queues work with `hansa add`.")
 
 
@@ -1330,6 +1331,7 @@ def cmd_serve(a):
     record_serve_code(desk)  # which code this server runs, for hansa status to tell from what is installed later
     record_serve_locale(desk)  # the locale its lanes' commands get, for hansa explain lane to say
     dropped = record_serve_session(desk)  # a Claude Code session's identity, which nothing it starts gets
+    up.record_start(desk, a)  # how hansa up brings this server back, and this account's list of desks
     alert.sweep_runs(desk)  # the folders of alert runs a stopped or killed server left (none runs now: one server)
     try:
         port = start_web(desk, a.host, a.port).server_address[1]
@@ -1372,6 +1374,18 @@ def cmd_serve(a):
         desk.event("server_stopped")
     finally:
         alert.sweep_runs(desk)
+
+
+def cmd_up(a):
+    desk = Desk.find(a.desk, optional=True)
+    if desk is None:
+        ok = up.all_desks_up()
+    else:
+        if not (desk.settings_path.is_file() and desk.tasks_dir.is_dir()):
+            raise SystemExit(f"hansa: {desk.root} is not a desk; nothing started")
+        ok = up.desk_up(desk)
+    if not ok:
+        raise SystemExit(1)
 
 
 def web_port(desk: Desk) -> int:
@@ -3089,11 +3103,13 @@ def main(argv=None):
     p.epilog = see_more("cost-figures")
     p = add("ping", cmd_ping, "send one tiny request through a provider (or all)")
     p.add_argument("provider", nargs="?")
-    p = add("serve", cmd_serve, "run the dispatcher and the web page (keep it running)")
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8765, help="the web page's port (default 8765); another desk's server "
+    p = add("up", cmd_up, "start this desk's server again as it last ran; outside a desk, start this account's desks")
+    p.epilog = see_more("bringing-up")
+    p = add("serve", cmd_serve, "run the dispatcher and the web page in the foreground (what hansa up starts)")
+    p.add_argument("--host", default=up.DEFAULTS["host"])
+    p.add_argument("--port", type=int, default=up.DEFAULTS["port"], help="the web page's port (default 8765); another desk's server "
                    "on this machine needs another one")
-    p.add_argument("--every", type=float, default=3.0, help=argparse.SUPPRESS)
+    p.add_argument("--every", type=float, default=up.DEFAULTS["every"], help=argparse.SUPPRESS)
     p = add("web", cmd_web, "print the web page address for the principal")
     p.description += (", then wait on its input, which holds an ssh tunnel to the page open, until that input ends "
                       "or Ctrl+C. A script that wants only the address gives it no input (hansa web </dev/null): it "
@@ -3155,7 +3171,7 @@ def main(argv=None):
     if a.cmd == "ask" and not a.text:
         ap.error("ask needs the request" if a.close is None else "ask --close needs the reason: hansa ask --close N \"why\"")
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
-    if a.cmd not in ("coordinator", "init", "notify", "notify-follow"):
+    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up"):
         _as_desk_account(a, argv)
     a.fn(a)
     return 0

@@ -1582,18 +1582,20 @@ def account_home() -> str:
 PROGRAMS = ("claude", "git", "srt", "node", "tmux")
 
 
-def program_candidates(name: str) -> list:
+def program_candidates(name: str, env=None) -> list:
     """Where hansa looks for a program it runs, in order: the first that can be run is the one."""
+    env = os.environ if env is None else env
+    found = shutil.which(name, path=env.get("PATH", os.defpath))
     if name == "claude":
-        return [os.environ.get("HANSA_CLAUDE"), shutil.which("claude"), os.path.expanduser("~/.local/bin/claude")]
+        return [env.get("HANSA_CLAUDE"), found, os.path.expanduser("~/.local/bin/claude")]
     if name == "tmux":
-        return [os.environ.get("HANSA_TMUX"), shutil.which("tmux"), "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"]
-    return [shutil.which(name)]
+        return [env.get("HANSA_TMUX"), found, "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"]
+    return [found]
 
 
-def program(name: str) -> str:
-    """The program as hansa finds it; '' when it is not on this machine."""
-    return next((c for c in program_candidates(name) if c and os.access(c, os.X_OK)), "")
+def program(name: str, env=None) -> str:
+    """The program as hansa finds it, optionally in a saved environment; '' when it is not on this machine."""
+    return next((c for c in program_candidates(name, env) if c and os.access(c, os.X_OK)), "")
 
 
 def _hops(path: str) -> list:
@@ -2450,13 +2452,16 @@ class Desk:
         self.failed_starts = {}  # stopped launches whose failed-start record may still need disk space
 
     @classmethod
-    def find(cls, explicit: str | None = None) -> "Desk":
+    def find(cls, explicit: str | None = None, *, optional: bool = False) -> Desk | None:
+        """Find a named or enclosing desk; optional returns None only when neither is given or found."""
         if explicit or os.environ.get("HANSA_DESK"):
             return cls(explicit or os.environ["HANSA_DESK"])
         here = Path.cwd().resolve()
         for d in (here, *here.parents):
             if (d / "settings.json").is_file() and (d / "tasks").is_dir():
                 return cls(d)
+        if optional:
+            return None
         raise SystemExit("hansa: no desk here. Run inside a desk, pass --desk DIR, or set HANSA_DESK.")
 
     # -- settings ---------------------------------------------------------

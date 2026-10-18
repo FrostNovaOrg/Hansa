@@ -116,7 +116,7 @@ hansa's code from the path it was started by, without following links, so throug
 
 ```sh
 hansa init ~/desk --repo ~/code/myproject   # the first lane, "a", on the checkout's current branch
-cd ~/desk && hansa serve                     # keep it running (tmux, systemd, ...)
+cd ~/desk && hansa up                     # starts the server and keeps it running; tmux when installed
 ```
 
 The repository needs a first commit: `hansa init` and `hansa lane add` refuse one without. hansa also
