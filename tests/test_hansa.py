@@ -2665,6 +2665,32 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertIn(shlex.join([up.hansa_command(), "--desk", str(self.desk.root), "coordinator", "--model", "opus",
                                   "--continue"]), said)
 
+    def test_notify_on_decides_by_the_record_not_by_hansa_role(self):
+        """A desk owner's wrapper sets HANSA_ROLE=coordinator on every hansa command it runs."""
+        from hansa import up
+        # no record of hansa coordinator for this session: recorded as any session is
+        said, rec, args = self.notify_on(["claude", "--name", "desk b"], HANSA_ROLE="coordinator")
+        args.assert_called_once_with(4242)
+        self.assertEqual((rec["kind"], rec["argv"], rec["session"]), ("notify", ["claude", "--name", "desk b"],
+                                                                       self.SESS))
+        self.assertIn("After a restart, hansa up starts this session again", said)
+        # hansa coordinator's record of another session (another pid, or the same pid started later) is replaced
+        for other in ({"pid": 1, "start": "boot:77"}, {"pid": 4242, "start": "boot:78"}):
+            with self.subTest(other=other):
+                write_json(self.desk.state_dir / "coordinator-start.json",
+                           {"kind": "coordinator", "words": ["--model", "opus"], "session": other})
+                _, rec, args = self.notify_on(["claude", "--name", "desk b"], HANSA_ROLE="coordinator")
+                args.assert_called_once_with(4242)
+                self.assertEqual((rec["kind"], rec["session"]), ("notify", self.SESS))
+        # the session hansa coordinator started keeps that record and is not recorded again as notify
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "coordinator", "words": ["--model", "opus"], "session": self.SESS})
+        said, rec, args = self.notify_on(["claude", "--other"], HANSA_ROLE="coordinator")
+        args.assert_not_called()
+        self.assertEqual((rec["kind"], rec["words"], rec["session"]), ("coordinator", ["--model", "opus"], self.SESS))
+        self.assertIn(shlex.join([up.hansa_command(), "--desk", str(self.desk.root), "coordinator", "--model", "opus",
+                                  "--continue"]), said)
+
     def test_the_words_continue_replaces_refuse_nothing_though_they_hold_the_sessions_identity(self):
         from hansa import up
         for words in (["--resume", self.IDENTITY], ["-r", self.IDENTITY], ["--resume=" + self.IDENTITY],
