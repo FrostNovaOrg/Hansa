@@ -285,7 +285,8 @@ def record_coordinator(desk: Desk, clear: str, words: list) -> str:
     rec = {"kind": "coordinator", "hansa": hansa_command(), "clear_daily": clear, "words": unpicked(words),
            "folder": str(desk.root), "tmux": record_tmux(), "env": start_env(desk, os.environ),
            "session": {"pid": os.getpid(), "start": proc_start(os.getpid())}}
-    return _keep(desk, rec, unsafe(desk, [clear, *words, str(desk.root)]))
+    # the words kept: those --continue replaces (as --resume <its id>) are not recorded, so they refuse nothing
+    return _keep(desk, rec, unsafe(desk, [clear, *rec["words"], str(desk.root)]))
 
 
 def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None) -> str:
@@ -300,7 +301,8 @@ def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None
         return _keep(desk, rec, "the arguments of its claude process cannot be read", unread=True)
     if not folder or not os.path.isdir(folder):
         return _keep(desk, rec, "the folder of its claude process cannot be read", unread=True)
-    return _keep(desk, rec, unsafe(desk, [*argv, folder]))
+    # the words kept, as record_coordinator: not --resume <its id>, nor the inbox hansa up's launcher gave it
+    return _keep(desk, rec, unsafe(desk, [*rec["argv"], folder]))
 
 
 def restart_plan(desk: Desk, rec: dict) -> dict:
@@ -386,6 +388,8 @@ def coordinator_line(desk: Desk) -> str:
     plan = restart_plan(desk, rec)
     if prints(plan["words"]):
         return "hansa up starts no coordinator's session: its last start ran claude with --print, not interactive"
+    if not os.path.isdir(plan["folder"]):  # as hansa up says it
+        return f"hansa up starts no coordinator's session: its folder {plan['folder']} is not there"
     return f"hansa up starts the coordinator's session again, in tmux, {restart_line(desk, rec)}"
 
 

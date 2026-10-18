@@ -2002,6 +2002,11 @@ class UpTest(unittest.TestCase):
             "XDG_STATE_HOME": str(self.tmp / "state")}, clear=True)
         env.start()
         self.addCleanup(env.stop)
+        # nor the Claude Code session the tests may run in, which hansa took out as it was imported: hansa serve
+        # would say it was started inside one
+        session = unittest.mock.patch.dict(hansa.SESSION, clear=True)
+        session.start()
+        self.addCleanup(session.stop)
         self.desk = Desk(self.tmp / "desk with spaces")
         self.desk.root.mkdir()
         self.desk.tasks_dir.mkdir()
@@ -2577,14 +2582,14 @@ class CoordinatorUpTest(unittest.TestCase):
         folder.mkdir(exist_ok=True)
         return folder
 
-    def notify_on(self, argv, folder=None, **env):
-        """hansa notify on from a session (SESS) whose claude ran with argv in folder: what it printed, what it
-        recorded, and whether it read the session's process."""
+    def notify_on(self, argv, folder=None, sess=None, **env):
+        """hansa notify on from a session (SESS unless given) whose claude ran with argv in folder: what it printed,
+        what it recorded, and whether it read the session's process."""
         folder = str(self.own_folder()) if folder is None else folder
         os.environ.update(env)
         from hansa import up
         with unittest.mock.patch.object(notify, "turn_on", return_value="hansa now posts to this session"), \
-                unittest.mock.patch.object(notify, "session_here", return_value=dict(self.SESS)), \
+                unittest.mock.patch.object(notify, "session_here", return_value=dict(sess or self.SESS)), \
                 unittest.mock.patch.object(up, "proc_args", return_value=argv) as args, \
                 unittest.mock.patch.object(up, "proc_cwd", return_value=folder), \
                 unittest.mock.patch.object(up, "record_tmux", return_value={"server": ["-L", "default"],
@@ -2651,8 +2656,58 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertIn(shlex.join([up.hansa_command(), "--desk", str(self.desk.root), "coordinator", "--model", "opus",
                                   "--continue"]), said)
 
+    def test_the_words_continue_replaces_refuse_nothing_though_they_hold_the_sessions_identity(self):
+        from hansa import up
+        for words in (["--resume", self.IDENTITY], ["-r", self.IDENTITY], ["--resume=" + self.IDENTITY],
+                      ["--session-id", self.IDENTITY]):
+            with self.subTest(words=words):
+                said, rec, _ = self.notify_on(["claude", *words, "--name", "n"], CLAUDE_CODE_SESSION_ID=self.IDENTITY)
+                self.assertNotIn("will not start", said)
+                self.assertEqual((rec["kind"], rec["argv"]), ("notify", ["claude", "--name", "n"]))
+                self.assertNotIn(self.IDENTITY, (self.desk.state_dir / "coordinator-start.json").read_text())
+                self.assertIn("After a restart, hansa up starts this session again", said)
+        # hansa coordinator's record too; a word that is kept still refuses it
+        with unittest.mock.patch.object(up, "record_tmux", return_value={}):
+            self.assertEqual(up.record_coordinator(self.desk, "", ["--session-id", self.IDENTITY, "--model", "o"]), "")
+            self.assertEqual(up.read_coordinator(self.desk)["words"], ["--model", "o"])
+            self.assertIn("the session's identity",
+                          up.record_coordinator(self.desk, "", ["--resume", self.IDENTITY, "--name", self.IDENTITY]))
+        self.assertEqual(up.read_coordinator(self.desk)["kind"], "unrecorded")
+
+    def test_a_session_the_launcher_started_keeps_its_record_when_it_runs_notify_on(self):
+        """Recorded, started again by hansa up through the launcher, hansa notify on in that session (whose words
+        and environment carry the inbox the launcher gave it), and hansa up after a restart: the same start."""
+        from hansa import up
+        folder = str(self.own_folder())
+        self.notify_on(["claude", "--name", "desk b", "--continue"])
+        _, calls, _ = self.coordinator_up()
+        pane = self.pane_words(calls[1])
+        launched = pane[pane.index("notify-launch") + 1:]
+        self.assertEqual(launched, ["claude", "--name", "desk b", "--continue"])
+        started, sock = {}, str(self.tmp / "hansa-501" / "c4242.sock")
+        with unittest.mock.patch.object(notify, "socket_path", return_value=sock), \
+                unittest.mock.patch.object(notify, "start", return_value="started"), \
+                unittest.mock.patch.object(up, "record_tmux", return_value={}), \
+                unittest.mock.patch("os.execvpe", lambda prog, argv, env: started.update(argv=argv)):
+            self.say("notify-launch", *launched)
+        self.assertIn(sock, started["argv"])
+        me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}  # the launcher's process: claude's
+        said, rec, _ = self.notify_on(started["argv"], folder, me, CLAUDE_CODE_MESSAGING_SOCKET=sock,
+                                      CLAUDE_CODE_SESSION_ID=self.IDENTITY)
+        self.assertNotIn("will not start", said)
+        self.assertEqual((rec["kind"], rec["argv"], rec["folder"], rec["session"]),
+                         ("notify", ["claude", "--name", "desk b"], folder, me))
+        self.assertNotIn(sock, (self.desk.state_dir / "coordinator-start.json").read_text())
+        with unittest.mock.patch.object(up, "alive", return_value=False):  # after a restart: that process is gone
+            said, calls, ok = self.coordinator_up()
+        self.assertTrue(ok, said)
+        self.assertEqual(self.pane_words(calls[1]), pane)
+        self.assertEqual(calls[1].args[0][calls[1].args[0].index("-c") + 1], folder)
+
     def test_a_processs_exact_words_and_folder_are_read(self):
         from hansa import run
+        if not (os.path.isdir("/proc/self") or sys.platform == "darwin"):
+            self.skipTest("neither /proc nor macOS: hansa has no reader of a process's arguments here")
         folder = self.own_folder()
         words = ["--model", "opus[1m]", "", "a b"]
         child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()", *words], cwd=folder,
@@ -2663,8 +2718,7 @@ class CoordinatorUpTest(unittest.TestCase):
         while time.monotonic() < end and (seen is None or seen[-4:] != words):  # until its exec is done
             seen = run.proc_args(child.pid)
             time.sleep(0.05)
-        if seen is None:
-            self.skipTest("this sandbox does not let a process's arguments be read")
+        self.assertIsNotNone(seen, "the reader of a process's arguments read none")
         self.assertEqual(seen[-4:], words)
         self.assertTrue(os.path.samefile(run.proc_cwd(child.pid), folder))
 
@@ -2866,6 +2920,10 @@ class CoordinatorUpTest(unittest.TestCase):
         write_json(self.desk.state_dir / "coordinator-start.json",
                    {"kind": "notify", "argv": ["claude", "-p"], "folder": str(folder), "session": {"pid": 0}})
         self.assertIn("--print", up.coordinator_line(self.desk))
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "notify", "argv": ["claude"], "folder": str(self.tmp / "gone"), "session": {"pid": 0}})
+        self.assertEqual(up.coordinator_line(self.desk),
+                         f"hansa up starts no coordinator's session: its folder {self.tmp / 'gone'} is not there")
         write_json(self.desk.state_dir / "coordinator-start.json",
                    {"kind": "notify", "argv": ["claude"], "folder": str(folder),
                     "session": {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}})

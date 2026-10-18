@@ -85,13 +85,16 @@ the latest start wins.
 The record never holds a key or a session's identity. The words that pick a
 conversation or give an inbox are left out with their values: `-c`,
 `--continue`, `-r`/`--resume`, `--session-id`, `--fork-session` and
-`--messaging-socket-path`. When a word holds one of the desk's keys or the
-session's identity, or the argument list or the folder cannot be read, no
-command is saved and the start says why. The record then holds only that and
-the session's process, so `hansa up` starts no older command and says why;
-only a session already recorded keeps its record when a later `hansa notify
-on` cannot read it. As root on an account's desk nothing is saved: root writes
-nothing there, and `hansa up` runs as the account.
+`--messaging-socket-path`. So a session started with `--resume <its id>` or
+`--session-id <its id>` is recorded, and so is one `hansa up`'s launcher
+started (it carries its inbox) when it runs `hansa notify on`: it hears from
+hansa already, and running it does no harm. When a word that is kept holds
+one of the desk's keys or the session's identity, or the argument list or the
+folder cannot be read, no command is saved and the start says why. The record
+then holds only that and the session's process, so `hansa up` starts no older
+command and says why; only a session already recorded keeps its record when a
+later `hansa notify on` cannot read it. As root on an account's desk nothing
+is saved: root writes nothing there, and `hansa up` runs as the account.
 
 After the server, `hansa up` starts nothing when a session hears from hansa,
 and names it (pid and name). It starts nothing either when the recorded
@@ -137,7 +140,8 @@ command to run by hand. Without tmux it starts no coordinator, and prints the
 command to run in a terminal of one's own. On another account's desk it starts
 nothing, as for the server. While no session hears from hansa, `hansa status`
 says in one line that `hansa up` starts the session again, and how, or why it
-does not, including a start not recorded yet and what to do about it.
+does not, including a start not recorded yet and what to do about it, and a
+recorded folder that is not there.
 
 ## A desk's files
 
