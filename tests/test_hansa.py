@@ -20314,7 +20314,12 @@ class DeskTest(unittest.TestCase):
                       "behaviour that already worked (coverage)", "may pass either way",
                       "whether it tests what its name says", "name promises one case and tests another",
                       "coverage or not", "undo each part the task asks for, in turn",
-                      "run the tests again", "each part no test fails without", "each part no test watches"):
+                      "run only the tests it adds or changes, selected by name",
+                      "one test, a class, or a name pattern, as the project's test runner allows",
+                      "not their whole file or suite",
+                      "run only the tests that concern that part, selected the same way",
+                      "each part no test fails without", "each part no test watches",
+                      "Run the project's whole check at most once, at the end, and only if you need to"):
             self.assertIn(words, text)
         self.assertIn("VERDICT: does not hold", text)
 
