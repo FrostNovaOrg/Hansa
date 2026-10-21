@@ -218,7 +218,6 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
   .settings-nav button { flex:none; min-height:44px; padding:9px 12px; }
   .settings-nav button.on::before { display:none; }
   .settings-nav button[data-dirty=true]::after { margin-left:0; }
-  .settings-nav small { display:none; }
   .settings-head { margin-bottom:24px; }
   .metric-grid { gap:10px; }
   .metric-card { padding:14px; }
@@ -285,8 +284,7 @@ const T = ZH ? {
   saveKey:"保存密钥", clearKey:"清除密钥", keyHint:"填在这里，只存在本机、谁也看不到内容", check:"Ping", checking:"Ping 中…",
   rest:"歇",
   ready:"可用", lastCheck:"上次 Ping", addProvider:"加一家供应", newName:"名字（小写字母、数字、-）", remove:"删除",
-  general:"总体", concurrency:"同时最多做几件", coolMinutes:"额度用完后先歇几分钟", coordinator:"协调席",
-  compactIdle:"空闲时压缩于（token）", compactWorking:"工作中压缩于（token）",
+  general:"总体", concurrency:"同时最多做几件", compactIdle:"空闲时压缩于（token）", compactWorking:"工作中压缩于（token）",
   compactNote:"一轮以回答结束、会话空闲后，若上下文达到第一个数，协调席的 mod 在空闲一分钟后压缩它，这时整个上下文还在提示缓存里。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第二个数时压缩（hansa coordinator 用 --autocompact 传给它）。两个数都在 100,000 到 1,000,000 token 之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或第一个数不小于第二个数），那个压缩就不会发生：Claude Code 自己先压缩了。第二个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。第一个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第二个数从会话下次启动起生效。协调席不能改它们。Claude Code（2.1.299 或更新的版本）还会自己压缩一个有 200,000 token 或更多、空闲了约 54 分钟的对话；这一项 hansa 既不设置也不读取。mod 需要 Claude Code 2.1.290 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
   modStarted:t => `协调席会话 ${t} 启动：`, modOn:"hansa 加载了协调席的 mod", modOff:why => `hansa 没有加载协调席的 mod，因为：${why}`,
   modUnknown:"hansa 是否加载了协调席的 mod：不知道", modOptions:"命令行里的 --autocompact 选项：", notKnown:"不知道",
@@ -321,14 +319,14 @@ const T = ZH ? {
   noReadStop:"什么都不启动：工作者不能读的列表里有一条用不上",
   save:"保存设置", reload:"放弃修改", saved:"已保存，下一件活起生效。", problems:"没保存，有这些问题：",
   last24h:"最近 24 小时", finished:"做完", merged:"已合并", tokens:"token", listValue:"按价目折算",
-  days:"最近", daysUnit:"天", total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
+  total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
   costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。一件活重新排队再试时，每次尝试的 token 都算在里面。",
   coordinatorUncounted:"这里没有算协调席和它的子代理的用量：协调席以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
   runs:"运行次数（每次尝试都算）", turns:"轮数",
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按工作线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
   seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", helper_reviewer:"复核", helper_scout:"侦察", helper_operator:"操作",
-  events:"最近发生的事", none:"无", detail:"详情", hide:"收起", forbidden:"没有权限：请用 hansa web 给的地址打开",
-  noPrice:"没价目", tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并", markersInChange:"改动里留着冲突标记，不能合并",
+  events:"最近发生的事", none:"无", forbidden:"没有权限：请用 hansa web 给的地址打开",
+  tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并", markersInChange:"改动里留着冲突标记，不能合并",
   mcBatch:(members, owner) => `与 ${members.join(", ")} 一起验收；运行 ${owner} 的合并验收`,
   merging:"正在合并验收（跟基础分支现在的样子合在一起再跑一遍验收，通过就自动合并，不通过就回到待审）", mergeCheck:"合并验收",
   mcQueuedAhead:w => `合并验收在排队：同一个仓库和基础分支一次只跑一个合并验收，先等工作线 ${w.lane} 上 ${w.id} 的合并验收`,
@@ -359,11 +357,10 @@ const T = ZH ? {
   releaseMailboxes:"新增行中的邮箱必须使用保留示例域名或列入允许名单（合并和发布时检查；默认关闭）",
   releaseMailboxAllow:"邮箱允许名单（每行一项，忽略大小写）：完整邮箱地址允许该地址；@域名允许该域名及其子域名",
   f_release:"发布命令",
-  alerts:"提醒", alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调者叫停了发布、协调者向你提了请求、hansa serve 很久没跑完一轮、hansa 发给协调者会话的消息到不了它）由 hansa 运行，以这台机器的账号在沙箱外、在桌面 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；相隔 20 秒内的提醒合成一次（空＝不提醒）。协调者不能设置它，也不发提醒",
+  alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调者叫停了发布、协调者向你提了请求、hansa serve 很久没跑完一轮、hansa 发给协调者会话的消息到不了它）由 hansa 运行，以这台机器的账号在沙箱外、在桌面 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；相隔 20 秒内的提醒合成一次（空＝不提醒）。协调者不能设置它，也不发提醒",
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
   alertKeep:"提醒命令不要把提醒的文字留在协调者能读到的地方（文件、日志或聊天记录）：其中的一次性码能批准发布。",
   alertOutside:"这个文件在桌面的 secrets/ 外，协调者可以修改它，一次性发布码会经过它；请把它放在 secrets/ 下。",
-  alertNoSession:"没有会话在听 hansa 多少分钟后提醒", alertWindow:"协调者会话停在窗口上多少分钟后提醒", alertReview:"任务等审、协调者会话空闲多少分钟后提醒",
   alertCoordinatorNote:"种类 coordinator：hansa 发给协调者会话的消息到不了它时提醒你：没有会话在听 hansa、要发的东西等了这么久（hansa serve 提醒一次，有会话再听过之后才会再提醒）；会话停在权限对话框或问题上，发给它的东西没人理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，hansa 不再发给它）。0 到 1440 的整数分钟，0＝不提醒这一种；没有提醒命令时一种也不提醒。协调者不能改",
   laneTargets:"发布目标：基础分支发出去的各种方式，每个有自己的命令、时限（分钟）和必须先发的目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 的目标在为它做的提交固定检出里运行，什么都不占",
   laneMergeCheck:"合并验收命令：合并前由 hansa 在把这件活并上基础分支后跑，代替验收命令；每件改了东西的活合并前都跑，活做完后不跑（空＝合并验收跑验收命令）", mergeTimeout:"合并验收最长分钟（空＝同每件最长分钟）", f_merge_check:"合并验收命令"
@@ -381,8 +378,7 @@ const T = ZH ? {
   saveKey:"Save key", clearKey:"Clear key", keyHint:"Stored on this machine only; nobody can read it back", check:"Ping", checking:"pinging…",
   rest:"rest",
   ready:"ready", lastCheck:"last ping", addProvider:"Add provider", newName:"name (a-z, 0-9, -)", remove:"Remove",
-  general:"General", concurrency:"Tasks at once", coolMinutes:"Rest after a usage limit (min)", coordinator:"Coordinator",
-  compactIdle:"Compact when idle at (tokens)", compactWorking:"Compact while working at (tokens)",
+  general:"General", concurrency:"Tasks at once", compactIdle:"Compact when idle at (tokens)", compactWorking:"Compact while working at (tokens)",
   compactNote:"Once a turn has ended with an answer and the session is idle, the coordinator's mod compacts it after a minute if its context is at or above the first figure, while the whole context is still in the prompt cache. A new turn cancels the wait. While it works nothing interrupts it: Claude Code's own auto-compact compacts it at the second (hansa coordinator gives it with --autocompact). Both figures take 100,000 to 1,000,000 tokens. The defaults suit a model with a 1M-token window. A figure at or near the model's window, or a first figure at or above the second, never comes: Claude Code compacts on its own first. A second figure above the model's window is taken as that window: Claude Code compacts at the model's own limit, as with no figure. A change to the first applies from the session's next decision (when a turn ends, or a wait ends); a change to the second from the session's next start. The coordinator cannot change them. Claude Code (2.1.299 or later) also compacts by itself a conversation of 200,000 tokens or more left idle about 54 minutes; hansa neither sets nor reads that. The mod needs Claude Code 2.1.290 or later; the status line at the top says whether the session was started with it, and why not.",
   repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
@@ -410,13 +406,13 @@ const T = ZH ? {
   noReadStop:"Nothing starts: an entry of what workers may not read cannot be applied",
   save:"Save settings", reload:"Discard changes", saved:"Saved; applies from the next task.", problems:"Not saved:",
   last24h:"Last 24 h", finished:"finished", merged:"merged", tokens:"tokens", listValue:"priced",
-  days:"Last", daysUnit:"days", total:"Total", unpriced:"No price yet for:", setPrice:"Add them under Settings > Prices.",
+  total:"Total", unpriced:"No price yet for:", setPrice:"Add them under Settings > Prices.",
   costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill. A task queued again for another try counts every try's tokens.",
   runs:"Runs (every try)", turns:"Turns",
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
   seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_verify:"verifications", helper_reviewer:"reviewer", helper_scout:"scout", helper_operator:"operator",
-  events:"Recent events", none:"none", detail:"details", hide:"hide", forbidden:"Forbidden: open the address printed by hansa web",
-  noPrice:"no price", tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged", markersInChange:"holds conflict markers: cannot be merged",
+  events:"Recent events", none:"none", forbidden:"Forbidden: open the address printed by hansa web",
+  tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged", markersInChange:"holds conflict markers: cannot be merged",
   mcBatch:(members, owner) => `Checked with ${members.join(", ")}; ${owner}’s check runs`,
   merging:"Merging (checked together with the base as it is now; each merges by itself if that passes, and comes back for review if not)", mergeCheck:"Merge check",
   mcQueuedAhead:w => `merge check queued: waits for ${w.id}'s merge check on lane ${w.lane}`,
@@ -447,73 +443,84 @@ const T = ZH ? {
   releaseMailboxes:"Require reserved example domains or allowlisted mailboxes in added lines (checked at merges and releases; off by default)",
   releaseMailboxAllow:"Mailbox allowlist (one entry per line, ignoring case): a full address allows that address; @domain allows the domain and its subdomains",
   f_release:"release",
-  alerts:"Alerts", alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time, what hansa posts to the coordinator's session cannot reach it), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
+  alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time, what hansa posts to the coordinator's session cannot reach it), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
   alertSavedAt:t => `saved on this page ${t}`, alertTest:"Send a test alert", alertTesting:"sending…", alertTestOk:"test alert sent", alertTestBad:"test alert failed: ",
   alertKeep:"Your alert command must not keep the alert's text anywhere the coordinator can read it (a file, a log, a chat history): the one-time code in it approves a release.",
   alertOutside:"This file is outside the desk's secrets/: the coordinator can change it, and one-time release codes pass through it; keep it under secrets/.",
-  alertNoSession:"Alert when no session has heard from hansa for (minutes)", alertWindow:"Alert when the coordinator's session has waited on its window for (minutes)", alertReview:"Alert when a task has waited for review, its session idle, for (minutes)",
   alertCoordinatorNote:"Alerts of kind coordinator, when what hansa posts to the coordinator's session cannot reach it: no session hears from hansa while what it would post waits this long (hansa serve alerts once, and again only after a session has heard from hansa since); the session waits on a permission dialog or a question with what was posted to it unanswered (once per stretch of waiting); a task posted to it has waited for review this long while the session is idle (once per task; hansa does not post it again). Whole minutes from 0 to 1440; 0 turns that one off; with no alert command, none goes out. The coordinator cannot change them",
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
 Object.assign(T, ZH ? {
-  settingsIntro:"按主题管理模型、运行方式和发布规则。切换页面时，未保存的修改会保留。",
+  protectedStop:"列表中任何一条含 ()[]{}*?\\ 的路径都会停止所有工作者、验证者和协调席。",
+  alertBoundary:"提醒命令以这台机器的账号在沙箱外运行。",
+  mailboxChecks:"合并和发布时都检查。", runtimeReadOnly:"并发数和磁盘下限由协调席设定，这里只能看。",
+  settingsIntro:"按主题设置模型、运行方式和发布规则。切换页面时，未保存的修改会保留。",
   settingsNav:"设置分组", allSaved:"设置已同步", unsaved:"有未保存的修改", saving:"正在保存…",
   draftNote:"修改仅保留在当前页面，保存后才会生效。", discardConfirm:"放弃所有未保存的设置和未保存的密钥输入，并重新加载？",
-  providersIntro:"连接模型供应商，设置默认模型与思考强度。", coordinatorGroup:"运行与协调",
-  coordinatorIntro:"管理协调席的默认模型、上下文与供应商冷却时间。", lanesIntro:"查看工作线及其运行边界。工作线由协调席管理。",
-  securityGroup:"访问保护", securityIntro:"管理工作者不可读取的本机路径。", releasesGroup:"发布规则",
-  releasesIntro:"控制哪些发布需要审批，以及哪些内容不可发布。", alertsGroup:"通知提醒",
-  alertsIntro:"设置提醒命令，以及需要通知你的等待时长。", pricesGroup:"模型价格",
+  providersIntro:"连接模型供应，设置各家的模型与思考强度。", coordinatorGroup:"协调席",
+  coordinatorIntro:"选择协调席的模型，设置上下文压缩。", lanesIntro:"查看工作线及其运行边界。工作线由协调席设定。",
+  securityGroup:"工作者不能读的", securityIntro:"列出工作者不能读的本机路径。", releasesGroup:"发布",
+  releasesIntro:"选择哪些发布要等你点头，哪些内容不许发布。", alertsGroup:"提醒",
+  alertsIntro:"设置提醒命令，以及需要通知你的等待时长。", pricesGroup:"价目",
   pricesIntro:"设置 token 单价，用于成本页估算。金额单位为美元／百万 token。",
-  readOnly:"只读", learnMore:"查看完整说明", advanced:"高级选项与运行边界", connection:"连接信息",
-  keySeparate:"密钥单独保存，不随“保存设置”提交。", keyPending:"有密钥尚未保存，请在模型供应中单独保存。", keySaved:"密钥已保存。",
+  readOnly:"只读", learnMore:"查看完整说明", advanced:"其余各项（只读）", connection:"连接信息",
+  keySeparate:"密钥单独保存，不随“保存设置”提交。", keyPending:"有密钥尚未保存，请在模型供应中单独保存。", keySaved:"密钥已保存。", keyCleared:"密钥已清除。",
   invalidName:"名称只能包含小写字母、数字和连字符，且不能重复。", invalidModel:"模型名称不能为空或重复。",
-  addProviderTitle:"添加供应商", providerName:"供应商名称", priceName:"模型名称", baseModel:"默认模型",
-  cooldown:"额度用完后休息（分钟）", contextTitle:"上下文管理", compactHint:"范围 100,000–1,000,000 token。详细生效方式见说明。",
+  providerName:"供应名称", priceName:"模型名称", baseModel:"模型（空＝用供应的）",
+  cooldown:"额度用完后休息（分钟）", contextTitle:"上下文压缩", compactHint:"范围 100,000–1,000,000 token。详细生效方式见说明。",
   protectedPaths:"不可读取的路径", protectedHint:"每行一个绝对路径。常见登录信息、密钥与浏览器数据已内置保护。",
-  releaseApproval:"发布审批", autoRelease:"无需逐次审批的目标", autoReleaseHint:"未勾选的目标，每次发布都需要你批准。",
-  directPolicy:"直接提交的审批方式", contentRules:"发布内容检查", forbiddenWords:"禁止发布的字眼",
-  forbiddenHint:"每行一个词、短语或 re:Python 正则表达式。", exceptionsTitle:"按工作线豁免", mailboxTitle:"检查新增行中的邮箱",
+  releaseApproval:"发布是否等你点头", autoRelease:"不用逐次点头的目标", autoReleaseHint:"未勾选的目标，每次发布都要等你点头。",
+  directPolicy:"直接提交的点头规则", contentRules:"发布内容检查", forbiddenWords:"禁止发布的字眼",
+  forbiddenHint:"每行一个词、短语或 re:Python 正则表达式，每项最多 200 字符；只在一行之内匹配，只查 UTF-8 文字。", exceptionsTitle:"按工作线豁免", mailboxTitle:"检查新增行中的邮箱",
   mailboxAllowTitle:"邮箱允许名单", mailboxHint:"每行一个完整邮箱地址，或 @域名。", alertCommandTitle:"提醒命令",
   alertCommandHint:"留空时不发送提醒。测试按钮使用已保存的命令。", alertTiming:"何时提醒你",
   noSessionShort:"没有会话在听（分钟）", windowShort:"协调席等待操作（分钟）", reviewShort:"任务等待审核（分钟）",
-  runtimeTitle:"运行概况", compactTitle:"协调席模型", configError:"添加失败", savedWithKeys:"设置已保存；密钥输入仍需单独保存。"
+  compactTitle:"协调席模型", savedWithKeys:"设置已保存；密钥输入仍需单独保存。"
 } : {
+  protectedStop:"Any entry containing ()[]{}*?\\ stops every worker, verifier and the coordinator.",
+  alertBoundary:"The alert command runs as this machine's account, outside the sandbox.",
+  mailboxChecks:"Checked at merges as well as releases.", runtimeReadOnly:"Concurrency and the disk floor are set by the coordinator and only shown here.",
   settingsIntro:"Manage models, runtime and release rules by topic. Unsaved changes stay when you switch pages.",
   settingsNav:"Settings sections", allSaved:"Settings up to date", unsaved:"Unsaved changes", saving:"Saving…",
   draftNote:"Changes stay in this page until you save them.", discardConfirm:"Discard all unsaved settings and key inputs, and reload?",
-  providersIntro:"Connect providers and choose their default model and effort.", coordinatorGroup:"Runtime & coordinator",
-  coordinatorIntro:"Choose coordinator defaults, context limits and provider cooldown.", lanesIntro:"Inspect lanes and their runtime boundaries. Lanes are managed by the coordinator.",
-  securityGroup:"Access protection", securityIntro:"Manage local paths that workers must not read.", releasesGroup:"Release rules",
-  releasesIntro:"Choose which releases need approval and what content must stay local.", alertsGroup:"Notifications",
-  alertsIntro:"Set the alert command and when a wait needs your attention.", pricesGroup:"Model pricing",
+  providersIntro:"Connect providers and choose their default model and effort.", coordinatorGroup:"Coordinator",
+  coordinatorIntro:"Choose the coordinator model and context compaction limits.", lanesIntro:"Inspect lanes and their runtime boundaries. Lanes are managed by the coordinator.",
+  securityGroup:"What workers may not read", securityIntro:"Manage local paths that workers must not read.", releasesGroup:"Releases",
+  releasesIntro:"Choose which releases need approval and what content must stay local.", alertsGroup:"Alerts",
+  alertsIntro:"Set the alert command and when a wait needs your attention.", pricesGroup:"Prices",
   pricesIntro:"Token rates for the Cost page. All rates are USD per million tokens.",
-  readOnly:"Read only", learnMore:"Full explanation", advanced:"Advanced options & runtime boundaries", connection:"Connection",
-  keySeparate:"Keys are saved separately from Save settings.", keyPending:"Some keys are unsaved. Save them separately under Providers.", keySaved:"Key saved.",
+  readOnly:"Read only", learnMore:"Full explanation", advanced:"Other fields (read only)", connection:"Connection",
+  keySeparate:"Keys are saved separately from Save settings.", keyPending:"Some keys are unsaved. Save them separately under Providers.", keySaved:"Key saved.", keyCleared:"Key cleared.",
   invalidName:"Use a unique name with lowercase letters, digits and hyphens.", invalidModel:"Enter a unique, non-empty model name.",
-  addProviderTitle:"Add a provider", providerName:"Provider name", priceName:"Model name", baseModel:"Default model",
+  providerName:"Provider name", priceName:"Model name", baseModel:"Model (blank = the provider's)",
   cooldown:"Rest after a usage limit (minutes)", contextTitle:"Context management", compactHint:"100,000–1,000,000 tokens. See the explanation for when each applies.",
   protectedPaths:"Paths workers must not read", protectedHint:"One absolute path per line. Common logins, keys and browser data are already protected.",
   releaseApproval:"Release approvals", autoRelease:"Targets allowed without individual approval", autoReleaseHint:"Unticked targets need your approval for every release.",
   directPolicy:"Approval for direct commits", contentRules:"Release content checks", forbiddenWords:"Forbidden words",
-  forbiddenHint:"One word, phrase or re:Python pattern per line.", exceptionsTitle:"Exceptions by lane", mailboxTitle:"Check mailboxes in added lines",
+  forbiddenHint:"One word, phrase or re:Python pattern per line, at most 200 characters per entry. Matches within one line, in UTF-8 text only.", exceptionsTitle:"Exceptions by lane", mailboxTitle:"Check mailboxes in added lines",
   mailboxAllowTitle:"Mailbox allowlist", mailboxHint:"One full mailbox or @domain per line.", alertCommandTitle:"Alert command",
   alertCommandHint:"Blank means no alerts. The test uses the saved command.", alertTiming:"When to alert",
   noSessionShort:"No listening session (minutes)", windowShort:"Coordinator waiting for input (minutes)", reviewShort:"Task waiting for review (minutes)",
-  runtimeTitle:"Runtime overview", compactTitle:"Coordinator model", configError:"Could not add", savedWithKeys:"Settings saved; key inputs still need to be saved separately."
+  compactTitle:"Coordinator model", savedWithKeys:"Settings saved; key inputs still need to be saved separately."
 });
 Object.assign(T, ZH ? {
+  staleReloaded:(changed, both) => `设置已在别处修改，页面已重新加载。别处修改的项：${changed}。两边都修改的项（保留你的草稿值）：${both}。草稿和密钥输入仍保留；再次点保存才会保存。`,
+  staleReloadFailed:"设置已在别处修改，重新加载失败。草稿和密钥输入仍保留，请再试一次。",
+  savedReloadFailed:"设置已保存，但重新加载失败。当前内容仍保留，请重新加载。",
   primaryNav:"工作台导航", showKey:"显示密钥", hideKey:"隐藏密钥", refresh:"重新加载",
   reloading:"正在重新加载…", keySaving:"正在保存密钥…", saveFailed:"保存失败，修改仍保留。",
   loadFailed:"重新加载失败，当前内容仍保留。", modifiedGroup:"此分组有未保存修改",
-  savedGroup:"此分组已同步", jumpToField:"前往对应设置", retrySave:"修正后可重新保存。",
+  jumpToField:"前往对应设置", retrySave:"修正后可重新保存。",
   needsAttention:"需要检查设置", keySaveFailed:"密钥操作未完成，请查看错误提示。"
 } : {
-  primaryNav:"Workspace navigation", showKey:"Show key", hideKey:"Hide key", refresh:"Reload settings",
+  staleReloaded:(changed, both) => `Settings changed elsewhere and the page reloaded them. Changed elsewhere: ${changed}. Changed by both (your draft values kept): ${both}. Your draft and key inputs remain; press Save again to save.`,
+  staleReloadFailed:"Settings changed elsewhere, but reloading failed. Your draft and key inputs remain; try again.",
+  savedReloadFailed:"Settings saved, but reloading failed. The current contents remain; reload settings.",
+  primaryNav:"Desk navigation", showKey:"Show key", hideKey:"Hide key", refresh:"Reload settings",
   reloading:"Reloading settings…", keySaving:"Saving key…", saveFailed:"Save failed. Your changes are still here.",
   loadFailed:"Reload failed. The current settings are still here.", modifiedGroup:"This section has unsaved changes",
-  savedGroup:"This section is up to date", jumpToField:"Go to this setting", retrySave:"Correct the values and save again.",
+  jumpToField:"Go to this setting", retrySave:"Correct the values and save again.",
   needsAttention:"Settings need attention", keySaveFailed:"Key operation incomplete. Check the error details."
 });
 Object.assign(T, ZH ? {
@@ -521,12 +528,12 @@ Object.assign(T, ZH ? {
   autoUpdates:"自动更新", refreshNote:"页面可见时每 5 秒更新；填写内容时暂缓更新。", dispatchControl:"派活控制",
   noActiveTasks:"当前没有进行中的任务", noActiveTasksNote:"任务开始、排队或等待审核时，会显示在这里。", taskFlow:"任务进展",
   noLanes:"还没有工作线", noLanesNote:"由协调席添加工作线后，这里会显示它的状态。",
-  noProviders:"还没有模型供应", noProvidersNote:"在设置中添加供应商后，这里会显示连接状态。",
+  noProviders:"还没有模型供应", noProvidersNote:"在设置中加一家供应后，这里会显示连接状态。",
   noEvents:"还没有活动记录", noEventsNote:"任务与工作台的最新变化会显示在这里。", closedRequests:"已处理的请求",
-  period:"统计范围", periodDays:n => `最近 ${n} 天`, estimatedCost:"折算金额", totalTokens:"Token 用量", unpricedTokens:"未定价 token",
-  unpricedNote:"未计入折算金额", usdNote:"USD · 按价目折算", costLoading:"正在加载用量…", costReady:"按所选时间范围统计。",
+  period:"统计范围", periodDays:n => `最近 ${n} 天`, estimatedCost:"折算金额", totalTokens:"Token 用量", unpricedTokens:"没有价目的 token",
+  unpricedNote:"未计入折算金额", usdNote:"USD · 按设置中的价目折算", costLoading:"正在加载用量…", costReady:"按所选时间范围统计。",
   costLoadFailed:"用量加载失败，请重试。", costRetained:n => `仍显示最近 ${n} 天的上次结果。`, retry:"重试", exporting:"正在导出…", exported:"CSV 已导出。", exportFailed:"导出失败，请重试。",
-  noCost:"这段时间还没有用量", noCostNote:"模型调用产生用量后，会按席位、日期、模型、工作线、供应商和任务显示明细。", seatColumn:"席位", dayColumn:"日期"
+  noCost:"这段时间还没有用量", noCostNote:"模型调用产生用量后，会按席位、日期、模型、工作线、供应和任务显示明细。", seatColumn:"席位", dayColumn:"日期"
 } : {
   statusIntro:"Follow tasks, lanes and the decisions that need your attention.", costIntro:"Explore token usage and its estimated value by period and category.",
   autoUpdates:"Auto updates", refreshNote:"Updates every 5 seconds while visible; pauses while you fill in a field.", dispatchControl:"Dispatch control",
@@ -535,7 +542,7 @@ Object.assign(T, ZH ? {
   noProviders:"No providers yet", noProvidersNote:"Add a provider in Settings to see its connection status here.",
   noEvents:"No activity yet", noEventsNote:"New task and desk events will appear here.", closedRequests:"Closed requests",
   period:"Time range", periodDays:n => `Last ${n} days`, estimatedCost:"Estimated value", totalTokens:"Token usage", unpricedTokens:"Unpriced tokens",
-  unpricedNote:"Excluded from the estimated value", usdNote:"USD · at list price", costLoading:"Loading usage…", costReady:"Totals for the selected period.",
+  unpricedNote:"Excluded from the estimated value", usdNote:"USD · using the Settings price table", costLoading:"Loading usage…", costReady:"Totals for the selected period.",
   costLoadFailed:"Could not load usage. Try again.", costRetained:n => `Still showing the previous ${n}-day report.`, retry:"Retry", exporting:"Exporting…", exported:"CSV exported.", exportFailed:"Could not export. Try again.",
   noCost:"No usage in this period", noCostNote:"Model usage will appear by seat, day, model, lane, provider and task.", seatColumn:"Seat", dayColumn:"Date"
 });
@@ -697,7 +704,7 @@ async function loadStatus() {
       st.failed.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"bad"}, m.error)]))) : null,
     dashboardPanel(T.providers, "providers", st.providers.length, st.providers.length ? table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
       p.name, p.kind === "subscription" ? T.subscription : T.compatible,
-      p.model + (p.effort ? " · " + p.effort : "") + ` · ${T.rest} ${p.rest_minutes} min` + ` (${T.general})`,
+      p.model + (p.effort ? " · " + p.effort : "") + ` · ${T.rest} ${p.rest_minutes} min` + ` (${T.providers})`,
       p.problem ? statusPill(p.problem, "warn", "error") : statusPill(T.ready, "ok"),
       p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${p.check.detail} (${when(p.check.at)})`) : "",
       checkButton(p.name, loadStatus)])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
@@ -801,6 +808,7 @@ let S = null, DISK_FREE = null, KEYS = {}, REV = null, LANE_CMDS = [], DENY_SKIP
 // Drafts live only in this page's memory. In particular, keys never enter browser storage or settings JSON.
 let settingsBaseline = null, settingsLoading = null, settingsSaving = false, settingsGroup = "providers", settingsEpoch = 0;
 let settingsMessage = "", settingsProblems = [], KEY_DRAFTS = {}, newProviderName = "", newPriceName = "";
+let settingsRebase = "", keyProblemProvider = "";
 let settingsPending = "save", settingsFailure = "", fieldRecords = [];
 let settingsForm, settingsSaveButton, settingsDiscardButton, settingsBadge, settingsSaveState;
 let settingsPanels = {}, settingsNavButtons = {}, fieldSequence = 0, exceptionRefreshers = [];
@@ -811,20 +819,30 @@ const SETTINGS_GROUPS = [
   ["prices", T.pricesGroup, T.pricesIntro]
 ];
 const GROUP_KEYS = {
-  providers:["providers"], coordinator:["coordinator", "coordinator_compact", "cool_minutes"], lanes:[],
+  providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact"], lanes:[],
   security:["workers_may_not_read", "workers_may_not_read_added"],
   releases:["releases_without_asking", "release_direct", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow"],
   alerts:["alert", "coordinator_alert"], prices:["prices"]
 };
+// Object order and optional blank fields do not change a setting's value. Array order still matters.
+function settingValue(value) {
+  if (value == null || value === "") return undefined;
+  if (Array.isArray(value)) return value.map(settingValue);
+  if (typeof value === "object") return Object.fromEntries(Object.keys(value).sort()
+    .map(key => [key, settingValue(value[key])]).filter(([, v]) => v !== undefined));
+  return value;
+}
+const settingText = value => JSON.stringify(settingValue(value));
 function groupDirty(key) {
   if (!S || settingsBaseline === null) return false;
   const base = JSON.parse(settingsBaseline);
-  return (GROUP_KEYS[key] || []).some(k => JSON.stringify(S[k]) !== JSON.stringify(base[k]))
-    || (key === "providers" && Object.values(KEY_DRAFTS).some(Boolean));
+  return (GROUP_KEYS[key] || []).some(k => settingText(S[k]) !== settingText(base[k]))
+    || (key === "providers" && (Object.values(KEY_DRAFTS).some(Boolean) || !!newProviderName))
+    || (key === "prices" && !!newPriceName);
 }
 function settingsDirty() {
-  return !!S && ((settingsBaseline !== null && JSON.stringify(S) !== settingsBaseline)
-    || Object.values(KEY_DRAFTS).some(value => value !== ""));
+  return !!S && ((settingsBaseline !== null && settingText(S) !== settingsBaseline)
+    || Object.values(KEY_DRAFTS).some(value => value !== "") || !!newProviderName || !!newPriceName);
 }
 function refreshSettingsState() {
   const dirty = settingsDirty(), pendingKeys = Object.values(KEY_DRAFTS).some(Boolean);
@@ -842,7 +860,7 @@ function refreshSettingsState() {
     settingsBadge.className = "draft-badge"; settingsBadge.setAttribute("data-tone", tone);
   }
   if (settingsSaveState) {
-    const text = settingsSaving ? pending : tone === "error" ? ({reload:T.loadFailed, key:T.keySaveFailed, save:T.saveFailed}[settingsFailure] || T.needsAttention)
+    const text = settingsSaving ? pending : tone === "error" ? ({reload:T.loadFailed, key:T.keySaveFailed, save:T.saveFailed, stale:T.staleReloadFailed, savedReload:T.savedReloadFailed}[settingsFailure] || T.needsAttention)
       : pendingKeys ? T.keyPending : dirty ? T.draftNote : settingsMessage || T.allSaved;
     settingsSaveState.replaceChildren(icon(symbol), h("span", {}, text));
     settingsSaveState.className = "save-state"; settingsSaveState.setAttribute("data-tone", tone);
@@ -891,24 +909,45 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   ALERT_OUTSIDE = r.alert_outside || [];
   S.alert = S.alert || {command:""}; S.coordinator_alert = S.coordinator_alert || {}; S.coordinator_compact = S.coordinator_compact || {};
   if (!keepKeys) KEY_DRAFTS = {};
-  newProviderName = ""; newPriceName = ""; settingsMessage = ""; settingsFailure = "";
-  settingsBaseline = JSON.stringify(S);
+  newProviderName = ""; newPriceName = ""; settingsMessage = ""; settingsFailure = ""; settingsRebase = ""; keyProblemProvider = "";
+  settingsBaseline = settingText(S);
   settingsEpoch++;
   renderSettings(problems && problems.length ? problems : r.problems);
 }
 async function saveSettings() {
   if (settingsSaving || !S) return;
   settingsEpoch++;
-  settingsPending = "save"; settingsSaving = true; settingsMessage = ""; refreshSettingsState();
+  settingsPending = "save"; settingsSaving = true; settingsMessage = ""; settingsRebase = ""; settingsFailure = ""; keyProblemProvider = ""; refreshSettingsState();
+  let saved = false;
   try {
     // Disable the settings form until both the write and its canonical reload finish.
     // Main-page navigation stays available and never replaces this draft.
     const r = await api("/api/settings", {settings:JSON.parse(JSON.stringify(S)), rev:REV});
     if (r.ok) {
+      saved = true;
       await loadSettings(undefined, true);
       settingsMessage = Object.values(KEY_DRAFTS).some(Boolean) ? T.savedWithKeys : T.saved;
+    } else if ((r.problems || []).some(p => p.startsWith("the settings changed since this page loaded them"))) {
+      settingsFailure = "stale";
+      const draft = JSON.parse(JSON.stringify(S)), base = JSON.parse(settingsBaseline);
+      const keys = [...new Set([...Object.keys(base), ...Object.keys(draft)])].sort();
+      const changed = keys.filter(k => settingText(draft[k]) !== settingText(base[k]));
+      const providerName = newProviderName, priceName = newPriceName;
+      await loadSettings(undefined, true);
+      const elsewhere = [...new Set([...Object.keys(base), ...Object.keys(S)])].sort()
+        .filter(k => settingText(S[k]) !== settingText(base[k]));
+      for (const k of changed) {
+        if (Object.hasOwn(draft, k)) S[k] = draft[k]; else delete S[k];
+      }
+      newProviderName = providerName; newPriceName = priceName;
+      settingsRebase = T.staleReloaded(elsewhere.join(", ") || T.none,
+        elsewhere.filter(k => changed.includes(k)).join(", ") || T.none);
+      renderSettings([]);
     } else { settingsFailure = "save"; renderSettings(r.problems || [T.problems]); }
-  } catch (e) { settingsFailure = "save"; renderSettings([String(e.message || e)]); }
+  } catch (e) {
+    settingsFailure = saved ? "savedReload" : settingsFailure === "stale" ? "stale" : "save";
+    renderSettings([String(e.message || e)]);
+  }
   finally { settingsSaving = false; refreshSettingsState(); }
 }
 async function discardSettings() {
@@ -924,14 +963,14 @@ async function saveProviderKey(name, clear = false) {
   const value = clear ? "" : KEY_DRAFTS[name] || "";
   if (!clear && !value.trim()) return;
   settingsEpoch++;
-  settingsPending = "key"; settingsSaving = true; refreshSettingsState();
+  settingsPending = "key"; settingsSaving = true; keyProblemProvider = name; refreshSettingsState();
   try {
     const r = await api("/api/key", {provider:name, key:value});
     if (r.ok || r.saved === true) { KEYS[name] = !!value.trim(); delete KEY_DRAFTS[name]; }
     if (r.ok === false) { settingsFailure = "key"; renderSettings(r.problems || [T.problems]); }
     else {
       if (settingsFailure === "key") { settingsProblems = []; settingsFailure = ""; }
-      settingsMessage = T.keySaved; renderSettings();
+      keyProblemProvider = ""; settingsMessage = clear ? T.keyCleared : T.keySaved; renderSettings();
     }
   } catch (e) { settingsFailure = "key"; renderSettings([String(e.message || e)]); }
   finally { settingsSaving = false; refreshSettingsState(); }
@@ -940,7 +979,7 @@ const help = (text, title = T.learnMore) => h("details", {class:"help"}, h("summ
 function controlMeta(obj, key) {
   if (!S) return null;
   const prefix = (group, text) => ({group, matches:problem => problem.startsWith(text)});
-  if (obj === S) return prefix(key.startsWith("release") ? "releases" : "coordinator", key);
+  if (obj === S) return prefix(key.startsWith("release") ? "releases" : key === "cool_minutes" ? "providers" : "coordinator", key);
   if (obj === S.coordinator_compact) return prefix("coordinator", "coordinator_compact:");
   if (obj === S.coordinator_alert) return {group:"alerts", matches:p => p.startsWith("coordinator_alert") && (p.includes(`(${key})`) || p.startsWith("coordinator_alert must"))};
   if (obj === S.alert) return prefix("alerts", "the alert command");
@@ -964,9 +1003,9 @@ function problemTarget(problem) {
   if (record) return record;
   const group = /^(provider |at least one provider)/.test(problem) ? "providers"
     : /^(coordinator_alert|the alert command)/.test(problem) ? "alerts"
-    : /^(coordinator|cool_minutes)/.test(problem) ? "coordinator"
-    : /^workers_may_not_read/.test(problem) ? "security"
-    : /^release/.test(problem) ? "releases" : /^price/.test(problem) ? "prices" : /^lane/.test(problem) ? "lanes" : "";
+    : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
+    : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
+    : /^(release|the releases without asking|the words no release)/.test(problem) ? "releases" : /^price/.test(problem) ? "prices" : /^lane/.test(problem) ? "lanes" : "";
   return group ? {group} : null;
 }
 function focusProblem(problem) {
@@ -992,14 +1031,14 @@ function passwordControl(input) {
     }}, icon("eye"));
   return h("div", {class:"password-control"}, input, toggle);
 }
-function field(label, control, note = "", explanation = "", wide = false) {
+function field(label, control, note = "", explanation = "", wide = false, meta = control._settingMeta) {
   const id = control.id || "setting-field-" + (++fieldSequence);
   const direct = ["INPUT", "SELECT", "TEXTAREA"].includes(control.tagName);
   if (direct) control.setAttribute("id", id);
   const noteId = id + "-note";
   if (direct && note) control.setAttribute("aria-describedby", noteId);
   const error = h("p", {class:"field-error", id:id + "-error", hidden:true});
-  if (direct && control._settingMeta) fieldRecords.push({control, error, noteId:note ? noteId : "", ...control._settingMeta});
+  if (meta) fieldRecords.push({control, error, noteId:note ? noteId : "", ...meta});
   return h("div", {class:"field" + (wide ? " wide" : "")},
     h(direct ? "label" : "div", {class:"field-label", ...(direct ? {for:id} : {})}, label), control,
     note ? h("div", {class:"field-note", id:noteId}, note) : null, error, explanation ? help(explanation) : null);
@@ -1074,6 +1113,7 @@ function alertSection() {
   S.coordinator_alert = S.coordinator_alert || {};
   return [section(T.alertCommandTitle,
     fields(field(T.alertCommandTitle, bind(S.alert, "command"), T.alertCommandHint, T.alertCmd, true)),
+    h("p", {class:"field-note"}, T.alertBoundary),
     S.alert.at ? h("p", {class:"field-note"}, T.alertSavedAt(when(S.alert.at))) : null,
     h("p", {class:"field-note"}, T.alertKeep),
     ALERT_OUTSIDE.map(f => h("div", {class:"warn"}, `${f.path}: ${T.alertOutside}`)),
@@ -1113,9 +1153,9 @@ function renderSettings(problems = settingsProblems) {
   settingsProblems = problems || [];
   exceptionRefreshers = []; fieldRecords = [];
   const newProv = h("input", {value:newProviderName, placeholder:T.newName, "aria-label":T.providerName, maxlength:32,
-    oninput:e => { newProviderName = e.target.value; }});
+    oninput:e => { newProviderName = e.target.value; refreshSettingsState(); }});
   const newPrice = h("input", {value:newPriceName, placeholder:"model", "aria-label":T.priceName,
-    oninput:e => { newPriceName = e.target.value; }});
+    oninput:e => { newPriceName = e.target.value; refreshSettingsState(); }});
   const groups = {
     providers: [section(T.connection,
       Object.entries(S.providers).map(([name, p]) => {
@@ -1134,25 +1174,26 @@ function renderSettings(problems = settingsProblems) {
                   h("div", {}, h("div", {class:"row"}, h("span", {class:"key-status " + (KEYS[name] ? "ok" : "warn")}, icon(KEYS[name] ? "check" : "security"), KEYS[name] ? T.keySet : T.keyMissing), passwordControl(keyBox)),
                     h("div", {class:"row", style:"margin-top:8px"},
                       saveKey,
-                      KEYS[name] ? h("button", {onclick:() => saveProviderKey(name, true)}, T.clearKey) : null)), T.keySeparate, "", true)]
+                      KEYS[name] ? h("button", {onclick:() => saveProviderKey(name, true)}, T.clearKey) : null)), T.keySeparate, "", true,
+                  {control:keyBox, group:"providers", matches:() => settingsFailure === "key" && keyProblemProvider === name})]
               : [field(T.loginDir, bind(p, "config_dir"), "", "", true)])));
       }),
       h("div", {class:"row add-row"}, newProv, h("button", {onclick:() => {
         const n = newProviderName.trim();
         if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(n) || S.providers[n]) return renderSettings([T.invalidName]);
         S.providers[n] = {kind:"compatible", model:"", effort:"", base_url:""}; newProviderName = ""; renderSettings([]);
-      }}, T.addProvider)))],
+      }}, T.addProvider))),
+      section(T.cooldown, fields(field(T.cooldown, bind(S, "cool_minutes", "number"))))],
     coordinator: [
       section(T.compactTitle, fields(
         field(T.provider, pick(S.coordinator, "provider", Object.keys(S.providers), Object.keys(S.providers))),
-        field(T.baseModel, bind(S.coordinator, "model")), field(T.effort, pick(S.coordinator, "effort", EFFORTS)),
-        field(T.cooldown, bind(S, "cool_minutes", "number")))),
+        field(T.baseModel, bind(S.coordinator, "model")), field(T.effort, pick(S.coordinator, "effort", EFFORTS)))),
       section(T.contextTitle, fields(
         field(T.compactIdle, bind(S.coordinator_compact, "idle_at", "number")),
         field(T.compactWorking, bind(S.coordinator_compact, "working_at", "number"))),
         h("p", {class:"field-note"}, T.compactHint), help(T.compactNote))],
     lanes: [
-      section(T.general, fields(
+      section(T.general, h("p", {class:"field-note"}, T.runtimeReadOnly), fields(
         field(T.concurrency, h("div", {class:"readonly-value"}, S.concurrency), "", T.concurrencyNote),
         field(T.diskFloor, h("div", {class:"readonly-value"}, S.disk_floor ? `${S.disk_floor} GB` : T.diskFloorOff),
           DISK_FREE == null ? "" : `${T.diskFree} ${(DISK_FREE / 1e9).toFixed(1)} GB`, T.diskFloorNote))),
@@ -1161,9 +1202,9 @@ function renderSettings(problems = settingsProblems) {
         ...(LANE_WARNINGS.length ? [h("p", {class:"warn"}, T.laneWarnings), h("ul", {}, LANE_WARNINGS.map(p => h("li", {class:"warn mono"}, p)))] : []),
         Object.entries(S.lanes).map(([name, l]) => h("div", {class:"lane"},
           h("div", {class:"card-head"}, h("strong", {}, name), h("span", {class:"tag"}, T.readOnly)),
-          h("div", {class:"facts"}, ["repo", "base", "providers"].map(k => [h("span", {class:"muted"}, LANE_LABELS[k]), h("pre", {class:"mono"}, laneValue(k, l[k]))])),
+          h("div", {class:"facts"}, ["repo", "base", "providers", "network", "write", "allow"].map(k => [h("span", {class:"muted"}, LANE_LABELS[k]), h("pre", {class:"mono"}, laneValue(k, l[k]))])),
           h("details", {class:"help"}, h("summary", {}, T.advanced),
-            h("div", {class:"facts"}, laneFields(l).filter(([k]) => !["repo", "base", "providers"].includes(k))
+            h("div", {class:"facts"}, laneFields(l).filter(([k]) => !["repo", "base", "providers", "network", "write", "allow"].includes(k))
               .map(([k, v]) => [h("span", {class:"muted"}, LANE_LABELS[k] || k), h("pre", {class:"mono"}, v)])))))),
       section(T.laneCommands, help(T.laneCommandsNote),
         LANE_CMDS.length ? table([T.at, T.lane, T.field, T.change], LANE_CMDS.map(e => [when(e.ts), e.lane,
@@ -1173,6 +1214,7 @@ function renderSettings(problems = settingsProblems) {
       h("textarea", {placeholder:"/Users/me/.config/myproject/keys", oninput:e => {
         S.workers_may_not_read = e.target.value.split("\n").map(x => x.trim()).filter(Boolean); refreshSettingsState();
       }}, (S.workers_may_not_read || []).join("\n")), T.protectedHint, T.workersMayNotRead, true)),
+      h("p", {class:"field-note"}, T.protectedStop),
       ...(hiddenByCoordinator().length ? [h("p", {class:"field-note"}, T.workersMayNotReadAdded),
         h("ul", {}, hiddenByCoordinator().map(([p, v]) => h("li", {}, `${p} · ${T.addedByCoordinator} ${when(v.at)}`)))] : []),
       ...(DENY_SKIPPED.length ? [h("p", {class:"warn"}, T.workersMayNotReadSkipped), h("ul", {}, DENY_SKIPPED.map(p => h("li", {class:"bad"}, p)))] : []))],
@@ -1188,7 +1230,7 @@ function renderSettings(problems = settingsProblems) {
           S.release_forbidden = e.target.value.split("\n").map(x => x.trim()).filter(Boolean); exceptionRefreshers.forEach(update => update()); refreshSettingsState();
         }}, (S.release_forbidden || []).join("\n")), T.forbiddenHint, T.releaseForbidden, true),
         field(T.exceptionsTitle, forbiddenExceptions(), "", T.releaseForbiddenExcept, true),
-        field(T.mailboxTitle, (() => { const input = bind(S, "release_mailboxes", "bool"); input.setAttribute("id", "release-mailboxes"); return input; })(), "", T.releaseMailboxes, true),
+        field(T.mailboxTitle, (() => { const input = bind(S, "release_mailboxes", "bool"); input.setAttribute("id", "release-mailboxes"); return input; })(), T.mailboxChecks, T.releaseMailboxes, true),
         field(T.mailboxAllowTitle, h("textarea", {id:"release-mailbox-allow", placeholder:"maintainer@example.com\n@project.example", oninput:e => {
           S.release_mailbox_allow = e.target.value.split("\n").filter(x => x.trim()); refreshSettingsState();
         }}, (S.release_mailbox_allow || []).join("\n")), T.mailboxHint, T.releaseMailboxAllow, true)))],
@@ -1222,7 +1264,9 @@ function renderSettings(problems = settingsProblems) {
   settingsDiscardButton = h("button", {onclick:discardSettings}, T.reload);
   $("#tab-settings").replaceChildren(...shown([
     h("div", {class:"settings-head"}, h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T.settings), h("h1", {}, T.settings), h("p", {}, T.settingsIntro)), settingsBadge),
-    settingsProblems.length ? h("section", {class:"settings-errors", role:"alert"}, h("h2", {}, icon("error"), T.problems), h("p", {class:"field-note"}, T.retrySave),
+    settingsRebase ? h("div", {class:"notice", role:"status"}, settingsRebase) : null,
+    settingsProblems.length ? h("section", {class:"settings-errors", role:"alert"}, h("h2", {}, icon("error"), settingsFailure === "savedReload" ? T.savedReloadFailed : T.problems),
+      ["stale", "savedReload"].includes(settingsFailure) ? null : h("p", {class:"field-note"}, T.retrySave),
       h("ul", {}, settingsProblems.map(p => h("li", {class:"bad"}, problemTarget(p) ? h("button", {type:"button", onclick:() => focusProblem(p), title:T.jumpToField}, p) : p)))) : null,
     NO_READ_STOP ? section(T.noReadStop, h("p", {class:"bad"}, NO_READ_STOP)) : null,
     h("div", {class:"settings-layout"}, nav, h("div", {class:"settings-content"}, settingsForm,
@@ -1283,7 +1327,7 @@ function renderCost(r) {
     const panel = dashboardPanel(T["by" + key], key === "provider" ? "providers" : key === "lane" ? "lanes" : "cost", rows.length,
       table([label, T.tokens, "$ " + T.listValue, T.tokensNoPrice, ...(tries ? [T.runs, T.turns] : [])],
         rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : "",
-          ...(tries ? [v.runs ? fmt(v.runs) : "", v.turns ? fmt(v.turns) : ""] : [])])));
+          ...(tries ? [v.runs ? fmt(v.runs) : "", v.runs ? fmt(v.turns) : ""] : [])])));
     if (["provider", "task"].includes(key)) panel.className += " cost-wide";
     return panel;
   };

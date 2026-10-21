@@ -20,9 +20,11 @@ page's native CSS and JavaScript controls and reduced-motion support.
 
 ## Settings on the web page
 
-Settings are grouped into providers, runtime and coordinator, lanes (read only),
-access protection, release rules, notifications and model pricing. Select a group
-in the directory; full explanations and advanced lane details expand in place.
+Settings are grouped into Providers, Coordinator, Lanes (read only), What workers
+may not read, Releases, Alerts and Prices. Select a group in the directory; full
+explanations and other read-only lane fields expand in place. Network, write and
+allowed-command rules remain visible, as do the warnings needed before saving.
+Providers includes the rest minutes that apply to every provider.
 The save bar applies to all editable settings groups.
 
 The directory marks groups with unsaved edits. The save bar distinguishes edits,
@@ -38,8 +40,15 @@ or close. Drafts live only in page memory: they do not survive leaving the page.
 Save settings writes them; a failed save keeps them. During a save the settings
 form is disabled until the saved settings have been reloaded. Discard confirms
 before replacing a draft with the desk's latest settings; with no draft it simply
-reloads them. Changes made elsewhere still use the existing stale-page check:
-a save cannot silently overwrite them.
+reloads them. If a save meets newer settings, the server refuses it. The page
+reloads the latest settings and keeps each top-level setting changed in your
+draft, taking the others from the new copy. It names the settings changed
+elsewhere and those changed by both, for which your draft value is kept. Typed
+keys remain. Nothing is saved until you press Save again. A failed reload keeps
+the draft too. Unsaved markers compare values regardless of object key order;
+a blank optional field counts as unset. Names typed for a new provider or price
+also count as drafts, even before Add. If a save succeeds but its reload fails,
+the page says that the save succeeded.
 
 Keys are saved separately with each provider's Save key button. An unsaved key
 input stays in memory across page and group switches, and across a settings save;
