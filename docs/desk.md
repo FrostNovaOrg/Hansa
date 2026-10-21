@@ -26,6 +26,8 @@ explanations and other read-only lane fields expand in place. Network, write and
 allowed-command rules remain visible, as do the warnings needed before saving.
 Providers includes the rest minutes that apply to every provider.
 The save bar applies to all editable settings groups.
+The visible not-read warning says that while the list holds an entry containing
+`()[]{}*?\`, hansa starts no worker, verifier or coordinator until it is changed here.
 
 The directory marks groups with unsaved edits. The save bar distinguishes edits,
 an operation in progress, success and failure; a failed save says that the draft
@@ -43,7 +45,9 @@ before replacing a draft with the desk's latest settings; with no draft it simpl
 reloads them. If a save meets newer settings, the server refuses it. The page
 reloads the latest settings and keeps each top-level setting changed in your
 draft, taking the others from the new copy. It names the settings changed
-elsewhere and those changed by both, for which your draft value is kept. Typed
+elsewhere and those changed by both using the page's group names in its language,
+and shows any problems returned with the new copy alongside the notice. Your
+draft value is kept for settings changed by both. Typed
 keys remain. Nothing is saved until you press Save again. A failed reload keeps
 the draft too. Unsaved markers compare values regardless of object key order;
 a blank optional field counts as unset. Names typed for a new provider or price

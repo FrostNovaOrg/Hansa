@@ -452,7 +452,7 @@ const T = ZH ? {
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
 Object.assign(T, ZH ? {
-  protectedStop:"列表中任何一条含 ()[]{}*?\\ 的路径都会停止所有工作者、验证者和协调席。",
+  protectedStop:"只要列表里有一条含 ()[]{}*?\\ 的路径，hansa 就不启动任何工作者、验证者或协调席，直到这里改掉它。",
   alertBoundary:"提醒命令以这台机器的账号在沙箱外运行。",
   mailboxChecks:"合并和发布时都检查。", runtimeReadOnly:"并发数和磁盘下限由协调席设定，这里只能看。",
   settingsIntro:"按主题设置模型、运行方式和发布规则。切换页面时，未保存的修改会保留。",
@@ -478,7 +478,7 @@ Object.assign(T, ZH ? {
   noSessionShort:"没有会话在听（分钟）", windowShort:"协调席等待操作（分钟）", reviewShort:"任务等待审核（分钟）",
   compactTitle:"协调席模型", savedWithKeys:"设置已保存；密钥输入仍需单独保存。"
 } : {
-  protectedStop:"Any entry containing ()[]{}*?\\ stops every worker, verifier and the coordinator.",
+  protectedStop:"While the list holds an entry containing ()[]{}*?\\, hansa starts no worker, verifier or coordinator until it is changed here.",
   alertBoundary:"The alert command runs as this machine's account, outside the sandbox.",
   mailboxChecks:"Checked at merges as well as releases.", runtimeReadOnly:"Concurrency and the disk floor are set by the coordinator and only shown here.",
   settingsIntro:"Manage models, runtime and release rules by topic. Unsaved changes stay when you switch pages.",
@@ -940,9 +940,11 @@ async function saveSettings() {
         if (Object.hasOwn(draft, k)) S[k] = draft[k]; else delete S[k];
       }
       newProviderName = providerName; newPriceName = priceName;
-      settingsRebase = T.staleReloaded(elsewhere.join(", ") || T.none,
-        elsewhere.filter(k => changed.includes(k)).join(", ") || T.none);
-      renderSettings([]);
+      const groupNames = keys => [...new Set(keys.map(k => SETTINGS_GROUPS.find(([name]) =>
+        (GROUP_KEYS[name] || []).includes(k) || name === "lanes" && ["lanes", "concurrency", "disk_floor"].includes(k))?.[1]
+        || T.general))].join(", ") || T.none;
+      settingsRebase = T.staleReloaded(groupNames(elsewhere), groupNames(elsewhere.filter(k => changed.includes(k))));
+      renderSettings();
     } else { settingsFailure = "save"; renderSettings(r.problems || [T.problems]); }
   } catch (e) {
     settingsFailure = saved ? "savedReload" : settingsFailure === "stale" ? "stale" : "save";

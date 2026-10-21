@@ -26112,8 +26112,10 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       const notice = find(el => el.attrs.role === "status" && el.className === "notice");
       check(notice && has(zh ? "设置已在别处修改，页面已重新加载" : "Settings changed elsewhere and the page reloaded them", notice),
         "stale reload was not plainly announced");
-      for (const name of ["coordinator", "cool_minutes", "lanes", "prices", "workers_may_not_read"]) check(has(name, notice), "missing remote setting: " + name);
-      check(has(zh ? "两边都修改的项（保留你的草稿值）：cool_minutes, coordinator" : "Changed by both (your draft values kept): cool_minutes, coordinator", notice), "overlapping changes not named");
+      for (const label of ["T.coordinatorGroup", "T.providers", "T.lanes", "T.pricesGroup", "T.securityGroup", "T.releasesGroup"])
+        check(has(run(label), notice), "missing remote setting group: " + label);
+      check(has((zh ? "两边都修改的项（保留你的草稿值）：" : "Changed by both (your draft values kept): ") +
+        run('T.providers + ", " + T.coordinatorGroup'), notice), "overlapping changes not named");
       check(!has(run("T.retrySave")) && run('KEY_DRAFTS.compatible') === "sk-still-typed" && key().value === "sk-still-typed",
         "stale reload lost key or showed validation advice");
       check(settingsPostCount === 1 && run("settingsDirty()"), "stale reload saved automatically or cleared draft");
@@ -26134,6 +26136,52 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       await run("saveSettings()");
       check(run('!Object.hasOwn(S, "cool_minutes") && KEY_DRAFTS.compatible === "sk-still-typed"'),
         "stale reload replaced a deliberately cleared top-level value");
+    } else if (ask === "settings-fix-stale-problems") {
+      change(number(), "38"); change(key(), "sk-keep-draft");
+      const problem = "workers cannot be kept from reading /example/repo";
+      given["/api/settings"].problems = [problem];
+      given["/api/settings"].rev = "new-rev";
+      settingsPostReply = {ok:false, problems:["the settings changed since this page loaded them"]};
+      await run("saveSettings()");
+      const errors = find(el => el.attrs.role === "alert" && el.className === "settings-errors");
+      check(errors && has(problem, errors), "stale reload hid the new copy's problems");
+      check(find(el => el.attrs.role === "status" && el.className === "notice"), "new problems hid the stale notice");
+      check(run('S.cool_minutes === 38 && KEY_DRAFTS.compatible === "sk-keep-draft" && settingsDirty()') &&
+        settingsPostCount === 1, "new problems lost or saved the draft");
+      const link = find(el => el.tag === "button" && el.textContent === problem, errors);
+      check(link, "reloaded problem lost normal navigation"); await link.click();
+      check(run('settingsGroup === "security"'), "reloaded problem reached wrong group");
+    } else if (ask === "settings-fix-stale-labels") {
+      change(number(), "38"); run('S.coordinator_compact.idle_at = 300000');
+      const next = given["/api/settings"].settings;
+      next.cool_minutes = 49; next.coordinator_compact.idle_at = 450000;
+      next.workers_may_not_read = ["/private/example-hidden"];
+      next.workers_may_not_read_added = {"/private/example-hidden": {by:"coordinator", at:1}};
+      next.coordinator_alert = {window_min:12}; next.alert.command = "echo example";
+      next.providers.compatible.model = "remote-model"; next.coordinator.model = "remote-model";
+      next.prices["example/engine"].in = 3; next.lanes.a.base = "remote-base";
+      next.concurrency = 2; next.disk_floor = 11;
+      next.releases_without_asking = [{lane:"a", target:"default"}]; next.release_direct = "hold";
+      next.release_forbidden = ["example-word"]; next.release_forbidden_except = [{entry:"example-word", lanes:["a"]}];
+      next.release_mailboxes = true; next.release_mailbox_allow = ["@example.org"];
+      settingsPostReply = {ok:false, problems:["the settings changed since this page loaded them"]};
+      await run("saveSettings()");
+      const notice = find(el => el.attrs.role === "status" && el.className === "notice");
+      const zh = process.argv[4] === "zh";
+      const elsewhere = zh ? "提醒, 工作线, 模型供应, 协调席, 价目, 发布, 工作者不能读的" :
+        "Alerts, Lanes, Providers, Coordinator, Prices, Releases, What workers may not read";
+      const both = zh ? "模型供应, 协调席" : "Providers, Coordinator";
+      check(notice && notice.textContent === run(`T.staleReloaded(${JSON.stringify(elsewhere)}, ${JSON.stringify(both)})`),
+        "stale notice did not use the page's translated group names: " + notice?.textContent);
+      for (const name of Object.keys(next)) check(!new RegExp("\\b" + name + "\\b").test(notice.textContent),
+        "stale notice exposed setting key: " + name);
+    } else if (ask === "settings-fix-not-read-starts") {
+      run('showSettingsGroup("security")');
+      const parts = process.argv[4] === "zh"
+        ? ["只要列表里有", "()[]{}*?\\", "hansa 就不启动任何工作者、验证者或协调席", "直到这里改掉它"]
+        : ["While the list holds", "()[]{}*?\\", "hansa starts no worker, verifier or coordinator", "until it is changed here"];
+      for (const part of parts) check(visibleText(part, run("settingsPanels.security")),
+        "visible not-read warning does not describe starting no runs: " + part);
     } else if (ask === "settings-fix-values") {
       const field = number(); change(field, ""); change(field, "37");
       check(!run("settingsDirty()") && run('SETTINGS_GROUPS.every(([k]) => !groupDirty(k))'),
@@ -26171,7 +26219,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     } else if (ask === "settings-fix-visible") {
       const zh = process.argv[4] === "zh";
       for (const [group, text] of [
-        ["security", zh ? "列表中任何一条含 ()[]{}*?\\ 的路径都会停止所有工作者、验证者和协调席" : "Any entry containing ()[]{}*?\\ stops every worker, verifier and the coordinator"],
+        ["security", run("T.protectedStop")],
         ["alerts", zh ? "提醒命令以这台机器的账号在沙箱外运行" : "The alert command runs as this machine's account, outside the sandbox"],
         ["releases", zh ? "每项最多 200 字符；只在一行之内匹配，只查 UTF-8 文字" : "at most 200 characters per entry. Matches within one line, in UTF-8 text only"],
         ["releases", zh ? "合并和发布时都检查" : "Checked at merges as well as releases"],
@@ -26574,6 +26622,15 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def test_stale_saves_reload_and_keep_the_changed_top_level_draft_and_keys(self):
         self.run_settings_fix_scenario("stale")
+
+    def test_stale_reload_shows_the_new_copys_problems_with_the_notice(self):
+        self.run_settings_fix_scenario("stale-problems")
+
+    def test_stale_notice_uses_translated_setting_groups_instead_of_keys(self):
+        self.run_settings_fix_scenario("stale-labels")
+
+    def test_visible_not_read_warning_says_hansa_starts_no_runs_until_changed(self):
+        self.run_settings_fix_scenario("not-read-starts")
 
     def test_draft_markers_compare_values_and_ignore_blank_optional_fields(self):
         self.run_settings_fix_scenario("values")
