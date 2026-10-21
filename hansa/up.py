@@ -373,10 +373,11 @@ def notify_on_line(desk: Desk, card: bool | None = None) -> str:
     theirs = account.desk_account(desk.root)
     if theirs:  # root's session on the account's desk: root writes nothing there, and hansa up runs as the account
         return f"hansa up does not start this session again after a restart: it is root's, on {theirs}'s desk"
+    removed = []
     if card is not None:
         write_json(desk.state_dir / COPY_ENABLED, card)
         if not card:
-            remove_copies(desk)
+            removed = remove_copies(desk)
     rec = read_coordinator(desk)
     # hansa coordinator started this same session and recorded that itself. By the record, not HANSA_ROLE: a desk
     # owner's wrapper sets that on every hansa command, so a session it did not start runs notify on with it too
@@ -388,8 +389,10 @@ def notify_on_line(desk: Desk, card: bool | None = None) -> str:
     if why and not kept:
         return f"hansa up will not start this session again after a restart: {why}; nothing was recorded."
     then = f"{why}, so nothing new was recorded. " if why else ""
+    placed = place_card(desk, rec)
+    placed["removed"] = removed + placed["removed"]
     return "\n".join([f"{then}After a restart, hansa up starts this session again {restart_line(desk, rec)}.",
-                      *card_lines(desk, rec, place_card(desk, rec))])
+                      *card_lines(desk, rec, placed)])
 
 
 def card_import(folder: Path, card: Path):
