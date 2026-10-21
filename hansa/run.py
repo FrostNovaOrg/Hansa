@@ -308,7 +308,9 @@ VERIFY_TASK = """Find out, by running things, whether task {id} does what it ask
 
 1. Run first.
    - If the change adds or changes tests: undo the code part of the change (keep the tests) and
-     run those tests. Also undo each part the task asks for, in turn, run the tests again, and name
+     run only the tests it adds or changes, selected by name (one test, a class, or a name pattern,
+     as the project's test runner allows), not their whole file or suite. Also undo each part the task
+     asks for, in turn, run only the tests that concern that part, selected the same way, and name
      each part no test fails without. Then put the code back. Each defect the task names needs a
      test that fails with the code undone; one that still passes does not test the change. A test
      the task asks for to cover behaviour that already worked (coverage) may pass either way:
@@ -316,6 +318,7 @@ VERIFY_TASK = """Find out, by running things, whether task {id} does what it ask
    - Run what the task is about the way a user or caller would meet it.
    - Try the edge cases you can think of: empty or missing values, data or settings left from
      before the change, errors, other languages.
+   - Run the project's whole check at most once, at the end, and only if you need to.
 2. Read the code only to decide what to run and to explain what you saw.
 3. For text or documentation, compare what it says with the code it describes.
 
