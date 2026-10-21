@@ -33,6 +33,7 @@ PRINTS = ("-p", "--print")  # claude's words for a run that is not an interactiv
 # session in another folder, so a fresh hansa coordinator would be a second one, in the wrong folder
 NOT_YET = ("its start is not recorded yet: this desk had a coordinator before hansa recorded its start, maybe a "
            "session in another folder")
+EXTERNAL_ASK = "Allow external CLAUDE.md file imports?"  # Claude Code's question for imports from outside the folder
 TO_RECORD = ("Start it as before and run hansa notify on in it, or start it with hansa coordinator; from then on "
              "hansa up starts it again")
 
@@ -372,7 +373,73 @@ def notify_on_line(desk: Desk) -> str:
     if why and not kept:
         return f"hansa up will not start this session again after a restart: {why}; nothing was recorded."
     then = f"{why}, so nothing new was recorded. " if why else ""
-    return f"{then}After a restart, hansa up starts this session again {restart_line(desk, rec)}."
+    return "\n".join([f"{then}After a restart, hansa up starts this session again {restart_line(desk, rec)}.",
+                      *card_lines(desk, rec)])
+
+
+def card_import(folder: Path, card: Path):
+    """The CLAUDE.md (or .claude/CLAUDE.md) in folder or a folder above it with a line that imports card: @path,
+    a relative path read from the folder of the file that holds it. None when there is none."""
+    for d in (folder, *folder.parents):
+        for f in (d / "CLAUDE.md", d / ".claude" / "CLAUDE.md"):
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if any(os.path.realpath(os.path.join(f.parent, os.path.expanduser(m))) == str(card)
+                   for m in re.findall(r"(?:^|\s)@(\S+)", text)):
+                return f
+    return None
+
+
+def card_check(desk: Desk, rec: dict) -> dict:
+    """Whether Claude Code loads the desk's card (its CLAUDE.md) for the session a hansa notify on record names.
+    {} when it does, and for a session hansa coordinator started: that one runs in the desk. Else its state:
+    'external' (imported from outside the session's folder) or 'missing', with the line that imports it."""
+    if rec.get("kind") != "notify" or not isinstance(rec.get("folder"), str) or not os.path.isdir(rec["folder"]):
+        return {}
+    folder, root = Path(os.path.realpath(rec["folder"])), Path(os.path.realpath(desk.root))
+    card = root / "CLAUDE.md"
+    if folder == root or root in folder.parents:  # Claude Code loads it in the desk and the folders below it
+        return {}
+    inside, held = folder in root.parents, card_import(folder, card)
+    if held and inside:
+        return {}
+    return {"state": "external" if held else "missing", "folder": rec["folder"], "card": str(card),
+            "file": str(held or ""), "inside": inside,
+            "line": "@" + (os.path.relpath(card, folder) if inside else str(card))}
+
+
+def card_lines(desk: Desk, rec: dict) -> list:
+    """For hansa notify on and hansa explain notify: what the recorded session lacks to read the card, if anything."""
+    c = card_check(desk, rec)
+    if not c:
+        return []
+    then = "This takes effect from the session's next start; until then hansa help card prints the card."
+    if c["state"] == "external":
+        return [f"The coordinator's card ({c['card']}) is imported by {c['file']}, from outside the session's folder "
+                f"{c['folder']}: it loads only once Claude Code is allowed to load imports from outside the folder. "
+                f"Claude Code asks at a start: \"{EXTERNAL_ASK}\". {then}"]
+    return [f"This session does not read the coordinator's card ({c['card']}, the desk's CLAUDE.md): Claude Code loads "
+            f"it for a session started in the desk or a folder below it, and this one runs in {c['folder']}, whose "
+            "CLAUDE.md files do not import it. The card's rules (when to make a task instead of reading on, what never "
+            "to do) are not in its context.",
+            f"Add this line to {os.path.join(c['folder'], 'CLAUDE.md')}: {c['line']}",
+            *([] if c["inside"] else
+              ["The card is outside the session's folder: Claude Code asks once, at the session's next start, whether "
+               f"to allow imports from outside the folder (\"{EXTERNAL_ASK}\"), and loads nothing from there until it "
+               "is allowed."]),
+            f"{then} hansa does not write the line: the folder is another project's."]
+
+
+def card_note(desk: Desk) -> str:
+    """For hansa status's hansa posts to line: the same state as card_lines, short."""
+    c = card_check(desk, read_coordinator(desk))
+    if not c:
+        return ""
+    if c["state"] == "external":
+        return "the recorded session reads the card once external imports are allowed (hansa explain notify)"
+    return f"the recorded session does not read the card: add {c['line']} to its CLAUDE.md (hansa explain notify)"
 
 
 def coordinator_line(desk: Desk) -> str:

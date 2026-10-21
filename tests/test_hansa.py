@@ -2691,6 +2691,82 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertIn(shlex.join([up.hansa_command(), "--desk", str(self.desk.root), "coordinator", "--model", "opus",
                                   "--continue"]), said)
 
+    def desk_at(self, root):
+        """This test's desk at root (the session's folder made around or beside it)."""
+        self.desk = Desk(root)
+        for d in (self.desk.root, self.desk.tasks_dir, self.desk.secrets_dir, self.desk.state_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        write_json(self.desk.settings_path, {})
+        return self.desk
+
+    def status_line(self):
+        return next(x for x in views.status_text(views.status(self.desk)).splitlines() if x.startswith("hansa posts"))
+
+    def test_notify_on_says_how_a_session_that_holds_the_desk_reads_the_card(self):
+        project = self.tmp / "project"
+        desk = self.desk_at(project / "desk")
+        said, rec, _ = self.notify_on(["claude", "--name", "c"], str(project), HANSA_ROLE="coordinator")
+        self.assertEqual(rec["kind"], "notify")
+        self.assertIn("does not read the coordinator's card", said)
+        self.assertIn(f"Add this line to {project / 'CLAUDE.md'}: @desk/CLAUDE.md", said)
+        self.assertIn("next start", said)
+        self.assertIn("hansa help card", said)
+        self.assertNotIn("Allow external", said)  # the card is inside the folder
+        self.assertIn("add @desk/CLAUDE.md", self.status_line())
+        explained = views.explain_text(desk, "notify")
+        self.assertIn("@desk/CLAUDE.md", explained)
+        # with the line, in the folder's CLAUDE.md, its .claude/CLAUDE.md, or a folder above: nothing about the card
+        for holder, line in ((project / "CLAUDE.md", "@desk/CLAUDE.md"),
+                             (project / ".claude" / "CLAUDE.md", "See @../desk/CLAUDE.md for the rules"),
+                             (self.tmp / "CLAUDE.md", "@project/desk/CLAUDE.md")):
+            with self.subTest(holder=holder):
+                holder.parent.mkdir(exist_ok=True)
+                holder.write_text(f"# notes\n{line}\n")
+                said, _, _ = self.notify_on(["claude", "--name", "c"], str(project), HANSA_ROLE="coordinator")
+                self.assertNotIn("card", said)
+                self.assertNotIn("card", self.status_line())
+                self.assertNotIn("card", views.explain_text(desk, "notify").split("  now:")[1])
+                holder.unlink()
+        # a relative path is read from the folder of the file that holds it, so this one names another file
+        (project / ".claude" / "CLAUDE.md").write_text("@desk/CLAUDE.md\n")
+        said, _, _ = self.notify_on(["claude", "--name", "c"], str(project))
+        self.assertIn("@desk/CLAUDE.md", said)
+
+    def test_notify_on_says_how_a_session_beside_the_desk_reads_the_card(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        desk = self.desk_at(self.tmp / "desk")
+        card = desk.root / "CLAUDE.md"
+        said, _, _ = self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        self.assertIn(f"Add this line to {project / 'CLAUDE.md'}: @{card}", said)
+        self.assertIn("asks once, at the session's next start", said)
+        self.assertIn("Allow external CLAUDE.md file imports?", said)
+        self.assertIn("hansa help card", said)
+        self.assertIn(f"add @{card}", self.status_line())
+        (project / "CLAUDE.md").write_text(f"@{card}\n")
+        said, _, _ = self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        self.assertNotIn("Add this line", said)
+        self.assertIn("loads only once Claude Code is allowed to load imports from outside the folder", said)
+        self.assertIn("Allow external CLAUDE.md file imports?", said)
+        self.assertIn("once external imports are allowed", self.status_line())
+        self.assertNotIn("add @", self.status_line())
+
+    def test_a_session_hansa_coordinator_started_or_one_in_the_desk_hears_nothing_about_the_card(self):
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "coordinator", "words": [], "folder": str(self.desk.root), "session": self.SESS})
+        said, rec, _ = self.notify_on(["claude"], str(self.own_folder()), HANSA_ROLE="coordinator")
+        self.assertEqual(rec["kind"], "coordinator")
+        self.assertNotIn("card", said)
+        self.assertNotIn("card", self.status_line())
+        (self.desk.root / "notes").mkdir()
+        for folder in (self.desk.root, self.desk.root / "notes"):  # a session started in the desk, or below it
+            with self.subTest(folder=folder):
+                (self.desk.state_dir / "coordinator-start.json").unlink()
+                said, rec, _ = self.notify_on(["claude"], str(folder))
+                self.assertEqual(rec["kind"], "notify")
+                self.assertNotIn("card", said)
+                self.assertNotIn("card", self.status_line())
+
     def test_the_words_continue_replaces_refuse_nothing_though_they_hold_the_sessions_identity(self):
         from hansa import up
         for words in (["--resume", self.IDENTITY], ["-r", self.IDENTITY], ["--resume=" + self.IDENTITY],
@@ -13228,8 +13304,9 @@ class DeskTest(unittest.TestCase):
 
     # -- hansa posts to a coordinator's session (hansa/notify.py) ------------------------------------------
     def session(self):
-        """A stand-in for a Claude Code session: a process that runs until it is stopped, and its inbox path."""
-        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        """A stand-in for a Claude Code session: a process that runs until it is stopped, and its inbox path. It runs
+        in the desk, as hansa coordinator starts one, so it reads the card."""
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], cwd=self.desk.root)
         self.addCleanup(p.wait)
         self.addCleanup(p.kill)
         return p, str(self.tmp / f"inbox-{p.pid}.sock")
@@ -14841,7 +14918,7 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn(key, (self.desk.state_dir / "coordinator-start.json").read_text())
 
     def test_status_says_how_hansa_up_starts_the_coordinators_session_while_none_hears(self):
-        folder = self.tmp / "own folder"
+        folder = self.desk.root / "own folder"  # below the desk, so it reads the card
         folder.mkdir()
         write_json(self.desk.state_dir / "coordinator-start.json",
                    {"kind": "notify", "argv": ["claude", "--name", "n"], "folder": str(folder), "session": {"pid": 0}})

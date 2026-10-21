@@ -554,6 +554,7 @@ def status(desk: Desk) -> dict:
         "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
         "notifying": (hearing := notify.names(desk)),  # the sessions hansa posts to (hansa notify)
         "coordinator_start": "" if hearing else up.coordinator_line(desk),  # what hansa up does about the session
+        "card_note": up.card_note(desk),  # the recorded session's folder does not load the card (the desk's CLAUDE.md)
         "unreached": alert.coordinator_lines(desk, s),  # the coordinator alert's cases that hold now
         "heard": notify.hears(desk),  # whether the session asking is one of them
         "mod": (mod := plugin.status(desk)),  # what hansa did at the coordinator's start: the mod loaded or not, and why
@@ -650,8 +651,9 @@ def status_text(st: dict) -> str:
             for x in st.get("no_read_left_out") or []]
     out += [page_text(st["page"])] if st.get("page") else []
     out += [st["disk"]["line"]] if st.get("disk") else []
-    out.append("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
-               "hansa posts to no session (hansa notify on, from the coordinator's session)")
+    out.append(("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
+                "hansa posts to no session (hansa notify on, from the coordinator's session)")
+               + (f" · {st['card_note']}" if st.get("card_note") else ""))
     out += [st["coordinator_start"]] if st.get("coordinator_start") and not st.get("notifying") else []
     out += st.get("unreached") or []
     out += [x for x in (f"{st['mod_line']} {plugin.HELP}", st.get("clear_line"), st["compact_line"]) if x] \
@@ -1600,7 +1602,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "idle for 5 minutes and did not start inside that window. Inside the window, idle compaction waits for "
             "the clear. After any clear the session reads hansa status by itself, and hansa records when; hansa "
             "status says the last clear, and warns when windows passed without one. hansa notify on no longer clears.",
-            "  now: " + (", ".join(who) if who else "no session")])
+            "  now: " + (", ".join(who) if who else "no session"),
+            *[f"  {x}" for x in up.card_lines(desk, up.read_coordinator(desk))]])
     return "\n".join([
         "What you can look up: hansa explain lane <name> | provider <name> | server | notify",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
