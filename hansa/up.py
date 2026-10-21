@@ -36,7 +36,7 @@ NOT_YET = ("its start is not recorded yet: this desk had a coordinator before ha
 EXTERNAL_ASK = "Allow external CLAUDE.md file imports?"  # Claude Code's question for imports from outside the folder
 TO_RECORD = ("Start it as before and run hansa notify on in it, or start it with hansa coordinator; from then on "
              "hansa up starts it again")
-CARD = Path(__file__).with_name("card.md")  # the card hansa puts in a desk (cli.py), when the desk's cannot be read
+CARD = Path(__file__).with_name("card.md")  # the card hansa puts in a desk (cli.py), and the one its copy holds
 # Where hansa notify on copies the card for a session that does not read it: in the session's folder, which Claude
 # Code reads rules from at each start, for every session started there or below
 COPY = os.path.join(".claude", "rules", "hansa-card.md")
@@ -499,13 +499,11 @@ def exclude_copy(top: str, path: Path) -> str:
 
 
 def copy_text(desk: Desk, path: Path) -> str:
-    """The copy of the card: hansa's header, then the desk's card. An import line in it (@notes/PROJECT.md) names its
-    file from the copy's folder when that file is inside the session's folder, and is a pointer to it otherwise."""
+    """The copy of the card: hansa's header, then hansa's own card (card.md, the one hansa brings the desk's to; never
+    the desk's CLAUDE.md as it stands, which may be older or edited). An import line in it (@notes/PROJECT.md) names
+    its file from the copy's folder when that file is inside the session's folder, and is a pointer to it otherwise."""
     folder = Path(os.path.realpath(path.parent.parent.parent))
-    try:
-        card = (desk.root / "CLAUDE.md").read_text(encoding="utf-8")
-    except OSError:
-        card = CARD.read_text(encoding="utf-8")
+    card = CARD.read_text(encoding="utf-8")
 
     def imported(m):
         target = Path(os.path.realpath(desk.root / os.path.expanduser(m.group(1))))

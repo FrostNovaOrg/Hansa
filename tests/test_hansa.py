@@ -2775,11 +2775,17 @@ class CoordinatorUpTest(unittest.TestCase):
         self.desk = desk = cli.init_desk(self.tmp / "desk", "", "a", "")
         self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
         copy = self.copy_of(project)
+        mine = copy.read_text()
+        # the copy is made from hansa's own card, never from the desk's CLAUDE.md as it stands
         (desk.root / "CLAUDE.md").write_text("an older card\n")
+        copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older copy\n")
         self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")  # every notify on writes it again
-        self.assertTrue(copy.read_text().endswith("\n\nan older card\n"))
+        self.assertEqual(copy.read_text(), mine)
+        self.assertNotIn("an older card", mine)
+        copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older copy\n")
         cli.coordinator_desk(desk, os.getuid())  # hansa coordinator's start refreshes the card, and so the copy
-        self.assertNotIn("an older card", copy.read_text())
+        self.assertEqual((desk.root / "CLAUDE.md").read_text(), cli.CARD.read_text())
+        self.assertEqual(copy.read_text(), mine)
         self.assertIn("## Never", copy.read_text())
         # a copy in a folder that holds the desk would reach the session hansa coordinator starts there: removed
         inner = self.tmp / "inner"
@@ -2789,6 +2795,30 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertTrue(self.copy_of(inner).is_file())
         cli.coordinator_desk(desk, os.getuid())
         self.assertFalse(self.copy_of(inner).exists())
+
+    def test_hansa_serve_brings_the_desks_card_and_its_copy_up_to_date(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        self.desk = desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        copy = self.copy_of(project)
+        mine = copy.read_text()
+        # a desk whose coordinator only runs notify on: its card and the copy from an earlier hansa
+        (desk.root / "CLAUDE.md").write_text("an older card\n")
+        copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older card\n")
+        with unittest.mock.patch("hansa.web.start_web", side_effect=RuntimeError("no page in this test")), \
+                self.assertRaises(RuntimeError):
+            main(["--desk", str(desk.root), "serve", "--port", "0"])
+        self.assertEqual((desk.root / "CLAUDE.md").read_text(), cli.CARD.read_text())
+        self.assertIn("card_refreshed", desk.events_path.read_text())
+        self.assertEqual(copy.read_text(), mine)
+        self.assertTrue(mine.split("\n\n", 1)[1].startswith(cli.CARD.read_text().split("\n", 1)[0]))
+        # the card already current, an older copy alone is rewritten too
+        copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older card\n")
+        with unittest.mock.patch("hansa.web.start_web", side_effect=RuntimeError("no page in this test")), \
+                self.assertRaises(RuntimeError):
+            main(["--desk", str(desk.root), "serve", "--port", "0"])
+        self.assertEqual(copy.read_text(), mine)
 
     def test_notify_off_removes_hansas_copy_alone(self):
         project, other = self.tmp / "project", self.tmp / "other"

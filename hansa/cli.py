@@ -1359,6 +1359,11 @@ def cmd_serve(a):
     dropped = record_serve_session(desk)  # a Claude Code session's identity, which nothing it starts gets
     up.record_start(desk, a)  # how hansa up brings this server back, and this account's list of desks
     alert.sweep_runs(desk)  # the folders of alert runs a stopped or killed server left (none runs now: one server)
+    try:  # a desk whose coordinator only runs hansa notify on gets hansa's card (and its copy) only here
+        bring_card(desk)
+    except OSError as e:
+        print(f"hansa serve: the desk's card could not be brought up to date ({e.strerror or e})", file=sys.stderr,
+              flush=True)
     try:
         port = start_web(desk, a.host, a.port).server_address[1]
     except OSError as e:
@@ -1662,8 +1667,7 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
     s = desk.settings()
     co = s["coordinator"]
     p = s["providers"][co["provider"]]
-    _bring(desk, CARD.read_text(encoding="utf-8"), desk.root / "CLAUDE.md", "card_refreshed")
-    up.refresh_copy(desk, starting=True)  # the copy notify on wrote for a session outside the desk, as the card
+    bring_card(desk, starting=True)
     for f in sorted(HELPERS.glob("*.md")):
         _bring(desk, f.read_text(encoding="utf-8"), desk.root / ".claude" / "agents" / f.name, "helper_refreshed")
     mine = desk.root / ".claude" / "settings.json"  # hansa keeps its rules current there; the rest is left as it is
@@ -1720,6 +1724,13 @@ def cmd_coordinator_desk(a):
         print(json.dumps({}))
     except Exception as e:  # noqa: BLE001 - root starts all the same
         print(json.dumps({"mod_unrecorded": f"{type(e).__name__}: {e}"}))
+
+
+def bring_card(desk: Desk, starting: bool = False) -> None:
+    """The desk's card brought up to hansa's, and the copy hansa notify on wrote for a session outside the desk
+    with it (up.refresh_copy; starting: hansa coordinator's start)."""
+    _bring(desk, CARD.read_text(encoding="utf-8"), desk.root / "CLAUDE.md", "card_refreshed")
+    up.refresh_copy(desk, starting=starting)
 
 
 def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> None:
