@@ -8,6 +8,12 @@ effort, merging, what work costs, and the states a task goes through. The
 
 New lanes stop at 200 turns; saved lanes keep their limits (`hansa lane set L max_turns 200` lowers one).
 
+A run stopped at a ceiling before writing its report has its notes along the way as its report. At the
+time ceiling, a line follows them: the last tool call the session record shows the worker starting, whether
+or not it ended, and how many minutes before the stop it started (a Bash call's command on one line, cut
+to 300 characters; another tool's name and its file path or pattern). Many minutes there points to one
+long command, not a task too big. No line when the record holds no call or the provider keeps none.
+
 One Bash call of a task or verification worker may run as long as the lane's
 check may, plus 5 minutes, but never past the worker's own limit: hansa sets
 Claude Code's `BASH_MAX_TIMEOUT_MS` to that (without it a call may run at most

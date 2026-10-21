@@ -3672,6 +3672,50 @@ class DeskTest(unittest.TestCase):
             self.assertTrue((wt / path).is_file())
             self.assertNotIn(path, self.git_out("ls-files", cwd=wt))
 
+    def stopped_at_the_time_ceiling(self, rows):
+        """A run stopped at the time ceiling with no result, whose session record holds these rows."""
+        from hansa import run
+        s = self.desk.settings()  # a provider whose record is in the desk's state, not the user's
+        p = s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid, wt, base = self.protected_worktree()
+        self.desk.update(tid, timed_out=True, provider="mimo")
+        write_json(self.desk.raw_dir(tid) / "run.json", {})
+        rec = run.config_home(self.desk, "mimo", p) / "projects" / "-work" / "sid-x.jsonl"
+        self.assertTrue(str(rec).startswith(str(self.desk.state_dir)), rec)
+        rec.parent.mkdir(parents=True, exist_ok=True)
+        rec.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        run.finish(self.desk, tid, -9)
+        return (self.desk.tasks_dir / tid / "result.md").read_text()
+
+    def test_a_run_stopped_at_the_time_ceiling_names_its_last_call(self):
+        from datetime import datetime, timezone
+        from hansa import run
+        at = lambda minutes: datetime.fromtimestamp(time.time() - 60 * minutes, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        loop = "for i in $(seq 21); do\n  python3 -m unittest tests.test_long || break\ndone " + "x" * 400
+        rows = [{"type": "assistant", "timestamp": at(85), "message": {"content": [
+                    {"type": "text", "text": "Running the long test file."},
+                    {"type": "tool_use", "id": "u1", "name": "Read", "input": {"file_path": "/w/tests/test_long.py"}}]}},
+                {"type": "user", "timestamp": at(84), "message": {"content": [{"type": "tool_result", "tool_use_id": "u1"}]}},
+                {"type": "assistant", "timestamp": at(80), "message": {"content": [
+                    {"type": "tool_use", "id": "u2", "name": "Bash", "input": {"command": loop}}]}},
+                {"type": "user", "timestamp": at(0), "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "u2", "content": "Exit code 137"}]}}]
+        text = self.stopped_at_the_time_ceiling(rows)
+        self.assertTrue(text.startswith(run.STOPPED_NOTE + "Running the long test file."), text)
+        line = text.splitlines()[-1]
+        self.assertIn("80 minutes before the stop", line)
+        self.assertIn("Bash: for i in $(seq 21); do python3 -m unittest tests.test_long || break done xxx", line)
+        self.assertLess(len(line), 400)
+        self.assertNotIn("test_long.py", line)
+
+    def test_a_run_stopped_at_the_time_ceiling_with_no_call_has_its_notes_alone(self):
+        from hansa import run
+        rows = [{"type": "assistant", "timestamp": "2026-10-21T15:35:18.038Z", "message": {"content": [
+            {"type": "text", "text": "Reading the task."}]}}]
+        self.assertEqual(self.stopped_at_the_time_ceiling(rows), run.STOPPED_NOTE + "Reading the task.\n")
+
     def test_hansas_commit_names_every_protected_path_and_refuses_link_types(self):
         tid, wt, base = self.protected_worktree()
         paths = [".idea/" + "x" * 180 + ".xml", ".vscode/" + "y" * 180 + ".json", ".claude"]

@@ -289,8 +289,9 @@ or ask `scout` when reading is enough; say what you need back.
 - Every JVM in a lane prints `Picked up JAVA_TOOL_OPTIONS: ...` first on stderr, so a script that
   reads a version must look for the line holding `version "`. More: `hansa help java`.
 - Each task stops at its lane's ceiling of turns and minutes, set high: reaching it means the task
-  was too big or unclear, or the worker got stuck. It fails with the worker's notes as its report:
-  read them, then split the task or make it clearer rather than re-running it unchanged.
+  was too big or unclear, or the worker got stuck. It fails with the worker's notes as its report
+  (at the minutes ceiling, then the last call it started and how long before the stop: a long one
+  points to a stuck command): read them, then split the task or make it clearer rather than re-running it unchanged.
 - A failed write (a full disk) does not stop `hansa serve`: free space so it can record what it kept.
   More: `hansa help free-space`.
 - A key never shows in reports, errors or the event log (More: `hansa help desk-files`). A change

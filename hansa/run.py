@@ -29,6 +29,7 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from . import account, build, installed, installed_text, session_vars, without_session
@@ -1292,6 +1293,36 @@ def _record(home: Path, sid: str):
 def notes_of(home: Path, sid: str, limit: int = 6000) -> str:
     """What a worker wrote along the way, from its session record."""
     return "\n\n".join(_record(home, sid)[0])[-limit:]
+
+
+def last_call(home: Path, sid: str, stopped: float) -> str:
+    """The last tool call a session record shows the worker starting, whether or not it holds its result, and
+    how many minutes before `stopped` it started: for a run stopped at the time ceiling. Empty when the record
+    has no call or cannot be read."""
+    found = None
+    for d in _rows(home, sid) or []:
+        content = (d.get("message") or {}).get("content") if d.get("type") == "assistant" else None
+        for c in content if isinstance(content, list) else []:
+            if isinstance(c, dict) and c.get("type") == "tool_use":
+                found = (c, d.get("timestamp"))
+    if not found:
+        return ""
+    c, stamp = found
+    args = c.get("input") if isinstance(c.get("input"), dict) else {}
+    name = str(c.get("name") or "?")
+    if name == "Bash" and isinstance(args.get("command"), str):
+        what = " ".join(args["command"].split())
+        what = f"Bash: {what[:300]}" + ("…" if len(what) > 300 else "")
+    else:
+        where = next((args[k] for k in ("file_path", "notebook_path", "path", "pattern") if isinstance(args.get(k), str)), "")
+        what = f"{name}: {where}" if where else name
+    when = ""
+    try:
+        began = datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+        when = f", {max(0, round((stopped - began) / 60))} minutes before the stop"
+    except ValueError:
+        pass
+    return f"The last call it started{when}: {what}"
 
 
 def _rows(home: Path, sid: str):
@@ -3974,6 +4005,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         notes = read_detail(desk, tid, "notes", "", notes_of, config_home(desk, meta["provider"], p),
                             meta.get("session_id", ""))
         report = STOPPED_NOTE + notes if notes else ""
+        if meta.get("timed_out"):  # what it was doing when the time ran out: a long command, say
+            call = read_detail(desk, tid, "last call", "", last_call, config_home(desk, meta["provider"], p),
+                               meta.get("session_id", ""), now())
+            report += ("\n\n" if report else "") + call if call else ""
     report = desk.redact(report)
     denied = run.get("permission_denials") or []
     reasons = read_detail(desk, tid, "refusal reasons", {}, refusal_reasons, config_home(desk, meta["provider"], p),
