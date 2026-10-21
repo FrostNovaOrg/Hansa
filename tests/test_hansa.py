@@ -2842,6 +2842,30 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertEqual(self.copy_of(other).read_text(), "my own rules\n")
         self.assertIn("add @", self.status_line())
 
+    def test_notify_off_keeps_a_file_the_user_put_in_place_of_hansas_copy(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        self.desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        self.assertTrue(self.copy_of(project).is_file())
+        self.copy_of(project).write_text("my own rules\n")  # where hansa's copy was, the user's file
+        with unittest.mock.patch.object(notify, "turn_off", return_value="hansa no longer posts to this session"):
+            said = self.say("notify", "off")
+        self.assertEqual(self.copy_of(project).read_text(), "my own rules\n")
+        self.assertNotIn("removed its copy", said)
+
+    def test_bringing_the_card_up_to_date_keeps_a_file_the_user_put_in_place_of_hansas_copy(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        self.desk = desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        self.assertTrue(self.copy_of(project).is_file())
+        self.copy_of(project).write_text("my own rules\n")
+        (desk.root / "CLAUDE.md").write_text("an older card\n")
+        self.serve_until_web(desk)
+        self.assertEqual((desk.root / "CLAUDE.md").read_text(), cli.CARD.read_text())  # the card itself was brought
+        self.assertEqual(self.copy_of(project).read_text(), "my own rules\n")
+
     def test_a_file_without_hansas_header_or_a_folder_hansa_cannot_write_gets_the_line(self):
         project = self.tmp / "project"
         self.copy_of(project).parent.mkdir(parents=True)

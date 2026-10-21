@@ -141,7 +141,6 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
         write_text(desk.lanes_dir / lane / "brief.md", "")
     write_json(desk.settings_path, s)
     write_text(desk.root / "CLAUDE.md", CARD.read_text(encoding="utf-8"))
-    up.refresh_copy(desk)
     if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; then only hansa notes archive writes it
         write_text(desk.project_path, PROJECT_INTRO)
     (desk.root / ".claude").mkdir(exist_ok=True)
