@@ -560,7 +560,7 @@ def status(desk: Desk) -> dict:
         "mod": (mod := plugin.status(desk)),  # what hansa did at the coordinator's start: the mod loaded or not, and why
         "mod_line": plugin.status_line(mod) if mod else "",
         "clear_line": plugin.clear_line(mod) if mod else "",  # its daily clear: the window, and the clears recorded
-        "compact_line": plugin.settings_line(s) if mod else "",  # the desk's compaction settings
+        "compact_line": plugin.settings_line(s) if mod and mod.get("kind") != "notify" else "",
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
         "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any

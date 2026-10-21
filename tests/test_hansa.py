@@ -27049,7 +27049,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         for language in ("en", "zh"):
             [page] = self.page_header("status-parts", status, language)
             parts = page["parts"]
-            for words in ("/home/work/desk", "hansa test-build", time.strftime("%Y-%m-%d %H:%M", time.localtime(status["installed"]))):
+            for words in ("/home/work/desk", "test-build", time.strftime("%Y-%m-%d %H:%M", time.localtime(status["installed"]))):
                 self.assertEqual(len([p for p in parts if words in p["text"] and p["tone"] == "muted"]), 1, words)
             self.assertEqual(len([p for p in parts if "review queue" in p["text"] and p["tone"] == "warn"]), 1)
             self.assertEqual(len([p for p in parts if ("server not running" if language == "en" else "后台没在运行")
@@ -27060,6 +27060,43 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertTrue(any("3" in p["text"] and ("dispatch" if language == "en" else "派活") in p["text"]
                                 for p in page["parts"]))
             status.update(paused="review queue", server_up=False, server={"state":"gone"})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_summary_labels(self):
+        status = views.status(self.desk)
+        status.update(desk="/home/work/desk", build="test-build")
+        for language, desk, version, current in (("en", "desk", "hansa", "now"),
+                                                  ("zh", "工作台", "hansa 版本", "现在")):
+            with self.subTest(language=language):
+                [page] = self.page_header("status-parts", status, language)
+                parts = [p["text"] for p in page["parts"]]
+                self.assertIn(desk + " /home/work/desk", parts)
+                self.assertIn(version + " test-build", parts)
+                self.assertTrue(any(re.fullmatch(current + r" \d{2}:\d{2}", p) for p in parts), parts)
+
+    def test_notify_compaction(self):
+        from hansa import up
+        for old_start in (False, True):
+            with self.subTest(old_start=old_start):
+                if old_start:
+                    self.start_with_mod()
+                    self.assertIn("the mod reads it", views.status(self.desk)["compact_line"])
+                self.assertEqual(up.record_session(self.desk, {"pid":12345, "start":"other-session"},
+                                                  ["claude"], str(self.desk.root)), "")
+                status = views.status(self.desk)
+                self.assertEqual(status["compact_line"], "")
+                printed = self.hansa("status")
+                self.assertIn("started outside hansa coordinator", printed)
+                self.assertNotIn("coordinator's compaction", printed)
+                self.assertNotIn("--autocompact", printed)
+                if shutil.which("node"):
+                    for language in ("en", "zh"):
+                        [page] = self.page_header("notify-status", status, language)
+                        self.assertNotIn("--autocompact", page["text"])
+                        self.assertNotIn("compaction", page["text"])
+                        self.assertNotIn("压缩", page["text"])
+        self.start_with_mod()
+        self.assertIn("the mod reads it", views.status(self.desk)["compact_line"])
 
     def test_notify_session_replaces_old_coordinator_mod_and_daily_clear_status(self):
         from hansa import up

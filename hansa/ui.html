@@ -274,6 +274,7 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 const ZH = (navigator.language || "").toLowerCase().startsWith("zh");
 const T = ZH ? {
   status:"状态", settings:"设置", cost:"成本",
+  desk:"工作台", version:"hansa 版本", summaryNow:"现在",
   dispatchLimit:n => `正在派活，同时最多 ${n} 件`, installed:"安装于",
   dispatchOn:"正在派活", paused:"已暂停", pause:"暂停派活", resume:"恢复派活", pauseReason:"暂停原因（可不填）",
   serverUp:"后台在运行", serverDown:"后台没在运行：新活不会开始",
@@ -370,6 +371,7 @@ const T = ZH ? {
   laneMergeCheck:"合并验收命令：合并前由 hansa 在把这件活并上基础分支后跑，代替验收命令；每件改了东西的活合并前都跑，活做完后不跑（空＝合并验收跑验收命令）", mergeTimeout:"合并验收最长分钟（空＝同每件最长分钟）", f_merge_check:"合并验收命令"
 } : {
   status:"Status", settings:"Settings", cost:"Cost",
+  desk:"desk", version:"hansa", summaryNow:"now",
   dispatchLimit:n => `dispatch on, ${n} at a time`, installed:"installed",
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
   serverUp:"server running", serverDown:"server not running: new tasks will not start",
@@ -661,13 +663,13 @@ async function loadStatus() {
   const pad = n => String(n).padStart(2, "0"), now = new Date(), installed = new Date(st.installed * 1000);
   const clock = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
   const parts = [], part = (text, warn = false) => { if (text) parts.push(h("span", {class:warn ? "warn" : "muted"}, text)); };
-  part("desk " + st.desk);
+  part(T.desk + " " + st.desk);
   part(st.paused ? T.paused + ": " + st.paused : T.dispatchLimit(st.concurrency), !!st.paused);
   part(st.server && st.server.state === "stuck" ? T.serverStuck(st.server.pid, Math.floor(st.server.quiet / 60))
     : st.server_up ? T.serverUp : T.serverDown, !st.server_up || (st.server && st.server.state === "stuck"));
-  part("hansa " + st.build);
+  part(T.version + " " + st.build);
   part(T.installed + " " + (st.installed ? `${installed.getFullYear()}-${pad(installed.getMonth() + 1)}-${pad(installed.getDate())} ${clock(installed)}` : "?"));
-  part(T.now + " " + clock(now));
+  part(T.summaryNow + " " + clock(now));
   part(st.srt_missing, true);
   part(st.disk && st.disk.low_text ? (ZH ? T.diskLow + "：" : "") + st.disk.low_text : "", true);
   for (const x of st.disk && st.disk.unknown || []) part(x, true);
