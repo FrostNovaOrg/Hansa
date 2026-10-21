@@ -1,6 +1,7 @@
 """Tests for hansa with a stand-in for claude, so no model is called."""
 import contextlib
 import ast
+import csv
 import errno
 import fcntl
 import functools
@@ -22276,7 +22277,15 @@ class DeskTest(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_merge_wait_page_test_reports_a_skip_without_node(self):
+        # Without node the page assertion must be a visible skip, before starting a server or task.
+        with unittest.mock.patch("shutil.which", return_value=None):
+            with self.assertRaisesRegex(unittest.SkipTest, "needs node"):
+                self.test_the_page_shows_merge_checks_with_what_they_wait_for()
+
     def test_the_page_shows_merge_checks_with_what_they_wait_for(self):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
         skip_unless_ports(self)
         d, t1, t2 = self.two_lanes(check="test -f README.md")
         t3 = self.desk.new_task("Add b.txt again", lane="b")
@@ -22297,7 +22306,8 @@ class DeskTest(unittest.TestCase):
         tok = self.desk.web_token()
         try:
             with urllib.request.urlopen(f"{base}/api/status?t={tok}") as r:
-                merging = {m["id"]: m for m in json.load(r)["merging"]}
+                status = json.load(r)
+                merging = {m["id"]: m for m in status["merging"]}
             with urllib.request.urlopen(f"{base}/?t={tok}") as r:
                 page = r.read().decode()
         finally:
@@ -22308,15 +22318,30 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((merging[t3]["phase"], merging[t3]["busy_with"], merging[t3]["waits_for"]),
                          ("queued", t2, {"id": t2, "lane": "b"}))
         self.assertEqual(merging[t3]["where"], f"merge check queued: waits for {t2}'s merge check on lane b")  # as hansa status says
-        # shown with the tasks waiting for review, in both languages, as hansa status puts it
-        self.assertIn("st.review.length || (st.merging || []).length ? section(T.review", page)
-        self.assertIn("m.waits_for ? T.mcQueuedAhead(m.waits_for) : m.busy_with ? T.mcQueuedBusy(m.lane, m.busy_with)", page)
-        self.assertIn("`merge check running for ${n} min`", page)
-        self.assertIn("`merge check queued: waits for ${w.id}'s merge check on lane ${w.lane}`", page)
-        self.assertIn("`merge check queued: waits for lane ${lane}, busy with ${id}`", page)
-        self.assertIn("`合并验收已跑了 ${n} 分钟`", page)
-        self.assertIn("`合并验收在排队：同一个仓库和基础分支一次只跑一个合并验收，先等工作线 ${w.lane} 上 ${w.id} 的合并验收`", page)
-        self.assertIn("`合并验收在排队：等工作线 ${lane} 空出来（现在在做 ${id}）`", page)
+        # Render the served page with that status reply: layout helpers can change, but the review section
+        # must still explain a running check, a check ahead of it, and a busy lane in both languages.
+        harness, served = self.tmp / "merge-status-page.js", self.tmp / "served-merge-page.html"
+        harness.write_text(self.PAGE_HARNESS)
+        served.write_text(page)
+        for language, heading, running, ahead, busy in (
+                ("en", "Waiting for review", "merge check running for 0 min",
+                 f"merge check queued: waits for {t2}'s merge check on lane b",
+                 f"merge check queued: waits for lane b, busy with {t2}"),
+                ("zh", "做完待审", "合并验收已跑了 0 分钟",
+                 f"合并验收在排队：同一个仓库和基础分支一次只跑一个合并验收，先等工作线 b 上 {t2} 的合并验收",
+                 f"合并验收在排队：等工作线 b 空出来（现在在做 {t2}）")):
+            for waiting_for_check, expected in ((True, ahead), (False, busy)):
+                with self.subTest(language=language, waiting_for_check=waiting_for_check):
+                    reply = json.loads(json.dumps(status))
+                    if not waiting_for_check:
+                        next(m for m in reply["merging"] if m["id"] == t3)["waits_for"] = None
+                    rendered = subprocess.run(["node", str(harness), str(served), "status", language],
+                                              input=json.dumps({"/api/status": reply, "/api/events": []}),
+                                              capture_output=True, text=True, timeout=60)
+                    self.assertEqual(rendered.returncode, 0, rendered.stderr)
+                    text = json.loads(rendered.stdout)
+                    for expected_text in (heading, running, expected):
+                        self.assertIn(expected_text, text)
 
     def test_the_page_shows_how_long_the_check_itself_has_run(self):
         skip_unless_ports(self)
@@ -25911,34 +25936,210 @@ const [page, given, ask] = [fs.readFileSync(process.argv[2], "utf8"), JSON.parse
 const script = page.slice(page.indexOf("<script>") + 8, page.lastIndexOf("</script>"));
 class El {
   constructor(tag) { this.tag = tag; this.kids = []; this.attrs = {}; this.className = ""; this.hidden = false;
-    this.value = ""; this.checked = false; this.on = {}; this.classList = {toggle: () => {}}; this.dataset = {}; }
+    this.value = ""; this.checked = false; this.disabled = false; this.on = {}; this.classList = {toggle: () => {}}; this.dataset = {}; }
+  get tagName() { return this.tag.toUpperCase(); }
+  get id() { return this.attrs.id || ""; } set id(value) { this.setAttribute("id", value); }
+  get type() { return this.attrs.type || ""; } set type(value) { this.setAttribute("type", value); }
   set textContent(x) { this.kids = [String(x)]; } get textContent() { return this.kids.map(k => k.textContent ?? k).join(""); }
-  setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith("data-")) this.dataset[k.slice(5)] = String(v); }
-  addEventListener(k, f) { this.on[k] = f; }
+  setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith("data-")) this.dataset[k.slice(5)] = String(v);
+    if (k === "id") ids["#" + v] = this;
+    if (k === "disabled" || k === "hidden") this[k] = true; }
+  getAttribute(k) { return this.attrs[k] ?? null; }
+  removeAttribute(k) { delete this.attrs[k]; if (k === "disabled" || k === "hidden") this[k] = false; }
+  focus() { document.activeElement = this; }
+  click() {
+    if (this.tag === "a") downloads.push({href:this.attrs.href, name:this.attrs.download});
+    return this.on.click?.({target:this, preventDefault() {}});
+  }
+  remove() { if (this.parentElement) this.parentElement.kids = this.parentElement.kids.filter(k => k !== this); }
+  addEventListener(k, f) { const previous = this.on[k]; this.on[k] = previous ? e => { previous(e); return f(e); } : f; }
   // as the DOM does, what is not a node becomes text: null the text "null"
-  append(...xs) { this.kids.push(...xs.map(x => x instanceof El || x instanceof Text ? x : new Text(String(x)))); }
+  append(...xs) { for (const x of xs) { const child = x instanceof El || x instanceof Text ? x : new Text(String(x));
+    child.parentElement = this; this.kids.push(child); } }
   replaceChildren(...xs) { this.kids = []; this.append(...xs); }
   contains() { return false; } get nodeType() { return 1; }
 }
 class Text { constructor(s) { this.textContent = s; } get nodeType() { return 3; } }
 const ids = {};
-const document = {createElement: t => new El(t), createTextNode: s => new Text(s), title: "", body: new El("body"),
-  hidden: false, activeElement: null, querySelectorAll: () => [],
-  querySelector: s => ids[s] || (ids[s] = new El("div"))};
+const descendants = (root, tag) => !root ? [] : root.kids.flatMap(child => child instanceof El
+  ? [...(child.tag === tag ? [child] : []), ...descendants(child, tag)] : []);
+const document = {createElement: t => new El(t), createElementNS: (namespace, t) => new El(t),
+  createTextNode: s => new Text(s), title: "", body: new El("body"),
+  hidden: false, activeElement: null, querySelectorAll: s => {
+    const match = /^(#[\w-]+) (\w+)$/.exec(s); return match ? descendants(ids[match[1]], match[2]) : []; },
+  querySelector: s => { const match = /^(#[\w-]+) (\w+)$/.exec(s);
+    return match ? descendants(ids[match[1]], match[2])[0] || null : ids[s] || (ids[s] = new El("div")); }};
 const reply = path => given[Object.keys(given).find(p => path.startsWith(p))] ?? (path.startsWith("/api/events") ? [] : null);
-let posted = null;
+let posted = null, settingsGetCount = 0, settingsPostCount = 0, settingsPostGate = null, settingsGetGate = null;
+let settingsPostReply = {ok:true, problems:[]}, settingsPostError = null;
+let keyPostReply = {ok:true, saved:true}, settingsGetError = null;
+const keyPosts = [], windowEvents = {}, confirmations = [];
+const apiGets = [], apiPosts = [], blobs = [], downloads = [], revokedUrls = [];
+let costGetError = ask === "cost-interactions" ? "example initial cost failure" : null;
+let costGetGate = null, costRowsError = null, costRowsGate = null;
+let confirmReply = true;
 const fetch = async (path, options) => {
+  if (options && options.method === "POST") apiPosts.push({path, body:JSON.parse(options.body)});
+  else apiGets.push(path);
   if (options && options.method === "POST" && path === "/api/settings") {
-    posted = JSON.parse(options.body); return {status:200, json:async () => ({ok:true, problems:[]})};
+    posted = JSON.parse(options.body); settingsPostCount++;
+    if (settingsPostGate) await settingsPostGate;
+    if (settingsPostError) throw new Error(settingsPostError);
+    if (settingsPostReply.ok) given["/api/settings"] = {...given["/api/settings"], settings:JSON.parse(JSON.stringify(posted.settings))};
+    return {status:200, json:async () => settingsPostReply};
   }
-  const r = reply(path); if (r === null) return new Promise(() => {}); return {status: 200, json: async () => r};
+  if (options && options.method === "POST" && path === "/api/key") {
+    keyPosts.push(JSON.parse(options.body)); return {status:200, json:async () => keyPostReply};
+  }
+  if (options && options.method === "POST" && ["/api/pause", "/api/resume", "/api/ask/close", "/api/release/answer", "/api/release/stop"].includes(path)) {
+    const body = JSON.parse(options.body);
+    if (path === "/api/pause") given["/api/status"].paused = body.reason || "from page";
+    if (path === "/api/resume") given["/api/status"].paused = "";
+    return {status:200, json:async () => ({ok:true})};
+  }
+  if (path.startsWith("/api/cost")) {
+    const rows = path.includes("rows=1"), gate = rows ? costRowsGate : costGetGate;
+    if (gate) await gate;
+    const error = rows ? costRowsError : costGetError; if (error) throw new Error(error);
+  }
+  if (path === "/api/settings") { settingsGetCount++; if (settingsGetError) throw new Error(settingsGetError); }
+  const r = reply(path); if (r === null) return new Promise(() => {});
+  const snapshot = JSON.parse(JSON.stringify(r));
+  if (path === "/api/settings" && settingsGetGate) await settingsGetGate;
+  return {status: 200, json: async () => JSON.parse(JSON.stringify(snapshot))};
 };
 const ctx = vm.createContext({document, fetch, navigator: {language: "en"}, location: {search: ""}, history: {replaceState() {}},
-  setInterval() {}, window: {scrollTo() {}}, console, URL, Blob: class {}});
+  setInterval() {}, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
+    confirm(message) { confirmations.push(message); return confirmReply; }}, console,
+  URL: class extends URL {
+    static createObjectURL(blob) { blobs.push(blob); return "blob:page-test-" + blobs.length; }
+    static revokeObjectURL(url) { revokedUrls.push(url); }
+  }, Blob: class { constructor(parts, options) { this.parts = parts; this.type = options?.type || ""; }
+    async text() { return this.parts.join(""); } }});
 if (process.argv[4]) ctx.navigator.language = process.argv[4];
 vm.runInContext(script, ctx);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
-if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()])", ctx).then(() => {
+const stateBeforeCost = document.querySelector("#state").textContent;
+if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(async () => {
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const run = code => vm.runInContext(code, ctx);
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const find = predicate => { let found = null; walk(ids["#tab-status"], el => { if (!found && predicate(el)) found = el; }); return found; };
+  const button = label => find(el => el.tag === "button" && el.textContent === label);
+  const input = label => find(el => el.tag === "input" && el.attrs.placeholder === label);
+  const postedTo = path => apiPosts.filter(post => post.path === path).at(-1)?.body;
+  const same = (actual, expected, why) => check(JSON.stringify(actual) === JSON.stringify(expected), why);
+  const reason = input(run("T.pauseReason"));
+  check(reason && button(run("T.pause")), "pause controls missing");
+  reason.value = "Review UI, keep the queue"; await button(run("T.pause")).click();
+  same(postedTo("/api/pause"), {reason:"Review UI, keep the queue"}, "pause payload changed");
+  check(button(run("T.resume")), "pause did not expose resume");
+  await button(run("T.resume")).click();
+  same(postedTo("/api/resume"), {}, "resume payload changed");
+  check(button(run("T.pause")), "resume did not restore pause controls");
+  let task = button("t0042");
+  check(task, "queued task link missing"); await task.click(); await flush();
+  check(run('detailOpen.has("t0042")') && task.attrs["aria-expanded"] === "true" &&
+    ids["#" + task.attrs["aria-controls"]]?.textContent.includes("Task detail from API"),
+    "task expansion did not load and announce its detail");
+  check(apiGets.includes("/api/task?id=t0042"), "task detail API address changed");
+  await run("loadStatus()"); await flush(); task = button("t0042");
+  check(task.attrs["aria-expanded"] === "true" && ids["#" + task.attrs["aria-controls"]]?.textContent.includes("Task detail from API"),
+    "status refresh lost the expanded task");
+  await task.click();
+  check(!run('detailOpen.has("t0042")') && task.attrs["aria-expanded"] === "false", "task detail did not collapse");
+  const answer = input(run("T.answer"));
+  check(answer && button(run("T.close")), "ask answer controls missing");
+  answer.value = "Ready, continue"; await button(run("T.close")).click();
+  same(postedTo("/api/ask/close"), {id:7, answer:"Ready, continue"}, "ask close payload changed");
+  const releasePayload = {id:17, yes:true, reason:"Reviewed the exact commit", commit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", command:"git push origin alpha"};
+  input(run("T.releaseReason")).value = releasePayload.reason; await button(run("T.releaseYes")).click();
+  same(postedTo("/api/release/answer"), releasePayload, "release approval lost its original commit or command");
+  input(run("T.releaseReason")).value = "Wait for review"; await button(run("T.releaseNo")).click();
+  same(postedTo("/api/release/answer"), {...releasePayload, yes:false, reason:"Wait for review"}, "release refusal payload changed");
+  input(run("T.releaseStopReason")).value = "Stop this run"; await button(run("T.releaseStop")).click();
+  same(postedTo("/api/release/stop"), {id:18, reason:"Stop this run"}, "release stop payload changed");
+  console.log(JSON.stringify({pause:true, resume:true, details:true, asks:true, releases:true}));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "cost-interactions") vm.runInContext("loadCost()", ctx).then(async () => {
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const run = code => vm.runInContext(code, ctx);
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const find = predicate => { let found = null; walk(ids["#tab-cost"], el => { if (!found && predicate(el)) found = el; }); return found; };
+  check(ids["#tab-cost"].textContent.includes(run("T.costLoadFailed")) &&
+    !ids["#tab-cost"].textContent.includes(run("T.costLoading")) && ids["#tab-cost"].attrs["aria-busy"] !== "true",
+    "initial cost load failure retained its loading placeholder");
+  check(ids["#state"].textContent === stateBeforeCost, "initial cost failure changed the global desk status");
+  const initialRetry = find(el => el.tag === "button" && el.textContent === run("T.retry"));
+  check(initialRetry, "initial cost load failure did not offer retry");
+  costGetError = null; await initialRetry.click(); await flush();
+  const text = ids["#tab-cost"].textContent;
+  check(["seat", "day", "model", "lane", "provider", "task"].every(key => text.includes(run('T["by' + key + '"]'))),
+    "cost breakdown category missing");
+  check(text.includes("12.34") && text.includes(run("fmt(1234567)")), "cost total did not render its API values");
+  check(text.includes(run("T.unpriced")) && text.includes("unpriced-engine") && text.includes("auditor"),
+    "unpriced or uncounted coordinator warning missing");
+  const taskRow = find(el => el.tag === "tr" && el.kids[0]?.textContent === "t-cost");
+  check(taskRow && JSON.stringify(taskRow.kids.slice(-2).map(el => el.textContent)) === '["3","9"]',
+    "cost task breakdown lost run or turn counts");
+  for (const days of [1, 7, 30]) {
+    const select = find(el => el.tag === "select"); check(select && select.on.change, "cost period selector missing");
+    select.value = String(days); await select.on.change({target:select}); await flush();
+    check(run("costDays") === days && apiGets.filter(path => path.startsWith("/api/cost") && !path.includes("rows=1")).at(-1) === "/api/cost?days=" + days,
+      "cost period did not request its own day range");
+  }
+  const choose = async days => {
+    const select = find(el => el.tag === "select"); select.value = String(days);
+    select.on.change({target:select}); await flush();
+  };
+  const busy = () => ids["#tab-cost"].attrs["aria-busy"] === "true" ||
+    !!find(el => el.attrs["aria-busy"] === "true");
+  let finishLoad;
+  costGetGate = new Promise(resolve => { finishLoad = resolve; });
+  await choose(1);
+  check(busy(), "cost load did not announce its pending state");
+  finishLoad(); await flush(); costGetGate = null;
+  check(!busy(), "completed cost load stayed busy");
+  costGetError = "example cost network failure"; await choose(30);
+  const failedExport = find(el => el.tag === "button" && el.textContent === run("T.export"));
+  check(!busy() && ids["#tab-cost"].textContent.includes(run("T.costLoadFailed")) &&
+    ids["#tab-cost"].textContent.includes(run("T.costRetained(1)")) && failedExport?.disabled,
+    "failed period change did not identify its retained report and disable export");
+  check(ids["#state"].textContent === stateBeforeCost, "cost period failure changed the global desk status");
+  const exportsBeforeRetry = apiGets.filter(path => path.includes("rows=1")).length;
+  await run("exportCsv()");
+  check(apiGets.filter(path => path.includes("rows=1")).length === exportsBeforeRetry,
+    "failed period change could export a report for a different period");
+  const retry = find(el => el.tag === "button" && el.textContent === run("T.retry"));
+  check(retry, "cost retry control missing");
+  costGetError = null; await retry.click(); await flush();
+  check(!busy() && !ids["#tab-cost"].textContent.includes(run("T.costLoadFailed")) &&
+    !ids["#tab-cost"].textContent.includes(run("T.costRetained(1)")) &&
+    !find(el => el.tag === "button" && el.textContent === run("T.export")).disabled &&
+    apiGets.at(-1) === "/api/cost?days=30", "cost retry did not reload the failed period and restore export");
+  const exporter = () => find(el => el.tag === "button" && el.textContent === run("T.export"));
+  costRowsError = "example CSV network failure";
+  check(exporter(), "cost CSV button missing"); await exporter().click(); await flush();
+  check(downloads.length === 0 && exporter() && !exporter().disabled &&
+    ids["#tab-cost"].textContent.includes(run("T.exportFailed")), "failed export did not retain an enabled retry control");
+  check(ids["#state"].textContent === stateBeforeCost, "CSV export failure changed the global desk status");
+  costRowsError = null;
+  let finishRows;
+  costRowsGate = new Promise(resolve => { finishRows = resolve; });
+  const exportButton = exporter(), exporting = exportButton.click(); await flush();
+  check(exportButton.disabled, "pending CSV export did not lock its button");
+  await choose(7);
+  finishRows(); await exporting; await flush(); costRowsGate = null;
+  check(apiGets.filter(path => path.includes("rows=1")).at(-1) === "/api/cost?days=30&rows=1" &&
+    downloads.length === 1 && downloads[0].name === "cost-30d.csv" && run("costDays") === 7,
+    "changing the period during export changed its requested window or filename");
+  check(exporter() && !exporter().disabled && !ids["#tab-cost"].textContent.includes(run("T.exportFailed")),
+    "successful export did not clear its previous failure");
+  check(revokedUrls.includes(downloads[0].href), "CSV export left an object URL allocated");
+  check(blobs[0].type === "text/csv", "cost export MIME type changed");
+  console.log(JSON.stringify({periods:true, breakdowns:true, warnings:true, recovery:true, name:downloads[0].name, csv:await blobs[0].text()}));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettings()])", ctx).then(() => {
   const nulls = [];
   for (const tab of ["#tab-status", "#tab-settings"]) {
     walk(ids[tab], el => el.kids.forEach(k => { if ((k.textContent ?? k) === "null" && !(k instanceof El)) nulls.push(tab); }));
@@ -25950,6 +26151,425 @@ else if (ask === "release-hits" || ask === "status") vm.runInContext("loadStatus
   console.log(JSON.stringify(ids["#tab-status"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {
+  if (ask.startsWith("settings-fix-")) {
+    const run = code => vm.runInContext(code, ctx);
+    const check = (ok, why) => { if (!ok) throw new Error(why); };
+    const find = (predicate, root = ids["#tab-settings"]) => { let found = null; walk(root, el => { if (!found && predicate(el)) found = el; }); return found; };
+    const change = (input, value) => { check(input?.on.input, "setting input missing"); input.value = value; input.on.input({target:input}); };
+    const number = () => find(el => el.tag === "input" && el.type === "number" && Number(el.value) === run("S.cool_minutes"));
+    const key = () => find(el => el.tag === "input" && el.type === "password" && el.attrs["aria-label"].startsWith("compatible ·"));
+    const has = (text, root = ids["#tab-settings"]) => root.textContent.includes(text);
+    const visible = (el, root) => {
+      for (let p = el; p; p = p.parentElement) {
+        if (p.hidden || (p.tag === "details" && !p.attrs.open)) return false;
+        if (p === root) return true;
+      }
+      return false;
+    };
+    const visibleText = (text, root) => !!find(el => el.textContent.includes(text) &&
+      !el.kids.some(k => k instanceof El && k.textContent.includes(text)) && visible(el, root), root);
+    if (ask === "settings-fix-stale") {
+      change(number(), "38"); change(key(), "sk-still-typed");
+      run('S.coordinator.model = "draft-model"; S.release_direct = "hold"; refreshSettingsState()');
+      const next = given["/api/settings"];
+      next.settings.cool_minutes = 49; next.settings.coordinator.model = "remote-model";
+      next.settings.workers_may_not_read = ["/private/example-hidden"];
+      delete next.settings.prices["example/engine"]; delete next.settings.release_forbidden;
+      next.settings.lanes.a.network = ["docs.example.org"];
+      next.rev = "new-rev";
+      settingsPostReply = {ok:false, problems:["the settings changed since this page loaded them (another tab or a command); reload"]};
+      const gets = settingsGetCount;
+      await run("saveSettings()");
+      check(settingsGetCount === gets + 1 && run('REV') === "new-rev", "stale save did not fetch the new revision");
+      check(run('S.cool_minutes === 38 && S.coordinator.model === "draft-model" && S.release_direct === "hold"'),
+        "stale reload lost a changed top-level setting");
+      check(run('S.workers_may_not_read[0] === "/private/example-hidden" && !S.prices["example/engine"] && !Object.hasOwn(S, "release_forbidden") && S.lanes.a.network[0] === "docs.example.org"'),
+        "stale reload did not take untouched settings from the new copy");
+      const zh = process.argv[4] === "zh";
+      const notice = find(el => el.attrs.role === "status" && el.className === "notice");
+      check(notice && has(zh ? "设置已在别处修改，页面已重新加载" : "Settings changed elsewhere and the page reloaded them", notice),
+        "stale reload was not plainly announced");
+      for (const label of ["T.coordinatorGroup", "T.providers", "T.lanes", "T.pricesGroup", "T.securityGroup", "T.releasesGroup"])
+        check(has(run(label), notice), "missing remote setting group: " + label);
+      check(has((zh ? "两边都修改的项（保留你的草稿值）：" : "Changed by both (your draft values kept): ") +
+        run('T.providers + ", " + T.coordinatorGroup'), notice), "overlapping changes not named");
+      check(!has(run("T.retrySave")) && run('KEY_DRAFTS.compatible') === "sk-still-typed" && key().value === "sk-still-typed",
+        "stale reload lost key or showed validation advice");
+      check(settingsPostCount === 1 && run("settingsDirty()"), "stale reload saved automatically or cleared draft");
+      await run('show("status")'); await run('show("settings")');
+      check(run('S.cool_minutes') === 38 && has(notice.textContent), "tab switch lost reloaded draft or notice");
+      settingsPostReply = {ok:true}; await run("saveSettings()");
+      check(settingsPostCount === 2 && posted.rev === "new-rev" && posted.settings.cool_minutes === 38 &&
+        posted.settings.workers_may_not_read[0] === "/private/example-hidden" && !JSON.stringify(posted).includes("sk-still-typed"),
+        "retry did not save the combined draft using the new rev");
+      // A failed stale reload must also leave the old draft and typed key available.
+      change(number(), "39"); settingsPostReply = {ok:false, problems:["the settings changed since this page loaded them"]};
+      settingsGetError = "stale reload unavailable"; await run("saveSettings()"); settingsGetError = null;
+      check(run('S.cool_minutes === 39 && KEY_DRAFTS.compatible === "sk-still-typed" && settingsDirty()') &&
+        has(run("T.staleReloadFailed")) && !has(run("T.retrySave")), "failed stale reload lost draft or misdirected user");
+      settingsPostError = "transport unavailable"; await run("saveSettings()"); settingsPostError = null;
+      check(has(run("T.saveFailed")) && !has(run("T.staleReloadFailed")), "a later network failure reused stale-reload advice");
+      change(number(), ""); given["/api/settings"].settings.cool_minutes = 50;
+      await run("saveSettings()");
+      check(run('!Object.hasOwn(S, "cool_minutes") && KEY_DRAFTS.compatible === "sk-still-typed"'),
+        "stale reload replaced a deliberately cleared top-level value");
+    } else if (ask === "settings-fix-stale-problems") {
+      change(number(), "38"); change(key(), "sk-keep-draft");
+      const problem = "workers cannot be kept from reading /example/repo";
+      given["/api/settings"].problems = [problem];
+      given["/api/settings"].rev = "new-rev";
+      settingsPostReply = {ok:false, problems:["the settings changed since this page loaded them"]};
+      await run("saveSettings()");
+      const errors = find(el => el.attrs.role === "alert" && el.className === "settings-errors");
+      check(errors && has(problem, errors), "stale reload hid the new copy's problems");
+      check(find(el => el.attrs.role === "status" && el.className === "notice"), "new problems hid the stale notice");
+      check(run('S.cool_minutes === 38 && KEY_DRAFTS.compatible === "sk-keep-draft" && settingsDirty()') &&
+        settingsPostCount === 1, "new problems lost or saved the draft");
+      const link = find(el => el.tag === "button" && el.textContent === problem, errors);
+      check(link, "reloaded problem lost normal navigation"); await link.click();
+      check(run('settingsGroup === "security"'), "reloaded problem reached wrong group");
+    } else if (ask === "settings-fix-stale-labels") {
+      change(number(), "38"); run('S.coordinator_compact.idle_at = 300000');
+      const next = given["/api/settings"].settings;
+      next.cool_minutes = 49; next.coordinator_compact.idle_at = 450000;
+      next.workers_may_not_read = ["/private/example-hidden"];
+      next.workers_may_not_read_added = {"/private/example-hidden": {by:"coordinator", at:1}};
+      next.coordinator_alert = {window_min:12}; next.alert.command = "echo example";
+      next.providers.compatible.model = "remote-model"; next.coordinator.model = "remote-model";
+      next.prices["example/engine"].in = 3; next.lanes.a.base = "remote-base";
+      next.concurrency = 2; next.disk_floor = 11;
+      next.releases_without_asking = [{lane:"a", target:"default"}]; next.release_direct = "hold";
+      next.release_forbidden = ["example-word"]; next.release_forbidden_except = [{entry:"example-word", lanes:["a"]}];
+      next.release_mailboxes = true; next.release_mailbox_allow = ["@example.org"];
+      settingsPostReply = {ok:false, problems:["the settings changed since this page loaded them"]};
+      await run("saveSettings()");
+      const notice = find(el => el.attrs.role === "status" && el.className === "notice");
+      const zh = process.argv[4] === "zh";
+      const elsewhere = zh ? "提醒, 工作线, 模型供应, 协调席, 价目, 发布, 工作者不能读的" :
+        "Alerts, Lanes, Providers, Coordinator, Prices, Releases, What workers may not read";
+      const both = zh ? "模型供应, 协调席" : "Providers, Coordinator";
+      check(notice && notice.textContent === run(`T.staleReloaded(${JSON.stringify(elsewhere)}, ${JSON.stringify(both)})`),
+        "stale notice did not use the page's translated group names: " + notice?.textContent);
+      for (const name of Object.keys(next)) check(!new RegExp("\\b" + name + "\\b").test(notice.textContent),
+        "stale notice exposed setting key: " + name);
+    } else if (ask === "settings-fix-not-read-starts") {
+      run('showSettingsGroup("security")');
+      const parts = process.argv[4] === "zh"
+        ? ["只要列表里有", "()[]{}*?\\", "hansa 就不启动任何工作者、验证者或协调席", "直到这里改掉它"]
+        : ["While the list holds", "()[]{}*?\\", "hansa starts no worker, verifier or coordinator", "until it is changed here"];
+      for (const part of parts) check(visibleText(part, run("settingsPanels.security")),
+        "visible not-read warning does not describe starting no runs: " + part);
+    } else if (ask === "settings-fix-values") {
+      const field = number(); change(field, ""); change(field, "37");
+      check(!run("settingsDirty()") && run('SETTINGS_GROUPS.every(([k]) => !groupDirty(k))'),
+        "cleared and retyped number changed only object order but stayed unsaved");
+      // The coordinator has no model override, and alert minutes have no saved value.
+      const model = find(el => el.tag === "label" && el.textContent === run("T.baseModel"));
+      const modelInput = ids["#" + model.attrs.for];
+      change(modelInput, "temporary"); change(modelInput, "");
+      check(!run("settingsDirty()"), "clearing a previously unset text field stayed unsaved");
+      const minutesLabel = find(el => el.tag === "label" && el.textContent === run("T.noSessionShort"));
+      const minutes = ids["#" + minutesLabel.attrs.for];
+      change(minutes, "23"); change(minutes, "");
+      check(!run("settingsDirty()"), "clearing a previously unset number stayed unsaved");
+      run('S.providers = Object.fromEntries(Object.entries(S.providers).reverse()); refreshSettingsState()');
+      check(!run("settingsDirty()"), "provider key order stayed unsaved");
+      change(field, "38"); check(run('settingsDirty() && groupDirty("providers")'), "different value was missed");
+      change(field, "37"); check(!run("settingsDirty()"), "changed-back value stayed unsaved");
+    } else if (ask === "settings-fix-labels") {
+      const zh = process.argv[4] === "zh";
+      const labels = run('SETTINGS_GROUPS.map(([,label]) => label)');
+      check(JSON.stringify(labels) === JSON.stringify(zh
+        ? ["模型供应", "协调席", "工作线", "工作者不能读的", "发布", "提醒", "价目"]
+        : ["Providers", "Coordinator", "Lanes", "What workers may not read", "Releases", "Alerts", "Prices"]), "group names do not match desk vocabulary");
+      check(has(zh ? "模型（空＝用供应的）" : "Model (blank = the provider's)"), "coordinator model wrongly called default");
+      run('showSettingsGroup("providers")');
+      check(visible(number(), run("settingsPanels.providers")), "rest minutes are not in Providers");
+      await run('saveProviderKey("compatible", true)');
+      check(has(zh ? "密钥已清除。" : "Key cleared.") && !has(zh ? "密钥已保存。" : "Key saved."), "clearing a key said saved");
+      check(has(zh ? "其余各项（只读）" : "Other fields (read only)"), "lane fold sounds editable");
+      await run("loadStatus()");
+      check(has(zh ? "(模型供应)" : "(Providers)", ids["#tab-status"]), "status rest minutes name wrong group");
+      await run("loadCost()");
+      check(has(zh ? "按设置中的价目折算" : "using the Settings price table", ids["#tab-cost"]), "cost card does not name Settings price table");
+      check(!/供应商|审批|定价|管理|workspace/i.test(run('Object.values(T).filter(v => typeof v === "string").join(" ")')), "inconsistent vocabulary remains");
+    } else if (ask === "settings-fix-visible") {
+      const zh = process.argv[4] === "zh";
+      for (const [group, text] of [
+        ["security", run("T.protectedStop")],
+        ["alerts", zh ? "提醒命令以这台机器的账号在沙箱外运行" : "The alert command runs as this machine's account, outside the sandbox"],
+        ["releases", zh ? "每项最多 200 字符；只在一行之内匹配，只查 UTF-8 文字" : "at most 200 characters per entry. Matches within one line, in UTF-8 text only"],
+        ["releases", zh ? "合并和发布时都检查" : "Checked at merges as well as releases"],
+        ["lanes", zh ? "并发数和磁盘下限由协调席设定，这里只能看" : "Concurrency and the disk floor are set by the coordinator and only shown here"]]) {
+        run(`showSettingsGroup(${JSON.stringify(group)})`);
+        check(visibleText(text, run(`settingsPanels.${group}`)), "required explanation folded or missing: " + group);
+      }
+      const lane = find(el => el.className === "lane" && el.textContent.includes("/example/lane-repo"), run("settingsPanels.lanes"));
+      for (const value of ["docs.example.net", "/example/extra-write", "WebFetch(domain:docs.example.net)"])
+        check(visibleText(value, lane), "lane permission hidden: " + value);
+      check(visibleText(run("T.readOnly"), lane), "lane read-only mark hidden");
+      check(!/\.settings-nav small\s*\{[^}]*display\s*:\s*none/.test(page), "read-only navigation mark hidden on narrow screens");
+      check(find(el => el.tag === "details" && el.textContent.includes(run("T.workersMayNotRead"))), "full explanations no longer folded");
+    } else if (ask === "settings-fix-problems") {
+      for (const [problem, group] of [
+        ["workers cannot be kept from reading /example/repo", "security"],
+        ["what workers may not read must be a list of up to 100 full paths", "security"],
+        ["the releases without asking must be a list of lanes and their release targets", "releases"],
+        ["the words no release may send out must be a list of up to 200 words", "releases"]]) {
+        settingsPostReply = {ok:false, problems:[problem]}; await run("saveSettings()");
+        const link = find(el => el.tag === "button" && el.textContent === problem);
+        check(link, "problem has no destination: " + problem); await link.click();
+        check(run("settingsGroup") === group, "problem reached wrong group: " + problem);
+      }
+      // Multiple providers: a key API problem belongs only to the provider whose request failed.
+      change(key(), "sk-retain-on-error"); keyPostReply = {ok:false, problems:["unknown provider", "example invalid key"]};
+      await run('saveProviderKey("compatible")');
+      check(key().attrs["aria-invalid"] === "true", "key API problem did not mark provider's key input");
+      const described = key().attrs["aria-describedby"].split(/\s+/).map(id => ids["#" + id]);
+      check(described.some(el => el?.textContent.includes("unknown provider") && el.textContent.includes("example invalid key")), "key error not beside its input");
+      const other = find(el => el.tag === "input" && el.type === "password" && el.attrs["aria-label"].startsWith("other ·"));
+      check(other.attrs["aria-invalid"] !== "true", "key error attached to another provider");
+      const link = find(el => el.tag === "button" && el.textContent === "unknown provider"); await link.click();
+      check(document.activeElement === key() && run('settingsGroup') === "providers" && key().value === "sk-retain-on-error", "key problem navigation lost its draft");
+    } else if (ask === "settings-fix-dead") {
+      const body = script.slice(script.indexOf("const EFFORTS"));
+      const refs = new Set([...body.matchAll(/\bT\.([A-Za-z0-9_]+)/g)].map(m => m[1]));
+      for (const name of run("Object.keys(T)")) {
+        check(refs.has(name) || /^(status$|settings$|cost$|v_|seat_|helper_|by)/.test(name), "unused string: " + name);
+      }
+    } else if (ask === "settings-fix-reload") {
+      change(number(), "38"); settingsGetError = "reload unavailable";
+      await run("saveSettings()"); settingsGetError = null;
+      const zh = process.argv[4] === "zh";
+      check(has(zh ? "设置已保存，但重新加载失败" : "Settings saved, but reloading failed") &&
+        !has(run("T.saveFailed")) && !has(run("T.problems")) && !has(run("T.retrySave")), "successful save was reported as failed");
+      check(given["/api/settings"].settings.cool_minutes === 38, "save did not actually succeed before failed reload");
+      await run("loadSettings()"); check(!run("settingsDirty()"), "reload after saved write left dirty state");
+    } else if (ask === "settings-fix-discard") {
+      for (const label of ["T.providerName", "T.priceName"]) {
+        const name = find(el => el.tag === "input" && el.attrs["aria-label"] === run(label));
+        change(name, "new-name");
+        const group = label === "T.providerName" ? "providers" : "prices";
+        check(run(`groupDirty(${JSON.stringify(group)})`), "unadded name did not mark its group");
+        const gets = settingsGetCount, prompts = confirmations.length;
+        confirmReply = false; await run("discardSettings()");
+        check(confirmations.length === prompts + 1 && settingsGetCount === gets && name.value === "new-name",
+          "discard did not confirm or retain an unadded name");
+        confirmReply = true; await run("discardSettings()");
+        check(settingsGetCount === gets + 1 && !run("settingsDirty()"), "confirmed discard did not clear an unadded name");
+      }
+    } else if (ask === "settings-fix-turns") {
+      await run("loadCost()");
+      const rows = descendants(ids["#tab-cost"], "tr");
+      const cells = name => rows.find(row => row.kids[0].textContent === name).kids.map(cell => cell.textContent);
+      check(cells("t-zero").slice(-2).join(",") === "2,0", "task with runs lost its zero turns");
+      check(cells("t-no-runs").slice(-2).join(",") === ",", "task without runs showed turns");
+    } else throw new Error("unknown regression scenario: " + ask);
+    console.log(JSON.stringify({ok:true})); return;
+  }
+  if (ask === "settings-feedback") {
+    const check = (ok, why) => { if (!ok) throw new Error(why); };
+    const run = code => vm.runInContext(code, ctx);
+    const find = predicate => { let found = null; walk(ids["#tab-settings"], el => { if (!found && predicate(el)) found = el; }); return found; };
+    const change = (input, value) => { check(input && input.on.input, "setting input missing"); input.value = value; input.on.input({target:input}); };
+    const cooldown = () => find(el => el.tag === "input" && el.type === "number" && Number(el.value) === run("S.cool_minutes"));
+    check(run("SETTINGS_GROUPS.length") === 7 && run("SETTINGS_GROUPS.every(([key]) => !groupDirty(key))"),
+      "loaded settings did not start with seven clean groups");
+    check(run('settingsSaveState.getAttribute("role") === "status" && settingsSaveState.getAttribute("aria-live") === "polite"'),
+      "save feedback did not provide a dedicated live status");
+    const input = cooldown();
+    change(input, "38");
+    check(run('groupDirty("providers") && !groupDirty("coordinator") && settingsNavButtons.providers.getAttribute("data-dirty") === "true"'),
+      "edit did not mark its navigation group dirty");
+    change(input, "37");
+    check(run('!groupDirty("providers") && !settingsDirty() && settingsNavButtons.providers.getAttribute("data-dirty") === "false"'),
+      "restoring a value left its navigation group dirty");
+    const key = find(el => el.tag === "input" && el.type === "password");
+    const toggle = find(el => el.tag === "button" && el.attrs["aria-controls"] === key.id);
+    check(toggle && toggle.type === "button", "key visibility button missing");
+    toggle.on.click();
+    check(key.type === "text" && toggle.attrs["aria-pressed"] === "true" && !run("settingsDirty()"),
+      "showing a key changed its draft or did not announce visibility");
+    change(key, "sk-feedback-draft");
+    check(run('groupDirty("providers") && !groupDirty("coordinator")'), "key draft did not mark its own group dirty");
+    run('showSettingsGroup("coordinator")'); run('showSettingsGroup("providers")');
+    check(find(el => el === key) === key && key.type === "text" && key.value === "sk-feedback-draft",
+      "group navigation recreated the visible key input");
+    toggle.on.click();
+    check(key.type === "password" && toggle.attrs["aria-pressed"] === "false" &&
+      run('KEY_DRAFTS.compatible') === "sk-feedback-draft", "hiding a key changed its draft");
+    change(key, "");
+    check(run('!groupDirty("providers") && !settingsDirty()'), "clearing an unsaved key left the group dirty");
+    change(input, "0");
+    run('showSettingsGroup("providers")');
+    const problem = "cool_minutes must be a whole number from 1 to 1440";
+    settingsPostReply = {ok:false, problems:[problem, "example unrelated backend problem"]};
+    await run("saveSettings()");
+    check(settingsPostCount === 1 && posted.settings.cool_minutes === 0,
+      "field feedback changed the authoritative backend save flow");
+    const invalid = cooldown();
+    check(invalid.attrs["aria-invalid"] === "true", "backend problem did not mark its field invalid");
+    const described = (invalid.attrs["aria-describedby"] || "").split(/\s+/).map(id => ids["#" + id]).filter(Boolean);
+    check(described.some(el => el.textContent.includes(problem)), "invalid field did not describe its backend problem");
+    check(run('settingsSaveState.getAttribute("data-tone")') === "error" &&
+      run('settingsSaveState.textContent.includes(T.saveFailed)') && run("settingsDirty()"),
+      "failed save did not retain the draft and expose an error state");
+    check(ids["#tab-settings"].textContent.includes("example unrelated backend problem"),
+      "an unmapped backend problem disappeared from the error summary");
+    const problemLink = find(el => el.tag === "button" && el.textContent.includes(problem));
+    check(problemLink && problemLink.on.click, "field problem navigation missing");
+    problemLink.on.click();
+    check(run('settingsGroup === "providers"') && document.activeElement === invalid,
+      "problem navigation did not reveal and focus the invalid field");
+    change(invalid, "39");
+    settingsPostReply = {ok:true, problems:[]};
+    let finishPost;
+    settingsPostGate = new Promise(resolve => { finishPost = resolve; });
+    const saving = run("saveSettings()");
+    await Promise.resolve();
+    check(run('settingsForm.getAttribute("aria-busy")') === "true" &&
+      run('settingsSaveState.getAttribute("data-tone")') === "pending", "save did not announce its pending state");
+    finishPost(); await saving; settingsPostGate = null;
+    check(!run("settingsDirty()") && run('settingsForm.getAttribute("aria-busy")') === "false" &&
+      run('settingsSaveState.getAttribute("data-tone")') === "success", "successful save did not announce its final state");
+    check(run("SETTINGS_GROUPS.every(([key]) => !groupDirty(key))"), "successful save left a group dirty");
+    change(find(el => el.tag === "input" && el.type === "password"), "sk-retry-draft");
+    keyPostReply = {ok:false, problems:["example key save failure"]};
+    await run('saveProviderKey("compatible")');
+    check(run('KEY_DRAFTS.compatible') === "sk-retry-draft" &&
+      run('settingsSaveState.getAttribute("data-tone")') === "error", "failed key save lost its draft or error state");
+    keyPostReply = {ok:true, saved:true};
+    await run('saveProviderKey("compatible")');
+    check(!run("settingsDirty()") && !run('KEY_DRAFTS.compatible') && run("settingsProblems.length") === 0 &&
+      run('settingsSaveState.getAttribute("data-tone")') === "success" &&
+      !ids["#tab-settings"].textContent.includes("example key save failure"),
+      "successful key retry retained its old failure or draft");
+    change(cooldown(), "0");
+    settingsPostReply = {ok:false, problems:[problem]};
+    await run("saveSettings()");
+    change(find(el => el.tag === "input" && el.type === "password"), "sk-keep-setting-error");
+    await run('saveProviderKey("compatible")');
+    check(run("settingsProblems.includes(" + JSON.stringify(problem) + ")") && run("S.cool_minutes") === 0 &&
+      !run('KEY_DRAFTS.compatible') && run("settingsDirty()") &&
+      run('settingsSaveState.getAttribute("data-tone")') === "error",
+      "saving a key cleared an unrelated settings error or draft");
+    const priceProblem = "price provider/model: in must be a number, 0 or more";
+    settingsPostReply = {ok:false, problems:[priceProblem]};
+    await run("saveSettings()");
+    const priceLink = find(el => el.tag === "button" && el.textContent.includes(priceProblem));
+    check(priceLink && priceLink.on.click, "price problem navigation missing");
+    priceLink.on.click();
+    check(run('settingsGroup === "prices"') && document.activeElement === run("settingsNavButtons.prices"),
+      "a price problem containing provider navigated to the wrong group");
+    console.log(JSON.stringify({groups:true, visibility:true, errors:true, saving:true, keys:true}));
+    return;
+  }
+  if (ask === "settings-drafts") {
+    const check = (ok, why) => { if (!ok) throw new Error(why); };
+    const run = code => vm.runInContext(code, ctx);
+    const dirty = () => run("settingsDirty()");
+    const find = predicate => { let found = null; walk(ids["#tab-settings"], el => { if (!found && predicate(el)) found = el; }); return found; };
+    const number = value => find(el => el.tag === "input" && el.attrs.type === "number" && Number(el.value) === value);
+    const change = (input, value) => { check(input && input.on.input, "setting input missing"); input.value = value; input.on.input({target:input}); };
+    const unload = () => {
+      const event = {prevented:false, preventDefault() { this.prevented = true; }};
+      for (const f of windowEvents.beforeunload || []) f(event);
+      return event;
+    };
+    const getsBeforeRefresh = settingsGetCount;
+    given["/api/settings"].settings.cool_minutes = 36;
+    await run('show("status")'); await run('show("settings")');
+    check(run("S.cool_minutes") === 36 && settingsGetCount === getsBeforeRefresh + 1,
+      "returning to clean settings did not refresh backend changes");
+    given["/api/settings"].settings.cool_minutes = 37;
+    await run('show("settings")');
+    const initial = run("S"), input = number(37), tree = ids["#tab-settings"].kids.slice();
+    check(!dirty() && !unload().prevented, "clean settings warn before leaving");
+    let finishGet;
+    given["/api/settings"].settings.cool_minutes = 35;
+    settingsGetGate = new Promise(resolve => { finishGet = resolve; });
+    const refreshing = run('show("settings")');
+    change(input, "38"); finishGet(); await refreshing; settingsGetGate = null;
+    check(run("S") === initial && run("S.cool_minutes") === 38 && number(38) === input,
+      "a refresh response overwrote edits made while it was pending");
+    given["/api/settings"].settings.cool_minutes = 37;
+    change(input, "38");
+    check(dirty() && run("S.cool_minutes") === 38, "input did not make a draft");
+    check(find(el => el.className.startsWith("draft-badge") && el.textContent === run("T.unsaved")),
+      "input did not display the unsaved state");
+    change(input, "37");
+    check(!dirty() && !unload().prevented, "restoring the saved value left settings dirty");
+    change(input, "38");
+    const key = find(el => el.tag === "input" && el.attrs.type === "password");
+    await run('saveProviderKey("compatible")');
+    change(key, " \t "); await run('saveProviderKey("compatible")');
+    check(keyPosts.length === 0, "saving a blank key sent an implicit key deletion");
+    change(key, "sk-example-draft");
+    check(run('KEY_DRAFTS.compatible') === "sk-example-draft", "key input did not retain its draft");
+    for (const group of ["security", "providers", "coordinator"]) run(`showSettingsGroup(${JSON.stringify(group)})`);
+    check(run('Object.entries(settingsPanels).every(([key, panel]) => panel.hidden === (key !== "coordinator"))'),
+      "settings group selection did not show only the selected group");
+    check(tree.length === ids["#tab-settings"].kids.length && tree.every((el, i) => el === ids["#tab-settings"].kids[i]),
+      "switching a settings group rebuilt the form");
+    const gets = settingsGetCount;
+    await run('show("status")'); await run('show("settings")');
+    check(run("S") === initial && settingsGetCount === gets && number(38) === input,
+      "switching main tabs reloaded or rebuilt the draft");
+    check(key.value === "sk-example-draft", "switching tabs lost an unsaved key");
+    const warning = unload();
+    check(warning.prevented && warning.returnValue === "", "dirty settings did not warn before leaving");
+    confirmReply = false; await run("discardSettings()");
+    check(run("S") === initial && dirty() && number(38) === input && key.value === "sk-example-draft",
+      "cancelling discard lost the draft");
+    confirmReply = true; await run("discardSettings()");
+    check(run("S.cool_minutes") === 37 && !dirty() && !unload().prevented &&
+      run("Object.keys(KEY_DRAFTS).length") === 0, "confirmed discard did not reset drafts");
+    check(confirmations.length === 2 && confirmations.every(Boolean), "discard did not ask for confirmation");
+    change(number(37), "39");
+    settingsPostReply = {ok:false, problems:["example validation failure"]};
+    await run("saveSettings()");
+    check(dirty() && run("S.cool_minutes") === 39 && !run("settingsSaving"), "failed save cleared or locked the draft");
+    check(ids["#tab-settings"].textContent.includes("example validation failure"), "save validation failure was not shown");
+    settingsPostError = "example network failure";
+    await run("saveSettings()");
+    check(dirty() && run("S.cool_minutes") === 39 && !run("settingsSaving"), "network failure cleared or locked the draft");
+    settingsPostError = null; settingsPostReply = {ok:true, problems:[]};
+    let finishPost;
+    settingsPostGate = new Promise(resolve => { finishPost = resolve; });
+    const saving = run("saveSettings()");
+    await Promise.resolve();
+    check(run("settingsSaving"), "save did not enter its pending state");
+    check(find(el => el.tag === "fieldset" && el.disabled), "saving did not disable the settings form");
+    const count = settingsPostCount;
+    await run("saveSettings()");
+    check(settingsPostCount === count, "a second click posted a second save");
+    finishPost(); await saving; settingsPostGate = null;
+    check(!dirty() && !run("settingsSaving") && run("S.cool_minutes") === 39 && !unload().prevented,
+      "successful save did not clear the saved draft");
+    const keyAgain = find(el => el.tag === "input" && el.attrs.type === "password");
+    change(keyAgain, "sk-example-draft"); change(number(39), "40");
+    await run("saveSettings()");
+    check(dirty() && run('KEY_DRAFTS.compatible') === "sk-example-draft" && run("S.cool_minutes") === 40,
+      "saving ordinary settings cleared an unsaved key");
+    check(!JSON.stringify(posted).includes("sk-example-draft"), "a key draft was posted with ordinary settings");
+    const saveKey = find(el => el.tag === "button" && (el.textContent === "Save key" || el.textContent === "保存密钥"));
+    check(saveKey, "save key button missing"); await saveKey.on.click();
+    check(keyPosts.length === 1 && keyPosts[0].provider === "compatible" && keyPosts[0].key === "sk-example-draft" &&
+      !dirty() && !run('KEY_DRAFTS.compatible'), "saving the key did not clear only its own draft");
+    const beforeKeyRefresh = run("S");
+    given["/api/settings"].keys.compatible = false;
+    settingsGetGate = new Promise(resolve => { finishGet = resolve; });
+    const keyRefresh = run('show("settings")');
+    change(find(el => el.tag === "input" && el.attrs.type === "password"), "sk-example-new-key");
+    const saveNewKey = find(el => el.tag === "button" && (el.textContent === "Save key" || el.textContent === "保存密钥"));
+    await saveNewKey.on.click();
+    check(!dirty() && run("KEYS.compatible"), "successful key save left a pending draft");
+    finishGet(); await keyRefresh; settingsGetGate = null;
+    check(run("S") === beforeKeyRefresh && run("KEYS.compatible") && !dirty(),
+      "an older settings refresh overwrote the state of a successfully saved key");
+    console.log(JSON.stringify({navigation:true, discard:true, failures:true, saving:true, keys:true, unload:true}));
+    return;
+  }
   if (ask === "settings-problems") {
     console.log(JSON.stringify(ids["#tab-settings"].textContent));
     return;
@@ -25995,15 +26615,16 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
   if (ask === "mailboxes") {
     let input = null, allow = null, ruleLabel = "", allowLabel = "";
     walk(ids["#tab-settings"], el => {
-      const i = el.kids.findIndex(k => k instanceof Text &&
-        (k.textContent.startsWith("Require reserved example domains") || k.textContent.startsWith("新增行中的邮箱")));
-      if (i >= 0) {
-        input = el.kids[i + 1]; ruleLabel = el.kids[i].textContent;
-        allowLabel = el.kids[i + 2].textContent; allow = el.kids[i + 3];
-      }
+      if (el.attrs.id === "release-mailboxes") input = el;
+      if (el.attrs.id === "release-mailbox-allow") allow = el;
+      if (!el.className.split(" ").includes("field")) return;
+      walk(el, child => {
+        if (child.attrs.id === "release-mailboxes") ruleLabel = el.textContent;
+        if (child.attrs.id === "release-mailbox-allow") allowLabel = el.textContent;
+      });
     });
     if (!input || input.attrs.type !== "checkbox") throw new Error("mailbox rule checkbox missing");
-    if (!allow || allow.tag !== "textarea") throw new Error("mailbox allowlist textarea missing beside checkbox");
+    if (!allow || allow.tag !== "textarea") throw new Error("mailbox allowlist textarea missing");
     const before = input.checked;
     input.checked = !before; input.on.change({target: input});
     const after = vm.runInContext("S.release_mailboxes", ctx);
@@ -26044,6 +26665,162 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                      ".tick > input { flex:none;"):
             self.assertIn(rule, css)
         self.assertNotIn("max-content 1fr", css)
+
+    def run_settings_fix_scenario(self, scenario):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        public = public_settings(self.desk)
+        public["settings"]["cool_minutes"] = 37
+        public["settings"]["coordinator"].pop("model", None)
+        public["settings"]["coordinator_alert"] = {}
+        for name in ("compatible", "other"):
+            public["settings"]["providers"][name] = {
+                "kind": "compatible", "model": "example-model", "effort": "", "base_url": "https://example.org"}
+            public["keys"][name] = True
+        public["settings"]["prices"]["example/engine"] = {"in": 1, "out": 2}
+        public["settings"]["lanes"]["a"].update(
+            repo="/example/lane-repo", network=["docs.example.net"], write=["/example/extra-write"],
+            allow=["WebFetch(domain:docs.example.net)"])
+        report = {"days": 7, "total": {"tokens": 30, "usd": 1}, "unpriced_models": [],
+                  "by": {"model": {}, "task": {
+                      "t-zero": {"tokens": 20, "usd": 1, "runs": 2},
+                      "t-no-runs": {"tokens": 10, "usd": 0, "runs": 0, "turns": 7}}}}
+        replies = {"/api/settings": public, "/api/status": views.status(self.desk), "/api/events": [],
+                   "/api/cost": report}
+        harness = self.tmp / "settings-fixes-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), "settings-fix-" + scenario, language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"ok": True})
+
+    def test_stale_saves_reload_and_keep_the_changed_top_level_draft_and_keys(self):
+        self.run_settings_fix_scenario("stale")
+
+    def test_stale_reload_shows_the_new_copys_problems_with_the_notice(self):
+        self.run_settings_fix_scenario("stale-problems")
+
+    def test_stale_notice_uses_translated_setting_groups_instead_of_keys(self):
+        self.run_settings_fix_scenario("stale-labels")
+
+    def test_visible_not_read_warning_says_hansa_starts_no_runs_until_changed(self):
+        self.run_settings_fix_scenario("not-read-starts")
+
+    def test_draft_markers_compare_values_and_ignore_blank_optional_fields(self):
+        self.run_settings_fix_scenario("values")
+
+    def test_labels_use_the_desks_groups_and_describe_model_key_and_price_behavior(self):
+        self.run_settings_fix_scenario("labels")
+
+    def test_required_warnings_and_lane_permissions_stay_visible(self):
+        self.run_settings_fix_scenario("visible")
+
+    def test_backend_and_key_problems_reach_their_settings_group_or_field(self):
+        self.run_settings_fix_scenario("problems")
+
+    def test_page_has_no_unused_translation_strings(self):
+        self.run_settings_fix_scenario("dead")
+
+    def test_successful_save_reports_a_failed_reload_as_saved(self):
+        self.run_settings_fix_scenario("reload")
+
+    def test_discard_confirms_unadded_provider_and_price_names(self):
+        self.run_settings_fix_scenario("discard")
+
+    def test_cost_tasks_show_turns_when_they_have_runs(self):
+        self.run_settings_fix_scenario("turns")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_settings_drafts_survive_navigation_and_clear_only_after_discard_or_save(self):
+        # Exercise the real input handlers and save requests: switching a tab must not silently replace a draft,
+        # and a failed save must not make the page safe to close. Key drafts have their own explicit save.
+        public = public_settings(self.desk)
+        public["settings"]["cool_minutes"] = 37
+        public["settings"]["providers"]["compatible"] = {
+            "kind": "compatible", "model": "example-model", "effort": "", "base_url": "https://example.org"}
+        replies = {"/api/settings": public, "/api/status": views.status(self.desk), "/api/events": []}
+        harness = self.tmp / "draft-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), "settings-drafts", language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {
+                    "navigation": True, "discard": True, "failures": True, "saving": True, "keys": True, "unload": True})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_settings_feedback_tracks_groups_keys_and_backend_field_errors(self):
+        # Use the real input handlers and a refused save: visual feedback must preserve the existing draft,
+        # navigate to the backend's field error, and leave all validation decisions with that backend.
+        public = public_settings(self.desk)
+        public["settings"]["cool_minutes"] = 37
+        public["settings"]["providers"]["compatible"] = {
+            "kind": "compatible", "model": "example-model", "effort": "", "base_url": "https://example.org"}
+        harness = self.tmp / "feedback-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), "settings-feedback", language],
+                                        input=json.dumps({"/api/settings": public}), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"groups": True, "visibility": True, "errors": True, "saving": True, "keys": True})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_status_page_controls_keep_their_api_payloads_and_expanded_tasks(self):
+        status = views.status(self.desk)
+        status.update(paused="", queued=[{"id": "t0042", "lane": "a", "title": "Queued UI task", "waiting": "paused"}],
+                      asks=[{"id": 7, "text": "Please review the account", "note": "Ready now"}])
+        waiting = {"id": 17, "state": "waiting", "lane": "a", "target": "push", "base": "alpha",
+                   "commit": "a" * 40, "command": "git push origin alpha", "asked": 1,
+                   "runs": "in a checkout", "count": 1, "since_release": 0, "checked": 1,
+                   "commits": [{"sha": "a" * 40, "subject": "Ready to publish"}], "files_count": 1,
+                   "files": ["README.md"]}
+        status["releases"] = [waiting, {**waiting, "id": 18, "state": "approved", "what": "approved"}]
+        harness = self.tmp / "status-controls-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        replies = {"/api/status": status, "/api/events": [], "/api/task": {"text": "Task detail from API"}}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), "status-controls", language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"pause": True, "resume": True, "details": True, "asks": True, "releases": True})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_cost_page_periods_breakdowns_warnings_and_csv_round_trip(self):
+        aggregate = {"tokens": 2345, "usd": 2.34, "unpriced_tokens": 345, "runs": 3, "turns": 9}
+        row = {"day": "2026-10-21", "seat": "worker", "lane": "a,b", "task": 't"001',
+               "provider": "provider\nnext", "model": "unpriced-engine", "in": 12, "out": 34,
+               "cache_read": 56, "cache_write": 78, "usd": None, "priced_by": 'table,"manual"', "runs": 2, "turns": 3}
+        report = {"days": 7, "total": {"tokens": 1234567, "usd": 12.34, "runs": 3, "turns": 9},
+                  "by": {category: {name: aggregate} for category, name in (
+                      ("seat", "helper:operator"), ("day", "2026-10-21"), ("model", "unpriced-engine"),
+                      ("lane", "lane-a"), ("provider", "provider-p"), ("task", "t-cost"))},
+                  "unpriced_models": ["unpriced-engine"], "coordinator_user": "auditor",
+                  "coordinator_uncounted": "Coordinator records unavailable for auditor", "rows": [row]}
+        harness = self.tmp / "cost-interactions-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        columns = ["day", "seat", "lane", "task", "provider", "model", "in", "out", "cache_read", "cache_write",
+                   "usd", "priced_by", "runs", "turns"]
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), "cost-interactions", language],
+                                        input=json.dumps({"/api/cost": report}), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                output = json.loads(result.stdout)
+                self.assertEqual({key: output[key] for key in ("periods", "breakdowns", "warnings", "recovery")},
+                                 {"periods": True, "breakdowns": True, "warnings": True, "recovery": True})
+                self.assertEqual(output["name"], "cost-30d.csv")
+                self.assertEqual(list(csv.reader(io.StringIO(output["csv"]))),
+                                 [columns, ["" if row[column] is None else str(row[column]) for column in columns]])
 
     def test_both_page_languages_name_ping_and_operator(self):
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
