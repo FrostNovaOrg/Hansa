@@ -2721,6 +2721,10 @@ class CoordinatorUpTest(unittest.TestCase):
         for words in ("hansa notify off", "edits to it are lost", "not started by `hansa coordinator`",
                       "scout, reviewer, operator", "the coordinator's mod", "make a task"):
             self.assertIn(words, header)
+        self.assertTrue(header.endswith(
+            "\n>\n> This card is for the session that coordinates that desk: the one hansa posts its notices to. "
+            "Any other session started in this folder or below it, such as a worker a script starts or a session "
+            "for other work, is not that session: ignore this card."))
         self.assertIn("## Never", body)
         # the card's import of the project's rules names a file outside this folder: a pointer to it, no import
         self.assertNotIn("\n@notes/PROJECT.md\n", body)

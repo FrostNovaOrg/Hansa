@@ -515,7 +515,10 @@ def copy_text(desk: Desk, path: Path) -> str:
               "it with `hansa notify off`, so edits to it are lost.\n>\n"
               "> This session was not started by `hansa coordinator`, so the helpers the card names (scout, "
               "reviewer, operator) and the coordinator's mod are not in it: where the card says to ask a helper, "
-              "make a task.\n\n")
+              "make a task.\n>\n"
+              "> This card is for the session that coordinates that desk: the one hansa posts its notices to. "
+              "Any other session started in this folder or below it, such as a worker a script starts or a session "
+              "for other work, is not that session: ignore this card.\n\n")
     return header + re.sub(r"(?m)^@([^\s/~]\S*)[ \t]*$", imported, card)
 
 

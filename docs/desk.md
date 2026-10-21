@@ -173,7 +173,10 @@ the card the copy has hansa's header: hansa wrote it for this desk, rewrites
 it, and removes it, so edits to it are lost; and the session was not started
 by `hansa coordinator`, so the helpers (scout, reviewer, operator) and the
 coordinator's mod are not in it, and where the card says to ask a helper it
-makes a task. The card's import of `notes/PROJECT.md` names that file from
+makes a task. The header also says the card is for the session that coordinates
+that desk, the one hansa posts its notices to, and any other session started
+in that folder or below it, such as a worker a script starts or a session for
+other work, must ignore it. The card's import of `notes/PROJECT.md` names that file from
 the copy's folder when the desk is inside F; with the desk outside F the copy
 holds a pointer to the file in its place, and imports nothing. The copy is
 always made from hansa's own card, never from the desk's `CLAUDE.md` as it
