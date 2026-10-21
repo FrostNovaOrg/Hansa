@@ -102,18 +102,48 @@ is saved: root writes nothing there, and `hansa up` runs as the account.
 Claude Code loads the card (the desk's `CLAUDE.md`) only for a session started
 in the desk or below it, or one whose `CLAUDE.md` imports it. So
 `hansa notify on` looks at the `CLAUDE.md` and `.claude/CLAUDE.md` in the
-recorded folder and the folders above it for a line `@path` naming the card (a
-relative path read from the file's folder). With none, it says the session does
-not read the card and gives the line to add to the folder's `CLAUDE.md`:
-the card's path relative to the folder when the desk is inside it (such as
-`@desk/CLAUDE.md`), else its absolute path, which Claude Code loads only once imports from outside the
-folder are allowed (it asks once at a start: "Allow external CLAUDE.md file
-imports?"). A line already there with the card outside the folder gets that
-note too. The change counts from the session's next start; until then
-`hansa help card` prints the card. hansa never writes the line: the folder is
-another project's. `hansa status` adds a short note to its `hansa posts to`
-line, and `hansa explain notify` the full lines. A session `hansa coordinator`
-started runs in the desk and is not checked.
+recorded folder F and the folders above it for a line `@path` naming the card
+(a relative path read from the file's folder). With none, it writes a copy of
+the card to `F/.claude/rules/hansa-card.md`, which every Claude Code session
+started in F or a folder below it reads at each start; this session reads it
+from its next start, and until then `hansa help card` prints the card. Above
+the card the copy has hansa's header: hansa wrote it for this desk, rewrites
+it, and removes it, so edits to it are lost; and the session was not started
+by `hansa coordinator`, so the helpers (scout, reviewer, operator) and the
+coordinator's mod are not in it, and where the card says to ask a helper it
+makes a task. The card's import of `notes/PROJECT.md` names that file from
+the copy's folder when the desk is inside F; with the desk outside F the copy
+holds a pointer to the file in its place, and imports nothing. hansa rewrites
+the copy at every `hansa notify on` and wherever it writes the desk's card (at
+`hansa init` and at `hansa coordinator`'s start, which instead removes a copy in a
+folder that holds the desk: the session it starts there would read both).
+`hansa notify off` removes hansa's copies, and `hansa notify on` from another
+folder removes the earlier one; only a file with hansa's header for this desk
+that git does not track is removed. When F is in a git work tree, hansa adds
+the copy's path to that repository's `info/exclude` (`git rev-parse --git-path
+info/exclude`), once, and not when git already ignores it; it never writes a
+file git tracks, as a copy committed into a project would reach every session
+of everyone who clones it. hansa's own runs leave the copy out: each worker
+and verifier run lists, for every folder above its checkout, that folder's
+`CLAUDE.md` files and `.claude/rules/**` in its `claudeMdExcludes`.
+
+hansa writes no copy, and says why, when a file without its header is at that
+path (it is left), when git tracks the path, or when F cannot be written: it
+then gives the line to add to F's `CLAUDE.md`: the card's path relative to F
+when the desk is inside it (such as `@desk/CLAUDE.md`), else its absolute path,
+which Claude Code loads only once imports from outside the folder are allowed
+(it asks once at a start: "Allow external CLAUDE.md file imports?"); hansa
+never writes that line, the folder being another project's. Nor does it write
+a copy when F's `.claude` is the account's Claude Code folder (the home
+folder's, or `CLAUDE_CONFIG_DIR`'s) or F holds the home folder: rules there
+reach every session of the account. It then gives no line either, as a
+`CLAUDE.md` there reaches every session below it, and says to start the
+coordinator in a folder of its own or with `hansa coordinator`. A line already
+there with the card outside the folder gets the note on external imports, and
+no copy. `hansa status` adds a short note to its `hansa posts to` line (with
+the copy in place, that the session reads the card from it), and `hansa explain
+notify` the full lines. A session `hansa coordinator` started runs in the desk
+and is not checked.
 
 After the server, `hansa up` starts nothing when a session hears from hansa,
 and names it (pid and name). It starts nothing either when the recorded

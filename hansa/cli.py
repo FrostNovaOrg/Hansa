@@ -141,6 +141,7 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
         write_text(desk.lanes_dir / lane / "brief.md", "")
     write_json(desk.settings_path, s)
     write_text(desk.root / "CLAUDE.md", CARD.read_text(encoding="utf-8"))
+    up.refresh_copy(desk)
     if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; then only hansa notes archive writes it
         write_text(desk.project_path, PROJECT_INTRO)
     (desk.root / ".claude").mkdir(exist_ok=True)
@@ -1235,7 +1236,11 @@ def cmd_notify(a):
     if a.action == "on":  # and how hansa up starts this session again after a restart
         print("\n".join(x for x in (notify.turn_on(desk), up.notify_on_line(desk)) if x))
         return
-    print(notify.turn_off(desk) if a.action == "off" else notify.list_text(desk))
+    if a.action != "off":
+        print(notify.list_text(desk))
+        return
+    print("\n".join([notify.turn_off(desk), *[f"hansa removed its copy of the card, {p}: sessions started in its "
+                                              "folder no longer read it." for p in up.remove_copies(desk)]]))
 
 
 def cmd_notify_launch(a):
@@ -1658,6 +1663,7 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
     co = s["coordinator"]
     p = s["providers"][co["provider"]]
     _bring(desk, CARD.read_text(encoding="utf-8"), desk.root / "CLAUDE.md", "card_refreshed")
+    up.refresh_copy(desk, starting=True)  # the copy notify on wrote for a session outside the desk, as the card
     for f in sorted(HELPERS.glob("*.md")):
         _bring(desk, f.read_text(encoding="utf-8"), desk.root / ".claude" / "agents" / f.name, "helper_refreshed")
     mine = desk.root / ".claude" / "settings.json"  # hansa keeps its rules current there; the rest is left as it is
