@@ -26361,7 +26361,24 @@ if (process.argv[4]) ctx.navigator.language = process.argv[4];
 vm.runInContext(script, ctx);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 const stateBeforeCost = document.querySelector("#state").textContent;
-if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(async () => {
+if (["desk-name", "desk-count", "status-parts", "notify-status"].includes(ask)) vm.runInContext("loadStatus()", ctx).then(async () => {
+  const snapshot = () => ({title:document.title, caption:ids["#title"].kids.at(-1).textContent,
+    text:ids["#state"].textContent, parts:ids["#state"].kids.filter(el => el instanceof El)
+      .map(el => ({text:el.textContent, tone:el.className}))});
+  const snapshots = [snapshot()];
+  if (ask === "desk-count") {
+    const st = given["/api/status"];
+    for (const [releases, asks] of [
+      [[{state:"waiting"}, {state:"approved"}, {state:"running"}, {state:"denied"}, {state:"done"}], [{id:1}, {id:2}]],
+      [[{state:"running"}], [{id:2}]], [[], []]]) {
+      // Only the title's count matters here; these are not full release/request cards.
+      st.releases = releases; st.asks = asks;
+      await vm.runInContext("loadStatus()", ctx); snapshots.push(snapshot());
+    }
+  }
+  console.log(JSON.stringify(snapshots));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(async () => {
   const check = (ok, why) => { if (!ok) throw new Error(why); };
   const run = code => vm.runInContext(code, ctx);
   const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -26991,6 +27008,86 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
   console.log(JSON.stringify({ticks, after: vm.runInContext("S.releases_without_asking", ctx)}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 """
+
+    def page_header(self, scenario, status, language):
+        harness = self.tmp / "header-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        result = subprocess.run(["node", str(harness), str(page), scenario, language],
+                                input=json.dumps({"/api/status": status, "/api/events": []}),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_title_and_caption_name_the_desk_and_its_parent(self):
+        status = views.status(self.desk)
+        for language in ("en", "zh"):
+            for folder in ("/home/work/desk", "/home/other/desk", "/home/work/a < b & c"):
+                with self.subTest(language=language, folder=folder):
+                    status.update(desk=folder, asks=[], releases=[])
+                    [page] = self.page_header("desk-name", status, language)
+                    name = "/".join(folder.split("/")[-2:])
+                    self.assertEqual(page["title"], "Hansa · " + name)
+                    self.assertEqual(page["caption"], name)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_title_counts_waiting_releases_and_open_requests_on_each_refresh(self):
+        status = views.status(self.desk)
+        status.update(desk="/home/work/desk", asks=[], releases=[], asks_closed=[{"id":3, "text":"closed"}])
+        for language in ("en", "zh"):
+            pages = self.page_header("desk-count", status, language)
+            self.assertEqual([p["title"] for p in pages], [
+                "Hansa · work/desk", "(3) Hansa · work/desk", "(1) Hansa · work/desk", "Hansa · work/desk"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_status_summary_has_separate_parts_and_marks_only_bad_parts(self):
+        status = views.status(self.desk)
+        status.update(desk="/home/work/desk", build="test-build", installed=1727778840, concurrency=3,
+                      server_up=False, server={"state":"gone"}, paused="review queue", srt_missing="",
+                      disk=None, no_read_stop="", no_read_left_out=[])
+        for language in ("en", "zh"):
+            [page] = self.page_header("status-parts", status, language)
+            parts = page["parts"]
+            for words in ("/home/work/desk", "hansa test-build", time.strftime("%Y-%m-%d %H:%M", time.localtime(status["installed"]))):
+                self.assertEqual(len([p for p in parts if words in p["text"] and p["tone"] == "muted"]), 1, words)
+            self.assertEqual(len([p for p in parts if "review queue" in p["text"] and p["tone"] == "warn"]), 1)
+            self.assertEqual(len([p for p in parts if ("server not running" if language == "en" else "后台没在运行")
+                                 in p["text"] and p["tone"] == "warn"]), 1)
+            status.update(paused="", server_up=True, server={"state":"up"})
+            [page] = self.page_header("status-parts", status, language)
+            self.assertFalse(any(p["tone"] == "warn" for p in page["parts"]))
+            self.assertTrue(any("3" in p["text"] and ("dispatch" if language == "en" else "派活") in p["text"]
+                                for p in page["parts"]))
+            status.update(paused="review queue", server_up=False, server={"state":"gone"})
+
+    def test_notify_session_replaces_old_coordinator_mod_and_daily_clear_status(self):
+        from hansa import up
+        self.start_with_mod("--clear-daily", "04-09")
+        previous = self.mod_line()
+        self.assertIn("hansa loaded", previous)
+        self.assertEqual(up.record_session(self.desk, {"pid":12345, "start":"other-session"},
+                                           ["claude"], str(self.desk.root)), "")
+        for old_start in (True, False):
+            if not old_start:
+                (self.desk.state_dir / "coordinator.json").unlink()
+            status = views.status(self.desk)
+            printed = self.hansa("status")
+            self.assertIn("started outside hansa coordinator", status["mod_line"])
+            self.assertIn("coordinator's mod and the daily clear are not in it", status["mod_line"])
+            self.assertIn(status["mod_line"], printed)
+            self.assertNotIn(previous, printed)
+            self.assertNotIn("--autocompact options", printed)
+            self.assertEqual(status["clear_line"], "")
+            if shutil.which("node"):
+                for language, words in (("en", "started outside hansa coordinator"), ("zh", "在 hansa coordinator 之外启动")):
+                    [page] = self.page_header("notify-status", status, language)
+                    self.assertIn(words, page["text"])
+                    self.assertNotIn("--autocompact", page["text"])
+                    self.assertNotIn("04-09", page["text"])
+        self.start_with_mod("--clear-daily", "04-09")
+        self.assertIn("hansa loaded", self.mod_line())
+        self.assertIn("daily clear 04-09", views.status(self.desk)["clear_line"])
 
     def test_the_page_lays_out_long_commands_inside_the_page(self):
         css = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()

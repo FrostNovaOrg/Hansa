@@ -48,7 +48,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import account
+from . import account, up
 from .desk import Desk, compact_settings, now, write_json
 
 MOD = Path(__file__).with_name("mod")
@@ -335,7 +335,10 @@ def status(desk: Desk) -> dict | None:
     """The coordinator's session as hansa status and the page show it: when it started; whether hansa loaded the mod
     at that start (loaded), and why not; the --autocompact options of its command line, quoted ('' when none); and its
     daily clear (_clear). None for what that start's record does not tell (none, an earlier start's, or one that does
-    not hold it); None in all before a coordinator was started."""
+    not hold it); None in all before a coordinator was started. A notify record names another session: only its
+    kind is returned, so neither the earlier coordinator's start nor its clears describe it."""
+    if up.read_coordinator(desk).get("kind") == "notify":
+        return {"kind": "notify"}
     who = _read(desk.state_dir / "coordinator.json")
     start = who.get("at") if isinstance(who, dict) else None
     if not _number(start):
@@ -380,6 +383,9 @@ def _clear(desk: Desk, r: dict, start: float, loaded) -> dict:
 def status_line(st: dict) -> str:
     """The line on the coordinator's session, in hansa status and on the page: what hansa did at its start, and
     nothing else."""
+    if st.get("kind") == "notify":
+        return ("the recorded session was started outside hansa coordinator; "
+                "the coordinator's mod and the daily clear are not in it.")
     if st["loaded"] is None:
         mod = "whether hansa loaded the coordinator's mod: not known"
     elif st["loaded"]:
@@ -393,6 +399,8 @@ def status_line(st: dict) -> str:
 def clear_line(st: dict) -> str:
     """The line on the coordinator's daily clear, in hansa status and on the page: the window hansa handed over at the
     start and the clears its hook recorded; a warning once MISSED windows or more ended without one."""
+    if st.get("kind") == "notify":
+        return ""  # status_line already explains why this session has neither the mod nor its daily clear
     c, w = st["clear"], st["clear"]["window"]
     if w is None or (w and st["loaded"] is None):
         return "daily clear: not known."
