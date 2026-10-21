@@ -99,6 +99,22 @@ command and says why; only a session already recorded keeps its record when a
 later `hansa notify on` cannot read it. As root on an account's desk nothing
 is saved: root writes nothing there, and `hansa up` runs as the account.
 
+Claude Code loads the card (the desk's `CLAUDE.md`) only for a session started
+in the desk or below it, or one whose `CLAUDE.md` imports it. So
+`hansa notify on` looks at the `CLAUDE.md` and `.claude/CLAUDE.md` in the
+recorded folder and the folders above it for a line `@path` naming the card (a
+relative path read from the file's folder). With none, it says the session does
+not read the card and gives the line to add to the folder's `CLAUDE.md`:
+the card's path relative to the folder when the desk is inside it (such as
+`@desk/CLAUDE.md`), else its absolute path, which Claude Code loads only once imports from outside the
+folder are allowed (it asks once at a start: "Allow external CLAUDE.md file
+imports?"). A line already there with the card outside the folder gets that
+note too. The change counts from the session's next start; until then
+`hansa help card` prints the card. hansa never writes the line: the folder is
+another project's. `hansa status` adds a short note to its `hansa posts to`
+line, and `hansa explain notify` the full lines. A session `hansa coordinator`
+started runs in the desk and is not checked.
+
 After the server, `hansa up` starts nothing when a session hears from hansa,
 and names it (pid and name). It starts nothing either when the recorded
 session's process still runs (the same pid, started at the same time), even
