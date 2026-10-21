@@ -5,46 +5,256 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Desk</title>
 <style>
-:root { --bg:#f7f7f4; --fg:#1d1d1b; --muted:#6b6b66; --line:#e2e1db; --card:#fff; --accent:#2f5d8a; --warn:#9a5a00; --bad:#b3261e; --ok:#2e7d32; }
-@media (prefers-color-scheme: dark) { :root { --bg:#151514; --fg:#ecebe6; --muted:#a3a29c; --line:#2f2e2b; --card:#1e1e1c; --accent:#8ab4e0; --warn:#e0a458; --bad:#f28b82; --ok:#81c995; } }
-* { box-sizing: border-box; }
-body { margin:0; font:15px/1.55 system-ui,-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif; background:var(--bg); color:var(--fg); }
-/* a command, path or ref of any length breaks inside its box rather than widening it past the page */
+:root { color-scheme:light; --bg:#f8f9fb; --fg:#20232c; --muted:#626878; --line:#e1e4eb; --control-line:#b5bdcb; --card:#fff; --surface:#f0f2f6; --input:#fcfcfd; --accent:#365fc9; --link:#365fc9; --tint:#edf2ff; --warn:#875800; --bad:#b3261e; --ok:#236d47; --warn-bg:#fff7e6; --bad-bg:#fff1f0; --ok-bg:#edf8f1; --shadow:0 2px 8px #18223b04; --header-height:64px; }
+@media (prefers-color-scheme: dark) { :root { color-scheme:dark; --bg:#101114; --fg:#f0f1f4; --muted:#a6aab7; --line:#2e313b; --control-line:#555d70; --card:#191b21; --surface:#22252d; --input:#121419; --accent:#4267cc; --link:#abc4ff; --tint:#222e49; --warn:#e6bd77; --bad:#ffa59e; --ok:#8cd6ad; --warn-bg:#2e2619; --bad-bg:#302024; --ok-bg:#1a2b23; --shadow:0 2px 8px #00000012; } }
+* { box-sizing:border-box; }
+body { margin:0; font:14px/1.6 system-ui,-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif; background:var(--bg); color:var(--fg); }
+/* Long commands and paths stay inside the page. */
 body, td, label, code, .mono { overflow-wrap:anywhere; }
-header { display:flex; gap:14px; align-items:center; flex-wrap:wrap; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:2; }
+header { display:flex; gap:20px; align-items:center; flex-wrap:wrap; padding:12px 24px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:5; }
+#title { display:flex; align-items:center; gap:9px; font-size:15px; letter-spacing:-.3px; white-space:nowrap; }
+.brand-mark { display:grid; place-items:center; width:27px; height:27px; border-radius:8px; background:var(--fg); color:var(--card); font-size:15px; font-weight:700; }
+.brand-caption { color:var(--muted); font-size:12px; font-weight:400; padding-left:9px; border-left:1px solid var(--line); }
 nav { display:flex; gap:4px; }
-nav button { border:none; background:none; padding:6px 10px; border-radius:6px; color:var(--muted); }
-nav button.on { background:var(--bg); color:var(--fg); font-weight:600; }
-main { max-width:1100px; margin:0 auto; padding:16px; }
-section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin-bottom:14px; }
-h2 { font-size:15px; margin:0 0 8px; }
-h3 { font-size:14px; margin:12px 0 6px; }
+#tabs { padding:3px; background:var(--surface); border:1px solid var(--line); border-radius:9px; }
+nav button { display:flex; gap:7px; align-items:center; border:1px solid transparent; background:none; padding:6px 11px; border-radius:6px; color:var(--muted); }
+nav button.on { background:var(--card); border-color:var(--line); color:var(--fg); font-weight:600; box-shadow:var(--shadow); }
+#state { display:inline-flex; align-items:baseline; gap:7px; margin-left:auto; font-size:12px; min-width:0; max-width:52%; }
+#state::before { content:""; width:6px; height:6px; flex:none; border-radius:50%; background:var(--ok); }
+#state.warn::before { background:var(--warn); } #state.bad::before { background:var(--bad); }
+main { max-width:1240px; margin:0 auto; padding:30px 28px; }
+section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 20px; margin-bottom:16px; box-shadow:var(--shadow); }
+h2 { font-size:15px; margin:0 0 12px; } h3 { font-size:14px; margin:16px 0 8px; }
+p { margin:8px 0; }
 .scroll { overflow-x:auto; max-width:100%; }
 table { width:100%; border-collapse:collapse; }
-th, td { text-align:left; padding:6px 8px; border-top:1px solid var(--line); vertical-align:top; }
-th { color:var(--muted); font-weight:500; border-top:none; white-space:nowrap; }
-input, select, textarea { font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:5px; background:var(--bg); color:var(--fg); max-width:100%; }
+th, td { text-align:left; padding:9px 10px; border-top:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-size:12px; font-weight:500; border-top:none; white-space:nowrap; }
+input, select, textarea { font:inherit; padding:8px 10px; border:1px solid var(--control-line); border-radius:7px; background:var(--input); color:var(--fg); max-width:100%; transition:border-color .14s, box-shadow .14s, background-color .14s; }
+input::placeholder, textarea::placeholder { color:var(--muted); opacity:.8; }
+input:hover, select:hover, textarea:hover { border-color:var(--muted); }
+input:focus-visible, select:focus-visible, textarea:focus-visible { border-color:var(--link); outline:0; box-shadow:0 0 0 3px var(--tint); }
 input[type=number] { width:90px; }
-textarea { width:100%; min-height:84px; font:13px/1.45 ui-monospace,Menlo,monospace; }
-button { font:inherit; padding:4px 10px; border:1px solid var(--line); border-radius:5px; background:var(--card); color:var(--fg); cursor:pointer; }
+input[type=checkbox] { width:16px; height:16px; accent-color:var(--accent); cursor:pointer; }
+textarea { width:100%; min-height:104px; resize:vertical; font:13px/1.6 ui-monospace,Menlo,monospace; }
+select { cursor:pointer; }
+button { display:inline-flex; align-items:center; justify-content:center; gap:7px; font:inherit; font-size:13px; font-weight:500; padding:7px 11px; min-height:34px; border:1px solid var(--line); border-radius:7px; background:var(--card); color:var(--fg); cursor:pointer; transition:background-color .14s, border-color .14s, color .14s, box-shadow .14s; }
 button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-button.link { border:none; background:none; color:var(--accent); padding:0; text-decoration:underline; }
+button.link { display:inline; min-height:0; border:none; background:none; color:var(--link); padding:0; text-decoration:underline; }
+button:hover:not(:disabled) { border-color:var(--control-line); background:var(--surface); }
+button.primary:hover:not(:disabled) { background:var(--accent); border-color:var(--accent); box-shadow:0 0 0 3px var(--tint); }
+button:active:not(:disabled) { box-shadow:inset 0 1px 3px #00000012; }
+button:disabled { cursor:default; opacity:.5; }
+button.danger { color:var(--bad); }
+:focus-visible { outline:2px solid var(--link); outline-offset:3px; }
+[hidden] { display:none !important; }
+.icon { display:inline-block; width:17px; height:17px; flex:none; vertical-align:middle; }
 .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-/* grid and flex children may shrink below their content, so nothing pushes a control out of the page */
+/* grid and flex children may shrink below their content. */
 .row > *, .grid > *, .facts > * { min-width:0; }
 .grid { display:grid; grid-template-columns: fit-content(22em) minmax(0, 1fr); gap:6px 12px; align-items:center; }
 .muted { color:var(--muted); } .bad { color:var(--bad); } .ok { color:var(--ok); } .warn { color:var(--warn); }
-.mono { font:13px/1.45 ui-monospace,Menlo,monospace; }
+.mono { font:12px/1.6 ui-monospace,Menlo,monospace; }
 pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
-.lane { border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:8px 0; }
-.facts { display:grid; grid-template-columns: minmax(0, 24em) minmax(0, 1fr); gap:6px 12px; align-items:start; }
-.facts > .muted { font-size:13px; }
-.bar { position:sticky; bottom:0; background:var(--bg); padding:10px 0; }
-/* one release target's tick: the box keeps its size, the words beside it wrap */
-.tick { display:flex; gap:6px; align-items:baseline; margin:2px 0; cursor:pointer; }
+.lane { border:1px solid var(--line); border-radius:9px; padding:16px; margin:12px 0; }
+.facts { display:grid; grid-template-columns: minmax(0, 24em) minmax(0, 1fr); gap:8px 16px; align-items:start; }
+.facts > .muted { font-size:12px; }
+.tick { display:flex; gap:9px; align-items:baseline; margin:2px 0; cursor:pointer; }
 .tick > input { flex:none; margin:0; }
 .tick > span { min-width:0; }
-@media (max-width:640px) { main { padding:10px; } .grid, .facts { grid-template-columns:minmax(0, 1fr); } th, td { padding:5px 4px; } }
+.settings-head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin:0 0 30px; }
+.settings-head h1 { margin:0 0 8px; font-size:28px; line-height:1.3; font-weight:650; letter-spacing:-.7px; }
+.settings-head p, .group-head p { margin:0; color:var(--muted); font-size:13px; max-width:68ch; }
+.eyebrow { margin-bottom:10px; color:var(--muted); font-size:10px; font-weight:600; letter-spacing:.12em; }
+.draft-badge { display:inline-flex; align-items:center; gap:6px; flex:none; font-size:12px; padding:6px 10px; border:1px solid var(--line); border-radius:20px; background:var(--card); }
+.draft-badge .icon { width:14px; height:14px; }
+.draft-badge[data-tone=dirty] { background:var(--warn-bg); border-color:var(--warn); color:var(--warn); }
+.draft-badge[data-tone=error] { background:var(--bad-bg); color:var(--bad); }
+.draft-badge[data-tone=success] { background:var(--ok-bg); color:var(--ok); }
+.settings-layout { display:grid; grid-template-columns:202px minmax(0,1fr); gap:32px; align-items:start; }
+.settings-nav { display:flex; flex-direction:column; gap:4px; position:sticky; top:calc(var(--header-height) + 24px); padding:4px; border:1px solid var(--line); border-radius:12px; background:var(--card); }
+.settings-nav button { position:relative; justify-content:flex-start; gap:10px; text-align:left; padding:10px 12px; min-height:42px; border:1px solid transparent; background:transparent; border-radius:7px; color:var(--muted); white-space:nowrap; }
+.settings-nav button .icon { width:16px; height:16px; }
+.settings-nav button.on { background:var(--tint); color:var(--fg); border-color:transparent; font-weight:600; box-shadow:none; }
+.settings-nav button.on::before { content:""; position:absolute; left:-5px; top:12px; bottom:12px; width:2px; border-radius:2px; background:var(--link); }
+.settings-nav button[data-dirty=true]::after { content:""; width:5px; height:5px; border-radius:50%; background:var(--warn); margin-left:auto; flex:none; }
+.settings-nav small { margin-left:auto; font-size:10px; font-weight:400; }
+.settings-content, .settings-form { min-width:0; }
+.settings-form { border:0; padding:0; margin:0; }
+.group-head { display:flex; gap:12px; align-items:flex-start; margin:0 0 20px; }
+.group-symbol { display:grid; place-items:center; width:38px; height:38px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--muted); flex:none; }
+.group-head h2 { font-size:19px; margin:0 0 4px; letter-spacing:-.3px; }
+.settings-group > section { padding:20px; margin-bottom:16px; }
+.settings-group section > h2 { font-size:13px; margin-bottom:18px; }
+.settings-group .lane { padding:18px; margin:0 0 16px; background:var(--input); }
+.card-head { display:flex; flex-wrap:wrap; gap:9px; align-items:center; margin-bottom:20px; }
+.card-head strong { font-size:14px; }
+.card-head .card-actions { margin-left:auto; display:flex; gap:6px; }
+.tag { font-size:10px; font-weight:500; padding:2px 7px; border:1px solid var(--line); border-radius:5px; color:var(--muted); background:var(--card); }
+.form-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px 20px; }
+.field { display:flex; flex-direction:column; gap:7px; min-width:0; }
+.field.wide { grid-column:1 / -1; }
+.field-label { display:block; font-size:12px; font-weight:550; }
+.field:focus-within > .field-label { color:var(--link); }
+.field-note { color:var(--muted); font-size:12px; line-height:1.65; }
+.field > input:not([type=checkbox]), .field > select, .field > textarea,
+.field > div > input:not([type=checkbox]) { width:100%; min-width:0; padding:9px 11px; border-radius:7px; }
+.field input[type=number] { width:100%; }
+.field [aria-invalid=true] { border-color:var(--bad); }
+.field-error { color:var(--bad); font-size:12px; margin:0; }
+.settings-group .row > input:not([type=checkbox]) { flex:1; min-width:140px; }
+.settings-group .row > button { flex:none; }
+.add-row { margin-top:18px; padding-top:18px; border-top:1px dashed var(--line); }
+.password-control { position:relative; flex:1; min-width:160px; }
+.password-control input { width:100%; padding:9px 44px 9px 11px; min-width:0; }
+.password-control button { position:absolute; top:4px; right:4px; width:32px; min-height:32px; padding:0; border:0; color:var(--muted); background:transparent; }
+.key-status { display:inline-flex; align-items:center; gap:5px; padding:3px 7px; border-radius:5px; font-size:11px; background:var(--surface); }
+.help { margin:10px 0 0; font-size:12px; color:var(--muted); }
+.help summary { display:flex; align-items:center; gap:7px; cursor:pointer; width:fit-content; font-weight:500; padding:3px 0; list-style:none; }
+.help summary::-webkit-details-marker { display:none; }
+.help summary::before { content:""; width:5px; height:5px; border:solid currentColor; border-width:0 1.5px 1.5px 0; transform:rotate(-45deg); transition:transform .14s; margin:0 3px; }
+.help[open] > summary::before { transform:rotate(45deg); }
+.help[open] > summary { margin-bottom:10px; color:var(--fg); }
+.help p { margin:0; padding:12px 14px; background:var(--surface); border-radius:7px; line-height:1.8; }
+.notice { padding:12px 14px; border:1px solid var(--line); border-radius:8px; font-size:12px; margin:0 0 16px; background:var(--surface); }
+.notice p { margin:4px 0 0; color:var(--muted); }
+.readonly-value { padding:10px 12px; background:var(--surface); border-radius:7px; font-size:16px; font-weight:600; }
+.settings-group .facts { grid-template-columns:minmax(0,14em) minmax(0,1fr); gap:12px 20px; }
+.settings-group .facts > .muted { font-size:12px; } .settings-group .facts > pre { font-size:12px; }
+.settings-group .tick { padding:8px 0; }
+#settings-prices table { min-width:840px; }
+#settings-prices td:first-child { min-width:180px; }
+#settings-prices button { white-space:nowrap; }
+.settings-footer { display:flex; gap:12px; align-items:center; flex-wrap:wrap; position:sticky; bottom:12px; z-index:4; border:1px solid var(--line); border-radius:12px; background:var(--card); padding:14px 16px; margin-top:20px; box-shadow:0 4px 20px #0000000a; }
+.settings-footer .save-state { display:flex; align-items:center; gap:8px; margin-right:auto; font-size:12px; max-width:100%; }
+.save-state .icon { width:16px; height:16px; }
+.save-state[data-tone=dirty] { color:var(--warn); } .save-state[data-tone=success] { color:var(--ok); } .save-state[data-tone=error] { color:var(--bad); }
+.settings-footer:has([data-tone=error]) { border-color:var(--bad); background:var(--bad-bg); }
+.settings-footer button { min-height:36px; padding:8px 12px; }
+.settings-errors { border-color:var(--bad); background:var(--bad-bg); }
+.settings-errors h2 { display:flex; align-items:center; gap:8px; color:var(--bad); }
+.settings-errors ul { padding-left:18px; margin:8px 0 0; }
+.settings-errors button { display:inline; text-align:left; min-height:0; font-size:12px; padding:2px 0; border:0; color:var(--bad); background:transparent; text-decoration:underline; }
+.page-head { display:flex; justify-content:space-between; align-items:flex-start; gap:20px; margin:0 0 26px; }
+.page-head h1 { margin:0 0 8px; font-size:28px; line-height:1.3; font-weight:650; letter-spacing:-.7px; }
+.page-head p { margin:0; color:var(--muted); font-size:13px; max-width:68ch; }
+.page-head > .status-pill { margin-top:4px; flex:none; }
+.status-pill { display:inline-flex; align-items:center; gap:6px; width:fit-content; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--muted); font-size:11px; line-height:1.5; }
+.status-pill.ok { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
+.status-pill.warn { color:var(--warn); background:var(--warn-bg); border-color:transparent; }
+.status-pill.bad { color:var(--bad); background:var(--bad-bg); border-color:transparent; }
+.status-pill .icon { width:13px; height:13px; }
+.dashboard-panel { padding:20px; margin-bottom:20px; }
+.section-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 16px; }
+.section-head h2 { display:flex; align-items:center; gap:9px; margin:0; font-size:14px; }
+.section-head h2 .icon { color:var(--muted); width:16px; height:16px; }
+.count-badge { display:inline-flex; align-items:center; justify-content:center; min-width:24px; padding:1px 7px; border:1px solid var(--line); border-radius:5px; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
+.metric-caption { margin:0 0 10px; color:var(--muted); font-size:12px; font-weight:500; }
+.metric-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin:0 0 24px; }
+.metric-card { min-width:0; border:1px solid var(--line); border-radius:11px; background:var(--card); padding:17px 18px; box-shadow:var(--shadow); }
+.metric-label { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; }
+.metric-label .icon { width:15px; height:15px; }
+.metric-value { display:block; margin-top:7px; font-size:27px; font-weight:620; letter-spacing:-.6px; line-height:1.3; font-variant-numeric:tabular-nums; }
+.metric-note { display:block; margin-top:5px; font-size:11px; color:var(--muted); }
+.runtime-toolbar { display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:16px; }
+.runtime-summary { min-width:0; flex:1; }
+.runtime-summary h2 { margin:0 0 8px; font-size:14px; }
+.runtime-summary p { font-size:12px; color:var(--muted); margin:7px 0 0; }
+.runtime-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.runtime-actions input { min-width:180px; flex:1; }
+.runtime-actions button { min-height:40px; }
+.dashboard-panel table { font-size:12px; }
+.dashboard-panel th { padding-top:0; }
+.dashboard-panel td { padding-top:12px; padding-bottom:12px; }
+.dashboard-panel .mono { font-size:11px; }
+.task-detail { border-left:2px solid var(--line); padding:10px 0 0 12px; margin-top:8px; min-width:200px; }
+.empty-state { display:flex; flex-direction:column; align-items:center; text-align:center; padding:28px 16px; color:var(--muted); }
+.empty-state > .icon { width:24px; height:24px; margin-bottom:12px; }
+.empty-state strong { color:var(--fg); font-size:13px; font-weight:550; }
+.empty-state p { margin:5px 0 0; max-width:54ch; font-size:12px; }
+.request-card { padding:14px 0; border-top:1px solid var(--line); }
+.request-card:first-of-type { border-top:0; padding-top:0; }
+.request-body { display:flex; align-items:baseline; gap:9px; margin-bottom:10px; font-size:13px; }
+.request-body strong { flex:none; color:var(--muted); font-size:12px; }
+.request-card .row input { flex:1; min-width:180px; }
+.request-card .field-note { margin-top:7px; }
+.release-card { background:var(--input); }
+.release-card > .mono { padding:8px 10px; background:var(--surface); border-radius:6px; margin:7px 0; }
+.release-card > .muted { font-size:12px; margin-top:8px; }
+.event-list { max-height:400px; overflow:auto; }
+.event-row { display:grid; grid-template-columns:160px minmax(0,1fr); gap:5px 16px; padding:12px 0; border-top:1px solid var(--line); }
+.event-row:first-child { border-top:0; padding-top:0; }
+.event-time { color:var(--muted); font-size:11px; }
+.event-name { font-size:12px; font-weight:550; }
+.event-data { grid-column:2; color:var(--muted); }
+.cost-toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.period-control { display:flex; align-items:center; gap:9px; font-size:12px; font-weight:500; }
+.period-control select { min-width:125px; min-height:40px; }
+.cost-toolbar > button { min-height:40px; margin-left:auto; }
+.cost-feedback { display:flex; align-items:center; gap:8px; margin-top:12px; color:var(--muted); font-size:12px; }
+.cost-feedback .icon { width:14px; height:14px; }
+.cost-feedback[data-tone=error] { color:var(--bad); }
+.cost-feedback[data-tone=success] { color:var(--ok); }
+.cost-feedback button { margin-left:auto; }
+.cost-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.cost-explanation { font-size:12px; color:var(--muted); margin:0; line-height:1.8; }
+.cost-warning { display:flex; gap:9px; padding:12px 14px; margin:14px 0 0; border-radius:7px; color:var(--warn); background:var(--warn-bg); font-size:12px; }
+.cost-warning .icon { margin-top:2px; }
+.cost-warning p { margin:0; }
+.cost-breakdowns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 20px; }
+.cost-breakdowns > section { min-width:0; }
+.cost-breakdowns > .cost-wide { grid-column:1 / -1; }
+.cost-breakdowns table { min-width:440px; }
+.cost-breakdowns .cost-wide table { min-width:680px; }
+.cost-breakdowns td:not(:first-child), .cost-breakdowns th:not(:first-child) { text-align:right; font-variant-numeric:tabular-nums; }
+.cost-breakdowns td:first-child { min-width:125px; }
+@media (max-width:860px) {
+  header { gap:12px; padding:12px 18px; }
+  #state { flex-basis:100%; max-width:100%; margin-left:0; font-size:11px; }
+  .brand-caption { display:none; }
+  main { padding:24px 18px; }
+  .settings-layout { grid-template-columns:minmax(0,1fr); gap:20px; }
+  .settings-nav { flex-direction:row; overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:thin; scrollbar-color:var(--control-line) transparent; top:calc(var(--header-height) + 6px); z-index:3; box-shadow:var(--shadow); border-radius:10px; }
+  .settings-nav button { flex:none; min-height:44px; padding:9px 12px; }
+  .settings-nav button.on::before { display:none; }
+  .settings-nav button[data-dirty=true]::after { margin-left:0; }
+  .settings-nav small { display:none; }
+  .settings-head { margin-bottom:24px; }
+  .metric-grid { gap:10px; }
+  .metric-card { padding:14px; }
+  .metric-value { font-size:24px; }
+  .cost-breakdowns { grid-template-columns:minmax(0,1fr); }
+}
+@media (max-width:640px) { main { padding:16px 12px; } .grid, .facts { grid-template-columns:minmax(0, 1fr); } th, td { padding:7px 6px; } }
+@media (max-width:640px) {
+  header { padding:10px 12px; gap:10px; }
+  #title { font-size:14px; } .brand-mark { width:25px; height:25px; }
+  #tabs { margin-left:auto; } #tabs button { padding:6px 9px; }
+  #tabs .icon { display:none; }
+  .settings-head { gap:10px; } .settings-head h1 { font-size:25px; }
+  .settings-head p { font-size:12px; }
+  .draft-badge { padding:5px 8px; font-size:11px; }
+  .settings-group > section { padding:16px; }
+  .settings-group .lane { padding:14px; }
+  .form-fields, .settings-group .facts { grid-template-columns:minmax(0,1fr); }
+  .settings-footer { gap:9px; padding:12px; bottom:8px; }
+  .settings-footer .save-state { flex-basis:100%; }
+  .page-head { gap:12px; margin-bottom:20px; }
+  .page-head h1 { font-size:25px; }
+  .page-head p { font-size:12px; }
+  .page-head > .status-pill { max-width:110px; }
+  .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); margin-bottom:20px; }
+  .cost-metrics .metric-card:last-child { grid-column:1 / -1; }
+  .metric-value { font-size:25px; }
+  .dashboard-panel { padding:16px; margin-bottom:16px; }
+  .runtime-actions { width:100%; }
+  .runtime-actions input { min-width:140px; }
+  .event-row { grid-template-columns:minmax(0,1fr); gap:4px; }
+  .event-data { grid-column:1; }
+}
+@media (prefers-reduced-motion:reduce) {
+  *, *::before, *::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; }
+}
 </style>
 </head>
 <body>
@@ -246,8 +456,92 @@ const T = ZH ? {
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
+Object.assign(T, ZH ? {
+  settingsIntro:"按主题管理模型、运行方式和发布规则。切换页面时，未保存的修改会保留。",
+  settingsNav:"设置分组", allSaved:"设置已同步", unsaved:"有未保存的修改", saving:"正在保存…",
+  draftNote:"修改仅保留在当前页面，保存后才会生效。", discardConfirm:"放弃所有未保存的设置和未保存的密钥输入，并重新加载？",
+  providersIntro:"连接模型供应商，设置默认模型与思考强度。", coordinatorGroup:"运行与协调",
+  coordinatorIntro:"管理协调席的默认模型、上下文与供应商冷却时间。", lanesIntro:"查看工作线及其运行边界。工作线由协调席管理。",
+  securityGroup:"访问保护", securityIntro:"管理工作者不可读取的本机路径。", releasesGroup:"发布规则",
+  releasesIntro:"控制哪些发布需要审批，以及哪些内容不可发布。", alertsGroup:"通知提醒",
+  alertsIntro:"设置提醒命令，以及需要通知你的等待时长。", pricesGroup:"模型价格",
+  pricesIntro:"设置 token 单价，用于成本页估算。金额单位为美元／百万 token。",
+  readOnly:"只读", learnMore:"查看完整说明", advanced:"高级选项与运行边界", connection:"连接信息",
+  keySeparate:"密钥单独保存，不随“保存设置”提交。", keyPending:"有密钥尚未保存，请在模型供应中单独保存。", keySaved:"密钥已保存。",
+  invalidName:"名称只能包含小写字母、数字和连字符，且不能重复。", invalidModel:"模型名称不能为空或重复。",
+  addProviderTitle:"添加供应商", providerName:"供应商名称", priceName:"模型名称", baseModel:"默认模型",
+  cooldown:"额度用完后休息（分钟）", contextTitle:"上下文管理", compactHint:"范围 100,000–1,000,000 token。详细生效方式见说明。",
+  protectedPaths:"不可读取的路径", protectedHint:"每行一个绝对路径。常见登录信息、密钥与浏览器数据已内置保护。",
+  releaseApproval:"发布审批", autoRelease:"无需逐次审批的目标", autoReleaseHint:"未勾选的目标，每次发布都需要你批准。",
+  directPolicy:"直接提交的审批方式", contentRules:"发布内容检查", forbiddenWords:"禁止发布的字眼",
+  forbiddenHint:"每行一个词、短语或 re:Python 正则表达式。", exceptionsTitle:"按工作线豁免", mailboxTitle:"检查新增行中的邮箱",
+  mailboxAllowTitle:"邮箱允许名单", mailboxHint:"每行一个完整邮箱地址，或 @域名。", alertCommandTitle:"提醒命令",
+  alertCommandHint:"留空时不发送提醒。测试按钮使用已保存的命令。", alertTiming:"何时提醒你",
+  noSessionShort:"没有会话在听（分钟）", windowShort:"协调席等待操作（分钟）", reviewShort:"任务等待审核（分钟）",
+  runtimeTitle:"运行概况", compactTitle:"协调席模型", configError:"添加失败", savedWithKeys:"设置已保存；密钥输入仍需单独保存。"
+} : {
+  settingsIntro:"Manage models, runtime and release rules by topic. Unsaved changes stay when you switch pages.",
+  settingsNav:"Settings sections", allSaved:"Settings up to date", unsaved:"Unsaved changes", saving:"Saving…",
+  draftNote:"Changes stay in this page until you save them.", discardConfirm:"Discard all unsaved settings and key inputs, and reload?",
+  providersIntro:"Connect providers and choose their default model and effort.", coordinatorGroup:"Runtime & coordinator",
+  coordinatorIntro:"Choose coordinator defaults, context limits and provider cooldown.", lanesIntro:"Inspect lanes and their runtime boundaries. Lanes are managed by the coordinator.",
+  securityGroup:"Access protection", securityIntro:"Manage local paths that workers must not read.", releasesGroup:"Release rules",
+  releasesIntro:"Choose which releases need approval and what content must stay local.", alertsGroup:"Notifications",
+  alertsIntro:"Set the alert command and when a wait needs your attention.", pricesGroup:"Model pricing",
+  pricesIntro:"Token rates for the Cost page. All rates are USD per million tokens.",
+  readOnly:"Read only", learnMore:"Full explanation", advanced:"Advanced options & runtime boundaries", connection:"Connection",
+  keySeparate:"Keys are saved separately from Save settings.", keyPending:"Some keys are unsaved. Save them separately under Providers.", keySaved:"Key saved.",
+  invalidName:"Use a unique name with lowercase letters, digits and hyphens.", invalidModel:"Enter a unique, non-empty model name.",
+  addProviderTitle:"Add a provider", providerName:"Provider name", priceName:"Model name", baseModel:"Default model",
+  cooldown:"Rest after a usage limit (minutes)", contextTitle:"Context management", compactHint:"100,000–1,000,000 tokens. See the explanation for when each applies.",
+  protectedPaths:"Paths workers must not read", protectedHint:"One absolute path per line. Common logins, keys and browser data are already protected.",
+  releaseApproval:"Release approvals", autoRelease:"Targets allowed without individual approval", autoReleaseHint:"Unticked targets need your approval for every release.",
+  directPolicy:"Approval for direct commits", contentRules:"Release content checks", forbiddenWords:"Forbidden words",
+  forbiddenHint:"One word, phrase or re:Python pattern per line.", exceptionsTitle:"Exceptions by lane", mailboxTitle:"Check mailboxes in added lines",
+  mailboxAllowTitle:"Mailbox allowlist", mailboxHint:"One full mailbox or @domain per line.", alertCommandTitle:"Alert command",
+  alertCommandHint:"Blank means no alerts. The test uses the saved command.", alertTiming:"When to alert",
+  noSessionShort:"No listening session (minutes)", windowShort:"Coordinator waiting for input (minutes)", reviewShort:"Task waiting for review (minutes)",
+  runtimeTitle:"Runtime overview", compactTitle:"Coordinator model", configError:"Could not add", savedWithKeys:"Settings saved; key inputs still need to be saved separately."
+});
+Object.assign(T, ZH ? {
+  primaryNav:"工作台导航", showKey:"显示密钥", hideKey:"隐藏密钥", refresh:"重新加载",
+  reloading:"正在重新加载…", keySaving:"正在保存密钥…", saveFailed:"保存失败，修改仍保留。",
+  loadFailed:"重新加载失败，当前内容仍保留。", modifiedGroup:"此分组有未保存修改",
+  savedGroup:"此分组已同步", jumpToField:"前往对应设置", retrySave:"修正后可重新保存。",
+  needsAttention:"需要检查设置", keySaveFailed:"密钥操作未完成，请查看错误提示。"
+} : {
+  primaryNav:"Workspace navigation", showKey:"Show key", hideKey:"Hide key", refresh:"Reload settings",
+  reloading:"Reloading settings…", keySaving:"Saving key…", saveFailed:"Save failed. Your changes are still here.",
+  loadFailed:"Reload failed. The current settings are still here.", modifiedGroup:"This section has unsaved changes",
+  savedGroup:"This section is up to date", jumpToField:"Go to this setting", retrySave:"Correct the values and save again.",
+  needsAttention:"Settings need attention", keySaveFailed:"Key operation incomplete. Check the error details."
+});
+Object.assign(T, ZH ? {
+  statusIntro:"查看任务进展、工作线和需要你处理的事项。", costIntro:"按时间与分类查看 token 用量及折算金额。",
+  autoUpdates:"自动更新", refreshNote:"页面可见时每 5 秒更新；填写内容时暂缓更新。", dispatchControl:"派活控制",
+  noActiveTasks:"当前没有进行中的任务", noActiveTasksNote:"任务开始、排队或等待审核时，会显示在这里。", taskFlow:"任务进展",
+  noLanes:"还没有工作线", noLanesNote:"由协调席添加工作线后，这里会显示它的状态。",
+  noProviders:"还没有模型供应", noProvidersNote:"在设置中添加供应商后，这里会显示连接状态。",
+  noEvents:"还没有活动记录", noEventsNote:"任务与工作台的最新变化会显示在这里。", closedRequests:"已处理的请求",
+  period:"统计范围", periodDays:n => `最近 ${n} 天`, estimatedCost:"折算金额", totalTokens:"Token 用量", unpricedTokens:"未定价 token",
+  unpricedNote:"未计入折算金额", usdNote:"USD · 按价目折算", costLoading:"正在加载用量…", costReady:"按所选时间范围统计。",
+  costLoadFailed:"用量加载失败，请重试。", costRetained:n => `仍显示最近 ${n} 天的上次结果。`, retry:"重试", exporting:"正在导出…", exported:"CSV 已导出。", exportFailed:"导出失败，请重试。",
+  noCost:"这段时间还没有用量", noCostNote:"模型调用产生用量后，会按席位、日期、模型、工作线、供应商和任务显示明细。", seatColumn:"席位", dayColumn:"日期"
+} : {
+  statusIntro:"Follow tasks, lanes and the decisions that need your attention.", costIntro:"Explore token usage and its estimated value by period and category.",
+  autoUpdates:"Auto updates", refreshNote:"Updates every 5 seconds while visible; pauses while you fill in a field.", dispatchControl:"Dispatch control",
+  noActiveTasks:"No tasks in progress", noActiveTasksNote:"Running, queued and review tasks will appear here.", taskFlow:"Task progress",
+  noLanes:"No lanes yet", noLanesNote:"Lanes appear here after the coordinator adds them.",
+  noProviders:"No providers yet", noProvidersNote:"Add a provider in Settings to see its connection status here.",
+  noEvents:"No activity yet", noEventsNote:"New task and desk events will appear here.", closedRequests:"Closed requests",
+  period:"Time range", periodDays:n => `Last ${n} days`, estimatedCost:"Estimated value", totalTokens:"Token usage", unpricedTokens:"Unpriced tokens",
+  unpricedNote:"Excluded from the estimated value", usdNote:"USD · at list price", costLoading:"Loading usage…", costReady:"Totals for the selected period.",
+  costLoadFailed:"Could not load usage. Try again.", costRetained:n => `Still showing the previous ${n}-day report.`, retry:"Retry", exporting:"Exporting…", exported:"CSV exported.", exportFailed:"Could not export. Try again.",
+  noCost:"No usage in this period", noCostNote:"Model usage will appear by seat, day, model, lane, provider and task.", seatColumn:"Seat", dayColumn:"Date"
+});
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const $ = s => document.querySelector(s);
+const mainTabLabels = {};
 // what a node is given as children: null and false are left out (the DOM's append and replaceChildren would show "null")
 const shown = kids => kids.flat(9).filter(c => c != null && c !== false);
 function h(tag, attrs, ...kids) {
@@ -262,9 +556,37 @@ function h(tag, attrs, ...kids) {
   for (const c of shown(kids)) el.append(c.nodeType ? c : document.createTextNode(String(c)));
   return el;
 }
+// Small native SVGs: decoration only, with all names and state carried by text.
+function icon(name) {
+  const paths = {
+    status:["M3 12h4l3-8 4 16 3-8h4"], settings:["M4 7h16M4 17h16M8 4v6m8 4v6"], cost:["M5 20v-7m7 7V4m7 16V9"],
+    providers:["M8 8V4h8v4M6 8h12v8H6zM9 20h6m-3-4v4"],
+    coordinator:["M4 5h16v12H4zM8 21h8m-4-4v4M8 9l2 2-2 2m5 0h3"], lanes:["M5 4v16m14-16v16M5 8h14M5 16h14"],
+    security:["M12 3l8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM9 12l2 2 4-4"], releases:["M12 16V3m-4 4 4-4 4 4M4 13v7h16v-7"],
+    alerts:["M6 9a6 6 0 0 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9m4 12h4"], prices:["M3 12l9-9h8v8l-9 10zM16 7h.01"],
+    check:["M5 12l4 4L19 6"], edit:["M4 20l4-1L20 7l-3-3L5 16zM14 7l3 3"], pending:["M12 4v4m0 8v4M4 12h4m8 0h4M6 6l3 3m6 6 3 3M6 18l3-3m6-6 3-3"],
+    error:["M12 3l10 18H2zM12 9v5m0 3h.01"], reload:["M20 7V3m0 4h-4M20 7a8 8 0 1 0 0 10"],
+    eye:["M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12", "M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0"],
+    eyeOff:["M3 3l18 18M10 5a12 12 0 0 1 2 0c6 0 10 7 10 7a23 23 0 0 1-3 4M6 6a23 23 0 0 0-4 6s4 7 10 7a12 12 0 0 0 5-1M9 9a4 4 0 0 0 6 6"]
+  };
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  for (const [key, value] of Object.entries({class:"icon", viewBox:"0 0 24 24", fill:"none", stroke:"currentColor", "stroke-width":"1.7", "stroke-linecap":"round", "stroke-linejoin":"round", "aria-hidden":"true", focusable:"false"})) svg.setAttribute(key, value);
+  for (const d of paths[name] || paths.settings) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", d); svg.append(path);
+  }
+  return svg;
+}
 const section = (title, ...kids) => h("section", {}, h("h2", {}, title), ...kids);
 const table = (head, rows) => h("div", {class:"scroll"}, h("table", {}, h("tr", {}, head.map(x => h("th", {}, x))),
   rows.map(r => h("tr", {}, r.map(c => h("td", {}, c))))));
+const statusPill = (text, tone = "", symbol = "check") => h("span", {class:"status-pill " + tone}, icon(symbol), text);
+const pageHeading = (tab, intro, aside) => h("div", {class:"page-head"},
+  h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T[tab]), h("h1", {}, T[tab]), h("p", {}, intro)), aside);
+const summaryCard = (label, value, note, symbol) => h("div", {class:"metric-card"},
+  h("span", {class:"metric-label"}, icon(symbol), label), h("strong", {class:"metric-value"}, value), note ? h("span", {class:"metric-note"}, note) : null);
+const dashboardPanel = (title, symbol, count, ...kids) => h("section", {class:"dashboard-panel"},
+  h("div", {class:"section-head"}, h("h2", {}, icon(symbol), title), count == null ? null : h("span", {class:"count-badge"}, count)), ...kids);
+const emptyState = (title, note, symbol) => h("div", {class:"empty-state"}, icon(symbol), h("strong", {}, title), h("p", {}, note));
 const fmt = n => (n || 0).toLocaleString();
 const when = ts => ts ? new Date(ts * 1000).toLocaleString() : "";
 async function api(path, body) {
@@ -278,21 +600,25 @@ async function api(path, body) {
 let current = "status";
 function show(tab) {
   current = tab;
-  for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === tab);
+  for (const b of document.querySelectorAll("#tabs button")) {
+    b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
+  }
   for (const t of ["status", "settings", "cost"]) $("#tab-" + t).hidden = t !== tab;
-  ({status:loadStatus, settings:loadSettings, cost:loadCost})[tab]().catch(err);
+  return ({status:loadStatus, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
 }
 function err(e) { $("#state").textContent = String(e.message || e); $("#state").className = "bad"; }
 
 /* ---------- status ---------- */
 const detailOpen = new Set();
+let taskDetailSequence = 0;
 function taskLink(id) {
-  const box = h("div", {class:"mono", hidden:!detailOpen.has(id)});
+  const box = h("div", {class:"mono task-detail", id:"task-detail-" + (++taskDetailSequence), hidden:!detailOpen.has(id)});
   const load = async () => { const r = await api("/api/task?id=" + id); box.replaceChildren(...shown([h("pre", {}, r.text)])); };
   if (detailOpen.has(id)) load().catch(err);
-  const btn = h("button", {class:"link", onclick: () => {
+  const btn = h("button", {class:"link", "aria-expanded":String(detailOpen.has(id)), "aria-controls":box.id, onclick: () => {
     if (detailOpen.has(id)) { detailOpen.delete(id); box.hidden = true; }
     else { detailOpen.add(id); box.hidden = false; load().catch(err); }
+    btn.setAttribute("aria-expanded", String(detailOpen.has(id)));
   }}, id);
   return [btn, box];
 }
@@ -328,22 +654,33 @@ async function loadStatus() {
     || (st.mod && st.mod.loaded !== true) || (st.mod && st.mod.clear && st.mod.clear.warn)
     || (st.disk && (st.disk.low_text || (st.disk.unknown || []).length))
     || st.no_read_stop || (st.no_read_left_out || []).length) ? "warn" : "muted";
-  const reason = h("input", {placeholder:T.pauseReason});
+  const reason = h("input", {placeholder:T.pauseReason, "aria-label":T.pauseReason});
   const t = st.last_24h;
   $("#tab-status").replaceChildren(...shown([
-    h("section", {}, h("div", {class:"row"},
+    pageHeading("status", T.statusIntro, statusPill(T.autoUpdates, "", "reload")),
+    h("div", {class:"metric-caption"}, T.last24h),
+    h("div", {class:"metric-grid", "aria-label":T.last24h},
+      summaryCard(T.finished, fmt(t.finished), "", "check"), summaryCard(T.merged, fmt(t.merged), "", "releases"),
+      summaryCard(T.tokens, fmt(t.worker_tokens), T.last24h, "status"), summaryCard(T.estimatedCost, "$" + t.worker_usd.toFixed(2), T.listValue, "cost")),
+    h("section", {class:"dashboard-panel runtime-toolbar"},
+      h("div", {class:"runtime-summary"}, h("h2", {}, T.dispatchControl),
+        statusPill(st.paused ? T.paused : T.dispatchOn, st.paused ? "warn" : "ok", st.paused ? "pending" : "check"),
+        st.paused ? h("p", {}, st.paused) : null, h("p", {}, T.refreshNote)),
+      h("div", {class:"runtime-actions"},
       st.paused ? h("button", {class:"primary", onclick: () => api("/api/resume", {}).then(loadStatus).catch(err)}, T.resume)
-                : [reason, h("button", {onclick: () => api("/api/pause", {reason:reason.value}).then(loadStatus).catch(err)}, T.pause)],
-      h("span", {class:"muted"}, `${T.last24h}: ${t.finished} ${T.finished} · ${t.merged} ${T.merged} · ${fmt(t.worker_tokens)} ${T.tokens} · $${t.worker_usd.toFixed(2)} ${T.listValue}`))),
+                : [reason, h("button", {onclick: () => api("/api/pause", {reason:reason.value}).then(loadStatus).catch(err)}, T.pause)])),
     releasesSection(st.releases || []),
-    section(T.lanes, table([T.lane, T.order, T.now], st.lanes.map(l => [l.merge_lane ? [l.name, h("br"), h("span", {class:"muted"}, T.mergeLane(l.merge_for))] : l.name, l.providers.join(" → "), l.task ? [T.busyWith + " ", taskLink(l.task)] : l.trying ? T.trying : T.free]))),
-    st.running.length ? section(T.running, table([T.task, T.lane, T.provider, T.minutes, T.titleCol],
+    asksSection(st),
+    dashboardPanel(T.lanes, "lanes", st.lanes.length, st.lanes.length ? table([T.lane, T.order, T.now], st.lanes.map(l => [l.merge_lane ? [l.name, h("br"), h("span", {class:"muted"}, T.mergeLane(l.merge_for))] : l.name, l.providers.join(" → "), l.task ? [T.busyWith + " ", taskLink(l.task)] : statusPill(l.trying ? T.trying : T.free, l.trying ? "warn" : "", l.trying ? "pending" : "check")])) : emptyState(T.noLanes, T.noLanesNote, "lanes")),
+    !st.running.length && !st.queued.length && !st.review.length && !(st.merging || []).length ? dashboardPanel(T.taskFlow, "status", 0,
+      emptyState(T.noActiveTasks, T.noActiveTasksNote, "check")) : null,
+    st.running.length ? dashboardPanel(T.running, "status", st.running.length, table([T.task, T.lane, T.provider, T.minutes, T.titleCol],
       st.running.map(m => [taskLink(m.id), m.lane, (m.checking ? T.checkingWork : `${m.provider} (${m.model})`) + (m.browser ? T.withBrowser : ""),
         m.checking ? T.checkMinutes(m.check_minutes, m.minutes) : m.minutes,
         m.progress ? h("span", {}, m.title, h("br"), h("span", {class:"muted"}, T.progressFmt(m.progress.replies, m.progress.idle_min))) : m.title]))) : null,
-    st.queued.length ? section(T.queued, table([T.task, T.lane, T.titleCol, T.waiting],
+    st.queued.length ? dashboardPanel(T.queued, "pending", st.queued.length, table([T.task, T.lane, T.titleCol, T.waiting],
       st.queued.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"}, m.waiting)]))) : null,
-    st.review.length || (st.merging || []).length ? section(T.review, (st.merging || []).length ? [h("h3", {}, T.merging),
+    st.review.length || (st.merging || []).length ? dashboardPanel(T.review, "security", st.review.length + (st.merging || []).length, (st.merging || []).length ? [h("h3", {}, T.merging),
       table([T.task, T.lane, T.titleCol, T.mergeCheck], st.merging.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"},
         (m.members?.length ? T.mcBatch(m.members.filter(id => id !== m.id), m.check_task) : ["starting", "running"].includes(m.phase) ? T.mcRunning(m.minutes) : m.waits_for ? T.mcQueuedAhead(m.waits_for) : m.busy_with ? T.mcQueuedBusy(m.lane, m.busy_with)
           : m.waiting_for === "slot" ? T.mcQueuedSlot : m.waiting_for === "try" ? T.mcQueuedTry(m.lane)
@@ -356,31 +693,38 @@ async function loadStatus() {
           : [h("span", {class: {holds:"ok", "does not hold":"bad"}[m.verify.verdict] || "warn"}, T["v_" + m.verify.verdict] || T.v_none),
              m.verify.verdict === "holds, with notes" ? [" · ", taskLink(m.verify.task)] : null],
         m.denied ? h("span", {class:"warn"}, m.denied) : "0"])) : null) : null,
-    st.failed.length ? section(T.failed, table([T.task, T.lane, T.titleCol, T.error],
+    st.failed.length ? dashboardPanel(T.failed, "error", st.failed.length, table([T.task, T.lane, T.titleCol, T.error],
       st.failed.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"bad"}, m.error)]))) : null,
-    st.asks.length || (st.asks_closed || []).length ? section(T.asks, [...st.asks.map(a => {
-      const ans = h("input", {placeholder:T.answer, style:"flex:1"});
-      return h("div", {class:"row", style:"margin:6px 0"}, h("strong", {}, "#" + a.id), h("span", {}, a.text), a.note ? h("span", {class:"ok"}, a.note) : null, ans,
-        h("button", {onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
-          .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close));
-    }), ...(st.asks_closed || []).map(a => h("div", {class:"row muted", style:"margin:6px 0"}, h("strong", {}, "#" + a.id),
-      h("span", {}, a.text), h("span", {}, `${T.closedByCoordinator}${a.reason} (${when(a.closed)})`)))]) : null,
-    section(T.providers, table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
+    dashboardPanel(T.providers, "providers", st.providers.length, st.providers.length ? table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
       p.name, p.kind === "subscription" ? T.subscription : T.compatible,
       p.model + (p.effort ? " · " + p.effort : "") + ` · ${T.rest} ${p.rest_minutes} min` + ` (${T.general})`,
-      p.problem ? h("span", {class:"warn"}, p.problem) : h("span", {class:"ok"}, T.ready),
+      p.problem ? statusPill(p.problem, "warn", "error") : statusPill(T.ready, "ok"),
       p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${p.check.detail} (${when(p.check.at)})`) : "",
-      checkButton(p.name, loadStatus)]))),
-    section(T.events, h("div", {class:"mono"}, ev.slice(0, 20).map(e => h("div", {}, `${when(e.ts)}  ${e.event}  ` +
-      Object.entries(e).filter(([k]) => k !== "ts" && k !== "event").map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" ")))))
+      checkButton(p.name, loadStatus)])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
+    dashboardPanel(T.events, "status", Math.min(ev.length, 20), ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(e => h("div", {class:"event-row"},
+      h("span", {class:"event-time"}, when(e.ts)), h("span", {class:"event-name"}, e.event),
+      h("div", {class:"event-data mono"}, Object.entries(e).filter(([k]) => k !== "ts" && k !== "event")
+        .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" "))))) : emptyState(T.noEvents, T.noEventsNote, "status"))
   ]));
+}
+function asksSection(st) {
+  if (!st.asks.length && !(st.asks_closed || []).length) return null;
+  return dashboardPanel(T.asks, "alerts", st.asks.length, st.asks.map(a => {
+    const ans = h("input", {placeholder:T.answer, "aria-label":`#${a.id} · ${T.answer}`});
+    return h("div", {class:"request-card"}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, a.text)),
+      a.note ? h("span", {class:"ok"}, a.note) : null,
+      h("div", {class:"row"}, ans, h("button", {onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
+        .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close)));
+  }), (st.asks_closed || []).length ? h("h3", {}, T.closedRequests) : null,
+    (st.asks_closed || []).map(a => h("div", {class:"request-card muted"}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, a.text)),
+      h("div", {class:"field-note"}, `${T.closedByCoordinator}${a.reason} (${when(a.closed)})`))));
 }
 function releaseBlock(r) {
   const reason = h("input", {placeholder:T.releaseReason, style:"flex:1"});
   const answer = yes => api("/api/release/answer", {id:r.id, yes, reason:reason.value, commit:r.commit, command:r.command})
     .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err);
   const named = new Set(r.named || []);
-  return h("div", {class:"lane"},
+  return h("div", {class:"lane release-card"},
     h("div", {class:"row"}, h("strong", {}, "#" + r.id), h("span", {}, `${T.lane} ${r.lane}${r.target ? ` · ${T.releaseTarget} ${r.target}` : ""} · ${r.base} @ `, h("code", {}, (r.commit || "").slice(0, 10))),
       h("span", {class:"muted"}, when(r.asked))),
     r.note ? h("div", {}, `${T.releaseNote}: ${r.note}`) : null,
@@ -432,7 +776,7 @@ function releaseHits(hits) {
 function releasesSection(rel) {
   const waiting = rel.filter(r => r.state === "waiting"), others = rel.filter(r => r.state !== "waiting");
   if (!rel.length) return null;
-  return section(T.releases, waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
+  return dashboardPanel(T.releases, "releases", rel.length, waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
     others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
       "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs), releaseOutside(r)),
       h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
@@ -454,29 +798,231 @@ function checkButton(name, after) {
 
 /* ---------- settings ---------- */
 let S = null, DISK_FREE = null, KEYS = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+// Drafts live only in this page's memory. In particular, keys never enter browser storage or settings JSON.
+let settingsBaseline = null, settingsLoading = null, settingsSaving = false, settingsGroup = "providers", settingsEpoch = 0;
+let settingsMessage = "", settingsProblems = [], KEY_DRAFTS = {}, newProviderName = "", newPriceName = "";
+let settingsPending = "save", settingsFailure = "", fieldRecords = [];
+let settingsForm, settingsSaveButton, settingsDiscardButton, settingsBadge, settingsSaveState;
+let settingsPanels = {}, settingsNavButtons = {}, fieldSequence = 0, exceptionRefreshers = [];
+const SETTINGS_GROUPS = [
+  ["providers", T.providers, T.providersIntro], ["coordinator", T.coordinatorGroup, T.coordinatorIntro],
+  ["lanes", T.lanes, T.lanesIntro], ["security", T.securityGroup, T.securityIntro],
+  ["releases", T.releasesGroup, T.releasesIntro], ["alerts", T.alertsGroup, T.alertsIntro],
+  ["prices", T.pricesGroup, T.pricesIntro]
+];
+const GROUP_KEYS = {
+  providers:["providers"], coordinator:["coordinator", "coordinator_compact", "cool_minutes"], lanes:[],
+  security:["workers_may_not_read", "workers_may_not_read_added"],
+  releases:["releases_without_asking", "release_direct", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow"],
+  alerts:["alert", "coordinator_alert"], prices:["prices"]
+};
+function groupDirty(key) {
+  if (!S || settingsBaseline === null) return false;
+  const base = JSON.parse(settingsBaseline);
+  return (GROUP_KEYS[key] || []).some(k => JSON.stringify(S[k]) !== JSON.stringify(base[k]))
+    || (key === "providers" && Object.values(KEY_DRAFTS).some(Boolean));
+}
+function settingsDirty() {
+  return !!S && ((settingsBaseline !== null && JSON.stringify(S) !== settingsBaseline)
+    || Object.values(KEY_DRAFTS).some(value => value !== ""));
+}
+function refreshSettingsState() {
+  const dirty = settingsDirty(), pendingKeys = Object.values(KEY_DRAFTS).some(Boolean);
+  const pending = settingsPending === "reload" ? T.reloading : settingsPending === "key" ? T.keySaving : T.saving;
+  const tone = settingsSaving ? "pending" : settingsProblems.length ? "error" : dirty ? "dirty" : settingsMessage ? "success" : "idle";
+  const symbol = {pending:"pending", error:"error", dirty:"edit", success:"check", idle:"check"}[tone];
+  if (settingsForm) { settingsForm.disabled = settingsSaving; settingsForm.setAttribute("aria-busy", String(settingsSaving)); }
+  if (settingsSaveButton) {
+    settingsSaveButton.disabled = settingsSaving;
+    settingsSaveButton.replaceChildren(icon(settingsSaving ? "pending" : "check"), h("span", {}, settingsSaving ? pending : T.save));
+  }
+  if (settingsDiscardButton) { settingsDiscardButton.disabled = settingsSaving; settingsDiscardButton.textContent = dirty ? T.reload : T.refresh; }
+  if (settingsBadge) {
+    settingsBadge.replaceChildren(icon(symbol), h("span", {}, settingsSaving ? pending : tone === "error" ? T.needsAttention : dirty ? T.unsaved : T.allSaved));
+    settingsBadge.className = "draft-badge"; settingsBadge.setAttribute("data-tone", tone);
+  }
+  if (settingsSaveState) {
+    const text = settingsSaving ? pending : tone === "error" ? ({reload:T.loadFailed, key:T.keySaveFailed, save:T.saveFailed}[settingsFailure] || T.needsAttention)
+      : pendingKeys ? T.keyPending : dirty ? T.draftNote : settingsMessage || T.allSaved;
+    settingsSaveState.replaceChildren(icon(symbol), h("span", {}, text));
+    settingsSaveState.className = "save-state"; settingsSaveState.setAttribute("data-tone", tone);
+  }
+  for (const [key, button] of Object.entries(settingsNavButtons)) {
+    const changed = groupDirty(key);
+    button.setAttribute("data-dirty", String(changed));
+    button.setAttribute("aria-label", SETTINGS_GROUPS.find(([name]) => name === key)[1] + (changed ? ", " + T.modifiedGroup : ""));
+  }
+  if (mainTabLabels.settings) mainTabLabels.settings.textContent = T.settings + (dirty ? " •" : "");
+  updateFieldErrors();
+}
+function ensureSettings() {
+  if (S && (settingsDirty() || settingsSaving || newProviderName || newPriceName)) return Promise.resolve();
+  if (!settingsLoading) settingsLoading = loadSettings(undefined, false, !!S).finally(() => { settingsLoading = null; });
+  return settingsLoading;
+}
+function showSettingsGroup(key) {
+  if (!settingsPanels[key]) return;
+  settingsGroup = key;
+  for (const [name, panel] of Object.entries(settingsPanels)) panel.hidden = name !== key;
+  for (const [name, button] of Object.entries(settingsNavButtons)) {
+    button.className = name === key ? "on" : "";
+    button.setAttribute("aria-current", name === key ? "true" : "false");
+  }
+  // Keep a selected item visible in the horizontal menu without scrolling the document.
+  const button = settingsNavButtons[key], nav = button && button.parentElement;
+  if (nav && nav.scrollWidth > nav.clientWidth) {
+    const left = button.offsetLeft, right = left + button.offsetWidth;
+    if (left < nav.scrollLeft) nav.scrollLeft = Math.max(0, left - 8);
+    else if (right > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = right - nav.clientWidth + 8;
+  }
+}
+window.addEventListener("beforeunload", event => {
+  if (settingsDirty()) { event.preventDefault(); event.returnValue = ""; }
+});
 /* the entries of what workers may not read that the coordinator added with hansa hide, as hansa recorded them */
 const hiddenByCoordinator = () => Object.entries(S.workers_may_not_read_added || {}).filter(([p]) => (S.workers_may_not_read || []).includes(p));
-async function loadSettings(problems) {
+async function loadSettings(problems, keepKeys = false, background = false) {
+  const before = background ? JSON.stringify(S) : null, epoch = settingsEpoch;
   const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed,lane_allow_changed&n=20")]);
+  // A clean page may refresh on return, but a reply must never replace edits begun while it was in flight.
+  if (background && (epoch !== settingsEpoch || settingsSaving || settingsDirty() || JSON.stringify(S) !== before || newProviderName || newPriceName)) return;
   S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
   RELEASE_UNMATCHED = r.release_unmatched || []; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
+  S.alert = S.alert || {command:""}; S.coordinator_alert = S.coordinator_alert || {}; S.coordinator_compact = S.coordinator_compact || {};
+  if (!keepKeys) KEY_DRAFTS = {};
+  newProviderName = ""; newPriceName = ""; settingsMessage = ""; settingsFailure = "";
+  settingsBaseline = JSON.stringify(S);
+  settingsEpoch++;
   renderSettings(problems && problems.length ? problems : r.problems);
 }
+async function saveSettings() {
+  if (settingsSaving || !S) return;
+  settingsEpoch++;
+  settingsPending = "save"; settingsSaving = true; settingsMessage = ""; refreshSettingsState();
+  try {
+    // Disable the settings form until both the write and its canonical reload finish.
+    // Main-page navigation stays available and never replaces this draft.
+    const r = await api("/api/settings", {settings:JSON.parse(JSON.stringify(S)), rev:REV});
+    if (r.ok) {
+      await loadSettings(undefined, true);
+      settingsMessage = Object.values(KEY_DRAFTS).some(Boolean) ? T.savedWithKeys : T.saved;
+    } else { settingsFailure = "save"; renderSettings(r.problems || [T.problems]); }
+  } catch (e) { settingsFailure = "save"; renderSettings([String(e.message || e)]); }
+  finally { settingsSaving = false; refreshSettingsState(); }
+}
+async function discardSettings() {
+  if (settingsSaving || (settingsDirty() && !window.confirm(T.discardConfirm))) return;
+  settingsEpoch++;
+  settingsPending = "reload"; settingsSaving = true; refreshSettingsState();
+  try { await loadSettings(); }
+  catch (e) { settingsFailure = "reload"; renderSettings([String(e.message || e)]); }
+  finally { settingsSaving = false; refreshSettingsState(); }
+}
+async function saveProviderKey(name, clear = false) {
+  if (settingsSaving) return;
+  const value = clear ? "" : KEY_DRAFTS[name] || "";
+  if (!clear && !value.trim()) return;
+  settingsEpoch++;
+  settingsPending = "key"; settingsSaving = true; refreshSettingsState();
+  try {
+    const r = await api("/api/key", {provider:name, key:value});
+    if (r.ok || r.saved === true) { KEYS[name] = !!value.trim(); delete KEY_DRAFTS[name]; }
+    if (r.ok === false) { settingsFailure = "key"; renderSettings(r.problems || [T.problems]); }
+    else {
+      if (settingsFailure === "key") { settingsProblems = []; settingsFailure = ""; }
+      settingsMessage = T.keySaved; renderSettings();
+    }
+  } catch (e) { settingsFailure = "key"; renderSettings([String(e.message || e)]); }
+  finally { settingsSaving = false; refreshSettingsState(); }
+}
+const help = (text, title = T.learnMore) => h("details", {class:"help"}, h("summary", {}, title), h("p", {}, text));
+function controlMeta(obj, key) {
+  if (!S) return null;
+  const prefix = (group, text) => ({group, matches:problem => problem.startsWith(text)});
+  if (obj === S) return prefix(key.startsWith("release") ? "releases" : "coordinator", key);
+  if (obj === S.coordinator_compact) return prefix("coordinator", "coordinator_compact:");
+  if (obj === S.coordinator_alert) return {group:"alerts", matches:p => p.startsWith("coordinator_alert") && (p.includes(`(${key})`) || p.startsWith("coordinator_alert must"))};
+  if (obj === S.alert) return prefix("alerts", "the alert command");
+  if (obj === S.coordinator) return {group:"coordinator", matches:p => p.startsWith("coordinator:") && p.includes(key)};
+  const provider = Object.entries(S.providers).find(([, value]) => value === obj);
+  if (provider) return prefix("providers", `provider ${provider[0]}: ${key === "base_url" ? "the endpoint address" : key}`);
+  return null;
+}
+function updateFieldErrors() {
+  for (const record of fieldRecords) {
+    const problems = settingsProblems.filter(record.matches);
+    const invalid = problems.length > 0;
+    record.control.setAttribute("aria-invalid", String(invalid));
+    record.error.hidden = !invalid;
+    record.error.textContent = problems.join(" · ");
+    record.control.setAttribute("aria-describedby", [record.noteId, invalid ? record.error.id : ""].filter(Boolean).join(" "));
+  }
+}
+function problemTarget(problem) {
+  const record = fieldRecords.find(r => r.matches(problem));
+  if (record) return record;
+  const group = /^(provider |at least one provider)/.test(problem) ? "providers"
+    : /^(coordinator_alert|the alert command)/.test(problem) ? "alerts"
+    : /^(coordinator|cool_minutes)/.test(problem) ? "coordinator"
+    : /^workers_may_not_read/.test(problem) ? "security"
+    : /^release/.test(problem) ? "releases" : /^price/.test(problem) ? "prices" : /^lane/.test(problem) ? "lanes" : "";
+  return group ? {group} : null;
+}
+function focusProblem(problem) {
+  const target = problemTarget(problem);
+  if (!target) return;
+  showSettingsGroup(target.group);
+  if (target.control) {
+    target.control.focus();
+    // The sticky save bar must not cover the field reached from an error summary.
+    if (target.control.scrollIntoView) target.control.scrollIntoView({block:"center", behavior:"auto"});
+  }
+  else if (settingsNavButtons[target.group]) settingsNavButtons[target.group].focus();
+}
+function passwordControl(input) {
+  if (!input.id) input.id = "setting-key-" + (++fieldSequence);
+  const toggle = h("button", {type:"button", "aria-label":T.showKey, "aria-controls":input.id, "aria-pressed":"false",
+    onclick:() => {
+      const visible = input.type === "password";
+      input.type = visible ? "text" : "password";
+      toggle.setAttribute("aria-pressed", String(visible));
+      toggle.setAttribute("aria-label", visible ? T.hideKey : T.showKey);
+      toggle.replaceChildren(icon(visible ? "eyeOff" : "eye"));
+    }}, icon("eye"));
+  return h("div", {class:"password-control"}, input, toggle);
+}
+function field(label, control, note = "", explanation = "", wide = false) {
+  const id = control.id || "setting-field-" + (++fieldSequence);
+  const direct = ["INPUT", "SELECT", "TEXTAREA"].includes(control.tagName);
+  if (direct) control.setAttribute("id", id);
+  const noteId = id + "-note";
+  if (direct && note) control.setAttribute("aria-describedby", noteId);
+  const error = h("p", {class:"field-error", id:id + "-error", hidden:true});
+  if (direct && control._settingMeta) fieldRecords.push({control, error, noteId:note ? noteId : "", ...control._settingMeta});
+  return h("div", {class:"field" + (wide ? " wide" : "")},
+    h(direct ? "label" : "div", {class:"field-label", ...(direct ? {for:id} : {})}, label), control,
+    note ? h("div", {class:"field-note", id:noteId}, note) : null, error, explanation ? help(explanation) : null);
+}
+const fields = (...items) => h("div", {class:"form-fields"}, ...items);
 function forbiddenExceptions() {
   const rows = Array.isArray(S.release_forbidden_except) ? S.release_forbidden_except.filter(row =>
     row && typeof row.entry === "string" && Array.isArray(row.lanes) && row.lanes.every(lane => typeof lane === "string")) : [];
-  return h("div", {}, rows.map((row, i) => h("div", {class:"forbidden-exception"},
-    h("div", {class:"row"},
-      h("input", {value:row.entry, placeholder:T.forbiddenEntry, "data-exception-entry":i,
-        oninput:e => { row.entry = e.target.value; }, onchange:() => renderSettings()}),
-      h("input", {value:row.lanes.join(" "), placeholder:T.forbiddenLanes, "data-exception-lanes":i,
-        oninput:e => { row.lanes = e.target.value.split(/[\s,]+/).filter(Boolean); }, onchange:() => renderSettings()}),
-      h("button", {onclick:() => { S.release_forbidden_except = rows.filter((_, j) => j !== i); renderSettings(); }}, T.remove)),
-    !(S.release_forbidden || []).includes(row.entry) ? h("p", {class:"warn"}, `${row.entry}: ${T.forbiddenEntryUnmatched}`) : null,
-    row.lanes.filter(lane => !S.lanes[lane]).map(lane => h("p", {class:"warn"}, `${lane}: ${T.forbiddenLaneUnmatched}`)))),
-    h("button", {onclick:() => { S.release_forbidden_except = [...rows, {entry:"", lanes:[]}]; renderSettings(); }}, T.addForbiddenException));
+  return h("div", {}, rows.map((row, i) => {
+    const warnings = h("div", {});
+    const update = () => warnings.replaceChildren(...shown([
+      !(S.release_forbidden || []).includes(row.entry) ? h("p", {class:"warn"}, `${row.entry}: ${T.forbiddenEntryUnmatched}`) : null,
+      row.lanes.filter(lane => !S.lanes[lane]).map(lane => h("p", {class:"warn"}, `${lane}: ${T.forbiddenLaneUnmatched}`))]));
+    exceptionRefreshers.push(update); update();
+    return h("div", {class:"forbidden-exception"}, h("div", {class:"row"},
+      h("input", {value:row.entry, placeholder:T.forbiddenEntry, "data-exception-entry":i, "aria-label":T.forbiddenEntry,
+        oninput:e => { row.entry = e.target.value; update(); refreshSettingsState(); }}),
+      h("input", {value:row.lanes.join(" "), placeholder:T.forbiddenLanes, "data-exception-lanes":i, "aria-label":T.forbiddenLanes,
+        oninput:e => { row.lanes = e.target.value.split(/[\s,]+/).filter(Boolean); update(); refreshSettingsState(); }}),
+      h("button", {onclick:() => { S.release_forbidden_except = rows.filter((_, j) => j !== i); renderSettings(); }}, T.remove)), warnings);
+  }), h("button", {onclick:() => { S.release_forbidden_except = [...rows, {entry:"", lanes:[]}]; renderSettings(); }}, T.addForbiddenException));
 }
+
 /* Lanes are shown, not edited: the coordinator sets them. Known fields first, in this order,
    then any other field the lane has, under its own name. */
 const LANE_LABELS = {repo:T.repo, base:T.base, providers:T.providersList, max_turns:T.maxTurns, timeout_min:T.timeout,
@@ -501,13 +1047,18 @@ function bind(obj, key, kind) {
     if (kind === "number") { if (el.value === "") delete obj[key]; else obj[key] = Number(el.value); }
     else if (kind === "bool") obj[key] = el.checked;
     else obj[key] = el.value;
+    refreshSettingsState();
   };
-  if (kind === "bool") return h("input", {type:"checkbox", checked:obj[key], onchange: e => set(e.target)});
-  return h("input", {type: kind === "number" ? "number" : "text", value: obj[key] ?? "", oninput: e => set(e.target), step:"any"});
+  const input = kind === "bool" ? h("input", {type:"checkbox", checked:obj[key], onchange: e => set(e.target)})
+    : h("input", {type: kind === "number" ? "number" : "text", value: obj[key] ?? "", oninput: e => set(e.target), step:"any"});
+  input._settingMeta = controlMeta(obj, key);
+  return input;
 }
 function pick(obj, key, options, labels) {
-  return h("select", {onchange: e => { obj[key] = e.target.value; }},
+  const select = h("select", {onchange: e => { obj[key] = e.target.value; refreshSettingsState(); }},
     options.map((o, i) => h("option", {value:o, selected: (obj[key] || "") === o}, labels ? labels[i] : (o || T.effortDefault))));
+  select._settingMeta = controlMeta(obj, key);
+  return select;
 }
 /* The principal's alert command; who saved it and when are recorded by hansa as the page saves it. With it, the minutes
    of the coordinator alert's three cases (blank: the default) */
@@ -521,13 +1072,16 @@ function alertSection() {
       said.className = r.ok ? "ok" : "bad"; } catch (e) { err(e); }
     test.disabled = false; }}, T.alertTest);
   S.coordinator_alert = S.coordinator_alert || {};
-  return section(T.alerts, h("div", {class:"grid"},
-    T.alertCmd, h("div", {}, bind(S.alert, "command"), S.alert.at ? h("div", {class:"muted"}, T.alertSavedAt(when(S.alert.at))) : null,
-      h("div", {class:"muted"}, T.alertKeep), ALERT_OUTSIDE.map(f => h("div", {class:"warn"}, `${f.path}: ${T.alertOutside}`)),
-      h("div", {class:"row"}, test, said)),
-    T.alertNoSession, bind(S.coordinator_alert, "no_session_min", "number"),
-    T.alertWindow, bind(S.coordinator_alert, "window_min", "number"),
-    T.alertReview, h("div", {}, bind(S.coordinator_alert, "review_min", "number"), h("div", {class:"muted"}, T.alertCoordinatorNote))));
+  return [section(T.alertCommandTitle,
+    fields(field(T.alertCommandTitle, bind(S.alert, "command"), T.alertCommandHint, T.alertCmd, true)),
+    S.alert.at ? h("p", {class:"field-note"}, T.alertSavedAt(when(S.alert.at))) : null,
+    h("p", {class:"field-note"}, T.alertKeep),
+    ALERT_OUTSIDE.map(f => h("div", {class:"warn"}, `${f.path}: ${T.alertOutside}`)),
+    h("div", {class:"row"}, test, said)),
+    section(T.alertTiming, fields(
+      field(T.noSessionShort, bind(S.coordinator_alert, "no_session_min", "number")),
+      field(T.windowShort, bind(S.coordinator_alert, "window_min", "number")),
+      field(T.reviewShort, bind(S.coordinator_alert, "review_min", "number"))), help(T.alertCoordinatorNote))];
 }
 /* an entry of the releases without asking: [lane, target]; an old unnamed entry stays distinct unless migrated */
 const listedKey = x => typeof x === "string" ? [x, ""] : [x.lane, x.target || ""];
@@ -549,136 +1103,249 @@ function releaseTicks() {
     return h("label", {class:"tick", "data-lane":lane, "data-target":t},
       h("input", {type:"checkbox", checked:(S.releases_without_asking || []).some(same(lane, t)), onchange: e => {
         S.releases_without_asking = (S.releases_without_asking || []).filter(x => !same(lane, t)(x));
-        if (e.target.checked) S.releases_without_asking.push({lane, target:t}); }}),
+        if (e.target.checked) S.releases_without_asking.push({lane, target:t}); refreshSettingsState(); }}),
       h("span", {}, lane + (t ? ` · ${T.releaseTarget} ${t}` : ""),
         was == null ? null : h("span", {class:"warn"}, " — " + T.releaseGone,
           h("div", {class:"muted"}, was ? [T.releaseGoneWas, h("span", {class:"mono"}, was)] : T.releaseGoneUnknown))));
   }));
 }
-function renderSettings(problems) {
-  const newProv = h("input", {placeholder:T.newName});
-  const newPrice = h("input", {placeholder:"model"});
-  const msg = h("span", {});
-  $("#tab-settings").replaceChildren(...shown([
-    problems && problems.length ? section(T.problems, h("ul", {}, problems.map(p => h("li", {class:"bad"}, p)))) : null,
-    NO_READ_STOP ? section(T.noReadStop, h("p", {class:"bad"}, NO_READ_STOP)) : null,
-    section(T.providers,
+function renderSettings(problems = settingsProblems) {
+  settingsProblems = problems || [];
+  exceptionRefreshers = []; fieldRecords = [];
+  const newProv = h("input", {value:newProviderName, placeholder:T.newName, "aria-label":T.providerName, maxlength:32,
+    oninput:e => { newProviderName = e.target.value; }});
+  const newPrice = h("input", {value:newPriceName, placeholder:"model", "aria-label":T.priceName,
+    oninput:e => { newPriceName = e.target.value; }});
+  const groups = {
+    providers: [section(T.connection,
       Object.entries(S.providers).map(([name, p]) => {
-        const keyBox = h("input", {type:"password", placeholder:T.keyHint, autocomplete:"off", style:"min-width:240px"});
+        const saveKey = h("button", {disabled:!(KEY_DRAFTS[name] || "").trim(), onclick:() => saveProviderKey(name)}, T.saveKey);
+        const keyBox = h("input", {type:"password", value:KEY_DRAFTS[name] || "", placeholder:T.keyHint, autocomplete:"off",
+          "aria-label":`${name} · ${T.key}`, oninput:e => { KEY_DRAFTS[name] = e.target.value; saveKey.disabled = !e.target.value.trim(); refreshSettingsState(); }});
         const kindSel = pick(p, "kind", ["subscription", "compatible"], [T.subscription, T.compatible]);
         kindSel.addEventListener("change", () => renderSettings());
         return h("div", {class:"lane"},
-          h("div", {class:"row"}, h("strong", {}, name), checkButton(name, null),
-            h("button", {onclick: () => { delete S.providers[name]; renderSettings(); }}, T.remove)),
-          h("div", {class:"grid"},
-            T.kind, kindSel, T.model, bind(p, "model"), T.effort, pick(p, "effort", EFFORTS),
+          h("div", {class:"card-head"}, h("strong", {}, name), h("span", {class:"tag"}, p.kind === "compatible" ? T.compatible : T.subscription),
+            h("div", {class:"card-actions"}, checkButton(name, null),
+              h("button", {class:"danger", onclick:() => { delete S.providers[name]; delete KEY_DRAFTS[name]; renderSettings(); }}, T.remove))),
+          fields(field(T.kind, kindSel), field(T.model, bind(p, "model")), field(T.effort, pick(p, "effort", EFFORTS)),
             ...(p.kind === "compatible"
-              ? [T.endpoint, bind(p, "base_url"), T.key, h("div", {class:"row"},
-                  h("span", {class: KEYS[name] ? "ok" : "warn"}, KEYS[name] ? T.keySet : T.keyMissing), keyBox,
-                  h("button", {onclick: () => api("/api/key", {provider:name, key:keyBox.value})
-                    .then(r => { if (r.saved === true) KEYS[name] = true;
-                      if (r.ok === false) return renderSettings(r.problems);
-                      KEYS[name] = !!keyBox.value.trim(); renderSettings(); }).catch(err)}, T.saveKey),
-                  KEYS[name] ? h("button", {onclick: () => api("/api/key", {provider:name, key:""})
-                    .then(() => { KEYS[name] = false; renderSettings(); }).catch(err)}, T.clearKey) : null)]
-              : [T.loginDir, bind(p, "config_dir")])));
+              ? [field(T.endpoint, bind(p, "base_url")), field(T.key,
+                  h("div", {}, h("div", {class:"row"}, h("span", {class:"key-status " + (KEYS[name] ? "ok" : "warn")}, icon(KEYS[name] ? "check" : "security"), KEYS[name] ? T.keySet : T.keyMissing), passwordControl(keyBox)),
+                    h("div", {class:"row", style:"margin-top:8px"},
+                      saveKey,
+                      KEYS[name] ? h("button", {onclick:() => saveProviderKey(name, true)}, T.clearKey) : null)), T.keySeparate, "", true)]
+              : [field(T.loginDir, bind(p, "config_dir"), "", "", true)])));
       }),
-      h("div", {class:"row"}, newProv, h("button", {onclick: () => { const n = newProv.value.trim();
-        if (n && !S.providers[n]) { S.providers[n] = {kind:"compatible", model:"", effort:"", base_url:""}; renderSettings(); } }}, T.addProvider))),
-    section(T.lanes, h("p", {class:"warn"}, T.lanesNote), h("p", {class:"muted"}, T.briefNote),
-      ...(LANE_WARNINGS.length ? [h("p", {class:"warn"}, T.laneWarnings), h("ul", {}, LANE_WARNINGS.map(p => h("li", {class:"warn mono"}, p)))] : []),
-      Object.entries(S.lanes).map(([name, l]) => h("div", {class:"lane"}, h("strong", {}, name),
-        h("div", {class:"facts"}, laneFields(l).map(([k, v]) => [h("span", {class:"muted"}, LANE_LABELS[k] || k), h("pre", {class:"mono"}, v)])))),
-      h("h3", {}, T.laneCommands), h("p", {class:"muted"}, T.laneCommandsNote),
-      LANE_CMDS.length ? table([T.at, T.lane, T.field, T.change], LANE_CMDS.map(e => [when(e.ts), e.lane, (CHANGE_LABELS[changedField(e)] || changedField(e)) + (e.target ? ` · ${T.releaseTarget} ${e.target}` : ""),
-        h("span", {class:"mono"}, `${JSON.stringify(e.old ?? "")} -> ${JSON.stringify(e.new ?? "")}`)])) : h("p", {class:"muted"}, T.none)),
-    section(T.general, h("div", {class:"grid"},
-      T.concurrency, h("div", {}, h("strong", {}, S.concurrency), " ", h("span", {class:"muted"}, T.concurrencyNote)),
-      T.diskFloor, h("div", {}, h("strong", {}, S.disk_floor ? `${S.disk_floor} GB` : T.diskFloorOff),
-        DISK_FREE == null ? null : ` · ${T.diskFree} ${(DISK_FREE / 1e9).toFixed(1)} GB`, " ", h("span", {class:"muted"}, T.diskFloorNote)),
-      T.coolMinutes, bind(S, "cool_minutes", "number"),
-      T.coordinator, h("div", {class:"row"}, pick(S.coordinator, "provider", Object.keys(S.providers), Object.keys(S.providers)),
-        T.model, bind(S.coordinator, "model"), T.effort, pick(S.coordinator, "effort", EFFORTS)),
-      ...(S.coordinator_compact = S.coordinator_compact || {}, [
-        T.compactIdle, bind(S.coordinator_compact, "idle_at", "number"),
-        T.compactWorking, h("div", {}, bind(S.coordinator_compact, "working_at", "number"), h("div", {class:"muted"}, T.compactNote))]),
-      T.workersMayNotRead, h("textarea", {placeholder:"/Users/me/.config/myproject/keys", oninput: e => {
-        S.workers_may_not_read = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.workers_may_not_read || []).join("\n")),
-      ...(hiddenByCoordinator().length ? [T.workersMayNotReadAdded, h("ul", {}, hiddenByCoordinator().map(([p, v]) =>
-        h("li", {}, `${p} · ${T.addedByCoordinator} ${when(v.at)}`)))] : []),
-      ...(DENY_SKIPPED.length ? [T.workersMayNotReadSkipped, h("ul", {}, DENY_SKIPPED.map(p => h("li", {class:"bad"}, p)))] : []))),
-    section(T.releases, h("div", {class:"grid"},
-      /* the list holds each release target as it was when saved (the lane's repository and base branch, the
-         target's command and the target it must follow); one ticked here, or taken back in, is recorded as it is
-         when Save is pressed */
-      T.releasesWithoutAsking, releaseTicks(),
-      ...(RELEASE_UNMATCHED.some(u => !u.gone) ? [T.releaseUnmatched, h("div", {},
+      h("div", {class:"row add-row"}, newProv, h("button", {onclick:() => {
+        const n = newProviderName.trim();
+        if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(n) || S.providers[n]) return renderSettings([T.invalidName]);
+        S.providers[n] = {kind:"compatible", model:"", effort:"", base_url:""}; newProviderName = ""; renderSettings([]);
+      }}, T.addProvider)))],
+    coordinator: [
+      section(T.compactTitle, fields(
+        field(T.provider, pick(S.coordinator, "provider", Object.keys(S.providers), Object.keys(S.providers))),
+        field(T.baseModel, bind(S.coordinator, "model")), field(T.effort, pick(S.coordinator, "effort", EFFORTS)),
+        field(T.cooldown, bind(S, "cool_minutes", "number")))),
+      section(T.contextTitle, fields(
+        field(T.compactIdle, bind(S.coordinator_compact, "idle_at", "number")),
+        field(T.compactWorking, bind(S.coordinator_compact, "working_at", "number"))),
+        h("p", {class:"field-note"}, T.compactHint), help(T.compactNote))],
+    lanes: [
+      section(T.general, fields(
+        field(T.concurrency, h("div", {class:"readonly-value"}, S.concurrency), "", T.concurrencyNote),
+        field(T.diskFloor, h("div", {class:"readonly-value"}, S.disk_floor ? `${S.disk_floor} GB` : T.diskFloorOff),
+          DISK_FREE == null ? "" : `${T.diskFree} ${(DISK_FREE / 1e9).toFixed(1)} GB`, T.diskFloorNote))),
+      section(T.lanes, h("div", {class:"notice"}, h("strong", {}, T.readOnly), h("p", {}, T.lanesNote)),
+        h("p", {class:"field-note"}, T.briefNote),
+        ...(LANE_WARNINGS.length ? [h("p", {class:"warn"}, T.laneWarnings), h("ul", {}, LANE_WARNINGS.map(p => h("li", {class:"warn mono"}, p)))] : []),
+        Object.entries(S.lanes).map(([name, l]) => h("div", {class:"lane"},
+          h("div", {class:"card-head"}, h("strong", {}, name), h("span", {class:"tag"}, T.readOnly)),
+          h("div", {class:"facts"}, ["repo", "base", "providers"].map(k => [h("span", {class:"muted"}, LANE_LABELS[k]), h("pre", {class:"mono"}, laneValue(k, l[k]))])),
+          h("details", {class:"help"}, h("summary", {}, T.advanced),
+            h("div", {class:"facts"}, laneFields(l).filter(([k]) => !["repo", "base", "providers"].includes(k))
+              .map(([k, v]) => [h("span", {class:"muted"}, LANE_LABELS[k] || k), h("pre", {class:"mono"}, v)])))))),
+      section(T.laneCommands, help(T.laneCommandsNote),
+        LANE_CMDS.length ? table([T.at, T.lane, T.field, T.change], LANE_CMDS.map(e => [when(e.ts), e.lane,
+          (CHANGE_LABELS[changedField(e)] || changedField(e)) + (e.target ? ` · ${T.releaseTarget} ${e.target}` : ""),
+          h("span", {class:"mono"}, `${JSON.stringify(e.old ?? "")} -> ${JSON.stringify(e.new ?? "")}`)])) : h("p", {class:"muted"}, T.none))],
+    security: [section(T.protectedPaths, fields(field(T.protectedPaths,
+      h("textarea", {placeholder:"/Users/me/.config/myproject/keys", oninput:e => {
+        S.workers_may_not_read = e.target.value.split("\n").map(x => x.trim()).filter(Boolean); refreshSettingsState();
+      }}, (S.workers_may_not_read || []).join("\n")), T.protectedHint, T.workersMayNotRead, true)),
+      ...(hiddenByCoordinator().length ? [h("p", {class:"field-note"}, T.workersMayNotReadAdded),
+        h("ul", {}, hiddenByCoordinator().map(([p, v]) => h("li", {}, `${p} · ${T.addedByCoordinator} ${when(v.at)}`)))] : []),
+      ...(DENY_SKIPPED.length ? [h("p", {class:"warn"}, T.workersMayNotReadSkipped), h("ul", {}, DENY_SKIPPED.map(p => h("li", {class:"bad"}, p)))] : []))],
+    releases: [section(T.releaseApproval, fields(
+      field(T.autoRelease, releaseTicks(), T.autoReleaseHint, T.releasesWithoutAsking, true),
+      ...(RELEASE_UNMATCHED.some(u => !u.gone) ? [field(T.releaseUnmatched, h("div", {},
         h("ul", {}, RELEASE_UNMATCHED.filter(u => !u.gone).map(u => h("li", {class:"bad"}, `${u.lane}${u.target ? ` · ${T.releaseTarget} ${u.target}` : ""}: ${(ZH && u.why_zh) || u.why}`))),
-        h("button", {onclick: e => { S.releases_without_asking = (S.releases_without_asking || []).map(listedKey).map(([lane, target]) => ({lane, target}));
-          e.target.disabled = true; }}, T.releaseTakeBack))] : []),
-      T.releaseDirect, pick(S, "release_direct", ["record", "hold"], [T.releaseDirectRecord, T.releaseDirectHold]),
-      T.releaseForbidden, h("textarea", {placeholder:"internal-only", onchange:() => renderSettings(), oninput: e => {
-        S.release_forbidden = e.target.value.split("\n").map(x => x.trim()).filter(x => x); }}, (S.release_forbidden || []).join("\n")),
-      T.releaseForbiddenExcept, forbiddenExceptions(),
-      T.releaseMailboxes, bind(S, "release_mailboxes", "bool"),
-      T.releaseMailboxAllow, h("textarea", {placeholder:"maintainer@example.com\n@project.example", oninput: e => {
-        S.release_mailbox_allow = e.target.value.split("\n").filter(x => x.trim());
-      }}, (S.release_mailbox_allow || []).join("\n")))),
-    alertSection(),
-    section(T.prices, h("p", {class:"muted"}, T.pricesNote),
-      table([T.model, T.in, T.out, T.cacheRead, T.cacheWrite, T.cacheWrite1h, ""], Object.entries(S.prices).map(([m, p]) =>
-        [m, bind(p, "in", "number"), bind(p, "out", "number"), bind(p, "cache_read", "number"), bind(p, "cache_write", "number"),
-         bind(p, "cache_write_1h", "number"), h("button", {onclick: () => { delete S.prices[m]; renderSettings(); }}, T.remove)])),
-      h("div", {class:"row"}, newPrice, h("button", {onclick: () => { const n = newPrice.value.trim();
-        if (n && !S.prices[n]) { S.prices[n] = {in:0, out:0}; renderSettings(); } }}, T.addPrice))),
-    h("div", {class:"row bar"},
-      h("button", {class:"primary", onclick: async () => {
-        try { const r = await api("/api/settings", {settings:S, rev:REV});
-          if (r.ok) { await loadSettings(); msg.textContent = T.saved; msg.className = "ok"; $("#tab-settings").append(...shown([msg])); }
-          else { renderSettings(r.problems); window.scrollTo(0, 0); } } catch (e) { err(e); } }}, T.save),
-      h("button", {onclick: () => loadSettings()}, T.reload), msg)
+        h("button", {onclick:e => { S.releases_without_asking = (S.releases_without_asking || []).map(listedKey).map(([lane, target]) => ({lane, target}));
+          e.target.disabled = true; refreshSettingsState(); }}, T.releaseTakeBack)), "", "", true)] : []),
+      field(T.directPolicy, pick(S, "release_direct", ["record", "hold"], [T.releaseDirectRecord, T.releaseDirectHold]), "", T.releaseDirect, true))),
+      section(T.contentRules, fields(
+        field(T.forbiddenWords, h("textarea", {placeholder:"internal-only", oninput:e => {
+          S.release_forbidden = e.target.value.split("\n").map(x => x.trim()).filter(Boolean); exceptionRefreshers.forEach(update => update()); refreshSettingsState();
+        }}, (S.release_forbidden || []).join("\n")), T.forbiddenHint, T.releaseForbidden, true),
+        field(T.exceptionsTitle, forbiddenExceptions(), "", T.releaseForbiddenExcept, true),
+        field(T.mailboxTitle, (() => { const input = bind(S, "release_mailboxes", "bool"); input.setAttribute("id", "release-mailboxes"); return input; })(), "", T.releaseMailboxes, true),
+        field(T.mailboxAllowTitle, h("textarea", {id:"release-mailbox-allow", placeholder:"maintainer@example.com\n@project.example", oninput:e => {
+          S.release_mailbox_allow = e.target.value.split("\n").filter(x => x.trim()); refreshSettingsState();
+        }}, (S.release_mailbox_allow || []).join("\n")), T.mailboxHint, T.releaseMailboxAllow, true)))],
+    alerts: alertSection(),
+    prices: [section(T.prices, h("p", {class:"field-note"}, T.pricesNote),
+      table([T.model, T.in, T.out, T.cacheRead, T.cacheWrite, T.cacheWrite1h, ""], Object.entries(S.prices).map(([m, p]) => [m,
+        ...[["in", T.in], ["out", T.out], ["cache_read", T.cacheRead], ["cache_write", T.cacheWrite], ["cache_write_1h", T.cacheWrite1h]].map(([k, label]) => {
+          const input = bind(p, k, "number"); input.setAttribute("aria-label", `${m} · ${label}`); return input;
+        }), h("button", {onclick:() => { delete S.prices[m]; renderSettings(); }}, T.remove)])),
+      h("div", {class:"row add-row"}, newPrice, h("button", {onclick:() => {
+        const n = newPriceName.trim();
+        if (!n || S.prices[n]) return renderSettings([T.invalidModel]);
+        S.prices[n] = {in:0, out:0}; newPriceName = ""; renderSettings([]);
+      }}, T.addPrice)))]
+  };
+  settingsPanels = {}; settingsNavButtons = {};
+  const nav = h("nav", {class:"settings-nav", "aria-label":T.settingsNav}, SETTINGS_GROUPS.map(([key, label], i) => {
+    const button = h("button", {"aria-controls":"settings-" + key, onclick:() => showSettingsGroup(key)},
+      icon(key), h("span", {}, label),
+      key === "lanes" ? h("small", {}, T.readOnly) : null);
+    settingsNavButtons[key] = button; return button;
+  }));
+  settingsForm = h("fieldset", {class:"settings-form", "aria-label":T.settings}, SETTINGS_GROUPS.map(([key, label, description]) => {
+    const panel = h("div", {id:"settings-" + key, class:"settings-group", "aria-labelledby":"settings-title-" + key},
+      h("div", {class:"group-head"}, h("span", {class:"group-symbol"}, icon(key)), h("div", {}, h("h2", {id:"settings-title-" + key}, label), h("p", {}, description))), groups[key]);
+    settingsPanels[key] = panel; return panel;
+  }));
+  settingsBadge = h("span", {class:"draft-badge"});
+  settingsSaveState = h("span", {class:"save-state", role:"status", "aria-live":"polite"});
+  settingsSaveButton = h("button", {class:"primary", onclick:saveSettings}, T.save);
+  settingsDiscardButton = h("button", {onclick:discardSettings}, T.reload);
+  $("#tab-settings").replaceChildren(...shown([
+    h("div", {class:"settings-head"}, h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T.settings), h("h1", {}, T.settings), h("p", {}, T.settingsIntro)), settingsBadge),
+    settingsProblems.length ? h("section", {class:"settings-errors", role:"alert"}, h("h2", {}, icon("error"), T.problems), h("p", {class:"field-note"}, T.retrySave),
+      h("ul", {}, settingsProblems.map(p => h("li", {class:"bad"}, problemTarget(p) ? h("button", {type:"button", onclick:() => focusProblem(p), title:T.jumpToField}, p) : p)))) : null,
+    NO_READ_STOP ? section(T.noReadStop, h("p", {class:"bad"}, NO_READ_STOP)) : null,
+    h("div", {class:"settings-layout"}, nav, h("div", {class:"settings-content"}, settingsForm,
+      h("div", {class:"settings-footer"}, settingsSaveState, settingsDiscardButton, settingsSaveButton)))
   ]));
+  showSettingsGroup(settingsGroup);
+  refreshSettingsState();
 }
 
 /* ---------- cost ---------- */
-let costDays = 7;
+let costDays = 7, costEpoch = 0, costLoading = false, costExporting = false, costLoadError = false, costRenderedDays = null;
+let costSelect, costExportButton, costFeedback, costRetryButton, costPlaceholder;
+function costControlsState() {
+  if (costSelect) costSelect.disabled = costLoading || costExporting;
+  if (costExportButton) {
+    costExportButton.disabled = costLoading || costExporting || costLoadError || costRenderedDays === null;
+    costExportButton.replaceChildren(icon(costExporting ? "pending" : "cost"), costExporting ? T.exporting : T.export);
+  }
+  if (costRetryButton) costRetryButton.disabled = costLoading || costExporting;
+}
+function costFeedbackState(tone, text, retry = false) {
+  if (!costFeedback) return;
+  costFeedback.setAttribute("data-tone", tone);
+  costFeedback.replaceChildren(icon(tone === "error" ? "error" : tone === "pending" ? "pending" : "check"), h("span", {}, text), costRetryButton);
+  costRetryButton.hidden = !retry;
+}
 async function loadCost() {
-  const r = await api("/api/cost?days=" + costDays);
+  const epoch = ++costEpoch, days = costDays, host = $("#tab-cost");
+  costLoading = true; host.setAttribute("aria-busy", "true");
+  if (!costFeedback) renderCost(null);
+  if (costPlaceholder) { costPlaceholder.textContent = T.costLoading; costPlaceholder.className = "field-note"; }
+  costControlsState(); costFeedbackState("pending", T.costLoading);
+  try {
+    const r = await api("/api/cost?days=" + days);
+    // Rapid tab switches must not let an older period replace the newest report.
+    if (epoch !== costEpoch) return;
+    costLoadError = false;
+    renderCost(r);
+    costFeedbackState(costExporting ? "pending" : "idle", costExporting ? T.exporting : T.costReady);
+  } catch (e) {
+    if (epoch !== costEpoch) return;
+    costLoadError = true;
+    costFeedbackState("error", T.costLoadFailed + " " + (costRenderedDays === null ? "" : T.costRetained(costRenderedDays) + " ") + String(e.message || e), true);
+    if (costPlaceholder) { costPlaceholder.textContent = T.costLoadFailed; costPlaceholder.className = "bad"; }
+  } finally {
+    if (epoch === costEpoch) {
+      costLoading = false; host.setAttribute("aria-busy", "false"); costControlsState();
+    }
+  }
+}
+function renderCost(r) {
   const seatName = k => k.startsWith("helper:") ? `${T.seat_helper}: ${T["helper_" + k.slice(7)] || k.slice(7)}` : T["seat_" + k] || k;
   const block = key => {
     const rows = Object.entries(r.by[key] || {});
     if (!rows.length) return null;
     const tries = key === "task";  // every run of a task counts: its earlier tries too
-    return h("div", {}, h("h3", {}, T["by" + key]), table(["", T.tokens, "$ " + T.listValue, T.tokensNoPrice, ...(tries ? [T.runs, T.turns] : [])],
-      rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : "",
-        ...(tries ? [v.runs ? fmt(v.runs) : "", v.runs ? fmt(v.turns) : ""] : [])])));
+    const label = {seat:T.seatColumn, day:T.dayColumn, model:T.model, lane:T.lane, provider:T.provider, task:T.task}[key];
+    const panel = dashboardPanel(T["by" + key], key === "provider" ? "providers" : key === "lane" ? "lanes" : "cost", rows.length,
+      table([label, T.tokens, "$ " + T.listValue, T.tokensNoPrice, ...(tries ? [T.runs, T.turns] : [])],
+        rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : "",
+          ...(tries ? [v.runs ? fmt(v.runs) : "", v.turns ? fmt(v.turns) : ""] : [])])));
+    if (["provider", "task"].includes(key)) panel.className += " cost-wide";
+    return panel;
   };
+  costSelect = h("select", {id:"cost-period", "aria-label":T.period}, [1, 7, 30].map(days => h("option", {value:String(days), selected:days === costDays}, T.periodDays(days))));
+  costSelect.addEventListener("change", e => { costDays = Number(e.target.value); loadCost().catch(err); });
+  costExportButton = h("button", {onclick:() => exportCsv()}, T.export);
+  costRetryButton = h("button", {type:"button", hidden:true, onclick:() => loadCost().catch(err)}, T.retry);
+  costFeedback = h("div", {class:"cost-feedback", role:"status", "aria-live":"polite"});
+  costPlaceholder = r ? null : h("p", {class:"field-note"}, T.costLoading);
+  const sections = r ? ["seat", "day", "model", "lane", "provider", "task"].map(block).filter(Boolean) : [];
+  const unpriced = r ? Object.values(r.by.model || {}).reduce((sum, value) => sum + (value.unpriced_tokens || 0), 0) : 0;
   $("#tab-cost").replaceChildren(...shown([
-    h("section", {},
-      h("div", {class:"row"}, T.days, pick({d:String(costDays)}, "d", ["1", "7", "30"], ["1", "7", "30"]), T.daysUnit,
-        h("strong", {}, `${T.total}: ${fmt(r.total.tokens)} ${T.tokens} · $${r.total.usd.toFixed(2)} ${T.listValue}`),
-        h("button", {onclick: exportCsv}, T.export)),
-      h("p", {class:"muted"}, T.costNote),
-      r.coordinator_uncounted ? h("p", {class:"warn"}, ZH ? T.coordinatorUncounted.replaceAll("{user}", r.coordinator_user) : r.coordinator_uncounted) : null,
-      r.unpriced_models.length ? h("p", {class:"warn"}, T.unpriced + " " + r.unpriced_models.join(", ") + " — " + T.setPrice) : null),
-    section(T.cost, ["seat", "day", "model", "lane", "provider", "task"].map(block))]));
-  const sel = $("#tab-cost select");
-  sel.addEventListener("change", e => { costDays = Number(e.target.value); loadCost().catch(err); });
+    pageHeading("cost", T.costIntro),
+    h("section", {class:"dashboard-panel"}, h("div", {class:"cost-toolbar"},
+      h("div", {class:"period-control"}, h("label", {for:"cost-period"}, T.period), costSelect), costExportButton), costFeedback),
+    r ? h("div", {class:"metric-grid cost-metrics", "aria-label":T.total},
+      summaryCard(T.totalTokens, fmt(r.total.tokens), T.periodDays(costDays), "status"),
+      summaryCard(T.estimatedCost, "$" + r.total.usd.toFixed(2), T.usdNote, "cost"),
+      summaryCard(T.unpricedTokens, fmt(unpriced), T.unpricedNote, "prices")) : null,
+    r ? h("section", {class:"dashboard-panel"}, h("p", {class:"cost-explanation"}, T.costNote),
+      r.coordinator_uncounted ? h("div", {class:"cost-warning"}, icon("error"), h("p", {}, ZH ? T.coordinatorUncounted.replaceAll("{user}", r.coordinator_user) : r.coordinator_uncounted)) : null,
+      r.unpriced_models.length ? h("div", {class:"cost-warning"}, icon("prices"), h("p", {}, T.unpriced + " " + r.unpriced_models.join(", ") + " — " + T.setPrice)) : null) : null,
+    r ? sections.length ? h("div", {class:"cost-breakdowns"}, sections) : dashboardPanel(T.cost, "cost", 0, emptyState(T.noCost, T.noCostNote, "cost"))
+      : dashboardPanel(T.cost, "cost", null, costPlaceholder)
+  ]));
+  if (r) costRenderedDays = costDays;
+  costControlsState();
 }
 async function exportCsv() {
-  const r = await api(`/api/cost?days=${costDays}&rows=1`);
-  const cols = ["day", "seat", "lane", "task", "provider", "model", "in", "out", "cache_read", "cache_write", "usd", "priced_by", "runs", "turns"];
-  const esc = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-  const csv = [cols.join(",")].concat(r.rows.map(x => cols.map(c => esc(x[c])).join(","))).join("\n");
-  const a = h("a", {href:URL.createObjectURL(new Blob([csv], {type:"text/csv"})), download:`cost-${costDays}d.csv`});
-  document.body.append(...shown([a])); a.click(); a.remove();
+  if (costExporting || costLoading || costLoadError || costRenderedDays === null) return;
+  const days = costDays;
+  costExporting = true; costControlsState(); costFeedbackState("pending", T.exporting);
+  let url;
+  try {
+    const r = await api(`/api/cost?days=${days}&rows=1`);
+    const cols = ["day", "seat", "lane", "task", "provider", "model", "in", "out", "cache_read", "cache_write", "usd", "priced_by", "runs", "turns"];
+    const esc = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const csv = [cols.join(",")].concat(r.rows.map(x => cols.map(c => esc(x[c])).join(","))).join("\n");
+    url = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
+    const a = h("a", {href:url, download:`cost-${days}d.csv`});
+    document.body.append(...shown([a])); a.click(); a.remove();
+    costFeedbackState("success", T.exported);
+  } catch (e) {
+    costFeedbackState("error", T.exportFailed + " " + String(e.message || e));
+  } finally {
+    if (url && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(url);
+    costExporting = false; costControlsState();
+  }
 }
 
 /* ---------- start ---------- */
 document.title = T.title;
-$("#title").textContent = T.title;
-for (const tab of ["status", "settings", "cost"])
-  $("#tabs").append(...shown([h("button", {"data-tab":tab, onclick: () => show(tab)}, T[tab])]));
+$("#title").replaceChildren(h("span", {class:"brand-mark", "aria-hidden":"true"}, "H"), h("span", {}, "Hansa"), h("span", {class:"brand-caption"}, T.title));
+$("#tabs").setAttribute("aria-label", T.primaryNav);
+for (const tab of ["status", "settings", "cost"]) {
+  mainTabLabels[tab] = h("span", {}, T[tab]);
+  $("#tabs").append(...shown([h("button", {"data-tab":tab, onclick: () => show(tab)}, icon(tab), mainTabLabels[tab])]));
+}
+if (typeof ResizeObserver !== "undefined") {
+  const header = document.querySelector("header");
+  new ResizeObserver(() => document.documentElement.style.setProperty("--header-height", header.getBoundingClientRect().height + "px")).observe(header);
+}
 if (location.search.includes("t=")) history.replaceState(null, "", "/");
 show("status");
 setInterval(() => {

@@ -1,5 +1,54 @@
 # The desk: files, keys and notes
 
+## Status and cost on the web page
+
+Status shows the last 24 hours in summary cards, keeps dispatch controls separate
+from task tables, and places release decisions and requests near the top. Empty
+states explain where new activity will appear. Task details remain open across
+refreshes. The page refreshes every five seconds while Status is visible, unless
+you are filling in an input. Release approvals, refusals, stops and request replies
+use the same actions as before.
+
+Cost offers the last 1, 7 or 30 days, with token usage, estimated value and unpriced
+tokens above the six category tables. Unpriced models and unreadable coordinator
+usage remain explicit warnings; dollar values are an estimate, not a bill. A
+failed range change identifies the old report that remains visible and disables
+export until a report loads successfully. Retry requests the selected range.
+CSV export keeps the original rows and columns, uses the range selected when the
+export started, and reports success or failure. Both pages share the settings
+page's native CSS and JavaScript controls and reduced-motion support.
+
+## Settings on the web page
+
+Settings are grouped into providers, runtime and coordinator, lanes (read only),
+access protection, release rules, notifications and model pricing. Select a group
+in the directory; full explanations and advanced lane details expand in place.
+The save bar applies to all editable settings groups.
+
+The directory marks groups with unsaved edits. The save bar distinguishes edits,
+an operation in progress, success and failure; a failed save says that the draft
+is still present. Known validation errors link to the relevant field or group,
+with field errors shown beside the control. Narrow screens use a horizontal
+group directory. Controls have visible keyboard focus, and brief transitions
+follow the browser's reduced-motion preference.
+
+Switching between Status, Settings and Cost, or between settings groups, keeps
+unsaved edits. The page marks them and asks the browser to warn before a refresh
+or close. Drafts live only in page memory: they do not survive leaving the page.
+Save settings writes them; a failed save keeps them. During a save the settings
+form is disabled until the saved settings have been reloaded. Discard confirms
+before replacing a draft with the desk's latest settings; with no draft it simply
+reloads them. Changes made elsewhere still use the existing stale-page check:
+a save cannot silently overwrite them.
+
+Keys are saved separately with each provider's Save key button. An unsaved key
+input stays in memory across page and group switches, and across a settings save;
+it is never included in the settings request or put in browser storage. A
+confirmed discard clears those inputs too. Keys already saved are unaffected.
+The eye button shows or hides the current key input without saving or changing it.
+With no draft, returning to Settings refreshes it from the desk. If you start
+editing before that reply arrives, the reply leaves your new draft alone.
+
 ## Starting the server and the coordinator again
 
 Run `hansa up` in a desk, or name it with `hansa --desk DIR up` or `HANSA_DESK`.
@@ -339,7 +388,7 @@ of them has less free than the floor, it starts no new task, verification, try, 
 
 - `hansa status` has a line naming the volume, the places on it, its free space and the floor (`DISK LOW: ...`),
   and always one with the free space of the desk's volume and the floor, also when nothing is under it;
-- the page shows the same in its status line, and the floor next to the free space under Settings, General;
+- the page shows the same in its status line, and the floor next to the free space under Settings, Lanes, General;
 - `hansa explain server` lists each volume with its free space;
 - a queued task, merge or release says it waits for space;
 - the coordinator's session is told once when a volume goes under the floor and once when all are back over it,
