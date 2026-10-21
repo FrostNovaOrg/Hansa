@@ -42,6 +42,11 @@ CARD = Path(__file__).with_name("card.md")  # the card hansa puts in a desk (cli
 COPY = os.path.join(".claude", "rules", "hansa-card.md")
 COPY_MARK = "<!-- hansa: copy of the coordinator's card for the desk at "  # its header's first line, then the desk
 COPIES = "card-copies.json"  # in .hansa/: the copies hansa wrote, so notify off finds them after the record changes
+COPY_ENABLED = "card-copy.json"  # in .hansa/: the desk's choice, independent of the session's start record
+
+
+def card_copy_enabled(desk: Desk) -> bool:
+    return read_json(desk.state_dir / COPY_ENABLED, True) is not False
 
 
 def hansa_command() -> str:
@@ -362,12 +367,16 @@ def restart_line(desk: Desk, rec: dict) -> str:
     return f"in {plan['folder']} with {shlex.join(plan['hand'])}"
 
 
-def notify_on_line(desk: Desk) -> str:
+def notify_on_line(desk: Desk, card: bool | None = None) -> str:
     """The line hansa notify on adds: how hansa up starts this session again, recorded now; or why it does not."""
     sess = notify.session_here()
     theirs = account.desk_account(desk.root)
     if theirs:  # root's session on the account's desk: root writes nothing there, and hansa up runs as the account
         return f"hansa up does not start this session again after a restart: it is root's, on {theirs}'s desk"
+    if card is not None:
+        write_json(desk.state_dir / COPY_ENABLED, card)
+        if not card:
+            remove_copies(desk)
     rec = read_coordinator(desk)
     # hansa coordinator started this same session and recorded that itself. By the record, not HANSA_ROLE: a desk
     # owner's wrapper sets that on every hansa command, so a session it did not start runs notify on with it too
@@ -431,7 +440,8 @@ def card_check(desk: Desk, rec: dict) -> dict:
     {} when it does, and for a session hansa coordinator started: that one runs in the desk. Else its state:
     'external' (imported from outside the session's folder), 'copy' (hansa's copy of it is in the folder's
     .claude/rules), 'account' (that folder would reach every session of the account), 'foreign' (a file hansa did
-    not write is where the copy goes) or 'missing', with the line that imports it."""
+    not write is where the copy goes), 'off' (the owner turned the copy off) or 'missing', with the line that
+    imports it."""
     if rec.get("kind") != "notify" or not isinstance(rec.get("folder"), str) or not os.path.isdir(rec["folder"]):
         return {}
     folder, root = Path(os.path.realpath(rec["folder"])), Path(os.path.realpath(desk.root))
@@ -446,6 +456,8 @@ def card_check(desk: Desk, rec: dict) -> dict:
          "line": "@" + (os.path.relpath(card, folder) if inside else str(card))}
     if held:
         return {**c, "state": "external"}
+    if not card_copy_enabled(desk):
+        return {**c, "state": "off"}
     why = account_rules(folder, rec)
     if why:
         return {**c, "state": "account", "why": why}
@@ -549,6 +561,8 @@ def remove_copies(desk: Desk, keep: str = "") -> list:
 def write_copy(desk: Desk, c: dict) -> dict:
     """Put the card in the session's folder's .claude/rules, as card_check found it: the state after, 'copy' when
     written (with 'git': what git was told), else 'missing' with 'why'. Never a file git tracks."""
+    if not card_copy_enabled(desk):
+        return {**c, "state": "off"}
     path = Path(c["copy"])
     top = git_top(c["folder"])
     if tracked(top, path):
@@ -593,6 +607,9 @@ def card_lines(desk: Desk, rec: dict, c: dict = None) -> list:
     removed = [f"hansa removed its earlier copy of the card, {p}." for p in c.get("removed") or []]
     if not c.get("state"):
         return removed
+    if c["state"] == "off":
+        return ["This session does not read the coordinator's card because the copy is turned off for this desk. "
+                "hansa notify on --card turns it on.", *removed]
     then = "This takes effect from the session's next start; until then hansa help card prints the card."
     reach = (f"every Claude Code session started in {c['folder']}, or in a folder below it, reads that file at each "
              "start (hansa's own runs leave it out)")
@@ -632,6 +649,9 @@ def card_note(desk: Desk) -> str:
     c = card_check(desk, read_coordinator(desk))
     if not c:
         return ""
+    if c["state"] == "off":
+        return ("the recorded session does not read the card because the copy is turned off for this desk; "
+                "hansa notify on --card turns it on")
     if c["state"] == "copy":
         return f"the recorded session reads the card from {c['copy']}, hansa's copy (hansa explain notify)"
     if c["state"] == "external":

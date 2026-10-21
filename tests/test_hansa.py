@@ -2592,7 +2592,7 @@ class CoordinatorUpTest(unittest.TestCase):
         folder.mkdir(exist_ok=True)
         return folder
 
-    def notify_on(self, argv, folder=None, sess=None, **env):
+    def notify_on(self, argv, folder=None, sess=None, flags=(), **env):
         """hansa notify on from a session (SESS unless given) whose claude ran with argv in folder: what it printed,
         what it recorded, and whether it read the session's process."""
         folder = str(self.own_folder()) if folder is None else folder
@@ -2604,7 +2604,7 @@ class CoordinatorUpTest(unittest.TestCase):
                 unittest.mock.patch.object(up, "proc_cwd", return_value=folder), \
                 unittest.mock.patch.object(up, "record_tmux", return_value={"server": ["-L", "default"],
                                                                             "session": "work"}):
-            said = self.say("notify", "on")
+            said = self.say("notify", "on", *flags)
         return said, up.read_coordinator(self.desk), args
 
     def test_notify_on_records_the_sessions_exact_start_without_its_conversation_or_identity(self):
@@ -2735,6 +2735,71 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertNotIn("git", said.split("notify off.", 1)[1])  # not a git work tree
         self.assertIn(f"reads the card from {copy}", self.status_line())
         self.assertIn(f"reads the coordinator's card from {copy}", views.explain_text(desk, "notify"))
+
+    def test_notify_no_card_persists_until_card_is_enabled(self):
+        from hansa import up
+        project = self.own_folder()
+        self.desk = desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        said, rec, _ = self.notify_on(["claude"], str(project), flags=["--no-card"])
+        self.assertEqual((rec["kind"], rec["folder"], rec["session"]), ("notify", str(project), self.SESS))
+        self.assertFalse(self.copy_of(project).exists())
+        for text in (said, self.say("status"), self.say("explain", "notify")):
+            self.assertIn("does not read", text)
+            self.assertIn("copy is turned off", text)
+            self.assertIn("hansa notify on --card", text)
+            self.assertNotIn("@", text)
+        # A different session rewrites its start record, but keeps the desk's choice.
+        _, rec, _ = self.notify_on(["claude", "--name", "new"], str(project),
+                                   sess={"pid": 4343, "start": "boot:88"})
+        self.assertEqual(rec["argv"], ["claude", "--name", "new"])
+        self.assertFalse(self.copy_of(project).exists())
+        self.serve_until_web(desk)
+        self.assertFalse(self.copy_of(project).exists())
+        with unittest.mock.patch.object(notify, "turn_off", return_value="hansa no longer posts to this session"):
+            self.say("notify", "off")
+        self.notify_on(["claude"], str(project))
+        self.assertFalse(self.copy_of(project).exists())
+        said, _, _ = self.notify_on(["claude"], str(project), flags=["--card"])
+        self.assertTrue(self.copy_of(project).read_text().startswith(up.COPY_MARK))
+        self.assertIn("wrote a copy", said)
+        self.assertNotIn("copy is turned off", self.say("status"))
+
+    def test_notify_no_card_removes_only_hansas_copies(self):
+        project = self.own_folder()
+        self.desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(project))
+        self.assertTrue(self.copy_of(project).is_file())
+        self.notify_on(["claude"], str(project), flags=["--no-card"])
+        self.assertFalse(self.copy_of(project).exists())
+        self.notify_on(["claude"], str(project))
+        self.assertFalse(self.copy_of(project).exists())
+        self.notify_on(["claude"], str(project), flags=["--card"])
+        self.copy_of(project).write_text("my own rules\n")
+        self.notify_on(["claude"], str(project), flags=["--no-card"])
+        self.assertEqual(self.copy_of(project).read_text(), "my own rules\n")
+
+    def test_card_refresh_does_not_rewrite_a_copy_while_off(self):
+        from hansa import up
+        project = self.own_folder()
+        self.desk = desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        _, rec, _ = self.notify_on(["claude"], str(project))
+        before = up.card_check(desk, rec)
+        copy = self.copy_of(project)
+        stale = copy.read_text().split("\n\n", 1)[0] + "\n\nan older copy\n"
+        self.notify_on(["claude"], str(project), flags=["--no-card"])
+        # An old file put back after opting out must not be refreshed by either start.
+        copy.write_text(stale)
+        up.write_copy(desk, before)  # even a state read before opting out cannot write
+        self.assertEqual(copy.read_text(), stale)
+        self.serve_until_web(desk)
+        self.assertEqual(copy.read_text(), stale)
+        cli.coordinator_desk(desk, os.getuid())
+        self.assertEqual(copy.read_text(), stale)
+
+    def test_notify_card_flags_require_on(self):
+        for words in (("off", "--no-card"), ("--card",)):
+            with self.subTest(words=words), self.assertRaisesRegex(SystemExit, "notify on"):
+                self.say("notify", *words)
 
     def test_the_copy_is_kept_out_of_the_git_repository_of_a_session_that_holds_the_desk(self):
         project = self.tmp / "project"

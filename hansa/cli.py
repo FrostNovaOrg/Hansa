@@ -1231,9 +1231,11 @@ def cmd_release(a):
 
 
 def cmd_notify(a):
+    if a.card is not None and a.action != "on":
+        raise SystemExit("hansa: --card and --no-card require hansa notify on")
     desk = Desk.find(a.desk)
     if a.action == "on":  # and how hansa up starts this session again after a restart
-        print("\n".join(x for x in (notify.turn_on(desk), up.notify_on_line(desk)) if x))
+        print("\n".join(x for x in (notify.turn_on(desk), up.notify_on_line(desk, a.card)) if x))
         return
     if a.action != "off":
         print(notify.list_text(desk))
@@ -2894,6 +2896,11 @@ def main(argv=None):
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "
             "Code session this is run from")
     p.add_argument("action", nargs="?", choices=["on", "off"])
+    card = p.add_mutually_exclusive_group()
+    card.add_argument("--no-card", dest="card", action="store_false", default=None,
+                      help="with on: remove hansa's card copy and keep it off for this desk until --card")
+    card.add_argument("--card", action="store_true", default=None,
+                      help="with on: turn the desk's card copy back on (default: keep the desk's choice)")
     p.epilog = see_more("inbox")
     p = add("wait", cmd_wait, "return when a task finishes or fails, or the principal answers; run it in the "
             "background when hansa does not notify the session (hansa notify)")

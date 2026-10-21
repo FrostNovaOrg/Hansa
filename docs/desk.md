@@ -183,6 +183,10 @@ brings the desk's card up to hansa's, as `hansa coordinator` does, so a desk
 whose coordinator only runs `hansa notify on` gets an upgraded hansa's card and
 copy too) and at `hansa coordinator`'s start, which instead removes a copy in a
 folder that holds the desk: the session it starts there would read both.
+`hansa notify on --no-card` records the session but removes hansa's copy and
+keeps the copy off for this desk, including later plain `notify on` and starts
+of `hansa serve` or `hansa coordinator`. `hansa notify on --card` turns it back
+on and writes the copy as above; the default is on.
 `hansa notify off` removes hansa's copies, and `hansa notify on` from another
 folder removes the earlier one; only a file with hansa's header for this desk
 that git does not track is removed. When F is in a git work tree, hansa adds
