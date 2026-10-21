@@ -2796,6 +2796,14 @@ class CoordinatorUpTest(unittest.TestCase):
         cli.coordinator_desk(desk, os.getuid())
         self.assertFalse(self.copy_of(inner).exists())
 
+    def serve_until_web(self, desk):
+        """hansa serve's start up to its web server, which this test does not start; its lock let go after."""
+        with cli.hold_server_lock(desk) as held, \
+                unittest.mock.patch.object(cli, "hold_server_lock", return_value=held), \
+                unittest.mock.patch("hansa.web.start_web", side_effect=RuntimeError("no page in this test")), \
+                self.assertRaisesRegex(RuntimeError, "no page"):
+            main(["--desk", str(desk.root), "serve", "--port", "0"])
+
     def test_hansa_serve_brings_the_desks_card_and_its_copy_up_to_date(self):
         project = self.tmp / "project"
         project.mkdir()
@@ -2806,18 +2814,14 @@ class CoordinatorUpTest(unittest.TestCase):
         # a desk whose coordinator only runs notify on: its card and the copy from an earlier hansa
         (desk.root / "CLAUDE.md").write_text("an older card\n")
         copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older card\n")
-        with unittest.mock.patch("hansa.web.start_web", side_effect=RuntimeError("no page in this test")), \
-                self.assertRaises(RuntimeError):
-            main(["--desk", str(desk.root), "serve", "--port", "0"])
+        self.serve_until_web(desk)
         self.assertEqual((desk.root / "CLAUDE.md").read_text(), cli.CARD.read_text())
         self.assertIn("card_refreshed", desk.events_path.read_text())
         self.assertEqual(copy.read_text(), mine)
         self.assertTrue(mine.split("\n\n", 1)[1].startswith(cli.CARD.read_text().split("\n", 1)[0]))
         # the card already current, an older copy alone is rewritten too
         copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older card\n")
-        with unittest.mock.patch("hansa.web.start_web", side_effect=RuntimeError("no page in this test")), \
-                self.assertRaises(RuntimeError):
-            main(["--desk", str(desk.root), "serve", "--port", "0"])
+        self.serve_until_web(desk)
         self.assertEqual(copy.read_text(), mine)
 
     def test_notify_off_removes_hansas_copy_alone(self):

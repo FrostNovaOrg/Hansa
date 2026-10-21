@@ -113,10 +113,14 @@ by `hansa coordinator`, so the helpers (scout, reviewer, operator) and the
 coordinator's mod are not in it, and where the card says to ask a helper it
 makes a task. The card's import of `notes/PROJECT.md` names that file from
 the copy's folder when the desk is inside F; with the desk outside F the copy
-holds a pointer to the file in its place, and imports nothing. hansa rewrites
-the copy at every `hansa notify on` and wherever it writes the desk's card (at
-`hansa init` and at `hansa coordinator`'s start, which instead removes a copy in a
-folder that holds the desk: the session it starts there would read both).
+holds a pointer to the file in its place, and imports nothing. The copy is
+always made from hansa's own card, never from the desk's `CLAUDE.md` as it
+stands. hansa rewrites the copy at every `hansa notify on` and wherever it
+writes the desk's card: at `hansa init`, at each `hansa serve` start (which
+brings the desk's card up to hansa's, as `hansa coordinator` does, so a desk
+whose coordinator only runs `hansa notify on` gets an upgraded hansa's card and
+copy too) and at `hansa coordinator`'s start, which instead removes a copy in a
+folder that holds the desk: the session it starts there would read both.
 `hansa notify off` removes hansa's copies, and `hansa notify on` from another
 folder removes the earlier one; only a file with hansa's header for this desk
 that git does not track is removed. When F is in a git work tree, hansa adds
