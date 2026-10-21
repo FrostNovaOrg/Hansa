@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from . import SESSION, SESSION_PREFIXES, account, notify, without_session
-from .desk import Desk, now, program, read_json, write_json
+from .desk import Desk, now, program, read_json, write_json, write_text
 from .run import alive, proc_args, proc_cwd, proc_start, server_state
 
 DEFAULTS = {"host": "127.0.0.1", "port": 8765, "every": 3.0}
@@ -36,6 +36,12 @@ NOT_YET = ("its start is not recorded yet: this desk had a coordinator before ha
 EXTERNAL_ASK = "Allow external CLAUDE.md file imports?"  # Claude Code's question for imports from outside the folder
 TO_RECORD = ("Start it as before and run hansa notify on in it, or start it with hansa coordinator; from then on "
              "hansa up starts it again")
+CARD = Path(__file__).with_name("card.md")  # the card hansa puts in a desk (cli.py), and the one its copy holds
+# Where hansa notify on copies the card for a session that does not read it: in the session's folder, which Claude
+# Code reads rules from at each start, for every session started there or below
+COPY = os.path.join(".claude", "rules", "hansa-card.md")
+COPY_MARK = "<!-- hansa: copy of the coordinator's card for the desk at "  # its header's first line, then the desk
+COPIES = "card-copies.json"  # in .hansa/: the copies hansa wrote, so notify off finds them after the record changes
 
 
 def hansa_command() -> str:
@@ -374,7 +380,7 @@ def notify_on_line(desk: Desk) -> str:
         return f"hansa up will not start this session again after a restart: {why}; nothing was recorded."
     then = f"{why}, so nothing new was recorded. " if why else ""
     return "\n".join([f"{then}After a restart, hansa up starts this session again {restart_line(desk, rec)}.",
-                      *card_lines(desk, rec)])
+                      *card_lines(desk, rec, place_card(desk, rec))])
 
 
 def card_import(folder: Path, card: Path):
@@ -392,10 +398,40 @@ def card_import(folder: Path, card: Path):
     return None
 
 
+def account_rules(folder: Path, rec: dict) -> str:
+    """Why folder/.claude/rules would reach every session of the account, '' when it would not: that .claude is
+    the account's Claude Code folder (the home folder's, or CLAUDE_CONFIG_DIR's), or folder holds the home folder."""
+    home = Path(os.path.realpath(os.path.expanduser("~")))
+    env = rec.get("env") if isinstance(rec.get("env"), dict) else {}
+    own = {os.path.realpath(home / ".claude"), *[os.path.realpath(os.path.expanduser(x)) for x in
+                                                  (os.environ.get("CLAUDE_CONFIG_DIR"), env.get("CLAUDE_CONFIG_DIR"))
+                                                  if isinstance(x, str) and x]}
+    if os.path.realpath(folder / ".claude") in own:
+        return (f"{folder / '.claude'} is the account's Claude Code folder, and rules there reach every session of the "
+                "account")
+    if folder in home.parents:
+        return f"{folder} holds the home folder, and rules in its .claude reach every session started below it"
+    return ""
+
+
+def copy_owner(path) -> str | None:
+    """The desk hansa's header in this copy of the card names; '' for a file without that header, None for none."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            first = f.readline().rstrip("\n")
+    except FileNotFoundError:
+        return None
+    except OSError:  # a folder, or unreadable: not hansa's to replace
+        return ""
+    return first[len(COPY_MARK):-len(" -->")] if first.startswith(COPY_MARK) and first.endswith(" -->") else ""
+
+
 def card_check(desk: Desk, rec: dict) -> dict:
     """Whether Claude Code loads the desk's card (its CLAUDE.md) for the session a hansa notify on record names.
     {} when it does, and for a session hansa coordinator started: that one runs in the desk. Else its state:
-    'external' (imported from outside the session's folder) or 'missing', with the line that imports it."""
+    'external' (imported from outside the session's folder), 'copy' (hansa's copy of it is in the folder's
+    .claude/rules), 'account' (that folder would reach every session of the account), 'foreign' (a file hansa did
+    not write is where the copy goes) or 'missing', with the line that imports it."""
     if rec.get("kind") != "notify" or not isinstance(rec.get("folder"), str) or not os.path.isdir(rec["folder"]):
         return {}
     folder, root = Path(os.path.realpath(rec["folder"])), Path(os.path.realpath(desk.root))
@@ -405,31 +441,190 @@ def card_check(desk: Desk, rec: dict) -> dict:
     inside, held = folder in root.parents, card_import(folder, card)
     if held and inside:
         return {}
-    return {"state": "external" if held else "missing", "folder": rec["folder"], "card": str(card),
-            "file": str(held or ""), "inside": inside,
-            "line": "@" + (os.path.relpath(card, folder) if inside else str(card))}
+    c = {"folder": rec["folder"], "card": str(card), "file": str(held or ""), "inside": inside,
+         "copy": str(Path(rec["folder"]) / COPY),
+         "line": "@" + (os.path.relpath(card, folder) if inside else str(card))}
+    if held:
+        return {**c, "state": "external"}
+    why = account_rules(folder, rec)
+    if why:
+        return {**c, "state": "account", "why": why}
+    owner = copy_owner(c["copy"])
+    return {**c, "state": "copy" if owner == str(desk.root) else "foreign" if owner == "" else "missing"}
 
 
-def card_lines(desk: Desk, rec: dict) -> list:
-    """For hansa notify on and hansa explain notify: what the recorded session lacks to read the card, if anything."""
+def _git(folder, *args):
+    """git's answer in folder, without the GIT_ variables of the command's environment; None when it did not run."""
+    try:
+        return subprocess.run(["git", *args], cwd=folder, capture_output=True, text=True, timeout=10,
+                              env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def git_top(folder) -> str:
+    """The top of the git work tree folder is in; '' when it is in none."""
+    r = _git(folder, "rev-parse", "--show-toplevel")
+    return r.stdout.strip() if r and r.returncode == 0 else ""
+
+
+def tracked(top: str, path) -> bool:
+    """Whether git tracks path in the work tree at top."""
+    r = top and _git(top, "ls-files", "--error-unmatch", "--",
+                     os.path.relpath(os.path.realpath(path), os.path.realpath(top)))
+    return bool(r) and r.returncode == 0
+
+
+def exclude_copy(top: str, path: Path) -> str:
+    """Keep the copy out of the repository whose work tree it is in: its path in that repository's info/exclude,
+    once, and not when git already ignores it. What was done, as a sentence."""
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(top))
+    r = _git(top, "check-ignore", "-q", "--", rel)
+    if r and r.returncode == 0:
+        return f"git in {top} ignores it."
+    r = _git(top, "rev-parse", "--git-path", "info/exclude")
+    if not r or r.returncode or not r.stdout.strip():
+        return f"git in {top} lists it, as the repository's info/exclude could not be found: commit it nowhere."
+    exclude = Path(top, r.stdout.strip())
+    line = "/" + re.sub(r"([*?\[\\])", r"\\\1", rel.replace(os.sep, "/"))
+    try:
+        text = exclude.read_text(encoding="utf-8", errors="replace") if exclude.is_file() else ""
+        if line not in text.splitlines():
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            with open(exclude, "a", encoding="utf-8") as f:
+                f.write(("\n" if text and not text.endswith("\n") else "") + line + "\n")
+    except OSError as e:
+        return f"git in {top} lists it, as {exclude} could not be written ({e.strerror or e}): commit it nowhere."
+    return f"hansa added it to {exclude}, so git in {top} leaves it out."
+
+
+def copy_text(desk: Desk, path: Path) -> str:
+    """The copy of the card: hansa's header, then hansa's own card (card.md, the one hansa brings the desk's to; never
+    the desk's CLAUDE.md as it stands, which may be older or edited). An import line in it (@notes/PROJECT.md) names
+    its file from the copy's folder when that file is inside the session's folder, and is a pointer to it otherwise."""
+    folder = Path(os.path.realpath(path.parent.parent.parent))
+    card = CARD.read_text(encoding="utf-8")
+
+    def imported(m):
+        target = Path(os.path.realpath(desk.root / os.path.expanduser(m.group(1))))
+        if folder in target.parents:
+            return "@" + os.path.relpath(target, os.path.realpath(path.parent))
+        return f"(The card imports {target} here; this copy does not, as it is outside this folder: read it.)"
+    header = (f"{COPY_MARK}{desk.root} -->\n"
+              f"> hansa wrote this file for the desk at {desk.root}. It rewrites it when the card changes and removes "
+              "it with `hansa notify off`, so edits to it are lost.\n>\n"
+              "> This session was not started by `hansa coordinator`, so the helpers the card names (scout, "
+              "reviewer, operator) and the coordinator's mod are not in it: where the card says to ask a helper, "
+              "make a task.\n\n")
+    return header + re.sub(r"(?m)^@([^\s/~]\S*)[ \t]*$", imported, card)
+
+
+def remember_copies(desk: Desk, paths: list) -> None:
+    try:
+        write_json(desk.state_dir / COPIES, sorted(set(paths)))
+    except OSError:
+        pass
+
+
+def known_copies(desk: Desk) -> list:
+    listed = read_json(desk.state_dir / COPIES, [])
+    return [x for x in listed if isinstance(x, str)] if isinstance(listed, list) else []
+
+
+def remove_copies(desk: Desk, keep: str = "") -> list:
+    """Remove the copies of the card hansa wrote for this desk (a file with its header that git does not track), all
+    but keep: their paths."""
+    gone = []
+    for p in dict.fromkeys(known_copies(desk)):
+        if p != keep and copy_owner(p) == str(desk.root) and not tracked(git_top(Path(p).parent), p):
+            try:
+                os.unlink(p)
+                gone.append(p)
+            except OSError:
+                continue
+    remember_copies(desk, [p for p in known_copies(desk) if p == keep or copy_owner(p) == str(desk.root)])
+    return gone
+
+
+def write_copy(desk: Desk, c: dict) -> dict:
+    """Put the card in the session's folder's .claude/rules, as card_check found it: the state after, 'copy' when
+    written (with 'git': what git was told), else 'missing' with 'why'. Never a file git tracks."""
+    path = Path(c["copy"])
+    top = git_top(c["folder"])
+    if tracked(top, path):
+        return {**c, "state": "missing", "why": f"git tracks {path} in {top}, and hansa changes no tracked file"}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new = copy_text(desk, path)
+        if not (path.is_file() and path.read_text(encoding="utf-8", errors="replace") == new):
+            write_text(path, new, follow_symlinks=False)
+    except OSError as e:
+        return {**c, "state": "missing", "why": f"{path} could not be written ({e.strerror or e})"}
+    remember_copies(desk, [*known_copies(desk), str(path)])
+    return {**c, "state": "copy", "git": exclude_copy(top, path) if top else ""}
+
+
+def place_card(desk: Desk, rec: dict) -> dict:
+    """hansa notify on's part: the card copied for the recorded session when it does not read it, any earlier copy
+    of this desk's elsewhere removed (in 'removed'). card_check's state after."""
     c = card_check(desk, rec)
-    if not c:
-        return []
+    if c.get("state") in ("missing", "copy"):
+        c = write_copy(desk, c)
+    return {**c, "removed": remove_copies(desk, c.get("copy", "") if c.get("state") == "copy" else "")}
+
+
+def refresh_copy(desk: Desk, starting: bool = False) -> None:
+    """After hansa writes the desk's card: its copy rewritten to match. At hansa coordinator's start (starting), a
+    copy in the desk's folder or above it is removed instead: the session it starts in the desk would read both."""
+    c = card_check(desk, read_coordinator(desk))
+    if c.get("state") != "copy":
+        return
+    if starting and c["inside"]:
+        remove_copies(desk)
+    else:
+        write_copy(desk, c)
+
+
+def card_lines(desk: Desk, rec: dict, c: dict = None) -> list:
+    """For hansa notify on (c: what place_card did) and hansa explain notify: how the recorded session reads the
+    card, or what it lacks to, if anything."""
+    c = card_check(desk, rec) if c is None else c
+    placed = "removed" in c
+    removed = [f"hansa removed its earlier copy of the card, {p}." for p in c.get("removed") or []]
+    if not c.get("state"):
+        return removed
     then = "This takes effect from the session's next start; until then hansa help card prints the card."
+    reach = (f"every Claude Code session started in {c['folder']}, or in a folder below it, reads that file at each "
+             "start (hansa's own runs leave it out)")
+    if c["state"] == "copy":
+        kept = "hansa rewrites it when the card changes and removes it with hansa notify off."
+        if not placed:
+            return [f"This session reads the coordinator's card from {c['copy']}, hansa's copy of it: {reach}. {kept}"]
+        return [f"This session does not read the coordinator's card ({c['card']}, the desk's CLAUDE.md) from the desk, "
+                f"so hansa wrote a copy of it to {c['copy']}: {reach}. This session reads it from its next start; "
+                "until then hansa help card prints the card.", f"{kept} {c.get('git') or ''}".strip(), *removed]
     if c["state"] == "external":
         return [f"The coordinator's card ({c['card']}) is imported by {c['file']}, from outside the session's folder "
                 f"{c['folder']}: it loads only once Claude Code is allowed to load imports from outside the folder. "
-                f"Claude Code asks at a start: \"{EXTERNAL_ASK}\". {then}"]
-    return [f"This session does not read the coordinator's card ({c['card']}, the desk's CLAUDE.md): Claude Code loads "
-            f"it for a session started in the desk or a folder below it, and this one runs in {c['folder']}, whose "
-            "CLAUDE.md files do not import it. The card's rules (when to make a task instead of reading on, what never "
-            "to do) are not in its context.",
+                f"Claude Code asks at a start: \"{EXTERNAL_ASK}\". {then}", *removed]
+    lacks = (f"This session does not read the coordinator's card ({c['card']}, the desk's CLAUDE.md): Claude Code loads "
+             f"it for a session started in the desk or a folder below it, and this one runs in {c['folder']}, whose "
+             "CLAUDE.md files do not import it. The card's rules (when to make a task instead of reading on, what never "
+             "to do) are not in its context.")
+    if c["state"] == "account":
+        return [lacks, f"hansa puts no copy of the card in {c['copy']}: {c['why']}. Nor a line in a CLAUDE.md there: a "
+                f"CLAUDE.md in {c['folder']} reaches every session started below it. Start the coordinator in a "
+                "folder of its own, or with hansa coordinator.", *removed]
+    why = (f"{c['copy']} holds a file without hansa's header, so hansa leaves it and writes no copy of the card there."
+           if c["state"] == "foreign" else f"hansa wrote no copy of the card: {c['why']}." if c.get("why") else
+           f"hansa notify on in it writes a copy of the card to {c['copy']}; or:")
+    return [lacks, why,
             f"Add this line to {os.path.join(c['folder'], 'CLAUDE.md')}: {c['line']}",
             *([] if c["inside"] else
               ["The card is outside the session's folder: Claude Code asks once, at the session's next start, whether "
                f"to allow imports from outside the folder (\"{EXTERNAL_ASK}\"), and loads nothing from there until it "
                "is allowed."]),
-            f"{then} hansa does not write the line: the folder is another project's."]
+            f"{then} hansa does not write the line: the folder is another project's.", *removed]
 
 
 def card_note(desk: Desk) -> str:
@@ -437,8 +632,13 @@ def card_note(desk: Desk) -> str:
     c = card_check(desk, read_coordinator(desk))
     if not c:
         return ""
+    if c["state"] == "copy":
+        return f"the recorded session reads the card from {c['copy']}, hansa's copy (hansa explain notify)"
     if c["state"] == "external":
         return "the recorded session reads the card once external imports are allowed (hansa explain notify)"
+    if c["state"] == "account":
+        return ("the recorded session does not read the card, and hansa puts no copy in its folder: rules there "
+                "reach every session of the account (hansa explain notify)")
     return f"the recorded session does not read the card: add {c['line']} to its CLAUDE.md (hansa explain notify)"
 
 

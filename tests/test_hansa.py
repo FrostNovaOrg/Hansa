@@ -2703,19 +2703,214 @@ class CoordinatorUpTest(unittest.TestCase):
     def status_line(self):
         return next(x for x in views.status_text(views.status(self.desk)).splitlines() if x.startswith("hansa posts"))
 
-    def test_notify_on_says_how_a_session_that_holds_the_desk_reads_the_card(self):
+    def copy_of(self, folder):
+        return Path(folder) / ".claude" / "rules" / "hansa-card.md"
+
+    def test_notify_on_copies_the_card_into_a_session_beside_the_desk(self):
         project = self.tmp / "project"
-        desk = self.desk_at(project / "desk")
-        said, rec, _ = self.notify_on(["claude", "--name", "c"], str(project), HANSA_ROLE="coordinator")
+        project.mkdir()
+        desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.desk = desk
+        card = (desk.root / "CLAUDE.md").read_text()
+        said, rec, _ = self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
         self.assertEqual(rec["kind"], "notify")
-        self.assertIn("does not read the coordinator's card", said)
+        copy = self.copy_of(project)
+        text = copy.read_text()
+        header, body = text.split("\n\n", 1)
+        self.assertTrue(header.startswith(f"<!-- hansa: copy of the coordinator's card for the desk at {desk.root} "))
+        for words in ("hansa notify off", "edits to it are lost", "not started by `hansa coordinator`",
+                      "scout, reviewer, operator", "the coordinator's mod", "make a task"):
+            self.assertIn(words, header)
+        self.assertIn("## Never", body)
+        # the card's import of the project's rules names a file outside this folder: a pointer to it, no import
+        self.assertNotIn("\n@notes/PROJECT.md\n", body)
+        self.assertIn(str(Path(os.path.realpath(desk.project_path))), body)
+        self.assertEqual(body.count("\n"), card.count("\n"))
+        for words in (str(copy), f"every Claude Code session started in {project}, or in a folder below it",
+                      "at each start", "hansa's own runs leave it out", "reads it from its next start",
+                      "hansa help card"):
+            self.assertIn(words, said)
+        self.assertNotIn("Add this line", said)
+        self.assertNotIn("Allow external", said)  # a plain file inside the folder, no import
+        self.assertNotIn("git", said.split("notify off.", 1)[1])  # not a git work tree
+        self.assertIn(f"reads the card from {copy}", self.status_line())
+        self.assertIn(f"reads the coordinator's card from {copy}", views.explain_text(desk, "notify"))
+
+    def test_the_copy_is_kept_out_of_the_git_repository_of_a_session_that_holds_the_desk(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        sh("git", "init", "-q", str(project), cwd=self.tmp)
+        (project / "README").write_text("mine\n")
+        self.desk = desk = cli.init_desk(project / "desk", "", "a", "")
+        before = subprocess.run(["git", "status", "--porcelain"], cwd=project, capture_output=True, text=True).stdout
+        exclude = project / ".git" / "info" / "exclude"
+        said, _, _ = self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        copy = self.copy_of(project)
+        self.assertTrue(copy.is_file())
+        self.assertIn("\n@../../desk/notes/PROJECT.md\n", copy.read_text())  # read from the copy's folder
+        self.assertEqual(exclude.read_text().splitlines().count("/.claude/rules/hansa-card.md"), 1)
+        self.assertIn(f"added it to {os.path.realpath(exclude)}", said)
+        self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=project, capture_output=True,
+                                        text=True).stdout, before)
+        said, _, _ = self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        self.assertEqual(exclude.read_text().splitlines().count("/.claude/rules/hansa-card.md"), 1)
+        self.assertNotIn("added it", said)
+        self.assertIn("ignores it", said)
+        # a path git ignores by itself: nothing added
+        exclude.write_text("")
+        (project / ".gitignore").write_text(".claude/\n")
+        said, _, _ = self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        self.assertEqual(exclude.read_text(), "")
+        # a tracked file there is never changed, even one with hansa's header
+        (project / ".gitignore").unlink()
+        sh("git", "add", "-f", ".claude/rules/hansa-card.md", cwd=project)
+        copy.write_text(copy.read_text() + "committed\n")
+        said, _, _ = self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        self.assertTrue(copy.read_text().endswith("committed\n"))
+        self.assertIn("git tracks", said)
+        self.assertIn("Add this line", said)
+
+    def test_rewriting_the_desks_card_rewrites_its_copy(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        self.desk = desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        copy = self.copy_of(project)
+        mine = copy.read_text()
+        # the copy is made from hansa's own card, never from the desk's CLAUDE.md as it stands
+        (desk.root / "CLAUDE.md").write_text("an older card\n")
+        copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older copy\n")
+        self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")  # every notify on writes it again
+        self.assertEqual(copy.read_text(), mine)
+        self.assertNotIn("an older card", mine)
+        copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older copy\n")
+        cli.coordinator_desk(desk, os.getuid())  # hansa coordinator's start refreshes the card, and so the copy
+        self.assertEqual((desk.root / "CLAUDE.md").read_text(), cli.CARD.read_text())
+        self.assertEqual(copy.read_text(), mine)
+        self.assertIn("## Never", copy.read_text())
+        # a copy in a folder that holds the desk would reach the session hansa coordinator starts there: removed
+        inner = self.tmp / "inner"
+        inner.mkdir()
+        self.desk = desk = cli.init_desk(inner / "desk", "", "a", "")
+        self.notify_on(["claude"], str(inner), HANSA_ROLE="coordinator")
+        self.assertTrue(self.copy_of(inner).is_file())
+        cli.coordinator_desk(desk, os.getuid())
+        self.assertFalse(self.copy_of(inner).exists())
+
+    def serve_until_web(self, desk):
+        """hansa serve's start up to its web server, which this test does not start; its lock let go after."""
+        with cli.hold_server_lock(desk) as held, \
+                unittest.mock.patch.object(cli, "hold_server_lock", return_value=held), \
+                unittest.mock.patch("hansa.web.start_web", side_effect=RuntimeError("no page in this test")), \
+                self.assertRaisesRegex(RuntimeError, "no page"):
+            main(["--desk", str(desk.root), "serve", "--port", "0"])
+
+    def test_hansa_serve_brings_the_desks_card_and_its_copy_up_to_date(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        self.desk = desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        copy = self.copy_of(project)
+        mine = copy.read_text()
+        # a desk whose coordinator only runs notify on: its card and the copy from an earlier hansa
+        (desk.root / "CLAUDE.md").write_text("an older card\n")
+        copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older card\n")
+        self.serve_until_web(desk)
+        self.assertEqual((desk.root / "CLAUDE.md").read_text(), cli.CARD.read_text())
+        self.assertIn("card_refreshed", desk.events_path.read_text())
+        self.assertEqual(copy.read_text(), mine)
+        self.assertTrue(mine.split("\n\n", 1)[1].startswith(cli.CARD.read_text().split("\n", 1)[0]))
+        # the card already current, an older copy alone is rewritten too
+        copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older card\n")
+        self.serve_until_web(desk)
+        self.assertEqual(copy.read_text(), mine)
+
+    def test_notify_off_removes_hansas_copy_alone(self):
+        project, other = self.tmp / "project", self.tmp / "other"
+        project.mkdir()
+        other.mkdir()
+        self.desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(other), HANSA_ROLE="coordinator")
+        self.assertTrue(self.copy_of(other).is_file())
+        said, _, _ = self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")  # the session moved
+        self.assertFalse(self.copy_of(other).exists())
+        self.assertIn(f"removed its earlier copy of the card, {self.copy_of(other)}", said)
+        self.copy_of(other).write_text("my own rules\n")  # a file without the header, at a path hansa wrote
+        with unittest.mock.patch.object(notify, "turn_off", return_value="hansa no longer posts to this session"):
+            said = self.say("notify", "off")
+        self.assertFalse(self.copy_of(project).exists())
+        self.assertIn(f"removed its copy of the card, {self.copy_of(project)}", said)
+        self.assertEqual(self.copy_of(other).read_text(), "my own rules\n")
+        self.assertIn("add @", self.status_line())
+
+    def test_notify_off_keeps_a_file_the_user_put_in_place_of_hansas_copy(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        self.desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        self.assertTrue(self.copy_of(project).is_file())
+        self.copy_of(project).write_text("my own rules\n")  # where hansa's copy was, the user's file
+        with unittest.mock.patch.object(notify, "turn_off", return_value="hansa no longer posts to this session"):
+            said = self.say("notify", "off")
+        self.assertEqual(self.copy_of(project).read_text(), "my own rules\n")
+        self.assertNotIn("removed its copy", said)
+
+    def test_bringing_the_card_up_to_date_keeps_a_file_the_user_put_in_place_of_hansas_copy(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        self.desk = desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        self.assertTrue(self.copy_of(project).is_file())
+        self.copy_of(project).write_text("my own rules\n")
+        (desk.root / "CLAUDE.md").write_text("an older card\n")
+        self.serve_until_web(desk)
+        self.assertEqual((desk.root / "CLAUDE.md").read_text(), cli.CARD.read_text())  # the card itself was brought
+        self.assertEqual(self.copy_of(project).read_text(), "my own rules\n")
+
+    def test_a_file_without_hansas_header_or_a_folder_hansa_cannot_write_gets_the_line(self):
+        project = self.tmp / "project"
+        self.copy_of(project).parent.mkdir(parents=True)
+        self.copy_of(project).write_text("my own rules\n")
+        self.desk = desk = self.desk_at(project / "desk")
+        said, _, _ = self.notify_on(["claude", "--name", "c"], str(project), HANSA_ROLE="coordinator")
+        self.assertEqual(self.copy_of(project).read_text(), "my own rules\n")
+        self.assertIn("without hansa's header", said)
         self.assertIn(f"Add this line to {project / 'CLAUDE.md'}: @desk/CLAUDE.md", said)
-        self.assertIn("next start", said)
-        self.assertIn("hansa help card", said)
         self.assertNotIn("Allow external", said)  # the card is inside the folder
         self.assertIn("add @desk/CLAUDE.md", self.status_line())
-        explained = views.explain_text(desk, "notify")
-        self.assertIn("@desk/CLAUDE.md", explained)
+        self.assertIn("@desk/CLAUDE.md", views.explain_text(desk, "notify"))
+        if os.geteuid() == 0:
+            self.skipTest("root writes in a folder without write permission")
+        beside = self.tmp / "beside"
+        beside.mkdir()
+        beside.chmod(0o555)
+        self.addCleanup(beside.chmod, 0o755)
+        said, _, _ = self.notify_on(["claude"], str(beside), HANSA_ROLE="coordinator")
+        self.assertFalse(self.copy_of(beside).exists())
+        self.assertIn("could not be written", said)
+        self.assertIn(f"Add this line to {beside / 'CLAUDE.md'}: @{os.path.realpath(desk.root / 'CLAUDE.md')}", said)
+        self.assertIn("Allow external CLAUDE.md file imports?", said)
+
+    def test_no_copy_goes_where_its_rules_reach_every_session_of_the_account(self):
+        self.desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        said, _, _ = self.notify_on(["claude"], str(self.tmp))  # the fake home: its .claude is the account's
+        self.assertFalse((self.tmp / ".claude" / "rules").exists())
+        self.assertIn("account's Claude Code folder", said)
+        self.assertIn("folder of its own, or with hansa coordinator", said)
+        self.assertNotIn("Add this line", said)
+        self.assertNotIn("@", said)
+        self.assertIn("every session of the account", self.status_line())
+        self.assertNotIn("add @", self.status_line())
+        project = self.tmp / "project"
+        project.mkdir()
+        said, _, _ = self.notify_on(["claude"], str(project), CLAUDE_CONFIG_DIR=str(project / ".claude"))
+        self.assertFalse((project / ".claude" / "rules").exists())
+        self.assertIn("account's Claude Code folder", said)
+        self.assertNotIn("Add this line", said)
+
+    def test_a_session_whose_claude_md_imports_the_card_gets_no_copy(self):
+        project = self.tmp / "project"
+        desk = self.desk_at(project / "desk")
         # with the line, in the folder's CLAUDE.md, its .claude/CLAUDE.md, or a folder above: nothing about the card
         for holder, line in ((project / "CLAUDE.md", "@desk/CLAUDE.md"),
                              (project / ".claude" / "CLAUDE.md", "See @../desk/CLAUDE.md for the rules"),
@@ -2725,27 +2920,21 @@ class CoordinatorUpTest(unittest.TestCase):
                 holder.write_text(f"# notes\n{line}\n")
                 said, _, _ = self.notify_on(["claude", "--name", "c"], str(project), HANSA_ROLE="coordinator")
                 self.assertNotIn("card", said)
+                self.assertFalse(self.copy_of(project).exists())
                 self.assertNotIn("card", self.status_line())
                 self.assertNotIn("card", views.explain_text(desk, "notify").split("  now:")[1])
                 holder.unlink()
         # a relative path is read from the folder of the file that holds it, so this one names another file
         (project / ".claude" / "CLAUDE.md").write_text("@desk/CLAUDE.md\n")
         said, _, _ = self.notify_on(["claude", "--name", "c"], str(project))
-        self.assertIn("@desk/CLAUDE.md", said)
-
-    def test_notify_on_says_how_a_session_beside_the_desk_reads_the_card(self):
-        project = self.tmp / "project"
-        project.mkdir()
-        desk = self.desk_at(self.tmp / "desk")
-        card = desk.root / "CLAUDE.md"
-        said, _, _ = self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
-        self.assertIn(f"Add this line to {project / 'CLAUDE.md'}: @{card}", said)
-        self.assertIn("asks once, at the session's next start", said)
-        self.assertIn("Allow external CLAUDE.md file imports?", said)
-        self.assertIn("hansa help card", said)
-        self.assertIn(f"add @{card}", self.status_line())
-        (project / "CLAUDE.md").write_text(f"@{card}\n")
-        said, _, _ = self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        self.assertTrue(self.copy_of(project).is_file())
+        # imported from outside the folder: as before, and no copy beside the import
+        (project / ".claude" / "CLAUDE.md").unlink()
+        beside = self.tmp / "beside"
+        beside.mkdir()
+        (beside / "CLAUDE.md").write_text(f"@{desk.root / 'CLAUDE.md'}\n")
+        said, _, _ = self.notify_on(["claude"], str(beside), HANSA_ROLE="coordinator")
+        self.assertFalse(self.copy_of(beside).exists())
         self.assertNotIn("Add this line", said)
         self.assertIn("loads only once Claude Code is allowed to load imports from outside the folder", said)
         self.assertIn("Allow external CLAUDE.md file imports?", said)
@@ -2766,6 +2955,7 @@ class CoordinatorUpTest(unittest.TestCase):
                 said, rec, _ = self.notify_on(["claude"], str(folder))
                 self.assertEqual(rec["kind"], "notify")
                 self.assertNotIn("card", said)
+                self.assertFalse((folder / ".claude" / "rules").exists())
                 self.assertNotIn("card", self.status_line())
 
     def test_the_words_continue_replaces_refuse_nothing_though_they_hold_the_sessions_identity(self):
@@ -16154,6 +16344,20 @@ class DeskTest(unittest.TestCase):
         skipped = json.loads(argv[argv.index("--settings") + 1])["claudeMdExcludes"]
         self.assertIn(str(self.desk.root / "CLAUDE.md"), skipped)  # the desk's card is the coordinator's
         self.assertNotIn(str(Path(m["worktree"]) / "CLAUDE.md"), skipped)  # the checkout's own stays
+
+    def test_runs_leave_out_the_rules_of_every_folder_above_their_checkout(self):
+        from hansa import run
+        real = self.tmp / "real"
+        (real / "wt").mkdir(parents=True)
+        (self.tmp / "link").symlink_to(real)
+        given = self.tmp / "link" / "wt"
+        argv = run.isolated(given)
+        skipped = json.loads(argv[argv.index("--settings") + 1])["claudeMdExcludes"]
+        folders = [*given.parents, *given.resolve().parents]
+        self.assertIn(str(real.resolve()), [str(d) for d in folders])  # resolved, and as given
+        for d in folders:
+            self.assertIn(str(d / ".claude" / "rules" / "**"), skipped)
+        self.assertNotIn(str(given / ".claude" / "rules" / "**"), skipped)  # the checkout's own rules stay
 
     def test_the_provider_check_runs_the_way_workers_do(self):
         from hansa import run

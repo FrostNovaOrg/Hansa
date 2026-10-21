@@ -1488,11 +1488,13 @@ def provider_env(desk: Desk, name: str, p: dict) -> dict:
 def isolated(cwd, settings: dict | None = None) -> list:
     """What keeps a Claude Code run hansa starts to its checkout and hansa's own instructions: no settings,
     plugins, hooks or CLAUDE.md of the user it runs as, no MCP servers but those hansa gives it, and no
-    CLAUDE.md from the folders above the checkout (the desk's card, the coordinator's, among them).
+    CLAUDE.md or .claude/rules from the folders above the checkout (the desk's card, the coordinator's, among them,
+    and the copy of it hansa notify on puts in a session's folder that holds the desk).
     `settings` go into the same --settings object (a worker's sandbox, say)."""
     above = []
     for d in dict.fromkeys([*Path(cwd).parents, *Path(cwd).resolve().parents]):
-        above += [str(d / "CLAUDE.md"), str(d / "CLAUDE.local.md"), str(d / ".claude" / "CLAUDE.md")]
+        above += [str(d / "CLAUDE.md"), str(d / "CLAUDE.local.md"), str(d / ".claude" / "CLAUDE.md"),
+                  str(d / ".claude" / "rules" / "**")]
     return ["--setting-sources", "project,local", "--strict-mcp-config",
             "--settings", json.dumps({"claudeMdExcludes": above, **(settings or {})})]
 
