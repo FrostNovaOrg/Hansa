@@ -8656,15 +8656,26 @@ class DeskTest(unittest.TestCase):
         self.assertNotIn("m", self.desk.settings()["lanes"])
 
     def test_merge_lane_timeout_uses_its_own_limit(self):
-        d, tid = self.merge_lane_task("sleep 30", timeout_min=90, merge_timeout_min=7)
+        release = self.tmp / "release-merge-check"
+        command = f"while test ! -f {shlex.quote(str(release))}; do sleep 0.05; done"
+        d, tid = self.merge_lane_task(command, timeout_min=90, merge_timeout_min=7)
         self.hansa("merge", tid)
-        d.tick()
-        mc = self.desk.meta(tid)["merge_check"]
-        self.desk.update(tid, merge_check={**mc, "started": now() - 6 * 60})
-        d.tick()
-        self.assertFalse(self.desk.meta(tid)["merge_check"].get("timed_out"))
-        self.desk.update(tid, merge_check={**mc, "started": now() - 7.5 * 60})
-        m = self.settle_merge(d, tid, timeout=10)
+        try:
+            d.tick()
+            mc = self.desk.meta(tid)["merge_check"]
+            self.assertEqual(mc["phase"], "running")
+            self.desk.update(tid, merge_check={**mc, "started": now() - 6 * 60})
+            d.tick()
+            self.assertFalse(self.desk.meta(tid)["merge_check"].get("timed_out"))
+            self.desk.update(tid, merge_check={**mc, "started": now() - 7.5 * 60})
+            d.tick()
+            # Check the decision separately from reaping, keeping the command gated until it is stopped.
+            self.assertTrue(self.desk.meta(tid)["merge_check"].get("timed_out"))
+            m = self.settle_merge(d, tid)
+        finally:
+            release.touch()
+            if self.desk.meta(tid)["state"] == "merging":
+                self.settle_merge(d, tid)
         self.assertEqual((m["state"], m["merge_check_result"]["note"], m["merge_check_result"]["lane"]),
                          ("done", "stopped at the lane's time ceiling", "m"))
 
@@ -11185,14 +11196,20 @@ class DeskTest(unittest.TestCase):
         self.assertIn("set aside", (self.desk.tasks_dir / tid / "setup.log").read_text())
 
     def test_a_failing_setup_fails_the_task_with_its_output_and_never_holds_up_the_server(self):
+        from concurrent.futures import ThreadPoolExecutor
+        release = self.tmp / "release-setup"
         s = self.desk.settings()
-        s["lanes"]["a"]["setup"] = "sleep 2; echo 'registry: API Error: 429 rate_limit_error'; exit 3"
+        s["lanes"]["a"]["setup"] = (f"while test ! -f {shlex.quote(str(release))}; do sleep 0.05; done; "
+                                     "echo 'registry: API Error: 429 rate_limit_error'; exit 3")
         self.assertEqual(self.desk.save_settings(s), [])
         tid = self.desk.new_task("Add hello.txt")
         d = Dispatcher(self.desk)
-        t0 = time.time()
-        d.tick()
-        self.assertLess(time.time() - t0, 1.8)  # running the two-second setup in serve
+        with ThreadPoolExecutor(max_workers=1) as server:
+            try:
+                # The tick must return while setup is still held, however long scheduling takes.
+                server.submit(d.tick).result(timeout=30)
+            finally:
+                release.touch()
         m = self.settle(d, tid)
         self.assertEqual(m["state"], "failed", m)
         self.assertIn("setup command failed (exit 3)", m["error"])
