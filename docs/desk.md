@@ -2,6 +2,17 @@
 
 ## Status and cost on the web page
 
+The browser tab and the caption beside Hansa name the desk by its parent folder
+and its own folder, such as `work/desk`. The tab title is `Hansa · work/desk`,
+prefixed with the number of releases waiting for approval plus open requests
+when that count is nonzero. It updates with each status refresh.
+
+The header summary presents its facts as separate items: desk, dispatch, server,
+version, install time and current time, followed by any status notes. Each item
+that needs attention, such as paused dispatch or a stopped server, stands out
+on its own. On the Chinese page, the desk and version items are labelled
+`工作台` and `hansa 版本`; the English current-time item uses `now`, as `hansa status` does.
+
 Status shows the last 24 hours in summary cards, keeps dispatch controls separate
 from task tables, and places release decisions and requests near the top. Empty
 states explain where new activity will appear. Task details remain open across
@@ -409,6 +420,14 @@ After any clear, the session is shown `hansa status`, and hansa records when.
 `hansa status` and the page show the window and the last clear, and warn once
 two windows have ended since without one; the session started as root on an
 account's desk records no clear, so there the last clear is not known.
+
+When the session recorded for `hansa up` is one that ran `hansa notify on`
+(kind `notify`), `hansa status` and the page instead say in one line that it was
+started outside `hansa coordinator`, so the coordinator's mod and the daily
+clear are not in it. They do not describe the earlier coordinator's start or
+show its daily clear for this session. They also omit the coordinator's compaction
+line: neither the mod's idle setting nor the `--autocompact` option passed by
+`hansa coordinator` reaches this session through `hansa up`.
 
 So the coordinator keeps what must survive in the desk (tasks, requests, and
 its notes under `notes/`), not only in the conversation. It keeps the notes file
