@@ -223,6 +223,15 @@ counts as "holds" for merging, including release files, and for the suggested
 next step. Show, the page and the merge command name the verification with
 the notes. Only "does not hold" counts toward the advice to rethink below.
 
+New verifications keep each top-level list item under the last Notes heading
+(any level), including sub-items, as `VID.N`, with the checked task, title and
+time. Missing or unlisted Notes keeps one report pointer. Other verdicts and
+past verifications add nothing. `hansa gaps` lists unmarked notes oldest first
+(160-character previews); `--all` includes marks and reasons. `hansa gaps show
+ID` prints one whole. `hansa gaps mark ID fixed|later|wontfix "why"` requires
+a reason; marking again replaces it, recording who and when. Records persist
+in `tasks/VID/meta.json`. Posts give the count; status counts unmarked notes.
+
 `hansa merge ID` merges a task's branch into its lane's base branch. A failed
 check blocks it unless the coordinator says `--despite-check` (recorded), and
 so does a verification that does not hold. That flag skips the merge check

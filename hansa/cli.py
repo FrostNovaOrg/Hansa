@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import getpass
 import json
 import os
 import re
@@ -16,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, alert, build, cost, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
+from . import account, alert, build, cost, gaps, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
@@ -91,7 +92,7 @@ TOPICS = {
 }
 # hansa help: the commands, a few to a line (a command left out of these goes on the last line)
 COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
-                  ("watching", ("status", "wait", "notify", "ask", "explain", "notes", "cost")),
+                  ("watching", ("status", "wait", "notify", "ask", "explain", "notes", "gaps", "cost")),
                   ("lanes and releases", ("lane", "release", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
                   ("the desk", ("init", "up", "serve", "web", "coordinator", "ping", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -2691,6 +2692,22 @@ def cmd_memory_floor(a):
              "as its floor instead"))
 
 
+def cmd_gaps(a):
+    desk = Desk.find(a.desk)
+    if a.words and a.words[0] == "mark" and len(a.words) in (3, 4) and not a.all:
+        _, nid, kind, *why = a.words
+        gaps.mark(desk, nid, kind, why[0] if why else "", os.environ.get("HANSA_ROLE") or getpass.getuser(),
+                  notify.session_here())
+        print(gaps.show(desk, nid))
+    elif len(a.words) == 2 and a.words[0] == "show" and not a.all:
+        print(gaps.show(desk, a.words[1]))
+    elif not a.words:
+        print(gaps.list_text(desk, a.all))
+    else:
+        raise SystemExit('hansa: use hansa gaps [--all], hansa gaps show ID, or hansa gaps mark ID '
+                         'fixed|later|wontfix "why"; nothing was changed')
+
+
 def cmd_notes(a):
     desk = Desk.find(a.desk)
     if a.words[:1] == ["archive"] and len(a.words) > 1:
@@ -3193,6 +3210,15 @@ def main(argv=None):
                    "runs nothing")
     q.add_argument("--every", type=float, default=0.5, help=argparse.SUPPRESS)
     q.epilog = see_more("linux-sandbox")
+    p = add("gaps", cmd_gaps, "verification notes: list those not marked, oldest first; --all includes marks and why")
+    p.description += ('. hansa gaps show ID prints a whole note, its task and title, when it was kept, and its mark, '
+                      'why, who and when. hansa gaps mark ID fixed|later|wontfix "why" replaces its mark; why is '
+                      'required. New "holds, with notes" verifications collect each top-level list item (including '
+                      'sub-items) under the last Notes heading of any level. An absent or empty list keeps one '
+                      'note pointing to the report. Other verdicts and old verifications add nothing. Notes and '
+                      'marks stay in tasks/VID/meta.json across server restarts. List previews stop at 160 characters.')
+    p.add_argument("words", nargs="*", metavar='show ID | mark ID fixed|later|wontfix "why"')
+    p.add_argument("--all", action="store_true", help="include marked notes, with their marks and why")
     p = add("notes", cmd_notes, "the coordinator's notes: list the files under notes/ with their headings, or move "
             "a finished section out of one: hansa notes archive FILE HEADING [--to OTHER]")
     p.description = (

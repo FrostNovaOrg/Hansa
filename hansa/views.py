@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, memory, notify, plugin, release, up
+from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, gaps, installed, installed_text, memory, notify, plugin, release, up
 from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
@@ -562,6 +562,7 @@ def status(desk: Desk) -> dict:
         "clear_line": plugin.clear_line(mod) if mod else "",  # its daily clear: the window, and the clears recorded
         "compact_line": plugin.settings_line(s) if mod and mod.get("kind") != "notify" else "",
         "project": project_file(desk),  # notes/PROJECT.md, which the card imports
+        "verification_notes": sum(not n.get("mark") for n in gaps.all_notes(desk, tasks)),
         "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
         "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
@@ -666,6 +667,8 @@ def status_text(st: dict) -> str:
     out += [x for x in (f"{st['mod_line']} {plugin.HELP}", st.get("clear_line"), st["compact_line"]) if x] \
         if st.get("mod_line") else []
     out += [project_text(st["project"])] if st.get("project") else []
+    if st.get("verification_notes"):
+        out.append(f"verification notes: {st['verification_notes']} not marked (hansa gaps)")
     out += [f"sandbox probe: {st['try_note']}"] if st.get("try_note") else []
     out.append("lanes:")
     lanes = st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]
