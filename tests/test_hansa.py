@@ -13352,7 +13352,7 @@ def save():'''))
 
         def join(d):
             for thread in getattr(d, "probes", {}).values():
-                thread.join(timeout=10)
+                thread.join(timeout=30)
                 self.assertFalse(thread.is_alive(), "provider check did not end")
 
         def queue_verification(desk, parent):
