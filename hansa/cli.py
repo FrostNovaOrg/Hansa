@@ -1808,7 +1808,7 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
 
 LANE_LISTS = ("providers", "allow", "network", "write", "release_files", "verify_for")
 LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min", "merge_batch")
-LANE_FIELDS = ("repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check", "setup",
+LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "setup",
                "release_files", "max_turns", "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane", "verify_for",
                *MESSAGE_FIELDS, "identity")
 # empty (none) takes them out: the check's command and limit again, hansa's own message forms,
@@ -3056,7 +3056,7 @@ def main(argv=None):
         "address, localhost, a name for a local or private network such as .internal or .local, or a wildcard over "
         "a shared suffix such as *.co.uk or *.github.io is refused, as are names with no dot and names such as nip.io or lvh.me that come back as this machine; any listed name can still be pointed at any address, so list only sites you know), and WebSearch, which sends search queries out "
         "of the machine; MCP tools are refused. Each rule is its own value: one Claude Code would read as several (it splits on commas and spaces outside parentheses, and every ')' closes them), such as Bash(x),WebFetch or Bash(a(b),WebFetch,c), is refused, and a rule given twice is kept once. A change of allow is recorded. providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
-        "lane's env; repo, base, check, merge_check, setup, commit_message, merge_message and "
+        "lane's env; base, check, merge_check, setup, commit_message, merge_message and "
         "identity take "
         "one value (none: empty); max_turns, timeout_min, merge_timeout_min and merge_batch take one whole number. "
         "merge_batch is 1 to 10 (default 4, none restores it): the check lane takes that many queued merges "

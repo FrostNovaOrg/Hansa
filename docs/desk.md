@@ -502,7 +502,7 @@ For long merge checks and busy task lanes, add a merge lane with `hansa lane add
 They must share V's repository; none may be V, a merge lane or a verify lane. V cannot be a merge lane.
 Ordinary work queued or running prevents setting it. Every settings save checks these rules to prevent
 misrouting; unset `verify_for` before giving V ordinary work. Removing a lane removes its list entries;
-`--like` copies `verify_for`.
+`--like` copies `verify_for`. Merge lanes' served-lane lists exclude verify lanes, which never merge.
 
 ## Free space
 

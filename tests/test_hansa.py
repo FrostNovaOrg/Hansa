@@ -22284,6 +22284,43 @@ class DeskTest(unittest.TestCase):
         self.desk.update(stale, lane="")
         self.assertIn("ready for lane 0", waiting_reason(self.desk, self.desk.settings(), self.desk.meta(stale), set()))
 
+    def test_verify_lane_dispatcher_skips_ready_first_candidate(self):
+        from hansa import run
+        self.add_verify_lane("0")
+        s = self.desk.settings()
+        self.assertEqual(sorted(s["lanes"])[0], "0")
+        self.assertEqual(provider_problem(self.desk, s, "claude"), "")
+        tid = self.desk.new_task("Unassigned work")
+        # Observe the dispatcher's choice independently of start's own guard.
+        with unittest.mock.patch.object(run, "start", return_value=None) as start:
+            Dispatcher(self.desk).tick()
+        start.assert_called_once_with(self.desk, tid, "a", "claude")
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+
+    def test_verify_lane_waiting_reason_excludes_ready_first_candidate(self):
+        self.add_verify_lane("0")
+        s = self.desk.settings()
+        s["providers"]["verifier"] = dict(s["providers"]["claude"])
+        s["lanes"]["0"]["providers"] = ["verifier"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.set_provider_state("claude", cool_until=now() + 600, reason="taking a rest")
+        self.assertEqual(sorted(s["lanes"])[0], "0")
+        self.assertEqual(provider_problem(self.desk, s, "verifier"), "")
+        tid = self.desk.new_task("Unassigned work")
+        reason = waiting_reason(self.desk, s, self.desk.meta(tid), set())
+        self.assertIn("lane a has no provider ready (claude: resting", reason)
+        self.assertNotIn("lane 0", reason)
+
+    def test_verify_lane_set_refuses_repo(self):
+        self.add_verify_lane()
+        before = self.desk.settings_path.read_bytes()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as e:
+            self.hansa("lane", "set", "a", "repo", str(self.repo))
+        self.assertEqual(e.exception.code, 2)
+        self.assertIn("argument field: invalid choice: 'repo'", errors.getvalue())
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+
     def test_verify_lane_settings_refuse_invalid_targets_atomically(self):
         self.hansa("lane", "add", "v1", "--like", "a")
         self.hansa("lane", "add", "b", "--like", "a")
@@ -22311,8 +22348,7 @@ class DeskTest(unittest.TestCase):
         other = self.tmp / "other"
         shutil.copytree(self.repo, other)
         before = self.desk.settings_path.read_bytes()
-        for args, reason in ((("a", "repo", str(other)), "another repository"),
-                             (("a", "merge_lane", "true"), "merge lane"),
+        for args, reason in ((("a", "merge_lane", "true"), "merge lane"),
                              (("a", "verify_for", "v1"), "verify lane"),
                              (("v1", "merge_lane", "true"), "merge lane cannot be a verify lane")):
             with self.subTest(args=args), self.assertRaises(SystemExit) as e:
@@ -22320,6 +22356,11 @@ class DeskTest(unittest.TestCase):
             self.assertIn("lane v1:", str(e.exception))
             self.assertIn(reason, str(e.exception))
             self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        s = self.desk.settings()
+        s["lanes"]["a"]["repo"] = str(other)
+        self.assertIn("lane v1: verify_for cannot name lane a: it is on another repository",
+                      self.desk.save_settings(s))
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
         s = self.desk.settings()
         del s["lanes"]["a"]
         self.assertTrue(any("lane v1:" in p and "no lane a" in p for p in self.desk.save_settings(s)))
@@ -22381,6 +22422,22 @@ class DeskTest(unittest.TestCase):
                 self.assertIn(line, self.hansa(*args))
         self.assertIn("verifications on lanes v1, v2", self.hansa("explain", "lane", "a"))
         self.assertIn("verifications on lanes v1", self.hansa("explain", "lane", "b"))
+
+    def test_merge_lane_views_exclude_verify_lanes_from_served_lanes(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        self.add_verify_lane("v1", "a", "b")
+        self.add_verify_lane("v2")
+        self.merge_lane_for_checks()
+        status = views.status(self.desk)
+        lane = next(ln for ln in status["lanes"] if ln["name"] == "m")
+        self.assertEqual(lane["merge_for"], ["a", "b"])
+        for args in (("lane",), ("status",), ("explain", "lane", "m")):
+            with self.subTest(args=args):
+                out = self.hansa(*args)
+                self.assertIn("merge lane for lanes a, b; takes no work", out)
+                self.assertNotIn("merge lane for lanes a, b, v1", out)
+                if args[0] == "explain":
+                    self.assertIn("merge checks for lanes a, b:", out)
 
     def test_verify_lane_resting_providers_leave_verification_waiting_there(self):
         d, tid = self.verify_lane_task()

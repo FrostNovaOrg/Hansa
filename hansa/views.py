@@ -575,8 +575,7 @@ def status(desk: Desk) -> dict:
                  "unknown": disk.unknown_lines(desk)},  # what its look could not measure, and what was known
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and occupied_lane(m) == n), None),
-                   **({"merge_lane": True, "merge_for": [x for x in sorted(s["lanes"]) if x != n
-                                                        and merge_target(s, x) == merge_target(s, n)]}
+                   **({"merge_lane": True, "merge_for": merge_served_lanes(s, n)}
                       if ln.get("merge_lane") else {}),
                    **({"verify_for": ln["verify_for"]} if ln.get("verify_for") else {}),
                    "trying": n in tried,  # a `hansa lane try` queued or running holds the lane
@@ -1229,9 +1228,15 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     return "\n".join(out)
 
 
+def merge_served_lanes(s: dict, name: str) -> list:
+    """The work lanes whose merges a merge lane serves; verify lanes never merge."""
+    return [n for n, ln in sorted(s["lanes"].items()) if n != name and not ln.get("verify_for")
+            and merge_target(s, n) == merge_target(s, name)]
+
+
 def merge_lane_text(s: dict, name: str) -> str:
     if s["lanes"][name].get("merge_lane"):
-        served = [n for n in sorted(s["lanes"]) if n != name and merge_target(s, n) == merge_target(s, name)]
+        served = merge_served_lanes(s, name)
         return f"  merge lane for lanes {', '.join(served) or '(none yet)'}; takes no work"
     selected = merge_lane(s, name)
     return f"  merge checks on lane {selected}" if selected != name else ""
@@ -1403,8 +1408,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         check_name = merge_lane(s, name)
         check_lane = s["lanes"][check_name]
         separate = check_name != name
-        served = ([n for n in sorted(s["lanes"]) if n != name and merge_target(s, n) == merge_target(s, name)]
-                  if ln.get("merge_lane") else [])
+        served = merge_served_lanes(s, name) if ln.get("merge_lane") else []
         all_tasks = [m for m in desk.tasks() if m.get("kind") != "verify"]
         tasks = [m for m in all_tasks if m.get("lane") == name]
         merge_tasks = ([m for m in all_tasks if (m.get("merge_check_result") or {}).get("lane") == name]
