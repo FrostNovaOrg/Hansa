@@ -324,7 +324,7 @@ if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a pro
                 "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error",
                 "test-timed-out": "Ran 40 tests\nERROR: test_upload (tests.test_api): the upload request timed out after 60s\nFAILED (errors=1)",
                 "log-overloaded": "The suite failed:\n2026-10-08 12:00:01 WARN queue overloaded, shedding requests\nerror: 2 tests failed",
-                "limit": os.environ.get("FAKE_LIMIT_TEXT", "")}[what]
+                "402": "payment required", "limit": os.environ.get("FAKE_LIMIT_TEXT", "")}[what]
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
                           "api_error_status": 429 if what in ("quota", "limit") else status,
                           "result": text, "session_id": "s-net", "num_turns": 3,
@@ -13406,6 +13406,220 @@ class DeskTest(unittest.TestCase):
         st = self.desk.provider_state()["claude"]
         self.assertEqual(st["rest_how"], "fixed")
         self.assertAlmostEqual(st["cool_until"], t0 + 60 * 30, delta=30)
+
+    def credit_run(self, text="credit balance is too low", status=None):
+        count = self.net_lane("402" if status == 402 else "limit", 1, FAKE_LIMIT_TEXT=text)
+        count.write_text("0")
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        end = time.time() + 30
+        while time.time() < end and not self.desk.meta(tid).get("attempts"):
+            d.tick()
+            time.sleep(0.05)
+        self.assertTrue(self.desk.meta(tid).get("attempts"), self.desk.meta(tid))
+        return tid, d, count
+
+    def test_credit_errors_rest_without_an_end_time(self):
+        from hansa import run
+        for text, status in [("credit balance is too low", None), ("API Error: 402", None),
+                             ("payment required", 402), ("insufficient balance", None),
+                             ("insufficient_balance", None), ("insufficient_quota", None), ("余额不足", None)]:
+            with self.subTest(text=text):
+                for old in self.desk.tasks():
+                    if old["state"] == "queued":
+                        self.desk.update(old["id"], state="cancelled")
+                self.desk.write_key("claude", "sk-topped-up", by="page")
+                tid, d, count = self.credit_run(text + "; resets in 1 minute", status)
+                st = self.desk.provider_state()["claude"]
+                self.assertFalse(st.get("cool_until"), st)
+                self.assertGreater(st["credit_since"], 0)
+                m = self.desk.meta(tid)
+                self.assertEqual((m["state"], run.tries_used(m["attempts"])), ("queued", 0))
+                self.assertEqual(m["attempts"][0]["kind"], "credit")
+                # A fresh dispatcher and Desk read the hold from disk, even long after cool_minutes.
+                with unittest.mock.patch.object(run.time, "time", return_value=time.time() + 40 * 86400):
+                    self.assertIn("topped up", provider_problem(Desk(self.desk.root), self.desk.settings(), "claude"))
+                Dispatcher(Desk(self.desk.root)).tick()
+                self.assertEqual(count.read_text(), "1")
+                self.desk.update(tid, state="cancelled")
+
+    def test_the_page_top_up_control_ends_a_credit_rest(self):
+        from hansa.web import _top_up_provider
+        tid, d, count = self.credit_run()
+        self.assertEqual(_top_up_provider(self.desk, "claude"), {"ok": True})
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+        self.assertFalse(self.desk.provider_state()["claude"].get("credit_since"))
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertEqual(count.read_text(), "2")
+
+    def test_the_page_routes_the_top_up_control(self):
+        why = unix_sockets_refused()
+        if why:
+            skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS)
+        self.credit_run()
+        self.assertEqual(self.page_post("/api/provider/top-up", {"provider": "claude"}), {"ok": True})
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+
+    def test_a_new_key_ends_a_credit_rest(self):
+        s = self.desk.settings()
+        s["providers"]["claude"] = {"kind": "compatible", "model": "opus", "effort": "", "base_url": "https://example.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("claude", "sk-old-credit", by="page")
+        tid, d, count = self.credit_run()
+        before = self.desk.provider_state()["claude"]["credit_since"]
+        self.desk.write_key("claude", "", by="page")
+        self.assertEqual(self.desk.provider_state()["claude"]["credit_since"], before)
+        self.assertIn("topped up", provider_problem(self.desk, self.desk.settings(), "claude"))
+        self.desk.write_key("claude", "sk-new-credit", by="page")
+        self.assertEqual(self.desk.provider_state()["claude"].get("credit_since"), 0)
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertEqual(count.read_text(), "2")
+
+    def test_credit_sends_one_alert_and_post_per_rest(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from hansa import alert, notify, run
+        captured = self.tmp / "credit-alert.txt"
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": f"cat >> {captured}"}))["ok"])
+        tid, d, _ = self.credit_run()
+        self.assertEqual(len(alert.queued(self.desk)), 1)
+        first = self.desk.provider_state()["claude"]["credit_since"]
+        # Finishes from other tasks on the same provider race under the same desk lock.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda _: run.rest_provider(self.desk, self.desk.settings(), "claude", "credit", "low"), range(2)))
+        self.assertEqual(self.desk.provider_state()["claude"]["credit_since"], first)
+        self.assertEqual(len(alert.queued(self.desk)), 1)
+        [event] = self.events("provider_credit")
+        self.assertEqual(notify._item(self.desk, event)[1], alert.queued(self.desk)[0]["text"])
+        self.assertIn("provider claude: credit balance too low at", event["text"])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertEqual(captured.read_text().count("provider claude:"), 1)
+        self.desk.write_key("claude", "sk-topped-up", by="page")
+        self.desk.update(tid, state="cancelled")
+        self.credit_run()
+        self.assertEqual(len(self.events("provider_credit")), 2)
+        self.assertEqual(len(notify.items_for(self.desk, self.events("provider_credit"), {"session": None})), 2)
+        self.assertEqual(len(alert.queued(self.desk)), 1)
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertEqual(captured.read_text().count("provider claude:"), 2)
+
+    def test_two_tasks_out_of_credit_start_one_rest_and_one_alert(self):
+        from hansa import alert, notify, run
+        self.net_lane("limit", 1, FAKE_LIMIT_TEXT="credit balance is too low")
+        s = self.desk.settings()
+        s["concurrency"] = 2
+        s["lanes"]["b"] = {**s["lanes"]["a"], "env": {"FAKE_NET": f"limit:1:{self.tmp / 'second-count'}",
+                                                        "FAKE_LIMIT_TEXT": "credit balance is too low"}}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "cat > /dev/null"}))["ok"])
+        tids = [self.desk.new_task("Add hello.txt", lane=ln) for ln in ("a", "b")]
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(set(d.procs), set(tids))  # both start before either finish is read
+        end = time.time() + 30
+        while time.time() < end and not all(self.desk.meta(tid).get("attempts") for tid in tids):
+            d.tick()
+            time.sleep(0.05)
+        for tid in tids:
+            m = self.desk.meta(tid)
+            self.assertEqual((m["state"], len(m["attempts"]), run.tries_used(m["attempts"])), ("queued", 1, 0))
+        self.assertEqual(len(self.events("provider_credit")), 1)
+        self.assertEqual(len(alert.queued(self.desk)), 1)
+        self.assertEqual(len(notify.items_for(self.desk, self.events("provider_credit"), {})), 1)
+
+    def test_status_show_and_explain_say_credit_waits_for_the_principal(self):
+        from hansa import alert
+        tid, _, _ = self.credit_run()
+        line = "rests until the principal says it is topped up on the page; credit balance too low since "
+        for shown in (self.hansa_out("status"), self.hansa_out("show", tid),
+                      self.hansa_out("explain", "provider", "claude")):
+            self.assertIn(line, shown)
+            since = self.desk.provider_state()["claude"]["credit_since"]
+            self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(since)), shown)
+        self.assertEqual(alert.queued(self.desk), [])  # no alert command: the post still goes
+        self.assertEqual(len(self.events("provider_credit")), 1)
+        self.assertNotIn("rest 30 min", self.hansa_out("status"))
+
+    def test_a_credit_rest_survives_a_coordinators_ping_and_other_errors(self):
+        from hansa import run
+        tid, _, _ = self.credit_run()
+        before = self.desk.provider_state()["claude"]
+        self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        self.assertIn("topped up", provider_problem(self.desk, self.desk.settings(), "claude"))
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "out of quota")
+        self.assertEqual(self.desk.provider_state()["claude"]["credit_since"], before["credit_since"])
+        self.assertFalse(self.desk.provider_state()["claude"].get("cool_until"))
+        # Settings edits and automatic outage probes must not release or probe a credit hold either.
+        self.assertTrue(self.page_save(lambda s: s.update(cool_minutes=1))["ok"])
+        self.desk.set_provider_state("claude", unreachable_since=time.time() - 3600)
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            d.probe_providers(self.desk.settings())
+            check.assert_not_called()
+            self.assertEqual(d.probes, {})
+        d.rests(self.desk.settings())
+        self.assertIn("claude", d.resting)
+
+    def test_credit_moves_to_the_next_provider_without_using_a_try(self):
+        from hansa import run
+        self.net_lane("limit", 1, FAKE_LIMIT_TEXT="insufficient_quota")
+        s = self.desk.settings()
+        s["providers"]["spare"] = {"kind": "subscription", "model": "opus", "effort": ""}
+        s["lanes"]["a"]["providers"] = ["claude", "spare"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
+        self.assertEqual((m["state"], m["provider"], run.tries_used(m["attempts"])), ("done", "spare", 0))
+        self.assertIn("topped up", provider_problem(self.desk, s, "claude"))
+        self.assertIn("credit balance too low since", views.show_text(self.desk, m["id"]))
+        self.assertEqual(run.tries_used(m["attempts"] * (run.LIMIT_RETURNS + 1)), 0)
+        # If the spare later hits its usage limit, show still explains the earlier provider's credit rest.
+        run.rest_provider(self.desk, s, "spare", "quota", "usage limit reached")
+        self.desk.update(m["id"], state="queued", attempts=[*m["attempts"], {
+            "provider": "spare", "kind": "limit", "counted": False, "error": "usage limit reached", "at": now()}])
+        self.assertIn("credit balance too low since", views.show_text(self.desk, m["id"]))
+
+    def test_a_top_up_for_a_missing_or_ready_provider_does_not_clear_other_rests(self):
+        from hansa import run
+        from hansa.web import _top_up_provider
+        self.assertFalse(_top_up_provider(self.desk, "missing")["ok"])
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "usage limit reached")
+        before = self.desk.provider_state()["claude"]
+        self.assertTrue(_top_up_provider(self.desk, "claude")["ok"])
+        self.assertEqual(self.desk.provider_state()["claude"], before)
+
+    def test_429_and_usage_limits_keep_their_timed_rests(self):
+        from hansa import run
+        for text in ("API Error: 429", "usage limit reached", "rate_limit_error", "You've hit your session limit",
+                     "quota exceeded", "too many requests", "额度不足", "额度已用"):
+            with self.subTest(text=text):
+                self.assertEqual(run.unusable_reason({"is_error": True, "result": text}, "")[0], "quota")
+                t = time.time()
+                until = run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", text, text)
+                self.assertAlmostEqual(until, t + 30 * 60, delta=5)
+                self.assertEqual(self.desk.provider_state()["claude"]["rest_how"], "fixed")
+                until = run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", text,
+                                          text + "; resets in 10 minutes")
+                self.assertAlmostEqual(until, t + 11 * 60, delta=5)
+                self.assertEqual(self.desk.provider_state()["claude"]["rest_how"], "reset")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_settings_provider_row_shows_credit_and_a_top_up_control(self):
+        self.credit_run()
+        harness = self.tmp / "credit-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language in ("en", "zh-CN"):
+            with self.subTest(language=language):
+                replies = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk),
+                           "/api/events": [], "/api/provider/top-up": {"ok": True}}
+                r = subprocess.run(["node", str(harness), str(page), "credit", language],
+                                   input=json.dumps(replies), capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                shown = json.loads(r.stdout)
+                self.assertIn("credit balance too low since", shown["before"])
+                self.assertEqual(shown["posts"], [{"path": "/api/provider/top-up", "body": {"provider": "claude"}}])
+                self.assertNotIn("credit balance too low since", shown["after"])
+                self.assertEqual(shown["draft"], "kept-model")
 
     def test_a_detail_reader_that_raises_does_not_keep_a_run_from_ending(self):
         from hansa import run
@@ -26578,6 +26792,17 @@ else if (ask === "release-hits" || ask === "status") vm.runInContext("loadStatus
   console.log(JSON.stringify(ids["#tab-status"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {
+  if (ask === "credit") {
+    const before = ids["#tab-settings"].textContent;
+    let button = null;
+    walk(ids["#tab-settings"], el => { if (el.tag === "button" && /Topped up|已充值/.test(el.textContent)) button = el; });
+    if (!button) throw new Error("provider's top-up control missing");
+    vm.runInContext('S.providers.claude.model = "kept-model"', ctx);
+    await button.on.click();
+    console.log(JSON.stringify({before, after:ids["#tab-settings"].textContent, posts:apiPosts,
+      draft:vm.runInContext("S.providers.claude.model", ctx)}));
+    return;
+  }
   if (ask.startsWith("settings-fix-")) {
     const run = code => vm.runInContext(code, ctx);
     const check = (ok, why) => { if (!ok) throw new Error(why); };

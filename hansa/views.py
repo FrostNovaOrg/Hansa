@@ -14,7 +14,7 @@ from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SEC
                    release_files_in, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of,
-                  provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
+                  credit_text, provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_looks, waiting_reason, write_list)
 
 STATES = {
@@ -583,6 +583,7 @@ def status(desk: Desk) -> dict:
                   for n, ln in sorted(s["lanes"].items())],
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
                        "rest_minutes": s.get("cool_minutes", 30),
+                       "credit_since": pst.get(n, {}).get("credit_since", 0),
                        "problem": provider_status_problem(desk, s, n, queued), "check": pst.get(n, {}).get("check")}
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
@@ -746,7 +747,7 @@ def provider_status_problem(desk: Desk, s: dict, name: str, queued: list) -> str
 
 def rest_words(p: dict) -> str:
     """A provider's rest after a usage limit whose error gives no reset time, for hansa status."""
-    if p.get("rest_minutes") is None:
+    if p.get("credit_since") or p.get("rest_minutes") is None:
         return ""
     return f"rest {p['rest_minutes']} min" + " (desk)"
 
@@ -755,9 +756,12 @@ def limit_wait(desk: Desk, m: dict) -> str:
     """For hansa show: the line of a queued task whose last run ended on its provider's usage limit while that
     provider still rests; '' otherwise."""
     last = (m.get("attempts") or [{}])[-1]
-    if m.get("state") != "queued" or last.get("kind") != "limit":
+    if m.get("state") != "queued" or last.get("kind") not in ("limit", "credit"):
         return ""
     st = desk.provider_state().get(last["provider"]) or {}
+    if st.get("credit_since"):
+        return (f"{last['provider']}: {credit_text(st)}; it starts when a provider of its lane is ready. "
+                "That return used no try. More: hansa help provider-limits")
     if st.get("cool_until", 0) <= time.time():
         return ""
     how = rest_text(st)
@@ -1017,16 +1021,20 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         if a.get("model") and (a["provider"], a["model"], a.get("effort", ""), a.get("effort_from")) != (
                 m.get("provider"), m.get("model_asked"), m.get("effort_used", ""), m.get("effort_from")):
             on = run_text(a, desk.settings()["providers"].get(a["provider"]))
-        out.append(f"earlier try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
+        out.append(f"earlier run on {on}: {a['error']} (credit; no try used)" if a.get("kind") == "credit" else
+                   f"earlier try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
                    f"earlier run on {on}: {a['error']}; what it reported, if anything, is not kept"
                    if a.get("kind") == "killed" else  # it used no try
                    f"earlier run on {on}: {a['error']} (its usage limit; "
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
+        if a.get("kind") == "credit" and (m["state"] != "queued" or a != m["attempts"][-1]):
+            if resting := credit_text(desk.provider_state().get(a["provider"]) or {}):
+                out.append(f"  {a['provider']}: {resting}")
         if a.get("turns_unknown_after_resume"):  # run.finish: the system killed the run hansa resumed
             out.append("  its turns after hansa resumed it are unknown: the system killed it before it said")
         out += ["  " + x for x in oom_lines(a, "earlier run")]
         start = a.get("run_start")
-        if (not start and a.get("kind") in ("network", "limit") and m.get("base")
+        if (not start and a.get("kind") in ("network", "limit", "credit") and m.get("base")
                 and m.get("kind") != "verify"):
             start = {"commit": m.get("start_from") or m["base"],
                      "source": "earlier task's commit" if m.get("start_from") else "base"}

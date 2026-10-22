@@ -279,6 +279,8 @@ def _item(desk: Desk, e: dict):
         return (("after-merge", e.get("lane"), e.get("target")),
                 f"lane {e.get('lane')} target {e.get('target')} after merges {e.get('merges')}: {e.get('why')}"
                 " · next: hansa explain lane " + str(e.get("lane")), None, False, None)
+    if kind == "provider_credit":
+        return ("credit", e.get("provider"), e.get("since")), e["text"], None, True, None
     if kind == "disk_low":
         return ("disk",), (f"free space is under the floor ({e.get('floor') or 0:g} GB): "
                            + "; ".join(e.get("volumes") or []) + f": hansa serve starts {disk.STARTS} until "

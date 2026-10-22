@@ -87,7 +87,7 @@ timed out, or a log line saying "overloaded", is the task's own failure.
 
 ### When a provider hits a usage limit
 
-When a provider answers with a usage limit (HTTP 402 or 429, or the wording of one), it rests: no task
+When a provider answers with a usage limit (HTTP 429, or the wording of one), it rests: no task
 starts on it until the rest ends, and a task stopped by the limit moves to the next ready provider of its
 lane, or waits for one.
 
@@ -112,6 +112,14 @@ lane, or waits for one.
   as the task goes back. A run hansa resumed counts with the run before it, the resumed part read from
   the session record after the resume only. `hansa cost` (also `--by task`, which shows each task's runs
   and turns), `hansa show`, and the page's cost and task view count every try once, by when each run ended.
+
+Credit errors (`credit balance is too low`, HTTP/API Error 402, `insufficient balance`,
+`insufficient_balance`, `insufficient_quota`, `余额不足`) rest indefinitely, surviving server restarts.
+Only the principal ends this rest: press **Topped up** on that provider's row in **Settings, Providers**,
+or save a new key. The coordinator cannot end it, even with `hansa ping`.
+The task moves to the lane's next provider without using a try; if all rest, it waits.
+Once per credit rest, hansa posts a line to the coordinator and runs the principal's alert command,
+if set. `status`, `show`, `explain provider P`, and the provider's page row say why and since when.
 
 ## A check's output
 

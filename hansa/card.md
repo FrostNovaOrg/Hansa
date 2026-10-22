@@ -279,10 +279,11 @@ or ask `scout` when reading is enough; say what you need back.
   settle it with the principal. More: `hansa help who-changes-what`.
 
 ## Facts you can rely on
-- A provider out of quota or at its usage limit rests (until the reset time the error gives, else
+- A provider at its usage limit rests (until the reset time the error gives, else
   the desk's `cool_minutes`), and the task moves to the lane's next
   provider without using a try (5 times); one that refuses a task (its content filter) does not
-  rest. `hansa show` says until when. More: `hansa help provider-limits`.
+  rest. Credit rests until the principal confirms a top-up on the page or saves a new key.
+  `hansa show` says when or why it waits. More: `hansa help provider-limits`.
 - While a task runs, `hansa status` and `hansa show <id>` say how far it got (replies, minutes idle,
   its last note). Some providers take minutes per reply; a task is stuck only when nothing has
   happened for a long while. Where a run's effort came from: `hansa help effort`.

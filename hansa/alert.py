@@ -4,6 +4,7 @@ The principal sets one command line on the page (settings `alert`, which only th
 the page records that it saved it, and when. hansa runs it when a release starts waiting for the principal's yes,
 when a release ends (done, failed, void or forbidden), when the coordinator stops one (release_stopped; the principal's
 own Stop on the page sends none), when a request to the principal is filed (hansa ask), when a lane's runs cannot
+start because a provider ran out of credit (once per rest: run.rest_provider), when a lane's runs cannot
 start because their sandbox cannot (once for each lane and reason: run.hold), when free space goes under the floor
 and hansa serve starts nothing new (once each time: disk.look),
 when hansa serve has finished no round for STUCK_ALERT seconds, and when what hansa posts to the coordinator's session
@@ -63,7 +64,7 @@ from pathlib import Path
 from . import without_session
 from .desk import Desk, now, read_json, write_json
 
-KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "disk", "coordinator",
+KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "disk", "coordinator", "credit",
          "test")
 GATHER = 20  # seconds: alerts that come within this of each other go out in one run
 MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
@@ -207,6 +208,8 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
     elif kind == "ask":
         a = next((x for x in desk.asks() if x.get("id") == fields.get("id")), {})
         add(desk, "ask", f"request #{fields.get('id')} waits for you on the page: {a.get('text', '')}")
+    elif kind == "provider_credit":
+        add(desk, "credit", fields["text"])
     elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason (run.hold)
         from .run import sandbox_held_text
         why = sandbox_held_text({**fields, "kind": fields.get("run")})
