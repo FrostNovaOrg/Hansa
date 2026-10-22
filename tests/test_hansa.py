@@ -18786,6 +18786,138 @@ def save():'''))
         self.assertIn(str(self.desk.secrets_dir), box["filesystem"]["denyRead"])  # the denials stay as they were
         self.assertIn(str(self.repo.resolve() / ".git" / "refs"), box["filesystem"]["denyWrite"])
 
+    @staticmethod
+    def read_open(fs, path) -> bool:
+        """Whether srt with these filesystem settings lets a command read `path`, as its README has it: each
+        denyRead entry that covers it (a path with all under it, a pattern as macOS reads it) closes it unless an
+        allowRead entry at or inside that entry covers it; a denyRead inside an allowRead stays closed."""
+        def covers(entry, p):
+            if any(c in entry for c in "*?["):
+                return bool(re.match(macos_rx(entry), p))
+            return p == entry or p.startswith(entry.rstrip("/") + "/")
+        for p in dict.fromkeys([str(path), os.path.realpath(path)]):
+            for d in (d for d in fs.get("denyRead", []) if covers(d, p)):
+                if not any(covers(d, a) and covers(a, p) for a in fs.get("allowRead", [])):
+                    return False
+        return True
+
+    def fenced_runs(self):
+        """A desk with a finished task on lane a, lane b's worktree and other runs' temporary folders, and the
+        sandbox each kind of run on lane a gets: (what none may read, {kind: (its filesystem settings, what it
+        reads)})."""
+        from hansa import run
+        from contrib.codex.tests.codexkit import shim
+        for name, value in (("WORKER_TMP_ROOT", self.tmp / "runs"), ("tempdir", self.tmp / "system-tmp")):
+            value.mkdir()
+            patch = unittest.mock.patch.object(run if name == "WORKER_TMP_ROOT" else tempfile, name, str(value))
+            patch.start()
+            self.addCleanup(patch.stop)
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        if not self.desk.asks_path.exists():
+            write_json(self.desk.asks_path, [])
+        wt = self.desk.worktrees_dir / "a"
+        (self.desk.worktrees_dir / "b").mkdir()
+        (self.desk.worktrees_dir / "b" / "x.txt").write_text("lane b's")
+        others = [tempfile.mkdtemp(prefix="hansa-t0999-", dir=run.WORKER_TMP_ROOT),  # another worker's (make_worker_tmp)
+                  tempfile.mkdtemp(prefix="hansa-check-")]  # another lane command's (run_tmp)
+        closed = [self.desk.settings_path, self.desk.tasks_dir / tid / "task.md", self.desk.tasks_dir / tid / "result.md",
+                  self.desk.lanes_dir / "a" / "brief.md", self.desk.events_path, self.desk.asks_path,
+                  self.desk.worktrees_dir / "b" / "x.txt", *(Path(o) / "f" for o in others),
+                  self.desk.given / "settings.json"]  # the desk as it was given, links not followed
+        for f in closed:
+            self.assertTrue(f.exists() or f.parent.is_dir(), f)
+        s = self.desk.settings()
+        s["providers"]["compat"] = {"kind": "compatible", "model": "m", "effort": "", "base_url": "https://llm.example"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        lane, p = s["lanes"]["a"], s["providers"]["claude"]
+        mine, tried = (tempfile.mkdtemp(prefix=f"hansa-{tid}-", dir=run.WORKER_TMP_ROOT),
+                       tempfile.mkdtemp(prefix="hansa-try-"))
+        worker = run.sandbox_settings(self.desk, lane, "claude", p, wt, mine)
+        both = [wt / "README.md", self.desk.given / "worktrees" / "a" / "README.md", self.repo / ".git" / "HEAD"]
+        kinds = {"worker": (worker["sandbox"]["filesystem"], [*both, Path(mine) / "f"]),
+                 "compatible provider": (run.sandbox_settings(self.desk, lane, "compat", s["providers"]["compat"], wt,
+                                                              mine)["sandbox"]["filesystem"], [*both, Path(mine) / "f"]),
+                 "codex adapter": (shim.srt_settings(worker, str(wt), mine, str(self.tmp / "codex-home"))["filesystem"],
+                                   [*both, Path(mine) / "f"]),
+                 "sandbox try": (run.sandbox_try_settings(worker["sandbox"], wt, tried)["filesystem"],
+                                 [*both, Path(tried) / "f"])}
+        for linux in (False, True):  # a setup's, check's, merge check's or lane try's (srt_settings)
+            with unittest.mock.patch.object(account, "LINUX", linux):
+                t, own = run.run_tmp(self.desk, "check")
+            self.assertEqual(self.desk.state_dir in Path(own).parents, linux)  # on Linux its TMPDIR is in .hansa
+            kinds[f"lane command, linux={linux}"] = (run.srt_settings(self.desk, lane, "claude", p, wt, t,
+                                                                      own=own)["filesystem"],
+                                                     [*both, Path(t) / "f", Path(own) / "f"])
+        return closed, kinds
+
+    def test_each_kind_of_run_is_kept_from_the_desk_and_other_runs_folders(self):
+        closed, kinds = self.fenced_runs()
+        for kind, (fs, _) in kinds.items():
+            for path in [*closed, self.desk.secrets_dir / "x.key", self.desk.state_dir / "runs" / "t0001" / "run.json",
+                         self.desk.notes_dir / "PROJECT.md", self.desk.root / "CLAUDE.md"]:  # the last four as before
+                with self.subTest(kind=kind, path=path):
+                    self.assertFalse(self.read_open(fs, path), fs)
+
+    def test_each_kind_of_run_still_reads_its_worktree_its_folders_and_gits(self):
+        _, kinds = self.fenced_runs()
+        for kind, (fs, opened) in kinds.items():
+            for path in opened:
+                with self.subTest(kind=kind, path=path):
+                    self.assertTrue(self.read_open(fs, path), fs)
+
+    def test_a_lane_repository_inside_the_desk_keeps_its_git_folder_readable(self):
+        from hansa import run
+        root = unittest.mock.patch.object(run, "WORKER_TMP_ROOT", str(self.tmp / "runs"))
+        root.start()
+        self.addCleanup(root.stop)
+        repo = self.desk.root / "repo-b"
+        repo.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=repo)
+        (repo / "README.md").write_text("b\n")
+        sh("git", "add", ".", cwd=repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init", cwd=repo)
+        self.hansa("lane", "add", "b", "--repo", str(repo))
+        wt = self.desk.worktrees_dir / "b"
+        sh("git", "worktree", "add", "-q", "--detach", str(wt), cwd=repo)
+        s = self.desk.settings()
+        fs = run.sandbox_settings(self.desk, s["lanes"]["b"], "claude", s["providers"]["claude"], wt)["sandbox"]["filesystem"]
+        for path in (wt / "README.md", repo / ".git" / "HEAD", repo / ".git" / "worktrees" / "b" / "HEAD"):
+            with self.subTest(path=path):
+                self.assertTrue(self.read_open(fs, path), fs)
+        for path in (repo / "README.md", self.desk.settings_path, self.desk.state_dir / "x"):  # the rest stays closed
+            with self.subTest(path=path):
+                self.assertFalse(self.read_open(fs, path), fs)
+
+    def test_a_worker_run_start_gives_is_kept_from_the_desk_but_its_own(self):
+        from hansa import run
+        seen = self.tmp / "argv.jsonl"
+        root = unittest.mock.patch.object(run, "WORKER_TMP_ROOT", str(self.tmp / "runs"))
+        (self.tmp / "runs").mkdir()
+        root.start()
+        self.addCleanup(root.stop)
+        other = tempfile.mkdtemp(prefix="hansa-t0999-", dir=run.WORKER_TMP_ROOT)  # another run's, going on
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        proc = run.start(self.desk, tid, "a", "claude")
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.assertEqual(proc.wait(timeout=60), 0, (self.desk.raw_dir(tid) / "run.err").read_text())
+        mine = self.desk.meta(tid)["worker_tmp"]
+        fs = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]
+        for path in (self.desk.settings_path, self.desk.tasks_dir / tid / "task.md", self.desk.lanes_dir / "a" / "brief.md",
+                     self.desk.events_path, self.desk.asks_path, self.desk.worktrees_dir / "b", Path(other) / "f",
+                     self.desk.given / "settings.json"):
+            with self.subTest(path=path):
+                self.assertFalse(self.read_open(fs, path), fs)
+        wt = Path(self.desk.meta(tid)["worktree"])
+        for path in (wt / "README.md", self.desk.given / "worktrees" / "a" / "README.md", Path(mine) / "f",
+                     self.repo / ".git" / "HEAD"):
+            with self.subTest(path=path):
+                self.assertTrue(self.read_open(fs, path), fs)
+
     def test_a_run_leaves_out_a_saved_write_folder_that_no_longer_passes_the_fences(self):
         from hansa import run
         cache, lk = self.tmp / "m2", self.tmp / "lk"
