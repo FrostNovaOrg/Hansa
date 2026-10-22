@@ -29,6 +29,24 @@ CSV export keeps the original rows and columns, uses the range selected when the
 export started, and reports success or failure. Both pages share the settings
 page's native CSS and JavaScript controls and reduced-motion support.
 
+The page keeps navigation for the current browser tab in `sessionStorage`:
+`hansa.tab` is written whenever Status, Settings or Cost is shown (including
+startup), `hansa.settingsSection` whenever a Settings section is shown, and
+`hansa.costPeriod` when the Cost range changes. Reloading restores those choices;
+a fresh browser tab starts on Status. An address containing `?t=` (or `&t=`)
+always opens Status, where releases and requests wait for the principal.
+Unknown saved choices fall back to Status, Providers and 7 days.
+Scroll position and expanded Status details are not stored.
+
+The small language selector at the end of the header, after the status summary,
+offers `中文` and `English`. Choosing writes `hansa.language` in `localStorage`
+(`zh-CN` or `en`) and reloads, keeping navigation while discarding unsaved Settings
+text without a draft warning. The choice applies across visits and browser tabs;
+without a valid choice, a browser language starting with `zh` selects Chinese,
+and other languages select English. The HTML `lang` attribute matches the shown
+language. If storage is unavailable or throws, the page still works with its
+usual defaults for the choices it cannot read or keep.
+
 ## Settings on the web page
 
 Settings are grouped into Providers, Coordinator, Lanes (read only), What workers
