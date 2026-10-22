@@ -288,7 +288,6 @@ const language = keptChoice("localStorage", "hansa.language", ["zh-CN", "en"],
   (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en");
 const ZH = language === "zh-CN";
 document.documentElement.setAttribute("lang", language);
-let changingLanguage = false;
 const T = ZH ? {
   status:"状态", settings:"设置", cost:"成本",
   desk:"工作台", version:"hansa 版本", summaryNow:"现在",
@@ -933,7 +932,7 @@ function showSettingsGroup(key) {
   }
 }
 window.addEventListener("beforeunload", event => {
-  if (!changingLanguage && settingsDirty()) { event.preventDefault(); event.returnValue = ""; }
+  if (settingsDirty()) { event.preventDefault(); event.returnValue = ""; }
 });
 /* the entries of what workers may not read that the coordinator added with hansa hide, as hansa recorded them */
 const hiddenByCoordinator = () => Object.entries(S.workers_may_not_read_added || {}).filter(([p]) => (S.workers_may_not_read || []).includes(p));
@@ -1430,7 +1429,6 @@ $("#language").append(...[ ["zh-CN", "中文"], ["en", "English"] ].map(([value,
   h("option", {value, lang:value, selected:value === language}, label)));
 $("#language").addEventListener("change", e => {
   keepChoice("localStorage", "hansa.language", e.target.value);
-  changingLanguage = true;
   location.reload();
 });
 if (typeof ResizeObserver !== "undefined") {

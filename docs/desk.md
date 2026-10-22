@@ -40,8 +40,10 @@ Scroll position and expanded Status details are not stored.
 
 The small language selector at the end of the header, after the status summary,
 offers `中文` and `English`. Choosing writes `hansa.language` in `localStorage`
-(`zh-CN` or `en`) and reloads, keeping navigation while discarding unsaved Settings
-text without a draft warning. The choice applies across visits and browser tabs;
+(`zh-CN` or `en`) and reloads, keeping navigation. Unsaved Settings text triggers
+the browser's usual warning before leaving; accepting the reload discards it.
+If the viewer stays, the language choice applies on the next load.
+The choice applies across visits and browser tabs;
 without a valid choice, a browser language starting with `zh` selects Chinese,
 and other languages select English. The HTML `lang` attribute matches the shown
 language. If storage is unavailable or throws, the page still works with its

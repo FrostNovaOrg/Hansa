@@ -15733,8 +15733,8 @@ class DeskTest(unittest.TestCase):
                       no_read_left_out=[])  # nothing else on the status line asks for attention
             given = {"/api/settings": public_settings(self.desk), "/api/status": st, "/api/events": []}
             for lang, words in (("en", says), ("zh-CN", zh)):
-                harness.write_text(script.replace('navigator: {language: "en"}', f'navigator: {{language: "{lang}"}}'))
-                r = subprocess.run(["node", str(harness), str(web.UI), "nulls"], input=json.dumps(given),
+                harness.write_text(script)
+                r = subprocess.run(["node", str(harness), str(web.UI), "nulls", lang], input=json.dumps(given),
                                    capture_output=True, text=True, timeout=60)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 page = json.loads(r.stdout)
@@ -15953,8 +15953,8 @@ class DeskTest(unittest.TestCase):
                       no_read_left_out=[])  # nothing else on the status line asks for attention
             given = {"/api/settings": public_settings(self.desk), "/api/status": st, "/api/events": []}
             for lang, words in (("en", says), ("zh-CN", zh)):
-                harness.write_text(script.replace('navigator: {language: "en"}', f'navigator: {{language: "{lang}"}}'))
-                r = subprocess.run(["node", str(harness), str(web.UI), "nulls"], input=json.dumps(given),
+                harness.write_text(script)
+                r = subprocess.run(["node", str(harness), str(web.UI), "nulls", lang], input=json.dumps(given),
                                    capture_output=True, text=True, timeout=60)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 page = json.loads(r.stdout)
@@ -26356,7 +26356,7 @@ const storage = (values = {}, mode) => ({values:{...values}, writes:[],
   setItem(key, value) { if (mode === "write") throw new Error("storage write blocked");
     this.values[key] = String(value); this.writes.push([key, String(value)]); }});
 let session = storage(preferences.session, preferences.sessionMode), local = storage(preferences.local, preferences.localMode);
-let reloads = 0, historyReplacements = [];
+let reloads = 0, historyReplacements = [], unloadWarnings = [];
 function openPage(search = "") {
   for (const key of Object.keys(ids)) delete ids[key];
   document.documentElement = new El("html"); document.activeElement = null; document.title = "Hansa";
@@ -26418,15 +26418,16 @@ if (ask === "preferences") (async () => {
       if (JSON.stringify(labels) !== JSON.stringify([["zh-CN", "中文", "zh-CN"], ["en", "English", "en"]])) throw new Error("language names missing");
       select.value = action.language; select.on.change({target:select});
       if (!reloads) throw new Error("language choice did not reload");
-      const event = {preventDefault() { throw new Error("language change warned about lost draft"); }};
+      const event = {prevented:false, returnValue:null, preventDefault() { this.prevented = true; }};
       for (const handler of windowEvents.beforeunload || []) handler(event);
-      ctx = openPage();
+      unloadWarnings.push({prevented:event.prevented, returnValue:event.returnValue});
+      if (!(event.prevented && action.cancelReload)) ctx = openPage();
     }
     if (action.newTab) { session = storage(); ctx = openPage(); }
     else if (action.reload) ctx = openPage(action.search || "");
     await flush(); snapshots.push(snapshot());
   }
-  console.log(JSON.stringify({snapshots, reloads, historyReplacements, sessionWrites:session.writes, localWrites:local.writes,
+  console.log(JSON.stringify({snapshots, reloads, historyReplacements, unloadWarnings, sessionWrites:session.writes, localWrites:local.writes,
     posts:apiPosts}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (["desk-name", "desk-count", "status-parts", "notify-status"].includes(ask)) vm.runInContext("loadStatus()", ctx).then(async () => {
@@ -27201,15 +27202,30 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertEqual(output["snapshots"][0]["language"], expected)
                     self.assertEqual(output["snapshots"][0]["lang"], expected)
 
-    def test_page_language_change_may_discard_unsaved_settings(self):
-        output = self.page_preferences(actions=[{"tab": "settings"}, {"draft": 919}, {"language": "zh-CN"}])
-        self.assertEqual(output["snapshots"][2]["cool"], 919)
-        self.assertEqual(output["snapshots"][3]["tab"], "settings")
-        self.assertNotEqual(output["snapshots"][3]["cool"], 919)
-        self.assertEqual(output["snapshots"][3]["language"], "zh-CN")
-        self.assertEqual(output["posts"], [])
-        for store in ("session", "local"):
-            self.assertNotIn("919", json.dumps(output["snapshots"][3][store]))
+    def test_page_language_change_warns_about_unsaved_settings(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                output = self.page_preferences(actions=[{"tab": "settings"}, {"draft": 919},
+                                                       {"language": "zh-CN", "cancelReload": cancel},
+                                                       {"reload": True}])
+                self.assertEqual(output["unloadWarnings"], [{"prevented": True, "returnValue": ""}])
+                self.assertEqual(output["snapshots"][2]["cool"], 919)
+                changed = output["snapshots"][3]
+                self.assertEqual(changed["tab"], "settings")
+                self.assertEqual(changed["local"]["hansa.language"], "zh-CN")
+                if cancel:
+                    self.assertEqual(changed["cool"], 919)
+                    self.assertEqual(changed["language"], "en")
+                else:
+                    self.assertNotEqual(changed["cool"], 919)
+                    self.assertEqual(changed["language"], "zh-CN")
+                loaded = output["snapshots"][4]
+                self.assertEqual(loaded["tab"], "settings")
+                self.assertEqual(loaded["language"], "zh-CN")
+                self.assertNotEqual(loaded["cool"], 919)
+                self.assertEqual(output["posts"], [])
+                for store in ("session", "local"):
+                    self.assertNotIn("919", json.dumps(loaded[store]))
 
     def page_header(self, scenario, status, language):
         harness = self.tmp / "header-page.js"
