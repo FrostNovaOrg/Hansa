@@ -248,6 +248,47 @@ def unpicked(words: list) -> list:
     return out
 
 
+DENY_FLAGS = ("--disallowedTools", "--disallowed-tools")  # claude's option for deny rules, in both its spellings
+
+
+def with_rules(words: list, rules: list) -> list:
+    """claude's words with these deny rules: in the first --disallowedTools (or --disallowed-tools) list the words
+    hold, right after its name, the words' own entries kept after them (but one that is one of these); else as a
+    list of their own, at the end of the options (before --), so no word after it is read as a rule."""
+    end = words.index("--") if "--" in words else len(words)
+    at = next((i for i, x in enumerate(words[:end]) if x.partition("=")[0] in DENY_FLAGS), None)
+    if at is None:
+        return words[:end] + ["--disallowedTools", *rules] + words[end:]
+    name, eq, value = words[at].partition("=")
+    own = [value] if eq and value not in rules else []
+    i = at + 1
+    if not eq:  # a list of values, up to the next option
+        while i < end and not words[i].startswith("-"):
+            own += [] if words[i] in rules else [words[i]]
+            i += 1
+    return words[:at] + [name, *rules, *own] + words[i:]
+
+
+def without_rules(words: list, rules: list) -> list:
+    """claude's words without the deny rules with_rules added (a list left with no entry goes too): what a
+    session hansa notify-launch started is recorded with when it runs hansa notify on."""
+    out, i = [], 0
+    while i < len(words):
+        x = words[i]
+        if x == "--":
+            return out + words[i:]
+        if x not in DENY_FLAGS:
+            out.append(x)
+            i += 1
+            continue
+        own, i = [], i + 1
+        while i < len(words) and not words[i].startswith("-"):
+            own += [] if words[i] in rules else [words[i]]
+            i += 1
+        out += [x, *own] if own else []
+    return out
+
+
 def resumed(words: list) -> list:
     """The words to start claude again with: --continue in place of the words that picked a conversation."""
     words = unpicked(words)
@@ -291,6 +332,25 @@ def _keep(desk: Desk, rec: dict, why: str = "", unread: bool = False) -> str:
     return why
 
 
+def recorded_folders(desk: Desk) -> list:
+    """The folder hansa notify on or notify-launch recorded for the desk's coordinator's session, where hansa writes
+    its copy of the card: in a list, empty when none is recorded or hansa notify off ran in that session since."""
+    rec = read_coordinator(desk)
+    f = rec.get("folder")
+    return [f] if rec.get("kind") == "notify" and not rec.get("off") and isinstance(f, str) and os.path.isabs(f) else []
+
+
+def notify_off(desk: Desk, sess: dict) -> None:
+    """hansa notify off in the recorded session: its folder is no longer recorded (recorded_folders) until a start or
+    a hansa notify on records it again. hansa up starts it again all the same."""
+    rec = read_coordinator(desk)
+    if rec.get("kind") == "notify" and notify.same(rec.get("session"), sess) and not rec.get("off"):
+        try:
+            write_json(desk.state_dir / COORDINATOR_START, {**rec, "off": now()})
+        except OSError:  # its folder's files stay closed to workers: nothing opens by this
+            pass
+
+
 def record_coordinator(desk: Desk, clear: str, words: list) -> str:
     """How hansa coordinator started this session (this process, which becomes it), for hansa up: '' when
     recorded, else why not. Its own option, the words it gave claude, the desk, tmux and the launch settings."""
@@ -301,14 +361,18 @@ def record_coordinator(desk: Desk, clear: str, words: list) -> str:
     return _keep(desk, rec, unsafe(desk, [clear, *rec["words"], str(desk.root)]))
 
 
-def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None) -> str:
+def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None, rules: list = None) -> str:
     """How a session hansa did not start began, for hansa up: its claude's exact arguments and folder, read from
     its process unless given (notify-launch gives its own), tmux, and the launch settings of this command's
-    environment, which it has from the session. '' when recorded, else why not."""
+    environment, which it has from the session. rules: the deny rules notify-launch starts it with (launch_rules),
+    kept in the record, which so says the session has them, and left out of its arguments. '' when recorded, else
+    why not."""
     argv = proc_args(sess["pid"]) if argv is None else argv
     folder = proc_cwd(sess["pid"]) if folder is None else folder
-    rec = {"kind": "notify", "hansa": hansa_command(), "argv": argv and [argv[0], *unpicked(argv[1:])],
-           "folder": folder, "tmux": record_tmux(), "env": start_env(desk, os.environ), "session": sess}
+    words = without_rules(unpicked(argv[1:]), rules or []) if argv else []
+    rec = {"kind": "notify", "hansa": hansa_command(), "argv": argv and [argv[0], *words],
+           "folder": folder, "tmux": record_tmux(), "env": start_env(desk, os.environ), "session": sess,
+           **({"launch_rules": rules} if rules is not None else {})}
     if not argv:
         return _keep(desk, rec, "the arguments of its claude process cannot be read", unread=True)
     if not folder or not os.path.isdir(folder):
@@ -383,7 +447,10 @@ def notify_on_line(desk: Desk, card: bool | None = None) -> str:
     # owner's wrapper sets that on every hansa command, so a session it did not start runs notify on with it too
     if rec.get("kind") == "coordinator" and notify.same(rec.get("session"), sess):
         return f"After a restart, hansa up starts this session again {restart_line(desk, rec)}."
-    why = record_session(desk, sess)
+    # hansa up started this session through notify-launch, with the deny rules its record keeps
+    rules = rec.get("launch_rules") if rec.get("kind") == "notify" and notify.same(rec.get("session"), sess) \
+        and isinstance(rec.get("launch_rules"), list) else None
+    why = record_session(desk, sess, rules=rules)
     rec = read_coordinator(desk)
     kept = rec.get("kind") == "notify" and notify.same(rec.get("session"), sess)
     if why and not kept:
@@ -392,7 +459,16 @@ def notify_on_line(desk: Desk, card: bool | None = None) -> str:
     placed = place_card(desk, rec)
     placed["removed"] = removed + placed["removed"]
     return "\n".join([f"{then}After a restart, hansa up starts this session again {restart_line(desk, rec)}.",
+                      *([] if isinstance(rec.get("launch_rules"), list) else [UNRULED]),
                       *card_lines(desk, rec, placed)])
+
+
+# What hansa notify on says of a session it records that hansa up did not start (notify-launch)
+UNRULED = ("This session has none of the deny rules hansa coordinator gives its own session (no pushing or "
+           "publishing from its shell, no reading of the desk's secrets/ and .hansa/ or of the logins and keys under "
+           "the home folder, no editing of the desk's files but notes/) until hansa up starts it again, which gives "
+           "it those; even then, not the principal's list of what workers may not read, nor the no-edit rule on the "
+           "lanes' repositories, and no helpers.")
 
 
 def card_import(folder: Path, card: Path):
@@ -531,6 +607,12 @@ def copy_text(desk: Desk, path: Path) -> str:
               "> This session was not started by `hansa coordinator`, so the helpers the card names (scout, "
               "reviewer, operator) and the coordinator's mod are not in it: where the card says to ask a helper, "
               "make a task.\n>\n"
+              "> Started by `hansa up`, it has these of the rules `hansa coordinator` gives its session: no pushing or "
+              "publishing from its shell, no reading of the desk's `secrets/` and `.hansa/` or of the logins and keys "
+              "under the home folder, no editing of the desk's files but `notes/`. Started otherwise and recorded "
+              "with `hansa notify on`, it has none of them until `hansa up` starts it. In both cases it is not denied "
+              "Read on the principal's list of what workers may not read, nor Edit in the lanes' repositories: the "
+              "card's rules still hold.\n>\n"
               "> This card is for the session that coordinates that desk: the one hansa posts its notices to. "
               "Any other session started in this folder or below it, such as a worker a script starts or a session "
               "for other work, is not that session: ignore this card.\n\n")

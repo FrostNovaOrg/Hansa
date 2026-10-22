@@ -34,7 +34,7 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
-                   refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, now, merge_message, message_fallback, parse_identity, program_candidates,
+                   refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, program_candidates,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
 from .srt_output import protected
@@ -2410,6 +2410,27 @@ def desk_private(desk: Desk) -> list:
     return [desk.secrets_dir, desk.state_dir, desk.notes_dir, desk.root / "CLAUDE.md"]
 
 
+SESSION_FILES = (".claude", "CLAUDE.md", "CLAUDE.local.md")  # a coordinator's settings, memory and copy of the card
+
+
+def session_private(desk: Desk) -> list:
+    """What of the folder hansa notify on or notify-launch recorded for the coordinator's session (up.recorded_folders)
+    no worker or verifier, setup or check may read: SESSION_FILES there. Built in, as notes/ is. Left out, stopping
+    nothing: all of them when the folder is the desk or in it, or a lane's repository or in one; and each the
+    principal's list would refuse (deny_split) or that would make a rule Claude Code splits (path_rule_problem)."""
+    from .up import recorded_folders
+    s = desk.settings()
+    lanes = s.get("lanes") if isinstance(s.get("lanes"), dict) else {}
+    repos = [r for _, r in lane_repos(s) if r.startswith("/")]
+    out = []
+    for f in recorded_folders(desk):
+        if any(_above(x, f) for x in [str(desk.root), *repos]):
+            continue
+        given = [os.path.join(f, n) for n in SESSION_FILES]
+        out += [x for x in deny_split(given, desk.root, lanes)[0] if not path_rule_problem(x)]
+    return out
+
+
 def paths_problem(desk: Desk, wt) -> str:
     """path_rule_problem for the folders hansa writes rules for when it starts a worker or verifier: the desk's private ones (desk_private), the worktree, what the principal keeps from workers; '' for
     none. One that would split is never dropped: nothing starts until it moves."""
@@ -2427,7 +2448,8 @@ def desk_read_rules(desk: Desk) -> list:
 
 def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
     """What a lane's sandbox lets through, for its workers (Claude Code's sandbox) and for its setup and
-    check (srt): (the hosts it may reach, {"denyRead": the desk's keys, state, notes and card (desk_private), every provider's Claude
+    check (srt): (the hosts it may reach, {"denyRead": the desk's keys, state, notes and card (desk_private), the recorded
+    coordinator's folder's Claude Code files (session_private), every provider's Claude
     Code folder (the login and the session records of whoever runs on it) and ~/.claude, whichever provider
     this run uses, the built-in logins and keys, and what the principal keeps from workers, "denyWrite":
     git's data, "allowWrite": the lane's write list}). Each adds the worktree and a temporary folder to what
@@ -2442,7 +2464,7 @@ def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple
     homes += [h for h in (config_home(desk, n, q) for n, q in desk.settings()["providers"].items()
                           if isinstance(q, dict) and isinstance(q.get("config_dir", ""), str)) if h.is_absolute()]
     deny = full_paths([*desk_private(desk), *homes, home / ".claude",
-                       *(home / f for f in home_secrets()), *no_read(desk)[0]])
+                       *(home / f for f in home_secrets()), *no_read(desk)[0], *session_private(desk)])
     # the write list holds build or test tools' cache folders; denyRead and denyWrite still win within them
     allow = full_paths(write_list(desk, lane)[0])
     return list(lane.get("network", [])), {"denyRead": deny, "denyWrite": git_write_deny(wt),
@@ -3689,7 +3711,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     desk.update(tid, no_read_left_out=not_kept)
     for line in not_kept:
         desk.event("no_read_left_out", task=tid, lane=lane_name, why=line)
-    argv += ["--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept),
+    argv += ["--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept), *no_read_rules(session_private(desk)),
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]

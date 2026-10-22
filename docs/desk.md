@@ -270,7 +270,19 @@ variables, and runs in the recorded folder:
   launcher starts the follower for its own process, as `hansa coordinator`
   does, records the start again, then execs claude with
   `--messaging-socket-path`, so the session hears from hansa without
-  `hansa notify on`.
+  `hansa notify on`. It runs outside the desk and reads none of the desk's
+  settings, so the launcher adds deny rules (`launch_rules` in
+  `hansa/cli.py`): the desk's push and publish rules (the same list), Read on
+  its `secrets/` and `.hansa/`, Edit on each of its files but `notes/` and
+  `worktrees/`, by full path, and Read on the logins and keys under the home
+  folder, as `hansa coordinator` gives its session. They go into the recorded
+  command's own `--disallowedTools` list when it has one; its other options
+  stay. A rule Claude Code would split stops the start, as for `hansa
+  coordinator`. Not added: the principal's list of what workers may not read
+  (it may hold what this session's work reads), the no-edit rules on the lanes'
+  repositories and worktrees, and turning off helpers it does not have. A
+  session started otherwise has none of these rules until `hansa up` starts
+  it; `hansa notify on` and the copy's header say so.
 
 `--continue` continues the most recent conversation in that folder. hansa's own
 `claude -p` runs (`hansa ping`) use a temporary folder, so they leave none

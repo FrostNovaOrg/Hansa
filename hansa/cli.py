@@ -19,7 +19,7 @@ from pathlib import Path
 from . import account, alert, build, cost, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, read_json, refused_rule, resolved, write_json,
-                   argv_rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
+                   argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name, compact_settings, write_text)
 from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
@@ -184,8 +184,46 @@ def permissions(desk: Desk) -> dict:
     # A desk reached through a link (/tmp on macOS is /private/tmp) gets the rule for each spelling: a path written
     # the short way matches only with both
     return {"allow": ["Bash(hansa:*)", *(f"Edit(//{x.lstrip('/')}/notes/**)" for x in desk_spellings(desk))],
-            "deny": [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"] + [f"Edit({g})" for g in guarded]
-            + [f"Bash({c}:*)" for c in NO_PUBLISH] + [f"Bash({r})" for r in no_publish_with_options()]}
+            "deny": desk_read_denials(desk) + [f"Edit({g})" for g in guarded] + no_publish_rules()}
+
+
+def desk_read_denials(desk: Desk) -> list:
+    """Read denied on the desk's secrets/ and .hansa/: in its .claude/settings.json, and to a session hansa
+    notify-launch starts (launch_rules)."""
+    r = str(desk.root).lstrip("/")
+    return [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"]
+
+
+def no_publish_rules() -> list:
+    """The deny rules for pushing and publishing from the coordinator's shell: in the desk's .claude/settings.json,
+    and on the command line of a session hansa notify-launch starts (launch_rules)."""
+    return [f"Bash({c}:*)" for c in NO_PUBLISH] + [f"Bash({r})" for r in no_publish_with_options()]
+
+
+# The desk's own files a session outside it may not change, besides what is in the desk now: those hansa writes
+# there, made or not yet. Not notes/ (the coordinator's), nor worktrees/ (the lanes' checkouts, as their repositories:
+# a commit made there directly is shown to the principal with the release that sends it)
+DESK_FILES = ("settings.json", "secrets", "tasks", "lanes", ".hansa", "events.jsonl", "asks.json", "PAUSED",
+              "CLAUDE.md", "CLAUDE.local.md", ".claude")
+
+
+def launch_rules(desk: Desk, home: str) -> list:
+    """The deny rules of a session hansa notify-launch starts: it runs in a folder of its own, so it reads none of
+    the desk's settings. Those the desk's .claude/settings.json gives a session in the desk (no_publish_rules,
+    desk_read_denials); Edit, which covers Write too, on each of the desk's files but notes/ and worktrees/, by its
+    full path; Read on the built-in logins and keys under the home folder, as hansa coordinator gives its session.
+    Not the principal's list of what workers may not read (it may hold what this session's own work reads), the
+    no-edit rules on the lanes' repositories and worktrees, nor the helpers turned off: it has none of hansa's."""
+    from .run import no_read_rules
+    try:
+        there = {e.name for e in os.scandir(desk.root)}
+    except OSError:
+        there = set()
+    names = sorted({*DESK_FILES, *there} - {desk.notes_dir.name, desk.worktrees_dir.name})
+    r = str(desk.root).lstrip("/")
+    return [*no_publish_rules(), *desk_read_denials(desk),
+            *(f"Edit(//{r}/{n}{end})" for n in names for end in ("", "/**")),
+            *no_read_rules([os.path.join(home, f) for f in home_secrets()])]
 
 
 # What the coordinator may not run from its own shell, whoever is at the session and whatever its mode: pushing
@@ -1240,7 +1278,9 @@ def cmd_notify(a):
     if a.action != "off":
         print(notify.list_text(desk))
         return
-    print("\n".join([notify.turn_off(desk), *[f"hansa removed its copy of the card, {p}: sessions started in its "
+    said = notify.turn_off(desk)
+    up.notify_off(desk, notify.session_here())  # its folder's files are open to runs that start from now on
+    print("\n".join([said, *[f"hansa removed its copy of the card, {p}: sessions started in its "
                                               "folder no longer read it." for p in up.remove_copies(desk)]]))
 
 
@@ -1251,11 +1291,19 @@ def cmd_notify_launch(a):
     desk = Desk.find(a.desk)
     if not a.rest:
         raise SystemExit("hansa: notify-launch starts claude's command given after it; none was given")
-    unrecorded = up.record_session(desk, {"pid": os.getpid(), "start": proc_start(os.getpid())}, a.rest, os.getcwd())
+    # the deny rules the desk's settings and hansa coordinator give the coordinator's own session (launch_rules),
+    # in the command's own --disallowedTools list when it has one. Checked as hansa coordinator checks its own
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    rules = launch_rules(desk, home)
+    unsplit = rules_problem(rules) or desk_paths_problem(desk, [home, *run_homes()])
+    if unsplit:  # a deny rule Claude Code would split, or one under a path it reads as a pattern, closes nothing
+        raise SystemExit(f"hansa: the coordinator's session was not started: {unsplit}")
+    unrecorded = up.record_session(desk, {"pid": os.getpid(), "start": proc_start(os.getpid())}, a.rest, os.getcwd(),
+                                   rules)
     if unrecorded:
         print(f"hansa: hansa up will not start this session again after a restart: {unrecorded}; nothing was "
               "recorded", file=sys.stderr)
-    argv = [a.rest[0], *_notified(desk, a.rest), *a.rest[1:]]
+    argv = [a.rest[0], *_notified(desk, a.rest), *up.with_rules(a.rest[1:], rules)]
     try:
         os.execvpe(argv[0], argv, os.environ)
     except OSError as e:
@@ -2565,8 +2613,9 @@ def cmd_hide(a):
         print("".join(f"  {w}\n" for w in why), end="")
     if added:
         print("Runs that start from now on are kept from it; a run already going keeps the sandbox it started with. "
-              "Your own Read is denied there from your next start. Only the principal removes an entry, on the web "
-              "page (Settings).")
+              "Read is denied there to the coordinator's session from its next start only when hansa coordinator "
+              "starts it: not to a session hansa notify on recorded, even one hansa up started. Only the principal "
+              "removes an entry, on the web page (Settings).")
     for x in warnings:  # as the page shows them on saving: the lanes' to fix, not the list's
         print(f"warning: {x}")
     if refused:
@@ -3116,8 +3165,8 @@ def main(argv=None):
                      "each judged as a page save adding it: any problem, even an old one, refuses it, with the page's "
                      "reason, and one already there, however it is spelled, is not added again. Each addition is "
                      "recorded as the coordinator's, with when, and shown so on the page and in hansa explain lane L. "
-                     "Runs that start from now on are kept from it, and Read is denied there to the coordinator from "
-                     "its next start; a run already going keeps the sandbox it started with. There is no command to "
+                     "Runs that start from now on are kept from it, and Read is denied there to the session hansa "
+                     "coordinator starts from its next start (not to one hansa notify on recorded); a run already going keeps the sandbox it started with. There is no command to "
                      "remove an entry: removing one gives workers something back, so only the principal removes "
                      "entries, on the web page.")
     p.add_argument("paths", nargs="*", metavar="PATH")

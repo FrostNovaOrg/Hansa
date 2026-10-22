@@ -20,7 +20,7 @@ The page also shows what goes on, and asks the principal about each release
 ([Releases](releases.md)).
 
 What workers may not read, no worker, verifier, setup or check reads, and Read
-is denied there to the coordinator too. No lane's
+is denied there to the session `hansa coordinator` starts too. No lane's
 repository or write list may be such a folder, inside one or above one. What
 the page refuses on that list, and what a saved entry that can no longer be
 applied does, is in [Workers and the sandbox](sandbox.md#what-workers-and-verifiers-may-touch).
@@ -34,8 +34,8 @@ hansa records each addition as the coordinator's, with when, writes an event
 (`no_read_added`) for it, and shows it beside the entry on the page and in
 `hansa explain lane L`; an entry the principal saves on the page is the
 principal's. Runs that start afterwards are kept from it, a run already going
-keeps the sandbox it started with, and the coordinator's own Read is denied there
-from its next start. Only the principal removes an entry, on the page: removing
+keeps the sandbox it started with, and Read is denied there to the session
+`hansa coordinator` starts from its next start. Only the principal removes an entry, on the page: removing
 one gives workers something back (keys, logins), so there is no command for it,
 and no command of the coordinator's may take one out. A page loaded before an
 addition does not drop it on saving: as for any change made since it loaded,
