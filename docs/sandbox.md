@@ -12,7 +12,11 @@ report, inside Claude Code's sandbox, which the operating system enforces: any
 command, but files changed only in the worktree (and its temporary folder, made
 for each run and removed when it ends, and the lane's write list, `hansa lane set L write ...`), no
 reading of the desk's keys and state, the coordinator's notes (`notes/`) and
-card (the desk's `CLAUDE.md`), of any provider's Claude Code folder or
+card (the desk's `CLAUDE.md`), of `.claude`, `CLAUDE.md` and `CLAUDE.local.md`
+in the folder `hansa notify on` recorded for the coordinator's session (built
+in; none when that folder is the desk, a lane's repository or in one, nor for
+an entry the principal's list would refuse; gone for runs that start after
+`hansa notify off` there or another folder is recorded), of any provider's Claude Code folder or
 `~/.claude`, of the logins, keys, tokens, browsers' profiles, messages and
 shell histories hansa knows under the home folder (`HOME_SECRETS` and, for
 macOS, `MAC_SECRETS` in `hansa/desk.py`: `~/.ssh`, `~/.aws`, Teleport, other
@@ -26,7 +30,8 @@ not read": this machine's own folders of keys, and `~/.m2/settings.xml` or
 `~/.gradle/gradle.properties` when they hold deploy credentials the project's
 builds do not need: hansa leaves them readable, as they also hold the mirrors
 and proxies a build may need; the coordinator may add to the list with `hansa
-hide`, and only the principal removes an entry; who else may not read them is
+hide`, and only the principal removes an entry; Read is denied there to the
+session `hansa coordinator` starts, not to one `hansa notify on` recorded; who else may not read them is
 under [The principal](who-changes-what.md#the-principal). An entry that would stop
 every worker is refused on saving, each with its reason: the home folder,
 the desk, a lane's repository, a folder on the `PATH`, the system's programs

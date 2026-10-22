@@ -2740,6 +2740,30 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertIn(f"reads the card from {copy}", self.status_line())
         self.assertIn(f"reads the coordinator's card from {copy}", views.explain_text(desk, "notify"))
 
+    def test_a_session_started_by_hand_is_told_it_lacks_the_coordinators_rules_until_hansa_up_starts_it(self):
+        """The principal starts Claude Code by hand in a folder of their own, then runs hansa notify on in it."""
+        project = self.own_folder()
+        self.desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        said, rec, _ = self.notify_on(["claude", "--name", "n"], str(project))
+        self.assertNotIn("launch_rules", rec)
+        [line] = [x for x in said.splitlines() if "deny rules" in x]
+        for words in ("none of the deny rules hansa coordinator gives its own session", "no pushing or publishing",
+                      "secrets/ and .hansa/", "until hansa up starts it again", "principal's list",
+                      "lanes' repositories", "no helpers"):
+            self.assertIn(words, line)
+        header = self.copy_of(project).read_text().split("\n\n", 1)[0]
+        for words in ("> Started by `hansa up`, it has these of the rules `hansa coordinator` gives its session: no "
+                      "pushing or publishing from its shell, no reading of the desk's `secrets/` and `.hansa/`",
+                      "Started otherwise and recorded with `hansa notify on`, it has none of them until `hansa up` "
+                      "starts it.", "In both cases it is not denied Read on the principal's list of what workers may "
+                      "not read, nor Edit in the lanes' repositories", "scout, reviewer, operator"):
+            self.assertIn(words, header)
+        # the session hansa coordinator started is not told so
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "coordinator", "words": [], "folder": str(self.desk.root), "session": self.SESS})
+        said, _, _ = self.notify_on(["claude"], str(project))
+        self.assertNotIn("deny rules", said)
+
     def test_notify_no_card_persists_until_card_is_enabled(self):
         from hansa import up
         project = self.own_folder()
@@ -3068,8 +3092,9 @@ class CoordinatorUpTest(unittest.TestCase):
         said, rec, _ = self.notify_on(started["argv"], folder, me, CLAUDE_CODE_MESSAGING_SOCKET=sock,
                                       CLAUDE_CODE_SESSION_ID=self.IDENTITY)
         self.assertNotIn("will not start", said)
-        self.assertEqual((rec["kind"], rec["argv"], rec["folder"], rec["session"]),
-                         ("notify", ["claude", "--name", "desk b"], folder, me))
+        self.assertNotIn("none of the deny rules", said)  # hansa up started it: it has them
+        self.assertEqual((rec["kind"], rec["argv"], rec["folder"], rec["session"], rec["launch_rules"]),
+                         ("notify", ["claude", "--name", "desk b"], folder, me, cli.launch_rules(self.desk, str(self.tmp))))
         self.assertNotIn(sock, (self.desk.state_dir / "coordinator-start.json").read_text())
         with unittest.mock.patch.object(up, "alive", return_value=False):  # after a restart: that process is gone
             said, calls, ok = self.coordinator_up()
@@ -3275,12 +3300,111 @@ class CoordinatorUpTest(unittest.TestCase):
             self.say("notify-launch", "claude", "--name", "desk b", "--continue")
         me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
         self.assertEqual(ran, [(me, sock, {"wait": False})])
+        rules = cli.launch_rules(self.desk, str(self.tmp))
         self.assertEqual(started, {"prog": "claude", "argv": ["claude", "--messaging-socket-path", sock, "--name",
-                                                              "desk b", "--continue"]})
+                                                              "desk b", "--continue", "--disallowedTools", *rules]})
         rec = up.read_coordinator(self.desk)
-        self.assertEqual((rec["kind"], rec["argv"], rec["folder"], rec["session"]),
-                         ("notify", ["claude", "--name", "desk b"], os.getcwd(), me))
+        self.assertEqual((rec["kind"], rec["argv"], rec["folder"], rec["session"], rec["launch_rules"]),
+                         ("notify", ["claude", "--name", "desk b"], os.getcwd(), me, rules))
         self.assertNotIn("notify-launch", self.say("help"))  # not listed
+
+    def fake_claude(self):
+        """A stand-in claude that writes the words it was started with to a file, one after another: (it, file)."""
+        seen = self.tmp / "claude-words"
+        fake = self.tmp / "fake-claude"
+        fake.write_text(f"#!/bin/sh\nprintf '%s\\0' \"$@\" > {shlex.quote(str(seen))}\n")
+        fake.chmod(0o755)
+        return fake, seen
+
+    @staticmethod
+    def denied(words) -> list:
+        """The values of the one --disallowedTools list in claude's words."""
+        at = words.index("--disallowedTools")
+        end = next((i for i in range(at + 1, len(words)) if words[i].startswith("-")), len(words))
+        return words[at + 1:end]
+
+    def test_hansa_up_starts_a_recorded_session_with_the_coordinators_deny_rules_in_its_own_list(self):
+        """hansa up starts the session hansa notify on recorded, in a folder outside the desk, in tmux through
+        hansa notify-launch; the pane's command is run here as tmux would run it, with a stand-in claude."""
+        from hansa import up
+        started = time.time()
+        self.addCleanup(stop_started_on, self.desk.root, started)  # the follower the launcher starts
+        fake, seen = self.fake_claude()
+        folder, extra = self.own_folder(), self.tmp / "extra"
+        extra.mkdir()
+        for d in ("notes", "worktrees", "lanes"):
+            (self.desk.root / d).mkdir()
+        mailbox = str(self.tmp / "mailbox")  # on the principal's list: this session's own work may read it
+        write_json(self.desk.settings_path, {"workers_may_not_read": [mailbox]})
+        own = ["--disallowedTools", "WebFetch", "Bash(rm:*)", "--settings", '{"env": {"A": "1"}}',
+               "--permission-mode", "auto", "--add-dir", str(extra), "--name", "desk b"]
+        rec = {"kind": "notify", "hansa": up.hansa_command(), "argv": [str(fake), *own], "folder": str(folder),
+               "tmux": {}, "env": {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(self.tmp)},
+               "session": {"pid": 0}}
+        said, calls, ok = self.coordinator_up(rec)
+        self.assertTrue(ok, said)
+        create = calls[1]
+        self.assertEqual(self.pane_words(create)[3:5], ["notify-launch", str(fake)])
+        r = subprocess.run(["/bin/sh", "-c", create.args[0][-1]], cwd=folder, capture_output=True, text=True,
+                           timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        words = seen.read_text().split("\0")[:-1]
+        self.assertEqual(words.count("--disallowedTools"), 1, words)  # one list: Claude Code is not left to join two
+        self.assertNotIn("--disallowed-tools", words)
+        denied, root, home = self.denied(words), str(self.desk.root).lstrip("/"), str(self.tmp).lstrip("/")
+        self.assertEqual(denied, [*cli.launch_rules(self.desk, str(self.tmp)), "WebFetch", "Bash(rm:*)"])
+        # git push origin main in its shell, and reading a file in the desk's secrets/, are refused
+        for rule in ("Bash(git push:*)", "Bash(git * push *)", "Bash(npm publish:*)", f"Read(//{root}/secrets/**)",
+                     f"Read(//{root}/.hansa/**)", f"Edit(//{root}/settings.json)", f"Edit(//{root}/tasks/**)",
+                     f"Edit(//{root}/CLAUDE.md)", f"Edit(//{root}/lanes/**)", f"Read(//{home}/.ssh/**)",
+                     f"Read(//{home}/.aws/**)"):
+            self.assertIn(rule, denied)
+        self.assertEqual([x for x in denied if x.startswith("Bash(")], [*cli.no_publish_rules(), "Bash(rm:*)"])
+        self.assertTrue(set(cli.permissions(self.desk)["deny"]) - set(denied) <= {
+            x for x in cli.permissions(self.desk)["deny"] if x.startswith("Edit(")})
+        # not the notes, the worktrees, the principal's list, the lanes' repositories or the helpers
+        for absent in ("/notes", "/worktrees", "mailbox", "Agent("):
+            self.assertFalse([x for x in denied if absent in x], absent)
+        # its own options stay as they are
+        self.assertEqual(words[words.index("--settings"):words.index("--settings") + len(own) - 3], own[3:])
+        self.assertIn("--continue", words)
+        # the record keeps the command as it was, and the rules it starts with
+        rec = up.read_coordinator(self.desk)
+        self.assertEqual(rec["argv"], [str(fake), *own])
+        self.assertEqual(rec["launch_rules"], cli.launch_rules(self.desk, str(self.tmp)))
+        self.assertEqual([os.path.realpath(x) for x in up.recorded_folders(self.desk)], [os.path.realpath(folder)])
+
+    def test_hansas_rules_go_into_the_commands_own_list_whichever_way_it_spells_it(self):
+        from hansa import up
+        mine = ["Bash(git push:*)", "Read(//d/secrets/**)"]
+        cases = [(["--disallowed-tools", "WebFetch", "--name", "n"],
+                  ["--disallowed-tools", *mine, "WebFetch", "--name", "n"]),
+                 (["--disallowedTools=WebFetch", "--name", "n"], ["--disallowedTools", *mine, "WebFetch", "--name", "n"]),
+                 (["--disallowedTools", "--name", "n"], ["--disallowedTools", *mine, "--name", "n"]),
+                 (["a prompt", "--continue"], ["a prompt", "--continue", "--disallowedTools", *mine]),
+                 (["--name", "n", "--", "text"], ["--name", "n", "--disallowedTools", *mine, "--", "text"]),
+                 # a launched session's command read back: hansa's are not doubled
+                 (["--disallowedTools", "Bash(git push:*)", "Read(//d/secrets/**)", "WebFetch"],
+                  ["--disallowedTools", *mine, "WebFetch"])]
+        for words, joined in cases:
+            with self.subTest(words=words):
+                self.assertEqual(up.with_rules(words, mine), joined)
+                self.assertEqual(sum(x.partition("=")[0] in up.DENY_FLAGS for x in joined), 1)
+        self.assertEqual(up.without_rules(["--disallowedTools", *mine, "WebFetch", "--name", "n"], mine),
+                         ["--disallowedTools", "WebFetch", "--name", "n"])
+        self.assertEqual(up.without_rules(["a", "--disallowedTools", *mine, "--", "--disallowedTools"], mine),
+                         ["a", "--", "--disallowedTools"])
+
+    def test_a_rule_claude_code_would_split_stops_the_launch_as_it_stops_hansa_coordinator(self):
+        odd = Desk(self.tmp / "odd) desk")
+        for d in (odd.root, odd.tasks_dir, odd.state_dir):
+            d.mkdir(parents=True)
+        write_json(odd.settings_path, {})
+        with unittest.mock.patch("os.execvpe") as ran, \
+                self.assertRaisesRegex(SystemExit, "the coordinator's session was not started: .*more than one"):
+            main(["--desk", str(odd.root), "notify-launch", "claude"])
+        ran.assert_not_called()
+        self.assertEqual(hansa.up.read_coordinator(odd), {})  # nothing recorded
 
     def test_the_status_line_says_how_hansa_up_starts_the_session_again_or_why_not(self):
         from hansa import up
@@ -14691,6 +14815,84 @@ class DeskTest(unittest.TestCase):
             self.assertEqual((agents / name).read_text(), (code / "agents" / name).read_text())
         self.assertIn("effort: medium", (agents / "scout.md").read_text())
 
+    def record_folder(self, folder):
+        """The desk's coordinator's session recorded in folder, as hansa notify on records it."""
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "notify", "argv": ["claude"], "folder": str(folder), "session": {"pid": 0}})
+
+    def test_workers_may_not_read_the_claude_code_files_of_the_folder_recorded_for_the_coordinator(self):
+        from hansa import run, up
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        f = (self.tmp / "own folder").resolve()
+        f.mkdir()
+        self.record_folder(f)
+        own = [str(f / n) for n in (".claude", "CLAUDE.md", "CLAUDE.local.md")]
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        deny = self.sandbox_of(argv)["filesystem"]["denyRead"]
+        srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
+        for x in own:
+            self.assertIn(x, deny)  # the worker's commands
+            self.assertIn(x, srt)  # the setup and the check
+            self.assertIn(f"Read(//{x.lstrip('/')}/**)", self.denied_by(argv))  # its Read tool
+        self.assertEqual([x for x in deny if x.startswith(str(f))], own)  # the rest of the folder stays readable
+        self.assertNotIn(str(f), self.desk.settings()["workers_may_not_read"])  # built in, not the principal's
+        explained = self.hansa("explain", "lane", "a")
+        self.assertIn("the Claude Code files of the folder hansa notify on recorded for the coordinator's session "
+                      f"(built in): {', '.join(own)}", explained)
+        # nothing for the desk or a folder in it, a lane's repository or a folder in it, nor for an entry the
+        # principal's list would refuse: none of them stops a run
+        odd = self.tmp / "own [1]"
+        odd.mkdir()
+        for folder in (self.desk.root, self.desk.notes_dir, self.repo, self.repo / "sub", odd):
+            with self.subTest(folder=folder):
+                self.record_folder(folder)
+                self.assertEqual(run.session_private(self.desk), [])
+                fs = run.lane_sandbox(self.desk, lane, "claude", p, self.repo)[1]["denyRead"]
+                self.assertFalse({str(folder / n) for n in (".claude", "CLAUDE.local.md")} & set(fs))
+                self.assertNotIn("Claude Code files of the folder", self.hansa("explain", "lane", "a"))
+        # no longer recorded: hansa notify off in that session, or another folder recorded in its place
+        self.record_folder(f)
+        other = (self.tmp / "other").resolve()
+        other.mkdir()
+        up.record_session(self.desk, {"pid": 7, "start": "s"}, ["claude"], str(other))
+        self.assertEqual(run.session_private(self.desk), [str(other / n) for n in run.SESSION_FILES])
+        with unittest.mock.patch.object(notify, "turn_off", return_value="hansa no longer posts to this session"), \
+                unittest.mock.patch.object(notify, "session_here", return_value={"pid": 7, "start": "s"}):
+            self.hansa("notify", "off")
+        self.assertEqual(run.session_private(self.desk), [])
+        tid = self.desk.new_task("Add hello2.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertFalse([x for x in self.sandbox_of(argv)["filesystem"]["denyRead"]
+                          if x.startswith((str(f), str(other)))])
+
+    def test_the_session_hansa_coordinator_starts_keeps_its_rules_with_a_folder_recorded(self):
+        self.record_folder((self.tmp / "own folder").resolve())
+        show = self.tmp / "argv-claude"
+        show.write_text("#!/bin/sh\nfor x in \"$@\"; do echo \"$x\"; done\n")
+        show.chmod(0o755)
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk",
+                            str(self.desk.root), "coordinator"], capture_output=True, text=True,
+                           env={**os.environ, "HANSA_CLAUDE": str(show)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        words = r.stdout.splitlines()
+        self.assertEqual(words.count("--disallowedTools"), 1)
+        denied = words[words.index("--disallowedTools") + 1:words.index("--model")]
+        repo = str(self.repo.resolve()).lstrip("/")
+        for rule in (f"Edit(//{repo}/**)", "Agent(general-purpose)"):
+            self.assertIn(rule, denied)
+        # its push and publish rules and Read on the desk's secrets/ are the desk's settings', not on its command line
+        self.assertFalse([x for x in denied if x.startswith("Bash(") or "own folder" in x or "/secrets/" in x])
+        self.assertEqual(json.loads((self.desk.root / ".claude" / "settings.json").read_text())["permissions"],
+                         cli.permissions(self.desk))
+        self.assertTrue(set(cli.no_publish_rules()) <= set(cli.permissions(self.desk)["deny"]))
+
     @unittest.skipIf(os.getuid() == 0, "root may write anywhere")
     def test_the_coordinator_turns_off_claude_codes_updates_only_where_this_account_cannot_write_its_install(self):
         def install(where, npm):  # a stand-in claude as npm or the native installer puts it, reached by a link
@@ -19186,7 +19388,9 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(code, 0, told)
         self.assertIn(f"added to what workers may not read: {keys}\n", told)
         for x in ("Runs that start from now on are kept from it", "a run already going keeps the sandbox it started with",
-                  "Your own Read is denied there from your next start", "Only the principal removes an entry"):
+                  "Read is denied there to the coordinator's session from its next start only when hansa "
+                  "coordinator starts it: not to a session hansa notify on recorded, even one hansa up started",
+                  "Only the principal removes an entry"):
             self.assertIn(x, told)
         s = self.desk.settings()
         self.assertEqual(s["workers_may_not_read"], [str(keys)])

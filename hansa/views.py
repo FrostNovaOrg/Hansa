@@ -12,7 +12,7 @@ from pathlib import Path
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, plugin, release, up
 from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (disk_short, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
+from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of,
                   provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_looks, waiting_reason, write_list)
@@ -1646,6 +1646,7 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
     built-in list as a count, the principal's own entries whole; whole: the built-in list name by name too."""
     homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in s["providers"].items() if isinstance(p, dict))
     kept = no_read_parts(s, desk.root)[0]
+    own = session_private(desk)
     mac = (f"; on macOS also, under ~/Library: {', '.join(x.removeprefix('Library/') for x in MAC_SECRETS)}"
            if sys.platform == "darwin" else "")
     built_in = (f"{', '.join('~/' + x for x in HOME_SECRETS)}{mac}" if whole else
@@ -1655,13 +1656,15 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
     return ["  what its workers and verifiers, its setup and its check may not read (the sandbox refuses it to any"
             " command; a name that does not exist is refused all the same):",
             f"    the desk's keys and state: {desk.secrets_dir}, {desk.state_dir}",
+            *([f"    the Claude Code files of the folder hansa notify on recorded for the coordinator's session (built "
+               f"in): {', '.join(own)}"] if own else []),
             f"    every provider's Claude Code folder, whichever provider the run uses: {', '.join(homes)}; and ~/.claude",
             "    logins, keys, tokens, browsing data, messages and histories under the home folder (built in): "
             + built_in,
             "    folders and files the principal keeps from workers (the principal's, on the web page, Settings; you"
-            " add to it with hansa hide, and only the principal removes an entry; Read is denied there to you, workers,"
-            " verifiers as well; no lane's repository or write list may be one, inside one or"
-            " above one): " + (", ".join(x + hidden_note(s, x) for x in kept) or "none"),
+            " add to it with hansa hide, and only the principal removes an entry; Read is denied there to workers,"
+            " verifiers and the session hansa coordinator starts, not one hansa notify on recorded; no lane's"
+            " repository or write list may be one, inside one or above one): " + (", ".join(x + hidden_note(s, x) for x in kept) or "none"),
             *("      " + x for x in no_read_unusable(s, desk.root))]
 
 
