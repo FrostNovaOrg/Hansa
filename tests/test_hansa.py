@@ -2751,7 +2751,9 @@ class CoordinatorUpTest(unittest.TestCase):
                       "secrets/ and .hansa/", "until hansa up starts it again", "principal's list",
                       "lanes' repositories", "no helpers"):
             self.assertIn(words, line)
+        self.assertIn("files but notes/ and worktrees/)", line)
         header = self.copy_of(project).read_text().split("\n\n", 1)[0]
+        self.assertIn("no editing of the desk's files but `notes/` and `worktrees/`.", header)
         for words in ("> Started by `hansa up`, it has these of the rules `hansa coordinator` gives its session: no "
                       "pushing or publishing from its shell, no reading of the desk's `secrets/` and `.hansa/`",
                       "Started otherwise and recorded with `hansa notify on`, it has none of them until `hansa up` "
@@ -2763,6 +2765,24 @@ class CoordinatorUpTest(unittest.TestCase):
                    {"kind": "coordinator", "words": [], "folder": str(self.desk.root), "session": self.SESS})
         said, _, _ = self.notify_on(["claude"], str(project))
         self.assertNotIn("deny rules", said)
+
+    def test_a_session_started_by_hand_in_the_desk_is_told_the_rules_it_has_from_the_desks_settings(self):
+        self.desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        inside = self.desk.root / "notes"
+        for folder in (*cli.desk_spellings(self.desk), str(inside)):  # each spelling of the desk's folder
+            with self.subTest(folder=folder):
+                said, rec, _ = self.notify_on(["claude", "--name", "n"], folder)
+                self.assertEqual(rec["folder"], folder)
+                [line] = [x for x in said.splitlines() if "deny rules" in x]
+                if folder == str(inside):  # not the desk's own folder: today's line
+                    self.assertIn("none of the deny rules", line)
+                    continue
+                self.assertNotIn("none of the deny rules", line)
+                for words in ("from the desk's .claude/settings.json", "no pushing or publishing",
+                              "no reading of the desk's secrets/ and .hansa/", "no editing of the desk's "
+                              "settings.json, secrets/, tasks/, .hansa/, events.jsonl and lanes/", "The rest",
+                              "logins and keys", "but notes/ and worktrees/", "come when hansa up starts it"):
+                    self.assertIn(words, line)
 
     def test_notify_no_card_persists_until_card_is_enabled(self):
         from hansa import up
@@ -27175,7 +27195,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
   if (ask === "credit") {
     const before = ids["#tab-settings"].textContent;
     let button = null;
-    walk(ids["#tab-settings"], el => { if (el.tag === "button" && /Topped up|已充值/.test(el.textContent)) button = el; });
+    const word = process.argv[4] === "zh-CN" ? "已充值" : "Topped up";
+    walk(ids["#tab-settings"], el => { if (el.tag === "button" && el.textContent.includes(word)) button = el; });
     if (!button) throw new Error("provider's top-up control missing");
     vm.runInContext('S.providers.claude.model = "kept-model"', ctx);
     await button.on.click();
