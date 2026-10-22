@@ -18918,6 +18918,69 @@ def save():'''))
             with self.subTest(path=path):
                 self.assertTrue(self.read_open(fs, path), fs)
 
+    @staticmethod
+    def read_ruled(rules, path) -> bool:
+        """Whether one of Claude Code's Read deny rules (Read(//PATH) for the path, Read(//PATH/**) for all under it)
+        matches `path` as written."""
+        for r in rules:
+            m = re.fullmatch(r"Read\(/(/.*)\)", r)
+            x = m.group(1) if m else None
+            if x and (str(path) == x or (x.endswith("/**") and str(path).startswith(x[:-2]))):
+                return True
+        return False
+
+    def test_worker_and_verifier_read_rules_close_the_desk_and_other_runs_folders_but_their_own(self):
+        from hansa import run
+        closed, _ = self.fenced_runs()  # WORKER_TMP_ROOT and the system's temporary folder are the test's own
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        wt = self.desk.worktrees_dir / "a"
+        for kind in ("work", "verify"):
+            tid = self.desk.new_task(f"A {kind} run", lane="a", kind=kind)
+            proc = run.start(self.desk, tid, "a", "claude")
+            self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+            self.addCleanup(lambda p=proc: p.kill() if p.poll() is None else None)
+            self.assertEqual(proc.wait(timeout=60), 0, (self.desk.raw_dir(tid) / "run.err").read_text())
+            rules = self.denied_by(json.loads(seen.read_text().splitlines()[-1]))
+            mine = self.desk.meta(tid)["worker_tmp"]
+            for path in [*closed, self.desk.worktrees_dir / "b", self.desk.tasks_dir / tid / "task.md"]:
+                for spelling in dict.fromkeys([str(path), os.path.realpath(path)]):
+                    with self.subTest(kind=kind, path=spelling):
+                        self.assertTrue(self.read_ruled(rules, spelling), rules)
+            for path in (wt, wt / "README.md", self.desk.given / "worktrees" / "a" / "README.md", Path(mine),
+                         Path(mine) / "attach" / "f", self.repo / ".git" / "HEAD"):
+                for spelling in dict.fromkeys([str(path), os.path.realpath(path)]):
+                    with self.subTest(kind=kind, path=spelling):
+                        self.assertFalse(self.read_ruled(rules, spelling), rules)
+
+    def test_read_rules_of_a_run_on_a_lane_repository_inside_the_desk_leave_its_git_folder(self):
+        from hansa import run
+        root = unittest.mock.patch.object(run, "WORKER_TMP_ROOT", str(self.tmp / "runs"))
+        (self.tmp / "runs").mkdir()
+        root.start()
+        self.addCleanup(root.stop)
+        repo = self.desk.root / "repo-b"
+        repo.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=repo)
+        (repo / "README.md").write_text("b\n")
+        sh("git", "add", ".", cwd=repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init", cwd=repo)
+        self.hansa("lane", "add", "b", "--repo", str(repo))
+        wt = self.desk.worktrees_dir / "b"
+        sh("git", "worktree", "add", "-q", "--detach", str(wt), cwd=repo)
+        mine = tempfile.mkdtemp(prefix="hansa-t0998-", dir=run.WORKER_TMP_ROOT)
+        other = tempfile.mkdtemp(prefix="hansa-t0999-", dir=run.WORKER_TMP_ROOT)
+        rules = run.desk_fence_rules(self.desk, wt, mine)
+        for path in (wt / "README.md", repo / ".git" / "HEAD", repo / ".git" / "worktrees" / "b" / "HEAD", Path(mine) / "f"):
+            with self.subTest(path=path):
+                self.assertFalse(self.read_ruled(rules, path), rules)
+        for path in (repo / "README.md", self.desk.settings_path, self.desk.worktrees_dir / "a" / "README.md",
+                     Path(other) / "f", self.desk.root / "PAUSED"):  # PAUSED: a name hansa makes, not there now
+            with self.subTest(path=path):
+                self.assertTrue(self.read_ruled(rules, path), rules)
+
     def test_a_run_leaves_out_a_saved_write_folder_that_no_longer_passes_the_fences(self):
         from hansa import run
         cache, lk = self.tmp / "m2", self.tmp / "lk"
@@ -20114,10 +20177,11 @@ def save():'''))
             deny = self.sandbox_of(argv)["filesystem"]["denyRead"]
             self.assertIn(str(good), deny)
             self.assertFalse(set(left) & set(deny), deny)
-            self.assertEqual([r for r in self.denied_by(argv) if r.startswith("Read(") and "keys" not in r],
-                             [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir, self.desk.state_dir,
-                                                                          self.desk.notes_dir)]
+            reads = [r for r in self.denied_by(argv) if r.startswith("Read(") and "keys" not in r]
+            self.assertEqual(reads[:4], [f"Read(//{str(d).lstrip('/')}/**)" for d in (self.desk.secrets_dir,
+                                                                                    self.desk.state_dir, self.desk.notes_dir)]
                              + [f"Read(//{str(self.desk.root).lstrip('/')}/CLAUDE.md)"])
+            self.assertFalse([r for r in reads if any(p.lstrip("/") in r for p in left)], reads)  # then desk_fence_rules'
             self.assertEqual(len(m["no_read_left_out"]), len(left))
             shown = views.show_text(self.desk, tid)
             for path, why in left.items():

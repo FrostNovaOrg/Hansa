@@ -2472,6 +2472,49 @@ def desk_read_rules(desk: Desk) -> list:
     return [rule("Read", d) for d in desk_private(desk)[:3]] + [f"Read(//{str(desk.root / 'CLAUDE.md').lstrip('/')})"]
 
 
+def _entries(folder) -> set:
+    """The names in `folder`; none where it cannot be read."""
+    try:
+        return {e.name for e in os.scandir(folder)}
+    except OSError:
+        return set()
+
+
+def _all_but(folder: str, keep: list, extra=()) -> list:
+    """The paths in `folder` (its entries, and the names `extra` there or not) with all under them, but `keep`: an
+    entry that holds one of them is gone into, so only what is beside it is given."""
+    out = []
+    for n in sorted({*_entries(folder), *extra}):
+        x = os.path.join(folder, n)
+        if any(_above(k, x) for k in keep):
+            continue
+        out += _all_but(x, keep) if any(_above(x, k) for k in keep) else [x]
+    return out
+
+
+def desk_fence_rules(desk: Desk, wt: Path, tmp: str) -> list:
+    """desk_fence as rules that deny Claude Code's file tools, which srt's denyRead does not hold. A deny rule there
+    wins over any allow rule, so none for the whole desk nor for every run's temporary folder: one for each of the
+    desk's entries but worktrees/ (those there now and the names hansa makes, cli.DESK_FILES), each lane's worktree
+    but the run's own `wt`, and each run's temporary folder there now but its own `tmp`. What holds `wt` or its git
+    folders (a lane's repository inside the desk) is gone into, not closed. A desk path whose rule Claude Code would
+    split stops the run, as the other rules' do (argv_rules_problem); a temporary folder's is not one hansa made
+    (path_rule_problem), and is left out."""
+    from .cli import DESK_FILES, desk_spellings
+    lanes = desk.settings().get("lanes")
+    keep = [str(wt), *map(str, git_folders(wt))]
+    trees = str(desk.worktrees_dir)
+    inside = [*_all_but(str(desk.root), [*keep, trees], DESK_FILES),
+              *_all_but(trees, keep, lanes if isinstance(lanes, dict) else ())]
+    root = str(desk.root)
+    paths = [d + x[len(root):] for x in inside for d in desk_spellings(desk)]  # a rule matches the path as written
+    runs = [os.path.join(r, n) for r in full_paths(dict.fromkeys([WORKER_TMP_ROOT, tempfile.gettempdir()]))
+            for n in sorted(_entries(r)) if n.startswith(RUN_TMP_PATTERN[:-1])]
+    runs = [x for x in runs if not any(_above(x, k) or _above(k, x) for k in [*keep, *([tmp] if tmp else [])])
+            and not path_rule_problem(x)]
+    return no_read_rules(list(dict.fromkeys(paths + runs)))
+
+
 def worker_read_denials(desk: Desk) -> list:
     """The read fence shared by worker sandboxes and attachment admission."""
     home = Path(account_home())
@@ -3795,7 +3838,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     desk.update(tid, no_read_left_out=not_kept)
     for line in not_kept:
         desk.event("no_read_left_out", task=tid, lane=lane_name, why=line)
-    argv += ["--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept), *no_read_rules(session_private(desk)),
+    argv += ["--disallowedTools", *desk_read_rules(desk), *desk_fence_rules(desk, wt, tmp), *no_read_rules(kept),
+             *no_read_rules(session_private(desk)),
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
