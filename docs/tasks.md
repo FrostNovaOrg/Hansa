@@ -171,6 +171,27 @@ that text. What holds up:
   what is accepted as it is.
 - Send work back to narrow it. Removing a condition can widen what a change does; widening is a new
   task.
+- Check the technical facts a task states on the machine, with the version the desk runs, before you
+  queue it: an option's spelling, what a version does, where a file is.
+- Check the names a task quotes from the code on the base branch as it is now. Give a line number
+  only beside the name, as a guide.
+- Put what workers cannot read into the task in full. A worker does not stop when a file the task
+  names is closed to it: it works from what the task says.
+- A task that changes how something starts, or the environment it starts in, lists each way the real
+  desk starts that thing, and asks for a test that goes through one of those ways (its wrapper, its
+  temporary folder), not only a call of the function.
+- The numbers in a report are the ones this run produced, not copied from earlier text; workers are
+  told so.
+
+### Which provider for which task
+
+Advice, not a rule hansa enforces:
+
+- A task about a tool's own behaviour (its options, settings, hooks, plugins) goes to a model made for
+  that tool or that knows it, and the task pastes in the parts of the tool's documentation it needs.
+- A task a provider's content filter may refuse (probing a sandbox from inside, say) goes to another
+  provider.
+- With a provider that tends to write long, give long text tasks a word limit.
 
 ## Merging, the merge check and conflicts
 

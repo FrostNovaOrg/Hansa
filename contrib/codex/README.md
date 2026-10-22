@@ -40,8 +40,10 @@ boundary, and some of its write denies are globs (below). On Linux srt drops eve
    environment first, then `codex.env` (or `trial.env`, an older name, while there is no `codex.env`). git ignores
    both, and the default `logs/` here.
 5. **Start the desk with the adapter:** `HANSA_CLAUDE=<checkout>/contrib/codex/bin/claude-or-codex hansa serve`.
-6. **Add a `compatible` provider** (for example `codex`) with base URL `http://codex.invalid`, any key (hansa wants
-   one) and any model name (the adapter uses `HANSA_CODEX_MODEL`), and put it in a lane's providers.
+6. **Add a `compatible` provider** (for example `codex`) with base URL `http://codex.invalid`, a key of at least 20
+   random characters, and any model name (the adapter uses `HANSA_CODEX_MODEL`), and put it in a lane's providers.
+   hansa refuses to merge a change that holds a provider's key, checking changed files, images and other binary
+   files included: a short or common string can turn up in one by chance.
 
 | setting | meaning | default |
 |---|---|---|
@@ -235,7 +237,7 @@ after-run check then fails the run, but a commit that landed in the repository s
 each way out (git in its workspace, the copy's `.git` pointed at the main repository five ways, writes outside it,
 the network); it prints whether the main repository changed (it must not) and what of the run is left running
 (nothing must be). Then set these in `codex.env`, and add a `compatible` provider with base URL
-`http://cursor.invalid`, any key and any model name, to a lane on a repository of its own (below):
+`http://cursor.invalid`, such a key and any model name, to a lane on a repository of its own (below):
 
 | setting | meaning | default |
 |---|---|---|

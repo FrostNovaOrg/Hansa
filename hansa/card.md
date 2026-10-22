@@ -102,7 +102,8 @@ own options make them unneeded: `hansa git L show REV:A REV:B` shows several fil
 ## Writing a task
 Say what to change, where, and how the worker can check it (a command, a file to look at). Keep one
 task to one goal, say what done looks like and what to report, and size it so one worker can finish
-it in one go; split anything bigger. Ask only for what the goal needs: each extra demand costs turns.
+it in one go; split anything bigger. Ask only for what the goal needs: extra demands cost turns.
+Check its facts and the names it quotes before you queue it: `hansa help writing-tasks`.
 - A worker needs no allowed commands: it may run any command inside its sandbox. What a lane's allow
   list adds for workers and verifiers is Claude Code's web tools. More: `hansa help web-tools`.
 - Workers change files only in their worktree, their temporary folder and the lane's write list,
@@ -145,8 +146,9 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   `hansa show <id>`; hansa will not merge
   while it runs, nor after "does not hold" unless you say `--despite-check`.
   "Holds, with notes" counts as "holds"; its verification's report lists the rare-state gaps under "Notes".
-- `--lane L` verifies on another lane of the same repository: another model is stronger than the
-  same model; use it if the task's provider is new to the desk or its lane is busy.
+- `--lane L` verifies on another lane of the same repository: another model sees other things than
+  the same model, but may judge more strictly and send more work back; use it if the task's provider is
+  new to the desk or its lane is busy.
 - Security, credentials, money, releases or stored data: `hansa verify <id>`, and also have the
   `reviewer` helper read the change.
 
@@ -305,10 +307,10 @@ or ask `scout` when reading is enough; say what you need back.
 
 ## The project's own rules
 `notes/PROJECT.md` holds this project's own rules: how it builds, what may never go out, who decides
-what. Claude Code loads it with this card at every start, after /clear and after compaction (the
-line below imports it); hansa makes it once and changes it only through `hansa notes archive
-PROJECT.md HEADING`, while this card hansa replaces. It is yours and the principal's: write there,
-without asking, what you would otherwise be told again. Keep it short: every turn rereads it (More:
+what; each rule says what it guards against and when it can go. Claude Code loads it with this card
+at every start, after /clear and after compaction (the line below imports it); hansa makes it once
+and changes it only through `hansa notes archive PROJECT.md HEADING`, while this card hansa replaces.
+It is yours and the principal's: write there, without asking, what you would otherwise be told again. Keep it short: every turn rereads it (More:
 `hansa help desk-files`). Workers do not see it, and no worker or verifier may read
 `notes/` or this card: rules for a lane's workers go in its standing instructions. A missing file
 loads nothing.
