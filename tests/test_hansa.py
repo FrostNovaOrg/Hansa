@@ -337,6 +337,14 @@ if os.environ.get("FAKE_SEE_TMP"):  # the temporary folder Claude Code was given
     open(os.environ["FAKE_SEE_TMP"], "a").write(json.dumps({"tmp": t, "tmpdir": os.environ.get("TMPDIR"), "there": os.path.isdir(t),
         "mode": os.stat(t).st_mode & 0o777 if os.path.isdir(t) else None}) + "\n")
     time.sleep(float(os.environ.get("FAKE_TMP_WAIT", "0")))
+if os.environ.get("FAKE_ATTACH_SEE"):
+    system = sys.argv[sys.argv.index("--append-system-prompt") + 1]
+    lines = [line for line in system.splitlines() if line.startswith("Attachments: ")]
+    folder = json.JSONDecoder().raw_decode(lines[0][len("Attachments: "):])[0] if lines else ""
+    files = {name: open(os.path.join(folder, name), "rb").read().hex() for name in os.listdir(folder)} if folder else {}
+    open(os.environ["FAKE_ATTACH_SEE"], "a").write(json.dumps({"folder": folder, "files": files, "lines": lines,
+        "tmp": os.environ["CLAUDE_CODE_TMPDIR"],
+        "attach_exists": os.path.exists(os.path.join(os.environ["CLAUDE_CODE_TMPDIR"], "attach"))}) + "\n")
 if os.environ.get("FAKE_REFUSED"):  # a call Claude Code refused, with its error text in the session record
     sid = sys.argv[sys.argv.index("--session-id") + 1]
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
@@ -3774,6 +3782,261 @@ class DeskTest(unittest.TestCase):
         with unittest.mock.patch.object(account, "LINUX", True):
             self.assertEqual(run.with_oom_score(["sh", "-c", "true"], str(self.tmp), dict(os.environ))[3:],
                              ["hansa-oom", "sh", "-c", "true"])
+
+    def attachment_files(self):
+        files = {"shot.png": b"\x89PNG\x00\xff", "fix.patch": b"--- a/file\n+++ b/file\n"}
+        paths = []
+        for name, data in files.items():
+            path = self.tmp / name
+            path.write_bytes(data)
+            paths += ["--attach", str(path)]
+        return files, paths
+
+    def attachment_run(self, tid, provider="claude"):
+        from hansa import run
+        seen = self.tmp / "attachments-seen.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_ATTACH_SEE"] = str(seen)
+        self.assertEqual(self.desk.save_settings(s), [])
+        proc = run.start(self.desk, tid, "a", provider)
+        self.assertIsNotNone(proc)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        self.addCleanup(proc.wait, timeout=15)
+        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.assertEqual(proc.wait(timeout=40), 0, (self.desk.raw_dir(tid) / "run.err").read_text())
+        return json.loads(seen.read_text().splitlines()[-1])
+
+    def assert_attachment_run(self, got, files):
+        self.assertEqual(got["files"], {n: b.hex() for n, b in files.items()})
+        self.assertEqual(Path(got["folder"]), Path(got["tmp"]) / "attach")
+        self.assertTrue(Path(got["folder"]).is_absolute())
+        self.assertEqual(len(got["lines"]), 1)
+        for name in files:
+            self.assertIn(json.dumps(name), got["lines"][0])
+        self.assertIn("path out in full, not as $TMPDIR", got["lines"][0])
+
+    def test_attachments_reach_run_start_with_claude_and_a_compatible_provider(self):
+        files, args = self.attachment_files()
+        s = self.desk.settings()
+        s["providers"]["compatible"] = {"kind": "compatible", "model": "test-model", "effort": "",
+                                         "base_url": "https://example.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("compatible", "sk-attachment-test-1234")
+        for provider in ("claude", "compatible"):
+            with self.subTest(provider=provider):
+                self.hansa("add", "Read the attachments", *args)
+                tid = self.desk.tasks()[-1]["id"]
+                got = self.attachment_run(tid, provider)
+                self.assert_attachment_run(got, files)
+
+    def test_attachments_are_snapshots_at_add_and_at_every_run_start(self):
+        from hansa import run
+        files, args = self.attachment_files()
+        self.hansa("add", "Read the attachments", *args)
+        (self.tmp / "shot.png").write_bytes(b"changed after add")
+        got = self.attachment_run("t0001")
+        self.assert_attachment_run(got, files)
+        (Path(got["folder"]) / "shot.png").write_bytes(b"changed by worker")
+        run.remove_sandbox_tmp(self.desk, "t0001")
+        self.desk.update("t0001", state="queued")
+        again = self.attachment_run("t0001")
+        self.assert_attachment_run(again, files)
+        self.assertNotEqual(got["folder"], again["folder"])
+
+    def test_attachments_reach_the_codex_adapter_on_macos(self):
+        if sys.platform != "darwin":
+            self.skipTest("the Codex adapter starts workers only on macOS")
+        from hansa import run
+        from contrib.codex.tests.codexkit import FAKES, FIXTURES, WRAPPER, shim
+        files, args = self.attachment_files()
+        record = self.tmp / "codex-record.json"
+        # Keep the existing fake's protocol; make it read attachments from the developer text it receives.
+        fake = self.tmp / "codex"
+        fake.write_text((FAKES / "codex").read_text().replace("def save():", '''
+for arg in argv:
+    if arg.startswith("developer_instructions="):
+        system = json.loads(arg.split("=", 1)[1])
+        lines = [line for line in system.splitlines() if line.startswith("Attachments: ")]
+        folder = json.JSONDecoder().raw_decode(lines[0][len("Attachments: "):])[0] if lines else ""
+        record["attachments"] = {"lines": lines, "folder": folder, "tmp": os.environ["CLAUDE_CODE_TMPDIR"],
+            "files": {name: open(os.path.join(folder, name), "rb").read().hex() for name in os.listdir(folder)} if folder else {}}
+
+def save():'''))
+        fake.chmod(0o755)
+        s = self.desk.settings()
+        s["providers"]["codex"] = {"kind": "compatible", "model": "codex", "effort": "",
+                                   "base_url": shim.PLACEHOLDER}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("codex", "sk-placeholder-1234")
+        os.environ["HANSA_CLAUDE"] = str(WRAPPER)
+        adapter_env = dict(HANSA_CODEX_BIN=str(fake), HANSA_CODEX_HOME=str(self.tmp / "codex-home"),
+                           HANSA_CODEX_LOGS=str(self.tmp / "codex-logs"), HANSA_CODEX_SRT=str(FAKES / "srt"),
+                           HANSA_REAL_CLAUDE=str(FAKES / "claude"), FAKE_CODEX_RECORD=str(record),
+                           FAKE_CODEX_FIXTURE=str(FIXTURES / "success.jsonl"))
+        self.hansa("add", "Read attachments", *args)
+        given = run.provider_env
+        with unittest.mock.patch.object(run, "provider_env", lambda *a: {**given(*a), **adapter_env}):
+            proc = run.start(self.desk, "t0001", "a", "codex")
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, "t0001")
+        self.addCleanup(proc.wait, timeout=15)
+        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.assertEqual(proc.wait(timeout=60), 0, (self.desk.raw_dir("t0001") / "run.err").read_text())
+        self.assert_attachment_run(json.loads(record.read_text())["attachments"], files)
+
+    def test_verify_inherits_attachments_and_gives_them_to_its_worker(self):
+        files, args = self.attachment_files()
+        self.hansa("add", "Add hello.txt", *args)
+        self.settle(Dispatcher(self.desk), "t0001")
+        self.hansa("verify", "t0001")
+        vid = self.desk.meta("t0001")["verify"]
+        self.assert_attachment_run(self.attachment_run(vid), files)
+
+    def test_retry_inherits_attachments_and_snapshots_its_new_ones(self):
+        files, args = self.attachment_files()
+        self.hansa("add", "Add hello.txt", *args)
+        self.settle(Dispatcher(self.desk), "t0001")
+        extra = self.tmp / "b.txt"
+        extra.write_bytes(b"follow-up")
+        self.hansa("retry", "t0001", "--attach", str(extra), "Read b too")
+        tid = self.desk.meta("t0001")["replaced_by"]
+        extra.write_bytes(b"later")
+        (self.tmp / "shot.png").unlink()
+        self.assert_attachment_run(self.attachment_run(tid), {**files, "b.txt": b"follow-up"})
+
+    def attachment_refused(self, paths, why, parent=""):
+        before = self.desk.tasks()
+        args = ["retry", parent] if parent else ["add", "Read attachments"]
+        for path in paths:
+            args += ["--attach", str(path)]
+        with self.assertRaises(SystemExit) as e:
+            self.hansa(*args)
+        said = str(e.exception.code)
+        self.assertIn(str(paths[-1]), said)
+        self.assertIn(why, said)
+        self.assertIn("nothing was queued", said)
+        self.assertEqual(self.desk.tasks(), before)
+        return said
+
+    def test_attachments_refuse_folders_and_missing_files(self):
+        for path, why in ((self.tmp, "is a folder"), (self.tmp / "missing.txt", "does not exist")):
+            with self.subTest(path=path):
+                self.attachment_refused([path], why)
+
+    def test_attachments_refuse_desk_secrets_state_and_links(self):
+        self.desk.secrets_dir.mkdir(exist_ok=True)
+        for folder in (self.desk.secrets_dir, self.desk.state_dir):
+            path = folder / "private.txt"
+            path.write_text("private")
+            link = self.tmp / (folder.name + "-link.txt")
+            link.symlink_to(path)
+            hard = self.tmp / (folder.name + "-hard.txt")
+            if folder == self.desk.secrets_dir:
+                os.link(path, hard)
+            for source in [path, link] + ([hard] if hard.exists() else []):
+                with self.subTest(source=source):
+                    self.attachment_refused([source], "which no agent reads")
+
+    def test_attachments_refuse_principals_no_read_list_and_symlinks(self):
+        private = self.tmp / "private"
+        private.mkdir()
+        path = private / "log.txt"
+        path.write_text("private")
+        s = self.desk.settings()
+        s["workers_may_not_read"] = [str(private)]
+        self.assertEqual(self.desk.save_settings(s), [])
+        link = self.tmp / "log-link.txt"
+        link.symlink_to(path)
+        for source in (path, link):
+            with self.subTest(source=source):
+                self.attachment_refused([source], "workers may not read")
+
+    def test_attachments_refuse_builtin_notes_logins_and_provider_folders(self):
+        from hansa import run
+        home = self.tmp / "home"
+        (home / ".ssh").mkdir(parents=True)
+        login = home / ".ssh" / "id_test"
+        login.write_text("private")
+        note = self.desk.notes_dir / "note.txt"
+        note.write_text("coordinator knowledge")
+        provider = self.tmp / "provider-home"
+        provider.mkdir()
+        settings = provider / "settings.json"
+        settings.write_text("private")
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(provider)
+        self.assertEqual(self.desk.save_settings(s), [])
+        with unittest.mock.patch.object(run, "account_home", lambda: str(home)):
+            for source in (note, login, settings, self.desk.root / "CLAUDE.md"):
+                with self.subTest(source=source):
+                    self.attachment_refused([source], "workers may not read")
+
+    def test_attachments_refuse_provider_keys_in_binary_without_showing_them(self):
+        key = "sk-attachment-private-1234"
+        self.desk.write_key("compatible", key)
+        path = self.tmp / "binary.log"
+        path.write_bytes(b"\x00\xff" + key.encode() + b"\xfe")
+        said = self.attachment_refused([path], "holds the key of compatible")
+        self.assertNotIn(key, said)
+
+    def test_attachments_refuse_more_than_twenty_files(self):
+        paths = [self.tmp / f"file-{i}.txt" for i in range(21)]
+        for path in paths:
+            path.write_text("x")
+        self.attachment_refused(paths, "more than 20 files")
+
+    def test_attachments_refuse_more_than_twenty_mb_in_total(self):
+        paths = [self.tmp / "a.bin", self.tmp / "b.bin"]
+        for path, size in zip(paths, (11, 10)):
+            with path.open("wb") as f:
+                f.truncate(size * 1024 * 1024)
+        self.attachment_refused(paths, "more than 20 MB in all")
+
+    def test_attachments_refuse_duplicate_names_including_inherited_ones(self):
+        first = self.tmp / "one" / "log.txt"
+        second = self.tmp / "two" / "log.txt"
+        for path in (first, second):
+            path.parent.mkdir()
+            path.write_text("log")
+        self.attachment_refused([first, second], "same name")
+        self.hansa("add", "Add hello.txt", "--attach", str(first))
+        self.settle(Dispatcher(self.desk), "t0001")
+        self.attachment_refused([second], "same name", parent="t0001")
+
+    def test_retry_attachment_limits_include_inherited_files(self):
+        paths = [self.tmp / f"file-{i}.txt" for i in range(21)]
+        for path in paths:
+            path.write_text("x")
+        args = [word for path in paths[:20] for word in ("--attach", str(path))]
+        self.hansa("add", "Add hello.txt", *args)
+        self.settle(Dispatcher(self.desk), "t0001")
+        self.attachment_refused(paths[20:], "more than 20 files", parent="t0001")
+
+    def test_retry_attachment_size_limit_includes_inherited_bytes(self):
+        first, extra = self.tmp / "first.bin", self.tmp / "extra.bin"
+        for path, mb in ((first, 20), (extra, 1)):
+            with path.open("wb") as f:
+                f.truncate(mb * 1024 * 1024)
+        self.hansa("add", "Add hello.txt", "--attach", str(first))
+        self.settle(Dispatcher(self.desk), "t0001")
+        self.attachment_refused([extra], "more than 20 MB in all", parent="t0001")
+
+    def test_attachment_paths_are_full_when_switching_desk_accounts(self):
+        path = "a screenshot.png"
+        got = account.switch_args(["add", "Read it", "--attach", path, "--attach=fix.patch"], self.desk.root)
+        self.assertIn("--attach=" + os.path.abspath(path), got)
+        self.assertIn("--attach=" + os.path.abspath("fix.patch"), got)
+
+    def test_show_lists_attachment_names_and_sizes(self):
+        files, args = self.attachment_files()
+        self.hansa("add", "Read attachments", *args)
+        shown = self.hansa("show", "t0001")
+        for name, data in files.items():
+            self.assertIn(f"attachment: {name} ({len(data)} bytes)", shown)
+
+    def test_no_attachments_adds_no_folder_or_worker_line(self):
+        self.hansa("add", "Add hello.txt")
+        got = self.attachment_run("t0001")
+        self.assertEqual((got["lines"], got["files"], got["attach_exists"]), ([], {}, False))
 
     def test_show_gives_the_text_hansa_read_queued_running_and_finished(self):
         f = self.tmp / "task.md"

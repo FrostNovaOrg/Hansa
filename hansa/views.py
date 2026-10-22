@@ -1005,6 +1005,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         meaning += (f"; it {on} on lane {m.get('lane') or 'any'}"
                     + (f", not {m['parent']}'s own lane {own}" if own and own != m.get("lane") else ""))
     out = [head, f"title: {m['title']}", *task_text_lines(desk, m, full), f"meaning: {meaning}"]
+    out += [f"attachment: {a['name']} ({a['size']} bytes)" for a in m.get("attachments", [])]
     out += [x for x in (rounds_line(desk, m), "" if verifying else rethink_text(desk, m)) if x]
     if m.get("error"):
         out.append(f"error: {m['error']}")

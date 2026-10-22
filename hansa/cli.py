@@ -261,24 +261,7 @@ def _kept_folder(args, f, st=None) -> str:
         desk = Desk.find(getattr(args, "desk", None))
     except SystemExit:
         return ""
-    real = os.path.realpath(f) if f else ""
-    for d in (desk.state_dir, desk.secrets_dir):
-        top = os.path.realpath(d)
-        if real and (real == top or real.startswith(top.rstrip(os.sep) + os.sep)):
-            return d.name
-    try:
-        st = st or os.stat(f)
-    except (OSError, TypeError):
-        return ""
-    held = [desk.state_dir / "web-token", desk.state_dir / "alerts.json"]
-    held += [Path(r, n) for r, _, ns in os.walk(desk.secrets_dir) for n in ns]
-    for s in held:
-        try:
-            if os.path.samestat(st, os.stat(s)):
-                return s.parent.name if s.parent == desk.state_dir else desk.secrets_dir.name
-        except OSError:
-            pass
-    return ""
+    return desk.kept_folder(f, st)
 
 
 def _stdin_kept(args) -> str:
@@ -421,7 +404,7 @@ def cmd_add(a):
     text = _text(a)
     _title_allowed(desk, s, a.title, text, a.lane)
     tid = desk.new_task(text, lane=a.lane or "", effort=a.effort or "", model=a.model or "",
-                        title=a.title or "", max_turns=a.max_turns or 0,
+                        title=a.title or "", max_turns=a.max_turns or 0, attach=a.attach,
                         **notify.recorded(notify.session_here()))
     if a.lane and a.lane not in s["lanes"]:
         print(f"note: there is no lane {a.lane} yet; the task waits until it is added: hansa lane add {a.lane} --repo PATH")
@@ -865,7 +848,7 @@ def _retry(desk: Desk, a) -> None:
     elif not a.fresh and m.get("head"):
         opts.update(start_from=m["head"], base=m["base"])
         text += f"\nYou start from the earlier task's last commit ({m['head'][:10]})."
-    tid = desk.new_task(text, **opts)
+    tid = desk.new_task(text, attach=a.attach, attachments_from=a.id, **opts)
     write_text(desk.tasks_dir / tid / NOTE_FILE, desk.redact(note) + "\n")  # later rounds quote it
     if m["state"] in ("done", "failed"):  # the follow-up carries the work on; the original leaves the review list
         desk.update(a.id, state="replaced", replaced_by=tid, ended_as=m["state"])
@@ -1024,6 +1007,7 @@ def _verify(desk: Desk, a) -> None:
                "judge each of those asks against the whole change.\n" if m.get("parent") else "")
             + f"\n## Task {a.id} as it was given\n{task}\n\n## The report of the worker who did it\n{report or '(none)'}\n")
     vid = desk.new_task(text, kind="verify", parent=a.id, lane=lane, effort=a.effort or "",
+                        attachments_from=a.id,
                         start_from=m["head"], base=m["head"], title=f"Verify {a.id}: {m['title']}"[:80],
                         **notify.recorded(sess))
     if v:
@@ -2842,6 +2826,9 @@ def main(argv=None):
     p.add_argument("--user", help="as root on a Linux server: the account the desk belongs to and hansa runs as")
     p = add("add", cmd_add, "queue a task")
     p.add_argument("text", nargs="*")
+    p.add_argument("--attach", action="append", default=[], metavar="PATH",
+                   help="copy a file into the task when queued (repeatable; at most 20 files, 20 MB in all). "
+                   "Workers get copies in their run's temporary folder; hansa show ID lists names and sizes")
     p.add_argument("--file", help="a file with the text; - reads it from standard input. It is read when the task is "
                                   "queued: changing the file afterwards changes nothing (hansa show ID gives the text "
                                   "hansa read)")
@@ -2907,6 +2894,9 @@ def main(argv=None):
                    "and base branch as the task's own lane, for example when that lane is busy; the task's "
                    "start, text, effort and model are carried as usual")
     p.add_argument("--file", help="a file with the note, instead of words; - reads it from standard input")
+    p.add_argument("--attach", action="append", default=[], metavar="PATH",
+                   help="add a file to the attachments inherited from this task (repeatable; at most 20 files, "
+                   "20 MB in all, including inherited files; copied when queued)")
     p.add_argument("--fresh", action="store_true", help="start from the base branch, not the earlier task")
     p.add_argument("--update", action="store_true", help="continue from the earlier task with the base as it is "
                    "now merged into its branch; a conflict is left in the files for the worker to settle")

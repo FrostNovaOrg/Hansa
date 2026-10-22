@@ -159,6 +159,14 @@ passes it on, but some such endpoints do not act on it.
 
 ## Writing a task a verification can judge
 
+Use `hansa add "..." --attach PATH` for screenshots, patches or logs; repeat `--attach` for
+more files. Copies are saved when queued, so later source edits change nothing. Retry inherits them
+and accepts more with `--attach`; verification inherits them too. Each run gets copies under its
+temporary `attach/`, named in its instructions by full path. `hansa show ID` lists names and sizes.
+To keep private data closed, folders, missing files, worker read denials (following links) and files
+holding provider keys are refused. Limits: 20 files, 20 MB total, distinct names, including inherited files.
+Keep these checks while accepting external files.
+
 A verification judges a change against the task's text, so most rounds of sending work back start in
 that text. What holds up:
 

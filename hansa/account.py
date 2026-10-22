@@ -18,7 +18,7 @@ from pathlib import Path
 from . import build, session_value, without_session
 
 LINUX = sys.platform.startswith("linux")
-PATH_OPTIONS = ("--desk", "--repo")  # made full paths before switching: the account starts elsewhere
+PATH_OPTIONS = ("--desk", "--repo", "--attach")  # made full paths before switching: the account starts elsewhere
 DUBIOUS = re.compile(r"dubious ownership in repository at '([^']+)'")
 
 
