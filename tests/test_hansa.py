@@ -3580,6 +3580,40 @@ class DeskTest(unittest.TestCase):
             time.sleep(0.1)
         self.fail(f"{tid} did not finish: {self.desk.meta(tid)}")
 
+    def test_find_skips_inaccessible_parent(self):
+        closed = self.tmp.resolve() / "closed"
+        child = closed / "child"
+        child.mkdir(parents=True)
+        for marker in ("settings.json", "tasks"):
+            for error in (PermissionError(errno.EPERM, "closed"), OSError(errno.EIO, "unavailable")):
+                with self.subTest(marker=marker, error=type(error).__name__):
+                    outer = False
+
+                    def is_file(path):
+                        if path == closed / "settings.json":
+                            if marker == "settings.json":
+                                raise error
+                            return True
+                        return outer and path == closed.parent / "settings.json"
+
+                    def is_dir(path):
+                        if path == closed / "tasks":
+                            raise error
+                        return outer and path == closed.parent / "tasks"
+
+                    with unittest.mock.patch.object(Path, "cwd", return_value=child), \
+                            unittest.mock.patch.object(Path, "is_file", is_file), \
+                            unittest.mock.patch.object(Path, "is_dir", is_dir):
+                        for optional in (False, True):
+                            with self.subTest(optional=optional):
+                                if optional:
+                                    self.assertIsNone(Desk.find(optional=True))
+                                else:
+                                    with self.assertRaisesRegex(SystemExit, "no desk here"):
+                                        Desk.find()
+                        outer = True
+                        self.assertEqual(Desk.find().root, closed.parent)
+
     def test_task_runs_is_recorded_and_merges(self):
         tid = self.desk.new_task("Add hello.txt")
         m = self.settle(Dispatcher(self.desk), tid)

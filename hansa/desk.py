@@ -2496,7 +2496,11 @@ class Desk:
             return cls(explicit or os.environ["HANSA_DESK"])
         here = Path.cwd().resolve()
         for d in (here, *here.parents):
-            if (d / "settings.json").is_file() and (d / "tasks").is_dir():
+            try:
+                found = (d / "settings.json").is_file() and (d / "tasks").is_dir()
+            except OSError:  # a sandbox may close an enclosing desk to a run
+                continue
+            if found:
                 return cls(d)
         if optional:
             return None

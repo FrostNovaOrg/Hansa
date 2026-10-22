@@ -1,5 +1,11 @@
 # The desk: files, keys and notes
 
+Without `--desk` or `HANSA_DESK`, hansa searches the current folder and then its
+parents for `settings.json` and a `tasks/` directory. If either cannot be
+looked at (for example, a run's sandbox closes an enclosing desk), it skips
+that folder and keeps searching. With no desk found, commands that need one
+give the usual "no desk here" refusal.
+
 ## Status and cost on the web page
 
 The browser tab and the caption beside Hansa name the desk by its parent folder
