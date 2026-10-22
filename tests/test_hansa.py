@@ -4806,6 +4806,112 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(m["state"], "done", m)
         return tid
 
+    def test_dangling_forbidden_exceptions_refuse_every_settings_save_privately(self):
+        kept = {"entry": "private-phrase", "lanes": ["a"]}
+        dangling = {"entry": "never-print-this-entry", "lanes": ["a", "b"]}
+        settings = {**self.desk.settings(), "release_forbidden": [kept["entry"]],
+                    "release_forbidden_except": [kept, dangling]}
+        reason = "release_forbidden_except: exception 2 (lanes a, b) names no entry in release_forbidden"
+        before = self.desk.settings_path.read_bytes()
+        self.assertEqual(save_from_page(self.desk, {"settings": settings}),
+                         {"ok": False, "problems": [reason]})
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        # A legacy desk loads unchanged, but every writer refuses its dangling exception.
+        write_json(self.desk.settings_path, settings)
+        before = self.desk.settings_path.read_bytes()
+        self.assertEqual(public_settings(self.desk)["problems"], [reason])
+        self.assertEqual(self.desk.save_settings({**settings, "cool_minutes": 9}), [reason])
+        for command in (("concurrency", "2"), ("hide", str(self.tmp / "private-keys"))):
+            with self.subTest(command=command):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as refused:
+                    main(["--desk", str(self.desk.root), *command])
+                said = str(refused.exception.code) + output.getvalue()
+                self.assertIn(reason, said)
+                for entry in (kept["entry"], dangling["entry"]):
+                    self.assertNotIn(entry, said)
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        self.assertEqual(save_from_page(self.desk, {"settings": {**settings, "release_forbidden": []}}),
+                         {"ok": False, "problems": [
+                             "release_forbidden_except: exception 1 (lanes a) names no entry in release_forbidden",
+                             reason]})
+
+    def test_forbidden_exception_identity_is_the_scans_exact_entry(self):
+        from hansa import release
+        for entry, line in ((r"re:secret-\d+", "secret-42"), (" private-phrase ", " private-phrase "),
+                            (r" re:secret-\d+ ", r" re:secret-\d+ ")):
+            with self.subTest(entry=entry):
+                settings = {**self.desk.settings(), "release_forbidden": [entry],
+                            "release_forbidden_except": [{"entry": entry, "lanes": ["a"]}]}
+                self.assertEqual(save_from_page(self.desk, {"settings": settings}), {"ok": True, "problems": []})
+                self.assertEqual(release.title_hits(line, release.lane_words(self.desk.settings(), "a")), [])
+                self.assertEqual(release.title_hits(line, release.lane_words(self.desk.settings(), "b")), [entry])
+                # Patterns are identified by their spelling, not by what they match; spaces stay significant.
+                other = entry.strip() if entry != entry.strip() else "secret-42"
+                settings["release_forbidden_except"][0]["entry"] = other
+                self.assertEqual(save_from_page(self.desk, {"settings": settings})["problems"], [
+                    "release_forbidden_except: exception 1 (lanes a) names no entry in release_forbidden"])
+
+    def forbidden_exception_page(self, scenario, settings, language="en"):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        write_json(self.desk.settings_path, settings)
+        harness = self.tmp / "forbidden-exceptions-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        result = subprocess.run(["node", str(harness), str(page), scenario, language],
+                                input=json.dumps({"/api/settings": public_settings(self.desk)}),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_page_offers_current_forbidden_entries_for_exceptions(self):
+        entries = ["private-phrase", r"re:secret-\d+", " padded-entry "]
+        settings = {**self.desk.settings(), "release_forbidden": entries,
+                    "release_forbidden_except": [{"entry": entries[0], "lanes": ["a"]}]}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.forbidden_exception_page("exception-choice", settings, language)
+                self.assertEqual(shown["tag"], "select")
+                self.assertEqual(shown["options"], ["", *entries])
+                self.assertEqual(shown["posted"]["settings"]["release_forbidden_except"],
+                                 [{"entry": entries[1], "lanes": ["a"]}])
+                self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+
+    def test_page_removing_forbidden_entry_drops_its_exceptions_in_save(self):
+        settings = {**self.desk.settings(), "release_forbidden": ["private-phrase", "kept"],
+                    "release_forbidden_except": [{"entry": "private-phrase", "lanes": ["a"]},
+                                                 {"entry": "private-phrase", "lanes": ["b", "c"]},
+                                                 {"entry": "kept", "lanes": ["a"]}]}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.forbidden_exception_page("exception-removal", settings, language)
+                self.assertIn("its 2 lane exceptions go with it" if language == "en" else "其 2 项 lane 豁免也会移除",
+                              shown["notice"])
+                self.assertIn("its 1 lane exception goes with it" if language == "en" else "其 1 项 lane 豁免也会移除",
+                              shown["notice"])
+                self.assertEqual(shown["posted"]["settings"]["release_forbidden"], ["kept"])
+                self.assertEqual(shown["posted"]["settings"]["release_forbidden_except"],
+                                 [{"entry": "kept", "lanes": ["a"]}])
+                self.assertEqual(shown["options"], ["", "kept"])
+                self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+
+    def test_page_marks_legacy_dangling_exception_and_names_save_refusal(self):
+        settings = {**self.desk.settings(), "release_forbidden": ["kept"],
+                    "release_forbidden_except": [{"entry": "private-orphan", "lanes": ["a", "b"]}]}
+        reason = "release_forbidden_except: exception 1 (lanes a, b) names no entry in release_forbidden"
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.forbidden_exception_page("exception-dangling", settings, language)
+                self.assertIn(reason, shown["warning"])
+                self.assertIn("private-orphan", shown["row"])
+                self.assertTrue(shown["unavailable"])
+                self.assertIn(reason, shown["refused"])
+                self.assertEqual(save_from_page(self.desk, shown["firstPost"]),
+                                 {"ok": False, "problems": [reason]})
+                self.assertEqual(shown["posted"]["settings"]["release_forbidden_except"], [])
+                self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+
     def test_forbidden_patterns_and_lane_exceptions_cases(self):
         from hansa import release, run
         pattern = r"re:\blane [a-k]\b"
@@ -4907,10 +5013,12 @@ class DeskTest(unittest.TestCase):
             c.assertNotIn("unprinted-phrase", c.hansa("explain", "lane", "e", "--all"))
             c.assertIn("2 forbidden entry/entries excepted on this lane", c.hansa("explain", "lane", "e"))
             c.assertIn("Nothing was queued", c.refused("add", "unprinted-phrase", "--lane", "a"))
-            c.forbid(product, "still-forbidden")
+            c.assertTrue(c.page_save(lambda s: s.update(release_forbidden=[product, "still-forbidden"],
+                                                        release_forbidden_except=[{"entry": product, "lanes": ["e"]}]))["ok"])
             c.assertIn("Nothing was queued", c.refused("add", "still-forbidden", "--lane", "e"))
             # Excepting a word that looks like an address does not allow it through the mailbox rule.
-            c.forbid("jane@realmail.hansa")
+            c.assertTrue(c.page_save(lambda s: s.update(release_forbidden=["jane@realmail.hansa"],
+                                                        release_forbidden_except=[]))["ok"])
             c.assertEqual(c.page_save(lambda s: s.update(release_mailboxes=True, release_forbidden_except=[
                 {"entry": "jane@realmail.hansa", "lanes": ["e"]}])), {"ok": True, "problems": []})
             tid = finished(c, "e", "jane@realmail.hansa")
@@ -4933,9 +5041,9 @@ class DeskTest(unittest.TestCase):
         def unmatched_exceptions(c):
             c.forbid("private-phrase")
             entries = [{"entry": "private-phrase", "lanes": ["z"]}, {"entry": "absent-entry", "lanes": ["a"]}]
-            c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=entries)), {"ok": True, "problems": []})
+            c.assertEqual(c.page_save(lambda s: s.update(release_forbidden_except=entries[:1])), {"ok": True, "problems": []})
             c.hansa("concurrency", "2")
-            c.assertEqual(c.desk.settings()["release_forbidden_except"], entries)
+            c.assertEqual(c.desk.settings()["release_forbidden_except"], entries[:1])
             settings = c.desk.settings()
             settings["release_forbidden_except"] = []
             c.assertIn("release_forbidden_except is the principal's", " ".join(c.desk.save_settings(settings)))
@@ -4943,6 +5051,8 @@ class DeskTest(unittest.TestCase):
                 c.refused("lane", "set", "a", "release_forbidden_except", "a")
             c.assertNotIn("private-phrase", c.hansa("explain", "lane", "a", "--all"))
             c.assertNotIn("absent-entry", c.hansa("explain", "lane", "a", "--all"))
+            # A legacy dangling entry stays visible for the principal to remove.
+            write_json(c.desk.settings_path, {**c.desk.settings(), "release_forbidden_except": entries})
             if not shutil.which("node"):
                 c.skipTest("needs node to verify the page's exception rows")
             harness = c.tmp / "page.js"
@@ -4956,7 +5066,7 @@ class DeskTest(unittest.TestCase):
                 shown = json.loads(result.stdout)
                 c.assertEqual(shown["before"], entries)
                 c.assertEqual(shown["rows"], 2)
-                for entry in ("z", "absent-entry"):
+                for entry in ("z", "exception 2"):
                     c.assertTrue(any(entry in w for w in shown["warnings"]), shown)
                 c.assertTrue(all(("matches nothing" if language == "en" else "不匹配任何项") in w
                                  for w in shown["warnings"]))
@@ -27014,6 +27124,37 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     console.log(JSON.stringify(posted));
     return;
   }
+  if (["exception-choice", "exception-removal", "exception-dangling"].includes(ask)) {
+    const find = pred => { let found = null; walk(ids["#tab-settings"], el => { if (!found && pred(el)) found = el; }); return found; };
+    const editor = () => find(el => el.attrs["data-exception-entry"] === "0");
+    const options = () => descendants(editor(), "option").map(el => el.value);
+    const save = () => vm.runInContext("saveSettings()", ctx);
+    if (ask === "exception-choice") {
+      const entry = editor(), tag = entry.tag, choices = options();
+      entry.value = given["/api/settings"].settings.release_forbidden[1];
+      (entry.on.change || entry.on.input)({target:entry});
+      await save();
+      console.log(JSON.stringify({tag, options:choices, posted})); return;
+    }
+    if (ask === "exception-removal") {
+      const words = find(el => el.tag === "textarea" && el.textContent.includes("private-phrase"));
+      words.value = "kept"; words.on.input({target:words});
+      const notice = ids["#tab-settings"].textContent, choices = options();
+      await save();
+      console.log(JSON.stringify({notice, options:choices, posted})); return;
+    }
+    const row = find(el => el.className === "forbidden-exception");
+    const warning = descendants(row, "p").filter(el => el.className === "warn").map(el => el.textContent).join(" ");
+    const rowText = row.textContent;
+    const unavailable = descendants(editor(), "option").some(el => el.value === "private-orphan" && el.disabled);
+    settingsPostReply = {ok:false, problems:given["/api/settings"].problems};
+    await save();
+    const firstPost = posted, refused = ids["#tab-settings"].textContent;
+    const currentRow = find(el => el.className === "forbidden-exception");
+    descendants(currentRow, "button")[0].on.click();
+    settingsPostReply = {ok:true, problems:[]}; await save();
+    console.log(JSON.stringify({warning, row:rowText, unavailable, refused, firstPost, posted})); return;
+  }
   if (ask === "exceptions") {
     const read = () => JSON.parse(vm.runInContext("JSON.stringify(S.release_forbidden_except)", ctx));
     const before = read(), warnings = [], rows = [];
@@ -27027,7 +27168,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     });
     walk(rows[0], el => { if (el.tag === "button") remove = el; });
     if (!entry || !lanes || !remove || !add) throw new Error("exception editor missing");
-    entry.value = "private-phrase"; entry.on.input({target:entry});
+    entry.value = "private-phrase"; entry.on.change({target:entry});
     lanes.value = "a, e"; lanes.on.input({target:lanes});
     const edited = read()[0];
     remove.on.click(); const afterRemove = read();

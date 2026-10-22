@@ -236,9 +236,13 @@ under the forbidden entries, one row per entry with its lanes:
 exactly as on `release_forbidden`. On those lanes it is skipped in task
 titles, merges and merge checks (including checks run by a merge
 lane for that task), release targets' commands and releases. Every other
-entry and the mailbox rule still apply. An entry absent from the forbidden
-list, or a lane absent from the desk, is kept; the page says each matches
-nothing. Changing a lane's exceptions makes its earlier scans unusable.
+entry and the mailbox rule still apply. Choose current entries on the page;
+spaces and `re:` stay significant. Every settings save, commands included,
+refuses dangling exceptions, preventing silent mistakes; reasons give position
+and lanes, never entry text. Legacy dangling rows are marked with removal
+controls. Removing an entry removes its exceptions in that save, after showing
+their count. Missing lanes stay marked as matching nothing.
+Changing a lane's exceptions makes its earlier scans unusable.
 No command changes the exceptions; `hansa explain lane L` gives only their
 count. Exceptions let a repository use a word it needs while other lanes
 still refuse it; remove one when that repository no longer needs the word.
