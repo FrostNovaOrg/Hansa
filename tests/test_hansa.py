@@ -4852,6 +4852,20 @@ class DeskTest(unittest.TestCase):
                 self.assertEqual(save_from_page(self.desk, {"settings": settings})["problems"], [
                     "release_forbidden_except: exception 1 (lanes a) names no entry in release_forbidden"])
 
+    def test_dangling_forbidden_exception_without_lanes_reason(self):
+        settings = {**self.desk.settings(), "release_forbidden": [],
+                    "release_forbidden_except": [{"entry": "private-orphan", "lanes": []}]}
+        reason = "release_forbidden_except: exception 1 (no lanes) names no entry in release_forbidden"
+        self.assertEqual(save_from_page(self.desk, {"settings": settings}),
+                         {"ok": False, "problems": [reason]})
+        write_json(self.desk.settings_path, settings)
+        self.assertEqual(self.desk.save_settings(settings), [reason])
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.forbidden_exception_page("exception-dangling", settings, language)
+                self.assertIn(reason, shown["warning"])
+                self.assertIn(reason, shown["refused"])
+
     def forbidden_exception_page(self, scenario, settings, language="en"):
         if not shutil.which("node"):
             self.skipTest("needs node to run the page's script")
@@ -4888,13 +4902,65 @@ class DeskTest(unittest.TestCase):
                 shown = self.forbidden_exception_page("exception-removal", settings, language)
                 self.assertIn("its 2 lane exceptions go with it" if language == "en" else "其 2 项 lane 豁免也会移除",
                               shown["notice"])
-                self.assertIn("its 1 lane exception goes with it" if language == "en" else "其 1 项 lane 豁免也会移除",
-                              shown["notice"])
+                self.assertNotIn("its 1 lane exception goes with it" if language == "en" else "其 1 项 lane 豁免也会移除",
+                                 shown["notice"])
                 self.assertEqual(shown["posted"]["settings"]["release_forbidden"], ["kept"])
                 self.assertEqual(shown["posted"]["settings"]["release_forbidden_except"],
                                  [{"entry": "kept", "lanes": ["a"]}])
                 self.assertEqual(shown["options"], ["", "kept"])
                 self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+
+    def test_page_edit_and_revert_forbidden_entry_keeps_exceptions_in_save(self):
+        settings = {**self.desk.settings(), "release_forbidden": ["secret", "kept"],
+                    "release_forbidden_except": [{"entry": "secret", "lanes": ["a"]},
+                                                 {"entry": "secret", "lanes": ["b", "c"]},
+                                                 {"entry": "kept", "lanes": ["a"]}]}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.forbidden_exception_page("exception-edit-revert", settings, language)
+                self.assertIn("its 2 lane exceptions go with it" if language == "en" else "其 2 项 lane 豁免也会移除",
+                              shown["duringNotice"])
+                self.assertEqual(shown["duringExceptions"], settings["release_forbidden_except"])
+                self.assertNotIn("its 2 lane exceptions" if language == "en" else "其 2 项 lane 豁免", shown["notice"])
+                self.assertEqual(shown["posted"]["settings"]["release_forbidden_except"],
+                                 settings["release_forbidden_except"])
+                self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+
+    def test_page_forbidden_exception_removal_notice_absent_at_load(self):
+        settings = {**self.desk.settings(), "release_forbidden": ["secret"],
+                    "release_forbidden_except": [{"entry": "secret", "lanes": ["a"]}]}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.forbidden_exception_page("exception-notice-load", settings, language)
+                self.assertNotIn('Removing "secret"' if language == "en" else '移除 "secret" 时', shown["notice"])
+
+    def test_page_forbidden_words_trim_typed_lines_and_keep_stored_padding(self):
+        settings = {**self.desk.settings(), "release_forbidden": [" stored ", "secret"],
+                    "release_forbidden_except": [{"entry": " stored ", "lanes": ["a"]}]}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.forbidden_exception_page("exception-padding", settings, language)
+                self.assertEqual(shown["posted"]["settings"]["release_forbidden"], [" stored ", "secret", "padded"])
+                self.assertEqual(shown["posted"]["settings"]["release_forbidden_except"],
+                                 settings["release_forbidden_except"])
+                self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+
+    def test_page_pending_forbidden_removal_survives_refusal_and_row_edits(self):
+        settings = {**self.desk.settings(), "release_forbidden": ["secret", "kept"],
+                    "release_forbidden_except": [{"entry": "secret", "lanes": ["a"]},
+                                                 {"entry": "secret", "lanes": ["b", "c"]},
+                                                 {"entry": "kept", "lanes": ["a"]}]}
+        for language in ("en", "zh"):
+            for scenario in ("exception-draft-refused", "exception-draft-stale"):
+                with self.subTest(language=language, scenario=scenario):
+                    shown = self.forbidden_exception_page(scenario, settings, language)
+                    self.assertEqual(shown["firstPost"]["settings"]["release_forbidden_except"],
+                                     [{"entry": "kept", "lanes": ["a"]}])
+                    self.assertEqual(shown["draftExceptions"], settings["release_forbidden_except"] +
+                                     [{"entry": "new-entry", "lanes": ["a"]}])
+                    self.assertEqual(shown["posted"]["settings"]["release_forbidden_except"],
+                                     settings["release_forbidden_except"])
+                    self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
 
     def test_page_marks_legacy_dangling_exception_and_names_save_refusal(self):
         settings = {**self.desk.settings(), "release_forbidden": ["kept"],
@@ -27124,11 +27190,53 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     console.log(JSON.stringify(posted));
     return;
   }
-  if (["exception-choice", "exception-removal", "exception-dangling"].includes(ask)) {
+  if (["exception-choice", "exception-removal", "exception-dangling", "exception-edit-revert",
+       "exception-notice-load", "exception-padding", "exception-draft-refused", "exception-draft-stale"].includes(ask)) {
     const find = pred => { let found = null; walk(ids["#tab-settings"], el => { if (!found && pred(el)) found = el; }); return found; };
     const editor = () => find(el => el.attrs["data-exception-entry"] === "0");
     const options = () => descendants(editor(), "option").map(el => el.value);
     const save = () => vm.runInContext("saveSettings()", ctx);
+    const wordsBox = () => find(el => el.tag === "textarea" && el.attrs.placeholder === "internal-only");
+    const typeWords = value => { const words = wordsBox(); words.value = value; words.on.input({target:words}); };
+    if (ask === "exception-notice-load") {
+      console.log(JSON.stringify({notice:ids["#tab-settings"].textContent})); return;
+    }
+    if (ask === "exception-edit-revert") {
+      typeWords("secrt\nkept");
+      const duringNotice = ids["#tab-settings"].textContent;
+      const duringExceptions = JSON.parse(vm.runInContext("JSON.stringify(S.release_forbidden_except)", ctx));
+      typeWords("secret\nkept");
+      const notice = ids["#tab-settings"].textContent;
+      await save();
+      console.log(JSON.stringify({duringNotice, duringExceptions, notice, posted})); return;
+    }
+    if (ask === "exception-padding") {
+      typeWords(" stored \nsecret\n padded \n \t\n");
+      await save();
+      console.log(JSON.stringify({posted})); return;
+    }
+    if (["exception-draft-refused", "exception-draft-stale"].includes(ask)) {
+      const add = () => find(el => el.tag === "button" &&
+        ["Add exception", "添加豁免"].includes(el.textContent)).on.click();
+      typeWords("secrt\nkept\nnew-entry"); add();
+      const entry = find(el => el.attrs["data-exception-entry"] === "1");
+      entry.value = "new-entry"; entry.on.change({target:entry});
+      const lanes = find(el => el.attrs["data-exception-lanes"] === "1");
+      lanes.value = "a"; lanes.on.input({target:lanes});
+      add();
+      const rows = descendants(ids["#tab-settings"], "div").filter(el => el.className === "forbidden-exception");
+      descendants(rows.at(-1), "button")[0].on.click();
+      typeWords("secrt\nkept");
+      settingsPostReply = {ok:false, problems:[ask === "exception-draft-stale"
+        ? "the settings changed since this page loaded them (another tab or a command); press Reload, then make the change again"
+        : "example unrelated save refusal"]};
+      await save();
+      const firstPost = posted;
+      const draftExceptions = JSON.parse(vm.runInContext("JSON.stringify(S.release_forbidden_except)", ctx));
+      typeWords("secret\nkept");
+      settingsPostReply = {ok:true, problems:[]}; await save();
+      console.log(JSON.stringify({firstPost, draftExceptions, posted})); return;
+    }
     if (ask === "exception-choice") {
       const entry = editor(), tag = entry.tag, choices = options();
       entry.value = given["/api/settings"].settings.release_forbidden[1];

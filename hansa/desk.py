@@ -669,7 +669,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     elif isinstance(words, list):
         # lane_words compares the original spellings, before the scan compiles re: patterns.
         # Keep spaces and the prefix intact; neither a regex match nor casefolding identifies an entry.
-        p.extend(f"release_forbidden_except: exception {i} (lanes {', '.join(x['lanes'])}) "
+        p.extend(f"release_forbidden_except: exception {i} "
+                 f"({('lanes ' + ', '.join(x['lanes'])) if x['lanes'] else 'no lanes'}) "
                  "names no entry in release_forbidden"
                  for i, x in enumerate(exceptions, 1) if x["entry"] not in words)
     al = s.get("alert", {"command": ""})

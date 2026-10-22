@@ -849,6 +849,7 @@ let settingsRebase = "", keyProblemProvider = "";
 let settingsPending = "save", settingsFailure = "", fieldRecords = [];
 let settingsForm, settingsSaveButton, settingsDiscardButton, settingsBadge, settingsSaveState;
 let settingsPanels = {}, settingsNavButtons = {}, fieldSequence = 0, exceptionRefreshers = [];
+let forbiddenSeenEntries = new Set();
 const SETTINGS_GROUPS = [
   ["providers", T.providers, T.providersIntro], ["coordinator", T.coordinatorGroup, T.coordinatorIntro],
   ["lanes", T.lanes, T.lanesIntro], ["security", T.securityGroup, T.securityIntro],
@@ -950,6 +951,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   if (!keepKeys) KEY_DRAFTS = {};
   newProviderName = ""; newPriceName = ""; settingsMessage = ""; settingsFailure = ""; settingsRebase = ""; keyProblemProvider = "";
   settingsBaseline = settingText(S);
+  forbiddenSeenEntries = new Set(S.release_forbidden || []);
   settingsEpoch++;
   renderSettings(problems && problems.length ? problems : r.problems);
 }
@@ -961,14 +963,19 @@ async function saveSettings() {
   try {
     // Disable the settings form until both the write and its canonical reload finish.
     // Main-page navigation stays available and never replaces this draft.
-    const r = await api("/api/settings", {settings:JSON.parse(JSON.stringify(S)), rev:REV});
+    const settings = JSON.parse(JSON.stringify(S)), removed = removedForbiddenEntries();
+    // Keep the draft intact: a failed save or a reverted edit must retain its exceptions.
+    if (Array.isArray(settings.release_forbidden_except)) {
+      settings.release_forbidden_except = settings.release_forbidden_except.filter(row => !removed.has(row?.entry));
+    }
+    const r = await api("/api/settings", {settings, rev:REV});
     if (r.ok) {
       saved = true;
       await loadSettings(undefined, true);
       settingsMessage = Object.values(KEY_DRAFTS).some(Boolean) ? T.savedWithKeys : T.saved;
     } else if ((r.problems || []).some(p => p.startsWith("the settings changed since this page loaded them"))) {
       settingsFailure = "stale";
-      const draft = JSON.parse(JSON.stringify(S)), base = JSON.parse(settingsBaseline);
+      const draft = JSON.parse(JSON.stringify(S)), base = JSON.parse(settingsBaseline), seen = forbiddenSeenEntries;
       const keys = [...new Set([...Object.keys(base), ...Object.keys(draft)])].sort();
       const changed = keys.filter(k => settingText(draft[k]) !== settingText(base[k]));
       const providerName = newProviderName, priceName = newPriceName;
@@ -978,6 +985,7 @@ async function saveSettings() {
       for (const k of changed) {
         if (Object.hasOwn(draft, k)) S[k] = draft[k]; else delete S[k];
       }
+      forbiddenSeenEntries = new Set([...forbiddenSeenEntries, ...seen]);
       newProviderName = providerName; newPriceName = priceName;
       const groupNames = keys => [...new Set(keys.map(k => SETTINGS_GROUPS.find(([name]) =>
         (GROUP_KEYS[name] || []).includes(k) || name === "lanes" && ["lanes", "concurrency", "disk_floor"].includes(k))?.[1]
@@ -1089,29 +1097,24 @@ function forbiddenExceptionRows() {
   return Array.isArray(S.release_forbidden_except) ? S.release_forbidden_except.filter(row =>
     row && typeof row.entry === "string" && Array.isArray(row.lanes) && row.lanes.every(lane => typeof lane === "string")) : [];
 }
+function removedForbiddenEntries() {
+  return new Set([...forbiddenSeenEntries].filter(entry => !(S.release_forbidden || []).includes(entry)));
+}
 function forbiddenWordsField() {
-  const notes = h("div", {}), removed = new Map();
+  const notes = h("div", {});
   const update = () => {
-    const counts = new Map(removed);
+    const counts = new Map(), removed = removedForbiddenEntries();
     for (const row of forbiddenExceptionRows()) {
-      if ((S.release_forbidden || []).includes(row.entry)) counts.set(row.entry, (counts.get(row.entry) || 0) + 1);
+      if (removed.has(row.entry)) counts.set(row.entry, (counts.get(row.entry) || 0) + 1);
     }
     notes.replaceChildren(...[...counts].map(([entry, n]) => h("p", {},
       T.forbiddenRemove(JSON.stringify(entry), n))));
   };
   exceptionRefreshers.push(update); update();
   return field(T.forbiddenWords, h("textarea", {placeholder:"internal-only", oninput:e => {
-    const words = e.target.value.split("\n").filter(x => x.trim());
-    const gone = (S.release_forbidden || []).filter(entry => !words.includes(entry));
-    const rows = forbiddenExceptionRows();
-    for (const entry of gone) {
-      const n = rows.filter(row => row.entry === entry).length;
-      if (n) removed.set(entry, n);
-    }
-    // Only drop exceptions for entries removed in this edit; legacy dangling rows need explicit repair.
-    if (Array.isArray(S.release_forbidden_except)) {
-      S.release_forbidden_except = S.release_forbidden_except.filter(row => !gone.includes(row?.entry));
-    }
+    // Preserve exact stored spellings (also used by exceptions), but trim newly typed lines.
+    const words = e.target.value.split("\n").map(x => forbiddenSeenEntries.has(x) ? x : x.trim()).filter(Boolean);
+    for (const entry of words) forbiddenSeenEntries.add(entry);
     S.release_forbidden = words;
     exceptionRefreshers.forEach(refresh => refresh()); refreshSettingsState();
   }}, (S.release_forbidden || []).join("\n")), h("div", {}, T.forbiddenHint, notes), T.releaseForbidden, true);
@@ -1119,12 +1122,13 @@ function forbiddenWordsField() {
 function forbiddenExceptions() {
   const editor = h("div", {});
   const render = () => {
-    const rows = forbiddenExceptionRows(), entries = S.release_forbidden || [];
+    const removed = removedForbiddenEntries();
+    const rows = forbiddenExceptionRows().filter(row => !removed.has(row.entry)), entries = S.release_forbidden || [];
     editor.replaceChildren(...rows.map((row, i) => {
       const warnings = h("div", {});
       const update = () => warnings.replaceChildren(...shown([
         row.entry && !entries.includes(row.entry) ? h("p", {class:"warn"}, `${T.forbiddenEntryUnmatched}. ` +
-          `release_forbidden_except: exception ${i + 1} (lanes ${row.lanes.join(", ")}) names no entry in release_forbidden`) : null,
+          `release_forbidden_except: exception ${i + 1} (${row.lanes.length ? "lanes " + row.lanes.join(", ") : "no lanes"}) names no entry in release_forbidden`) : null,
         row.lanes.filter(lane => !S.lanes[lane]).map(lane => h("p", {class:"warn"}, `${lane}: ${T.forbiddenLaneUnmatched}`))]));
       update();
       const choices = ["", ...new Set(entries)];
@@ -1136,8 +1140,8 @@ function forbiddenExceptions() {
             disabled:entry && !entries.includes(entry)}, entry || T.forbiddenEntry))),
         h("input", {value:row.lanes.join(" "), placeholder:T.forbiddenLanes, "data-exception-lanes":i, "aria-label":T.forbiddenLanes,
           oninput:e => { row.lanes = e.target.value.split(/[\s,]+/).filter(Boolean); update(); refreshSettingsState(); }}),
-        h("button", {onclick:() => { S.release_forbidden_except = rows.filter((_, j) => j !== i); renderSettings(); }}, T.remove)), warnings);
-    }), h("button", {onclick:() => { S.release_forbidden_except = [...rows, {entry:"", lanes:[]}]; renderSettings(); }}, T.addForbiddenException));
+        h("button", {onclick:() => { S.release_forbidden_except = forbiddenExceptionRows().filter(other => other !== row); renderSettings(); }}, T.remove)), warnings);
+    }), h("button", {onclick:() => { S.release_forbidden_except = [...forbiddenExceptionRows(), {entry:"", lanes:[]}]; renderSettings(); }}, T.addForbiddenException));
   };
   exceptionRefreshers.push(render); render();
   return editor;
