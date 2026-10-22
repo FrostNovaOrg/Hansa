@@ -16,7 +16,7 @@ def snapshot(desk, paths=(), parent="") -> list:
     """
     from .run import worker_read_denials
 
-    sources = [(desk.tasks_dir / parent / "attach" / a["name"], a["name"], True)
+    sources = [(desk.attachment_dir(parent) / a["name"], a["name"], True)
                for a in desk.meta(parent).get("attachments", [])] if parent else []
     sources += [(Path(p), Path(p).name, False) for p in paths]
     if not sources:

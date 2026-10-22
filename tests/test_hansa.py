@@ -3843,6 +3843,33 @@ class DeskTest(unittest.TestCase):
         self.assert_attachment_run(again, files)
         self.assertNotEqual(got["folder"], again["folder"])
 
+    def test_attachment_snapshots_are_denied_by_run_sandboxes(self):
+        files, args = self.attachment_files()
+        seen = self.tmp / "attachment-argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"].update(setup="true", check="true", env={"FAKE_SHOW_ARGV": str(seen)})
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("add", "Add hello.txt", *args)
+        # Find the queue-time copy independently of the implementation's chosen location.
+        [stored] = self.desk.root.rglob("shot.png")
+        self.assertEqual(stored.read_bytes(), files["shot.png"])
+        self.assertEqual(self.settle(Dispatcher(self.desk), "t0001")["state"], "done")
+        # Another task's worker must also be unable to read the first task's stored copies.
+        self.hansa("add", "Read the repository")
+        self.assertEqual(self.settle(Dispatcher(self.desk), "t0002")["state"], "done")
+        workers = [self.sandbox_of(json.loads(line))["filesystem"] for line in seen.read_text().splitlines()]
+        self.assertEqual(len(workers), 2)
+        commands = [call["settings"]["filesystem"] for call in self.srt_calls()]
+        self.assertEqual(len(commands), 4)  # setup and check for each task
+        for i, fs in enumerate([*workers, *commands]):
+            with self.subTest(sandbox=i):
+                self.assertTrue(any(Path(d).resolve() == stored.parent.resolve()
+                                    or Path(d).resolve() in stored.parent.resolve().parents
+                                    for d in fs["denyRead"]),
+                                f"sandbox leaves stored attachments readable: {stored.parent}")
+        self.assertIn(self.desk.state_dir.resolve(), stored.resolve().parents)
+        self.assertFalse((self.desk.tasks_dir / "t0001" / "attach").exists())
+
     def test_attachments_reach_the_codex_adapter_on_macos(self):
         if sys.platform != "darwin":
             self.skipTest("the Codex adapter starts workers only on macOS")

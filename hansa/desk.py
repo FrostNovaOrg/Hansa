@@ -2846,6 +2846,10 @@ class Desk:
         return ""
 
     # -- tasks ------------------------------------------------------------
+    def attachment_dir(self, tid: str) -> Path:
+        """Queue-time copies, kept in state so every run's sandbox denies reading them."""
+        return self.state_dir / "attachments" / tid
+
     def new_task(self, text: str, **opts) -> str:
         text = text.strip()
         if not text:
@@ -2865,9 +2869,10 @@ class Desk:
             d.mkdir()
             write_text(d / "task.md", text + "\n")
             if attachments:
-                (d / "attach").mkdir()
+                folder = self.attachment_dir(tid)
+                folder.mkdir(parents=True)
                 for name, data in attachments:
-                    write_bytes(d / "attach" / name, data)
+                    write_bytes(folder / name, data)
                 opts["attachments"] = [{"name": name, "size": len(data)} for name, data in attachments]
             title = self.redact(opts.pop("title", "")) or text.splitlines()[0][:80]
             meta = {"id": tid, "title": title, "state": "queued", "created": now(),

@@ -2612,7 +2612,7 @@ def make_worker_tmp(desk: Desk, tid: str) -> str:
         folder = Path(tmp) / "attach"
         folder.mkdir()
         for a in attachments:
-            copy_file(desk.tasks_dir / tid / "attach" / a["name"], folder / a["name"])
+            copy_file(desk.attachment_dir(tid) / a["name"], folder / a["name"])
     return tmp
 
 
