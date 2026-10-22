@@ -692,6 +692,8 @@ async function loadStatus() {
   part(st.srt_missing, true);
   part(st.disk && st.disk.low_text ? (ZH ? T.diskLow + "：" : "") + st.disk.low_text : "", true);
   for (const x of st.disk && st.disk.unknown || []) part(x, true);
+  part(st.memory && st.memory.low_text || "", true);
+  for (const x of st.memory && st.memory.unknown || []) part(x, true);
   part(st.no_read_stop ? T.noReadStop + ": " + st.no_read_stop : "", true);
   for (const x of st.no_read_left_out || []) part(T.workersMayNotReadSkipped + ": " + x, true);
   part(modLine(st.mod, st.mod_line), st.mod && st.mod.kind !== "notify" && st.mod.loaded !== true);

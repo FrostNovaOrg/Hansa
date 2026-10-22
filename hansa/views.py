@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, plugin, release, up
+from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, memory, notify, plugin, release, up
 from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
@@ -573,6 +573,9 @@ def status(desk: Desk) -> dict:
                  "low": (low := disk.held(desk)),
                  "low_text": disk.held_text(desk, low, disk.floor(s)) if low else "",
                  "unknown": disk.unknown_lines(desk)},  # what its look could not measure, and what was known
+        "memory": {"floor": memory.floor(s), "line": memory.desk_line(desk, s), "low": memory.held(desk),
+                   "low_text": memory.held_text(desk) if memory.held(desk) else "",
+                   "unknown": memory.unknown_lines(desk)},
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and occupied_lane(m) == n), None),
                    **({"merge_lane": True, "merge_for": merge_served_lanes(s, n)}
@@ -646,12 +649,15 @@ def status_text(st: dict) -> str:
     out += [st["alert_failed"]] if st.get("alert_failed") else []
     out += [st["disk"]["low_text"] + ". More: hansa help free-space"] if (st.get("disk") or {}).get("low_text") else []
     out += (st.get("disk") or {}).get("unknown") or []
+    out += [st["memory"]["low_text"]] if (st.get("memory") or {}).get("low_text") else []
+    out += (st.get("memory") or {}).get("unknown") or []
     out += [f"WARNING: {x}" for x in st.get("bad_messages") or []]
     out += [f"STOPPED: {st['no_read_stop']}"] if st.get("no_read_stop") else []
     out += [f"what workers may not read, entry left out: {x.removeprefix(DENY_AT)}"
             for x in st.get("no_read_left_out") or []]
     out += [page_text(st["page"])] if st.get("page") else []
     out += [st["disk"]["line"]] if st.get("disk") else []
+    out += [st["memory"]["line"]] if st.get("memory") else []
     out.append(("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                 "hansa posts to no session (hansa notify on, from the coordinator's session)")
                + (f" · {st['card_note']}" if st.get("card_note") else ""))
@@ -1593,7 +1599,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             *[f"  held: lane {ln} cannot run, {sandbox_held_text(h)}" for ln, groups in sorted(sandbox_held(desk).items())
               for h in groups.values()],
             "  More: hansa help sandbox-probe",
-            *disk.explain_lines(desk, desk.settings())])
+            *disk.explain_lines(desk, desk.settings()), *memory.explain_lines(desk, desk.settings())])
     if what == "notify":
         who = notify.names(desk)
         return "\n".join([
@@ -1635,7 +1641,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']})",
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "
         "You change tasks, lanes (hansa lane), how many run at once (hansa concurrency), the floor of free space under "
-        "which nothing new starts (hansa disk-floor), lanes' standing instructions (hansa lane brief) and "
+        "which nothing new starts (hansa disk-floor), the available memory floor (hansa memory-floor), "
+        "lanes' standing instructions (hansa lane brief) and "
         "pause/resume.",
         release_settings_line(s),
         alert.explain_line(s)])

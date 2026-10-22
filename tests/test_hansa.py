@@ -43,6 +43,7 @@ from hansa.web import cookie_name, start_web  # noqa: E402
 from hansa.web import _save_settings as save_from_page  # noqa: E402
 from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
 from hansa.run import RUN_TMP_DIR  # noqa: E402
+from hansa.memory import measure as measure_memory  # noqa: E402 - the reader, before setUp replaces it
 
 # What a lane's command on Linux is given in front of it, by hansa's prelude (run.LINUX_PRELUDE) and by srt: git's
 # global config and excludes in the command's TMPDIR, srt's proxy settings for git. A test makes its own repositories
@@ -3506,6 +3507,7 @@ class DeskTest(unittest.TestCase):
             total=self.total, used=(self.total or 0) - self.free_for(p), free=self.free_for(p)))
         usage.start()
         self.addCleanup(usage.stop)
+        self.memory_reading()  # available memory too is the test's, never the machine's
         if not tmp_writable():  # inside a sandbox that keeps /tmp closed: the workers' folders go in the test's own
             root = unittest.mock.patch("hansa.run.WORKER_TMP_ROOT", str(self.tmp))
             root.start()
@@ -24520,6 +24522,283 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(out.read_text(), "x\nx\n")
 
     # -- free space: the floor, and what old tasks kept (hansa/disk.py) ----------------------------------------------
+    def memory_reading(self, available=8, total=16):
+        """Available and total GB, set by the test instead of the host's memory pressure."""
+        self.memory_available, self.memory_total = available * 10 ** 9, total * 10 ** 9
+        reader = unittest.mock.patch("hansa.memory.measure", lambda: {
+            "available": self.memory_available, "total": self.memory_total})
+        reader.start()
+        self.addCleanup(reader.stop)
+
+    def test_under_the_memory_floor_nothing_starts_and_running_work_goes_on(self):
+        from hansa import alert
+        self.memory_reading()
+        s = self.desk.settings()
+        s["lanes"]["b"] = json.loads(json.dumps(s["lanes"]["a"]))
+        s["lanes"]["a"]["check"] = "test -f README.md"
+        s["concurrency"] = 2
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "cat > /dev/null"}))["ok"])
+        d = Dispatcher(self.desk)
+        running = self.desk.new_task("Add hello.txt", lane="a")
+        d.tick()
+        self.assertEqual(self.desk.meta(running)["state"], "running")
+        self.memory_available = 10 ** 9
+        waiting = self.desk.new_task("Add more.txt", lane="b")
+        d.tick()
+        self.assertEqual(self.desk.meta(waiting)["state"], "queued")
+        [low] = self.events("memory_low")
+        self.assertEqual(low["floor"], 2)
+        said = self.hansa("status")
+        self.assertIn("memory: 1.0 GB available · floor 2 GB (hansa memory-floor)", said)
+        self.assertIn("MEMORY LOW: 1.0 GB available (floor 2 GB)", said)
+        self.assertIn("until 3.0 GB is available; what runs goes on", said)
+        self.assertIn("waiting: hansa serve starts nothing new while available memory is under its floor", said)
+        self.assertIn("now: MEMORY LOW", self.hansa("explain", "server"))
+        self.assertEqual(self.settle(d, running)["state"], "done")
+        self.assertEqual(self.desk.meta(running)["check"]["ok"], True)
+        item = notify._item(self.desk, low)
+        self.assertEqual(item[0], ("memory",))
+        self.assertTrue(item[3])
+        self.assertIn("available memory is under", item[1])
+        alert.from_event(self.desk, "memory_low", low)
+        self.assertEqual(alert.queued(self.desk), [])
+
+    def test_memory_stays_low_without_repeating_the_notice(self):
+        self.memory_reading(1)
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        for _ in range(6):
+            d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertEqual(len(self.events("memory_low")), 1)
+        self.assertEqual(self.events("memory_ok"), [])
+
+    def test_memory_over_floor_but_below_margin_still_waits(self):
+        self.memory_reading(1)
+        d = Dispatcher(self.desk)
+        d.tick()
+        tid = self.desk.new_task("Add hello.txt")
+        self.memory_available = int(2.5 * 10 ** 9)
+        d = Dispatcher(self.desk)  # hysteresis survives a serve restart through memory.json
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertIn("MEMORY LOW:", self.hansa("status"))
+        self.assertIn("until 3.0 GB is available", self.hansa("status"))
+        self.assertEqual(self.events("memory_ok"), [])
+
+    def test_memory_at_floor_plus_one_starts_again_and_posts_once(self):
+        self.memory_reading(1)
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.memory_available = 3 * 10 ** 9
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "running")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        [ok] = self.events("memory_ok")
+        self.assertEqual(len(self.events("memory_low")), 1)
+        item = notify._item(self.desk, ok)
+        self.assertEqual(item[0], ("memory",))
+        self.assertTrue(item[3])
+        self.assertIn("starts things again", item[1])
+        self.assertNotIn("MEMORY LOW:", self.hansa("status"))
+        self.assertIn("memory: 3.0 GB available · floor 2 GB (hansa memory-floor)", self.hansa("status"))
+
+    def test_memory_floor_zero_never_holds_work_and_only_coordinator_sets_it(self):
+        self.memory_reading(0)
+        self.assertIn("memory floor: 2 GB -> off", self.hansa("memory-floor", "0"))
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertEqual(self.events("memory_low"), [])
+        self.assertTrue(self.page_save(lambda s: s.update(memory_floor=99))["ok"])
+        self.assertEqual(self.desk.settings()["memory_floor"], 0)
+
+    def test_six_gb_machine_uses_one_and_a_half_gb_memory_floor(self):
+        self.memory_reading(1.5, 6)
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(self.events("memory_low"), [])
+        self.assertIn("floor 1.5 GB for this 6.0 GB machine", self.hansa("status"))
+        self.memory_available = 10 ** 9
+        tid = self.desk.new_task("Add hello.txt")
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertIn("MEMORY LOW: 1.0 GB available (floor 1.5 GB)", self.hansa("status"))
+        self.memory_available = int(2.4 * 10 ** 9)
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.memory_available = int(2.5 * 10 ** 9)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+
+    def test_failed_memory_reading_holds_nothing_and_reports_changes_once(self):
+        from hansa import memory
+        self.memory_reading(1)
+        d = Dispatcher(self.desk)
+        d.tick()
+        with unittest.mock.patch("hansa.memory.measure", side_effect=OSError("reader failed")):
+            tid = self.desk.new_task("Add hello.txt")
+            for _ in range(3):
+                d.tick()
+            self.assertNotEqual(self.desk.meta(tid)["state"], "queued")
+            self.assertFalse(memory.held(self.desk))
+            self.assertEqual(memory.record(self.desk)["error"]["text"], "OSError: reader failed")
+            said = self.hansa("status")
+            self.assertNotIn("MEMORY LOW:", said)
+            self.assertIn("could not look at available memory", said)
+            self.assertIn("holds nothing back", said)
+            self.assertIn("could not look at available memory", self.hansa("explain", "server"))
+            self.assertEqual(self.settle(d, tid)["state"], "done")
+        [failed] = self.events("memory_look_failed")
+        self.assertTrue(notify._item(self.desk, failed)[3])
+        self.memory_available = 8 * 10 ** 9
+        for _ in range(2):
+            d.tick()
+        [ok] = self.events("memory_look_ok")
+        self.assertTrue(notify._item(self.desk, ok)[3])
+        self.assertNotIn("could not look at available memory", self.hansa("status"))
+
+    def test_memory_over_floor_does_not_override_low_disk(self):
+        # This case also passes before memory support: disk remains an independent hold.
+        d = Dispatcher(self.desk)
+        self.free = 2 * 10 ** 9
+        tid = self.desk.new_task("Add hello.txt")
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertEqual(len(self.events("disk_low")), 1)
+
+    def test_memory_floor_command_shows_default_and_sets_gb(self):
+        self.assertIn("memory floor: 2 GB; 8.0 GB available", self.hansa("memory-floor"))
+        self.assertIn("memory floor: 2 GB -> 3 GB", self.hansa("memory-floor", "3"))
+        self.assertEqual(self.desk.settings()["memory_floor"], 3)
+        self.assertIn("memory-floor", self.hansa("help"))
+        self.assertIn("four times the floor", " ".join(self.hansa("help", "memory-floor").split()))
+
+    def test_memory_floor_refuses_bad_values_without_changing_settings(self):
+        self.assertEqual(self.desk.settings().get("memory_floor"), 2)
+        for bad in ("-1", "no", "nan", "inf", "100001"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    self.hansa("memory-floor", bad)
+                self.assertEqual(self.desk.settings()["memory_floor"], 2)
+        for bad in (-1, "no", True, float("nan"), float("inf"), 100001):
+            with self.subTest(bad=bad):
+                self.assertIn("memory_floor must be a number", " ".join(validate({
+                    **self.desk.settings(), "memory_floor": bad})))
+
+    def test_macos_memory_reader_uses_memorystatus_percent_and_memsize(self):
+        from hansa import memory
+        with unittest.mock.patch.object(memory.sys, "platform", "darwin"), \
+                unittest.mock.patch.object(memory.subprocess, "check_output", side_effect=["74\n", "17179869184\n"]) as run:
+            measured = measure_memory()
+        self.assertEqual(measured["total"], 17179869184)
+        self.assertAlmostEqual(measured["available"], 17179869184 * 0.74)
+        self.assertEqual([c.args[0] for c in run.call_args_list], [
+            ["sysctl", "-n", "kern.memorystatus_level"], ["sysctl", "-n", "hw.memsize"]])
+
+    def test_linux_memory_reader_uses_memavailable_kb(self):
+        from hansa import memory
+        sample = "MemTotal:       16777216 kB\nMemFree:          100000 kB\nMemAvailable:    8000000 kB\nCached:          9000000 kB\n"
+        with unittest.mock.patch.object(memory.sys, "platform", "linux"), \
+                unittest.mock.patch.object(memory.Path, "read_text", return_value=sample) as read:
+            measured = measure_memory()
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(measured, {"available": 8000000 * 1024, "total": 16777216 * 1024})
+
+    def test_low_memory_holds_verifications_tries_and_releases(self):
+        from hansa import release, run
+        out = self.tmp / "released.txt"
+        self.with_release(f"echo x >> {out}")
+        self.assertTrue(self.page_save(lambda s: s.update(releases_without_asking=["a"]))["ok"])
+        self.memory_available = 10 ** 9
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.hansa("release", "a")
+        vid = self.desk.new_task("Verify the file", lane="a", kind="verify")
+        run.write_try(self.desk, "a", {"phase": "queued", "merge": False})
+        for _ in range(3):
+            d.tick()
+        self.assertEqual(self.desk.meta(vid)["state"], "queued")
+        self.assertEqual(run.read_try(self.desk, "a")["phase"], "queued")
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+        self.assertFalse(out.exists())
+        self.assertIn("waits for memory", self.hansa("release"))
+        self.assertIn("等可用内存", views.status(self.desk)["releases"][0]["what_zh"])
+        run.try_file(self.desk, "a").unlink()
+        self.memory_available = 3 * 10 ** 9
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        self.assertEqual(out.read_text(), "x\n")
+        self.assertEqual(self.settle(d, vid)["state"], "done")
+
+    def test_merge_check_waits_for_memory_then_runs(self):
+        d, t1, t2 = self.two_lanes(check="test -f README.md")
+        self.hansa("merge", t1)
+        self.memory_available = 10 ** 9
+        d.tick()
+        self.hansa("merge", t2)
+        for _ in range(3):
+            d.tick()
+        m = self.desk.meta(t2)
+        self.assertEqual((m["state"], m["merge_check"]["phase"]), ("merging", "queued"))
+        self.assertIn("waits for memory", self.hansa("status"))
+        self.memory_available = 3 * 10 ** 9
+        m = self.settle_merge(d, t2)
+        self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("merged", True))
+
+    def test_memory_failure_before_first_reading_and_changed_errors_are_recorded(self):
+        from hansa import memory
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch("hansa.memory.measure", side_effect=OSError("first error")):
+            d.tick()
+            d.tick()
+            self.assertIn("available memory never measured", self.hansa("status"))
+            self.assertIn("? GB available", self.hansa("memory-floor"))
+            Dispatcher(self.desk).tick()  # a restarted server does not repeat the same error
+        self.assertEqual(len(self.events("memory_look_failed")), 1)
+        with unittest.mock.patch("hansa.memory.measure", side_effect=OSError("changed error")):
+            d.tick()
+            d.tick()
+        self.assertEqual([e["error"] for e in self.events("memory_look_failed")],
+                         ["OSError: first error", "OSError: changed error"])
+        self.assertEqual(memory.record(self.desk)["error"]["text"], "OSError: changed error")
+        d.tick()
+        self.assertEqual(len(self.events("memory_look_ok")), 1)
+
+    def test_memory_readers_refuse_malformed_and_impossible_readings(self):
+        from hansa import memory
+        for percent, total in (("bad", "16000000000"), ("101", "16000000000"), ("74", "0")):
+            with self.subTest(percent=percent, total=total), \
+                    unittest.mock.patch.object(memory.sys, "platform", "darwin"), \
+                    unittest.mock.patch.object(memory.subprocess, "check_output", side_effect=[percent, total]):
+                with self.assertRaises(ValueError):
+                    measure_memory()
+        for sample in ("MemTotal: 16000000 kB\n", "MemTotal: 2 kB\nMemAvailable: 3 kB\n"):
+            with self.subTest(sample=sample), unittest.mock.patch.object(memory.sys, "platform", "linux"), \
+                    unittest.mock.patch.object(memory.Path, "read_text", return_value=sample):
+                with self.assertRaises((KeyError, ValueError)):
+                    measure_memory()
+        with unittest.mock.patch.object(memory.sys, "platform", "unsupported"):
+            with self.assertRaises(OSError):
+                measure_memory()
+
+    def test_memory_off_clears_a_hold_and_old_desks_get_the_default(self):
+        from hansa import memory
+        self.memory_available = 0
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertTrue(memory.held(self.desk))
+        self.hansa("memory-floor", "0")
+        d.tick()
+        self.assertFalse(memory.held(self.desk))
+        [ok] = self.events("memory_ok")
+        self.assertIn("the floor is off", notify._item(self.desk, ok)[1])
+        s = self.desk.settings()
+        del s["memory_floor"]
+        write_json(self.desk.settings_path, s)
+        self.assertEqual(self.desk.settings()["memory_floor"], 2)
+
     def test_under_the_disk_floor_serve_starts_nothing_new_and_what_runs_goes_on(self):
         from hansa import alert, disk
         GB = 10 ** 9
@@ -28270,6 +28549,14 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertFalse(any(p["tone"] == "warn" for p in page["parts"]))
             self.assertTrue(any("3" in p["text"] and ("dispatch" if language == "en" else "派活") in p["text"]
                                 for p in page["parts"]))
+            status["memory"] = {"low_text": "MEMORY LOW: waits for memory", "unknown": []}
+            [page] = self.page_header("status-parts", status, language)
+            self.assertTrue(any("MEMORY LOW:" in p["text"] and p["tone"] == "warn" for p in page["parts"]))
+            status["memory"] = {"low_text": "", "unknown": ["memory: could not look at available memory"]}
+            [page] = self.page_header("status-parts", status, language)
+            self.assertTrue(any("could not look at available memory" in p["text"] and p["tone"] == "warn"
+                                for p in page["parts"]))
+            status["memory"] = None
             status.update(paused="review queue", server_up=False, server={"state":"gone"})
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")

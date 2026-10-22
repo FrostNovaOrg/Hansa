@@ -5546,6 +5546,7 @@ class Dispatcher:
         self.swept = 0.0  # when it last swept hansa's leftover empty folders in the temporary folder (sweep_tmp)
         self.trimmed = 0.0  # when this server last trimmed what old tasks kept (disk.trim)
         self.look_error = None  # the error of its look of free space while that fails as a whole (disk.look_failed)
+        self.memory_error = None  # a failed available-memory reading, recorded once per change
         self.read = None  # (desk.writes, the tasks) as this round last read them; None at the start of a round
 
     def tasks(self) -> list:
@@ -5955,6 +5956,23 @@ class Dispatcher:
         self.look_error = None
         return rec["low"]
 
+    def memory(self, s: dict) -> bool:
+        """The independent memory hold; a failed reading holds nothing back."""
+        from . import memory
+        try:
+            rec = memory.look(self.desk, s)
+        except Exception as e:  # noqa: BLE001 - keep serving, as with a failed disk look
+            error = self.desk.redact(f"{type(e).__name__}: {e}")[:300]
+            if error != self.memory_error:
+                self.memory_error = error
+                try:
+                    memory.look_failed(self.desk, error)
+                except Exception:  # noqa: BLE001 - its record cannot be written either
+                    pass
+            return False
+        self.memory_error = None
+        return rec["low"]
+
     def record(self, tasks: list) -> None:
         """Record what each running worker, verifier and check runs below it (record_run), once
         each round: what it starts that leaves every marker sweep finds is still stopped at its end."""
@@ -5998,6 +6016,10 @@ class Dispatcher:
         low = []
         with serve_step():
             low = self.disk(s)
+        memory_low = False
+        with serve_step():
+            memory_low = self.memory(s)
+        low = bool(low or memory_low)
         with serve_step():
             self.record(self.tasks())
         for tid, proc in list(self.procs.items()):
@@ -6050,7 +6072,7 @@ class Dispatcher:
             self.merge_checks(s, starting=not low)
         with serve_step():
             beat(desk)  # what came before can take long: stopping a worker waits for its group, finishing sweeps
-        if desk.paused() or low:  # free space under the floor: what runs goes on, nothing new starts
+        if desk.paused() or low:  # disk or memory under its floor: existing work goes on
             return
         running = [m for m in self.tasks() if lane_occupied(m)]
         free = s["concurrency"] - len(running)
@@ -6373,10 +6395,12 @@ def server_text(st: dict) -> str:
 
 
 def disk_short(desk: Desk) -> str:
-    """Why hansa serve starts nothing new now, for what waits; '' when free space is over the floor (disk.held)."""
-    from . import disk
+    """Why new work waits for disk space or memory; disk takes precedence if both hold."""
+    from . import disk, memory
     low = disk.held(desk)
-    return disk.short_text(desk, low) if low else ""
+    if low:
+        return disk.short_text(desk, low)
+    return memory.short_text(desk) if memory.held(desk) else ""
 
 
 def waiting_looks(desk: Desk, s: dict, tasks: list | None = None, server: dict | None = None) -> dict:

@@ -85,6 +85,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa hide PATH [PATH ...]` | add to what workers may not read; only the principal removes |
 | `hansa concurrency [N]` | how many tasks run at once, over all lanes |
 | `hansa disk-floor [GB]` | the free space under which nothing new starts |
+| `hansa memory-floor [GB]` | available memory under which nothing new starts |
 | `hansa cost [--days N \| --since HH:MM] [--by seat\|lane\|task\|...]` | tokens and their worth at the principal's prices |
 | `hansa ask "<request>"` / `--close N "<why>"` | a request on the principal's page / close #N when done another way |
 | `hansa release [L [TARGET] ["<note>"]]`, `--stop ID`, `yes\|no ID CODE` | ask for, list, call off or answer a release |
@@ -242,7 +243,7 @@ or ask `scout` when reading is enough; say what you need back.
 ## What you change, and what only the principal changes
 - Yours: tasks; the lanes (`hansa lane`) and their standing instructions, which you read and change
   only with `hansa lane brief L`;
-  `hansa concurrency`; `hansa disk-floor`; pause and resume; additions to what workers may not read
+  `hansa concurrency`; `hansa disk-floor`; `hansa memory-floor`; pause and resume; additions to what workers may not read
   (`hansa hide`). hansa checks each change as it checks the principal's; one it refuses changes
   nothing.
 - You run outside any sandbox, so you can help a principal who knows little about computers: run

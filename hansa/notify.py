@@ -287,6 +287,20 @@ def _item(desk: Desk, e: dict):
                            + (e.get("again") or f"every volume has {(e.get('floor') or 0) + disk.MARGIN:g} GB free")
                            + "; what runs goes on · next: free "
                            "space, or hansa explain server"), None, True, None
+    if kind == "memory_low":
+        return ("memory",), (f"available memory is under the floor ({e.get('floor') or 0:g} GB): "
+                             f"{disk.gb(e.get('available') or 0)} available: hansa serve starts {disk.STARTS} "
+                             f"until {disk.gb(e.get('again') or 0)} is available; what runs goes on "
+                             "· next: hansa explain server"), None, True, None
+    if kind == "memory_ok":
+        return ("memory",), ("available memory is back over the floor"
+                             + (f" ({e.get('floor'):g} GB)" if e.get("floor") else " (the floor is off)")
+                             + ": hansa serve starts things again"), None, True, None
+    if kind == "memory_look_failed":
+        return ("memory", "look"), (f"hansa serve could not look at available memory ({e.get('error')}), "
+                                     "so it holds nothing back until it can · next: hansa explain server"), None, True, None
+    if kind == "memory_look_ok":
+        return ("memory", "look"), "hansa serve can look at available memory again", None, True, None
     if kind == "disk_ok":
         return ("disk",), ("free space is back over the floor"
                            + (f" ({e.get('floor') or 0:g} GB)" if e.get("floor") else " (the floor is off)")
