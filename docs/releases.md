@@ -236,10 +236,12 @@ under the forbidden entries, one row per entry with its lanes:
 exactly as on `release_forbidden`. On those lanes it is skipped in task
 titles, merges and merge checks (including checks run by a merge
 lane for that task), release targets' commands and releases. Every other
-entry and the mailbox rule still apply. Choose current entries on the page;
-spaces and `re:` stay significant. Every settings save, commands included,
-refuses dangling exceptions, preventing silent mistakes; reasons give position
-and lanes, never entry text. Legacy dangling rows are marked with removal
+entry and the mailbox rule still apply. The page offers the current entries to
+choose from. An exception matches its entry exactly as the word scan reads it,
+`re:` included, and the page trims the spaces around each line typed in the box
+of entries. Every settings save, commands included, refuses dangling
+exceptions, preventing silent mistakes; reasons give position and lanes, never
+entry text. Legacy dangling rows are marked with removal
 controls. Removing an entry removes its exceptions in that save, after showing
 their count. Missing lanes stay marked as matching nothing.
 Changing a lane's exceptions makes its earlier scans unusable.
@@ -371,7 +373,7 @@ sandbox, in a temporary folder of its own under the desk's `secrets/alert-runs` 
 coordinator, workers and verifiers; removed when the command ends, and what a stopped or killed
 `hansa serve` left there is swept when it starts), with hansa's own environment (not a lane's),
 the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
-`release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `coordinator`, `test`; comma-separated when several go
+`release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `coordinator`, `credit`, `test`; comma-separated when several go
 out together)
 and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
 characters; a release's text names its lane and target.

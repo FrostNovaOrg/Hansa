@@ -459,16 +459,36 @@ def notify_on_line(desk: Desk, card: bool | None = None) -> str:
     placed = place_card(desk, rec)
     placed["removed"] = removed + placed["removed"]
     return "\n".join([f"{then}After a restart, hansa up starts this session again {restart_line(desk, rec)}.",
-                      *([] if isinstance(rec.get("launch_rules"), list) else [UNRULED]),
+                      *([] if isinstance(rec.get("launch_rules"), list) else [unruled(desk, rec)]),
                       *card_lines(desk, rec, placed)])
 
 
 # What hansa notify on says of a session it records that hansa up did not start (notify-launch)
 UNRULED = ("This session has none of the deny rules hansa coordinator gives its own session (no pushing or "
            "publishing from its shell, no reading of the desk's secrets/ and .hansa/ or of the logins and keys under "
-           "the home folder, no editing of the desk's files but notes/) until hansa up starts it again, which gives "
+           "the home folder, no editing of the desk's files but notes/ and worktrees/) until hansa up starts it again, which gives "
            "it those; even then, not the principal's list of what workers may not read, nor the no-edit rule on the "
            "lanes' repositories, and no helpers.")
+
+
+def unruled(desk: Desk, rec: dict) -> str:
+    """UNRULED; for a session started in the desk's own folder, which loads the desk's .claude/settings.json, the
+    deny rules it has from there (cli.permissions) and those hansa up adds."""
+    from .cli import desk_spellings, permissions
+    if rec.get("folder") not in desk_spellings(desk):
+        return UNRULED
+    deny, r = permissions(desk)["deny"], str(desk.root).lstrip("/")
+
+    def names(tool: str) -> str:
+        got = dict.fromkeys(x[len(tool) + len(r) + 4:-1].replace("/**", "/") for x in deny
+                            if x.startswith(f"{tool}(//{r}/"))
+        return " and ".join([", ".join([*got][:-1]), [*got][-1]] if len(got) > 1 else got)
+    return ("Started in the desk's folder, this session has these of the deny rules hansa coordinator gives its own "
+            "session, from the desk's .claude/settings.json: no pushing or publishing from its shell, no reading of "
+            f"the desk's {names('Read')}, no editing of the desk's {names('Edit')}. The rest (no reading of the "
+            "logins and keys under the home folder, no editing of the desk's other files but notes/ and worktrees/) "
+            "come when hansa up starts it again; even then, not the principal's list of what workers may not read, "
+            "nor the no-edit rule on the lanes' repositories, and no helpers.")
 
 
 def card_import(folder: Path, card: Path):
@@ -609,7 +629,7 @@ def copy_text(desk: Desk, path: Path) -> str:
               "make a task.\n>\n"
               "> Started by `hansa up`, it has these of the rules `hansa coordinator` gives its session: no pushing or "
               "publishing from its shell, no reading of the desk's `secrets/` and `.hansa/` or of the logins and keys "
-              "under the home folder, no editing of the desk's files but `notes/`. Started otherwise and recorded "
+              "under the home folder, no editing of the desk's files but `notes/` and `worktrees/`. Started otherwise and recorded "
               "with `hansa notify on`, it has none of them until `hansa up` starts it. In both cases it is not denied "
               "Read on the principal's list of what workers may not read, nor Edit in the lanes' repositories: the "
               "card's rules still hold.\n>\n"
