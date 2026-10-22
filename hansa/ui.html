@@ -20,6 +20,7 @@ nav { display:flex; gap:4px; }
 nav button { display:flex; gap:7px; align-items:center; border:1px solid transparent; background:none; padding:6px 11px; border-radius:6px; color:var(--muted); }
 nav button.on { background:var(--card); border-color:var(--line); color:var(--fg); font-weight:600; box-shadow:var(--shadow); }
 #state { display:inline-flex; align-items:baseline; flex-wrap:wrap; gap:7px; margin-left:auto; font-size:12px; min-width:0; max-width:52%; }
+#language { width:auto; min-height:30px; padding:4px 7px; font-size:12px; }
 #state > span { min-width:0; }
 #state > span + span::before { content:"·"; color:var(--muted); margin-right:7px; }
 #state::before { content:""; width:6px; height:6px; flex:none; border-radius:50%; background:var(--ok); }
@@ -263,6 +264,7 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
   <strong id="title"></strong>
   <nav id="tabs"></nav>
   <span id="state" class="muted"></span>
+  <select id="language" aria-label="中文 / English"></select>
 </header>
 <main>
   <div id="tab-status"></div>
@@ -271,7 +273,21 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 </main>
 <script>
 "use strict";
-const ZH = (navigator.language || "").toLowerCase().startsWith("zh");
+// Site data may be unavailable, including access to the storage property itself.
+function keptChoice(storage, key, choices, fallback) {
+  try {
+    const value = globalThis[storage].getItem(key);
+    return choices.includes(value) ? value : fallback;
+  } catch (_) { return fallback; }
+}
+function keepChoice(storage, key, value) {
+  try { globalThis[storage].setItem(key, String(value)); } catch (_) {}
+}
+const TABS = ["status", "settings", "cost"], COST_PERIODS = [1, 7, 30];
+const language = keptChoice("localStorage", "hansa.language", ["zh-CN", "en"],
+  (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en");
+const ZH = language === "zh-CN";
+document.documentElement.setAttribute("lang", language);
 const T = ZH ? {
   status:"状态", settings:"设置", cost:"成本",
   desk:"工作台", version:"hansa 版本", summaryNow:"现在",
@@ -614,10 +630,11 @@ async function api(path, body) {
 let current = "status";
 function show(tab) {
   current = tab;
+  keepChoice("sessionStorage", "hansa.tab", tab);
   for (const b of document.querySelectorAll("#tabs button")) {
     b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
   }
-  for (const t of ["status", "settings", "cost"]) $("#tab-" + t).hidden = t !== tab;
+  for (const t of TABS) $("#tab-" + t).hidden = t !== tab;
   return ({status:loadStatus, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
 }
 function err(e) { $("#state").textContent = String(e.message || e); $("#state").className = "bad"; }
@@ -836,6 +853,7 @@ const SETTINGS_GROUPS = [
   ["releases", T.releasesGroup, T.releasesIntro], ["alerts", T.alertsGroup, T.alertsIntro],
   ["prices", T.pricesGroup, T.pricesIntro]
 ];
+settingsGroup = keptChoice("sessionStorage", "hansa.settingsSection", SETTINGS_GROUPS.map(([key]) => key), settingsGroup);
 const GROUP_KEYS = {
   providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact"], lanes:[],
   security:["workers_may_not_read", "workers_may_not_read_added"],
@@ -899,6 +917,7 @@ function ensureSettings() {
 function showSettingsGroup(key) {
   if (!settingsPanels[key]) return;
   settingsGroup = key;
+  keepChoice("sessionStorage", "hansa.settingsSection", key);
   for (const [name, panel] of Object.entries(settingsPanels)) panel.hidden = name !== key;
   for (const [name, button] of Object.entries(settingsNavButtons)) {
     button.className = name === key ? "on" : "";
@@ -1297,7 +1316,7 @@ function renderSettings(problems = settingsProblems) {
 }
 
 /* ---------- cost ---------- */
-let costDays = 7, costEpoch = 0, costLoading = false, costExporting = false, costLoadError = false, costRenderedDays = null;
+let costDays = Number(keptChoice("sessionStorage", "hansa.costPeriod", COST_PERIODS.map(String), "7")), costEpoch = 0, costLoading = false, costExporting = false, costLoadError = false, costRenderedDays = null;
 let costSelect, costExportButton, costFeedback, costRetryButton, costPlaceholder;
 function costControlsState() {
   if (costSelect) costSelect.disabled = costLoading || costExporting;
@@ -1351,8 +1370,8 @@ function renderCost(r) {
     if (["provider", "task"].includes(key)) panel.className += " cost-wide";
     return panel;
   };
-  costSelect = h("select", {id:"cost-period", "aria-label":T.period}, [1, 7, 30].map(days => h("option", {value:String(days), selected:days === costDays}, T.periodDays(days))));
-  costSelect.addEventListener("change", e => { costDays = Number(e.target.value); loadCost().catch(err); });
+  costSelect = h("select", {id:"cost-period", "aria-label":T.period}, COST_PERIODS.map(days => h("option", {value:String(days), selected:days === costDays}, T.periodDays(days))));
+  costSelect.addEventListener("change", e => { costDays = Number(e.target.value); keepChoice("sessionStorage", "hansa.costPeriod", costDays); loadCost().catch(err); });
   costExportButton = h("button", {onclick:() => exportCsv()}, T.export);
   costRetryButton = h("button", {type:"button", hidden:true, onclick:() => loadCost().catch(err)}, T.retry);
   costFeedback = h("div", {class:"cost-feedback", role:"status", "aria-live":"polite"});
@@ -1402,16 +1421,26 @@ async function exportCsv() {
 const deskCaption = h("span", {class:"brand-caption"});
 $("#title").replaceChildren(h("span", {class:"brand-mark", "aria-hidden":"true"}, "H"), h("span", {}, "Hansa"), deskCaption);
 $("#tabs").setAttribute("aria-label", T.primaryNav);
-for (const tab of ["status", "settings", "cost"]) {
+for (const tab of TABS) {
   mainTabLabels[tab] = h("span", {}, T[tab]);
   $("#tabs").append(...shown([h("button", {"data-tab":tab, onclick: () => show(tab)}, icon(tab), mainTabLabels[tab])]));
 }
+$("#language").append(...[ ["zh-CN", "中文"], ["en", "English"] ].map(([value, label]) =>
+  h("option", {value, lang:value, selected:value === language}, label)));
+$("#language").addEventListener("change", e => {
+  keepChoice("localStorage", "hansa.language", e.target.value);
+  location.reload();
+});
 if (typeof ResizeObserver !== "undefined") {
   const header = document.querySelector("header");
   new ResizeObserver(() => document.documentElement.style.setProperty("--header-height", header.getBoundingClientRect().height + "px")).observe(header);
 }
-if (location.search.includes("t=")) history.replaceState(null, "", "/");
-show("status");
+const tokenAddress = /(?:^|[?&])t=/.test(location.search);
+if (tokenAddress) history.replaceState(null, "", "/");
+const initialTab = tokenAddress ? "status" : keptChoice("sessionStorage", "hansa.tab", TABS, "status");
+show(initialTab);
+// The shared header and browser title need status even when another tab is restored.
+if (initialTab !== "status") loadStatus().catch(err);
 setInterval(() => {
   const typing = $("#tab-status").contains(document.activeElement) && document.activeElement.tagName === "INPUT";
   if (current === "status" && !document.hidden && !typing) loadStatus().catch(err);

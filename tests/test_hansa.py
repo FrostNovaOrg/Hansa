@@ -15733,8 +15733,8 @@ class DeskTest(unittest.TestCase):
                       no_read_left_out=[])  # nothing else on the status line asks for attention
             given = {"/api/settings": public_settings(self.desk), "/api/status": st, "/api/events": []}
             for lang, words in (("en", says), ("zh-CN", zh)):
-                harness.write_text(script.replace('navigator: {language: "en"}', f'navigator: {{language: "{lang}"}}'))
-                r = subprocess.run(["node", str(harness), str(web.UI), "nulls"], input=json.dumps(given),
+                harness.write_text(script)
+                r = subprocess.run(["node", str(harness), str(web.UI), "nulls", lang], input=json.dumps(given),
                                    capture_output=True, text=True, timeout=60)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 page = json.loads(r.stdout)
@@ -15953,8 +15953,8 @@ class DeskTest(unittest.TestCase):
                       no_read_left_out=[])  # nothing else on the status line asks for attention
             given = {"/api/settings": public_settings(self.desk), "/api/status": st, "/api/events": []}
             for lang, words in (("en", says), ("zh-CN", zh)):
-                harness.write_text(script.replace('navigator: {language: "en"}', f'navigator: {{language: "{lang}"}}'))
-                r = subprocess.run(["node", str(harness), str(web.UI), "nulls"], input=json.dumps(given),
+                harness.write_text(script)
+                r = subprocess.run(["node", str(harness), str(web.UI), "nulls", lang], input=json.dumps(given),
                                    capture_output=True, text=True, timeout=60)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 page = json.loads(r.stdout)
@@ -26305,7 +26305,7 @@ const ids = {};
 const descendants = (root, tag) => !root ? [] : root.kids.flatMap(child => child instanceof El
   ? [...(child.tag === tag ? [child] : []), ...descendants(child, tag)] : []);
 const document = {createElement: t => new El(t), createElementNS: (namespace, t) => new El(t),
-  createTextNode: s => new Text(s), title: "", body: new El("body"),
+  createTextNode: s => new Text(s), title: "", body: new El("body"), documentElement: new El("html"),
   hidden: false, activeElement: null, querySelectorAll: s => {
     const match = /^(#[\w-]+) (\w+)$/.exec(s); return match ? descendants(ids[match[1]], match[2]) : []; },
   querySelector: s => { const match = /^(#[\w-]+) (\w+)$/.exec(s);
@@ -26349,7 +26349,21 @@ const fetch = async (path, options) => {
   if (path === "/api/settings" && settingsGetGate) await settingsGetGate;
   return {status: 200, json: async () => JSON.parse(JSON.stringify(snapshot))};
 };
-const ctx = vm.createContext({document, fetch, navigator: {language: "en"}, location: {search: ""}, history: {replaceState() {}},
+// Existing scenarios deliberately omit storage. Preference scenarios reuse these stand-ins across page loads.
+const preferences = given.pagePreferences || {};
+const storage = (values = {}, mode) => ({values:{...values}, writes:[],
+  getItem(key) { if (mode === "read") throw new Error("storage read blocked"); return this.values[key] ?? null; },
+  setItem(key, value) { if (mode === "write") throw new Error("storage write blocked");
+    this.values[key] = String(value); this.writes.push([key, String(value)]); }});
+let session = storage(preferences.session, preferences.sessionMode), local = storage(preferences.local, preferences.localMode);
+let reloads = 0, historyReplacements = [], unloadWarnings = [];
+function openPage(search = "") {
+  for (const key of Object.keys(ids)) delete ids[key];
+  document.documentElement = new El("html"); document.activeElement = null; document.title = "Hansa";
+  for (const key of Object.keys(windowEvents)) delete windowEvents[key];
+  for (const tab of ["status", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
+  const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
+  location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
   setInterval() {}, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
     confirm(message) { confirmations.push(message); return confirmReply; }}, console,
   URL: class extends URL {
@@ -26357,11 +26371,66 @@ const ctx = vm.createContext({document, fetch, navigator: {language: "en"}, loca
     static revokeObjectURL(url) { revokedUrls.push(url); }
   }, Blob: class { constructor(parts, options) { this.parts = parts; this.type = options?.type || ""; }
     async text() { return this.parts.join(""); } }});
-if (process.argv[4]) ctx.navigator.language = process.argv[4];
-vm.runInContext(script, ctx);
+  if (ask === "preferences") {
+    for (const [name, value, mode] of [["sessionStorage", session, preferences.sessionMode], ["localStorage", local, preferences.localMode]]) {
+      if (mode === "missing") continue;
+      Object.defineProperty(context, name, {get() { if (mode === "access") throw new Error("storage access blocked"); return value; }});
+    }
+  }
+  vm.runInContext(script, context);
+  return context;
+}
+let ctx = openPage(preferences.search);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 const stateBeforeCost = document.querySelector("#state").textContent;
-if (["desk-name", "desk-count", "status-parts", "notify-status"].includes(ask)) vm.runInContext("loadStatus()", ctx).then(async () => {
+if (ask === "preferences") (async () => {
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const run = code => vm.runInContext(code, ctx);
+  const snapshot = () => {
+    const tab = ["status", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
+    const selected = document.querySelectorAll("#tabs button").find(el => el.attrs["aria-current"] === "page");
+    if (selected?.dataset.tab !== tab) throw new Error("tab selection and visibility disagree");
+    const group = run("settingsGroup");
+    if (tab === "settings" && (!ids["#settings-" + group] || ids["#settings-" + group].hidden)) throw new Error("settings section not shown");
+    const period = tab === "cost" ? descendants(ids["#cost-period"], "option").find(el => "selected" in el.attrs)?.value : null;
+    return {tab, group, period, language:run('ZH ? "zh-CN" : "en"'), lang:document.documentElement.attrs.lang,
+      title:document.title, caption:ids["#title"].kids.at(-1).textContent, state:ids["#state"].textContent,
+      cool:run("S && S.cool_minutes"), session:{...session.values}, local:{...local.values}};
+  };
+  await flush();
+  const snapshots = [snapshot()];
+  for (const action of preferences.actions || []) {
+    if (action.tab) await document.querySelectorAll("#tabs button").find(el => el.dataset.tab === action.tab).click();
+    if (action.group) await run(`settingsNavButtons[${JSON.stringify(action.group)}].click()`);
+    if (action.period) {
+      const select = ids["#cost-period"]; select.value = String(action.period); select.on.change({target:select});
+    }
+    if (action.draft) {
+      let input;
+      walk(ids["#tab-settings"], el => { if (el.tag === "input" && el.type === "number" && Number(el.value) === run("S.cool_minutes")) input = el; });
+      if (!input) throw new Error("settings field missing");
+      input.value = String(action.draft); input.on.input({target:input});
+    }
+    if (action.language) {
+      const select = ids["#language"];
+      if (!select?.on.change) throw new Error("language control missing");
+      const labels = descendants(select, "option").map(el => [el.value, el.textContent, el.attrs.lang]);
+      if (JSON.stringify(labels) !== JSON.stringify([["zh-CN", "中文", "zh-CN"], ["en", "English", "en"]])) throw new Error("language names missing");
+      select.value = action.language; select.on.change({target:select});
+      if (!reloads) throw new Error("language choice did not reload");
+      const event = {prevented:false, returnValue:null, preventDefault() { this.prevented = true; }};
+      for (const handler of windowEvents.beforeunload || []) handler(event);
+      unloadWarnings.push({prevented:event.prevented, returnValue:event.returnValue});
+      if (!(event.prevented && action.cancelReload)) ctx = openPage();
+    }
+    if (action.newTab) { session = storage(); ctx = openPage(); }
+    else if (action.reload) ctx = openPage(action.search || "");
+    await flush(); snapshots.push(snapshot());
+  }
+  console.log(JSON.stringify({snapshots, reloads, historyReplacements, unloadWarnings, sessionWrites:session.writes, localWrites:local.writes,
+    posts:apiPosts}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (["desk-name", "desk-count", "status-parts", "notify-status"].includes(ask)) vm.runInContext("loadStatus()", ctx).then(async () => {
   const snapshot = () => ({title:document.title, caption:ids["#title"].kids.at(-1).textContent,
     text:ids["#state"].textContent, parts:ids["#state"].kids.filter(el => el instanceof El)
       .map(el => ({text:el.textContent, tone:el.className}))});
@@ -27008,6 +27077,155 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
   console.log(JSON.stringify({ticks, after: vm.runInContext("S.releases_without_asking", ctx)}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 """
+
+    def page_preferences(self, *, language="en", **preferences):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        harness = self.tmp / "preferences-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        replies = {"pagePreferences": preferences, "/api/status": views.status(self.desk),
+                   "/api/settings": public_settings(self.desk), "/api/events": [],
+                   "/api/cost": {"total": {"tokens": 0, "usd": 0}, "by": {}, "unpriced_models": []}}
+        result = subprocess.run(["node", str(harness), str(page), "preferences", language],
+                                input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_page_keeps_cost_tab_and_period_on_reload(self):
+        output = self.page_preferences(actions=[{"tab": "cost"}, {"period": 30}, {"reload": True}])
+        self.assertEqual([s["tab"] for s in output["snapshots"]], ["status", "cost", "cost", "cost"])
+        self.assertEqual(output["snapshots"][-1]["period"], "30")
+        self.assertEqual(output["snapshots"][-1]["session"], {"hansa.tab": "cost", "hansa.costPeriod": "30"})
+
+    def test_page_keeps_settings_section_on_reload(self):
+        output = self.page_preferences(actions=[{"tab": "settings"}, {"group": "security"}, {"reload": True}])
+        self.assertEqual(output["snapshots"][-1]["group"], "security")
+        self.assertEqual(output["snapshots"][-1]["tab"], "settings")
+        self.assertEqual(output["snapshots"][-1]["session"], {"hansa.tab": "settings", "hansa.settingsSection": "security"})
+
+    def test_page_keeps_cost_period_independently_of_tab(self):
+        output = self.page_preferences(session={"hansa.costPeriod": "1"}, actions=[{"tab": "cost"}])
+        self.assertEqual(output["snapshots"][-1]["period"], "1")
+
+    def test_page_restored_navigation_still_populates_header(self):
+        for tab in ("settings", "cost"):
+            with self.subTest(tab=tab):
+                output = self.page_preferences(session={"hansa.tab": tab})
+                snapshot = output["snapshots"][0]
+                self.assertEqual(snapshot["tab"], tab)
+                self.assertTrue(snapshot["caption"])
+                self.assertIn(snapshot["caption"], snapshot["title"])
+                self.assertIn("dispatch", snapshot["state"])
+
+    def test_page_keeps_status_on_reload(self):
+        output = self.page_preferences(actions=[{"tab": "cost"}, {"tab": "status"}, {"reload": True}])
+        self.assertEqual(output["snapshots"][-1]["tab"], "status")
+        self.assertEqual(output["snapshots"][-1]["session"]["hansa.tab"], "status")
+
+    def test_page_new_browser_tab_starts_on_status(self):
+        output = self.page_preferences(local={"hansa.language": "zh-CN"},
+                                       actions=[{"tab": "cost"}, {"period": 30}, {"newTab": True}])
+        self.assertEqual(output["snapshots"][-1]["tab"], "status")
+        self.assertEqual(output["snapshots"][-1]["language"], "zh-CN")
+        self.assertNotIn("hansa.costPeriod", output["snapshots"][-1]["session"])
+
+    def test_page_token_address_always_opens_status(self):
+        for search in ("?t=", "?t=example-token", "?other=1&t=example-token"):
+            with self.subTest(search=search):
+                output = self.page_preferences(session={"hansa.tab": "cost", "hansa.costPeriod": "30"}, search=search)
+                self.assertEqual(output["snapshots"][0]["tab"], "status")
+                self.assertEqual(output["snapshots"][0]["session"]["hansa.tab"], "status")
+                self.assertEqual(output["historyReplacements"], [[None, "", "/"]])
+        output = self.page_preferences(session={"hansa.tab": "cost"}, search="?not=token")
+        self.assertEqual(output["snapshots"][0]["tab"], "cost")
+        self.assertEqual(output["historyReplacements"], [])
+
+    def test_page_ignores_obsolete_tab_section_and_period(self):
+        for value in ("old", "", "__proto__", "constructor", "toString", "0", "7.0", "NaN"):
+            with self.subTest(value=value):
+                output = self.page_preferences(session={"hansa.tab": value, "hansa.settingsSection": value,
+                                                       "hansa.costPeriod": value},
+                                               actions=[{"tab": "settings"}, {"tab": "cost"}])
+                self.assertEqual(output["snapshots"][0]["tab"], "status")
+                self.assertEqual(output["snapshots"][1]["group"], "providers")
+                self.assertEqual(output["snapshots"][2]["period"], "7")
+
+    def test_page_storage_missing_or_throwing_keeps_page_working(self):
+        for name in ("sessionMode", "localMode"):
+            for mode in ("missing", "access", "read", "write"):
+                with self.subTest(storage=name, mode=mode):
+                    output = self.page_preferences(language="zh-TW", **{name: mode},
+                                                   actions=[{"tab": "settings"}, {"group": "prices"},
+                                                            {"tab": "cost"}, {"period": 30}, {"reload": True}])
+                    self.assertEqual(output["snapshots"][0]["tab"], "status")
+                    self.assertEqual(output["snapshots"][0]["language"], "zh-CN")
+                    self.assertEqual(output["snapshots"][-1]["tab"], "status" if name == "sessionMode" else "cost")
+                    # A blocked language write must also leave the control usable without an exception.
+                    output = self.page_preferences(**{name: mode}, actions=[{"language": "zh-CN"}])
+                    self.assertEqual(output["reloads"], 1)
+                    self.assertEqual(output["snapshots"][-1]["language"], "en" if name == "localMode" else "zh-CN")
+        output = self.page_preferences(language="zh-CN", sessionMode="access", localMode="access",
+                                       actions=[{"tab": "cost"}, {"period": 30}, {"reload": True}])
+        self.assertEqual(output["snapshots"][-1]["tab"], "status")
+        self.assertEqual(output["snapshots"][-1]["language"], "zh-CN")
+
+    def test_page_keeps_chosen_language_over_browser_language(self):
+        for browser, chosen in (("zh-CN", "en"), ("en-US", "zh-CN")):
+            with self.subTest(browser=browser, chosen=chosen):
+                kept = self.page_preferences(language=browser, local={"hansa.language": chosen})
+                self.assertEqual(kept["snapshots"][0]["language"], chosen)
+                output = self.page_preferences(language=browser, actions=[{"tab": "cost"}, {"period": 1},
+                                                                         {"language": chosen}, {"newTab": True}])
+                self.assertEqual(output["snapshots"][2]["tab"], "cost")
+                self.assertEqual(output["snapshots"][3]["tab"], "cost")
+                self.assertEqual(output["snapshots"][3]["period"], "1")
+                for snapshot in output["snapshots"][3:]:
+                    self.assertEqual(snapshot["language"], chosen)
+                    self.assertEqual(snapshot["lang"], chosen)
+                self.assertEqual(output["localWrites"], [["hansa.language", chosen]])
+                self.assertEqual(output["snapshots"][-1]["local"], {"hansa.language": chosen})
+
+    def test_page_unchosen_language_follows_browser(self):
+        for browser, expected in (("zh-TW", "zh-CN"), ("ZH-cn", "zh-CN"), ("en-US", "en"), ("fr", "en"), ("", "en")):
+            with self.subTest(browser=browser):
+                output = self.page_preferences(language=browser)
+                self.assertEqual(output["snapshots"][0]["language"], expected)
+                self.assertEqual(output["snapshots"][0]["lang"], expected)
+                self.assertEqual(output["localWrites"], [])
+
+    def test_page_ignores_unknown_kept_language(self):
+        for value in ("fr", "zh", "EN", "__proto__", ""):
+            for browser, expected in (("zh-HK", "zh-CN"), ("en", "en")):
+                with self.subTest(value=value, browser=browser):
+                    output = self.page_preferences(language=browser, local={"hansa.language": value})
+                    self.assertEqual(output["snapshots"][0]["language"], expected)
+                    self.assertEqual(output["snapshots"][0]["lang"], expected)
+
+    def test_page_language_change_warns_about_unsaved_settings(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                output = self.page_preferences(actions=[{"tab": "settings"}, {"draft": 919},
+                                                       {"language": "zh-CN", "cancelReload": cancel},
+                                                       {"reload": True}])
+                self.assertEqual(output["unloadWarnings"], [{"prevented": True, "returnValue": ""}])
+                self.assertEqual(output["snapshots"][2]["cool"], 919)
+                changed = output["snapshots"][3]
+                self.assertEqual(changed["tab"], "settings")
+                self.assertEqual(changed["local"]["hansa.language"], "zh-CN")
+                if cancel:
+                    self.assertEqual(changed["cool"], 919)
+                    self.assertEqual(changed["language"], "en")
+                else:
+                    self.assertNotEqual(changed["cool"], 919)
+                    self.assertEqual(changed["language"], "zh-CN")
+                loaded = output["snapshots"][4]
+                self.assertEqual(loaded["tab"], "settings")
+                self.assertEqual(loaded["language"], "zh-CN")
+                self.assertNotEqual(loaded["cool"], 919)
+                self.assertEqual(output["posts"], [])
+                for store in ("session", "local"):
+                    self.assertNotIn("919", json.dumps(loaded[store]))
 
     def page_header(self, scenario, status, language):
         harness = self.tmp / "header-page.js"
