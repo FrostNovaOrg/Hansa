@@ -194,6 +194,9 @@ def task_line(desk: Desk, m: dict) -> str:
     else:
         head = f"{tid} {st}"
     head += f": {m.get('title', '')}"
+    if m.get("verification_notes"):
+        count = len(m["verification_notes"])
+        head += f" · kept {count} {'note' if count == 1 else 'notes'} (hansa gaps)"
     chk = m.get("check") or {}
     if st == "done" and m.get("kind") != "verify":
         head += (" (no changes)" if not m.get("commits") else

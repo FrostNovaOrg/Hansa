@@ -547,8 +547,8 @@ if os.environ.get("FAKE_SEE_BASH"):  # Claude Code's own limits on one Bash call
     open(os.environ["FAKE_SEE_BASH"], "a").write(json.dumps(
         {k: os.environ.get(k) for k in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS")}) + "\n")
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
-    "result": "Added hello.txt. Checked it exists." + (" Notes: " + os.environ["FAKE_WRITE"] if os.environ.get("FAKE_WRITE") else "") + ("\nran:\n" * 70 + "VERDICT: " + os.environ["FAKE_VERDICT"]
-                                                      if os.environ.get("FAKE_VERDICT") else ""),
+    "result": os.environ.get("FAKE_REPORT") or ("Added hello.txt. Checked it exists." + (" Notes: " + os.environ["FAKE_WRITE"] if os.environ.get("FAKE_WRITE") else "") + ("\nran:\n" * 70 + "VERDICT: " + os.environ["FAKE_VERDICT"]
+                                                      if os.environ.get("FAKE_VERDICT") else "")),
     "session_id": "s-ok",
     "permission_denials": [{"tool_name": "Bash", "tool_input": {"command": "env JAVA_HOME=/x mvn test"}}],
     "modelUsage": {"claude-haiku-4-5-20251001": {"inputTokens": 1000, "outputTokens": 200,
@@ -22533,6 +22533,121 @@ class DeskTest(unittest.TestCase):
         self.assertIn(f"{vid} · done", self.hansa("show", vid))
         self.assertIn("verdict: holds, with notes", self.hansa("show", vid))
         self.assertIn("VERDICT: holds, with notes", self.hansa("show", vid, "--report"))
+
+    def gaps_verification(self, report, verdict="holds, with notes", tid=None):
+        d = Dispatcher(self.desk)
+        if tid is None:
+            tid = self.settle(d, self.desk.new_task("Add hello.txt"))["id"]
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_REPORT": report + f"\n\nVERDICT: {verdict}"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        self.assertEqual(self.settle(d, vid)["verdict"], verdict)
+        return tid, vid
+
+    def test_verification_gaps_collect_three_items_and_post_the_count(self):
+        from hansa import notify
+        before = now()
+        tid, vid = self.gaps_verification("## Notes\n- Restart during cleanup.\n- Old settings.\n- Failed write.")
+        self.assertEqual(self.hansa("gaps").splitlines(), [
+            f"{vid}.1  {tid}  - Restart during cleanup.",
+            f"{vid}.2  {tid}  - Old settings.", f"{vid}.3  {tid}  - Failed write."])
+        shown = self.hansa("gaps", "show", f"{vid}.1")
+        for word in (f"{vid}.1", tid, "Add hello.txt", "not marked", "why: —", "kept:", "- Restart during cleanup."):
+            self.assertIn(word, shown)
+        notes = self.desk.meta(vid)["verification_notes"]
+        self.assertEqual([(n["id"], n["task"], n["title"]) for n in notes],
+                         [(f"{vid}.{i}", tid, "Add hello.txt") for i in (1, 2, 3)])
+        self.assertTrue(all(before <= n["kept"] <= now() for n in notes))
+        post = notify.task_line(self.desk, self.desk.meta(vid))
+        self.assertIn("kept 3 notes (hansa gaps)", post)
+
+    def test_verification_gaps_keep_subitems_and_use_the_last_notes_heading(self):
+        tid, vid = self.gaps_verification(
+            "# Notes\n- Superseded.\n# Evidence\n```md\n## Notes\n- Quoted.\n```\n"
+            "###### Notes ######\n- Restart.\n  Continued evidence.\n  - A sub-item.\n    1. More evidence.\n\n"
+            "- " + "x" * 180 + "\n# After\n- Not a note.")
+        self.assertEqual(self.hansa("gaps").splitlines(),
+                         [f"{vid}.1  {tid}  - Restart.", f"{vid}.2  {tid}  " + ("- " + "x" * 180)[:160]])
+        shown = self.hansa("gaps", "show", f"{vid}.1")
+        self.assertIn("- Restart.\n  Continued evidence.\n  - A sub-item.\n    1. More evidence.", shown)
+        for word in ("Superseded", "Quoted", "Not a note", "VERDICT:"):
+            self.assertNotIn(word, shown)
+
+    def test_verification_gaps_unsplittable_reports_point_to_the_report(self):
+        tid = None
+        for report in ("No heading.", "## Notes\nNo list.", "## 附注\n- A gap.",
+                       "# Notes\n- Earlier list.\n## Notes\n", "## Notes\n```\n- Example only.\n```"):
+            with self.subTest(report=report):
+                tid, vid = self.gaps_verification(report, tid=tid)
+                notes = self.desk.meta(vid).get("verification_notes", [])
+                self.assertEqual(len(notes), 1)
+                shown = self.hansa("gaps", "show", f"{vid}.1")
+                self.assertIn("notes could not be split", shown)
+                self.assertIn(f"hansa show {vid} --report", shown)
+
+    def test_verification_gaps_ignore_other_verdicts_and_old_verifications(self):
+        tid = None
+        for verdict in ("holds", "does not hold", "unsure"):
+            tid, vid = self.gaps_verification("## Notes\n- A gap.", verdict, tid)
+            self.assertNotIn("verification_notes", self.desk.meta(vid))
+        old = self.desk.new_task("Old verification", kind="verify", parent=tid, state="done")
+        self.desk.update(old, verdict="holds, with notes", finished=now() - 86400)
+        (self.desk.tasks_dir / old / "result.md").write_text("## Notes\n- An old gap.")
+        restarted = Dispatcher(Desk(self.desk.root))
+        restarted.tick()
+        self.assertEqual(self.hansa("gaps").strip(), "no verification notes not marked")
+        self.assertEqual(self.hansa("gaps", "--all").strip(), "no verification notes")
+        self.assertNotIn("verification notes:", self.hansa("status"))
+
+    def test_verification_gaps_two_verifications_keep_distinct_ids_oldest_first(self):
+        tid, first = self.gaps_verification("## Notes\n1. First gap.")
+        _, second = self.gaps_verification("Notes\n=====\n* Second gap.", tid=tid)
+        self.assertEqual(self.hansa("gaps").splitlines(),
+                         [f"{first}.1  {tid}  1. First gap.", f"{second}.1  {tid}  * Second gap."])
+        self.assertIn("verification notes: 2 not marked (hansa gaps)", self.hansa("status"))
+
+    def test_verification_gaps_marks_replace_and_survive_a_server_restart(self):
+        tid, vid = self.gaps_verification("## Notes\n- A gap.")
+        nid = f"{vid}.1"
+        for kind, why in (("later", "when that code changes next"), ("fixed", "covered by the next change"),
+                          ("wontfix", "outside the supported states")):
+            before = now()
+            with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "coordinator"}):
+                self.hansa("gaps", "mark", nid, kind, why)
+            self.assertNotIn(nid, self.hansa("gaps"))
+            for out in (self.hansa("gaps", "--all"), self.hansa("gaps", "show", nid)):
+                self.assertIn(kind, out)
+                self.assertIn(why, out)
+            mark = self.desk.meta(vid)["verification_notes"][0]["mark"]
+            self.assertEqual((mark["kind"], mark["why"], mark["by"]), (kind, why, "coordinator"))
+            self.assertTrue(before <= mark["at"] <= now())
+            self.assertIn("coordinator", self.hansa("gaps", "show", nid))
+        before_restart = self.hansa("gaps", "--all")
+        self.desk = Desk(self.desk.root)
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.hansa("gaps", "--all"), before_restart)
+        self.assertNotIn("verification notes:", self.hansa("status"))
+
+    def test_verification_gaps_refuse_invalid_marks_without_changes(self):
+        _, vid = self.gaps_verification("## Notes\n- A gap.")
+        nid = f"{vid}.1"
+        before = (self.desk.tasks_dir / vid / "meta.json").read_bytes()
+        for args, words in (((nid, "later"), "why is required"),
+                            ((nid, "later", "   "), "why is required"),
+                            ((nid, "unknown", "a reason"), "mark must be fixed, later or wontfix"),
+                            ((f"{vid}.99", "later", "a reason"), f"no verification note {vid}.99"),
+                            (("../../bad.1", "fixed", "a reason"), "no verification note")):
+            with self.subTest(args=args):
+                self.assertIn(words, self.refused("gaps", "mark", *args))
+                self.assertEqual((self.desk.tasks_dir / vid / "meta.json").read_bytes(), before)
+        self.assertIn("no verification note", self.refused("gaps", "show", "t9999.1"))
+
+    def test_verification_gaps_empty_desk_has_no_status_line(self):
+        self.assertEqual(self.hansa("gaps").strip(), "no verification notes not marked")
+        self.assertEqual(self.hansa("gaps", "--all").strip(), "no verification notes")
+        self.assertNotIn("verification notes:", self.hansa("status"))
 
     def test_merging_with_notes_accepts_checks_and_release_files_and_names_the_report(self):
         for name, release_files, recheck in (("change.py", False, False), ("build.sh", True, False),

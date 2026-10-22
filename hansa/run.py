@@ -4255,6 +4255,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             kept = {"usage": {}, "turns": None, "earlier_runs": [*(now_meta.get("earlier_runs") or []), {
                 "provider": meta.get("provider", ""), "at": now(), **run_numbers(meta, fields),
                 "why": f"stopped: the sandbox could not start ({meta['sandbox_failed']}); the task was held"}]}
+        if meta.get("kind") == "verify" and final != "queued" and fields.get("verdict") == "holds, with notes" \
+                and "verification_notes" not in now_meta:
+            from .gaps import collect
+            kept["verification_notes"] = collect(desk, now_meta, report, fields["finished"])
         return {"state": "running" if checking else final, "phase": "checking" if checking else "",
                 "error": desk.redact(message), "attempts": tries, "pid_start": "", **fields, **kept, **again}
     meta = desk.change(tid, decide)

@@ -90,6 +90,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa ask "<request>"` / `--close N "<why>"` | a request on the principal's page / close #N when done another way |
 | `hansa release [L [TARGET] ["<note>"]]`, `--stop ID`, `yes\|no ID CODE` | ask for, list, call off or answer a release |
 | `hansa notes [PATH]` / `notes archive FILE HEADING` | notes/ with headings / move a section out |
+| `hansa gaps [--all]` / `gaps show ID` / `gaps mark ID fixed\|later\|wontfix "why"` | notes |
 | `hansa help [command \| topic \| card \| topics]` | a command's help, a topic of hansa's docs, this card, the topics |
 
 `--json` on `status` or `cost` gives machine-readable output; `hansa <command> --help` gives all of a
@@ -147,6 +148,7 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   `hansa show <id>`; hansa will not merge
   while it runs, nor after "does not hold" unless you say `--despite-check`.
   "Holds, with notes" counts as "holds"; its verification's report lists the rare-state gaps under "Notes".
+  Notes go to `hansa gaps`, to be marked.
 - `--lane L` verifies on another lane of the same repository: another model sees other things than
   the same model, but may judge more strictly and send more work back; use it if the task's provider is
   new to the desk or its lane is busy.
