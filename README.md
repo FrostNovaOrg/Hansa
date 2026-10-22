@@ -194,6 +194,31 @@ principal's (`init`, `serve`, `web`, `coordinator`, `ping`) among them, and `han
 | `hansa cost [--by day\|seat\|lane\|task\|model\|provider]` | Tokens, and what they are worth at the principal's prices |
 | `hansa explain [lane L \| provider P \| server \| notify]` | This desk's current settings and state, and where each comes from |
 
+## Upgrading and going back
+
+**Upgrading.** In the desk, run `hansa pause "upgrade"` to keep new work from starting while
+running work finishes. `hansa status` lists what runs; wait until nothing runs.
+
+In hansa's clone, record `git rev-parse HEAD` for going back, then run `git fetch origin` and
+check out the version you want. `git checkout --detach COMMIT` runs one fixed commit.
+
+Restart `hansa serve` to run the new code. For a server `hansa up` started, stop the server
+with `kill PID` using the pid it printed, then run `hansa up` in the desk. It leaves running
+servers alone. For one started by hand, press Ctrl-C and rerun its `hansa serve` command
+with the same options.
+
+Server startup updates the card. The coordinator reads it at session start, after `/clear`
+or after compaction; changes to its permissions, helpers, mod or launch options need a
+session restart. See [Starting the server and the coordinator again](docs/desk.md#starting-the-server-and-the-coordinator-again).
+Then run `hansa resume`. The first line of `hansa status` shows the version and when it was installed.
+
+**Going back.** Follow the same steps with the commit you ran before. Newer commands may
+write settings older code does not know: `hansa status` and `hansa add` can still work, but
+saving settings is refused with `unknown setting: NAME` for each unfamiliar setting.
+Settings set with newer commands are best undone before going back.
+
+**What changed:** in the clone, run `git log --oneline OLD..NEW`.
+
 ## What keeps it safe
 
 - **Workers' commands run in the operating system's sandbox.** A worker may run any command, but its
