@@ -157,6 +157,15 @@ started with another model or effort names its own. On a provider whose endpoint
 `compatible`: any endpoint that speaks the Anthropic API) they add that the endpoint may ignore effort: hansa
 passes it on, but some such endpoints do not act on it.
 
+## Task text and options
+
+Give text inline or with `--file PATH`; add screenshots, patches or logs with repeatable `--attach PATH`.
+Copies are saved under `.hansa/` when queued, so later source edits change nothing. Retry inherits them
+and accepts more with `--attach`; verification inherits them too. Each run gets copies under its
+temporary `attach/`, named in its instructions by full path. `hansa show ID` lists names and sizes.
+To keep private data closed, folders, missing files, worker read denials (following links) and files
+holding provider keys are refused. Limits: 20 files, 20 MB total, distinct names, including inherited files.
+
 ## Writing a task a verification can judge
 
 A verification judges a change against the task's text, so most rounds of sending work back start in

@@ -2824,7 +2824,32 @@ class Desk:
         self.paused_path.unlink(missing_ok=True)
         self.event("resumed", by=by)
 
+    def kept_folder(self, f, st=None) -> str:
+        """The secrets/ or .hansa/ holding a file, following symbolic and private hard links."""
+        real = os.path.realpath(f) if f else ""
+        for d in (self.state_dir, self.secrets_dir):
+            top = os.path.realpath(d)
+            if real and (real == top or real.startswith(top.rstrip(os.sep) + os.sep)):
+                return d.name
+        try:
+            st = st or os.stat(f)
+        except (OSError, TypeError):
+            return ""
+        held = [self.state_dir / "web-token", self.state_dir / "alerts.json"]
+        held += [Path(r, n) for r, _, ns in os.walk(self.secrets_dir) for n in ns]
+        for s in held:
+            try:
+                if os.path.samestat(st, os.stat(s)):
+                    return s.parent.name if s.parent == self.state_dir else self.secrets_dir.name
+            except OSError:
+                pass
+        return ""
+
     # -- tasks ------------------------------------------------------------
+    def attachment_dir(self, tid: str) -> Path:
+        """Queue-time copies, kept in state so every run's sandbox denies reading them."""
+        return self.state_dir / "attachments" / tid
+
     def new_task(self, text: str, **opts) -> str:
         text = text.strip()
         if not text:
@@ -2834,6 +2859,8 @@ class Desk:
             why = work_lane_problem(self.settings(), lane, verifying=opts.get("kind") == "verify")
             if why:
                 raise SystemExit(f"hansa: {why}; nothing was queued")
+            from .attach import snapshot
+            attachments = snapshot(self, opts.pop("attach", ()) or (), opts.pop("attachments_from", ""))
             text = self.redact(text)  # a worker never gets a key in its task
             self.tasks_dir.mkdir(exist_ok=True)
             ids = [int(d.name[1:]) for d in self.tasks_dir.iterdir() if d.name[1:].isdigit()]
@@ -2841,6 +2868,12 @@ class Desk:
             d = self.tasks_dir / tid
             d.mkdir()
             write_text(d / "task.md", text + "\n")
+            if attachments:
+                folder = self.attachment_dir(tid)
+                folder.mkdir(parents=True)
+                for name, data in attachments:
+                    write_bytes(folder / name, data)
+                opts["attachments"] = [{"name": name, "size": len(data)} for name, data in attachments]
             title = self.redact(opts.pop("title", "")) or text.splitlines()[0][:80]
             meta = {"id": tid, "title": title, "state": "queued", "created": now(),
                     "lane": "", "effort": "", "model": "", "max_turns": 0, "attempts": []}

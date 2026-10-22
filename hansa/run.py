@@ -2467,6 +2467,15 @@ def desk_read_rules(desk: Desk) -> list:
     return [rule("Read", d) for d in desk_private(desk)[:3]] + [f"Read(//{str(desk.root / 'CLAUDE.md').lstrip('/')})"]
 
 
+def worker_read_denials(desk: Desk) -> list:
+    """The read fence shared by worker sandboxes and attachment admission."""
+    home = Path(account_home())
+    homes = [config_home(desk, n, p) for n, p in desk.settings()["providers"].items()
+             if isinstance(p, dict) and isinstance(p.get("config_dir", ""), str)]
+    return full_paths([*desk_private(desk), *(h for h in homes if h.is_absolute()), home / ".claude",
+                       *(home / f for f in home_secrets()), *no_read(desk)[0], *session_private(desk)])
+
+
 def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
     """What a lane's sandbox lets through, for its workers (Claude Code's sandbox) and for its setup and
     check (srt): (the hosts it may reach, {"denyRead": the desk's keys, state, notes and card (desk_private), the recorded
@@ -2480,12 +2489,7 @@ def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple
     if moved:  # git_write_deny's rules there would close another folder
         raise RuntimeError(f"hansa starts no run (worker, verifier, setup or check): {moved}")
     make_git_write_deny(wt)  # before anything starts in the sandbox
-    home = Path(account_home())  # the account's, not $HOME: the logins are where the account keeps them
-    homes = [config_home(desk, pname, p)]
-    homes += [h for h in (config_home(desk, n, q) for n, q in desk.settings()["providers"].items()
-                          if isinstance(q, dict) and isinstance(q.get("config_dir", ""), str)) if h.is_absolute()]
-    deny = full_paths([*desk_private(desk), *homes, home / ".claude",
-                       *(home / f for f in home_secrets()), *no_read(desk)[0], *session_private(desk)])
+    deny = full_paths([*desk_private(desk), config_home(desk, pname, p), *worker_read_denials(desk)])
     # the write list holds build or test tools' cache folders; denyRead and denyWrite still win within them
     allow = full_paths(write_list(desk, lane)[0])
     return list(lane.get("network", [])), {"denyRead": deny, "denyWrite": git_write_deny(wt),
@@ -2603,6 +2607,12 @@ def make_worker_tmp(desk: Desk, tid: str) -> str:
     mark = run_mark(desk, tid)  # the run's HANSA_RUN, given with its folder (worker_env)
     desk.change(tid, lambda x: {"worker_tmp": tmp, "worker_tmps": [*(x.get("worker_tmps") or []),
                                                                    {"path": tmp, "removed": None, "mark": mark}]})
+    attachments = desk.meta(tid).get("attachments", [])
+    if attachments:
+        folder = Path(tmp) / "attach"
+        folder.mkdir()
+        for a in attachments:
+            copy_file(desk.attachment_dir(tid) / a["name"], folder / a["name"])
     return tmp
 
 
@@ -3698,6 +3708,11 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp),
                                                                  long=long)
     system += around_note(desk, lane, meta, lane_name, tmp)
+    if meta.get("attachments"):
+        folder = str(Path(tmp) / "attach")
+        names = ", ".join(json.dumps(a["name"], ensure_ascii=False) for a in meta["attachments"])
+        system += (f"Attachments: {json.dumps(folder, ensure_ascii=False)}; files: {names}. "
+                   "Write this folder's path out in full, not as $TMPDIR.\n")
     carrying = (meta.get("run_start") or {}).get("source") == "earlier run's commit"
     if carrying:
         system += ("\nYou carry on an interrupted run of this same task, from that run's commits "
