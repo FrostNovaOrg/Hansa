@@ -203,6 +203,9 @@ Advice, not a rule hansa enforces:
 
 ## Merging, the merge check and conflicts
 
+`hansa verify ID` chooses a verify lane listing the task's lane: free first, then fewest queued,
+then lanes' order; otherwise its own lane. `--lane L` overrides this.
+
 A verification ends with `VERDICT: holds`, `VERDICT: holds, with notes`,
 `VERDICT: does not hold` or `VERDICT: unsure`.
 It says "does not hold" when ordinary use misses something the task asked for

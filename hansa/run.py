@@ -35,7 +35,7 @@ from pathlib import Path
 from . import account, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
                    refused_rule, argv_rules_problem, path_rule_problem, kept_from_workers, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, program_candidates,
-                   WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, write_bytes, write_json, write_text, write_problems)
+                   WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
 from .srt_output import protected
 
@@ -3672,8 +3672,10 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: st
 def start(desk: Desk, tid: str, lane_name: str, pname: str):
     """Claim a queued task and start its worker. None when the task was no longer queued, or was
     cancelled while hansa prepared it."""
-    with desk.lock():  # an unassigned task cannot start on a lane marked as a merge lane meanwhile
-        if desk.settings()["lanes"].get(lane_name, {}).get("merge_lane"):
+    with desk.lock():  # lane roles may have changed since dispatch chose it
+        queued = desk.meta(tid)
+        if work_lane_problem(desk.settings(), lane_name,
+                             verifying=queued.get("kind") == "verify" and bool(queued.get("lane"))):
             return None
         meta = desk.transition(tid, ("queued",), state="running", phase="starting", lane=lane_name, provider=pname,
                                started=now(), finished=None, pid=None, pid_start="", error="", timed_out=False,
@@ -6060,7 +6062,8 @@ class Dispatcher:
                 if m["state"] != "queued":
                     continue
                 for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
-                    if ln in busy or ln not in s["lanes"] or s["lanes"][ln].get("merge_lane") or self.sandbox_waits(ln, s):
+                    if (ln in busy or ln not in s["lanes"] or work_lane_problem(s, ln,
+                            verifying=m.get("kind") == "verify" and bool(m.get("lane"))) or self.sandbox_waits(ln, s)):
                         continue
                     pname = next((p for p in task_providers(s, ln, m)
                                   if p not in refused_by(m) and not provider_problem(desk, s, p)), None)
@@ -6391,7 +6394,7 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
         return "dispatch is paused"
     if lk["disk"]:
         return lk["disk"]
-    lanes = [m["lane"]] if m.get("lane") else sorted(n for n, ln in s["lanes"].items() if not ln.get("merge_lane"))
+    lanes = [m["lane"]] if m.get("lane") else sorted(n for n in s["lanes"] if not work_lane_problem(s, n))
     if not lanes:
         return "no lanes that take work in settings" if s["lanes"] else "no lanes in settings"
     why = []
@@ -6400,8 +6403,9 @@ def waiting_reason(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
         if ln not in s["lanes"]:
             why.append(f"lane {ln} is not in settings")
             continue
-        if s["lanes"][ln].get("merge_lane"):
-            why.append(f"lane {ln} is a merge lane and takes no work")
+        problem = work_lane_problem(s, ln, verifying=m.get("kind") == "verify" and bool(m.get("lane")))
+        if problem:
+            why.append(problem)
             continue
         if "work" in held.get(ln, {}):
             why.append(f"HELD: lane {ln} cannot run, {sandbox_held_text(held[ln]['work'])}")

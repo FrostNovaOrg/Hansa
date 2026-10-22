@@ -20,7 +20,7 @@ from . import account, alert, build, cost, installed_text, notes, notify, plugin
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
-                   PROJECT_INTRO, answer_name, compact_settings, write_text)
+                   PROJECT_INTRO, answer_name, compact_settings, work_lane_problem, write_text)
 from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
@@ -993,12 +993,22 @@ def _verify(desk: Desk, a) -> None:
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is already verifying {a.id}")
     lane = m.get("lane", "")
-    _work_lane(desk.settings(), a.lane or lane)
-    own = desk.settings()["lanes"].get(lane)
+    s = desk.settings()
+    selected = ""
+    if not a.lane:
+        candidates = [n for n, ln in s["lanes"].items() if lane in ln.get("verify_for", [])]
+        if candidates:
+            tasks = desk.tasks()
+            busy = {occupied_lane(t) for t in tasks if lane_occupied(t)}
+            queued = {n: sum(t["state"] == "queued" and t.get("lane") == n for t in tasks) for n in candidates}
+            selected = min(candidates, key=lambda n: (n in busy or queued[n] > 0, queued[n]))
+    target = a.lane or selected or lane
+    _work_lane(s, target, verifying=True)
+    own = s["lanes"].get(lane)
     moved = own is not None and m.get("repo") and not _same_repo(own["repo"], m["repo"])
-    if (a.lane and a.lane != lane) or own is None or moved:
-        _lane_reaches(desk, a.lane or lane, m)
-        lane = a.lane or lane
+    if target != lane or own is None or moved:
+        _lane_reaches(desk, target, m)
+        lane = target
     held = branch_holds(desk.settings()["lanes"][lane]["repo"], m)  # what is verified is the recorded commit
     if held:
         raise SystemExit(f"hansa: {held}; nothing was queued. hansa show {a.id} says what it holds")
@@ -1020,6 +1030,7 @@ def _verify(desk: Desk, a) -> None:
         close_verification(desk, m, f"closed: {vid} verifies {a.id} again")
     desk.update(a.id, verify=vid, **notify.recorded(sess))
     print(f"{vid} queued" + (f" on lane {lane}" if lane != m.get("lane", "") else "")
+          + (f" (chosen as a verify lane for lane {m['lane']})" if selected else "")
           + f": a worker will run {a.id}'s change to see whether it holds. "
           + (_wait_for(desk, vid) if notify.hears_of(desk, vid) else f"Follow it with: hansa wait {vid}")
           + f"; the verdict shows in hansa show {a.id}" + _waits(desk, vid))
@@ -1045,10 +1056,11 @@ def _same_repo(x: str, y: str) -> bool:
     return (resolved(x) or x) == (resolved(y) or y)
 
 
-def _work_lane(s: dict, name) -> None:
-    if s["lanes"].get(name, {}).get("merge_lane"):
-        raise SystemExit(f"hansa: lane {name} is a merge lane and takes no work: no tasks, verifications "
-                         "or retries; nothing was queued")
+def _work_lane(s: dict, name, *, verifying: bool = False) -> None:
+    why = work_lane_problem(s, name, verifying=verifying)
+    if why:
+        detail = ": no tasks, verifications or retries" if s["lanes"][name].get("merge_lane") else ""
+        raise SystemExit(f"hansa: {why}{detail}; nothing was queued")
 
 
 def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
@@ -1794,14 +1806,14 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
     desk.event(event, file=dst.name)
 
 
-LANE_LISTS = ("providers", "allow", "network", "write", "release_files")
+LANE_LISTS = ("providers", "allow", "network", "write", "release_files", "verify_for")
 LANE_NUMBERS = ("max_turns", "timeout_min", "merge_timeout_min", "merge_batch")
 LANE_FIELDS = ("base", "providers", "allow", "network", "write", "env", "check", "merge_check", "setup",
-               "release_files", "max_turns", "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane",
+               "release_files", "max_turns", "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane", "verify_for",
                *MESSAGE_FIELDS, "identity")
 # empty (none) takes them out: the check's command and limit again, hansa's own message forms,
 # the identity of hansa's commits (then the repository's own, or hansa's)
-LANE_UNSET = ("merge_check", "merge_timeout_min", "merge_batch", "merge_lane", *MESSAGE_FIELDS, "identity")
+LANE_UNSET = ("merge_check", "merge_timeout_min", "merge_batch", "merge_lane", "verify_for", *MESSAGE_FIELDS, "identity")
 OUTSIDE_WORKER = ("setup", "check", "merge_check")  # run by hansa itself, not by a worker
 
 
@@ -1839,6 +1851,8 @@ def _lane_value(field: str, values: list):
                          f"({' '.join(values)}): give none alone, or the values without it. Nothing was changed")
     if field == "allow":  # a rule given twice is kept once
         return list(dict.fromkeys(x for x in values if x))
+    if field == "verify_for" and not values:
+        return None
     if field in LANE_LISTS:
         return [x for v in values for x in (v.split(",") if field == "providers" else v.split()
                                             if field == "release_files" else [v]) if x]
@@ -1959,7 +1973,7 @@ def cmd_lane(a):
         lanes = desk.settings()["lanes"]
         rows = [(name, ln["repo"], f"base {ln.get('base', 'main')}", "providers " + " > ".join(ln["providers"])
                  + "".join(f"  {f} {_shown(ln[f])}" for f in MESSAGE_FIELDS if ln.get(f))
-                 + views.merge_lane_text(desk.settings(), name))
+                 + views.merge_lane_text(desk.settings(), name) + views.verify_lane_text(desk.settings(), name))
                 for name, ln in sorted(lanes.items())]
         widths = [max((len(r[i]) for r in rows), default=0) for i in range(3)]
         for r in rows:
@@ -2428,8 +2442,17 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
                 raise SystemExit(f"hansa: lane {name} was not removed: {e}") from None
     if known:
         del new["lanes"][name]
+        verifiers = []
+        for n, lane in new["lanes"].items():
+            if name in lane.get("verify_for", []):
+                lane["verify_for"] = [x for x in lane["verify_for"] if x != name]
+                if not lane["verify_for"]:
+                    del lane["verify_for"]
+                verifiers.append(n)
         _save(desk, new)
         print(f"lane {name} removed; its standing instructions stay in {desk.lanes_dir / name}")
+        for n in verifiers:
+            print(f"lane {name} removed from lane {n}'s verify_for")
     for wt, st in states.items():
         if st.get("why"):
             print(f"Its worktree {wt} stays: {st['why']}. The principal can look at it and delete it; if git in its "
@@ -2867,15 +2890,16 @@ def main(argv=None):
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     p.epilog = see_more("effort")
     p = add("verify", cmd_verify, "have a worker run a finished task's change to see whether it holds (never merged)")
-    p.description = ("have a worker run a finished task's change to see whether it holds (never merged). By default "
-                     "it runs on the task's own lane, with that lane's provider and model, and waits there behind "
-                     "the lane's other tasks. --lane L runs it on lane L instead: a verification by another model is a "
+    p.description = ("have a worker run a finished task's change to see whether it holds (never merged). "
+                     "By default it uses a verify lane listing the task's lane: free first, then fewest queued, "
+                     "then lanes' order. Without one it runs on the task's own lane. "
+                     "--lane L runs it on lane L instead: a verification by another model is a "
                      "stronger one, and an idle lane starts it sooner.")
     p.add_argument("id")
     p.add_argument("note", nargs="*", help="what to look at in particular")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     p.add_argument("--lane", help="run the verification on this lane, with its provider, model, effort, sandbox and "
-                   "lists; by default it runs on the task's own lane. A lane on the same repository as the task's; "
+                   "lists, overriding verify lanes. A lane on the same repository as the task's; "
                    "use it to have another model check the task, or when the task's lane is busy")
     p.epilog = see_more("effort")
     p = add("cancel", cmd_cancel, "stop a queued or running task or verification; on a merging task, stop its merge "
@@ -2990,7 +3014,7 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("--repo", help="the git checkout the lane works on")
     q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
-                   "providers, setup, check, merge_check, merge_lane, network, folders it may write, env, allow, limits "
+                   "providers, setup, check, merge_check, merge_lane, verify_for, network, folders it may write, env, allow, limits "
                    "with merge_timeout_min, commit_message, merge_message, identity, release "
                    "targets, release_files) "
                    "and standing instructions; "
@@ -3041,6 +3065,9 @@ def main(argv=None):
         "merge_lane takes true or false (unset: false): one lane per repository and base can serve their merge "
         "checks in its own worktree and sandbox, taking no tasks, verifications or retries; "
         "a lane with work queued or running cannot become one. "
+        "verify_for lists lanes on the same repository to verify (none: unset): it takes only verifications, "
+        "never ordinary work, and cannot list itself, merge lanes or verify lanes, or itself be a merge lane. "
+        "Ordinary work queued or running prevents setting it. "
         "check runs after each task; before a merge, hansa runs a merge check on the task merged with the base: by default the "
         "check again, when the base has moved since the task was made. merge_check gives the merge check a command "
         "of its own (a heavier one: the whole build, packaging, the slow suites), run in the same sandbox, after the "

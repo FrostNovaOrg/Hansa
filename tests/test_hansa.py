@@ -22158,6 +22158,299 @@ class DeskTest(unittest.TestCase):
         rec.write_text("".join(json.dumps(r) + "\n" for r in rows))
         self.assertEqual(run.background_left(home, "s61"), [command])
 
+    def verify_lane_task(self):
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        return d, tid
+
+    def add_verify_lane(self, name="v1", *lanes):
+        self.hansa("lane", "add", name, "--like", "a")
+        self.hansa("lane", "set", name, "verify_for", *(lanes or ("a",)))
+
+    def assert_verifies_on(self, tid, lane, automatic=True):
+        out = self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        self.assertEqual(self.desk.meta(vid)["lane"], lane)
+        if automatic:
+            self.assertIn(f"{vid} queued on lane {lane}", out)
+            self.assertIn(f"chosen as a verify lane for lane a", out)
+        return vid
+
+    def test_verify_lane_free_lane_runs_the_verification(self):
+        d, tid = self.verify_lane_task()
+        self.add_verify_lane()
+        self.hansa("lane", "set", "v1", "env", "FAKE_VERDICT=holds")
+        vid = self.assert_verifies_on(tid, "v1")
+        v = self.settle(d, vid)
+        self.assertEqual((v["lane"], v["kind"], v["verdict"]), ("v1", "verify", "holds"))
+
+    def test_verify_lane_prefers_free_over_running(self):
+        _, tid = self.verify_lane_task()
+        self.add_verify_lane("v1")
+        self.add_verify_lane("v2")
+        busy = self.desk.new_task("checking", lane="v1", kind="verify")
+        self.desk.update(busy, state="running")
+        vid = self.assert_verifies_on(tid, "v2")
+        self.desk.update(vid, state="done")
+        self.desk.update(busy, state="queued")
+        self.assert_verifies_on(tid, "v2")  # queued work also prevents a lane being free
+
+    def test_verify_lane_busy_lanes_choose_fewest_queued(self):
+        _, tid = self.verify_lane_task()
+        for lane, queued in (("v1", 2), ("v2", 1)):
+            self.add_verify_lane(lane)
+            busy = self.desk.new_task("checking", lane=lane, kind="verify")
+            self.desk.update(busy, state="running")
+            for _ in range(queued):
+                self.desk.new_task("waiting", lane=lane, kind="verify")
+        self.assert_verifies_on(tid, "v2")
+
+    def test_verify_lane_free_lanes_follow_settings_order(self):
+        _, tid = self.verify_lane_task()
+        self.add_verify_lane("v2")
+        self.add_verify_lane("v1")
+        first = next(n for n, ln in self.desk.settings()["lanes"].items() if ln.get("verify_for"))
+        vid = self.assert_verifies_on(tid, first)
+        self.desk.update(vid, state="done")
+        for lane in ("v1", "v2"):
+            busy = self.desk.new_task("checking", lane=lane, kind="verify")
+            self.desk.update(busy, state="running")
+        self.assert_verifies_on(tid, first)  # ties among busy lanes follow the same order
+
+    def test_verify_without_verify_lanes_uses_own_lane(self):
+        _, tid = self.verify_lane_task()
+        self.assert_verifies_on(tid, "a", automatic=False)
+
+    def test_verify_lane_explicit_lane_overrides_automatic_choice(self):
+        _, tid = self.verify_lane_task()
+        self.hansa("lane", "add", "b", "--like", "a")
+        self.add_verify_lane("v1")
+        self.add_verify_lane("v2", "b")  # an explicit verify lane need not list the task's lane
+        for lane in ("b", "v2"):
+            with self.subTest(lane=lane):
+                out = self.hansa("verify", tid, "--lane", lane)
+                vid = self.desk.meta(tid)["verify"]
+                self.assertEqual(self.desk.meta(vid)["lane"], lane)
+                self.assertIn(f"{vid} queued on lane {lane}:", out)
+                self.assertNotIn("chosen as a verify lane", out)
+                self.desk.update(vid, state="done", verdict="holds")
+        self.hansa("lane", "set", "v1", "verify_for", "none")
+        self.assert_verifies_on(tid, "a", automatic=False)  # v2 verifies b, so it does not match a
+
+    def test_verify_lane_refuses_add_retry_and_direct_work(self):
+        _, tid = self.verify_lane_task()
+        self.add_verify_lane()
+        before = self.desk.tasks()
+        for args in (("add", "--lane", "v1", "work"), ("retry", tid, "--lane", "v1", "again")):
+            with self.subTest(args=args), self.assertRaises(SystemExit) as e:
+                self.hansa(*args)
+            self.assertIn("lane v1 is a verify lane and takes only verifications", str(e.exception))
+            self.assertIn("nothing was queued", str(e.exception))
+            self.assertEqual(self.desk.tasks(), before)
+        with self.assertRaises(SystemExit) as e:
+            self.desk.new_task("direct work", lane="v1")
+        self.assertIn("lane v1 is a verify lane and takes only verifications", str(e.exception))
+        self.assertEqual(self.desk.tasks(), before)
+
+    def test_verify_lane_automatic_work_assignment_and_dispatch_guards(self):
+        from hansa import run
+        self.add_verify_lane("0")  # first ordinary automatic candidate before this feature
+        s = self.desk.settings()
+        s["providers"]["verifier"] = dict(s["providers"]["claude"])
+        s["lanes"]["0"]["providers"] = ["verifier"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.set_provider_state("verifier", unreachable_since=now(), unreachable_reason="offline")
+        self.assertIn("0 tasks wait for it", views.provider_status_problem(
+            self.desk, self.desk.settings(), "verifier", [self.desk.meta(tid)]))
+        self.assertIn("ready for lane a", waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set()))
+        self.assertIsNone(run.start(self.desk, tid, "0", "claude"))
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertEqual(self.settle(d, tid)["lane"], "a")
+        # An old or hand-written queue entry cannot bypass the dispatcher or its explanation.
+        stale = self.desk.new_task("work")
+        self.desk.update(stale, lane="0")
+        d.tick()
+        self.assertEqual(self.desk.meta(stale)["state"], "queued")
+        self.assertIn("lane 0 is a verify lane and takes only verifications",
+                      waiting_reason(self.desk, self.desk.settings(), self.desk.meta(stale), set()))
+        self.assertIn("1 task waits for it", views.provider_status_problem(
+            self.desk, self.desk.settings(), "verifier", [{**self.desk.meta(stale), "kind": "verify"}]))
+        self.desk.set_provider_state("verifier", unreachable_since=0, unreachable_reason="")
+        self.hansa("lane", "set", "0", "verify_for", "none")
+        self.hansa("lane", "set", "a", "verify_for", "0")
+        self.desk.update(stale, lane="")
+        self.assertIn("ready for lane 0", waiting_reason(self.desk, self.desk.settings(), self.desk.meta(stale), set()))
+
+    def test_verify_lane_dispatcher_skips_ready_first_candidate(self):
+        from hansa import run
+        self.add_verify_lane("0")
+        s = self.desk.settings()
+        self.assertEqual(sorted(s["lanes"])[0], "0")
+        self.assertEqual(provider_problem(self.desk, s, "claude"), "")
+        tid = self.desk.new_task("Unassigned work")
+        # Observe the dispatcher's choice independently of start's own guard.
+        with unittest.mock.patch.object(run, "start", return_value=None) as start:
+            Dispatcher(self.desk).tick()
+        start.assert_called_once_with(self.desk, tid, "a", "claude")
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+
+    def test_verify_lane_waiting_reason_excludes_ready_first_candidate(self):
+        self.add_verify_lane("0")
+        s = self.desk.settings()
+        s["providers"]["verifier"] = dict(s["providers"]["claude"])
+        s["lanes"]["0"]["providers"] = ["verifier"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.set_provider_state("claude", cool_until=now() + 600, reason="taking a rest")
+        self.assertEqual(sorted(s["lanes"])[0], "0")
+        self.assertEqual(provider_problem(self.desk, s, "verifier"), "")
+        tid = self.desk.new_task("Unassigned work")
+        reason = waiting_reason(self.desk, s, self.desk.meta(tid), set())
+        self.assertIn("lane a has no provider ready (claude: resting", reason)
+        self.assertNotIn("lane 0", reason)
+
+    def test_verify_lane_set_refuses_repo(self):
+        self.add_verify_lane()
+        before = self.desk.settings_path.read_bytes()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as e:
+            self.hansa("lane", "set", "a", "repo", str(self.repo))
+        self.assertEqual(e.exception.code, 2)
+        self.assertIn("argument field: invalid choice: 'repo'", errors.getvalue())
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+
+    def test_verify_lane_settings_refuse_invalid_targets_atomically(self):
+        self.hansa("lane", "add", "v1", "--like", "a")
+        self.hansa("lane", "add", "b", "--like", "a")
+        self.add_verify_lane("v2")
+        self.merge_lane_for_checks()
+        other = self.tmp / "other"
+        shutil.copytree(self.repo, other)
+        self.hansa("lane", "add", "c", "--repo", str(other))
+        before = self.desk.settings_path.read_bytes()
+        for target, reason in (("c", "another repository"), ("v1", "itself"), ("m", "merge lane"),
+                               ("v2", "verify lane"), ("missing", "no lane missing")):
+            with self.subTest(target=target), self.assertRaises(SystemExit) as e:
+                self.hansa("lane", "set", "v1", "verify_for", target)
+            self.assertIn("lane v1:", str(e.exception))
+            self.assertIn(reason, str(e.exception))
+            self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        for bad in ("a", [1], ["a", {}], None):
+            s = self.desk.settings()
+            s["lanes"]["v1"]["verify_for"] = bad
+            self.assertIn("lane v1: verify_for must be a list of lane names", self.desk.save_settings(s))
+            self.assertEqual(self.desk.settings_path.read_bytes(), before)
+
+    def test_verify_lane_settings_recheck_relationships_on_every_save(self):
+        self.add_verify_lane()
+        other = self.tmp / "other"
+        shutil.copytree(self.repo, other)
+        before = self.desk.settings_path.read_bytes()
+        for args, reason in ((("a", "merge_lane", "true"), "merge lane"),
+                             (("a", "verify_for", "v1"), "verify lane"),
+                             (("v1", "merge_lane", "true"), "merge lane cannot be a verify lane")):
+            with self.subTest(args=args), self.assertRaises(SystemExit) as e:
+                self.hansa("lane", "set", *args)
+            self.assertIn("lane v1:", str(e.exception))
+            self.assertIn(reason, str(e.exception))
+            self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        s = self.desk.settings()
+        s["lanes"]["a"]["repo"] = str(other)
+        self.assertIn("lane v1: verify_for cannot name lane a: it is on another repository",
+                      self.desk.save_settings(s))
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        s = self.desk.settings()
+        del s["lanes"]["a"]
+        self.assertTrue(any("lane v1:" in p and "no lane a" in p for p in self.desk.save_settings(s)))
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+
+    def test_verify_lane_cannot_be_merge_lane_or_hold_ordinary_work(self):
+        self.merge_lane_for_checks()
+        before = self.desk.settings_path.read_bytes()
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("lane", "set", "m", "verify_for", "a")
+        self.assertIn("lane m: a merge lane cannot be a verify lane", str(e.exception))
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        self.hansa("lane", "add", "v1", "--like", "a")
+        tid = self.desk.new_task("ordinary work", lane="v1")
+        before = self.desk.settings_path.read_bytes()
+        for state in ("queued", "running"):
+            self.desk.update(tid, state=state)
+            with self.subTest(state=state), self.assertRaises(SystemExit) as e:
+                self.hansa("lane", "set", "v1", "verify_for", "a")
+            self.assertIn(f"lane v1: cannot become a verify lane while {tid} is queued or running there",
+                          str(e.exception))
+            self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        self.desk.update(tid, state="done")
+        vid = self.desk.new_task("verification", lane="v1", kind="verify")
+        for state in ("queued", "running"):
+            self.desk.update(vid, state=state)
+            self.hansa("lane", "set", "v1", "verify_for", "a")
+            self.hansa("lane", "set", "v1", "verify_for", "none")
+
+    def test_verify_lane_remove_cleans_every_list_and_unset_restores_work(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        self.add_verify_lane("v1", "a", "b")
+        self.add_verify_lane("v2")
+        out = self.hansa("lane", "remove", "a")
+        for lane in ("v1", "v2"):
+            self.assertNotIn("a", self.desk.settings()["lanes"][lane].get("verify_for", []))
+            self.assertIn(f"lane a removed from lane {lane}'s verify_for", out)
+        self.assertEqual(self.desk.settings()["lanes"]["v1"]["verify_for"], ["b"])
+        self.assertNotIn("verify_for", self.desk.settings()["lanes"]["v2"])
+        self.hansa("add", "work", "--lane", "v2")
+        self.hansa("lane", "set", "v1", "verify_for", "none")
+        self.assertNotIn("verify_for", self.desk.settings()["lanes"]["v1"])
+        self.hansa("add", "work", "--lane", "v1")
+
+    def test_verify_lane_like_copies_verify_for(self):
+        self.add_verify_lane()
+        self.hansa("lane", "add", "v3", "--like", "v1")
+        self.assertEqual(self.desk.settings()["lanes"]["v3"]["verify_for"], ["a"])
+        self.hansa("lane", "set", "v1", "verify_for", "none")
+        self.assertEqual(self.desk.settings()["lanes"]["v3"]["verify_for"], ["a"])
+
+    def test_verify_lane_views_name_served_lanes_and_verifiers(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        self.add_verify_lane("v1", "a", "b")
+        self.add_verify_lane("v2")
+        line = "verify lane for lanes a, b; takes only verifications"
+        for args in (("lane",), ("status",), ("explain", "lane", "v1")):
+            with self.subTest(args=args):
+                self.assertIn(line, self.hansa(*args))
+        self.assertIn("verifications on lanes v1, v2", self.hansa("explain", "lane", "a"))
+        self.assertIn("verifications on lanes v1", self.hansa("explain", "lane", "b"))
+
+    def test_merge_lane_views_exclude_verify_lanes_from_served_lanes(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        self.add_verify_lane("v1", "a", "b")
+        self.add_verify_lane("v2")
+        self.merge_lane_for_checks()
+        status = views.status(self.desk)
+        lane = next(ln for ln in status["lanes"] if ln["name"] == "m")
+        self.assertEqual(lane["merge_for"], ["a", "b"])
+        for args in (("lane",), ("status",), ("explain", "lane", "m")):
+            with self.subTest(args=args):
+                out = self.hansa(*args)
+                self.assertIn("merge lane for lanes a, b; takes no work", out)
+                self.assertNotIn("merge lane for lanes a, b, v1", out)
+                if args[0] == "explain":
+                    self.assertIn("merge checks for lanes a, b:", out)
+
+    def test_verify_lane_resting_providers_leave_verification_waiting_there(self):
+        d, tid = self.verify_lane_task()
+        self.add_verify_lane()
+        self.desk.set_provider_state("claude", cool_until=now() + 600, reason="taking a rest")
+        out = self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        d.tick()
+        self.assertEqual((self.desk.meta(vid)["lane"], self.desk.meta(vid)["state"]), ("v1", "queued"))
+        self.assertIn(f"{vid} waits: lane v1 has no provider ready (claude: resting", out)
+        self.assertIn("taking a rest", out)
+        self.assertIn("lane v1 has no provider ready (claude: resting", self.hansa("status"))
+
     def test_verify_runs_the_change_and_holds_the_merge(self):
         seen = self.tmp / "argv.jsonl"
         d = Dispatcher(self.desk)
@@ -22407,7 +22700,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual((len(self.desk.tasks()), self.desk.meta(t1).get("verify")), (before, None))
         with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
             main(["verify", "--help"])
-        self.assertIn("By default it runs on the task's own lane", " ".join(helped.getvalue().split()))
+        self.assertIn("By default it uses a verify lane listing the task's lane", " ".join(helped.getvalue().split()))
+        self.assertIn("Without one it runs on the task's own lane", " ".join(helped.getvalue().split()))
         self.assertIn("--lane LANE", helped.getvalue())
         out = self.hansa("verify", t1, "--lane", "b")
         vid = self.desk.meta(t1)["verify"]

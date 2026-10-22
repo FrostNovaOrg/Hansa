@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, installed, installed_text, notify, plugin, release, up
 from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
-                   release_files_in, write_json, PROJECT_FILE, PROJECT_LONG)
+                   release_files_in, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of,
                   credit_text, provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
@@ -575,9 +575,9 @@ def status(desk: Desk) -> dict:
                  "unknown": disk.unknown_lines(desk)},  # what its look could not measure, and what was known
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and occupied_lane(m) == n), None),
-                   **({"merge_lane": True, "merge_for": [x for x in sorted(s["lanes"]) if x != n
-                                                        and merge_target(s, x) == merge_target(s, n)]}
+                   **({"merge_lane": True, "merge_for": merge_served_lanes(s, n)}
                       if ln.get("merge_lane") else {}),
+                   **({"verify_for": ln["verify_for"]} if ln.get("verify_for") else {}),
                    "trying": n in tried,  # a `hansa lane try` queued or running holds the lane
                    "held": held.get(n)}  # its runs whose sandbox could not start, by group (run.sandbox_held)
                   for n, ln in sorted(s["lanes"].items())],
@@ -670,6 +670,8 @@ def status_text(st: dict) -> str:
                                      "UNABLE TO RUN" if "work" in (ln.get("held") or {}) else "free"))
                    + (f" · merge lane for lanes {', '.join(ln['merge_for']) or '(none yet)'}; takes no work"
                       if ln.get("merge_lane") else "")
+                   + (f" · verify lane for lanes {', '.join(ln['verify_for'])}; takes only verifications"
+                      if ln.get("verify_for") else "")
                    + "".join(f"\n      {sandbox_held_text(h)}" for h in (ln.get("held") or {}).values())
                    + ("\n      More: hansa help sandbox-probe" if ln.get("held") else ""))
     if st["running"]:
@@ -738,7 +740,8 @@ def provider_status_problem(desk: Desk, s: dict, name: str, queued: list) -> str
     waiting = 0
     for m in queued:
         lanes = [m["lane"]] if m.get("lane") else s["lanes"]
-        providers = {p for ln in lanes if ln in s["lanes"] and not s["lanes"][ln].get("merge_lane")
+        providers = {p for ln in lanes if ln in s["lanes"] and not work_lane_problem(s, ln,
+                     verifying=m.get("kind") == "verify" and bool(m.get("lane")))
                      for p in task_providers(s, ln, m) if p not in refused_by(m)}
         if name in providers and not any(not provider_problem(desk, s, p) for p in providers):
             waiting += 1
@@ -1225,12 +1228,26 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     return "\n".join(out)
 
 
+def merge_served_lanes(s: dict, name: str) -> list:
+    """The work lanes whose merges a merge lane serves; verify lanes never merge."""
+    return [n for n, ln in sorted(s["lanes"].items()) if n != name and not ln.get("verify_for")
+            and merge_target(s, n) == merge_target(s, name)]
+
+
 def merge_lane_text(s: dict, name: str) -> str:
     if s["lanes"][name].get("merge_lane"):
-        served = [n for n in sorted(s["lanes"]) if n != name and merge_target(s, n) == merge_target(s, name)]
+        served = merge_served_lanes(s, name)
         return f"  merge lane for lanes {', '.join(served) or '(none yet)'}; takes no work"
     selected = merge_lane(s, name)
     return f"  merge checks on lane {selected}" if selected != name else ""
+
+
+def verify_lane_text(s: dict, name: str) -> str:
+    served = s["lanes"][name].get("verify_for")
+    if served:
+        return f"  verify lane for lanes {', '.join(served)}; takes only verifications"
+    verifiers = [n for n, ln in s["lanes"].items() if name in ln.get("verify_for", [])]
+    return f"  verifications on lanes {', '.join(verifiers)}" if verifiers else ""
 
 
 def lane_origin(desk: Desk, name: str) -> str:
@@ -1391,8 +1408,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         check_name = merge_lane(s, name)
         check_lane = s["lanes"][check_name]
         separate = check_name != name
-        served = ([n for n in sorted(s["lanes"]) if n != name and merge_target(s, n) == merge_target(s, name)]
-                  if ln.get("merge_lane") else [])
+        served = merge_served_lanes(s, name) if ln.get("merge_lane") else []
         all_tasks = [m for m in desk.tasks() if m.get("kind") != "verify"]
         tasks = [m for m in all_tasks if m.get("lane") == name]
         merge_tasks = ([m for m in all_tasks if (m.get("merge_check_result") or {}).get("lane") == name]
@@ -1401,6 +1417,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
             *([merge_lane_text(s, name)] if merge_lane_text(s, name) else []),
+            *([verify_lane_text(s, name)] if verify_lane_text(s, name) else []),
             f"  merge_batch: {check_lane.get('merge_batch', 4)} on check lane {check_name} "
             "(1 to 10; default 4; unsuccessful batches are checked alone)",
             f"  read them with hansa git {name} log|show|diff|grep ... (--worktree: the worktree), git commands that"
