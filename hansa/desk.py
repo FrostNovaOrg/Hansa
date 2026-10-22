@@ -262,6 +262,7 @@ def default_settings() -> dict:
         # GB of free space under which hansa serve starts nothing new (hansa/disk.py); 0: off. The coordinator's
         # (hansa disk-floor), as concurrency is
         "disk_floor": 10,
+        "memory_floor": 2,  # GB available to new work; coordinator's (hansa memory-floor); 0: off
         "cool_minutes": 30,
         "coordinator": {"provider": "claude", "model": "opus", "effort": "max"},
         # When the coordinator's session compacts (COMPACT_DEFAULTS). The principal's, on the page
@@ -615,7 +616,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     s = current_settings(s)
     original_key = mailbox_settings(s)
     mailbox_key = mailbox_key or original_key
-    known = {"version", "concurrency", "disk_floor", "cool_minutes", "coordinator", "providers", "lanes", "prices",
+    known = {"version", "concurrency", "disk_floor", "memory_floor", "cool_minutes", "coordinator", "providers", "lanes", "prices",
              "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
              "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "release_direct", "alert", "coordinator_compact",
              "coordinator_alert"}
@@ -701,9 +702,10 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
               if not _is_int(v, 0, COORDINATOR_ALERT_MOST)]
     if not _is_int(s.get("concurrency"), 1, 8):
         p.append("concurrency must be a whole number from 1 to 8")
-    fl = s.get("disk_floor", 10)
-    if not isinstance(fl, (int, float)) or isinstance(fl, bool) or not 0 <= fl <= 100000 or fl != fl:
-        p.append("disk_floor must be a number of GB from 0 (off) to 100000")
+    for key, default in (("disk_floor", 10), ("memory_floor", 2)):
+        fl = s.get(key, default)
+        if not isinstance(fl, (int, float)) or isinstance(fl, bool) or not 0 <= fl <= 100000 or fl != fl:
+            p.append(f"{key} must be a number of GB from 0 (off) to 100000")
     if not _is_int(s.get("cool_minutes"), 1, 1440):
         p.append("cool_minutes must be a whole number from 1 to 1440")
 

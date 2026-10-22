@@ -556,6 +556,14 @@ The floor is the coordinator's, as concurrency is: `hansa disk-floor` shows it w
 volume, `hansa disk-floor 20` sets it to 20 GB (default 10; 0 turns it off for every volume). It is one number:
 a small volume's own floor follows from it, as above. The page shows it and cannot change it.
 
+Memory has a floor too, guarding against starting more work while memory runs low. `hansa memory-floor [GB]`
+shows or sets it (coordinator only; default 2; 0 disables). Machines smaller than four times the floor use a
+quarter of their memory. Each round reads macOS `kern.memorystatus_level` percent of `hw.memsize`, or Linux
+`MemAvailable`. The same starts wait; running work continues. Starts resume at the floor plus 1 GB.
+Status shows available memory, the floor and `MEMORY LOW:`; explain server and waiting tasks say why.
+`memory_low`/`memory_ok` notify the coordinator once, without principal alerts. Failed readings hold nothing
+back, recorded and shown like disk failures; `memory_look_failed`/`memory_look_ok` report changes only.
+
 Free space rather than lower the floor. A lane whose builds leave large outputs in its worktree (`target/`,
 `build/`, `node_modules/`, a compiler's cache), or fill a cache of its own (a Maven or pip cache on its write
 list), should clean them in its setup, which runs before each task: `mvn -q clean` or `rm -rf build`, or a cache

@@ -1683,11 +1683,13 @@ def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> st
         return (f"等同一仓库上工作线 {lane} 的 {m['id']} 合并验收结束" if zh else
                 f"waits for {m['id']}'s merge check on lane {lane}, on the same repository")
     from .run import not_looking
-    from . import disk
+    from . import disk, memory
     low = disk.held(desk)
     if low:
         return (f"等磁盘空出来：有卷的剩余空间低于下限（{disk.floor_zh(disk.floor(s), low)}），hansa serve 暂不开始新的事"
                 if zh else "waits: " + disk.short_text(desk, low))
+    if memory.held(desk):
+        return ("等可用内存恢复到下限加 1 GB，hansa serve 暂不开始新的事" if zh else "waits: " + memory.short_text(desk))
     gone = not_looking(desk)
     if zh:
         return "后台（hansa serve）没在运行或卡住了，开始不了" if gone else "hansa serve 下次查看时开始（几秒内）"

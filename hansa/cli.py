@@ -92,7 +92,7 @@ TOPICS = {
 # hansa help: the commands, a few to a line (a command left out of these goes on the last line)
 COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
                   ("watching", ("status", "wait", "notify", "ask", "explain", "notes", "cost")),
-                  ("lanes and releases", ("lane", "release", "hide", "concurrency", "disk-floor", "pause", "resume")),
+                  ("lanes and releases", ("lane", "release", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
                   ("the desk", ("init", "up", "serve", "web", "coordinator", "ping", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
@@ -2668,6 +2668,29 @@ def cmd_disk_floor(a):
              f"its floor instead, and a margin scaled with it (no more than a quarter of that floor)"))
 
 
+def cmd_memory_floor(a):
+    from . import disk, memory
+    desk = Desk.find(a.desk)
+    if a.gb is None:
+        reading = memory.current()
+        print(f"memory floor: {disk.floor_text(memory.floor(desk.settings()))}; "
+              f"{disk.gb(reading['available']) if 'available' in reading else '? GB'} available")
+        return
+    if not 0 <= a.gb <= disk.MOST_FLOOR:
+        raise SystemExit(f"hansa: the floor is a number of GB from 0 (off) to {disk.MOST_FLOOR}; nothing was changed")
+    gb = int(a.gb) if a.gb == int(a.gb) else a.gb
+    with desk.lock():
+        new = desk.settings()
+        old = memory.floor(new)
+        new["memory_floor"] = gb
+        _save(desk, new)
+    print(f"memory floor: {disk.floor_text(old)} -> {disk.floor_text(gb)}"
+          + (": hansa serve starts things however little memory is available" if not gb else
+             f": hansa serve starts nothing new while less memory is available, and starts again at the floor "
+             f"plus {memory.MARGIN} GB; a machine with less than {disk.SMALL * gb:g} GB uses a quarter of its memory "
+             "as its floor instead"))
+
+
 def cmd_notes(a):
     desk = Desk.find(a.desk)
     if a.words[:1] == ["archive"] and len(a.words) > 1:
@@ -3209,6 +3232,14 @@ def main(argv=None):
                      "3.9 GB /tmp about 1 GB under the default 10), and a margin scaled with it, no more than a "
                      "quarter of that floor; a volume of four times the floor or more, or whose size is not known, "
                      "keeps the floor as set. One number for every volume: default 10; 0 turns it off.")
+    p.add_argument("gb", nargs="?", type=float, metavar="GB")
+    p.epilog = see_more("free-space")
+    p = add("memory-floor", cmd_memory_floor, "show, or set, the available memory (GB) under which hansa serve "
+            "starts nothing new (default 2; 0: off)")
+    p.description = ("Show, or set, the floor of available memory (GB). What runs goes on; new work waits until "
+                     "the floor plus 1 GB is available. A machine with less than four times the floor in memory "
+                     "uses a quarter of its memory as its floor. Default 2; 0 turns it off. Only the coordinator "
+                     "is notified when memory goes under or comes back; no principal alert runs.")
     p.add_argument("gb", nargs="?", type=float, metavar="GB")
     p.epilog = see_more("free-space")
     p = add("cost", cmd_cost, "tokens and what they are worth")
