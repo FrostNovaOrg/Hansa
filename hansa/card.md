@@ -149,6 +149,7 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
 - `--lane L` verifies on another lane of the same repository: another model sees other things than
   the same model, but may judge more strictly and send more work back; use it if the task's provider is
   new to the desk or its lane is busy.
+- A verify lane (`hansa lane set V verify_for L ...`) takes the verifications of the lanes it lists.
 - Security, credentials, money, releases or stored data: `hansa verify <id>`, and also have the
   `reviewer` helper read the change.
 

@@ -593,6 +593,16 @@ def current_settings(settings: dict) -> dict:
     return s
 
 
+def work_lane_problem(s: dict, name, *, verifying: bool = False) -> str:
+    """Why this lane cannot take the queued work; also used by dispatch and its waiting reasons."""
+    ln = s["lanes"].get(name, {})
+    if ln.get("merge_lane"):
+        return f"lane {name} is a merge lane and takes no work"
+    if ln.get("verify_for") and not verifying:
+        return f"lane {name} is a verify lane and takes only verifications"
+    return ""
+
+
 def validate(s: dict, root=None, page: bool = False, before: dict | None = None, mailbox_key: str = "") -> list:
     """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
     which no lane's write list may reach into. page: the page's save, which cannot change lanes, so the refused
@@ -741,7 +751,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             continue
         extra = set(ln) - {"repo", "base", "providers", "allow", "network", "write", "env", "check", "merge_check",
                            "setup", "release", "targets", "release_files", "max_turns",
-                           "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane", "identity", *MESSAGE_FIELDS}
+                           "timeout_min", "merge_timeout_min", "merge_batch", "merge_lane", "verify_for", "identity", *MESSAGE_FIELDS}
         if extra:
             p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
         if not isinstance(ln.get("repo"), str) or not ln.get("repo", "").startswith("/"):
@@ -760,6 +770,25 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                          f"base {target[1]}; at most one merge lane serves each repository and base")
             else:
                 merge_lanes[target] = name
+        verify_for = ln.get("verify_for", [])
+        if not isinstance(verify_for, list) or not all(isinstance(n, str) for n in verify_for):
+            p.append(f"{at}: verify_for must be a list of lane names")
+        elif verify_for:
+            if ln.get("merge_lane"):
+                p.append(f"{at}: a merge lane cannot be a verify lane")
+            for n in verify_for:
+                other = lanes.get(n)
+                if n == name:
+                    p.append(f"{at}: verify_for cannot name itself")
+                elif not isinstance(other, dict):
+                    p.append(f"{at}: verify_for names no lane {n}")
+                elif other.get("merge_lane"):
+                    p.append(f"{at}: verify_for cannot name lane {n}: it is a merge lane")
+                elif other.get("verify_for"):
+                    p.append(f"{at}: verify_for cannot name lane {n}: it is a verify lane")
+                elif (isinstance(ln.get("repo"), str) and isinstance(other.get("repo"), str)
+                      and (resolved(ln["repo"]) or ln["repo"]) != (resolved(other["repo"]) or other["repo"])):
+                    p.append(f"{at}: verify_for cannot name lane {n}: it is on another repository")
         order = ln.get("providers")
         if not isinstance(order, list) or not order:
             p.append(f"{at}: list at least one provider")
@@ -2558,6 +2587,12 @@ class Desk:
                     if work:
                         problems.append(f"lane {name}: cannot become a merge lane while {', '.join(work)} is queued "
                                         "or running there; a merge lane takes no work")
+                if isinstance(ln, dict) and ln.get("verify_for"):
+                    work = [m["id"] for m in self.tasks() if m.get("lane") == name
+                            and m["state"] in ("queued", "running") and m.get("kind") != "verify"]
+                    if work:
+                        problems.append(f"lane {name}: cannot become a verify lane while {', '.join(work)} is queued "
+                                        "or running there; a verify lane takes only verifications")
             if problems or dry:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
@@ -2794,8 +2829,9 @@ class Desk:
             raise ValueError("the task text is empty")
         with self.lock():  # a key saved meanwhile is either known here or scrubbed from the task after
             lane = opts.get("lane")
-            if self.settings()["lanes"].get(lane, {}).get("merge_lane"):
-                raise SystemExit(f"hansa: lane {lane} is a merge lane and takes no work; nothing was queued")
+            why = work_lane_problem(self.settings(), lane, verifying=opts.get("kind") == "verify")
+            if why:
+                raise SystemExit(f"hansa: {why}; nothing was queued")
             text = self.redact(text)  # a worker never gets a key in its task
             self.tasks_dir.mkdir(exist_ok=True)
             ids = [int(d.name[1:]) for d in self.tasks_dir.iterdir() if d.name[1:].isdigit()]
