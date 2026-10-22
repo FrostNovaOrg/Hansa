@@ -62,6 +62,15 @@ before the worker, and its check, after it, run in the same sandbox (with
 `srt`): the lane's network and write lists hold for them too, so a setup that
 downloads needs its registry on the network list.
 
+Of the desk itself a run reads only its own worktree (and a lane repository's git
+folder inside the desk; on Linux, a lane command's own TMPDIR in `.hansa/tmp`):
+not `settings.json`, `tasks/`, `lanes/`, `events.jsonl`, `asks.json` or other
+lanes' worktrees. Of the runs' temporary folders (`hansa-*` in `/tmp` and the
+system's temporary folder) it reads only its own. On Linux srt expands that
+pattern when it wraps a command, so a folder made afterwards stays readable to it.
+Claude Code's file tools get the same as Read rules, but a temporary folder made
+after the run started is open to them.
+
 A write-list entry that hansa would now refuse when a run starts (one saved before that refusal
 was there, or one whose link has since been pointed elsewhere) is left out of that run, and `hansa show`
 says so ([A lane's write list and env](#a-lanes-write-list-and-env)).

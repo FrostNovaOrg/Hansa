@@ -439,8 +439,9 @@ def srt_settings(box: dict, wt: str, tmp: str, codex_home: str) -> dict:
     """srt's settings for the Codex run, from the sandbox hansa gave Claude Code in --settings: writes in the
     worktree, its own git folder (own_git_write), its temporary folder, the lane's write list and
     HANSA_CODEX_HOME; git's data, the project folders (config_deny) and HOME_DENY in the Codex home never
-    written; the no-read list never read, but for the Codex home and what is inside it (home_read_open); the
-    lane's network list and CODEX_HOSTS. (hansa's srt_settings needs its desk.)"""
+    written; the no-read list never read, but for the Codex home and what is inside it (home_read_open), and what
+    hansa re-allows in it (allowRead: the worktree, the run's temporary folder); the lane's network list and
+    CODEX_HOSTS. (hansa's srt_settings needs its desk.)"""
     sb = box.get("sandbox") or {}
     fs, net = sb.get("filesystem") or {}, sb.get("network") or {}
     hosts = list(dict.fromkeys([*(net.get("allowedDomains") or []), *CODEX_HOSTS]))
@@ -450,6 +451,7 @@ def srt_settings(box: dict, wt: str, tmp: str, codex_home: str) -> dict:
     return {"network": network, "filesystem": {
         "allowWrite": both([wt, *own_git_write(wt), tmp, codex_home]) + [x for x in fs.get("allowWrite") or [] if x],
         "denyRead": home_read_open(fs.get("denyRead"), codex_home)[0],
+        "allowRead": [x for x in fs.get("allowRead") or [] if x],
         "denyWrite": list(dict.fromkeys([*(fs.get("denyWrite") or []), *config_deny(wt), *home_deny(codex_home)]))}}
 
 

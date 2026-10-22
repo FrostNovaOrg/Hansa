@@ -552,7 +552,7 @@ SANDBOX_TRIES = {}  # fingerprint of the settings: what the try found (try_sandb
 # Each part of the settings, tried alone when the whole is refused, to name what the sandbox refuses
 SANDBOX_PARTS = (("the exact deny-write paths", lambda fs, net: {"denyWrite": [x for x in fs["denyWrite"] if not _glob(x)]}),
                  ("the deny-write patterns", lambda fs, net: {"denyWrite": [x for x in fs["denyWrite"] if _glob(x)]}),
-                 ("the deny-read list", lambda fs, net: {"denyRead": fs["denyRead"]}),
+                 ("the deny-read list", lambda fs, net: {"denyRead": fs["denyRead"], "allowRead": fs["allowRead"]}),
                  ("the write list", lambda fs, net: {"allowWrite": fs["allowWrite"]}),
                  ("the network", lambda fs, net: {"network": net}))
 # What a try leaves out on Linux, said once in hansa status and hansa explain server: srt there drops every deny entry
@@ -617,7 +617,9 @@ def git_folders_kept(fn):
 
 def sandbox_try_settings(box: dict, wt: Path, tmp: str) -> dict:
     """srt's settings for a try of the sandbox Claude Code gets (`box`, the "sandbox" of sandbox_settings): its filesystem and network, the worktree and the temporary folder `tmp` written, and, in a
-    linked worktree, the common git folder, which Claude Code opens for writing too."""
+    linked worktree, the common git folder, which Claude Code opens for writing too. `tmp` stands for the run's
+    own temporary folder in allowRead (a run's folder is closed to the others, run_tmp_patterns), so the try's
+    fingerprint is the same for each run of a lane."""
     fs, net = box["filesystem"], box["network"]
     common, own = git_folders(wt)
     opened = [common] if own.resolve() != common.resolve() else []
@@ -626,6 +628,9 @@ def sandbox_try_settings(box: dict, wt: Path, tmp: str) -> dict:
         network["allowLocalBinding"] = True
     return {"network": network, "filesystem": {"allowWrite": full_paths([wt, tmp, *opened]) + list(fs.get("allowWrite", [])),
                                                "denyRead": list(fs.get("denyRead", [])),
+                                               "allowRead": list(dict.fromkeys([*(x for x in fs.get("allowRead", [])
+                                                                                  if not is_run_tmp(x)),
+                                                                                *full_paths([tmp])])),
                                                "denyWrite": list(fs.get("denyWrite", []))}}
 
 
@@ -2467,6 +2472,49 @@ def desk_read_rules(desk: Desk) -> list:
     return [rule("Read", d) for d in desk_private(desk)[:3]] + [f"Read(//{str(desk.root / 'CLAUDE.md').lstrip('/')})"]
 
 
+def _entries(folder) -> set:
+    """The names in `folder`; none where it cannot be read."""
+    try:
+        return {e.name for e in os.scandir(folder)}
+    except OSError:
+        return set()
+
+
+def _all_but(folder: str, keep: list, extra=()) -> list:
+    """The paths in `folder` (its entries, and the names `extra` there or not) with all under them, but `keep`: an
+    entry that holds one of them is gone into, so only what is beside it is given."""
+    out = []
+    for n in sorted({*_entries(folder), *extra}):
+        x = os.path.join(folder, n)
+        if any(_above(k, x) for k in keep):
+            continue
+        out += _all_but(x, keep) if any(_above(x, k) for k in keep) else [x]
+    return out
+
+
+def desk_fence_rules(desk: Desk, wt: Path, tmp: str) -> list:
+    """desk_fence as rules that deny Claude Code's file tools, which srt's denyRead does not hold. A deny rule there
+    wins over any allow rule, so none for the whole desk nor for every run's temporary folder: one for each of the
+    desk's entries but worktrees/ (those there now and the names hansa makes, cli.DESK_FILES), each lane's worktree
+    but the run's own `wt`, and each run's temporary folder there now but its own `tmp`. What holds `wt` or its git
+    folders (a lane's repository inside the desk) is gone into, not closed. A desk path whose rule Claude Code would
+    split stops the run, as the other rules' do (argv_rules_problem); a temporary folder's is not one hansa made
+    (path_rule_problem), and is left out."""
+    from .cli import DESK_FILES, desk_spellings
+    lanes = desk.settings().get("lanes")
+    keep = [str(wt), *map(str, git_folders(wt))]
+    trees = str(desk.worktrees_dir)
+    inside = [*_all_but(str(desk.root), [*keep, trees], DESK_FILES),
+              *_all_but(trees, keep, lanes if isinstance(lanes, dict) else ())]
+    root = str(desk.root)
+    paths = [d + x[len(root):] for x in inside for d in desk_spellings(desk)]  # a rule matches the path as written
+    runs = [os.path.join(r, n) for r in full_paths(dict.fromkeys([WORKER_TMP_ROOT, tempfile.gettempdir()]))
+            for n in sorted(_entries(r)) if n.startswith(RUN_TMP_PATTERN[:-1])]
+    runs = [x for x in runs if not any(_above(x, k) or _above(k, x) for k in [*keep, *([tmp] if tmp else [])])
+            and not path_rule_problem(x)]
+    return no_read_rules(list(dict.fromkeys(paths + runs)))
+
+
 def worker_read_denials(desk: Desk) -> list:
     """The read fence shared by worker sandboxes and attachment admission."""
     home = Path(account_home())
@@ -2476,32 +2524,72 @@ def worker_read_denials(desk: Desk) -> list:
                        *(home / f for f in home_secrets()), *no_read(desk)[0], *session_private(desk)])
 
 
-def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> tuple:
+RUN_TMP_PATTERN = "hansa-*"  # the name of every run's temporary folder: make_worker_tmp's, run_tmp's, a try's
+
+
+def run_tmp_patterns() -> list:
+    """srt's patterns for every run's temporary folder: RUN_TMP_PATTERN in WORKER_TMP_ROOT (a worker's) and in the
+    system's temporary folder (a setup's, check's or try's run folder), each spelling; none in a folder whose path
+    srt would read as a pattern itself."""
+    roots = full_paths(dict.fromkeys([WORKER_TMP_ROOT, tempfile.gettempdir()]))
+    return [os.path.join(r, RUN_TMP_PATTERN) for r in roots if not _glob(r)]
+
+
+def is_run_tmp(path: str) -> bool:
+    """Whether `path` is one of the runs' temporary folders run_tmp_patterns covers."""
+    return any(os.path.dirname(path) == os.path.dirname(x) and os.path.basename(path).startswith(RUN_TMP_PATTERN[:-1])
+               for x in run_tmp_patterns())
+
+
+def desk_fence(desk: Desk, wt: Path, mine, closed) -> tuple:
+    """What keeps a run to its own of the desk and of the runs' temporary folders: (denyRead: the desk in each of
+    its spellings (cli.desk_spellings) and every run's temporary folder (run_tmp_patterns); allowRead: the worktree
+    `wt`, its git folders where they are in the desk (a lane's repository inside it), and the run's own temporary
+    folders `mine`, on Linux a setup's or check's TMPDIR in .hansa among them (run_tmp)). srt's allowRead wins over
+    a denyRead it is in, so the worktree and git's folders are re-allowed only outside what stays closed
+    (`closed`, the rest of the run's denyRead); `mine` are made for this run alone."""
+    from .cli import desk_spellings
+    spellings = full_paths(desk_spellings(desk))
+    common, own = git_folders(wt)
+    git = [x for x in dict.fromkeys([common, own]) if any(_above(d, str(x)) for d in spellings)]
+    allow = []
+    for x in full_paths([wt, *git]):  # what is in the desk, under each spelling the desk is denied by
+        rest = next((x[len(d):] for d in spellings if x == d or x.startswith(d.rstrip("/") + "/")), None)
+        allow += [x] if rest is None else [d + rest for d in spellings]
+    allow = [x for x in allow if not any(_above(c, x) for c in closed)]
+    return spellings + run_tmp_patterns(), list(dict.fromkeys(allow + full_paths([m for m in mine if m])))
+
+
+def lane_sandbox(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, mine=()) -> tuple:
     """What a lane's sandbox lets through, for its workers (Claude Code's sandbox) and for its setup and
     check (srt): (the hosts it may reach, {"denyRead": the desk's keys, state, notes and card (desk_private), the recorded
     coordinator's folder's Claude Code files (session_private), every provider's Claude
     Code folder (the login and the session records of whoever runs on it) and ~/.claude, whichever provider
-    this run uses, the built-in logins and keys, and what the principal keeps from workers, "denyWrite":
-    git's data, "allowWrite": the lane's write list}). Each adds the worktree and a temporary folder to what
-    may be written."""
+    this run uses, the built-in logins and keys, what the principal keeps from workers, and the rest of the
+    desk and the other runs' temporary folders (desk_fence), "allowRead": what of those this run reads (its
+    worktree, its own temporary folders `mine`), "denyWrite": git's data, "allowWrite": the lane's write
+    list}). Each adds the worktree and a temporary folder to what may be written."""
     moved = next((w for x, what in ((wt, "the worktree"), (lane.get("repo"), "the lane's repository")) if x
                   for w in [pattern_path_problem(x, what, "git's data in it")] if w), "")
     if moved:  # git_write_deny's rules there would close another folder
         raise RuntimeError(f"hansa starts no run (worker, verifier, setup or check): {moved}")
     make_git_write_deny(wt)  # before anything starts in the sandbox
     deny = full_paths([*desk_private(desk), config_home(desk, pname, p), *worker_read_denials(desk)])
+    fence, opened = desk_fence(desk, wt, mine, deny)
+    deny += [x for x in fence if x not in deny]
     # the write list holds build or test tools' cache folders; denyRead and denyWrite still win within them
     allow = full_paths(write_list(desk, lane)[0])
-    return list(lane.get("network", [])), {"denyRead": deny, "denyWrite": git_write_deny(wt),
+    return list(lane.get("network", [])), {"denyRead": deny, "allowRead": opened, "denyWrite": git_write_deny(wt),
                                            "allowWrite": allow}
 
 
-def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path) -> dict:
+def sandbox_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str = "") -> dict:
     """Claude Code's Bash sandbox for a task or verification worker, enforced by the operating system:
     any command, but files changed only in the worktree (and the lane's write list) and never git's
-    history, no reading of keys and logins, no network but the lane's list, and no keys in the environment. It never falls back to
-    running unsandboxed."""
-    hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
+    history, no reading of keys and logins, nor of the desk but the worktree or of other runs' temporary folders
+    but its own (`tmp`, make_worker_tmp), no network but the lane's list, and no keys in the environment. It never
+    falls back to running unsandboxed."""
+    hosts, fs = lane_sandbox(desk, lane, pname, p, wt, [tmp])
     network = {"allowedDomains": hosts, "strictAllowlist": True}
     if any(is_local(h) for h in hosts):
         # macOS: a worker may bind ports and reach the whole loopback (Seatbelt allows outbound to localhost:*,
@@ -2525,13 +2613,14 @@ def srt_settings(desk: Desk, lane: dict, pname: str, p: dict, wt: Path, tmp: str
     """srt's settings for a lane's setup or check: the sandbox of the lane's workers, writing in the
     worktree, the temporary folder `tmp`, the command's own on disk (`own`, run_tmp) and the lane's write list.
 """
-    hosts, fs = lane_sandbox(desk, lane, pname, p, wt)
+    hosts, fs = lane_sandbox(desk, lane, pname, p, wt, [tmp, own])
     network = {"allowedDomains": hosts, "deniedDomains": []}  # srt refuses settings without deniedDomains
     if any(is_local(h) for h in hosts):
         network["allowLocalBinding"] = True
     mine = [wt, tmp, *([own] if own and own != tmp else [])]
     return {"network": network, "filesystem": {"allowWrite": full_paths(mine) + fs["allowWrite"],
-                                               "denyRead": fs["denyRead"], "denyWrite": fs["denyWrite"]}}
+                                               "denyRead": fs["denyRead"], "allowRead": fs["allowRead"],
+                                               "denyWrite": fs["denyWrite"]}}
 
 
 def run_tmp(desk: Desk, name: str) -> tuple:
@@ -3734,7 +3823,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         check_git_file(desk, wt)  # sandbox_settings asks git in the worktree
     except GitFileChanged as e:
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
-    box = sandbox_settings(desk, lane, pname, p, wt)
+    box = sandbox_settings(desk, lane, pname, p, wt, tmp)
     sandbox_guard(desk, lane_name, "verifier" if verifying else "worker", box["sandbox"], wt)  # else held (hold)
     argv += isolated(wt, box)
     left = write_list(desk, lane)[1]  # what the sandbox (the setup's and the check's too) was not given
@@ -3749,7 +3838,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     desk.update(tid, no_read_left_out=not_kept)
     for line in not_kept:
         desk.event("no_read_left_out", task=tid, lane=lane_name, why=line)
-    argv += ["--disallowedTools", *desk_read_rules(desk), *no_read_rules(kept), *no_read_rules(session_private(desk)),
+    argv += ["--disallowedTools", *desk_read_rules(desk), *desk_fence_rules(desk, wt, tmp), *no_read_rules(kept),
+             *no_read_rules(session_private(desk)),
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]
