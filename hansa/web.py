@@ -95,6 +95,18 @@ def cookie_name(token: str) -> str:
     return "hansa_t_" + hashlib.sha256(token.encode()).hexdigest()[:12]
 
 
+def _top_up_provider(desk: Desk, name: str) -> dict:
+    """Only the authenticated principal's page calls this; no coordinator command clears credit rests."""
+    with desk.lock():
+        if name not in desk.settings()["providers"]:
+            return {"ok": False, "problems": ["no such provider"]}
+        if (desk.provider_state().get(name) or {}).get("credit_since"):
+            desk.set_provider_state(name, credit_since=0, cool_until=0, reason="", rest_how="", rest_minutes=None)
+            desk.event("provider_topped_up", provider=name, by="page")
+    desk.ready_news()
+    return {"ok": True}
+
+
 def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
     token = desk.web_token()
     name = cookie_name(token)
@@ -165,6 +177,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if path == "/api/key":
                     desk.write_key(body["provider"], body.get("key", ""), by="page")
                     return self._send(200, {"ok": True})
+                if path == "/api/provider/top-up":
+                    return self._send(200, _top_up_provider(desk, body["provider"]))
                 if path == "/api/pause":
                     desk.pause(body.get("reason") or "paused on the page", by="page")
                     return self._send(200, {"ok": True})

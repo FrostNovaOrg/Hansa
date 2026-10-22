@@ -92,7 +92,7 @@ PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbi
 HIDDEN_BY = "workers_may_not_read_added"
 # The events that may call for an alert to the principal (alert.from_event)
 ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "release_stopped",
-           "ask", "sandbox_held", "disk_low")
+           "ask", "sandbox_held", "disk_low", "provider_credit")
 # What the principal's list of releases without asking records of each lane's release target, as the page saves
 # it: {lane, target, repo, base, command, after, fixed?, outside?} (outside: named outside files and hashes;
 # after: the target it must follow, "" for none; fixed: "yes"
@@ -2656,7 +2656,7 @@ class Desk:
             raise ValueError(problem)
         with self.lock():  # a provider check compares and records under the same lock
             write_text(f, value.strip() + "\n", mode=0o600, follow_symlinks=False)
-            self.set_provider_state(provider, cool_until=0, reason="")  # a new key ends any rest
+            self.set_provider_state(provider, cool_until=0, credit_since=0, reason="", rest_how="", rest_minutes=None)
             failed = self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
         self.ready_news()
@@ -2925,6 +2925,7 @@ class Desk:
 
 def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
+    from .run import credit_text
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
     mailbox_key = ""
@@ -2946,6 +2947,8 @@ def public_settings(desk: Desk) -> dict:
                  for observed in [listed_as(s.get("lanes", {}).get(lane), target)]
                  for why in [listed_mismatch(s, x, now_as=observed)] if why]
     return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
+            "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
+                                if n in s["providers"] and st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s),
             "alert_outside": outside.inspect((s.get("alert") if isinstance(s.get("alert"), dict) else {}).get("command") or "",

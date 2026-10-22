@@ -302,7 +302,7 @@ const T = ZH ? {
   providers:"模型供应", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
   effortDefault:"默认", endpoint:"接口地址", loginDir:"登录目录（空＝默认）", key:"密钥", keySet:"已填", keyMissing:"未填",
   saveKey:"保存密钥", clearKey:"清除密钥", keyHint:"填在这里，只存在本机、谁也看不到内容", check:"Ping", checking:"Ping 中…",
-  rest:"歇",
+  rest:"歇", toppedUp:"已充值",
   ready:"可用", lastCheck:"上次 Ping", addProvider:"加一家供应", newName:"名字（小写字母、数字、-）", remove:"删除",
   general:"总体", concurrency:"同时最多做几件", compactIdle:"空闲时压缩于（token）", compactWorking:"工作中压缩于（token）",
   compactNote:"一轮以回答结束、会话空闲后，若上下文达到第一个数，协调席的 mod 在空闲一分钟后压缩它，这时整个上下文还在提示缓存里。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第二个数时压缩（hansa coordinator 用 --autocompact 传给它）。两个数都在 100,000 到 1,000,000 token 之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或第一个数不小于第二个数），那个压缩就不会发生：Claude Code 自己先压缩了。第二个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。第一个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第二个数从会话下次启动起生效。协调席不能改它们。Claude Code（2.1.299 或更新的版本）还会自己压缩一个有 200,000 token 或更多、空闲了约 54 分钟的对话；这一项 hansa 既不设置也不读取。mod 需要 Claude Code 2.1.290 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
@@ -399,7 +399,7 @@ const T = ZH ? {
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
   effortDefault:"default", endpoint:"Endpoint", loginDir:"Login directory (blank = default)", key:"Key", keySet:"set", keyMissing:"missing",
   saveKey:"Save key", clearKey:"Clear key", keyHint:"Stored on this machine only; nobody can read it back", check:"Ping", checking:"pinging…",
-  rest:"rest",
+  rest:"rest", toppedUp:"Topped up",
   ready:"ready", lastCheck:"last ping", addProvider:"Add provider", newName:"name (a-z, 0-9, -)", remove:"Remove",
   general:"General", concurrency:"Tasks at once", compactIdle:"Compact when idle at (tokens)", compactWorking:"Compact while working at (tokens)",
   compactNote:"Once a turn has ended with an answer and the session is idle, the coordinator's mod compacts it after a minute if its context is at or above the first figure, while the whole context is still in the prompt cache. A new turn cancels the wait. While it works nothing interrupts it: Claude Code's own auto-compact compacts it at the second (hansa coordinator gives it with --autocompact). Both figures take 100,000 to 1,000,000 tokens. The defaults suit a model with a 1M-token window. A figure at or near the model's window, or a first figure at or above the second, never comes: Claude Code compacts on its own first. A second figure above the model's window is taken as that window: Claude Code compacts at the model's own limit, as with no figure. A change to the first applies from the session's next decision (when a turn ends, or a wait ends); a change to the second from the session's next start. The coordinator cannot change them. Claude Code (2.1.299 or later) also compacts by itself a conversation of 200,000 tokens or more left idle about 54 minutes; hansa neither sets nor reads that. The mod needs Claude Code 2.1.290 or later; the status line at the top says whether the session was started with it, and why not.",
@@ -739,7 +739,7 @@ async function loadStatus() {
       st.failed.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"bad"}, m.error)]))) : null,
     dashboardPanel(T.providers, "providers", st.providers.length, st.providers.length ? table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
       p.name, p.kind === "subscription" ? T.subscription : T.compatible,
-      p.model + (p.effort ? " · " + p.effort : "") + ` · ${T.rest} ${p.rest_minutes} min` + ` (${T.providers})`,
+      p.model + (p.effort ? " · " + p.effort : "") + (p.credit_since ? "" : ` · ${T.rest} ${p.rest_minutes} min (${T.providers})`),
       p.problem ? statusPill(p.problem, "warn", "error") : statusPill(T.ready, "ok"),
       p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${p.check.detail} (${when(p.check.at)})`) : "",
       checkButton(p.name, loadStatus)])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
@@ -839,7 +839,7 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, DISK_FREE = null, KEYS = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [], ALERT_OUTSIDE = [];
 // Drafts live only in this page's memory. In particular, keys never enter browser storage or settings JSON.
 let settingsBaseline = null, settingsLoading = null, settingsSaving = false, settingsGroup = "providers", settingsEpoch = 0;
 let settingsMessage = "", settingsProblems = [], KEY_DRAFTS = {}, newProviderName = "", newPriceName = "";
@@ -942,6 +942,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   // A clean page may refresh on return, but a reply must never replace edits begun while it was in flight.
   if (background && (epoch !== settingsEpoch || settingsSaving || settingsDirty() || JSON.stringify(S) !== before || newProviderName || newPriceName)) return;
   S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
+  CREDIT_RESTS = r.provider_credit || {};
   RELEASE_UNMATCHED = r.release_unmatched || []; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
   S.alert = S.alert || {command:""}; S.coordinator_alert = S.coordinator_alert || {}; S.coordinator_compact = S.coordinator_compact || {};
@@ -1005,13 +1006,27 @@ async function saveProviderKey(name, clear = false) {
   settingsPending = "key"; settingsSaving = true; keyProblemProvider = name; refreshSettingsState();
   try {
     const r = await api("/api/key", {provider:name, key:value});
-    if (r.ok || r.saved === true) { KEYS[name] = !!value.trim(); delete KEY_DRAFTS[name]; }
+    if (r.ok || r.saved === true) {
+      KEYS[name] = !!value.trim(); delete KEY_DRAFTS[name];
+      if (value.trim()) delete CREDIT_RESTS[name];
+    }
     if (r.ok === false) { settingsFailure = "key"; renderSettings(r.problems || [T.problems]); }
     else {
       if (settingsFailure === "key") { settingsProblems = []; settingsFailure = ""; }
       keyProblemProvider = ""; settingsMessage = clear ? T.keyCleared : T.keySaved; renderSettings();
     }
   } catch (e) { settingsFailure = "key"; renderSettings([String(e.message || e)]); }
+  finally { settingsSaving = false; refreshSettingsState(); }
+}
+async function topUpProvider(name) {
+  if (settingsSaving) return;
+  settingsSaving = true; refreshSettingsState();
+  try {
+    const r = await api("/api/provider/top-up", {provider:name});
+    if (r.ok) delete CREDIT_RESTS[name];
+    else err(new Error((r.problems || []).join("; ")));
+    renderSettings();
+  } catch (e) { err(e); }
   finally { settingsSaving = false; refreshSettingsState(); }
 }
 const help = (text, title = T.learnMore) => h("details", {class:"help"}, h("summary", {}, title), h("p", {}, text));
@@ -1207,6 +1222,8 @@ function renderSettings(problems = settingsProblems) {
           h("div", {class:"card-head"}, h("strong", {}, name), h("span", {class:"tag"}, p.kind === "compatible" ? T.compatible : T.subscription),
             h("div", {class:"card-actions"}, checkButton(name, null),
               h("button", {class:"danger", onclick:() => { delete S.providers[name]; delete KEY_DRAFTS[name]; renderSettings(); }}, T.remove))),
+          CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, CREDIT_RESTS[name]),
+            h("button", {onclick:() => topUpProvider(name)}, T.toppedUp)) : null,
           fields(field(T.kind, kindSel), field(T.model, bind(p, "model")), field(T.effort, pick(p, "effort", EFFORTS)),
             ...(p.kind === "compatible"
               ? [field(T.endpoint, bind(p, "base_url")), field(T.key,

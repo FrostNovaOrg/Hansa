@@ -101,10 +101,11 @@ def with_oom_score(argv: list, cwd=None, env=None) -> list:
 
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
-QUOTA = re.compile(r"API Error: (402|429)|rate_limit_error|usage limit reached|credit balance is too low|"
+CREDIT = re.compile(r"credit balance is too low|API Error: 402\b|insufficient[_ ]balance|insufficient_quota|余额不足", re.I)
+QUOTA = re.compile(r"API Error: 429|rate_limit_error|usage limit reached|"
                    r"you(?:'|’)ve hit your [\w' ]{0,40}limit|"  # Claude Code's own line for a subscription's limit
-                   r"insufficient[_ ](quota|balance)|quota exceeded|too many requests|余额不足|额度不足|额度已用", re.I)
-QUOTA_STATUS = {402, 429}
+                   r"insufficient quota|quota exceeded|too many requests|额度不足|额度已用", re.I)
+QUOTA_STATUS = {429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
 AUTH_STATUS = {401, 403}
 LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itself has no login for this provider
@@ -1169,28 +1170,44 @@ def _reset_time(text, at):
     return found
 
 
-def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "") -> float:
-    """Rest a provider that cannot be used ("quota" or a key or login problem, unusable_reason) and return
-    until when. After a usage limit: until the reset time its error gives (reset_time) and a minute, at most
-    REST_CAP; else for the desk's cool_minutes."""
-    t = time.time()
-    if kind != "quota":
-        until = t + 60 * KEY_REST_MINUTES
-        desk.set_provider_state(name, cool_until=until, reason=why, rest_how="", rest_minutes=None)
+def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "") -> float | None:
+    """Rest an unusable provider. Credit has no end time; usage limits use their reset time and a minute
+    (at most REST_CAP), else cool_minutes. Record and announce a credit rest once, across task finishes."""
+    with desk.lock():
+        if (desk.provider_state().get(name) or {}).get("credit_since"):
+            return None  # neither another failure nor a coordinator's check can end a credit rest
+        t = time.time()
+        if kind == "credit":
+            desk.set_provider_state(name, credit_since=t, cool_until=0, reason=desk.redact(why),
+                                    rest_how="credit", rest_minutes=None, unreachable_since=0, unreachable_reason="")
+            line = (f"provider {name}: credit balance too low at {time.strftime('%H:%M', time.localtime(t))}; "
+                    "it rests until you say on the page that it is topped up")
+            desk.event("provider_credit", provider=name, since=t, text=line)
+            return None
+        if kind != "quota":
+            until = t + 60 * KEY_REST_MINUTES
+            desk.set_provider_state(name, cool_until=until, reason=why, rest_how="", rest_minutes=None)
+            return until
+        try:
+            reset = reset_time(text, t)
+        except Exception as e:  # noqa: BLE001 - only a detail: the rest falls back to the fixed length
+            desk.event("detail_unread", provider=name, what="reset time", error=str(e)[:300])
+            reset = None
+        if reset is not None:
+            until = min(max(reset, t) + 60, t + REST_CAP)
+            desk.set_provider_state(name, cool_until=until, reason=why, rest_how="reset", rest_minutes=None)
+        else:
+            minutes = s.get("cool_minutes", 30)
+            until = t + 60 * minutes
+            desk.set_provider_state(name, cool_until=until, reason=why, rest_how="fixed", rest_minutes=minutes)
         return until
-    try:
-        reset = reset_time(text, t)
-    except Exception as e:  # noqa: BLE001 - only a detail: the rest falls back to the fixed length
-        desk.event("detail_unread", provider=name, what="reset time", error=str(e)[:300])
-        reset = None
-    if reset is not None:
-        until = min(max(reset, t) + 60, t + REST_CAP)
-        desk.set_provider_state(name, cool_until=until, reason=why, rest_how="reset", rest_minutes=None)
-    else:
-        minutes = s.get("cool_minutes", 30)
-        until = t + 60 * minutes
-        desk.set_provider_state(name, cool_until=until, reason=why, rest_how="fixed", rest_minutes=minutes)
-    return until
+
+
+def credit_text(st: dict) -> str:
+    """The principal alone ends a credit rest; the same words on the page and in the command views."""
+    since = st.get("credit_since")
+    return ("rests until the principal says it is topped up on the page; credit balance too low since "
+            + time.strftime('%m-%d %H:%M', time.localtime(since))) if since else ""
 
 
 def rest_text(st: dict) -> str:
@@ -1204,7 +1221,7 @@ def rest_text(st: dict) -> str:
 
 def tries_used(attempts: list) -> int:
     """Earlier runs except free usage-limit returns, system kills and drops during a known outage."""
-    return sum(1 for a in attempts if a.get("kind") != "killed"
+    return sum(1 for a in attempts if a.get("kind") not in ("killed", "credit")
                and (a.get("kind") != "limit" or a.get("counted"))
                and (a.get("kind") != "network" or a.get("counted", True)))
 
@@ -1238,12 +1255,14 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
     p = s["providers"].get(name)
     if not p:
         return "not in settings"
+    st = desk.provider_state().get(name, {})
+    if st.get("credit_since"):
+        return credit_text(st)
     if p["kind"] == "compatible":
         if not p.get("base_url"):
             return "no endpoint address"
         if not desk.has_key(name):
             return "no key"
-    st = desk.provider_state().get(name, {})
     if st.get("cool_until", 0) > time.time():
         if str(st.get("reason", "")).startswith("key rejected"):
             return f"{st['reason']}; saving a new key brings it back"
@@ -3901,15 +3920,17 @@ def refusal_reasons(home: Path, sid: str) -> dict:
 
 
 def unusable_reason(run: dict, err: str):
-    """Why this provider cannot be used for this run: ("quota" | "key" | "login" | "refused" | "", words)."""
+    """Why this provider cannot be used: ("credit" | "quota" | "key" | "login" | "refused" | "", words)."""
     if run.get("stop_reason") in REFUSED_STOPS:
         return "refused", f"refused the request ({run['stop_reason']})"
     status = run.get("api_error_status")
+    text = f"{run.get('result') or ''} {err}" if (run.get("is_error") or not run) else ""
+    if status == 402 or CREDIT.search(text):
+        return "credit", "credit balance too low"
     if status in QUOTA_STATUS:
         return "quota", f"out of quota (HTTP {status})"
     if status in AUTH_STATUS:
         return "key", f"key rejected (HTTP {status})"
-    text = f"{run.get('result') or ''} {err}" if (run.get("is_error") or not run) else ""
     m = QUOTA.search(text)
     if m:
         return "quota", f"out of quota ({m.group(0)})"
@@ -4146,11 +4167,12 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         state = "queued" if left and tries_used(attempts) < TRIES else "failed"
         error = f"{meta['provider']}: {why}; " + (
             "queued again for the lane's next provider" if state == "queued" else "no other provider in the lane to try")
-    elif kind == "quota":  # the provider's limit, not the task's doing: no try used, LIMIT_RETURNS times
+    elif kind in ("credit", "quota"):
         until = rest_provider(desk, desk.settings(), meta["provider"], kind, why, f"{run.get('result') or ''}\n{err}")
-        counted = sum(a.get("kind") == "limit" for a in attempts) >= LIMIT_RETURNS
-        attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "limit", "counted": counted,
-                         "rest_until": round(until)})
+        counted = kind != "credit" and sum(a.get("kind") == "limit" for a in attempts) >= LIMIT_RETURNS
+        attempts.append({"provider": meta["provider"], "at": now(), "error": why,
+                         "kind": "credit" if kind == "credit" else "limit", "counted": counted,
+                         "rest_until": round(until) if until is not None else None})
         state = "queued" if tries_used(attempts) < TRIES else "failed"
         error = f"{meta['provider']}: {why}; " + (
             f"gave up after {TRIES} tries" if state == "failed" else
@@ -4225,7 +4247,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         again = {"resumed": None, "restart": None} if final == "queued" else {}
         if (final == "queued" and len(attempts) > len(meta.get("attempts", []))
                 and meta.get("kind") != "verify"
-                and (kind == "quota" or net or attempts[-1].get("kind") == "killed")):
+                and (kind in ("quota", "credit") or net or attempts[-1].get("kind") == "killed")):
             again["restart"] = restart or interrupted_restart(desk, wt, meta, fields)
         if final == "queued" and meta.get("sandbox_failed"):  # its numbers still count (cost), as a run of the task
             kept = {"usage": {}, "turns": None, "earlier_runs": [*(now_meta.get("earlier_runs") or []), {
@@ -5875,7 +5897,7 @@ class Dispatcher:
         looked at too. Also once as the server starts, for rests that ran out while no server ran."""
         st = self.desk.provider_state()
         resting = {n for n in s["providers"] if (st.get(n) or {}).get("cool_until", 0) > time.time()
-                   or (st.get(n) or {}).get("unreachable_since")}
+                   or (st.get(n) or {}).get("credit_since") or (st.get(n) or {}).get("unreachable_since")}
         if resting != self.resting:
             self.desk.ready_news()
         self.resting = resting
@@ -5889,7 +5911,7 @@ class Dispatcher:
                 continue
             with self.desk.lock():
                 st = self.desk.provider_state().get(name) or {}
-                if not st.get("unreachable_since") or st.get("cool_until", 0) > time.time() or time.time() - max(
+                if st.get("credit_since") or not st.get("unreachable_since") or st.get("cool_until", 0) > time.time() or time.time() - max(
                         st["unreachable_since"], st.get("probe_at", 0)) < 60 * PROBE_MINUTES:
                     continue
                 self.desk.set_provider_state(name, probe_at=time.time())
@@ -6455,7 +6477,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
             return {**result, "ok": False, "detail": "the provider's key or settings changed while this check "
                                                      "ran, so it says nothing about them now; check again"}
         desk.set_provider_state(name, check=result)
-        if ok:
+        if ok and not (desk.provider_state().get(name) or {}).get("credit_since"):
             desk.set_provider_state(name, cool_until=0, reason="", unreachable_since=0, unreachable_reason="")
         elif kind:
             desk.set_provider_state(name, unreachable_since=0, unreachable_reason="")
