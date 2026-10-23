@@ -790,7 +790,7 @@ const dashboardPanel = (title, symbol, count, ...kids) => h("section", {class:"d
   h("div", {class:"section-head"}, h("h2", {}, icon(symbol), title), count == null ? null : h("span", {class:"count-badge"}, count)), ...kids);
 const emptyState = (title, note, symbol) => h("div", {class:"empty-state"}, icon(symbol), h("strong", {}, title), h("p", {}, note));
 const fmt = n => (n || 0).toLocaleString();
-const when = ts => ts ? new Date(ts * 1000).toLocaleString() : "";
+const when = ts => ts ? new Date(ts * 1000).toLocaleString(language) : "";
 async function api(path, body) {
   const opt = body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json", "X-Hansa":"1"}, body:JSON.stringify(body)};
   const r = await fetch(path, opt);
@@ -815,9 +815,22 @@ function err(e) { $("#state").textContent = String(e.message || e); $("#state").
 const detailOpen = new Set();
 let taskDetailSequence = 0;
 // Task-box strings stay with task/provider above, separate from the Status picture's dictionary.
+function taskStepTime(ts) {
+  const date = new Date(ts * 1000), options = {hour:"2-digit", minute:"2-digit"};
+  if (date.toDateString() !== new Date().toDateString()) {
+    options.month = "numeric"; options.day = "numeric";
+  }
+  return date.toLocaleString(language, options);
+}
+function taskDuration(seconds) {
+  if (seconds == null) return T.notKnown;
+  seconds = Math.max(0, seconds);
+  return seconds < 90 ? T.taskSeconds(Math.round(seconds))
+    : T.taskMinutes((seconds / 60).toFixed(seconds < 600 ? 1 : 0));
+}
 function taskStep(kind, label, start, duration, result, tone = "", running = false, extra = null) {
   return h("li", {class:"task-step " + tone, "data-task-step":kind, ...(running ? {"aria-current":"step"} : {})},
-    h("strong", {}, label), start ? h("time", {datetime:new Date(start * 1000).toISOString()}, when(start)) : h("span", {}, T.notKnown),
+    h("strong", {}, label), start ? h("time", {datetime:new Date(start * 1000).toISOString()}, taskStepTime(start)) : h("span", {}, T.notKnown),
     duration == null ? null : h("small", {}, duration), h("span", {}, running ? T.taskRunning : result), extra);
 }
 function taskCheckResult(r) {
@@ -827,17 +840,17 @@ function taskCheckResult(r) {
 function taskCheckStep(kind, label, r, start, running) {
   const first = r.retried || r.previous || (r.rerun_started ? r : null);
   const prior = first ? h("span", {class:first.ok === false || first.could_not_run ? "bad" : ""},
-    T.taskFirstResult, ": ", taskCheckResult(first), first.seconds != null ? " · " + T.taskSeconds(first.seconds) : "",
+    T.taskFirstResult, ": ", taskCheckResult(first), first.seconds != null ? " · " + taskDuration(first.seconds) : "",
     first.at != null && first.seconds != null ? h("time", {datetime:new Date((first.at - first.seconds) * 1000).toISOString()},
-      " · " + when(first.at - first.seconds)) : null) : null;
+      " · " + taskStepTime(first.at - first.seconds)) : null) : null;
   const cancelled = /cancelled|stopped on request/.test(r.note || "");
   const duration = running ? (start ? Math.max(0, Math.round(Date.now() / 1000 - start)) : null) : r.seconds;
-  return taskStep(kind, label, start, duration == null ? T.notKnown : T.taskSeconds(duration),
+  return taskStep(kind, label, start, taskDuration(duration),
     cancelled ? T.taskCancelled + (r.note ? " · " + r.note : "") : taskCheckResult(r),
     running ? "" : r.ok === false || r.could_not_run ? "bad" : r.ok === true ? "ok" : "", running, prior);
 }
 function taskSteps(m, v, ancestry) {
-  const minutes = (start, end) => start && end ? T.taskMinutes(Math.max(0, Math.round((end - start) / 6) / 10)) : T.notKnown;
+  const elapsed = (start, end) => start && end ? taskDuration(end - start) : T.notKnown;
   // Attempts and lost runs keep ran_from/ended; the last run keeps started/finished on the task.
   const runs = [...(m.attempts || []), ...(m.earlier_runs || [])].map(r => ({...r}));
   // A final failed attempt can keep its reason in attempts and its timing on the task itself.
@@ -856,10 +869,10 @@ function taskSteps(m, v, ancestry) {
   runs.sort((a, b) => (a.ran_from || a.ended || a.at || 0) - (b.ran_from || b.ended || b.at || 0));
   const firstStart = runs[0]?.ran_from;
   const steps = [taskStep("queued", T.taskQueued, m.created,
-    T.taskWait + ": " + minutes(m.created, firstStart || (m.state === "queued" && !runs.length ? Date.now() / 1000 : null)),
+    T.taskWait + ": " + elapsed(m.created, firstStart || (m.state === "queued" && !runs.length ? Date.now() / 1000 : null)),
     firstStart ? T.taskCompleted : T.notKnown, "", m.state === "queued")];
   runs.forEach((r, i) => steps.push(taskStep("run", T.taskRun(i + 1), r.ran_from,
-    [r.provider || T.notKnown, minutes(r.ran_from, r.ended || r.at || (r.running ? Date.now() / 1000 : null))].join(" · "),
+    [r.provider || T.notKnown, elapsed(r.ran_from, r.ended || r.at || (r.running ? Date.now() / 1000 : null))].join(" · "),
     [r.error || r.why || (r.cancelled ? T.taskCancelled : r.ended ? T.taskCompleted : T.notKnown),
       r.kind || "", r.exit != null ? T.taskExit(r.exit) : ""].filter(Boolean).join(" · "),
     r.running ? "" : r.error || r.why || r.cancelled ? "bad" : "", r.running)));
@@ -875,7 +888,7 @@ function taskSteps(m, v, ancestry) {
     const running = record && ["queued", "running"].includes(record.state);
     const holds = ["holds", "holds, with notes"].includes(verdict);
     steps.push(taskStep("verification", T.taskVerification, record?.started || record?.created,
-      minutes(record?.started, record?.finished || (running ? Date.now() / 1000 : null)),
+      elapsed(record?.started, record?.finished || (running ? Date.now() / 1000 : null)),
       record ? T["v_" + verdict] || T.v_none : T.taskVerificationUnavailable,
       holds ? "ok" : verdict === "does not hold" || record?.state === "failed" ? "bad" : "warn", running,
       own ? null : taskLink(m.verify, ancestry)));
@@ -1022,7 +1035,7 @@ function laneTracks(st) {
           h("span", {}, worker?.checking ? T.checkMinutes(worker.check_minutes, worker.minutes)
             : `${minutes || 0} ${T.minutes}`, " / ", `${m.limit_min} ${T.minutes}`)) : null,
         !compact ? h("div", {class:"lane-meta muted"},
-          started ? h("time", {datetime:started.toISOString()}, T.startedAt + " " + started.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})) : null,
+          started ? h("time", {datetime:started.toISOString()}, T.startedAt + " " + started.toLocaleTimeString(language, {hour:"2-digit", minute:"2-digit"})) : null,
           m ? h("span", {}, T.laneReplies(p?.replies ?? "—")) : null,
           m ? h("span", {}, T.laneIdle(p?.idle_min ?? "—")) : null,
           m ? h("span", {class:"lane-note", title:note}, T.lastNote + " " + (note || "—")) : null,

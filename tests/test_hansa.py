@@ -28489,11 +28489,27 @@ function openPage(search = "") {
     static revokeObjectURL(url) { revokedUrls.push(url); }
   }, Blob: class { constructor(parts, options) { this.parts = parts; this.type = options?.type || ""; }
     async text() { return this.parts.join(""); } }});
-  if (ask === "preferences") {
+  if (ask === "preferences" || given.pagePreferences) {
     for (const [name, value, mode] of [["sessionStorage", session, preferences.sessionMode], ["localStorage", local, preferences.localMode]]) {
       if (mode === "missing") continue;
       Object.defineProperty(context, name, {get() { if (mode === "access") throw new Error("storage access blocked"); return value; }});
     }
+  }
+  if (given.pageClock) {
+    context.pageClock = given.pageClock;
+    vm.runInContext(`
+      const SystemDate = Date;
+      Date = class extends SystemDate {
+        constructor(...args) { super(...(args.length ? args : [pageClock.now])); }
+        static now() { return new SystemDate(pageClock.now).getTime(); }
+        toLocaleString(locales, options) {
+          return super.toLocaleString(locales?.length ? locales : pageClock.browserLanguage, options);
+        }
+        toLocaleTimeString(locales, options) {
+          return super.toLocaleTimeString(locales?.length ? locales : pageClock.browserLanguage, options);
+        }
+      };
+    `, context);
   }
   vm.runInContext(script, context);
   return context;
@@ -28636,6 +28652,13 @@ else if (ask === "task-table-boxes") (async () => {
   }
   console.log(JSON.stringify({boxes, css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "page-time-language") (async () => {
+  await vm.runInContext("loadStatus()", ctx);
+  const event = descendants(ids["#tab-status"], "span").find(el => el.className === "event-time");
+  const lane = descendants(ids["#status-lanes"], "time")[0];
+  console.log(JSON.stringify({date:event?.textContent, start:lane?.textContent,
+    language:document.documentElement.attrs.lang}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "task-steps") (async () => {
   const flush = () => new Promise(resolve => setImmediate(resolve));
   const [button, box] = vm.runInContext('taskLink("t0042")', ctx);
@@ -28645,6 +28668,8 @@ else if (ask === "task-steps") (async () => {
   const steps = row instanceof El ? row.kids.filter(el => el instanceof El && el.attrs["data-task-step"]).map(el => ({
     step:el.attrs["data-task-step"], text:el.textContent, tone:el.className,
     current:el.attrs["aria-current"], times:descendants(el, "time").map(t => t.attrs.datetime),
+    timeText:descendants(el, "time").map(t => t.textContent),
+    durations:descendants(el, "small").map(t => t.textContent),
     failures:descendants(el, "span").filter(n => n.className === "bad").map(n => n.textContent)
   })) : [];
   const result = {steps, text:box.textContent, pre:descendants(box, "pre")[0]?.textContent,
@@ -30419,7 +30444,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 "merge_check_result": {"ok": True, "exit": 0, "at": 1700000390, "seconds": 30},
                 "merged": 1700000400, "merge_commit": "abcdef0123456789" * 2, **fields}
 
-    def task_steps_page(self, meta, language, related=None, open_task=None):
+    def task_steps_page(self, meta, language, related=None, open_task=None, clock=None):
         if not shutil.which("node"):
             self.skipTest("needs node to run the page's script")
         harness = self.tmp / "task-steps-page.js"
@@ -30431,13 +30456,88 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         replies["/api/task?id=t0042"] = {"meta": meta, "text": text}
         if open_task:
             replies["openTask"] = open_task
-        result = subprocess.run(["node", str(harness), str(page), "task-steps", language],
-                                input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+        browser = language
+        if clock:
+            browser = "zh-CN" if language == "en" else "en"
+            replies["pageClock"] = {"now": clock, "browserLanguage": browser}
+            replies["pagePreferences"] = {"local": {"hansa.language": "en" if language == "en" else "zh-CN"}}
+        result = subprocess.run(["node", str(harness), str(page), "task-steps", browser],
+                                input=json.dumps(replies), capture_output=True, text=True, timeout=60,
+                                env={**os.environ, "TZ": "UTC"})
         self.assertEqual(result.returncode, 0, result.stderr)
         shown = json.loads(result.stdout)
         self.assertEqual(shown["first"], "ol", "task steps must come before the plain text")
         self.assertEqual(shown["pre"], text)
         return shown
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_dates_and_lane_start_follow_page_language(self):
+        status = views.status(self.desk)
+        status["lanes"] = [{"name": "a", "providers": []}]
+        status["running"] = [{"id": "t0042", "lane": "a", "title": "Task", "minutes": 0, "limit_min": 240}]
+        harness = self.tmp / "page-time-language.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language, browser, date, start in (
+                ("zh-CN", "en", "2026/10/23 18:56:17", "开始 18:56"),
+                ("en", "zh-CN", "10/23/2026, 6:56:17 PM", "Started 06:56 PM")):
+            with self.subTest(language=language, browser=browser):
+                replies = {"/api/status": status, "/api/events": [{"ts": 1792781777, "event": "example"}],
+                           "pagePreferences": {"local": {"hansa.language": language}},
+                           "pageClock": {"now": "2026-10-23T18:56:17Z", "browserLanguage": browser}}
+                result = subprocess.run(["node", str(harness), str(page), "page-time-language", browser],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60,
+                                        env={**os.environ, "TZ": "UTC"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                shown = json.loads(result.stdout)
+                self.assertEqual(shown["language"], language)
+                with self.subTest(field="date"):
+                    self.assertEqual(shown["date"], date)
+                with self.subTest(field="lane start"):
+                    self.assertEqual(shown["start"], start)
+
+    def test_task_box_step_times_today_and_other_day(self):
+        for language in ("en", "zh"):
+            for offset, prefix in ((0, ""), (-86400, "10/22"), (-365 * 86400, "10/23")):
+                with self.subTest(language=language, offset=offset):
+                    start = 1792781777 + offset
+                    meta = self.task_steps_record(started=start, finished=start + 45,
+                        check_started=start, check={"ok": True, "seconds": 45,
+                            "retried": {"ok": False, "seconds": 45, "at": start + 45}})
+                    steps = self.task_steps_page(meta, language, clock="2026-10-23T20:00:00Z")["steps"]
+                    expected = ((prefix + (", " if language == "en" else " ")) if prefix else "") + (
+                        "06:56 PM" if language == "en" else "18:56")
+                    self.assertEqual(steps[1]["timeText"], [expected])
+                    self.assertEqual(steps[2]["timeText"], [expected, " · " + expected])
+                    self.assertEqual(steps[1]["times"], [time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(start))])
+
+    def test_task_box_step_duration_units_and_precision(self):
+        for language in ("en", "zh"):
+            for seconds, amount, unit in ((45, "45", "s"), (95, "1.6", "min"),
+                                          (360, "6.0", "min"), (6120, "102", "min"),
+                                          (89, "89", "s"), (90, "1.5", "min"),
+                                          (599, "10.0", "min"), (600, "10", "min")):
+                with self.subTest(language=language, seconds=seconds):
+                    start = 1792781777
+                    check = {"ok": True, "seconds": seconds, "at": start + seconds,
+                             "retried": {"ok": False, "seconds": seconds, "at": start + seconds}}
+                    meta = self.task_steps_record(created=start - seconds, started=start,
+                        finished=start + seconds, check_started=start, check=check,
+                        merge_check_result=check, verify="t0002")
+                    related = {"t0002": {"id": "t0002", "kind": "verify", "state": "done", "verdict": "holds",
+                                         "started": start, "finished": start + seconds}}
+                    steps = self.task_steps_page(meta, language, related, clock="2026-10-23T20:00:00Z")["steps"]
+                    expected = amount + " " + (unit if language == "en" else "秒" if unit == "s" else "分钟")
+                    for step in steps[:-1]:
+                        with self.subTest(step=step["step"]):
+                            duration = step["durations"][0]
+                            if step["step"] == "queued":
+                                duration = duration.split(": ", 1)[1]
+                            elif step["step"] == "run":
+                                duration = duration.split(" · ", 1)[1]
+                            self.assertEqual(duration, expected)
+                            if step["step"] in ("check", "merge-check"):
+                                self.assertIn(" · " + expected + " · ", step["text"])
 
     def test_task_box_steps_single_run_check_and_merge(self):
         for language in ("en", "zh"):
@@ -30450,8 +30550,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertIn(label, step["text"])
                     self.assertTrue(step["times"])
                     self.assertNotEqual(step.get("current"), "step")
-                self.assertIn("2 min" if language == "en" else "2 分钟", steps[0]["text"])
-                self.assertIn("3 min" if language == "en" else "3 分钟", steps[1]["text"])
+                self.assertIn("2.0 min" if language == "en" else "2.0 分钟", steps[0]["text"])
+                self.assertIn("3.0 min" if language == "en" else "3.0 分钟", steps[1]["text"])
                 self.assertIn("example-provider", steps[1]["text"])
                 self.assertIn("completed" if language == "en" else "已完成", steps[1]["text"])
                 self.assertIn("15 s" if language == "en" else "15 秒", steps[2]["text"])
@@ -30504,7 +30604,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertIn("connection lost", steps[1]["text"])
                 self.assertIn("bad", steps[1]["tone"].split())
                 self.assertIn("example-provider", steps[2]["text"])
-                self.assertIn("1 min" if language == "en" else "1 分钟", steps[0]["text"])
+                self.assertIn("60 s" if language == "en" else "60 秒", steps[0]["text"])
                 self.assertIn("First result" if language == "en" else "首次结果", steps[3]["text"])
                 self.assertIn("137", "".join(steps[3]["failures"]))
                 self.assertIn("22 s" if language == "en" else "22 秒", steps[3]["text"])
@@ -30590,7 +30690,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 steps = self.task_steps_page(meta, language)["steps"]
                 self.assertEqual([s["step"] for s in steps], ["queued", "run", "run"])
                 self.assertIn("refused", steps[-1]["text"])
-                self.assertIn("3 min" if language == "en" else "3 分钟", steps[-1]["text"])
+                self.assertIn("3.0 min" if language == "en" else "3.0 分钟", steps[-1]["text"])
                 self.assertIn("bad", steps[-1]["tone"].split())
 
     def test_task_box_steps_current_queue_verification_and_merge(self):
