@@ -159,9 +159,12 @@ which hansa reads. A model warning is said in the result and `codex_warnings`; i
 
 hansa checks a provider (`hansa ping`, the page, `hansa serve` while one cannot be reached) with
 `claude -p --output-format json --max-turns 1 --tools ""`, in `<desk>/.hansa/check`, a clean environment and
-`Reply with the single word OK.` on stdin, and judges the answer as it judges Claude's. hansa gives a check no
-sandbox, so the adapter makes one: a new empty folder `codex-check-…` in `TMPDIR`, which is Codex's working
-folder and `TMPDIR` and is removed afterwards however the check ends; writes there and in the Codex home only;
+`Reply with the single word OK.` on stdin, and judges the answer as it judges Claude's. Run from a shell,
+`hansa ping` uses the `claude` program the recorded `hansa serve` start used, from the `env` in
+`<desk>/.hansa/serve-start.json` (here the adapter), not whichever `claude` that shell would find, and says so
+first when the two differ. hansa gives a check no sandbox, so the adapter makes one: a new empty folder
+`codex-check-…` in `TMPDIR`, which is Codex's working folder and `TMPDIR` and is removed afterwards however
+the check ends; writes there and in the Codex home only;
 no reads of the usual logins in the home folder (`~/.ssh`, `~/.aws`, `~/.claude`, `~/.codex` and the like), of
 the folder hansa ran the check in, or of the desk's `.hansa`; the network, OpenAI's hosts alone. The rest is a
 worker run's, with `--skip-git-repo-check` and no developer instructions or lane env. A usage limit or a failed

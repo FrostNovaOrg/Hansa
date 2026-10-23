@@ -66,6 +66,14 @@ def start_env(desk: Desk, env) -> dict:
             and not any(key in v for key in keys)}
 
 
+def recorded_program(desk: Desk, name: str = "claude"):
+    """The program the last recorded `hansa serve` start runs `name` with, or None when no start is recorded or its
+    record keeps no environment (an older start's, say)."""
+    rec = read_json(desk.state_dir / "serve-start.json", {})
+    env = rec.get("env") if isinstance(rec, dict) else None
+    return program(name, env=env) if isinstance(env, dict) else None
+
+
 def tmux_server(socket: str) -> list:
     """tmux recreates its own socket directory after reboot; custom sockets keep their full path."""
     path = Path(socket)

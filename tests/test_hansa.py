@@ -17417,6 +17417,44 @@ def save():'''))
         self.assertEqual(self.argv[self.argv.index("--tools") + 1], "")
         self.assertIn("--strict-mcp-config", self.argv)  # its other options stay
 
+    def ping_provider(self):
+        """A compatible provider `mimo` whose model the desk's fake claude answers OK."""
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-ping-0001")
+
+    def record_start_with(self, claude):
+        """A server start record whose environment finds `claude` as the program; the shell's PATH for the rest."""
+        write_json(self.desk.state_dir / "serve-start.json",
+                   {"env": {"PATH": os.environ["PATH"], "HANSA_CLAUDE": str(claude)}})
+
+    def test_ping_runs_the_program_the_serve_start_recorded_not_this_shells(self):
+        self.ping_provider()
+        failing = self.tmp / "shell-claude"
+        failing.write_text("#!/bin/sh\necho 'not logged in'\n")
+        failing.chmod(0o755)
+        os.environ["HANSA_CLAUDE"] = str(failing)
+        self.record_start_with(self.tmp / "claude")  # the desk's fake, which answers OK
+        lines = self.hansa("ping", "mimo").splitlines()
+        self.assertEqual(lines[-1], "mimo: ok - fake-model")
+        self.assertIn(str(self.tmp / "claude"), lines[0])
+        self.assertIn(str(failing), lines[0])
+
+    def test_ping_without_a_start_record_uses_this_shells_program_and_says_nothing_else(self):
+        self.ping_provider()
+        self.assertEqual(self.hansa("ping", "mimo"), "mimo: ok - fake-model\n")
+
+    def test_ping_with_a_start_record_of_this_shells_program_says_nothing_else(self):
+        self.ping_provider()
+        self.record_start_with(self.tmp / "claude")  # setUp's HANSA_CLAUDE names it too
+        self.assertEqual(self.hansa("ping", "mimo"), "mimo: ok - fake-model\n")
+
+    def test_ping_with_a_start_record_that_keeps_no_environment_uses_this_shells_program(self):
+        self.ping_provider()
+        write_json(self.desk.state_dir / "serve-start.json", {"options": {}})
+        self.assertEqual(self.hansa("ping", "mimo"), "mimo: ok - fake-model\n")
+
     def test_a_ping_stopped_at_the_turn_limit_after_an_answer_is_ok(self):
         r = self.ping_on("tool-first")
         self.assertEqual((r["ok"], r["detail"]), (True, "tool-first: answered, but stopped at the turn limit"))

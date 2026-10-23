@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import account, alert, build, cost, gaps, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
 from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
-                   lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, read_json, refused_rule, resolved, write_json,
+                   lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name, compact_settings, work_lane_problem, write_text)
 from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
@@ -1371,8 +1371,13 @@ def cmd_cost(a):
 def cmd_ping(a):
     desk = Desk.find(a.desk)
     names = [a.provider] if a.provider else sorted(desk.settings()["providers"])
+    # the program the recorded hansa serve start runs its workers through, which need not be this shell's
+    served, mine = up.recorded_program(desk), program("claude")
+    if served and served != mine:
+        print(f"pinging with {served}, the program the recorded hansa serve start uses; "
+              f"this shell's is {mine or 'none'}")
     for n in names:
-        r = check_provider(desk, n)
+        r = check_provider(desk, n, claude=served or "")
         print(f"{n}: {'ok' if r['ok'] else 'NOT ok'} - {r['detail']}")
 
 
@@ -3290,6 +3295,8 @@ def main(argv=None):
                    "called; then totals by what started them. No message text")
     p.epilog = see_more("cost-figures")
     p = add("ping", cmd_ping, "send one tiny request through a provider (or all)")
+    p.description += (". It runs the claude program the recorded hansa serve start used, not necessarily this "
+                      "shell's, and says so when they differ.")
     p.add_argument("provider", nargs="?")
     p = add("up", cmd_up, "start this desk's server and the coordinator's session again as they last ran; outside "
             "a desk, start this account's desks")
