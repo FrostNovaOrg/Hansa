@@ -812,6 +812,7 @@ class Progress:
         if self.path is None:
             return
         last = time.time()
+        said = said.strip()
         note = said.splitlines()[0] if said else ""
         if self.changed == (replies, note) and last - self.wrote < 10:
             return
@@ -993,7 +994,8 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
                 seen.add(item.get("id") or f"#{len(seen)}")
                 if len(seen) > max_turns:
                     over = True
-            elif t == "item.completed" and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+            elif (t == "item.completed" and item.get("type") == "agent_message"
+                  and isinstance(item.get("text"), str) and item["text"]):
                 said = item["text"]
             elif t == "item.completed" and item.get("type") == "error" and item.get("message"):
                 warnings.append(str(item["message"]))  # a warning (Model metadata for `x` not found), not a failure

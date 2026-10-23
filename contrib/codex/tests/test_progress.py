@@ -21,6 +21,19 @@ class WorkerProgress(Scratch):
         self.assertGreaterEqual(progress["last"], began)
         self.assertLessEqual(progress["last"], time.time())
 
+    def test_empty_agent_message_keeps_previous_answer_and_progress_note(self):
+        run, code = self.run_worker("progress_empty_message.jsonl", argv=self.worker_argv(max_turns=1))
+        self.assertEqual((code, run["subtype"], run["num_turns"]), (1, "error_max_turns", 2))
+        progress = json.loads((self.root / "claude-home" / "progress" / f"{self.sid}.json").read_text())
+        self.assertEqual(progress["note"], "Real progress note.")
+        self.assertEqual(run["result"], "Real progress note.")
+
+    def test_progress_note_strips_message_before_taking_first_line(self):
+        run, code = self.run_worker("progress_blank_line.jsonl")
+        self.assertEqual((code, run["subtype"]), (0, "success"))
+        progress = json.loads((self.root / "claude-home" / "progress" / f"{self.sid}.json").read_text())
+        self.assertEqual(progress["note"], "Checking tests.")
+
     def test_progress_write_failure_does_not_fail_worker(self):
         (self.root / "claude-home").write_text("not a directory")
         run, code = self.run_worker("progress.jsonl")
