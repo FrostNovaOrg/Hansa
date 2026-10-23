@@ -1034,53 +1034,56 @@ function pipelineStrip(st) {
     h("div", {class:"pipeline-stages"}, FLOW_STEPS.map(box)), box("principal")));
 }
 function laneTracks(st) {
+  const active = [], idle = [];
+  st.lanes.forEach(l => {
+    const worker = st.running.find(m => m.lane === l.name);
+    const merge = (st.merging || []).find(m => (m.lane === l.name || m.id === l.task) && ["starting", "running"].includes(m.phase));
+    const m = worker || merge, parent = worker && verificationParent(st, worker.id);
+    const dimmed = !m && !l.trying;
+    const step = worker ? runningStep(st, worker) : merge ? "merge" : "";
+    const queued = st.queued.filter(q => q.lane === l.name);
+    const held = Object.values(l.held || {});
+    const compact = !m && !l.task && !l.trying && !held.length && !queued.length;
+    const role = [l.merge_lane ? T.mergeLane(l.merge_for || []) : "", l.verify_for?.length ? T.verifyLane(l.verify_for) : ""].filter(Boolean).join(" · ");
+    const minutes = worker?.checking && worker.check_retry ? worker.check_minutes : m?.minutes;
+    const providers = (l.providers || []).map(name => {
+      const p = st.providers.find(p => p.name === name);
+      return name + (p ? ` (${p.model})` : "");
+    }).join(" → ");
+    const started = m && new Date(Date.now() - (minutes || 0) * 60000);
+    const p = worker?.progress;
+    const note = (p?.note || "").split(/\r?\n/)[0];
+    (dimmed ? idle : active).push(h("article", {id:"status-lane-" + l.name, class:"lane-track" + (dimmed ? " dimmed" : ""),
+      "data-lane-track":l.name, "data-step":step, title:compact && role ? role : null},
+      h("div", {class:"lane-track-head"}, h("strong", {}, l.name),
+        h("span", {class:"muted"}, providers || "—"),
+        worker?.provider ? statusPill(`${worker.provider} (${worker.model || "—"})`) : null,
+        !m ? statusPill(held.length ? T.laneHeld : l.trying ? T.laneTrying : queued.length ? T.laneQueued(queued.length) : T.free, held.length || l.trying || queued.length ? "warn" : "") : null,
+        compact && role ? h("span", {class:"muted"}, role) : null),
+      !compact && l.merge_lane ? h("div", {class:"muted"}, T.mergeLane(l.merge_for || [])) : null,
+      !compact && l.verify_for?.length ? h("div", {class:"muted"}, T.verifyLane(l.verify_for)) : null,
+      !compact ? h("div", {class:"lane-steps", "aria-label":T.taskFlow}, FLOW_STEPS.map(s => h("span", {
+        class:"status-pill" + (s === step ? " current-step" : ""), "aria-current":s === step ? "step" : null}, flowLabel(s)))) : null,
+      m ? h("div", {class:"lane-task"}, taskLink(m.id), " · ", m.title,
+        parent ? [" · ", T.verifyingTask, " ", taskLink(parent.id)] : null,
+        worker?.browser ? T.withBrowser : null,
+        worker?.checking ? h("span", {class:"muted"}, " · " + T.checkingWork) : null) : l.task ? taskLink(l.task) : null,
+      m ? h("div", {class:"lane-time"}, h("progress", {class:"lane-budget" + (minutes > m.limit_min * .75 ? " warn" : ""),
+        value:minutes || 0, max:m.limit_min, "aria-label":T.timeBudget(minutes || 0, m.limit_min)}),
+        h("span", {}, worker?.checking ? T.checkMinutes(worker.check_minutes, worker.minutes)
+          : `${minutes || 0} ${T.minutes}`, " / ", `${m.limit_min} ${T.minutes}`)) : null,
+      !compact ? h("div", {class:"lane-meta muted"},
+        started ? h("time", {datetime:started.toISOString()}, T.startedAt + " " + started.toLocaleTimeString(language, {hour:"2-digit", minute:"2-digit"})) : null,
+        m ? h("span", {}, T.laneReplies(p?.replies ?? "—")) : null,
+        m ? h("span", {}, T.laneIdle(p?.idle_min ?? "—")) : null,
+        m ? h("span", {class:"lane-note", title:note}, T.lastNote + " " + (note || "—")) : null,
+        h("span", {}, T.laneQueued(queued.length))) : null,
+      !m && queued.length ? h("div", {class:"muted"}, waitingText(queued[0])) : null,
+      held.map(held => h("div", {class:"warn lane-held"}, T.laneHeld + ": " + held.why))));
+  });
   return h("section", {id:"status-lanes", class:"dashboard-panel"},
     h("div", {class:"section-head"}, h("h2", {}, icon("lanes"), T.laneTracks), h("span", {class:"count-badge"}, st.lanes.length)),
-    st.lanes.length ? st.lanes.map(l => {
-      const worker = st.running.find(m => m.lane === l.name);
-      const merge = (st.merging || []).find(m => (m.lane === l.name || m.id === l.task) && ["starting", "running"].includes(m.phase));
-      const m = worker || merge, parent = worker && verificationParent(st, worker.id);
-      const step = worker ? runningStep(st, worker) : merge ? "merge" : "";
-      const queued = st.queued.filter(q => q.lane === l.name);
-      const held = Object.values(l.held || {});
-      const compact = !m && !l.task && !l.trying && !held.length && !queued.length;
-      const role = [l.merge_lane ? T.mergeLane(l.merge_for || []) : "", l.verify_for?.length ? T.verifyLane(l.verify_for) : ""].filter(Boolean).join(" · ");
-      const minutes = worker?.checking && worker.check_retry ? worker.check_minutes : m?.minutes;
-      const providers = (l.providers || []).map(name => {
-        const p = st.providers.find(p => p.name === name);
-        return name + (p ? ` (${p.model})` : "");
-      }).join(" → ");
-      const started = m && new Date(Date.now() - (minutes || 0) * 60000);
-      const p = worker?.progress;
-      const note = (p?.note || "").split(/\r?\n/)[0];
-      return h("article", {id:"status-lane-" + l.name, class:"lane-track" + (!m && !l.trying ? " dimmed" : ""),
-        "data-lane-track":l.name, "data-step":step, title:compact && role ? role : null},
-        h("div", {class:"lane-track-head"}, h("strong", {}, l.name),
-          h("span", {class:"muted"}, providers || "—"),
-          worker?.provider ? statusPill(`${worker.provider} (${worker.model || "—"})`) : null,
-          !m ? statusPill(held.length ? T.laneHeld : l.trying ? T.laneTrying : queued.length ? T.laneQueued(queued.length) : T.free, held.length || l.trying || queued.length ? "warn" : "") : null,
-          compact && role ? h("span", {class:"muted"}, role) : null),
-        !compact && l.merge_lane ? h("div", {class:"muted"}, T.mergeLane(l.merge_for || [])) : null,
-        !compact && l.verify_for?.length ? h("div", {class:"muted"}, T.verifyLane(l.verify_for)) : null,
-        !compact ? h("div", {class:"lane-steps", "aria-label":T.taskFlow}, FLOW_STEPS.map(s => h("span", {
-          class:"status-pill" + (s === step ? " current-step" : ""), "aria-current":s === step ? "step" : null}, flowLabel(s)))) : null,
-        m ? h("div", {class:"lane-task"}, taskLink(m.id), " · ", m.title,
-          parent ? [" · ", T.verifyingTask, " ", taskLink(parent.id)] : null,
-          worker?.browser ? T.withBrowser : null,
-          worker?.checking ? h("span", {class:"muted"}, " · " + T.checkingWork) : null) : l.task ? taskLink(l.task) : null,
-        m ? h("div", {class:"lane-time"}, h("progress", {class:"lane-budget" + (minutes > m.limit_min * .75 ? " warn" : ""),
-          value:minutes || 0, max:m.limit_min, "aria-label":T.timeBudget(minutes || 0, m.limit_min)}),
-          h("span", {}, worker?.checking ? T.checkMinutes(worker.check_minutes, worker.minutes)
-            : `${minutes || 0} ${T.minutes}`, " / ", `${m.limit_min} ${T.minutes}`)) : null,
-        !compact ? h("div", {class:"lane-meta muted"},
-          started ? h("time", {datetime:started.toISOString()}, T.startedAt + " " + started.toLocaleTimeString(language, {hour:"2-digit", minute:"2-digit"})) : null,
-          m ? h("span", {}, T.laneReplies(p?.replies ?? "—")) : null,
-          m ? h("span", {}, T.laneIdle(p?.idle_min ?? "—")) : null,
-          m ? h("span", {class:"lane-note", title:note}, T.lastNote + " " + (note || "—")) : null,
-          h("span", {}, T.laneQueued(queued.length))) : null,
-        !m && queued.length ? h("div", {class:"muted"}, waitingText(queued[0])) : null,
-        held.map(held => h("div", {class:"warn lane-held"}, T.laneHeld + ": " + held.why)));
-    }) : emptyState(T.noLanes, T.noLanesNote, "lanes"));
+    st.lanes.length ? [...active, ...idle] : emptyState(T.noLanes, T.noLanesNote, "lanes"));
 }
 
 let timelinePanel = null, timelineReport = null, timelineFetchedAt = 0, timelinePending = null;

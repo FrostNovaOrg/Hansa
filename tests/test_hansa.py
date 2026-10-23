@@ -28679,7 +28679,8 @@ else if (ask.startsWith("status-picture")) (async () => {
     for (const box of boxes) {
       await box.click(); clicks.push(!!ids["#" + box.attrs["aria-controls"]]?.scrolled);
     }
-    return {rows, lists, text:root.textContent, state:ids["#state"].textContent,
+    return {rows, lists, laneCount:descendants(ids["#status-lanes"], "span").find(el => el.className === "count-badge")?.textContent,
+      text:root.textContent, state:ids["#state"].textContent,
       warnings:descendants(ids["#state"], "span").filter(el => el.className === "warn").map(el => el.textContent),
       events:descendants(root, "div").filter(el => el.className === "event-row").map(el => ({text:el.textContent,
         time:descendants(el, "span").find(n => n.className === "event-time")?.textContent,
@@ -30124,6 +30125,46 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertFalse(row["marked"])
             self.assertFalse(any("Providers in order" in t or "用哪家" in t for t in page["tables"]))
             self.assertTrue(all("dimmed" in b["tone"] for b in page["boxes"]))
+
+    def test_status_picture_active_lanes_first_in_status_order(self):
+        cases = (("worker", "abcd", "cabd"),
+                 ("worker-merge", "abcd", "bdac"),
+                 ("try", "abc", "cab"),
+                 ("free", "ab", "ab"),
+                 ("queued-held", "abc", "abc"),
+                 ("check", "abcd", "cabd"),
+                 ("verification", "abcd", "cabd"),
+                 ("review", "abc", "abc"))
+        for scenario, names, expected in cases:
+            st = self.picture_status()
+            st["lanes"] = [{**st["lanes"][0], "name": name} for name in names]
+            active = set()
+            if scenario in ("worker", "check", "verification", "worker-merge"):
+                lane = "b" if scenario == "worker-merge" else "c"
+                st["running"] = [self.picture_worker(lane=lane, checking=scenario == "check")]
+                active.add(lane)
+            if scenario == "worker-merge":
+                st["merging"] = [{"id": "merge", "lane": "d", "title": "Merge task",
+                                  "phase": "running", "minutes": 5, "limit_min": 9}]
+                active.add("d")
+            elif scenario == "verification":
+                st["review"] = [{"id": "parent", "lane": "a", "title": "Being verified",
+                                 "verify": {"task": "t0042", "state": "running", "lane": "c"}}]
+            elif scenario == "try":
+                st["lanes"][2]["trying"] = True
+                active.add("c")
+            elif scenario == "queued-held":
+                st["queued"] = [{"id": "next", "lane": "b", "title": "Next", "waiting": "busy"}]
+                st["lanes"][2]["held"] = {"work": {"why": "sandbox unavailable"}}
+            elif scenario == "review":
+                st["lanes"][2]["task"] = "waiting"
+                st["review"] = [{"id": "waiting", "lane": "c", "title": "Awaiting review"}]
+            for language, [page] in self.picture_pages(st):
+                with self.subTest(scenario=scenario, language=language):
+                    self.assertEqual([row["lane"] for row in page["rows"]], list(expected))
+                    self.assertEqual(page["laneCount"], str(len(names)))
+                    for row in page["rows"]:
+                        self.assertEqual("dimmed" in row["tone"], row["lane"] not in active)
 
     def test_status_picture_worker_progress_start_and_timeout_warning(self):
         st = self.picture_status()

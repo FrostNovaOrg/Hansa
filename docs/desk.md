@@ -29,9 +29,10 @@ Merge checks include those queued. A separate box counts waiting releases
 plus open requests. Clicking a box scrolls to its list (running stages use the lane
 tracks). Zero counts are dimmed.
 
-Below the strip, lane tracks replace the Lanes and Running tables, in the order
-sent by status. Each retains the providers in order, their models, the active
-provider and model, task link and title, browser marker and check timing. The
+Below the strip, lane tracks replace the Lanes and Running tables, with running
+workers, checks, verifications, merge checks and lane tries first, then dimmed lanes,
+preserving status order within each group. Each retains the providers in order,
+their models, the active provider and model, task link and title, browser marker and check timing. The
 merge and verify lanes also name the lanes they serve and the work they accept.
 The marked step distinguishes workers, checks, verifications (with their parent task)
 and merge checks. A running merge check still appears on its occupied lane if that
