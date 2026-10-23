@@ -1,2 +1,2 @@
-# Side-by-side tasks each append CHANGELOG entries; keep both sides' lines instead of conflicting.
+# When two changes touch CHANGELOG.md, both sides' lines are kept.
 CHANGELOG.md merge=union
