@@ -29643,6 +29643,33 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 for en, zh in expected:
                     self.assertIn(en if language == "en" else zh, text)
 
+    def test_status_waiting_reason_keeps_server_login_and_key_instructions(self):
+        from hansa import run
+        self.desk.new_task("Queued", lane="a")
+        cases = [
+            ("subscription", "not logged in (Please run /login)",
+             "log in with `CLAUDE_CONFIG_DIR='/example/claude two <&>' claude`"),
+            ("compatible", "not logged in (Please run /login)", "saving a new key brings it back"),
+            ("compatible", "key rejected (401)", "saving a new key brings it back"),
+        ]
+        for kind, why, instruction in cases:
+            settings = self.desk.settings()
+            settings["providers"]["claude"].update(kind=kind, config_dir="/example/claude two <&>",
+                                                    base_url="https://example.invalid")
+            self.assertEqual(self.desk.save_settings(settings), [])
+            self.desk.write_key("claude", "sk-test-status-01")
+            run.rest_provider(self.desk, settings, "claude", "login" if why.startswith("not logged in") else "key", why)
+            with unittest.mock.patch.object(hansa.account, "LINUX", False):
+                st = views.status(self.desk)
+            for language, [page] in self.picture_pages(st):
+                with self.subTest(kind=kind, why=why, language=language):
+                    # Both the lane's first wait and the queued task keep the server's actual remedy.
+                    for text in (page["rows"][0]["text"], "".join(page["tables"])):
+                        self.assertIn("resting until" if language == "en" else "休息到", text)
+                        self.assertIn(instruction, text)
+                        if why.startswith("not logged in"):
+                            self.assertIn("hansa ping claude", text)
+
     def test_status_picture_server_warnings_keep_server_text(self):
         st = self.picture_status()
         st.update(serve_code="restart hansa <&>", alert_failed="alert exit 4 <&>",
@@ -29713,7 +29740,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             ("release_answered", {"id": 8, "yes": False}, "refused", "已拒绝"),
             ("release_void", {"id": 8}, "voided", "已作废"),
             ("release_forbidden", {"id": 8}, "forbidden words", "禁词"),
-            ("release_waits", {"id": 8, "lane": "a"}, "waits for lane a", "等待工作线 a"),
+            ("release_waits", {"id": 8, "lane": "a", "target": "web"}, "waits for the principal's answer again", "再次等待主理人答复"),
             ("release_stopping", {"id": 8}, "stopping", "正在停止"),
             ("release_stopped", {"id": 8}, "stopped", "已停止"),
             ("lane_try_queued", {"lane": "a"}, "try queued", "试跑已排队"),
@@ -29731,6 +29758,33 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertIn(en if language == "en" else zh, rendered["text"])
                     self.assertEqual(rendered["links"], ["t0042"])
                     self.assertNotIn(kind, rendered["text"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_status_recent_events_release_waits_for_principals_answer_again(self):
+        from hansa import release
+        self.with_targets(web="true")
+        self.tick_targets("web")
+        self.hansa("release", "a", "web")
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+        self.tick_targets()
+        Dispatcher(self.desk).tick()
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r.get("without_asking")), ("waiting", None))
+        [event] = self.events("release_waits")
+        self.assertIn("no longer on the principal's list", event["why"])
+        for language in ("en", "zh"):
+            [page] = self.page_header("status-picture", self.picture_status(), language, events=[event])
+            with self.subTest(language=language):
+                text = page["events"][0]["text"]
+                self.assertIn("Release #1" if language == "en" else "发布 #1", text)
+                # The release needs a fresh answer because its exemption ceased to count; the lane is not busy.
+                self.assertIn("waits for the principal's answer again" if language == "en" else "再次等待主理人答复", text)
+                self.assertIn("lane a, target web" if language == "en" else "工作线 a，目标 web", text)
+                self.assertIn("target is no longer on their list of releases without asking" if language == "en"
+                              else "此目标已不在免询问发布列表中", text)
+                self.assertIn("or no longer matches what the list recorded" if language == "en"
+                              else "或已与列表记录不符", text)
+                self.assertNotIn("waits for lane" if language == "en" else "等待工作线", text)
 
     def test_status_picture_verification_names_its_parent(self):
         st = self.picture_status()

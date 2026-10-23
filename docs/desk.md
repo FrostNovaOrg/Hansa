@@ -88,6 +88,8 @@ Lane reasons use `missing_lane`, `merge_lane`, `verify_lane` or `busy` with
 Sizes include their units, and times are Unix seconds. Unknown codes, including
 nested ones, keep the server's English sentence. Error details and names remain
 as the server sent them.
+Login and rejected-key rests also keep the server's recovery sentence in both
+page languages, including the login command or how saving a new key restores it.
 
 The status line also warns about `serve_code`, `alert_failed` and every line of
 `unreached`, with short translated labels and the server's original text.
@@ -111,6 +113,9 @@ sentence in the page's language and a task link when they carry `task`:
 
 Other kinds retain their raw event name and `key=value` text. A missing check
 result reads as unknown; a check that could not run says so.
+`release_waits` names the lane and target and says the release needs the principal's
+answer again because its target left the releases-without-asking list or no longer
+matches what that list recorded.
 
 Cost offers the last 1, 7 or 30 days, with token usage, estimated value and unpriced
 tokens above the six category tables. Unpriced models and unreadable coordinator

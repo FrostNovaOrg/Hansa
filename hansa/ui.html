@@ -362,8 +362,8 @@ const T = ZH ? {
     providers:(v, render) => `工作线 ${v.lane} 没有就绪的供应（${v.providers.map(p => `${p.values.provider}：${render(p)}`).join("；")}）`,
     refused:() => "拒绝了这件任务", missing_provider:() => "设置中没有这家供应", no_endpoint:() => "没有接口地址", no_key:() => "没有密钥",
     credit:v => `余额不足，自 ${when(v.since)} 起休息，等主理人在网页上确认充值`,
-    rest:v => `休息到 ${when(v.until)}（${v.why}）` + (v.how === "reset" ? "；按错误给的重置时间再加一分钟"
-      : v.minutes ? `；错误没给重置时间，休息 ${v.minutes} 分钟` : "；修复登录或密钥后运行 hansa ping " + v.provider),
+    rest:(v, render, text) => `休息到 ${when(v.until)}（${v.why}）` + (v.how === "reset" ? "；按错误给的重置时间再加一分钟"
+      : v.minutes ? `；错误没给重置时间，休息 ${v.minutes} 分钟` : "；修复登录或密钥后运行 hansa ping " + v.provider + (text ? `；${text}` : "")),
     unreachable:v => `自 ${when(v.since)} 起无法连接（${v.why}），定时重试`
   },
   task:"任务", provider:"供应", titleCol:"内容", changes:"改动", refused:"被拒的命令", error:"原因",
@@ -434,7 +434,8 @@ const T = ZH ? {
     release_answered:e => `发布 #${e.id} ${e.yes ? "已批准" : "已拒绝"}`,
     release_started:e => `发布 #${e.id} 开始：${e.lane || "—"} ${e.target || ""}`,
     release_ended:(e, result) => `发布 #${e.id} ${result(e)}`, release_void:e => `发布 #${e.id} 已作废`,
-    release_forbidden:e => `发布 #${e.id} 因禁词被阻止`, release_waits:e => `发布 #${e.id} 等待工作线 ${e.lane || "—"}`,
+    release_forbidden:e => `发布 #${e.id} 因禁词被阻止`,
+    release_waits:e => `发布 #${e.id}（工作线 ${e.lane || "—"}，目标 ${e.target || "—"}）再次等待主理人答复：此目标已不在免询问发布列表中，或已与列表记录不符`,
     release_stopping:e => `发布 #${e.id} 正在停止`, release_stopped:e => `发布 #${e.id} 已停止`,
     lane_try_queued:e => `工作线 ${e.lane} 试跑已排队`, lane_try_started:e => `工作线 ${e.lane} 试跑开始`,
     lane_tried:(e, result) => `工作线 ${e.lane} 试跑${result(e)}`, lane_try_withdrawn:e => `工作线 ${e.lane} 试跑已撤回`,
@@ -503,8 +504,8 @@ const T = ZH ? {
     providers:(v, render) => `lane ${v.lane} has no provider ready (${v.providers.map(p => `${p.values.provider}: ${render(p)}`).join("; ")})`,
     refused:() => "refused this task", missing_provider:() => "not in settings", no_endpoint:() => "no endpoint address", no_key:() => "no key",
     credit:v => `credit balance too low since ${when(v.since)}; rests until the principal confirms a top-up on the page`,
-    rest:v => `resting until ${when(v.until)} (${v.why})` + (v.how === "reset" ? "; the reset time its error gave, and a minute"
-      : v.minutes ? `; no reset time in its error, so its rest of ${v.minutes} minutes` : "; fix the login or key, then run hansa ping " + v.provider),
+    rest:(v, render, text) => `resting until ${when(v.until)} (${v.why})` + (v.how === "reset" ? "; the reset time its error gave, and a minute"
+      : v.minutes ? `; no reset time in its error, so its rest of ${v.minutes} minutes` : "; fix the login or key, then run hansa ping " + v.provider + (text ? `; ${text}` : "")),
     unreachable:v => `unreachable since ${when(v.since)} (${v.why}); checked periodically`
   },
   task:"Task", provider:"Provider", titleCol:"Task", changes:"Changes", refused:"Refused", error:"Why",
@@ -566,7 +567,8 @@ const T = ZH ? {
     release_answered:e => `Release #${e.id} ${e.yes ? "approved" : "refused"}`,
     release_started:e => `Release #${e.id} started: ${e.lane || "—"} ${e.target || ""}`,
     release_ended:(e, result) => `Release #${e.id} ${result(e)}`, release_void:e => `Release #${e.id} voided`,
-    release_forbidden:e => `Release #${e.id} blocked by forbidden words`, release_waits:e => `Release #${e.id} waits for lane ${e.lane || "—"}`,
+    release_forbidden:e => `Release #${e.id} blocked by forbidden words`,
+    release_waits:e => `Release #${e.id} (lane ${e.lane || "—"}, target ${e.target || "—"}) waits for the principal's answer again: its target is no longer on their list of releases without asking, or no longer matches what the list recorded`,
     release_stopping:e => `Release #${e.id} stopping`, release_stopped:e => `Release #${e.id} stopped`,
     lane_try_queued:e => `Lane ${e.lane} try queued`, lane_try_started:e => `Lane ${e.lane} try started`,
     lane_tried:(e, result) => `Lane ${e.lane} try ${result(e)}`, lane_try_withdrawn:e => `Lane ${e.lane} try withdrawn`,
@@ -807,7 +809,7 @@ function taskLink(id) {
 }
 // Codes are supplied by the server; unrecognised reasons keep its English sentence.
 function waitingText(m) {
-  const render = r => Object.hasOwn(T.waitReasons, r.code) ? T.waitReasons[r.code](r.values, render) : r.text;
+  const render = r => Object.hasOwn(T.waitReasons, r.code) ? T.waitReasons[r.code](r.values, render, r.text) : r.text;
   return render({code:m.waiting_code, values:m.waiting_values, text:m.waiting});
 }
 function eventRow(e) {
