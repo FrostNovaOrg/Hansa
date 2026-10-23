@@ -20,11 +20,11 @@ from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_N
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
     "running": "a worker is on it, or hansa is running the lane's check on its work",
-    "done": "the worker finished; waiting for your review (hansa show / hansa merge / hansa retry)",
-    "merging": ("hansa merge is checking it together with what the base gained since it was made: merged onto the "
-                "base as it is now, with the lane's merge check (its check, unless it has a merge_check of its own) "
-                "run there; it merges if that passes. Or it needs no check "
-                "and waits its turn behind a merge check on the same base"),
+    "done": "the worker finished; waiting for the coordinator's review (hansa show / hansa merge / hansa retry)",
+    "merging": ("hansa merge is checking it, as the base's tip is not in the task's recorded head or the lane has a "
+                "merge_check of its own: merged onto the base as it is now, with that merge_check (else the lane's "
+                "check) run there; it merges if that passes. Or it needs no check (a task with no commits never does) "
+                "and waits behind other merges on the same repository and base, or a release running there"),
     "failed": "the run ended with an error; hansa show says why",
     "merged": "merged into the lane's base branch",
     "cancelled": "stopped or closed on request",
@@ -1626,8 +1626,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "key, the settings or a check change it, and when its rest after a usage limit runs out, which hansa "
             "serve sees), hansa serve stopping or "
             f"finishing no round for {STUCK_AFTER // 60} minutes (busy or stuck), and then running again, srt not "
-            "running. Not what you did yourself and saw. Each message starts with [hansa] and the desk, with one "
-            "line per event and the next command; events seconds apart come in one message.",
+            "running. Not what you did yourself and saw. Each message is bullet lines under one [hansa] header with "
+            "the desk, only the latest line per task, request or kind of event kept; task lines carry next:, other "
+            "lines only when one applies; events seconds apart come in one message.",
             "Who hears what: a task or request goes to the session that made it (hansa add, retry, verify, merge, "
             "and ask record it) while that session has a follower; otherwise to every follower of the desk, "
             "as do desk-wide events. A cancel is not posted to the session whose hansa cancel made it (hansa cancel "
@@ -1802,10 +1803,10 @@ def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool
     try:  # the worktree's .git is checked first; the task working there now fails for it when it ends
         if new:
             if not m.get("start_from") or m.get("kind") == "verify":
-                return (f"hansa: {tid} did not continue from an earlier attempt, so all of it is new: "
+                return (f"hansa: {tid} did not continue from an earlier task, so all of it is new: "
                         f"hansa diff {tid}" + (" --stat" if stat_only else ""))
             since = m["start_from"]
-            head = f"what {tid} added on top of {m.get('parent') or 'the earlier attempt'}'s last commit ({since[:10]})"
+            head = f"what {tid} added on top of {m.get('parent') or 'the earlier task'}'s last commit ({since[:10]})"
             if m.get("update"):  # the base's tip was merged in when it started: from that merge, when it was clean
                 rows = [x.split() for x in wgit(desk, wt, "rev-list", "--first-parent", "--parents",
                                                 f"{since}..{m['head']}").splitlines()]

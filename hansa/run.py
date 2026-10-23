@@ -418,14 +418,14 @@ INTERACTIVE_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "
 LOCAL_HOSTS = ("localhost", "127.0.0.1")
 
 UPDATE_NOTE = """
-Before you started, hansa merged {base} as it is now into this branch, which holds the previous attempt's
+Before you started, hansa merged {base} as it is now into this branch, which holds the earlier task's
 work. The merge conflicts in these files, which now hold git's conflict markers (<<<<<<< this branch,
 ======= then {base}, >>>>>>> end): {files}. Settle each conflict by editing the file so it keeps what
 both sides need, and remove every marker. Do not run git merge or commit: when you end, hansa's commit
 completes the merge. Then do what the task says.
 """
 UPDATE_CLEAN_NOTE = """
-Before you started, hansa merged {base} as it is now into this branch, which holds the previous attempt's
+Before you started, hansa merged {base} as it is now into this branch, which holds the earlier task's
 work; it merged without conflicts.
 """
 # A lane's setup or check command up to this long (the page takes up to 1000 characters) is in a worker's
@@ -4718,7 +4718,7 @@ def unverified_note(desk: Desk, m: dict) -> str:
         earlier.append(at)
         pv = verdict(at)
         if pv:
-            which = "the attempt it retries" if len(earlier) == 1 else "an earlier attempt of this change"
+            which = "the earlier task it retries" if len(earlier) == 1 else "an earlier task of this change"
             if pv["verdict"] not in HOLDING_VERDICTS:
                 return (f"{what}, and no verification of {m['id']} held; {pv['id']} verified {at['id']}, {which}, "
                         f"and {found(pv)}")
@@ -4728,9 +4728,9 @@ def unverified_note(desk: Desk, m: dict) -> str:
     if not earlier:
         return f"nothing verified this change: {what}, and no verification of it holds"
     if len(earlier) == 1:
-        return (f"nothing verified this change: {what}, and neither it nor {earlier[0]['id']}, the attempt it "
-                f"retries, has a verification that holds")
-    return (f"nothing verified this change: {what}, and neither it nor any attempt it retries "
+        return (f"nothing verified this change: {what}, and neither it nor {earlier[0]['id']}, the earlier task "
+                f"it retries, has a verification that holds")
+    return (f"nothing verified this change: {what}, and neither it nor any earlier task it retries "
             f"({', '.join(x['id'] for x in earlier)}) has a verification that holds")
 
 

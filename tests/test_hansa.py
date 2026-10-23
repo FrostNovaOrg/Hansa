@@ -11273,7 +11273,7 @@ def save():'''))
         self.assertIn("notes.txt", stat)
         self.assertNotIn("hello.txt", stat)
         self.assertIn("(no changes in nothing.txt)", self.hansa("diff", t1, "nothing.txt"))
-        self.assertIn(f"{t1} did not continue from an earlier attempt", self.hansa("diff", t1, "--new"))
+        self.assertIn(f"{t1} did not continue from an earlier task", self.hansa("diff", t1, "--new"))
         (self.repo / "base.txt").write_text("the base moved\n")  # the follow-up gets this merged in
         sh("git", "add", ".", cwd=self.repo)
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base moves", cwd=self.repo)
@@ -17631,6 +17631,19 @@ def save():'''))
         self.assertIn("--clear-daily HH-HH", out.getvalue())
         self.assertIn("claude --help lists them", " ".join(out.getvalue().split()))
         self.assertEqual(out.getvalue(), self.hansa_out("help", "coordinator"))
+
+    def test_the_task_states_in_docs_are_what_hansa_show_says_of_each_state(self):
+        """docs/tasks.md's states block (what hansa help states prints) holds, state by state and in order, the
+        words hansa show gives a task in that state, the docs' backticks aside."""
+        shown = self.hansa_out("help", "states")
+        rows = re.findall(r"^\| `([a-z]+)` \| (.+) \|$", shown, re.M)
+        self.assertEqual([state for state, _ in rows], list(views.STATES))
+        self.assertEqual({state: says.replace("`", "") for state, says in rows}, views.STATES)
+        self.assertIn(shown.strip(), (Path(__file__).resolve().parent.parent / "docs" / "tasks.md").read_text())
+        tid = self.desk.new_task("A task that waits for review")
+        self.desk.update(tid, state="done")
+        self.assertIn(views.STATES["done"], " ".join(self.hansa("show", tid).split()))
+
     def test_explain_task_points_to_show_and_forwards_its_output(self):
         tid = self.desk.new_task("A task to look at")
         said = self.hansa("explain", "task", tid)
@@ -23563,13 +23576,13 @@ def save():'''))
         self.assertEqual(self.settle(d, t4)["files"], ["c.py"])
         out = self.hansa("merge", t4)
         self.assertIn(f"{t4} merged into main", out)
-        self.assertIn(f"note: {t4} changed c.py, and no verification of {t4} held; {v3} verified {t3}, the attempt "
-                      f"it retries, not this one", out)
+        self.assertIn(f"note: {t4} changed c.py, and no verification of {t4} held; {v3} verified {t3}, the earlier "
+                      f"task it retries, not this one", out)
         t5 = done("d.py")
         self.hansa("retry", t5, "more")
         t6 = self.desk.meta(t5)["replaced_by"]
         self.settle(d, t6)
-        self.assertIn(f"neither it nor {t5}, the attempt it retries, has a verification that holds",
+        self.assertIn(f"neither it nor {t5}, the earlier task it retries, has a verification that holds",
                       self.hansa("merge", t6))
         t8 = done("e.py")  # verified; retried twice: the verification of the first attempt still counts, named
         v8 = verified(t8)
@@ -23582,7 +23595,7 @@ def save():'''))
         out = self.hansa("merge", t10)
         self.assertIn(f"{t10} merged into main", out)
         self.assertIn(f"note: {t10} changed e.py, and no verification of {t10} held; {v8} verified {t8}, an earlier "
-                      f"attempt of this change, not this one: what came after that verification (a conflict settled, "
+                      f"task of this change, not this one: what came after that verification (a conflict settled, "
                       f"code changed) is not the code it checked", out)
         self.assertNotIn("nothing verified", out)
         t11 = done("f.py")  # retried twice, never verified: every attempt is named
@@ -23592,8 +23605,8 @@ def save():'''))
         self.hansa("retry", t12, "more again")
         t13 = self.desk.meta(t12)["replaced_by"]
         self.settle(d, t13)
-        self.assertIn(f"nothing verified this change: {t13} changed f.py, and neither it nor any attempt it retries "
-                      f"({t12}, {t11}) has a verification that holds", self.hansa("merge", t13))
+        self.assertIn(f"nothing verified this change: {t13} changed f.py, and neither it nor any earlier task it "
+                      f"retries ({t12}, {t11}) has a verification that holds", self.hansa("merge", t13))
         t7 = done("guide.md")
         out = self.hansa("merge", t7)
         self.assertIn(f"{t7} merged into main", out)
@@ -23614,11 +23627,11 @@ def save():'''))
         t1, t2, t3 = ids
         v2 = self.desk.meta(t2)["verify"]
         note = unverified_note(self.desk, self.desk.meta(t3))
-        self.assertEqual(note, f"{t3} changed a.py, and no verification of {t3} held; {v2} verified {t2}, the attempt "
-                               f"it retries, and found it does not hold")
+        self.assertEqual(note, f"{t3} changed a.py, and no verification of {t3} held; {v2} verified {t2}, the earlier "
+                               f"task it retries, and found it does not hold")
         self.assertNotIn(t1, note)  # the older verification that held says nothing of what came after
         self.desk.update(self.desk.meta(t2)["verify"], verdict="unsure")
-        self.assertIn(f"{v2} verified {t2}, the attempt it retries, and could not tell whether it holds",
+        self.assertIn(f"{v2} verified {t2}, the earlier task it retries, and could not tell whether it holds",
                       unverified_note(self.desk, self.desk.meta(t3)))
         self.assertEqual(unverified_note(self.desk, self.desk.meta(t2)),
                          f"{t2} changed a.py, and its verification {v2} could not tell whether it holds")

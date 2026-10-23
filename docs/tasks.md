@@ -404,7 +404,7 @@ money goes. A coordinator run as root on a Linux server is not counted
 | `queued` | waiting for a free lane and a ready provider |
 | `running` | a worker is on it, or hansa is running the lane's check on its work |
 | `done` | the worker finished; waiting for the coordinator's review (`hansa show` / `hansa merge` / `hansa retry`) |
-| `merging` | `hansa merge` is checking it together with what the base gained since it was made: merged onto the base as it is now, with the lane's merge check (its check, unless it has a `merge_check` of its own) run there; it merges if that passes. Or it needs no check and waits its turn behind a merge check on the same base |
+| `merging` | `hansa merge` is checking it, as the base's tip is not in the task's recorded head or the lane has a `merge_check` of its own: merged onto the base as it is now, with that `merge_check` (else the lane's check) run there; it merges if that passes. Or it needs no check (a task with no commits never does) and waits behind other merges on the same repository and base, or a release running there |
 | `failed` | the run ended with an error; `hansa show` says why |
 | `merged` | merged into the lane's base branch |
 | `cancelled` | stopped or closed on request |

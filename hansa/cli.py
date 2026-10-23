@@ -791,7 +791,7 @@ def _retry(desk: Desk, a) -> None:
         raise SystemExit(f"hansa: {a.id} is {m['state']}; a follow-up is for a task that has ended. "
                          f"{_wait_for(desk, a.id)}, or cancel it first (hansa cancel {a.id})")
     if a.update and a.fresh:
-        raise SystemExit("hansa: --update continues from the previous attempt and --fresh starts from the base; "
+        raise SystemExit("hansa: --update continues from the earlier task and --fresh starts from the base; "
                          "choose one. Nothing was queued")
     lanes = desk.settings()["lanes"]
     own = lanes.get(m.get("lane"))
@@ -1348,7 +1348,7 @@ def _since(text: str) -> float:
         now = time.localtime()
         ts = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, t.tm_hour, t.tm_min, 0, 0, 0, -1))
         return ts - 86400 if ts > time.time() else ts
-    raise SystemExit("hansa: --since takes HH:MM (today) or YYYY-MM-DD HH:MM")
+    raise SystemExit("hansa: --since takes HH:MM (today's, or yesterday's when still ahead) or YYYY-MM-DD HH:MM")
 
 
 def cmd_cost(a):
@@ -3113,8 +3113,8 @@ def main(argv=None):
         "never ordinary work, and cannot list itself, merge lanes or verify lanes, or itself be a merge lane. "
         "Ordinary work queued or running prevents setting it. "
         "check runs after each task; before a merge, hansa runs a merge check on the task merged with the base: by default the "
-        "check again, when the base has moved since the task was made. merge_check gives the merge check a command "
-        "of its own (a heavier one: the whole build, packaging, the slow suites), run in the same sandbox, after the "
+        "check again, when the base's tip is not in the task's recorded head. merge_check gives the merge check a "
+        "command of its own (a heavier one: the whole build, packaging, the slow suites), run in the same sandbox, after the "
         "lane's setup, before every merge of a task that changed something, and never after a task; a lane with only "
         "a merge_check has no check after each task. merge_timeout_min is the merge check's own time limit in minutes "
         "(default: timeout_min). commit_message is the form of the message of the commit hansa makes of a task's "
@@ -3279,7 +3279,8 @@ def main(argv=None):
                      "lane or task, so in --by lane and --by task its usage is a row of its own, (coordinator): in "
                      "every view the rows add up to the total.")
     p.add_argument("--days", type=int, default=7)
-    p.add_argument("--since", help="HH:MM today, or YYYY-MM-DD HH:MM: count from then instead of --days")
+    p.add_argument("--since", help="HH:MM (today's, or yesterday's when still ahead), or YYYY-MM-DD "
+                   "HH:MM: count from then instead of --days")
     p.add_argument("--by", choices=["day", "seat", "lane", "task", "model", "provider"], help="the totals by "
                    "(default: day); not with --turns")
     p.add_argument("--json", action="store_true")
