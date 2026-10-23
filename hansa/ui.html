@@ -170,7 +170,19 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .dashboard-panel th { padding-top:0; }
 .dashboard-panel td { padding-top:12px; padding-bottom:12px; }
 .dashboard-panel .mono { font-size:11px; }
-.task-detail { border-left:2px solid var(--line); padding:10px 0 0 12px; margin-top:8px; min-width:200px; }
+.task-detail { border-left:2px solid var(--line); padding:10px 0 0 12px; margin-top:8px; min-width:0; max-width:100%; }
+td .task-detail { min-width:200px; }
+.task-steps { display:flex; flex-wrap:nowrap; overflow-x:auto; align-items:stretch; gap:8px; list-style:none; padding:0; margin:0 0 12px; max-width:100%; }
+.task-step { flex:1 0 150px; min-width:0; max-width:100%; padding:8px; border:1px solid var(--line); border-radius:7px; overflow-wrap:anywhere; }
+.task-step + .task-step::before { content:"→ "; }
+.task-step > strong { font:600 12px/1.6 system-ui,sans-serif; }
+.task-step > time, .task-step > small, .task-step > span { display:block; }
+.task-step[aria-current=step] { border-color:var(--link); background:var(--tint); }
+.task-relations { margin:0 0 8px; }
+@media (max-width:640px) {
+  .task-steps { flex-wrap:wrap; overflow-x:visible; }
+  .task-step { flex:1 1 140px; }
+}
 .empty-state { display:flex; flex-direction:column; align-items:center; text-align:center; padding:28px 16px; color:var(--muted); }
 .empty-state > .icon { width:24px; height:24px; margin-bottom:12px; }
 .empty-state strong { color:var(--fg); font-size:13px; font-weight:550; }
@@ -367,6 +379,9 @@ const T = ZH ? {
     unreachable:v => `自 ${when(v.since)} 起无法连接（${v.why}），定时重试`
   },
   task:"任务", provider:"供应", titleCol:"内容", changes:"改动", refused:"被拒的命令", error:"原因",
+  taskSteps:"任务步骤", taskQueued:"排队", taskRun:n => `运行 ${n}`, taskLaneCheck:"工作线验收", taskVerification:"核对", taskMergeCheck:"合并验收", taskMerged:"已合并",
+  taskRunning:"进行中", taskCompleted:"已完成", taskFailed:"失败", taskCancelled:"已取消", taskWait:"等待", taskFirstResult:"首次结果",
+  taskMinutes:n => `${n} 分钟`, taskSeconds:n => `${n} 秒`, taskExit:n => `退出码 ${n}`, taskVerifies:"核对任务", taskReplaces:"接替任务", taskVerificationUnavailable:"核对记录不可用",
   asks:"智能体提的请求", answer:"回复（可不填）", close:"处理完", closedByCoordinator:"已由协调者关闭：",
   providers:"模型供应", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
   effortDefault:"默认", endpoint:"接口地址", loginDir:"登录目录（空＝默认）", key:"密钥", keySet:"已填", keyMissing:"未填",
@@ -509,6 +524,9 @@ const T = ZH ? {
     unreachable:v => `unreachable since ${when(v.since)} (${v.why}); checked periodically`
   },
   task:"Task", provider:"Provider", titleCol:"Task", changes:"Changes", refused:"Refused", error:"Why",
+  taskSteps:"Task steps", taskQueued:"Queued", taskRun:n => `Run ${n}`, taskLaneCheck:"Lane check", taskVerification:"Verification", taskMergeCheck:"Merge check", taskMerged:"Merged",
+  taskRunning:"running", taskCompleted:"completed", taskFailed:"failed", taskCancelled:"cancelled", taskWait:"Wait", taskFirstResult:"First result",
+  taskMinutes:n => `${n} min`, taskSeconds:n => `${n} s`, taskExit:n => `exit ${n}`, taskVerifies:"Verifies", taskReplaces:"Replaces", taskVerificationUnavailable:"Verification record unavailable",
   asks:"Requests from agents", answer:"answer (optional)", close:"Done", closedByCoordinator:"closed by the coordinator: ",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
   effortDefault:"default", endpoint:"Endpoint", loginDir:"Login directory (blank = default)", key:"Key", keySet:"set", keyMissing:"missing",
@@ -796,14 +814,107 @@ function err(e) { $("#state").textContent = String(e.message || e); $("#state").
 /* ---------- status ---------- */
 const detailOpen = new Set();
 let taskDetailSequence = 0;
-function taskLink(id) {
-  const box = h("div", {class:"mono task-detail", id:"task-detail-" + (++taskDetailSequence), hidden:!detailOpen.has(id)});
-  const load = async () => { const r = await api("/api/task?id=" + id); box.replaceChildren(...shown([h("pre", {}, r.text)])); };
-  if (detailOpen.has(id)) load().catch(err);
-  const btn = h("button", {class:"link", "aria-expanded":String(detailOpen.has(id)), "aria-controls":box.id, onclick: () => {
-    if (detailOpen.has(id)) { detailOpen.delete(id); box.hidden = true; }
-    else { detailOpen.add(id); box.hidden = false; load().catch(err); }
-    btn.setAttribute("aria-expanded", String(detailOpen.has(id)));
+// Task-box strings stay with task/provider above, separate from the Status picture's dictionary.
+function taskStep(kind, label, start, duration, result, tone = "", running = false, extra = null) {
+  return h("li", {class:"task-step " + tone, "data-task-step":kind, ...(running ? {"aria-current":"step"} : {})},
+    h("strong", {}, label), start ? h("time", {datetime:new Date(start * 1000).toISOString()}, when(start)) : h("span", {}, T.notKnown),
+    duration == null ? null : h("small", {}, duration), h("span", {}, running ? T.taskRunning : result), extra);
+}
+function taskCheckResult(r) {
+  return [r.could_not_run ? T.couldNotRun : r.ok === true ? T.passed : r.ok === false ? T.notPassed : T.notKnown,
+    r.exit != null ? T.taskExit(r.exit) : "", r.note || ""].filter(Boolean).join(" · ");
+}
+function taskCheckStep(kind, label, r, start, running) {
+  const first = r.retried || r.previous || (r.rerun_started ? r : null);
+  const prior = first ? h("span", {class:first.ok === false || first.could_not_run ? "bad" : ""},
+    T.taskFirstResult, ": ", taskCheckResult(first), first.seconds != null ? " · " + T.taskSeconds(first.seconds) : "",
+    first.at != null && first.seconds != null ? h("time", {datetime:new Date((first.at - first.seconds) * 1000).toISOString()},
+      " · " + when(first.at - first.seconds)) : null) : null;
+  const cancelled = /cancelled|stopped on request/.test(r.note || "");
+  const duration = running ? (start ? Math.max(0, Math.round(Date.now() / 1000 - start)) : null) : r.seconds;
+  return taskStep(kind, label, start, duration == null ? T.notKnown : T.taskSeconds(duration),
+    cancelled ? T.taskCancelled + (r.note ? " · " + r.note : "") : taskCheckResult(r),
+    running ? "" : r.ok === false || r.could_not_run ? "bad" : r.ok === true ? "ok" : "", running, prior);
+}
+function taskSteps(m, v, ancestry) {
+  const minutes = (start, end) => start && end ? T.taskMinutes(Math.max(0, Math.round((end - start) / 6) / 10)) : T.notKnown;
+  // Attempts and lost runs keep ran_from/ended; the last run keeps started/finished on the task.
+  const runs = [...(m.attempts || []), ...(m.earlier_runs || [])].map(r => ({...r}));
+  // A final failed attempt can keep its reason in attempts and its timing on the task itself.
+  const last = [...runs].reverse().find(r => !r.ran_from && r.at >= m.started && r.provider === m.provider);
+  if (last) {
+    last.ran_from = m.started; last.ended = m.finished;
+  }
+  if (m.started && m.state !== "queued" && !runs.some(r => r.ran_from === m.started)) {
+    const completed = m.check || m.verdict;
+    const failed = m.state === "failed" && !completed;
+    const cancelled = m.state === "cancelled" && !completed;
+    runs.push({provider:m.provider, ran_from:m.started, ended:m.finished,
+      error:failed ? m.error || T.taskFailed : cancelled ? m.error || T.taskCancelled : "", cancelled,
+      running:m.state === "running" && m.phase !== "checking" && !m.finished});
+  }
+  runs.sort((a, b) => (a.ran_from || a.ended || a.at || 0) - (b.ran_from || b.ended || b.at || 0));
+  const firstStart = runs[0]?.ran_from;
+  const steps = [taskStep("queued", T.taskQueued, m.created,
+    T.taskWait + ": " + minutes(m.created, firstStart || (m.state === "queued" && !runs.length ? Date.now() / 1000 : null)),
+    firstStart ? T.taskCompleted : T.notKnown, "", m.state === "queued")];
+  runs.forEach((r, i) => steps.push(taskStep("run", T.taskRun(i + 1), r.ran_from,
+    [r.provider || T.notKnown, minutes(r.ran_from, r.ended || r.at || (r.running ? Date.now() / 1000 : null))].join(" · "),
+    [r.error || r.why || (r.cancelled ? T.taskCancelled : r.ended ? T.taskCompleted : T.notKnown),
+      r.kind || "", r.exit != null ? T.taskExit(r.exit) : ""].filter(Boolean).join(" · "),
+    r.running ? "" : r.error || r.why || r.cancelled ? "bad" : "", r.running)));
+  const checking = m.state === "running" && m.phase === "checking";
+  if (m.check || checking) {
+    const r = m.check || {};
+    steps.push(taskCheckStep("check", T.taskLaneCheck,
+      checking && m.check_retry && !r.retried ? {...r, retried:m.check_retry} : r, m.check_started, checking));
+  }
+  if (m.kind === "verify" ? m.verdict || m.state === "done" : m.verify) {
+    const own = m.kind === "verify", record = own ? m : v;
+    const verdict = record?.verdict;
+    const running = record && ["queued", "running"].includes(record.state);
+    const holds = ["holds", "holds, with notes"].includes(verdict);
+    steps.push(taskStep("verification", T.taskVerification, record?.started || record?.created,
+      minutes(record?.started, record?.finished || (running ? Date.now() / 1000 : null)),
+      record ? T["v_" + verdict] || T.v_none : T.taskVerificationUnavailable,
+      holds ? "ok" : verdict === "does not hold" || record?.state === "failed" ? "bad" : "warn", running,
+      own ? null : taskLink(m.verify, ancestry)));
+  }
+  const mc = m.merge_check, mr = m.merge_check_result;
+  if ((mc && !mc.plain) || (mr && !mr.waited)) {
+    const running = m.state === "merging" && mc && !mc.plain;
+    const r = mr || {};
+    const start = running ? mc.started : r.at != null && r.seconds != null ? r.at - r.seconds : null;
+    steps.push(taskCheckStep("merge-check", T.taskMergeCheck,
+      running && mc.retried && !r.retried ? {...r, retried:mc.retried} : r, start, running));
+  }
+  if (m.merged) steps.push(taskStep("merged", T.taskMerged, m.merged, null, (m.merge_commit || "").slice(0, 12) || T.notKnown, "ok"));
+  return h("ol", {class:"task-steps", "aria-label":T.taskSteps}, steps);
+}
+function taskLink(id, ancestry = []) {
+  // Related tasks can point back here. Keep those links collapsed until explicitly opened.
+  let open = detailOpen.has(id) && !ancestry.includes(id);
+  const path = [...ancestry, id];
+  const box = h("div", {class:"mono task-detail", id:"task-detail-" + (++taskDetailSequence), hidden:!open});
+  const load = async () => {
+    const r = await api("/api/task?id=" + encodeURIComponent(id));
+    const m = r.meta;
+    const text = h("pre", {}, r.text);
+    box.replaceChildren(text);
+    if (!m) return;
+    let v = null;
+    if (m.kind !== "verify" && m.verify) {
+      try { v = (await api("/api/task?id=" + encodeURIComponent(m.verify))).meta; } catch (_) { /* Keep the task's text available. */ }
+    }
+    box.replaceChildren(...shown([taskSteps(m, v, path),
+      m.parent ? h("div", {class:"task-relations"}, m.kind === "verify" ? T.taskVerifies : T.taskReplaces, " ", taskLink(m.parent, path)) : null, text]));
+  };
+  if (open) load().catch(err);
+  const btn = h("button", {class:"link", "aria-expanded":String(open), "aria-controls":box.id, onclick: () => {
+    open = !open; box.hidden = !open;
+    if (open) { detailOpen.add(id); load().catch(err); }
+    else detailOpen.delete(id);
+    btn.setAttribute("aria-expanded", String(open));
   }}, id);
   return [btn, box];
 }
