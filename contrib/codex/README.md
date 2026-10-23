@@ -147,7 +147,7 @@ codex's stderr, and classed on the whole text, so that hansa's own readings take
 | model at capacity, high demand | overloaded (529) | tries once more |
 | `content_filter` | refused | the lane's next provider |
 | a dropped stream, idle timeout | connection dropped | tries once more on the same provider |
-| refused, reset or timed-out connection; a 5xx | connection error, server error | tries once more |
+| refused, reset or timed-out connection; `workspace routing discovery failed`; a 5xx | connection error, server error | tries once more |
 | a token that cannot be refreshed, 401, not logged in | login | rests the provider until someone signs in |
 | 403 | key | rests the provider |
 | 404 (no such model), a refused configuration, anything else | neither | the task fails, saying why |
