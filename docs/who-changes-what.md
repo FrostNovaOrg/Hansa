@@ -51,8 +51,8 @@ The coordinator, with `hansa`: tasks; the lanes (`hansa lane`: each one's
 provider order, allowed commands (for workers and verifiers), network and write lists, environment,
 check and setup commands, limits, and the merge check's own command and limit,
 `merge_check` and `merge_timeout_min` ([Merging, the merge check and conflicts](tasks.md#merging-the-merge-check-and-conflicts))) and how many tasks run at once (`hansa concurrency`:
-side by side means lanes on one repository; when they each add to a CHANGELOG, `CHANGELOG.md merge=union`
-in the repository's `.gitattributes` keeps their merges from conflicting there);
+side by side means lanes on one repository; workers' changelog lines are collected,
+and `hansa changelog` lists them for one task to write up);
 each lane's standing instructions (`hansa lane brief`, kept in
 `lanes/<lane>/brief.md`); pause and resume; each lane's release command
 (`hansa lane target L default "git push origin main"`) or its named release

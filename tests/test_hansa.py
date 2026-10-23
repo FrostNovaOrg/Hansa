@@ -24733,9 +24733,12 @@ def save():'''))
         header = out.splitlines()[0]
         self.assertIn("lane a", header)
         self.assertIn("target default", header)
-        self.assertIn("no done release", header)
-        self.assertIn("all commits", header)
-        self.assertIn(self.git_out("rev-parse", "HEAD"), header)
+        self.assertIn("no done release yet", header)
+        self.assertIn("every commit up to", header)
+        self.assertIn("main's tip", header)
+        tip = self.git_out("rev-parse", "HEAD")
+        self.assertIn(tip[:7], header)
+        self.assertNotIn(tip, header)
         self.assertLess(out.index(f"- Adds X. ({first})"), out.index(f"- Adds Y. ({second})"))
         initial = self.git_out("rev-list", "--max-parents=0", "HEAD")
         self.assertIn(f"- [no task] init ({initial[:7]})", out)
@@ -24760,6 +24763,53 @@ def save():'''))
             self.assertIn(tid, out.splitlines()[-1])
             self.assertNotIn(f"({tid})", out)
         self.assertIn("none", out.splitlines()[-1].lower())
+
+    def test_changelog_reads_none_with_a_period_as_none(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Old.\nChangelog: none.")
+        out = self.hansa("changelog", "a")
+        self.assertEqual(out.splitlines()[-1], f"Tasks saying none: {tid}")
+        self.assertNotIn(f"({tid})", out)
+
+    def test_changelog_reads_backticked_none_as_none(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Old.\nChangelog: `none`")
+        out = self.hansa("changelog", "a")
+        self.assertEqual(out.splitlines()[-1], f"Tasks saying none: {tid}")
+        self.assertNotIn(f"({tid})", out)
+
+    def test_changelog_reads_backticked_none_with_a_period_as_none(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Old.\nChangelog: `none`.")
+        out = self.hansa("changelog", "a")
+        self.assertEqual(out.splitlines()[-1], f"Tasks saying none: {tid}")
+        self.assertNotIn(f"({tid})", out)
+
+    def test_changelog_accepts_a_colon_after_the_bold_label(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Old.\n**Changelog**: Adds X.")
+        out = self.hansa("changelog", "a")
+        self.assertIn(f"- Adds X. ({tid})", out)
+        self.assertNotIn("Old.", out)
+
+    def test_changelog_accepts_an_asterisk_bullet(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Old.\n* Changelog: Adds X.")
+        out = self.hansa("changelog", "a")
+        self.assertIn(f"- Adds X. ({tid})", out)
+        self.assertNotIn("Old.", out)
+
+    def test_changelog_preserves_backticks_in_a_sentence(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Adds `x` support.")
+        self.assertIn(f"- Adds `x` support. ({tid})", self.hansa("changelog", "a"))
+
+    def test_changelog_does_not_accept_a_space_before_the_colon(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog : Adds X.", title="Space before colon")
+        self.assertIn(f"- [no changelog line] Space before colon ({tid})", self.hansa("changelog", "a"))
+        (self.desk.tasks_dir / tid / "result.md").write_text("Changelog: Kept.\nChangelog : Adds X.")
+        self.assertIn(f"- Kept. ({tid})", self.hansa("changelog", "a"))
 
     def test_changelog_marks_old_reports_without_a_line(self):
         self.with_release("true")
@@ -24919,6 +24969,8 @@ def save():'''))
         self.assertIn("last line", run.PROTOCOL)
         self.assertIn("whole change", run.PROTOCOL)
         self.assertIn("follow-up", run.PROTOCOL.lower())
+        self.assertIn("The report's numbers", run.PROTOCOL)
+        self.assertIn("before you write the report", run.PROTOCOL)
         self.assertNotIn("Changelog:", run.VERIFY_PROTOCOL)
 
     def commit_in_repo(self, name, text, message=None):

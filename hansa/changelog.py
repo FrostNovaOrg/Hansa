@@ -8,7 +8,8 @@ from .desk import Desk, lane_targets
 from .release import _git_bytes, last_out, repo_key
 
 
-MARKER = re.compile(r"^\s*(?:-\s+)?(?:\*\*)?changelog:(?:\*\*)?\s*(.*?)\s*$", re.I)
+MARKER = re.compile(
+    r"^\s*(?:[-*]\s+)?(?:\*\*changelog:\*\*|\*\*changelog\*\*:|changelog:)\s*(.*?)\s*$", re.I)
 
 
 def report_line(desk: Desk, task: dict) -> str | None:
@@ -21,7 +22,8 @@ def report_line(desk: Desk, task: dict) -> str | None:
     found = [m.group(1) for line in report.splitlines() if (m := MARKER.match(line))]
     if not found:
         return None
-    return "" if found[-1].casefold() in ("none", "-") else found[-1]
+    sentence = found[-1]
+    return "" if sentence in ("", "-") or re.fullmatch(r"(?:none|`none`)\.?", sentence, re.I) else sentence
 
 
 def lines(desk: Desk, lane: str, target: str | None = None):
@@ -49,11 +51,12 @@ def lines(desk: Desk, lane: str, target: str | None = None):
     previous = last_out(desk, lane, repo, base, target)
     since = previous["commit"] if previous else ""
     rng = f"{since}..{tip}" if since else tip
-    counted = f"from release #{previous['id']}" if previous else "no done release; all commits"
+    counted = f"from release #{previous['id']}; range {rng}" if previous else (
+        f"no done release yet; every commit up to {base}'s tip ({tip[:7]})")
     if since and subprocess.run(["git", "merge-base", "--is-ancestor", since, tip], cwd=repo,
                                 capture_output=True, stdin=subprocess.DEVNULL).returncode:
         counted += f"; release commit {since} is not in {base}'s history"
-    yield f"Changelog for lane {lane}, target {target}: {counted}; range {rng}"
+    yield f"Changelog for lane {lane}, target {target}: {counted}"
 
     rows = _git_bytes(repo, "log", "--reverse", "--topo-order", "--format=%H%x1f%P%x1f%s", rng, "--")
     commits = [row.split("\x1f", 2) for row in rows.splitlines()]

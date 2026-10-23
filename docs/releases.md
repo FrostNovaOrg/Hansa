@@ -111,8 +111,8 @@ across lanes sharing the repository and base, for one task to write up once per 
 TARGET is required with several targets. The header names the range; without a done
 release, all history counts. A release outside base history is noted; git's range still applies.
 The last marker counts, ignoring case and accepting bold or bullet formatting.
-`none` and `-` ids appear last. Missing lines, direct commits and unidentifiable task
-commits are flagged. Verification reports are never read.
+`none` (with optional backticks or period) and `-` ids appear last. Missing lines,
+direct commits and unidentifiable task commits are flagged. Verification reports are never read.
 
 ### A release gated on a full build on another desk
 
