@@ -19,8 +19,32 @@ that needs attention, such as paused dispatch or a stopped server, stands out
 on its own. On the Chinese page, the desk and version items are labelled
 `工作台` and `hansa 版本`; the English current-time item uses `now`, as `hansa status` does.
 
-Status shows the last 24 hours in summary cards, keeps dispatch controls separate
-from task tables, and places release decisions and requests near the top. Empty
+Status starts with a pipeline strip: queued tasks, running workers, running checks,
+awaiting review, running verifications and merge checks. Counts come from the
+matching status lists; review includes tasks whose verification is still running,
+and merge checks include those queued. A separate box counts waiting releases
+plus open requests. Clicking a box scrolls to its list (running stages use the lane
+tracks). Zero counts are dimmed.
+
+Below the strip, lane tracks replace the Lanes and Running tables, in the order
+sent by status. Each retains the providers in order, their models, the active
+provider and model, task link and title, browser marker and check timing. The
+merge and verify lanes also name the lanes they serve and the work they accept.
+The marked step distinguishes workers, checks, verifications (with their parent task)
+and merge checks. The elapsed bar uses the current step's minutes against the
+lane's `timeout_min` (240 by default), warning past three quarters. The line below
+shows the estimated start time, replies, idle minutes, last note and lane queue
+count; unavailable progress reads `—`. Free and queued lanes are dimmed, tries
+are named, and sandbox holds show their reasons. When `hansa serve` is stopped,
+the picture still shows the desk's records; the page's status line warns once
+that new tasks will not start. When fetching `/api/status` fails, both parts show
+an error in place of their previous figures. An events fetch failure appears in
+Recent events and leaves the status picture visible.
+At widths up to 640 px the strip's stages take two lines; tracks fit the page.
+The picture has no animation and uses the page's English and Chinese dictionaries.
+
+Status also shows the last 24 hours in summary cards, keeps dispatch controls separate
+from task lists, and places release decisions and requests near the top. Empty
 states explain where new activity will appear. Task details remain open across
 refreshes. The page refreshes every five seconds while Status is visible, unless
 you are filling in an input. Release approvals, refusals, stops and request replies

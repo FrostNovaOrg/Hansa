@@ -578,6 +578,7 @@ def status(desk: Desk) -> dict:
                    "low_text": memory.held_text(desk) if memory.held(desk) else "",
                    "unknown": memory.unknown_lines(desk)},
         "lanes": [{"name": n, "providers": ln["providers"], "repo": ln["repo"],
+                   "timeout_min": ln.get("timeout_min", 240),
                    "task": next((m["id"] for m in tasks if lane_occupied(m) and occupied_lane(m) == n), None),
                    **({"merge_lane": True, "merge_for": merge_served_lanes(s, n)}
                       if ln.get("merge_lane") else {}),

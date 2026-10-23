@@ -254,6 +254,43 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
   .event-row { grid-template-columns:minmax(0,1fr); gap:4px; }
   .event-data { grid-column:1; }
 }
+/* Status picture: six connected stages and a separate principal decision box. */
+#status-picture section, #status-queued, #status-review, #status-merging, #status-principal { scroll-margin-top:calc(var(--header-height) + 16px); }
+.pipeline-strip { display:grid; grid-template-columns:minmax(0,6fr) minmax(0,1.25fr); gap:24px; }
+.pipeline-stages { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:16px; }
+.pipeline-box { position:relative; min-width:0; flex-direction:column; padding:10px 5px; background:var(--surface); text-align:center; line-height:1.4; }
+.pipeline-box strong { font-size:22px; font-variant-numeric:tabular-nums; }
+.pipeline-stages .pipeline-box:not(:last-child)::after { content:"→"; position:absolute; right:-15px; color:var(--muted); }
+.pipeline-strip > .pipeline-box { border-color:var(--control-line); }
+.pipeline-box.warn { background:var(--warn-bg); border-color:var(--warn); }
+.dimmed { color:var(--muted); background:var(--input); }
+.pipeline-box.dimmed { opacity:.6; }
+.lane-track { min-width:0; border:1px solid var(--line); border-radius:9px; padding:14px; margin-top:12px; }
+.lane-track-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; }
+.lane-steps { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:6px; margin:10px 0; }
+.lane-steps .status-pill { width:100%; justify-content:center; text-align:center; padding:4px; font-size:10px; }
+.current-step { color:var(--link); background:var(--tint); border-color:var(--link); font-weight:600; }
+.lane-time { display:flex; align-items:center; gap:12px; margin:8px 0; font-size:11px; flex-wrap:wrap; }
+.lane-budget { flex:1; min-width:0; height:8px; width:100%; appearance:none; border:0; border-radius:4px; background:var(--surface); accent-color:var(--accent); }
+.lane-budget.warn { accent-color:var(--warn); }
+.lane-budget::-webkit-progress-bar { background:var(--surface); border-radius:4px; }
+.lane-budget::-webkit-progress-value { background:var(--accent); border-radius:4px; }
+.lane-budget.warn::-webkit-progress-value { background:var(--warn); }
+.lane-budget::-moz-progress-bar { background:var(--accent); }
+.lane-budget.warn::-moz-progress-bar { background:var(--warn); }
+.lane-meta { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:11px; }
+.lane-note { flex:1; min-width:80px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.lane-task, .lane-track-head > * { min-width:0; }
+.lane-task .task-detail { min-width:0; }
+@media (max-width:640px) {
+  .pipeline-strip { gap:18px; grid-template-columns:minmax(0,3fr) minmax(0,1fr); }
+  .pipeline-stages { grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px 14px; }
+  .pipeline-box { font-size:10px; }
+  .pipeline-stages .pipeline-box:nth-child(3)::after { content:"↓"; right:50%; top:100%; line-height:10px; }
+  .lane-track { padding:10px; }
+  .lane-steps { gap:3px; }
+  .lane-time > span { width:100%; }
+}
 @media (prefers-reduced-motion:reduce) {
   *, *::before, *::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; }
 }
@@ -295,8 +332,8 @@ const T = ZH ? {
   dispatchOn:"正在派活", paused:"已暂停", pause:"暂停派活", resume:"恢复派活", pauseReason:"暂停原因（可不填）",
   serverUp:"后台在运行", serverDown:"后台没在运行：新活不会开始",
   serverStuck:(pid, m) => `后台（pid ${pid}）已 ${m} 分钟没跑完一轮：在忙或卡住了`,
-  lanes:"工作线", lane:"工作线", order:"用哪家（按顺序，前一家额度用完换下一家）", now:"现在", free:"空闲", trying:"试运行中", busyWith:"在做",
-  running:"正在做", queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", minutes:"分钟",
+  lanes:"工作线", lane:"工作线", now:"现在", free:"空闲",
+  queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", minutes:"分钟",
   task:"任务", provider:"供应", titleCol:"内容", changes:"改动", refused:"被拒的命令", error:"原因",
   asks:"智能体提的请求", answer:"回复（可不填）", close:"处理完", closedByCoordinator:"已由协调者关闭：",
   providers:"模型供应", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
@@ -318,11 +355,12 @@ const T = ZH ? {
   env:"给执行层的环境变量（每行 名字=值；一般不用动，装了新工具要让执行层找得到时才加）",
   allow:"这条线的执行层和核验不用问就能用的规则（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着命令规则。网页工具在沙箱的网络名单之外联网：每个网站写一条 WebFetch(domain:docs.python.org)，光写 WebFetch 会被拒绝；WebSearch 会把搜索词发到本机之外。git 的规则写了也不算：提交由框架来做）",
   network:"执行层做活时能连的主机", write:"执行层还能写的文件夹（工作树以外）",
-  laneCheck:"验收命令：每件活做完后由框架自己在工作树里跑，不经执行层；不通过就不让合并（空＝不验收）", checkCol:"验收", passed:"通过", notPassed:"没通过", couldNotRun:"没跑成（机器的问题，不是活的问题）", verifyCol:"实跑核对", v_holds:"成立", "v_holds, with notes":"成立，附注", "v_does not hold":"不成立", v_unsure:"拿不准", v_running:"正在核对", v_none:"没给结论", checkingWork:"执行层已做完，正在验收", withBrowser:"（带浏览器）", progressFmt:(n, idle) => idle == null ? "模型还没回话" : `已回 ${n} 轮，${idle} 分钟前还有动作`,
+  laneCheck:"验收命令：每件活做完后由框架自己在工作树里跑，不经执行层；不通过就不让合并（空＝不验收）", checkCol:"验收", passed:"通过", notPassed:"没通过", couldNotRun:"没跑成（机器的问题，不是活的问题）", verifyCol:"实跑核对", v_holds:"成立", "v_holds, with notes":"成立，附注", "v_does not hold":"不成立", v_unsure:"拿不准", v_running:"正在核对", v_none:"没给结论", checkingWork:"执行层已做完，正在验收", withBrowser:"（带浏览器）",
   setup:"每个任务开工前装依赖的命令（比如 pnpm install；空＝不用装）",
   providersList:"用哪几家（按顺序）", briefNote:"每条工作线的常驻说明由协调席用 hansa lane brief 设定，存在 lanes/工作线名/brief.md。",
   lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条工作线，在对话里跟协调席说。",
   mergeLane: lanes => `工作线 ${lanes.join("、") || "（还没有）"} 的合并验收线；不接活`,
+  verifyLane: lanes => `工作线 ${lanes.join("、")} 的核对线；只接核对`,
   mcQueuedSlot:"合并验收在排队：等待空闲的并发名额", mcQueuedTry: lane => `合并验收在排队：工作线 ${lane} 正在试跑`,
   laneWarnings:"这些工作线的允许命令里有现在不收的规则：运行时会被略去，别的设置照样能保存。要删掉它们，请协调席执行下面写的命令：",
   concurrencyNote:"由协调席用 hansa concurrency 设定，这里只能看；要改，在对话里跟协调席说。",
@@ -393,8 +431,8 @@ const T = ZH ? {
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
   serverUp:"server running", serverDown:"server not running: new tasks will not start",
   serverStuck:(pid, m) => `hansa serve (pid ${pid}) has not finished a round for ${m} min: busy or stuck`,
-  lanes:"Lanes", lane:"Lane", order:"Providers in order (the next takes over when one runs out)", now:"Now", free:"free", trying:"held by a try", busyWith:"on",
-  running:"Running", queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", minutes:"min",
+  lanes:"Lanes", lane:"Lane", now:"Now", free:"free",
+  queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", minutes:"min",
   task:"Task", provider:"Provider", titleCol:"Task", changes:"Changes", refused:"Refused", error:"Why",
   asks:"Requests from agents", answer:"answer (optional)", close:"Done", closedByCoordinator:"closed by the coordinator: ",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
@@ -408,11 +446,12 @@ const T = ZH ? {
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
   allow:"Rules the lane's workers and verifiers are given without asking (one per line; Bash(pnpm test:*) means any command starting with pnpm test). Workers work in a sandbox and need no command rule. Web tools reach the network outside the sandbox: WebFetch(domain:docs.python.org) for each site (a bare WebFetch is refused), WebSearch sends search queries out of the machine. Git rules count for nothing: hansa does the committing",
   network:"Hosts workers may reach during a task", write:"Extra folders workers may write to (besides the worktree)",
-  laneCheck:"Check command: hansa runs it in the worktree after each task, not the worker; a failed check blocks the merge (blank = none)", checkCol:"Check", passed:"passed", notPassed:"failed", couldNotRun:"could not run (the machine, not the task)", verifyCol:"Verified by running", v_holds:"holds", "v_holds, with notes":"holds, with notes", "v_does not hold":"does not hold", v_unsure:"unsure", v_running:"verifying", v_none:"no verdict", checkingWork:"worker done, checking", withBrowser:" (with a browser)", progressFmt:(n, idle) => idle == null ? "no reply from the model yet" : `${n} replies, active ${idle} min ago`,
+  laneCheck:"Check command: hansa runs it in the worktree after each task, not the worker; a failed check blocks the merge (blank = none)", checkCol:"Check", passed:"passed", notPassed:"failed", couldNotRun:"could not run (the machine, not the task)", verifyCol:"Verified by running", v_holds:"holds", "v_holds, with notes":"holds, with notes", "v_does not hold":"does not hold", v_unsure:"unsure", v_running:"verifying", v_none:"no verdict", checkingWork:"worker done, checking", withBrowser:" (with a browser)",
   setup:"Command that installs dependencies before each task, e.g. pnpm install (blank = none)",
   providersList:"Providers, in order", briefNote:"The coordinator sets each lane's standing instructions with hansa lane brief; they are kept in lanes/<lane>/brief.md.",
   lanesNote:"The coordinator sets lanes with hansa lane; here you can only look. To change a lane, ask the coordinator in the conversation.",
   mergeLane: lanes => `merge lane for lanes ${lanes.join(", ") || "(none yet)"}; takes no work`,
+  verifyLane: lanes => `verify lane for lanes ${lanes.join(", ")}; takes only verifications`,
   mcQueuedSlot:"merge check queued: waits for a free concurrency slot", mcQueuedTry: lane => `merge check queued: waits for lane ${lane}, held by a try`,
   laneWarnings:"These lanes' allowed commands hold rules no longer accepted: runs leave them out, and the other settings save all the same. To remove them, ask the coordinator to run the command named:",
   concurrencyNote:"set by the coordinator with hansa concurrency; here you can only look. To change it, ask the coordinator in the conversation.",
@@ -571,6 +610,17 @@ Object.assign(T, ZH ? {
   costLoadFailed:"Could not load usage. Try again.", costRetained:n => `Still showing the previous ${n}-day report.`, retry:"Retry", exporting:"Exporting…", exported:"CSV exported.", exportFailed:"Could not export. Try again.",
   noCost:"No usage in this period", noCostNote:"Model usage will appear by seat, day, model, lane, provider and task.", seatColumn:"Seat", dayColumn:"Date"
 });
+Object.assign(T, ZH ? {
+  pipeline:"工作流水线", laneTracks:"工作线进度", principalWaiting:"等主理人答复", flow_queued:"排队", flow_worker:"执行", flow_check:"验收", flow_review:"待审", flow_verification:"核对", flow_merge:"合并验收",
+  pipeline_worker:"执行中", pipeline_check:"验收中", pipeline_verification:"核对中",
+  laneTrying:"试跑中", laneHeld:"沙箱暂缓", startedAt:"开始", lastNote:"最近留言", verifyingTask:"核对任务",
+  laneQueued:n => `${n} 件排队`, laneReplies:n => `${n} 轮回复`, laneIdle:n => `空闲 ${n} 分钟`, timeBudget:(n, limit) => `已用 ${n} 分钟，时限 ${limit} 分钟`
+} : {
+  pipeline:"Work pipeline", laneTracks:"Lane tracks", principalWaiting:"Waiting on principal", flow_queued:"Queued", flow_worker:"Worker", flow_check:"Check", flow_review:"Awaiting review", flow_verification:"Verification", flow_merge:"Merge check",
+  pipeline_worker:"Worker running", pipeline_check:"Check running", pipeline_verification:"Verification running",
+  laneTrying:"trying", laneHeld:"Sandbox held", startedAt:"Started", lastNote:"Last note", verifyingTask:"Verifying task",
+  laneQueued:n => `${n} queued`, laneReplies:n => `${n} replies`, laneIdle:n => `${n} min idle`, timeBudget:(n, limit) => `${n} min elapsed, ${limit} min limit`
+});
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const $ = s => document.querySelector(s);
 const mainTabLabels = {};
@@ -673,8 +723,91 @@ function clearLine(m, line) {
     : !m.loaded ? T.clearNoMod(w, m.why || T.notKnown) : c.root ? T.clearRoot(w) : !c.known ? T.clearLastUnknown(w)
     : (c.last ? T.clearLast(w, c.last) : T.clearNever(w, m.started)) + (c.warn ? T.clearMissed(c.missed) : ""));
 }
+// The review links identify verifiers without adding fields to /api/status.
+const FLOW_STEPS = ["queued", "worker", "check", "review", "verification", "merge"];
+const flowLabel = step => T["flow_" + step];
+function verificationParent(st, id) {
+  return st.review.find(m => m.verify?.task === id);
+}
+function runningStep(st, m) {
+  return verificationParent(st, m.id) ? "verification" : m.checking ? "check" : "worker";
+}
+let statusPicture = null;
+function pictureError(message) {
+  const failure = title => dashboardPanel(title, "error", null, h("div", {class:"bad", role:"alert"}, message));
+  const parts = [failure(T.pipeline), failure(T.laneTracks)];
+  if (statusPicture) statusPicture.replaceChildren(...parts);
+  else $("#tab-status").replaceChildren(statusPicture = h("div", {id:"status-picture"}, parts));
+}
+function pipelineStrip(st) {
+  const counts = {queued:st.queued.length, review:st.review.length, merge:(st.merging || []).length,
+    worker:0, check:0, verification:0,
+    principal:(st.releases || []).filter(r => r.state === "waiting").length + st.asks.length};
+  for (const m of st.running) counts[runningStep(st, m)]++;
+  const targets = {queued:"status-queued", review:"status-review", merge:"status-merging", principal:"status-principal"};
+  const box = step => {
+    const target = targets[step] || "status-lanes";
+    return h("button", {class:"pipeline-box" + (!counts[step] ? " dimmed" : step === "principal" ? " warn" : ""),
+      "data-pipeline-step":step, "data-count":counts[step], "aria-controls":target,
+      onclick:() => $("#" + target)?.scrollIntoView({block:"start"})},
+      h("span", {}, step === "principal" ? T.principalWaiting : T["pipeline_" + step] || flowLabel(step)), h("strong", {}, counts[step]));
+  };
+  return dashboardPanel(T.pipeline, "status", null, h("div", {class:"pipeline-strip"},
+    h("div", {class:"pipeline-stages"}, FLOW_STEPS.map(box)), box("principal")));
+}
+function laneTracks(st) {
+  return h("section", {id:"status-lanes", class:"dashboard-panel"},
+    h("div", {class:"section-head"}, h("h2", {}, icon("lanes"), T.laneTracks), h("span", {class:"count-badge"}, st.lanes.length)),
+    st.lanes.length ? st.lanes.map(l => {
+      const worker = st.running.find(m => m.lane === l.name);
+      const merge = (st.merging || []).find(m => m.lane === l.name && ["starting", "running"].includes(m.phase));
+      const m = worker || merge, parent = worker && verificationParent(st, worker.id);
+      const step = worker ? runningStep(st, worker) : merge ? "merge" : "";
+      const queued = st.queued.filter(q => q.lane === l.name);
+      const minutes = worker?.checking ? worker.check_minutes : m?.minutes;
+      const providers = (l.providers || []).map(name => {
+        const p = st.providers.find(p => p.name === name);
+        return name + (p ? ` (${p.model})` : "");
+      }).join(" → ");
+      const started = m && new Date(Date.now() - (minutes || 0) * 60000);
+      const p = worker?.progress;
+      const note = (p?.note || "").split(/\r?\n/)[0];
+      return h("article", {id:"status-lane-" + l.name, class:"lane-track" + (!m && !l.trying ? " dimmed" : ""),
+        "data-lane-track":l.name, "data-step":step},
+        h("div", {class:"lane-track-head"}, h("strong", {}, l.name),
+          h("span", {class:"muted"}, providers || "—"),
+          worker?.provider ? statusPill(`${worker.provider} (${worker.model || "—"})`) : null,
+          !m ? statusPill(l.trying ? T.laneTrying : queued.length ? T.laneQueued(queued.length) : T.free, l.trying ? "warn" : "") : null),
+        l.merge_lane ? h("div", {class:"muted"}, T.mergeLane(l.merge_for || [])) : null,
+        l.verify_for?.length ? h("div", {class:"muted"}, T.verifyLane(l.verify_for)) : null,
+        h("div", {class:"lane-steps", "aria-label":T.taskFlow}, FLOW_STEPS.map(s => h("span", {
+          class:"status-pill" + (s === step ? " current-step" : ""), "aria-current":s === step ? "step" : null}, flowLabel(s)))),
+        m ? h("div", {class:"lane-task"}, taskLink(m.id), " · ", m.title,
+          parent ? [" · ", T.verifyingTask, " ", taskLink(parent.id)] : null,
+          worker?.browser ? T.withBrowser : null,
+          worker?.checking ? h("span", {class:"muted"}, " · " + T.checkingWork) : null) : l.task ? taskLink(l.task) : null,
+        m ? h("div", {class:"lane-time"}, h("progress", {class:"lane-budget" + (minutes > l.timeout_min * .75 ? " warn" : ""),
+          value:minutes || 0, max:l.timeout_min, "aria-label":T.timeBudget(minutes || 0, l.timeout_min)}),
+          h("span", {}, worker?.checking ? T.checkMinutes(worker.check_minutes, worker.minutes)
+            : `${minutes || 0} ${T.minutes}`, " / ", `${l.timeout_min} ${T.minutes}`)) : null,
+        h("div", {class:"lane-meta muted"},
+          started ? h("time", {datetime:started.toISOString()}, T.startedAt + " " + started.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})) : null,
+          m ? h("span", {}, T.laneReplies(p?.replies ?? "—")) : null,
+          m ? h("span", {}, T.laneIdle(p?.idle_min ?? "—")) : null,
+          m ? h("span", {class:"lane-note", title:note}, T.lastNote + " " + (note || "—")) : null,
+          h("span", {}, T.laneQueued(queued.length))),
+        !m && queued.length ? h("div", {class:"muted"}, queued[0].waiting) : null,
+        Object.values(l.held || {}).map(held => h("div", {class:"warn lane-held"}, T.laneHeld + ": " + held.why)));
+    }) : emptyState(T.noLanes, T.noLanesNote, "lanes"));
+}
+
 async function loadStatus() {
-  const [st, ev] = await Promise.all([api("/api/status"), api("/api/events")]);
+  const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
+  if (status.status === "rejected") {
+    const e = status.reason;
+    pictureError(String(e.message || e)); err(e); throw e;
+  }
+  const st = status.value, ev = events.status === "fulfilled" ? events.value : [];
   const name = st.desk.split("/").filter(Boolean).slice(-2).join("/") || "/";
   const waiting = (st.releases || []).filter(r => r.state === "waiting").length + st.asks.length;
   document.title = (waiting ? `(${waiting}) ` : "") + "Hansa · " + name;
@@ -702,7 +835,9 @@ async function loadStatus() {
   $("#state").className = parts.some(p => p.className === "warn") ? "warn" : "muted";
   const reason = h("input", {placeholder:T.pauseReason, "aria-label":T.pauseReason});
   const t = st.last_24h;
+  statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));
   $("#tab-status").replaceChildren(...shown([
+    statusPicture,
     pageHeading("status", T.statusIntro, statusPill(T.autoUpdates, "", "reload")),
     h("div", {class:"metric-caption"}, T.last24h),
     h("div", {class:"metric-grid", "aria-label":T.last24h},
@@ -715,30 +850,24 @@ async function loadStatus() {
       h("div", {class:"runtime-actions"},
       st.paused ? h("button", {class:"primary", onclick: () => api("/api/resume", {}).then(loadStatus).catch(err)}, T.resume)
                 : [reason, h("button", {onclick: () => api("/api/pause", {reason:reason.value}).then(loadStatus).catch(err)}, T.pause)])),
-    releasesSection(st.releases || []),
-    asksSection(st),
-    dashboardPanel(T.lanes, "lanes", st.lanes.length, st.lanes.length ? table([T.lane, T.order, T.now], st.lanes.map(l => [l.merge_lane ? [l.name, h("br"), h("span", {class:"muted"}, T.mergeLane(l.merge_for))] : l.name, l.providers.join(" → "), l.task ? [T.busyWith + " ", taskLink(l.task)] : statusPill(l.trying ? T.trying : T.free, l.trying ? "warn" : "", l.trying ? "pending" : "check")])) : emptyState(T.noLanes, T.noLanesNote, "lanes")),
+    h("div", {id:"status-principal"}, releasesSection(st.releases || []), asksSection(st)),
     !st.running.length && !st.queued.length && !st.review.length && !(st.merging || []).length ? dashboardPanel(T.taskFlow, "status", 0,
       emptyState(T.noActiveTasks, T.noActiveTasksNote, "check")) : null,
-    st.running.length ? dashboardPanel(T.running, "status", st.running.length, table([T.task, T.lane, T.provider, T.minutes, T.titleCol],
-      st.running.map(m => [taskLink(m.id), m.lane, (m.checking ? T.checkingWork : `${m.provider} (${m.model})`) + (m.browser ? T.withBrowser : ""),
-        m.checking ? T.checkMinutes(m.check_minutes, m.minutes) : m.minutes,
-        m.progress ? h("span", {}, m.title, h("br"), h("span", {class:"muted"}, T.progressFmt(m.progress.replies, m.progress.idle_min))) : m.title]))) : null,
-    st.queued.length ? dashboardPanel(T.queued, "pending", st.queued.length, table([T.task, T.lane, T.titleCol, T.waiting],
-      st.queued.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"}, m.waiting)]))) : null,
-    st.review.length || (st.merging || []).length ? dashboardPanel(T.review, "security", st.review.length + (st.merging || []).length, (st.merging || []).length ? [h("h3", {}, T.merging),
+    h("div", {id:"status-queued"}, st.queued.length ? dashboardPanel(T.queued, "pending", st.queued.length, table([T.task, T.lane, T.titleCol, T.waiting],
+      st.queued.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"}, m.waiting)]))) : emptyState(T.queued, T.none, "pending")),
+    h("div", {id:"status-merging"}, (st.merging || []).length ? dashboardPanel(T.merging, "releases", st.merging.length,
       table([T.task, T.lane, T.titleCol, T.mergeCheck], st.merging.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"},
         (m.members?.length ? T.mcBatch(m.members.filter(id => id !== m.id), m.check_task) : ["starting", "running"].includes(m.phase) ? T.mcRunning(m.minutes) : m.waits_for ? T.mcQueuedAhead(m.waits_for) : m.busy_with ? T.mcQueuedBusy(m.lane, m.busy_with)
           : m.waiting_for === "slot" ? T.mcQueuedSlot : m.waiting_for === "try" ? T.mcQueuedTry(m.lane)
-          : st.server_up ? T.mcQueuedSoon : T.mcQueuedNoServer) + (m.again ? T.mcAgain : ""))]))] : null,
-      st.review.length ? table([T.task, T.lane, T.titleCol, T.changes, T.checkCol, T.verifyCol, T.refused],
+          : st.server_up ? T.mcQueuedSoon : T.mcQueuedNoServer) + (m.again ? T.mcAgain : ""))]))) : emptyState(T.merging, T.none, "releases")),
+    h("div", {id:"status-review"}, st.review.length ? dashboardPanel(T.review, "security", st.review.length, table([T.task, T.lane, T.titleCol, T.changes, T.checkCol, T.verifyCol, T.refused],
       st.review.map(m => [taskLink(m.id), m.lane, m.title, [m.stat || T.none, (m.leaked || []).length ? h("span", {class:"bad"}, " · " + T.keyInChange) : null,
         (m.markers || []).length ? h("span", {class:"bad"}, " · " + T.markersInChange) : null],
         m.check_could_not_run ? h("span", {class:"warn"}, T.couldNotRun) : m.check == null ? "—" : h("span", {class: m.check ? "ok" : "bad"}, m.check ? T.passed : T.notPassed),
         !m.verify ? "—" : ["queued", "running"].includes(m.verify.state) ? h("span", {class:"muted"}, T.v_running)
           : [h("span", {class: {holds:"ok", "does not hold":"bad"}[m.verify.verdict] || "warn"}, T["v_" + m.verify.verdict] || T.v_none),
              m.verify.verdict === "holds, with notes" ? [" · ", taskLink(m.verify.task)] : null],
-        m.denied ? h("span", {class:"warn"}, m.denied) : "0"])) : null) : null,
+        m.denied ? h("span", {class:"warn"}, m.denied) : "0"]))) : emptyState(T.review, T.none, "security")),
     st.failed.length ? dashboardPanel(T.failed, "error", st.failed.length, table([T.task, T.lane, T.titleCol, T.error],
       st.failed.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"bad"}, m.error)]))) : null,
     dashboardPanel(T.providers, "providers", st.providers.length, st.providers.length ? table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
@@ -747,7 +876,9 @@ async function loadStatus() {
       p.problem ? statusPill(p.problem, "warn", "error") : statusPill(T.ready, "ok"),
       p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${p.check.detail} (${when(p.check.at)})`) : "",
       checkButton(p.name, loadStatus)])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
-    dashboardPanel(T.events, "status", Math.min(ev.length, 20), ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(e => h("div", {class:"event-row"},
+    dashboardPanel(T.events, "status", Math.min(ev.length, 20), events.status === "rejected"
+      ? h("div", {class:"bad", role:"alert"}, String(events.reason.message || events.reason))
+      : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(e => h("div", {class:"event-row"},
       h("span", {class:"event-time"}, when(e.ts)), h("span", {class:"event-name"}, e.event),
       h("div", {class:"event-data mono"}, Object.entries(e).filter(([k]) => k !== "ts" && k !== "event")
         .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" "))))) : emptyState(T.noEvents, T.noEventsNote, "status"))
@@ -757,7 +888,7 @@ function asksSection(st) {
   if (!st.asks.length && !(st.asks_closed || []).length) return null;
   return dashboardPanel(T.asks, "alerts", st.asks.length, st.asks.map(a => {
     const ans = h("input", {placeholder:T.answer, "aria-label":`#${a.id} · ${T.answer}`});
-    return h("div", {class:"request-card"}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, a.text)),
+    return h("div", {class:"request-card", "data-principal-request":true}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, a.text)),
       a.note ? h("span", {class:"ok"}, a.note) : null,
       h("div", {class:"row"}, ans, h("button", {onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
         .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close)));
@@ -770,7 +901,7 @@ function releaseBlock(r) {
   const answer = yes => api("/api/release/answer", {id:r.id, yes, reason:reason.value, commit:r.commit, command:r.command})
     .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err);
   const named = new Set(r.named || []);
-  return h("div", {class:"lane release-card"},
+  return h("div", {class:"lane release-card", "data-principal-request":true},
     h("div", {class:"row"}, h("strong", {}, "#" + r.id), h("span", {}, `${T.lane} ${r.lane}${r.target ? ` · ${T.releaseTarget} ${r.target}` : ""} · ${r.base} @ `, h("code", {}, (r.commit || "").slice(0, 10))),
       h("span", {class:"muted"}, when(r.asked))),
     r.note ? h("div", {}, `${T.releaseNote}: ${r.note}`) : null,
