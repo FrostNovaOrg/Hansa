@@ -28495,7 +28495,11 @@ if (ask.startsWith("status-picture")) (async () => {
     const root = ids["#tab-status"], rows = [], boxes = [], tables = [];
     walk(root, el => {
       if (el.attrs["data-lane-track"] != null) {
-        rows.push({lane:el.attrs["data-lane-track"], step:el.attrs["data-step"], tone:el.className, text:el.textContent,
+        rows.push({lane:el.attrs["data-lane-track"], step:el.attrs["data-step"], tone:el.className, text:el.textContent, role:el.attrs.title,
+          tracks:descendants(el, "div").filter(n => n.className === "lane-steps").length,
+          heads:descendants(el, "div").filter(n => n.className === "lane-track-head").map(n => n.textContent),
+          pills:descendants(el, "span").filter(n => n.className.startsWith("status-pill")).map(n => n.textContent),
+          sections:descendants(el, "div").map(n => n.className),
           marked:descendants(el, "span").filter(n => n.attrs["aria-current"] === "step").map(n => n.textContent),
           bars:descendants(el, "progress").map(n => ({value:String(n.value), max:n.attrs.max, tone:n.className})),
           start:descendants(el, "time")[0]?.attrs.datetime});
@@ -28512,6 +28516,7 @@ if (ask.startsWith("status-picture")) (async () => {
       await box.click(); clicks.push(!!ids["#" + box.attrs["aria-controls"]]?.scrolled);
     }
     return {rows, lists, text:root.textContent, state:ids["#state"].textContent,
+      css:ask === "status-picture-mobile" ? page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>")) : undefined,
       boxes:boxes.map(el => ({step:el.attrs["data-pipeline-step"], count:Number(el.attrs["data-count"]),
       text:el.textContent, tone:el.className})), clicks, tables, first:root.kids[0]?.id,
       alerts:descendants(ids["#status-picture"], "div").filter(el => el.attrs.role === "alert").map(el => el.textContent)};
@@ -29325,7 +29330,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def picture_worker(self, **fields):
         return {"id": "t0042", "lane": "a", "title": "Picture task <&>", "provider": "claude",
-                "model": "test-model", "minutes": 16, "checking": False, "starting": False,
+                "model": "test-model", "minutes": 16, "limit_min": 20, "checking": False, "starting": False,
                 "progress": {"replies": 7, "idle_min": 3, "note": "Last note <&>\nHidden second line"}, **fields}
 
     def picture_pages(self, status, scenario="status-picture"):
@@ -29333,6 +29338,109 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.skipTest("needs node to run the page's script")
         for language in ("en", "zh"):
             yield language, self.page_header(scenario, status, language)
+
+    def test_status_picture_review_excludes_running_verification(self):
+        st = self.picture_status()
+        st["running"] = [self.picture_worker()]
+        st["review"] = [{"id": "parent", "title": "Being verified", "lane": "b", "check": True,
+                         "verify": {"task": "t0042", "state": "running", "lane": "a"}},
+                        {"id": "waiting", "title": "Queued verification", "lane": "b", "check": True,
+                         "verify": {"task": "next", "state": "queued", "lane": "a"}},
+                        {"id": "ready", "title": "Ready", "lane": "b", "check": True}]
+        for language, [page] in self.picture_pages(st):
+            with self.subTest(language=language):
+                counts = {box["step"]: box["count"] for box in page["boxes"]}
+                self.assertEqual((counts["review"], counts["verification"]), (2, 1))
+                self.assertEqual(page["lists"]["review"], 3)  # all review links remain available
+
+    def test_status_picture_running_limits_follow_server(self):
+        settings = self.desk.settings()
+        settings["lanes"]["a"].update(timeout_min=27, merge_timeout_min=4)
+        settings["lanes"]["v"] = {**settings["lanes"]["a"], "timeout_min": 17, "verify_for": ["a"]}
+        settings["lanes"]["m"] = {**settings["lanes"]["a"], "timeout_min": 80, "merge_timeout_min": 9, "merge_lane": True}
+        self.assertEqual(self.desk.save_settings(settings), [])
+        task = self.desk.new_task("Task check", lane="a", state="running")
+        self.desk.update(task, phase="checking", started=now() - 22 * 60, check_started=now() - 2 * 60)
+        parent = self.desk.new_task("Review", lane="a", state="done")
+        verify = self.desk.new_task("Verification", kind="verify", parent=parent, lane="v", state="running")
+        self.desk.update(verify, phase="checking", started=now() - 12 * 60, check_started=now() - 12 * 60)
+        self.desk.update(parent, verify=verify)
+        merge = self.desk.new_task("Merge", lane="a", state="merging")
+        self.desk.update(merge, merge_check={"lane": "m", "phase": "running", "started": now() - 8 * 60})
+        # Explicit merge limit, fallback to timeout_min, then both defaults; tasks and verifiers
+        # always use timeout_min, even when their lane has a different merge limit.
+        for defaults, expected in ((0, {"a": 27, "v": 17, "m": 9}),
+                                   (1, {"a": 27, "v": 17, "m": 80}),
+                                   (2, {"a": 240, "v": 240, "m": 240})):
+            if defaults:
+                settings["lanes"]["m"].pop("merge_timeout_min", None)
+                if defaults == 2:
+                    for lane in settings["lanes"].values():
+                        lane.pop("timeout_min", None)
+                self.assertEqual(self.desk.save_settings(settings), [])
+            st = views.status(self.desk)
+            for language, [page] in self.picture_pages(st):
+                with self.subTest(language=language, defaults=defaults):
+                    for row in page["rows"]:
+                        self.assertEqual(row["bars"][0]["max"], str(expected[row["lane"]]))
+                    for item in st["running"] + st["merging"]:
+                        self.assertIn("limit_min", item)
+                        self.assertEqual(item["limit_min"], expected[item["lane"]])
+                    merge_bar = next(row for row in page["rows"] if row["lane"] == "m")["bars"][0]
+                    self.assertEqual("warn" in merge_bar["tone"], defaults == 0)
+
+    def test_status_picture_unmarked_merge_matches_lane_task(self):
+        st = self.picture_status()
+        st["lanes"][0]["task"] = "t0042"
+        # The lane's occupied task still identifies the run if its merge row names the task lane.
+        for phase in ("starting", "running"):
+            st["merging"] = [{"id": "t0042", "lane": "b", "title": "Merge task", "phase": phase,
+                              "minutes": 5, "limit_min": 9}]
+            for language, [page] in self.picture_pages(st):
+                with self.subTest(language=language, phase=phase):
+                    row = page["rows"][0]
+                    self.assertEqual(row["step"], "merge")
+                    self.assertEqual(row["marked"], ["Merge check" if language == "en" else "合并验收"])
+                    self.assertNotIn("free" if language == "en" else "空闲", row["pills"])
+                    self.assertEqual(row["bars"][0]["max"], "9")
+
+    def test_status_picture_mobile_labels_wrap_between_words(self):
+        st = self.picture_status()
+        st["running"] = [self.picture_worker()]
+        for language, [page] in self.picture_pages(st, "status-picture-mobile"):
+            with self.subTest(language=language):
+                # PAGE_HARNESS has no layout engine: check the CSS used by the rendered labels.
+                css = page["css"]
+                self.assertRegex(css, r"\.pipeline-box, \.lane-steps \.status-pill\s*\{[^}]*overflow-wrap:\s*normal;")
+                self.assertRegex(css, r"@media \(max-width:640px\)\s*\{\s*\.pipeline-strip\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\);")
+                self.assertRegex(css, r"@media \(max-width:640px\)\s*\{[\s\S]*?\.lane-steps\s*\{[^}]*grid-template-columns:\s*repeat\(3,minmax\(0,1fr\)\)")
+                self.assertIn("Awaiting review" if language == "en" else "待审", page["rows"][0]["pills"])
+
+    def test_status_picture_empty_free_lane_is_one_line(self):
+        st = self.picture_status()
+        st["lanes"] += [{**st["lanes"][0], "name": "m", "merge_lane": True, "merge_for": ["a"]},
+                        {**st["lanes"][0], "name": "v", "verify_for": ["a"]}]
+        for language, [page] in self.picture_pages(st):
+            with self.subTest(language=language):
+                for row in page["rows"]:
+                    self.assertEqual(row["tracks"], 0)
+                    self.assertEqual(row["sections"], ["lane-track-head"])
+                    self.assertEqual(row["text"], row["heads"][0])
+                    self.assertEqual(row["pills"], ["free" if language == "en" else "空闲"])
+                    self.assertIn("claude (" + st["providers"][0]["model"] + ")", row["text"])
+
+    def test_status_picture_sandbox_hold_pill_is_held(self):
+        st = self.picture_status()
+        for queued in (False, True):
+            if queued:
+                st["queued"] = [{"id": "next", "lane": "a", "title": "Next", "waiting": "sandbox"}]
+            st["lanes"][0]["held"] = {"work": {"why": "sandbox unavailable <&>"}}
+            for language, [page] in self.picture_pages(st):
+                with self.subTest(language=language, queued=queued):
+                    row = page["rows"][0]
+                    self.assertIn("Sandbox held" if language == "en" else "沙箱暂缓", row["pills"])
+                    self.assertNotIn("free" if language == "en" else "空闲", row["pills"])
+                    self.assertIn("sandbox unavailable <&>", row["text"])
 
     def test_status_picture_free_lanes_keep_order_and_provider_models(self):
         st = self.picture_status()
@@ -29402,12 +29510,12 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 row = page["rows"][0]
                 for word in (("verify lane", "b, c", "takes only verifications") if language == "en"
                              else ("工作线 b、c", "核对线", "只接核对")):
-                    self.assertIn(word, row["text"])
+                    self.assertIn(word, row["text"] if running else row["role"])
 
     def test_status_picture_merge_lane_uses_merge_task_minutes(self):
         st = self.picture_status()
         st["lanes"][0].update(merge_lane=True, merge_for=["b", "c"], task="t0042")
-        st["merging"] = [{"id": "t0042", "lane": "a", "title": "Merge task", "phase": "running", "minutes": 5}]
+        st["merging"] = [{"id": "t0042", "lane": "a", "title": "Merge task", "phase": "running", "minutes": 5, "limit_min": 20}]
         for language, [page] in self.picture_pages(st):
             row = page["rows"][0]
             self.assertEqual((row["step"], row["bars"][0]["value"]), ("merge", "5"))
@@ -29454,7 +29562,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(self.desk.save_settings(settings), [])
         self.assertEqual(views.status(self.desk)["lanes"][0]["timeout_min"], 240)
         st["server_up"] = True
-        st["running"] = [self.picture_worker(minutes=8, progress=None)]
+        st["running"] = [self.picture_worker(minutes=8, limit_min=27, progress=None)]
         for _, [page] in self.picture_pages(st):
             self.assertEqual(page["rows"][0]["bars"][0]["max"], "27")
 
@@ -29466,7 +29574,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         st["running"] = [self.picture_worker(), self.picture_worker(id="verifier", lane="v", title="Verify task")]
         st["review"] = [{"id": "parent", "lane": "a", "title": "Original", "check": True,
                          "verify": {"task": "verifier", "state": "running", "lane": "v"}}]
-        st["merging"] = [{"id": "merge", "lane": "m", "title": "Merge task", "phase": "running", "minutes": 5}]
+        st["merging"] = [{"id": "merge", "lane": "m", "title": "Merge task", "phase": "running", "minutes": 5, "limit_min": 20}]
         for language, [page] in self.picture_pages(st):
             self.assertEqual([row["lane"] for row in page["rows"]], ["a", "v", "m"])
             for row, tid, title in zip(page["rows"], ("t0042", "verifier", "merge"),
@@ -29512,7 +29620,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             lane = str(i)
             st["lanes"].append({"name": lane, "providers": ["claude"], "timeout_min": 20})
             if step == "merge":
-                st["merging"] = [{"id": "tmerge", "lane": lane, "title": "Merge", "phase": "running", "minutes": 3}]
+                st["merging"] = [{"id": "tmerge", "lane": lane, "title": "Merge", "phase": "running", "minutes": 3, "limit_min": 20}]
             else:
                 st["running"].append(self.picture_worker(id="t" + lane, lane=lane, checking=step == "check", check_minutes=2))
         st["review"] = [{"id": "parent", "lane": "0", "title": "Parent", "check": True,
@@ -29526,10 +29634,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         for _, [page] in self.picture_pages(st):
             counts = {box["step"]: box["count"] for box in page["boxes"]}
             self.assertEqual(counts, {"queued": len(st["queued"]), "worker": 1, "check": 1,
-                                      "review": len(st["review"]), "verification": 1, "merge": len(st["merging"]), "principal": 2})
+                                      "review": len(st["review"]) - 1, "verification": 1, "merge": len(st["merging"]), "principal": 2})
             for step in ("worker", "check", "verification"):
                 self.assertEqual(counts[step], sum(r["step"] == step for r in page["rows"]))
-            for step in ("queued", "review", "merge", "principal"):
+            self.assertEqual(counts["review"], page["lists"]["review"] - 1)
+            for step in ("queued", "merge", "principal"):
                 self.assertEqual(counts[step], page["lists"][step])
             self.assertTrue(all(page["clicks"]))
             self.assertIn("warn", page["boxes"][-1]["tone"])
