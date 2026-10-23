@@ -10,7 +10,9 @@ class TurnCeiling(Scratch):
     def test_more_items_than_max_turns_stops_codex(self):
         done = self.root / "codex-finished"
         t0 = time.time()
-        run, code = self.run_worker("many_items.jsonl", argv=self.worker_argv(max_turns=3),
+        # many_items_long.jsonl: many_items.jsonl with 150 more lines before its end, 30 s more at 0.2 s a line,
+        # so codex cannot reach its end before the turn ceiling stops it, however slow the shim is to react
+        run, code = self.run_worker("many_items_long.jsonl", argv=self.worker_argv(max_turns=3),
                                     FAKE_CODEX_DELAY="0.2", FAKE_CODEX_DONE=str(done))
         self.assertLess(time.time() - t0, 60, "a hang guard only: that codex was stopped, not waited for, is below")
         self.assertEqual(code, 1)

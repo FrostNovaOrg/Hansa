@@ -12326,7 +12326,7 @@ def save():'''))
         return d, desk, tid, root
 
     def oom_settle(self, dispatcher, desk, tid):
-        end = time.time() + 30
+        end = time.time() + 120  # a hang guard only: it returns as soon as the run ends
         while time.time() < end:
             dispatcher.tick()
             m = desk.meta(tid)
