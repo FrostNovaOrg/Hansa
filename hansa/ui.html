@@ -968,6 +968,10 @@ function timelineSection() {
 }
 function renderTimeline(report) {
   const root = timelineSection(), span = report.end - report.start;
+  const kindLabels = {worker:T.timeline_worker, check:T.timeline_check, verification:T.timeline_verification,
+    merge:T.timeline_merge, try:T.timeline_try, release:T.timeline_release, failed:T.timeline_failed};
+  const resultLabels = {failed:T.timeline_failed, running:T.timeline_running, done:T.timeline_done,
+    passed:T.timeline_passed, stopped:T.timeline_stopped, cancelled:T.timeline_cancelled, queued:T.timeline_queued};
   const axis = h("div", {class:"timeline-track timeline-axis", "aria-label":T.last24h});
   const hour = t => new Date(t * 1000).toLocaleTimeString(ZH ? "zh-CN" : "en", {hour:"2-digit", minute:"2-digit", hour12:false});
   const first = new Date(report.start * 1000); first.setMinutes(0, 0, 0);
@@ -988,7 +992,7 @@ function renderTimeline(report) {
       let level = levels.findIndex(end => end <= item.start);
       if (level < 0) level = levels.length;
       levels[level] = Math.max(item.start + 1, item.end);
-      const kind = T["timeline_" + item.kind], result = T["timeline_" + item.result] || T["v_" + item.result] || item.result;
+      const kind = kindLabels[item.kind], result = resultLabels[item.result] || T["v_" + item.result] || item.result;
       const names = item.tasks.map(task => `${task.id} ${task.title}`).join(", ") ||
         (item.release ? `#${item.release.id} ${item.release.target}` : row.lane);
       const label = [kind, names, `${T.startedAt}: ${new Date(item.started * 1000).toLocaleString(ZH ? "zh-CN" : "en")}`,
@@ -1010,7 +1014,7 @@ function renderTimeline(report) {
   root.replaceChildren(...shown([
     h("div", {class:"section-head"}, h("h2", {}, icon("status"), T.timeline)),
     h("div", {class:"timeline-legend"}, [...TIMELINE_KINDS, "failed"].map(kind =>
-      h("span", {}, h("i", {class:`timeline-swatch timeline-${kind}`, "aria-hidden":"true"}), T["timeline_" + kind]))),
+      h("span", {}, h("i", {class:`timeline-swatch timeline-${kind}`, "aria-hidden":"true"}), kindLabels[kind]))),
     h("div", {class:"timeline-row"}, h("span", {}), h("div", {class:"timeline-ends"}, T.timelineAgo, h("span", {}, T.timelineNow))),
     h("div", {class:"timeline-row"}, h("span", {}), axis), rows,
     !report.lanes.some(row => row.segments.length) ? h("p", {class:"muted"}, T.timelineEmpty) : null,
