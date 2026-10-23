@@ -93,7 +93,7 @@ TOPICS = {
 # hansa help: the commands, a few to a line (a command left out of these goes on the last line)
 COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
                   ("watching", ("status", "wait", "notify", "ask", "explain", "notes", "gaps", "cost")),
-                  ("lanes and releases", ("lane", "release", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
+                  ("lanes and releases", ("lane", "release", "changelog", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
                   ("the desk", ("init", "up", "serve", "web", "coordinator", "ping", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
@@ -1194,6 +1194,16 @@ def cmd_ask(a):
     n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"),
                                   session=notify.session_here())
     print(f"ask #{n} is on the principal's page")
+
+
+def cmd_changelog(a):
+    from .changelog import lines
+    desk = Desk.find(a.desk)
+    try:
+        for line in lines(desk, a.lane, a.target):
+            print(desk.redact(line))
+    except (RuntimeError, OSError) as e:
+        raise SystemExit(f"hansa: cannot collect changelog: {e}")
 
 
 def cmd_release(a):
@@ -2940,6 +2950,10 @@ def main(argv=None):
     p = add("pause", cmd_pause, "stop new tasks from starting")
     p.add_argument("reason", nargs="*")
     add("resume", cmd_resume, "let new tasks start again")
+    p = add("changelog", cmd_changelog, "list workers' changelog lines for a lane's next release to a target")
+    p.add_argument("lane")
+    p.add_argument("target", nargs="?")
+    p.epilog = see_more("release-flow")
     p = add("release", cmd_release, "ask for a release of a lane's base branch (a named target, run by hansa "
             "after the principal's yes on the page), or list the releases")
     p.description = ("hansa release L [TARGET] [note]: ask for a release of lane L's base branch as it is now, by "

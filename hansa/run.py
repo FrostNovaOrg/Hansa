@@ -265,6 +265,9 @@ on branch task/{tid}, which was made for this task.
   not whole sentences; skip a test the sandbox cannot run (one that binds a local port, say) with
   the reason in the skip, rather than leave it failing or delete it.
 {long}- End with a short report: what you changed, how you checked it, and anything left undone.
+  Its last line is `Changelog: ` and one sentence on the change for the project's users,
+  or `Changelog: none` when they would not notice it. A follow-up writes that line for the
+  whole change as it stands on its branch, not only for this round.
   Its numbers come from this run, not from earlier text.
   Stop or wait for any background work you started before you write it: your last message
   is taken as your report.
