@@ -66,6 +66,12 @@ refreshes. The page refreshes every five seconds while Status is visible, unless
 the principal is filling in an input. Release approvals, refusals, stops and request replies
 use the same actions as before.
 
+Dates and times follow the page's selected Chinese or English language, including
+the lane's estimated start time. In a task box's steps row, times show hours and
+minutes, with the month and day added for a different local calendar day; seconds
+are omitted. Durations below 90 seconds use seconds; longer durations use minutes,
+with one decimal below 10 minutes and whole minutes from 10 minutes onward.
+
 Queued tasks show their waiting reason in the page's language, both in the queue
 and under a lane's queued count. `/api/status` keeps the English `waiting` field
 and adds `waiting_code` and `waiting_values`. The command views still use the
