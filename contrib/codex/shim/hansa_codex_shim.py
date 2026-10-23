@@ -643,6 +643,7 @@ SERVER_STATUS = re.compile(r"(?:status:?|status code:?|HTTP)\s*(5\d\d)\b|\b(5\d\
 STREAM_WORDS = re.compile(r"stream (?:disconnected|closed|ended|error)|disconnected before completion|"
                           r"unexpected eof|idle timeout", re.I)
 CONNECT_WORDS = re.compile(r"error sending request|connection (?:reset|refused|closed|error|aborted)|"
+                           r"workspace routing discovery failed|"
                            r"timed? ?out|dns error|failed to lookup|network (?:is )?unreachable|broken pipe", re.I)
 
 

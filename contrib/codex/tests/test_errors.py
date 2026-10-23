@@ -52,6 +52,15 @@ class ErrorMappings(Scratch):
         self.assertEqual(hansa_run.network_reason(run, self.err),
                          "the connection to the provider failed (Connection error)")
 
+    def test_workspace_routing_discovery_failed_is_a_connection_error(self):
+        run = self.failed_run("workspace_routing_discovery_failed.jsonl")
+        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("", ""))
+        self.assertEqual(hansa_run.network_reason(run, self.err),
+                         "the connection to the provider failed (Connection error)")
+        self.assertTrue(run["result"].startswith(
+            "API Error: Connection error (Codex: workspace routing discovery failed)"))
+        self.assertEqual(run["codex_warnings"], ["Falling back from WebSockets to HTTPS transport."])
+
     def test_server_error(self):
         run = self.failed_run("server_error.jsonl")
         self.assertEqual(hansa_run.unusable_reason(run, self.err), ("", ""))
@@ -93,8 +102,19 @@ class Wordings(unittest.TestCase):
                  "the connection to the provider failed (Connection dropped)"),
                 ("error sending request for url (https://chatgpt.com/backend-api/codex/responses): operation timed out",
                  "the connection to the provider failed (Connection error)"),
+                ("workspace routing discovery failed", "the connection to the provider failed (Connection error)"),
+                ("workspace routing discovery timed out", "the connection to the provider failed (Connection error)"),
                 ("unexpected status 500 Internal Server Error", "the provider had a server error (HTTP 500)")):
             self.assertEqual(self.kind(text)[0], want, text)
+
+    def test_other_routing_messages_are_not_connection_errors(self):
+        for text, want in (
+                ("workspace routing discovery unauthorized (401)", "key"),
+                ("selected workspace missing from routing discovery", "")):
+            with self.subTest(text=text):
+                kind, run = self.kind(text)
+                self.assertEqual(kind, want)
+                self.assertEqual(hansa_run.network_reason(run, ""), "")
 
     def test_a_task_failure_is_neither(self):
         kind, run = self.kind("model produced invalid tool call")
