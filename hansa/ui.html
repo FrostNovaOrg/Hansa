@@ -1105,7 +1105,7 @@ function renderTimeline(report) {
   for (let t = firstHour; t < report.end; t += 3600) {
     const date = new Date(t * 1000);
     axis.append(h("span", {class:"timeline-hour", "data-mobile":date.getHours() % 6 === 0 ? "true" : "false",
-      style:`left:${(t - report.start) / span * 100}%;`, title:new Date(t * 1000).toLocaleString()},
+      style:`left:${(t - report.start) / span * 100}%;`, title:when(t)},
       h("span", {class:"timeline-hour-label"}, hour(t))));
   }
   const inspector = h("div", {class:"timeline-inspector", role:"status", "aria-live":"polite"});
