@@ -522,8 +522,8 @@ def killed_last(m: dict) -> dict:
 _TIMELINE_BOUNDARIES = {}  # Per log: only older starts (or missing starts) needed by ends still in the window.
 
 
-def timeline_events(path: Path, since: float) -> list:
-    """Read the window backwards. Cache lookups of crossing starts so old history is searched only once."""
+def timeline_events(path: Path, since: float, *, tasks=(), releases=(), tries=None) -> list:
+    """Read the window backwards; prefer recorded starts and bound/cache older lookups."""
     starts = {"task_started": "task", "check_started": "check", "merge_check_started": "merge",
               "lane_try_started": "try", "release_started": "release"}
     ends = {"task_finished": "task", "task_checked": "check", "check_killed": "check",
@@ -532,6 +532,42 @@ def timeline_events(path: Path, since: float) -> list:
 
     def identity(event, kind):
         return kind, event.get("id") if kind == "release" else event.get("lane") if kind == "try" else event.get("task")
+
+    saved = {}
+    meta = {m["id"]: m for m in tasks}
+    def remember(name, started, ended=None, **fields):
+        if started is not None:
+            event = {"event": name, "ts": started, **fields}
+            saved.setdefault(identity(event, starts[name]), []).append((event, ended))
+
+    for m in tasks:
+        fields = {"task": m["id"], "lane": m.get("lane")}
+        remember("task_started", m.get("started"), m.get("finished"), **fields)
+        for run in [*(m.get("attempts") or []), *(m.get("earlier_runs") or [])]:
+            remember("task_started", run.get("ran_from"), run.get("ended") or run.get("at"),
+                     **{**fields, "lane": run.get("lane", m.get("lane"))})
+        check = m.get("check") or {}
+        began = m.get("check_started")
+        remember("check_started", began, began + check["seconds"] if began is not None and
+                 check.get("seconds") is not None else None, **fields)
+        mc = m.get("merge_check") or {}
+        remember("merge_check_started", mc.get("started"),
+                 **{**fields, "lane": mc.get("lane") or m.get("lane"), "members": mc.get("members") or [m["id"]]})
+        result = m.get("merge_check_result") or {}
+        if result.get("at") is not None and result.get("seconds") is not None and not result.get("waited"):
+            remember("merge_check_started", result["at"] - result["seconds"], result["at"],
+                     **{**fields, "lane": result.get("lane") or m.get("lane"), "members": result.get("batch") or [m["id"]]})
+    for r in releases:
+        remember("release_started", r.get("started"), r.get("ended"),
+                 id=r["id"], lane=r.get("lane"), target=r.get("target"))
+    for lane, trial in (tries or {}).items():
+        remember("lane_try_started", trial.get("started"), trial.get("ended"), lane=lane)
+
+    def never_started(event):
+        # These end events explicitly describe work refused before launch: there is no older start.
+        return (event.get("could_not_run") or event.get("waited") or event.get("ran") is False or
+                event.get("event") == "task_finished" and "cancelled before it started" in event.get("error", "") or
+                event.get("event") == "task_checked" and "could not run" in event.get("note", ""))
 
     recent, older = [], []
     try:
@@ -561,21 +597,31 @@ def timeline_events(path: Path, since: float) -> list:
                     boundary = event
                     break
                 recent.append(event)
-            waiting = {}
+            waiting, end_events = {}, {}
             for event in recent:  # newest first; only ends without their start need an older lookup
                 name = event.get("event")
                 if name in starts:
                     waiting.pop(identity(event, starts[name]), None)
-                elif name in ends and not event.get("could_not_run") and not event.get("waited"):
+                elif name in ends and not never_started(event):
                     key = identity(event, ends[name])
-                    waiting.setdefault(key, (key, event["ts"]))
+                    signature = waiting.setdefault(key, (key, event["ts"]))
+                    end_events.setdefault(signature, event)
             for key, signature in list(waiting.items()):
-                if signature in lookups:
+                candidates = [start for start, end in saved.get(key, []) if start["ts"] <= signature[1]
+                              and (end is None or signature[1] <= end + 2)]
+                if candidates:
+                    start = max(candidates, key=lambda e: e["ts"])
+                    older.append(start)
+                    lookups[signature] = start
+                    del waiting[key]
+                elif signature in lookups:
                     if lookups[signature]:
                         older.append(lookups[signature])
                     del waiting[key]
             if waiting:
                 for event in itertools.chain([boundary] if boundary else [], stream):
+                    if event["ts"] < since - 7 * 86400:
+                        break
                     name = event.get("event")
                     if name in starts and (key := identity(event, starts[name])) in waiting:
                         lookups[waiting.pop(key)] = event
@@ -587,8 +633,13 @@ def timeline_events(path: Path, since: float) -> list:
                         lookups[waiting.pop(key)] = None
                         if not waiting:
                             break
-                for signature in waiting.values():
-                    lookups[signature] = None
+                for key, signature in waiting.items():
+                    # The true start is unavailable within the bounded history. Draw a cut interval.
+                    end = end_events[signature]
+                    start = {**end, "event": next(name for name, kind in starts.items() if kind == key[0]),
+                             "ts": since, "lane": end.get("lane") or meta.get(end.get("task"), {}).get("lane")}
+                    lookups[signature] = start
+                    older.append(start)
         _TIMELINE_BOUNDARIES[str(path)] = (file_id, stat.st_size, lookups)
     except FileNotFoundError:
         pass
@@ -755,8 +806,9 @@ def timeline(desk: Desk, *, at: float | None = None) -> dict:
     at = time.time() if at is None else at
     lanes = desk.settings()["lanes"]
     trials = {lane: read_json(desk.state_dir / "tries" / f"{lane}.json", {}) or {} for lane in lanes}
-    return timeline_data(lanes, desk.tasks(), timeline_events(desk.events_path, at - 86400),
-                         release.releases(desk), trials, at)
+    tasks, releases = desk.tasks(), release.releases(desk)
+    events = timeline_events(desk.events_path, at - 86400, tasks=tasks, releases=releases, tries=trials)
+    return timeline_data(lanes, tasks, events, releases, trials, at)
 
 
 def status(desk: Desk) -> dict:

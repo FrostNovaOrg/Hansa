@@ -320,6 +320,7 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .timeline-lane { font-size:12px; align-self:center; min-width:0; }
 .timeline-track { position:relative; min-width:0; min-height:32px; overflow:hidden; background:var(--surface); border-right:1px solid var(--line); }
 .timeline-hour { position:absolute; top:0; bottom:0; border-left:1px solid var(--line); font-size:10px; color:var(--muted); padding-left:2px; }
+.timeline-hour-label { position:relative; z-index:1; background:var(--card); padding-right:2px; }
 .timeline-axis { height:24px; background:none; }
 .timeline-ends { display:flex; justify-content:space-between; gap:8px; font-size:11px; color:var(--muted); }
 .timeline-segment, button.timeline-segment { position:absolute; top:5px; height:22px; min-height:0; min-width:3px; max-width:100%; margin:0; padding:0; border:0; border-radius:3px; background:var(--segment); color:var(--card); overflow:hidden; font-size:10px; white-space:nowrap; text-overflow:ellipsis; text-decoration:none; display:block; }
@@ -979,7 +980,8 @@ function renderTimeline(report) {
   for (let t = firstHour; t < report.end; t += 3600) {
     const date = new Date(t * 1000);
     axis.append(h("span", {class:"timeline-hour", "data-mobile":date.getHours() % 6 === 0 ? "true" : "false",
-      style:`left:${(t - report.start) / span * 100}%;`, title:new Date(t * 1000).toLocaleString()}, hour(t)));
+      style:`left:${(t - report.start) / span * 100}%;`, title:new Date(t * 1000).toLocaleString()},
+      h("span", {class:"timeline-hour-label"}, hour(t))));
   }
   const inspector = h("div", {class:"timeline-inspector", role:"status", "aria-live":"polite"});
   const details = h("div", {class:"timeline-details"});

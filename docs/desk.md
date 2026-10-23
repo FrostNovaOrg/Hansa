@@ -69,7 +69,8 @@ and target), original start, minutes and result. Clicking a task segment opens
 the same task details as its ID elsewhere; a merge batch names all its tasks.
 Concurrent pieces stack within their lane's row so each remains selectable.
 Checks that could not run say so. The legend and details use the page language.
-The axis fits the page on phones, with fewer hour labels but all hourly marks.
+The axis fits the page on phones, with fewer hour labels but all hourly marks;
+labels have an opaque background so adjacent grid lines do not cross their text.
 History loads when Status opens and at most once a minute during its regular
 five-second updates; it does not hold up the rest of Status.
 
@@ -80,6 +81,7 @@ the window. `lanes` is an ordered list of `{lane, segments}`. Each segment has:
 - `kind`: `worker`, `check`, `verification`, `merge`, `try` or `release`;
 - `lane`: the lane that executed it, including a dedicated merge lane;
 - `started`, `ended`: original Unix times (`ended: null` for running work);
+  an unknown older start uses the window's left edge;
 - `start`, `end`: drawing times clipped to the window;
 - `minutes`: elapsed minutes from the original start, to two decimal places;
 - `running`, `failed`, `could_not_run`: flags for presentation;
@@ -107,12 +109,19 @@ could be appended. Event pairs preserve earlier runs and retries; an end
 following another end does not duplicate a merge check.
 
 The endpoint reads the event log backwards in 64 KiB blocks to the start of the
-window, skipping damaged lines. If a pair crosses the window, it finds its older
-start once and keeps that boundary in memory until the end leaves the window.
-This also covers earlier tries whose lane record has since been replaced. A
-replaced or truncated log invalidates the remembered boundaries. It does not
-reread old log history on each request. Existing status responses and command
-output do not include timeline data.
+window, skipping damaged lines. An end explicitly saying that work never
+started (a task cancelled before launch, a refused check or an unstarted release)
+does not trigger an older-history search. A refused check remains a labelled
+point at its end. For a crossing pair, the endpoint first takes the start from
+the task, earlier run, release or lane try record. Only when no matching record
+supplies it does it search older events, stopping seven days before the window.
+If no start is found within that limit, the segment begins at the window's left
+edge; its minutes then count from that edge. It keeps recovered boundaries in
+memory until their ends leave the window, including earlier tries whose lane
+record has since been replaced. A replaced or truncated log invalidates the
+remembered boundaries. Thus neither a server restart nor a new unmatched end
+causes a search through the desk's entire history. Existing status responses
+and command output do not include timeline data.
 
 Status also shows the last 24 hours in summary cards, keeps dispatch controls separate
 from task lists, and places release decisions and requests near the top. Empty

@@ -29593,6 +29593,96 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             data = views.timeline_data(["a"], [{"id": "t0001", "lane": "a"}], found, [], {}, 200000)
             self.assertEqual(data["lanes"][0]["segments"], [])
 
+    def timeline_counted(self, at):
+        """Call the endpoint view and count actual event-log bytes, including its first lookup."""
+        original, reads = open, []
+        def tracked(path, *args, **kwargs):
+            source = original(path, *args, **kwargs)
+            if Path(path) == self.desk.events_path:
+                read = source.read
+                def counted(size=-1):
+                    data = read(size)
+                    reads.append(len(data))
+                    return data
+                source.read = counted
+            return source
+        with unittest.mock.patch("builtins.open", tracked):
+            data = views.timeline(self.desk, at=at)
+        return data, sum(reads)
+
+    def test_timeline_unstarted_ends_read_only_recent_tail(self):
+        at = 4000000
+        old = (json.dumps({"ts": 1, "event": "old"}) + "\n").encode() * 199998
+        task = self.desk.new_task("Cancelled before launch", lane="a", state="cancelled")
+        check = self.desk.new_task("Refused check", lane="a", state="failed")
+        events = [{"ts": at - 120, "event": "task_finished", "task": task, "state": "cancelled",
+                   "error": "cancelled before it started"},
+                  {"ts": at - 60, "event": "task_checked", "task": check, "ok": False,
+                   "exit": None, "note": "the lane's check could not run: unavailable"}]
+        self.desk.events_path.write_bytes(old + b"".join((json.dumps(e) + "\n").encode() for e in events))
+        for refresh in range(2):
+            with self.subTest(refresh=refresh):
+                if refresh:
+                    # A newly refused check must not incur a fresh search through all history.
+                    with self.desk.events_path.open("a") as log:
+                        log.write(json.dumps({**events[-1], "ts": at - 30}) + "\n")
+                data, count = self.timeline_counted(at)
+                self.assertLessEqual(count, 65536)
+                segments = data["lanes"][0]["segments"]
+                self.assertEqual(len(segments), 1 + refresh)
+                self.assertTrue(all(s["kind"] == "check" and s["could_not_run"] and s["failed"]
+                                    and s["start"] == s["end"] for s in segments))
+
+    def test_timeline_recorded_crossing_starts_read_only_recent_tail(self):
+        from hansa import release
+        at, started = 4000000, 1000000
+        task = self.desk.new_task("Long worker run", lane="a", state="done")
+        earlier = self.desk.new_task("Earlier long run", lane="a", state="running")
+        self.desk.update(task, started=started, finished=at - 120)
+        self.desk.update(earlier, started=at - 30, earlier_runs=[{"ran_from": started + 1, "ended": at - 100}])
+        releases = [{"id": 1, "lane": "a", "target": "preview", "state": "done",
+                     "started": started + 2, "ended": at - 60}]
+        release.releases_file(self.desk).write_text(json.dumps(releases))
+        events = [{"ts": started, "event": "task_started", "task": task, "lane": "a"},
+                  {"ts": started + 1, "event": "task_started", "task": earlier, "lane": "a"},
+                  {"ts": started + 2, "event": "release_started", "id": 1, "lane": "a"}]
+        ends = [{"ts": at - 120, "event": "task_finished", "task": task, "state": "done"},
+                {"ts": at - 100, "event": "task_finished", "task": earlier, "state": "queued"},
+                {"ts": at - 60, "event": "release_ended", "id": 1, "ok": True}]
+        raw = b"".join((json.dumps(e) + "\n").encode() for e in events)
+        raw += (json.dumps({"ts": started + 3, "event": "old"}) + "\n").encode() * 199994
+        raw += b"".join((json.dumps(e) + "\n").encode() for e in ends)
+        self.desk.events_path.write_bytes(raw)
+        data, count = self.timeline_counted(at)
+        self.assertLessEqual(count, 65536)
+        cut = [s for s in data["lanes"][0]["segments"] if not s["running"]]
+        self.assertEqual([(s["started"], s["start"], s["ended"]) for s in cut],
+                         [(started + i, at - 86400, e["ts"]) for i, e in enumerate(ends)])
+
+    def test_timeline_missing_crossing_start_search_stops_at_seven_days(self):
+        at = 4000000
+        task = self.desk.new_task("Lost start record", lane="a", state="done")
+        events = [{"ts": 1, "event": "task_started", "task": task, "lane": "a"},
+                  {"ts": at - 86400 - 7 * 86400 - 1, "event": "old"}]
+        raw = (json.dumps(events[0]) + "\n").encode()
+        raw += (json.dumps(events[1]) + "\n").encode() * 199997
+        raw += (json.dumps({"ts": at - 90000, "event": "note"}) + "\n").encode()
+        raw += (json.dumps({"ts": at - 60, "event": "task_finished", "task": task, "state": "done"}) + "\n").encode()
+        self.desk.events_path.write_bytes(raw)
+        data, count = self.timeline_counted(at)
+        self.assertLessEqual(count, 65536)
+        segment = data["lanes"][0]["segments"][0]
+        self.assertEqual((segment["start"], segment["started"], segment["end"]), (at - 86400, at - 86400, at - 60))
+
+    def test_timeline_stopped_release_is_red_from_record_alone(self):
+        at = 200000
+        records = [{"id": 7, "lane": "a", "target": "preview", "state": "stopped",
+                    "started": at - 120, "ended": at - 60}]
+        segment = views.timeline_data(["a"], [], [], records, {}, at)["lanes"][0]["segments"][0]
+        self.assertTrue(segment["failed"])
+        self.assertFalse(segment["running"])
+        self.assertEqual((segment["kind"], segment["result"]), ("release", "stopped"))
+
     def test_timeline_endpoint_view_reads_only_recent_log_tail(self):
         at = 200000
         self.desk.events_path.write_bytes((json.dumps({"ts": 1, "event": "old"}) + "\n").encode() * 200000 +
