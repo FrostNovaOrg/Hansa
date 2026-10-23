@@ -65,7 +65,16 @@ use the same actions as before.
 Cost offers the last 1, 7 or 30 days, with token usage, estimated value and unpriced
 tokens above the six category tables. Unpriced models and unreadable coordinator
 usage remain explicit warnings; dollar values are an estimate, not a bill. A
-failed range change identifies the old report that remains visible and disables
+bar chart above the day table shows each returned day's USD value at the
+principal's prices, in date order. Each bar's accessible label and tooltip give
+the full date, amount and any unpriced token count; a warning mark identifies
+days whose tokens are partly or wholly unpriced. Narrow screens keep all bars,
+with fewer visible date and amount labels. The day table is unchanged. The chart
+uses `/api/cost`'s `by.day` date keys, `usd` and `unpriced_tokens`; it does not
+price tokens in the browser. Only dates with day rows are plotted: the API omits
+empty dates and supplies no calendar boundaries or desk timezone for filling
+them. A period without rows shows the usage empty state. A failed range change
+identifies the old report that remains visible and disables
 export until a report loads successfully. Retry requests the selected range.
 CSV export keeps the original rows and columns, uses the range selected when the
 export started, and reports success or failure. Both pages share the settings
