@@ -24252,7 +24252,7 @@ def save():'''))
         status["server_up"] = True
         for language, [rendered] in self.picture_pages(status):
             row = rendered["rows"][0]
-            self.assertEqual((row["step"], row["bars"][0]["value"]), ("check", "1"))
+            self.assertEqual((row["step"], row["bars"][0]["value"]), ("check", "8"))
             self.assertIn("1 min so far (8 min in all)" if language == "en" else "验收已跑 1 分钟（一共 8 分钟）", row["text"])
 
     def test_web_needs_token_and_header(self):
