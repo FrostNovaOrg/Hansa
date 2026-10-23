@@ -28516,6 +28516,12 @@ if (ask.startsWith("status-picture")) (async () => {
       await box.click(); clicks.push(!!ids["#" + box.attrs["aria-controls"]]?.scrolled);
     }
     return {rows, lists, text:root.textContent, state:ids["#state"].textContent,
+      warnings:descendants(ids["#state"], "span").filter(el => el.className === "warn").map(el => el.textContent),
+      events:descendants(root, "div").filter(el => el.className === "event-row").map(el => ({text:el.textContent,
+        time:descendants(el, "span").find(n => n.className === "event-time")?.textContent,
+        links:descendants(el, "button").filter(n => n.className === "link").map(n => n.textContent)})),
+      warningPills:descendants(root, "span").filter(el => el.className.split(" ").includes("warn") && el.className.startsWith("status-pill"))
+        .map(el => ({text:el.textContent, paths:descendants(el, "path").map(n => n.attrs.d)})),
       css:ask === "status-picture-mobile" ? page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>")) : undefined,
       boxes:boxes.map(el => ({step:el.attrs["data-pipeline-step"], count:Number(el.attrs["data-count"]),
       text:el.textContent, tone:el.className})), clicks, tables, first:root.kids[0]?.id,
@@ -29491,8 +29497,218 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         st["running"] = [self.picture_worker(checking=True, check_minutes=2, progress=None)]
         for language, [page] in self.picture_pages(st):
             row = page["rows"][0]
-            self.assertEqual((row["step"], row["bars"][0]["value"]), ("check", "2"))
+            self.assertEqual((row["step"], row["bars"][0]["value"]), ("check", "16"))
             self.assertIn("2 min so far (16 min in all)" if language == "en" else "验收已跑 2 分钟（一共 16 分钟）", row["text"])
+
+    def test_status_picture_check_budget_follows_server_start(self):
+        tid = self.desk.new_task("Check budget", lane="a")
+        at = time.time()
+        for retry, expected in ((None, 16), ({"ok": False}, 2)):
+            self.desk.update(tid, state="running", phase="checking", started=at - 16 * 60,
+                             check_started=at - 2 * 60, check_retry=retry)
+            st = views.status(self.desk)
+            for language, [page] in self.picture_pages(st):
+                with self.subTest(language=language, retry=bool(retry)):
+                    row = page["rows"][0]
+                    self.assertEqual(row["bars"][0]["value"], str(expected))
+                    self.assertIn("2 min so far (16 min in all)" if language == "en"
+                                  else "验收已跑 2 分钟（一共 16 分钟）", row["text"])
+
+    def test_status_picture_warning_pills_use_warning_icon(self):
+        for held in (False, True):
+            st = self.picture_status()
+            st["queued"] = [{"id": "t0042", "lane": "a", "title": "Next", "waiting": "busy"}]
+            if held:
+                st["lanes"][0]["held"] = {"work": {"why": "sandbox unavailable"}}
+            for language, [page] in self.picture_pages(st):
+                with self.subTest(language=language, held=held):
+                    label = ("Sandbox held" if held else "1 queued") if language == "en" else ("沙箱暂缓" if held else "1 件排队")
+                    pills = [p for p in page["warningPills"] if p["text"] == label]
+                    self.assertEqual(len(pills), 1)
+                    pill = pills[0]
+                    self.assertEqual(pill["paths"], ["M12 3l10 18H2zM12 9v5m0 3h.01"])
+
+    def test_status_picture_waiting_reasons_use_page_language(self):
+        tid = self.desk.new_task("Queued", lane="a")
+        self.desk.pause("pause detail")
+        st = views.status(self.desk)
+        # Also exercise multi-lane reasons and an unknown code from a newer server.
+        st["queued"] += [{"id": "t0043", "lane": "a", "title": "Busy", "waiting": "English fallback",
+                           "waiting_code": "lanes", "waiting_values": {"reasons": [
+                               {"code": "busy", "values": {"lane": "a"}, "text": "lane a is busy"},
+                               {"code": "missing_lane", "values": {"lane": "b"}, "text": "lane b is not in settings"}]}},
+                          {"id": "t0044", "lane": "a", "title": "Future", "waiting": "future reason <&>",
+                           "waiting_code": "future", "waiting_values": {}}]
+        for language, [page] in self.picture_pages(st):
+            with self.subTest(language=language):
+                self.assertIn("dispatch is paused" if language == "en" else "派活已暂停", page["rows"][0]["text"])
+                self.assertIn("lane a is busy" if language == "en" else "工作线 a 正忙", page["text"])
+                self.assertIn("lane b is not in settings" if language == "en" else "设置中没有工作线 b", page["text"])
+                self.assertIn("future reason <&>", page["text"])
+                self.assertNotIn("English fallback", page["text"])
+        self.assertEqual(st["queued"][0]["waiting_code"], "paused")
+        self.assertEqual(st["queued"][0]["waiting_values"], {})
+        self.assertIn("waiting: dispatch is paused", views.status_text(st))
+
+    def test_status_waiting_reason_codes_and_values_render_in_both_languages(self):
+        from hansa import disk, memory, run
+        import copy
+        settings = self.desk.settings()
+        base = run.waiting_looks(self.desk, settings, [], {"state": "up", "quiet": 0})
+        st = self.picture_status()
+        st["lanes"] = []
+        expected = []
+
+        def add(code, en, zh, *, lk=None, lanes=None, task=None, busy=None):
+            s = copy.deepcopy(settings)
+            if lanes is not None:
+                s["lanes"] = lanes
+            looks = {**base, **(lk or {})}
+            m = {"lane": "a", **(task or {})}
+            detail = run.waiting_detail(self.desk, s, m, busy or set(), looks)
+            self.assertEqual(detail["waiting_code"], code)
+            self.assertEqual(run.waiting_reason(self.desk, s, m, busy or set(), looks), detail["waiting"])
+            st["queued"].append({"id": f"t{len(expected) + 1:04}", "title": "Queue", "lane": "a", **detail})
+            expected.append((en, zh))
+            return detail["waiting_values"]
+
+        add("paused", "dispatch is paused", "派活已暂停", lk={"paused": "yes"})
+        add("no_lanes", "no lanes in settings", "设置中没有工作线", lanes={}, task={"lane": None})
+        add("no_work_lanes", "no lanes that take work", "没有接活", lanes={"a": {"merge_lane": True}}, task={"lane": None})
+        add("lanes", "lane b is not in settings", "设置中没有工作线 b", task={"lane": "b"})
+        add("lanes", "takes no work", "不接活", lanes={"a": {"merge_lane": True}})
+        add("lanes", "takes only verifications", "只接核对", lanes={"a": {"verify_for": ["b"]}})
+        add("lanes", "lane a is busy", "工作线 a 正忙", busy={"a"})
+        add("lanes", "sandbox probe <&>", "沙箱暂缓", lk={"held": {"a": {"work": {"why": "sandbox probe <&>", "kind": "worker"}}}})
+        for server, en, zh in (("up", "within seconds", "几秒内"), ("busy", "within seconds", "几秒内"),
+                               ("gone", "not running", "服务未运行"), ("stuck", "6 min", "6 分钟")):
+            values = add("ready", en, zh, lk={"server": {"state": server, "quiet": 360}, "not_looking": "busy" if server in ("gone", "stuck") else ""})
+            self.assertEqual((values["lane"], values["provider"], values["seconds"]), ("a", "claude", 360))
+        at = 1700000000
+        problems = [("no endpoint address", {}, {}, "no endpoint address", "没有接口地址"),
+                    ("no key", {}, {}, "no key", "没有密钥"),
+                    ("not in settings", {}, {}, "not in settings", "没有这家供应"),
+                    ("refused this task", {}, {"attempts": [{"kind": "refused", "provider": "claude"}]}, "refused this task", "拒绝"),
+                    ("credit rest", {"credit_since": at}, {}, "credit balance", "余额不足"),
+                    ("quota rest", {"cool_until": time.time() + 3600, "rest_how": "fixed", "rest_minutes": 30}, {}, "30 minutes", "30 分钟"),
+                    ("quota rest", {"cool_until": time.time() + 3600, "rest_how": "reset"}, {}, "reset time", "重置时间"),
+                    ("login rest", {"cool_until": time.time() + 3600}, {}, "fix the login or key", "修复登录或密钥"),
+                    ("network", {"unreachable_since": at, "unreachable_reason": "network <&>", "reason": "old rest"}, {}, "unreachable since", "无法连接"),
+                    ("future provider problem <&>", {}, {}, "future provider problem <&>", "future provider problem <&>")]
+        for problem, state, task, en, zh in problems:
+            values = add("lanes", en, zh, lk={"problems": {"claude": problem}, "provider_state": {"claude": state}}, task=task)
+            provider = values["reasons"][0]["values"]["providers"][0]
+            self.assertEqual(provider["values"]["provider"], "claude")
+            self.assertEqual(provider["text"], problem)
+            if state.get("unreachable_since"):
+                self.assertEqual(provider["values"]["why"], "network <&>")
+        # Actual snapshots, including a volume with its own floor, supply structured resource values.
+        vol = {"mount": "/small <&>", "free": disk.GB, "total": 8 * disk.GB, "what": ["desk"]}
+        with unittest.mock.patch.object(disk, "held", return_value=[vol]):
+            looks = run.waiting_looks(self.desk, settings, [], {"state": "up"})
+            values = add("disk", "/small <&>", "磁盘空间", lk=looks)
+            self.assertEqual(values["volumes"][0]["free"], "1.0 GB")
+            self.assertEqual(values["volumes"][0]["floor"], "2 GB")
+        with unittest.mock.patch.object(disk, "held", return_value=[]), \
+                unittest.mock.patch.object(memory, "held", return_value=True), \
+                unittest.mock.patch.object(memory, "record", return_value={"available": disk.GB, "total": 32 * disk.GB}):
+            looks = run.waiting_looks(self.desk, settings, [], {"state": "up"})
+            values = add("memory", "Available memory", "可用内存", lk=looks)
+            self.assertEqual(values["available"], "1.0 GB")
+        for language, [page] in self.picture_pages(st):
+            with self.subTest(language=language):
+                text = "".join(page["tables"])
+                for en, zh in expected:
+                    self.assertIn(en if language == "en" else zh, text)
+
+    def test_status_picture_server_warnings_keep_server_text(self):
+        st = self.picture_status()
+        st.update(serve_code="restart hansa <&>", alert_failed="alert exit 4 <&>",
+                  unreached=["no listening session <&>", "review waits <&>"])
+        for language, [page] in self.picture_pages(st):
+            with self.subTest(language=language):
+                labels = ("Server code", "Alert failed", "Coordinator unreached") if language == "en" else ("服务代码", "提醒失败", "协调席未收到")
+                for label, raw in ((labels[0], st["serve_code"]), (labels[1], st["alert_failed"]),
+                                   *((labels[2], raw) for raw in st["unreached"])):
+                    self.assertIn(label + ": " + raw, page["warnings"])
+        for value in (st["serve_code"], st["alert_failed"], *st["unreached"]):
+            self.assertIn(value, views.status_text(st).splitlines())
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_status_recent_events_sentences_and_fallback(self):
+        st = self.picture_status()
+        samples = [
+            ("task_started", {"lane": "a", "provider": "claude"}, "started", "开始"),
+            ("task_finished", {"state": "done"}, "finished", "结束"),
+            ("check_started", {}, "Check started", "验收开始"),
+            ("task_checked", {"ok": False}, "failed", "没通过"),
+            ("verification_closed", {}, "Verification closed", "核对已关闭"),
+            ("merge_check_queued", {}, "Merge check queued", "合并验收排队"),
+            ("merge_check_started", {"lane": "a"}, "Merge check started", "合并验收开始"),
+            ("merge_checked", {"ok": True}, "passed", "通过"),
+            ("merge_check_ended", {"ok": False}, "failed", "没通过"),
+            ("task_merged", {"into": "main"}, "merged", "已合并"),
+            ("release_asked", {"id": 7, "lane": "a", "target": "web", "state": "waiting"}, "Release #7", "发布 #7"),
+            ("release_started", {"id": 7, "lane": "a"}, "started", "开始"),
+            ("release_ended", {"id": 7, "ok": False}, "failed", "没通过"),
+            ("lane_try_started", {"lane": "a"}, "try started", "试跑开始"),
+            ("lane_tried", {"lane": "a", "ok": True}, "passed", "通过"),
+            ("sandbox_held", {"lane": "a", "why": "probe <&>"}, "Sandbox held", "沙箱暂缓"),
+            ("provider_credit", {"provider": "claude"}, "topped up", "充值"),
+            ("server_stopped", {}, "Server stopped", "服务已停止"),
+            ("unknown_future", {"nested": {"x": 1}, "note": "raw <&>"}, "note=raw <&>", "note=raw <&>"),
+        ]
+        events = [{"ts": 1700000000 + i, "event": kind, **fields,
+                   **({"task": "t0042"} if i < 10 or kind == "sandbox_held" else {})}
+                  for i, (kind, fields, _, _) in enumerate(samples)]
+        # Older entries still stop at 20; unknown events retain their raw fields.
+        events += [{"ts": 1, "event": "extra", "note": "twentieth"}, {"ts": 1, "event": "extra", "note": "too old"}]
+        for language in ("en", "zh"):
+            [page] = self.page_header("status-picture", st, language, events=events)
+            with self.subTest(language=language):
+                self.assertEqual(len(page["events"]), 20)
+                for event, (_, _, en, zh), rendered in zip(events, samples, page["events"]):
+                    self.assertIn(en if language == "en" else zh, rendered["text"])
+                    self.assertTrue(rendered["time"])
+                    self.assertEqual(rendered["links"], [event["task"]] if event.get("task") and event["event"] != "unknown_future" else [])
+                    if event["event"] != "unknown_future":
+                        self.assertNotIn(event["event"], rendered["text"])
+                self.assertIn('nested={"x":1}', page["events"][18]["text"])
+                self.assertNotIn("too old", page["text"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_status_recent_events_results_and_other_sentences(self):
+        st = self.picture_status()
+        samples = [
+            ("check_killed", {}, "Check killed", "验收被终止"),
+            ("check_rerun_queued", {}, "Check rerun queued", "验收重跑已排队"),
+            ("merge_queued", {}, "Merge queued", "合并已排队"),
+            ("merge_check_killed", {}, "Merge check killed", "合并验收被终止"),
+            ("merge_check_cancel", {}, "Merge check cancelled", "合并验收已取消"),
+            ("merge_check_base_moved", {}, "Base moved", "基础分支已移动"),
+            ("merge_batch_split", {}, "batch split", "批次已拆分"),
+            ("release_answered", {"id": 8, "yes": True}, "approved", "已批准"),
+            ("release_answered", {"id": 8, "yes": False}, "refused", "已拒绝"),
+            ("release_void", {"id": 8}, "voided", "已作废"),
+            ("release_forbidden", {"id": 8}, "forbidden words", "禁词"),
+            ("release_waits", {"id": 8, "lane": "a"}, "waits for lane a", "等待工作线 a"),
+            ("release_stopping", {"id": 8}, "stopping", "正在停止"),
+            ("release_stopped", {"id": 8}, "stopped", "已停止"),
+            ("lane_try_queued", {"lane": "a"}, "try queued", "试跑已排队"),
+            ("lane_try_withdrawn", {"lane": "a"}, "try withdrawn", "试跑已撤回"),
+            ("sandbox_ready", {"lane": "a"}, "Sandbox ready", "沙箱已恢复"),
+            ("task_checked", {"ok": None}, "result unknown", "结果未知"),
+            ("task_checked", {"ok": None, "could_not_run": True}, "could not run", "没跑成"),
+        ]
+        for language in ("en", "zh"):
+            events = [{"event": kind, "ts": 1700000000, "task": "t0042", **fields}
+                      for kind, fields, _, _ in samples]
+            [page] = self.page_header("status-picture", st, language, events=events)
+            for (kind, _, en, zh), rendered in zip(samples, page["events"]):
+                with self.subTest(language=language, event=kind, expected=en):
+                    self.assertIn(en if language == "en" else zh, rendered["text"])
+                    self.assertEqual(rendered["links"], ["t0042"])
+                    self.assertNotIn(kind, rendered["text"])
 
     def test_status_picture_verification_names_its_parent(self):
         st = self.picture_status()
@@ -29801,12 +30017,12 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 for store in ("session", "local"):
                     self.assertNotIn("919", json.dumps(loaded[store]))
 
-    def page_header(self, scenario, status, language):
+    def page_header(self, scenario, status, language, events=None):
         harness = self.tmp / "header-page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
         result = subprocess.run(["node", str(harness), str(page), scenario, language],
-                                input=json.dumps({"/api/status": status, "/api/events": []}),
+                                input=json.dumps({"/api/status": status, "/api/events": events or []}),
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)

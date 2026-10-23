@@ -6516,48 +6516,96 @@ def disk_short(desk: Desk) -> str:
 
 
 def waiting_looks(desk: Desk, s: dict, tasks: list | None = None, server: dict | None = None) -> dict:
-    """What waiting_reason reads of the desk, read once for every queued task of one hansa status. tasks,
-    server: the desk's tasks and server_state, when the caller has them already."""
-    return {"tasks": desk.tasks() if tasks is None else tasks, "paused": desk.paused(), "disk": disk_short(desk),
-            "held": sandbox_held(desk), "not_looking": not_looking(desk, server),
-            "problems": {p: provider_problem(desk, s, p) for ln in s["lanes"].values() for p in ln["providers"]}}
+    """What waiting_reason reads once for all queued tasks in a status response."""
+    from . import disk, memory
+    server = server_state(desk) if server is None else server
+    low = disk.held(desk)
+    resource = None
+    if low:
+        fl = disk.floor(s)
+        resource = {"code": "disk", "values": {"volumes": [
+            {"mount": v.get("mount"), "free": disk.gb(v.get("free") or 0),
+             "floor": disk.floor_text(disk.vol_floor(fl, v)), "again": disk.gb(disk.vol_bar(fl, v))} for v in low]}}
+    elif memory.held(desk):
+        rec = memory.record(desk)
+        fl = memory.machine_floor(memory.floor(s), rec)
+        resource = {"code": "memory", "values": {"available": disk.gb(rec["available"]),
+                    "floor": disk.floor_text(fl), "again": disk.gb((fl + memory.MARGIN) * disk.GB)}}
+    return {"tasks": desk.tasks() if tasks is None else tasks, "paused": desk.paused(),
+            "disk": disk.short_text(desk, low) if low else memory.short_text(desk) if resource else "",
+            "resource": resource, "server": server, "held": sandbox_held(desk),
+            "not_looking": not_looking(desk, server),
+            "problems": {p: provider_problem(desk, s, p) for ln in s["lanes"].values() for p in ln["providers"]},
+            "provider_state": desk.provider_state()}
 
 
-def waiting_reason(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None = None) -> str:
-    """Why a queued task is not running yet, in one line. looks: waiting_looks, for many tasks at once."""
+def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None = None) -> dict:
+    """The unchanged command sentence alongside codes and values for the page's dictionaries.
+    Nested reasons carry their own English fallback, so newer codes remain readable by older pages."""
     lk = looks or waiting_looks(desk, s)
+
+    def reason(code, text, **values):
+        return {"code": code, "values": values, "text": text}
+
+    def result(code, text, **values):
+        return {"waiting": text, "waiting_code": code, "waiting_values": values}
+
     if lk["paused"]:
-        return "dispatch is paused"
+        return result("paused", "dispatch is paused")
     if lk["disk"]:
-        return lk["disk"]
+        resource = lk["resource"]
+        return result(resource["code"], lk["disk"], **resource["values"])
     lanes = [m["lane"]] if m.get("lane") else sorted(n for n in s["lanes"] if not work_lane_problem(s, n))
     if not lanes:
-        return "no lanes that take work in settings" if s["lanes"] else "no lanes in settings"
+        return (result("no_work_lanes", "no lanes that take work in settings") if s["lanes"] else
+                result("no_lanes", "no lanes in settings"))
     why = []
     held = lk["held"]
     for ln in lanes:
         if ln not in s["lanes"]:
-            why.append(f"lane {ln} is not in settings")
+            why.append(reason("missing_lane", f"lane {ln} is not in settings", lane=ln))
             continue
         problem = work_lane_problem(s, ln, verifying=m.get("kind") == "verify" and bool(m.get("lane")))
         if problem:
-            why.append(problem)
+            why.append(reason("merge_lane" if s["lanes"][ln].get("merge_lane") else "verify_lane", problem, lane=ln))
             continue
         if "work" in held.get(ln, {}):
-            why.append(f"HELD: lane {ln} cannot run, {sandbox_held_text(held[ln]['work'])}")
+            h = held[ln]["work"]
+            why.append(reason("sandbox", f"HELD: lane {ln} cannot run, {sandbox_held_text(h)}",
+                              lane=ln, kind=h.get("kind") or "run", why=h.get("why") or "?"))
             continue
         if ln in busy:
-            why.append(f"lane {ln} is busy")
+            why.append(reason("busy", f"lane {ln} is busy", lane=ln))
             continue
         probs = {p: "refused this task" if p in refused_by(m) else lk["problems"][p]
                  for p in task_providers(s, ln, m)}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
             why_not = lk["not_looking"]
-            return (f"ready for lane {ln} on {ready[0]}, but {why_not}" if why_not else
+            text = (f"ready for lane {ln} on {ready[0]}, but {why_not}" if why_not else
                     f"ready for lane {ln} on {ready[0]}; starts when `hansa serve` next looks (within seconds)")
-        why.append(f"lane {ln} has no provider ready ({'; '.join(f'{p}: {x}' for p, x in probs.items())})")
-    return "; ".join(why) if why else "waiting for a free slot"
+            return result("ready", text, lane=ln, provider=ready[0], server=lk["server"]["state"],
+                          seconds=lk["server"].get("quiet"))
+        providers = []
+        for p, problem in probs.items():
+            st = lk["provider_state"].get(p, {})
+            code = ({"refused this task": "refused", "not in settings": "missing_provider",
+                     "no endpoint address": "no_endpoint", "no key": "no_key"}.get(problem)
+                    or ("credit" if st.get("credit_since") else "rest" if st.get("cool_until", 0) > time.time()
+                        else "unreachable" if st.get("unreachable_since") else "unknown"))
+            providers.append(reason(code, problem, provider=p, since=st.get("credit_since") or st.get("unreachable_since"),
+                                    until=st.get("cool_until"), minutes=st.get("rest_minutes"),
+                                    how=st.get("rest_how"),
+                                    why=(st.get("unreachable_reason") if code == "unreachable" else st.get("reason")) or ""))
+        why.append(reason("providers", f"lane {ln} has no provider ready ({'; '.join(f'{p}: {x}' for p, x in probs.items())})",
+                          lane=ln, providers=providers))
+    return (result("lanes", "; ".join(r["text"] for r in why), reasons=why) if why else
+            result("slot", "waiting for a free slot"))
+
+
+def waiting_reason(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None = None) -> str:
+    """Why a queued task is not running yet, in one line, for the command views."""
+    return waiting_detail(desk, s, m, busy, looks)["waiting"]
 
 
 def key_stamp(desk: Desk, name: str) -> tuple:

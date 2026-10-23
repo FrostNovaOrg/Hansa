@@ -15,7 +15,7 @@ from .desk import (DENY_AT, HOME_SECRETS, hidden_note, no_read_unusable, MAC_SEC
 from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of,
                   credit_text, provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
-                  lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_looks, waiting_reason, write_list)
+                  lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_detail, waiting_looks, write_list)
 
 STATES = {
     "queued": "waiting for a free lane and a ready provider",
@@ -599,11 +599,12 @@ def status(desk: Desk) -> dict:
                                                 s["providers"].get(m.get("provider") or "")),
                      "checking": m.get("phase") == "checking", "starting": m.get("phase") == "starting",
                      "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
+                     "check_retry": bool(m.get("check_retry")),  # only retries reset the server's timeout start
                      **({"browser": m["browser"]} if "browser" in m else {}),
                      "progress": None if m.get("phase") in ("checking", "starting") else progress_of(desk, m)}
                     for m in running],
         "queued": [{"id": m["id"], "title": m["title"], "lane": m.get("lane") or "any",
-                    "waiting": waiting_reason(desk, s, m, busy, looks), **killed_last(m)} for m in queued],
+                    **waiting_detail(desk, s, m, busy, looks), **killed_last(m)} for m in queued],
         "merging": [{"id": m["id"], "title": m["title"], "lane": merge_check_lane(s, m),
                      "members": (m.get("merge_check") or {}).get("members", []),
                      "check_task": (m.get("merge_check") or {}).get("leader", m["id"]),

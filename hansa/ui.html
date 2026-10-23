@@ -332,9 +332,27 @@ const T = ZH ? {
   dispatchLimit:n => `正在派活，同时最多 ${n} 件`, installed:"安装于",
   dispatchOn:"正在派活", paused:"已暂停", pause:"暂停派活", resume:"恢复派活", pauseReason:"暂停原因（可不填）",
   serverUp:"后台在运行", serverDown:"后台没在运行：新活不会开始",
+  serveCodeWarning:"服务代码", unreachedWarning:"协调席未收到", alertFailedWarning:"提醒失败",
   serverStuck:(pid, m) => `后台（pid ${pid}）已 ${m} 分钟没跑完一轮：在忙或卡住了`,
   lanes:"工作线", lane:"工作线", now:"现在", free:"空闲",
   queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", minutes:"分钟",
+  waitReasons:{
+    paused:() => "派活已暂停", no_lanes:() => "设置中没有工作线", no_work_lanes:() => "设置中没有接活的工作线", slot:() => "等待空位",
+    disk:v => `磁盘空间低于下限，暂停新任务：${v.volumes.map(x => `${x.mount} 可用 ${x.free}，下限 ${x.floor}，恢复需 ${x.again}`).join("；")}`,
+    memory:v => `可用内存 ${v.available} 低于下限 ${v.floor}，暂停新任务，等待恢复到 ${v.again}`,
+    ready:v => `工作线 ${v.lane} 和供应 ${v.provider} 已就绪；` + (v.server === "gone" ? "服务未运行，请运行 hansa up"
+      : v.server === "stuck" ? `服务正忙或卡住，已有 ${Math.floor((v.seconds || 0) / 60)} 分钟没跑完一轮` : "服务下次查看时开始（几秒内）"),
+    lanes:(v, render) => v.reasons.map(render).join("；"),
+    missing_lane:v => `设置中没有工作线 ${v.lane}`, merge_lane:v => `工作线 ${v.lane} 是合并验收线，不接活`,
+    verify_lane:v => `工作线 ${v.lane} 是核对线，只接核对`, busy:v => `工作线 ${v.lane} 正忙`,
+    sandbox:v => `工作线 ${v.lane} 因沙箱暂缓：${v.why}；沙箱试跑通过后会自动恢复（修复后重启 hansa serve）`,
+    providers:(v, render) => `工作线 ${v.lane} 没有就绪的供应（${v.providers.map(p => `${p.values.provider}：${render(p)}`).join("；")}）`,
+    refused:() => "拒绝了这件任务", missing_provider:() => "设置中没有这家供应", no_endpoint:() => "没有接口地址", no_key:() => "没有密钥",
+    credit:v => `余额不足，自 ${when(v.since)} 起休息，等主理人在网页上确认充值`,
+    rest:v => `休息到 ${when(v.until)}（${v.why}）` + (v.how === "reset" ? "；按错误给的重置时间再加一分钟"
+      : v.minutes ? `；错误没给重置时间，休息 ${v.minutes} 分钟` : "；修复登录或密钥后运行 hansa ping " + v.provider),
+    unreachable:v => `自 ${when(v.since)} 起无法连接（${v.why}），定时重试`
+  },
   task:"任务", provider:"供应", titleCol:"内容", changes:"改动", refused:"被拒的命令", error:"原因",
   asks:"智能体提的请求", answer:"回复（可不填）", close:"处理完", closedByCoordinator:"已由协调者关闭：",
   providers:"模型供应", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
@@ -386,6 +404,30 @@ const T = ZH ? {
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按工作线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
   seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", helper_reviewer:"复核", helper_scout:"侦察", helper_operator:"操作",
   events:"最近发生的事", none:"无", forbidden:"没有权限：请用 hansa web 给的地址打开",
+  eventStates:{queued:"重新排队", running:"运行中", checking:"转入验收", done:"待审", failed:"失败", cancelled:"已取消", merged:"已合并", waiting:"等批准", approved:"已批准", stopped:"已停止"},
+  eventResult:e => e.could_not_run ? "没跑成" : e.ok === true ? "通过" : e.ok === false ? "没通过" : "结果未知",
+  eventSentences:{
+    task_started:e => `任务开始：工作线 ${e.lane || "—"}，供应 ${e.provider || "—"}`,
+    task_finished:(e, result, state) => `任务结束：${state(e.state)}`,
+    check_started:() => "验收开始", task_checked:(e, result) => `验收${result(e)}`, check_killed:() => "验收被终止",
+    verification_closed:() => "核对已关闭",
+    check_rerun_queued:() => "验收重跑已排队", merge_queued:() => "合并已排队",
+    merge_check_queued:() => "合并验收排队", merge_check_started:e => `合并验收开始：工作线 ${e.lane || "—"}`,
+    merge_checked:(e, result) => `合并验收${result(e)}`, merge_check_ended:(e, result) => `合并验收结束：${result(e)}`,
+    merge_check_killed:() => "合并验收被终止", merge_check_cancel:() => "合并验收已取消",
+    merge_check_base_moved:() => "基础分支已移动，重新合并验收", merge_batch_split:() => "合并验收批次已拆分",
+    task_merged:e => `已合并到 ${e.into || "—"}`,
+    release_asked:(e, result, state) => `发布 #${e.id} 已申请：${e.lane || "—"} ${e.target || ""}，${state(e.state)}`,
+    release_answered:e => `发布 #${e.id} ${e.yes ? "已批准" : "已拒绝"}`,
+    release_started:e => `发布 #${e.id} 开始：${e.lane || "—"} ${e.target || ""}`,
+    release_ended:(e, result) => `发布 #${e.id} ${result(e)}`, release_void:e => `发布 #${e.id} 已作废`,
+    release_forbidden:e => `发布 #${e.id} 因禁词被阻止`, release_waits:e => `发布 #${e.id} 等待工作线 ${e.lane || "—"}`,
+    release_stopping:e => `发布 #${e.id} 正在停止`, release_stopped:e => `发布 #${e.id} 已停止`,
+    lane_try_queued:e => `工作线 ${e.lane} 试跑已排队`, lane_try_started:e => `工作线 ${e.lane} 试跑开始`,
+    lane_tried:(e, result) => `工作线 ${e.lane} 试跑${result(e)}`, lane_try_withdrawn:e => `工作线 ${e.lane} 试跑已撤回`,
+    sandbox_held:e => `工作线 ${e.lane} 沙箱暂缓：${e.why || "—"}`, sandbox_ready:e => `工作线 ${e.lane} 沙箱已恢复`,
+    provider_credit:e => `供应 ${e.provider} 余额不足，等主理人确认充值`, server_stopped:() => "服务已停止，新任务暂停启动"
+  },
   tokensNoPrice:"token 没价目", keyInChange:"改动里有钥匙，不能合并", markersInChange:"改动里留着冲突标记，不能合并",
   mcBatch:(members, owner) => `与 ${members.join(", ")} 一起验收；运行 ${owner} 的合并验收`,
   merging:"正在合并验收（跟基础分支现在的样子合在一起再跑一遍验收，通过就自动合并，不通过就回到待审）", mergeCheck:"合并验收",
@@ -431,9 +473,27 @@ const T = ZH ? {
   dispatchLimit:n => `dispatch on, ${n} at a time`, installed:"installed",
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
   serverUp:"server running", serverDown:"server not running: new tasks will not start",
+  serveCodeWarning:"Server code", unreachedWarning:"Coordinator unreached", alertFailedWarning:"Alert failed",
   serverStuck:(pid, m) => `hansa serve (pid ${pid}) has not finished a round for ${m} min: busy or stuck`,
   lanes:"Lanes", lane:"Lane", now:"Now", free:"free",
   queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", minutes:"min",
+  waitReasons:{
+    paused:() => "dispatch is paused", no_lanes:() => "no lanes in settings", no_work_lanes:() => "no lanes that take work in settings", slot:() => "waiting for a free slot",
+    disk:v => `Free disk space is below its floor; new work waits: ${v.volumes.map(x => `${x.mount}: ${x.free} free, floor ${x.floor}, resumes at ${x.again}`).join("; ")}`,
+    memory:v => `Available memory ${v.available} is below its floor ${v.floor}; new work waits for ${v.again}`,
+    ready:v => `ready for lane ${v.lane} on ${v.provider}; ` + (v.server === "gone" ? "server is not running: run hansa up"
+      : v.server === "stuck" ? `server is busy or stuck: no round finished for ${Math.floor((v.seconds || 0) / 60)} min` : "starts when hansa serve next looks (within seconds)"),
+    lanes:(v, render) => v.reasons.map(render).join("; "),
+    missing_lane:v => `lane ${v.lane} is not in settings`, merge_lane:v => `lane ${v.lane} is a merge lane and takes no work`,
+    verify_lane:v => `lane ${v.lane} is a verify lane and takes only verifications`, busy:v => `lane ${v.lane} is busy`,
+    sandbox:v => `HELD: lane ${v.lane} cannot run: ${v.why}; resumes after a sandbox try passes (restart hansa serve after a fix)`,
+    providers:(v, render) => `lane ${v.lane} has no provider ready (${v.providers.map(p => `${p.values.provider}: ${render(p)}`).join("; ")})`,
+    refused:() => "refused this task", missing_provider:() => "not in settings", no_endpoint:() => "no endpoint address", no_key:() => "no key",
+    credit:v => `credit balance too low since ${when(v.since)}; rests until the principal confirms a top-up on the page`,
+    rest:v => `resting until ${when(v.until)} (${v.why})` + (v.how === "reset" ? "; the reset time its error gave, and a minute"
+      : v.minutes ? `; no reset time in its error, so its rest of ${v.minutes} minutes` : "; fix the login or key, then run hansa ping " + v.provider),
+    unreachable:v => `unreachable since ${when(v.since)} (${v.why}); checked periodically`
+  },
   task:"Task", provider:"Provider", titleCol:"Task", changes:"Changes", refused:"Refused", error:"Why",
   asks:"Requests from agents", answer:"answer (optional)", close:"Done", closedByCoordinator:"closed by the coordinator: ",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
@@ -476,6 +536,30 @@ const T = ZH ? {
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
   seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_verify:"verifications", helper_reviewer:"reviewer", helper_scout:"scout", helper_operator:"operator",
   events:"Recent events", none:"none", forbidden:"Forbidden: open the address printed by hansa web",
+  eventStates:{queued:"queued again", running:"running", checking:"checking", done:"awaiting review", failed:"failed", cancelled:"cancelled", merged:"merged", waiting:"awaiting approval", approved:"approved", stopped:"stopped"},
+  eventResult:e => e.could_not_run ? "could not run" : e.ok === true ? "passed" : e.ok === false ? "failed" : "result unknown",
+  eventSentences:{
+    task_started:e => `Task started on lane ${e.lane || "—"} with ${e.provider || "—"}`,
+    task_finished:(e, result, state) => `Task finished: ${state(e.state)}`,
+    check_started:() => "Check started", task_checked:(e, result) => `Check ${result(e)}`, check_killed:() => "Check killed",
+    verification_closed:() => "Verification closed",
+    check_rerun_queued:() => "Check rerun queued", merge_queued:() => "Merge queued",
+    merge_check_queued:() => "Merge check queued", merge_check_started:e => `Merge check started on lane ${e.lane || "—"}`,
+    merge_checked:(e, result) => `Merge check ${result(e)}`, merge_check_ended:(e, result) => `Merge check ended: ${result(e)}`,
+    merge_check_killed:() => "Merge check killed", merge_check_cancel:() => "Merge check cancelled",
+    merge_check_base_moved:() => "Base moved; merge check runs again", merge_batch_split:() => "Merge check batch split",
+    task_merged:e => `Task merged into ${e.into || "—"}`,
+    release_asked:(e, result, state) => `Release #${e.id} requested: ${e.lane || "—"} ${e.target || ""}, ${state(e.state)}`,
+    release_answered:e => `Release #${e.id} ${e.yes ? "approved" : "refused"}`,
+    release_started:e => `Release #${e.id} started: ${e.lane || "—"} ${e.target || ""}`,
+    release_ended:(e, result) => `Release #${e.id} ${result(e)}`, release_void:e => `Release #${e.id} voided`,
+    release_forbidden:e => `Release #${e.id} blocked by forbidden words`, release_waits:e => `Release #${e.id} waits for lane ${e.lane || "—"}`,
+    release_stopping:e => `Release #${e.id} stopping`, release_stopped:e => `Release #${e.id} stopped`,
+    lane_try_queued:e => `Lane ${e.lane} try queued`, lane_try_started:e => `Lane ${e.lane} try started`,
+    lane_tried:(e, result) => `Lane ${e.lane} try ${result(e)}`, lane_try_withdrawn:e => `Lane ${e.lane} try withdrawn`,
+    sandbox_held:e => `Sandbox held on lane ${e.lane}: ${e.why || "—"}`, sandbox_ready:e => `Sandbox ready on lane ${e.lane}`,
+    provider_credit:e => `Provider ${e.provider} rests until the principal confirms it is topped up`, server_stopped:() => "Server stopped; new tasks will not start"
+  },
   tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged", markersInChange:"holds conflict markers: cannot be merged",
   mcBatch:(members, owner) => `Checked with ${members.join(", ")}; ${owner}’s check runs`,
   merging:"Merging (checked together with the base as it is now; each merges by itself if that passes, and comes back for review if not)", mergeCheck:"Merge check",
@@ -662,7 +746,7 @@ function icon(name) {
 const section = (title, ...kids) => h("section", {}, h("h2", {}, title), ...kids);
 const table = (head, rows) => h("div", {class:"scroll"}, h("table", {}, h("tr", {}, head.map(x => h("th", {}, x))),
   rows.map(r => h("tr", {}, r.map(c => h("td", {}, c))))));
-const statusPill = (text, tone = "", symbol = "check") => h("span", {class:"status-pill " + tone}, icon(symbol), text);
+const statusPill = (text, tone = "", symbol = "check") => h("span", {class:"status-pill " + tone}, icon(tone === "warn" ? "error" : symbol), text);
 const pageHeading = (tab, intro, aside) => h("div", {class:"page-head"},
   h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T[tab]), h("h1", {}, T[tab]), h("p", {}, intro)), aside);
 const summaryCard = (label, value, note, symbol) => h("div", {class:"metric-card"},
@@ -705,6 +789,20 @@ function taskLink(id) {
     btn.setAttribute("aria-expanded", String(detailOpen.has(id)));
   }}, id);
   return [btn, box];
+}
+// Codes are supplied by the server; unrecognised reasons keep its English sentence.
+function waitingText(m) {
+  const render = r => Object.hasOwn(T.waitReasons, r.code) ? T.waitReasons[r.code](r.values, render) : r.text;
+  return render({code:m.waiting_code, values:m.waiting_values, text:m.waiting});
+}
+function eventRow(e) {
+  const sentence = Object.hasOwn(T.eventSentences, e.event) ? T.eventSentences[e.event] : null;
+  return h("div", {class:"event-row"}, h("span", {class:"event-time"}, when(e.ts)),
+    sentence ? h("div", {class:"event-name"}, e.task ? [taskLink(e.task), " · "] : null,
+      sentence(e, T.eventResult, state => T.eventStates[state] || state || "—"))
+    : [h("span", {class:"event-name"}, e.event),
+      h("div", {class:"event-data mono"}, Object.entries(e).filter(([k]) => k !== "ts" && k !== "event")
+        .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" "))]);
 }
 // What hansa did at the coordinator's start: whether it loaded the mod, and why not; and the --autocompact options of
 // the session's command line, as given (hansa/plugin.py)
@@ -768,7 +866,7 @@ function laneTracks(st) {
       const held = Object.values(l.held || {});
       const compact = !m && !l.task && !l.trying && !held.length && !queued.length;
       const role = [l.merge_lane ? T.mergeLane(l.merge_for || []) : "", l.verify_for?.length ? T.verifyLane(l.verify_for) : ""].filter(Boolean).join(" · ");
-      const minutes = worker?.checking ? worker.check_minutes : m?.minutes;
+      const minutes = worker?.checking && worker.check_retry ? worker.check_minutes : m?.minutes;
       const providers = (l.providers || []).map(name => {
         const p = st.providers.find(p => p.name === name);
         return name + (p ? ` (${p.model})` : "");
@@ -781,7 +879,7 @@ function laneTracks(st) {
         h("div", {class:"lane-track-head"}, h("strong", {}, l.name),
           h("span", {class:"muted"}, providers || "—"),
           worker?.provider ? statusPill(`${worker.provider} (${worker.model || "—"})`) : null,
-          !m ? statusPill(held.length ? T.laneHeld : l.trying ? T.laneTrying : queued.length ? T.laneQueued(queued.length) : T.free, held.length || l.trying ? "warn" : "") : null,
+          !m ? statusPill(held.length ? T.laneHeld : l.trying ? T.laneTrying : queued.length ? T.laneQueued(queued.length) : T.free, held.length || l.trying || queued.length ? "warn" : "") : null,
           compact && role ? h("span", {class:"muted"}, role) : null),
         !compact && l.merge_lane ? h("div", {class:"muted"}, T.mergeLane(l.merge_for || [])) : null,
         !compact && l.verify_for?.length ? h("div", {class:"muted"}, T.verifyLane(l.verify_for)) : null,
@@ -801,7 +899,7 @@ function laneTracks(st) {
           m ? h("span", {}, T.laneIdle(p?.idle_min ?? "—")) : null,
           m ? h("span", {class:"lane-note", title:note}, T.lastNote + " " + (note || "—")) : null,
           h("span", {}, T.laneQueued(queued.length))) : null,
-        !m && queued.length ? h("div", {class:"muted"}, queued[0].waiting) : null,
+        !m && queued.length ? h("div", {class:"muted"}, waitingText(queued[0])) : null,
         held.map(held => h("div", {class:"warn lane-held"}, T.laneHeld + ": " + held.why)));
     }) : emptyState(T.noLanes, T.noLanesNote, "lanes"));
 }
@@ -827,13 +925,16 @@ async function loadStatus() {
   part(T.version + " " + st.build);
   part(T.installed + " " + (st.installed ? `${installed.getFullYear()}-${pad(installed.getMonth() + 1)}-${pad(installed.getDate())} ${clock(installed)}` : "?"));
   part(T.summaryNow + " " + clock(now));
+  part(st.serve_code ? T.serveCodeWarning + ": " + st.serve_code : "", true);
   part(st.srt_missing, true);
+  part(st.alert_failed ? T.alertFailedWarning + ": " + st.alert_failed : "", true);
   part(st.disk && st.disk.low_text ? (ZH ? T.diskLow + "：" : "") + st.disk.low_text : "", true);
   for (const x of st.disk && st.disk.unknown || []) part(x, true);
   part(st.memory && st.memory.low_text || "", true);
   for (const x of st.memory && st.memory.unknown || []) part(x, true);
   part(st.no_read_stop ? T.noReadStop + ": " + st.no_read_stop : "", true);
   for (const x of st.no_read_left_out || []) part(T.workersMayNotReadSkipped + ": " + x, true);
+  for (const x of st.unreached || []) part(T.unreachedWarning + ": " + x, true);
   part(modLine(st.mod, st.mod_line), st.mod && st.mod.kind !== "notify" && st.mod.loaded !== true);
   part(clearLine(st.mod, st.clear_line), st.mod && st.mod.clear && st.mod.clear.warn);
   $("#state").replaceChildren(...parts);
@@ -859,7 +960,7 @@ async function loadStatus() {
     !st.running.length && !st.queued.length && !st.review.length && !(st.merging || []).length ? dashboardPanel(T.taskFlow, "status", 0,
       emptyState(T.noActiveTasks, T.noActiveTasksNote, "check")) : null,
     h("div", {id:"status-queued"}, st.queued.length ? dashboardPanel(T.queued, "pending", st.queued.length, table([T.task, T.lane, T.titleCol, T.waiting],
-      st.queued.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"}, m.waiting)]))) : emptyState(T.queued, T.none, "pending")),
+      st.queued.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"}, waitingText(m))]))) : emptyState(T.queued, T.none, "pending")),
     h("div", {id:"status-merging"}, (st.merging || []).length ? dashboardPanel(T.merging, "releases", st.merging.length,
       table([T.task, T.lane, T.titleCol, T.mergeCheck], st.merging.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"},
         (m.members?.length ? T.mcBatch(m.members.filter(id => id !== m.id), m.check_task) : ["starting", "running"].includes(m.phase) ? T.mcRunning(m.minutes) : m.waits_for ? T.mcQueuedAhead(m.waits_for) : m.busy_with ? T.mcQueuedBusy(m.lane, m.busy_with)
@@ -883,10 +984,7 @@ async function loadStatus() {
       checkButton(p.name, loadStatus)])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
     dashboardPanel(T.events, "status", Math.min(ev.length, 20), events.status === "rejected"
       ? h("div", {class:"bad", role:"alert"}, String(events.reason.message || events.reason))
-      : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(e => h("div", {class:"event-row"},
-      h("span", {class:"event-time"}, when(e.ts)), h("span", {class:"event-name"}, e.event),
-      h("div", {class:"event-data mono"}, Object.entries(e).filter(([k]) => k !== "ts" && k !== "event")
-        .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" "))))) : emptyState(T.noEvents, T.noEventsNote, "status"))
+      : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(eventRow)) : emptyState(T.noEvents, T.noEventsNote, "status"))
   ]));
 }
 function asksSection(st) {
