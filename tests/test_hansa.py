@@ -28607,6 +28607,29 @@ else if (["desk-name", "desk-count", "status-parts", "notify-status"].includes(a
   }
   console.log(JSON.stringify(snapshots));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "task-steps") (async () => {
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const [button, box] = vm.runInContext('taskLink("t0042")', ctx);
+  ids["#tab-status"].append(button, box);
+  await button.click(); await flush();
+  const row = box.kids[0];
+  const steps = row instanceof El ? row.kids.filter(el => el instanceof El && el.attrs["data-task-step"]).map(el => ({
+    step:el.attrs["data-task-step"], text:el.textContent, tone:el.className,
+    current:el.attrs["aria-current"], times:descendants(el, "time").map(t => t.attrs.datetime),
+    failures:descendants(el, "span").filter(n => n.className === "bad").map(n => n.textContent)
+  })) : [];
+  const result = {steps, text:box.textContent, pre:descendants(box, "pre")[0]?.textContent,
+    first:row?.tag, links:descendants(box, "button").map(el => el.textContent),
+    css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))};
+  if (given.openTask) {
+    const link = descendants(box, "button").find(el => el.textContent === given.openTask);
+    if (!link) throw new Error("related task link missing");
+    await link.click(); await flush();
+    result.opened = ids["#" + link.attrs["aria-controls"]]?.textContent;
+    result.gets = apiGets;
+  }
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(async () => {
   const check = (ok, why) => { if (!ok) throw new Error(why); };
   const run = code => vm.runInContext(code, ctx);
@@ -30359,6 +30382,200 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                         input=json.dumps(replies), capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), {"pause": True, "resume": True, "details": True, "asks": True, "releases": True})
+
+    def task_steps_record(self, **fields):
+        return {"id": "t0042", "kind": "task", "lane": "a", "state": "merged", "created": 1700000000,
+                "started": 1700000120, "finished": 1700000300, "provider": "example-provider",
+                "check_started": 1700000301, "check": {"ok": True, "exit": 0, "seconds": 15},
+                "merge_check_result": {"ok": True, "exit": 0, "at": 1700000390, "seconds": 30},
+                "merged": 1700000400, "merge_commit": "abcdef0123456789" * 2, **fields}
+
+    def task_steps_page(self, meta, language, related=None, open_task=None):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        harness = self.tmp / "task-steps-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        text = "Unchanged task text\n  report: <sample> & detail\n"
+        replies = {"/api/task?id=" + tid: {"meta": record, "text": "Related task " + tid}
+                   for tid, record in (related or {}).items()}
+        replies["/api/task?id=t0042"] = {"meta": meta, "text": text}
+        if open_task:
+            replies["openTask"] = open_task
+        result = subprocess.run(["node", str(harness), str(page), "task-steps", language],
+                                input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        shown = json.loads(result.stdout)
+        self.assertEqual(shown["first"], "ol", "task steps must come before the plain text")
+        self.assertEqual(shown["pre"], text)
+        return shown
+
+    def test_task_box_steps_single_run_check_and_merge(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.task_steps_page(self.task_steps_record(), language)
+                steps = shown["steps"]
+                self.assertEqual([s["step"] for s in steps], ["queued", "run", "check", "merge-check", "merged"])
+                for step, label in zip(steps, ("Queued", "Run 1", "Lane check", "Merge check", "Merged") if language == "en"
+                                       else ("排队", "运行 1", "工作线验收", "合并验收", "已合并")):
+                    self.assertIn(label, step["text"])
+                    self.assertTrue(step["times"])
+                    self.assertNotEqual(step.get("current"), "step")
+                self.assertIn("2 min" if language == "en" else "2 分钟", steps[0]["text"])
+                self.assertIn("3 min" if language == "en" else "3 分钟", steps[1]["text"])
+                self.assertIn("example-provider", steps[1]["text"])
+                self.assertIn("completed" if language == "en" else "已完成", steps[1]["text"])
+                self.assertIn("15 s" if language == "en" else "15 秒", steps[2]["text"])
+                self.assertIn("passed" if language == "en" else "通过", steps[2]["text"])
+                self.assertEqual(steps[3]["times"], ["2023-11-14T22:19:20.000Z"])
+                self.assertIn("abcdef012345", steps[4]["text"])
+                self.assertNotIn("abcdef0123456789", steps[4]["text"])
+                self.assertRegex(shown["css"], r"\.task-steps\s*\{[^}]*flex-wrap:wrap")
+                self.assertRegex(shown["css"], r"\.task-detail\s*\{[^}]*min-width:0")
+
+    def test_task_box_steps_two_runs_and_retried_check(self):
+        meta = self.task_steps_record(attempts=[{"provider": "first-provider", "ran_from": 1700000060,
+            "ended": 1700000100, "kind": "network", "error": "connection lost"}],
+            check={"ok": True, "exit": 0, "seconds": 15, "retried": {
+                "ok": False, "exit": 137, "seconds": 22, "note": "killed by the system"}})
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                steps = self.task_steps_page(meta, language)["steps"]
+                self.assertEqual([s["step"] for s in steps], ["queued", "run", "run", "check", "merge-check", "merged"])
+                self.assertIn("first-provider", steps[1]["text"])
+                self.assertIn("connection lost", steps[1]["text"])
+                self.assertIn("bad", steps[1]["tone"].split())
+                self.assertIn("example-provider", steps[2]["text"])
+                self.assertIn("1 min" if language == "en" else "1 分钟", steps[0]["text"])
+                self.assertIn("First result" if language == "en" else "首次结果", steps[3]["text"])
+                self.assertIn("137", "".join(steps[3]["failures"]))
+                self.assertIn("22 s" if language == "en" else "22 秒", steps[3]["text"])
+
+    def test_task_box_steps_verification_and_parent_link(self):
+        meta = self.task_steps_record(kind="verify", parent="t0001", state="done", verdict="holds, with notes",
+                                      check=None, check_started=None, merge_check_result=None, merged=None)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                parent = self.task_steps_record(id="t0001", verify="t0042")
+                shown = self.task_steps_page(meta, language, {"t0001": parent}, "t0001")
+                self.assertEqual([s["step"] for s in shown["steps"]], ["queued", "run", "verification"])
+                self.assertIn("holds, with notes" if language == "en" else "成立，附注", shown["steps"][-1]["text"])
+                self.assertIn("ok", shown["steps"][-1]["tone"].split())
+                self.assertIn("Verifies" if language == "en" else "核对任务", shown["text"])
+                self.assertIn("/api/task?id=t0001", shown["gets"])
+                self.assertIn("Related task t0001", shown["opened"])
+                # The work task names its verification; it gets that record's verdict and timing.
+                parent["id"] = "t0042"
+                parent["verify"] = "t0002"
+                related = {**meta, "id": "t0002", "parent": "t0042"}
+                shown = self.task_steps_page(parent, language, {"t0002": related}, "t0002")
+                self.assertEqual([s["step"] for s in shown["steps"]],
+                                 ["queued", "run", "check", "verification", "merge-check", "merged"])
+                self.assertIn("ok", shown["steps"][3]["tone"].split())
+                self.assertIn("Related task t0002", shown["opened"])
+                self.assertIn("/api/task?id=t0002", shown["gets"])
+
+    def test_task_box_steps_follow_up_has_only_its_own_runs(self):
+        meta = self.task_steps_record(parent="t0001")
+        parent = self.task_steps_record(id="t0001", provider="earlier-provider", replaced_by="t0042")
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.task_steps_page(meta, language, {"t0001": parent}, "t0001")
+                self.assertEqual([s["step"] for s in shown["steps"]], ["queued", "run", "check", "merge-check", "merged"])
+                self.assertNotIn("earlier-provider", shown["text"])
+                self.assertIn("Replaces" if language == "en" else "接替任务", shown["text"])
+                self.assertIn("Related task t0001", shown["opened"])
+
+    def test_task_box_steps_running_stops_at_current_step(self):
+        for language in ("en", "zh"):
+            for phase, expected in (("working", ["queued", "run"]), ("checking", ["queued", "run", "check"])):
+                with self.subTest(language=language, phase=phase):
+                    meta = self.task_steps_record(state="running", phase=phase, check=None, merged=None,
+                        merge_check_result=None, finished=None if phase == "working" else 1700000300)
+                    shown = self.task_steps_page(meta, language)
+                    self.assertEqual([s["step"] for s in shown["steps"]], expected)
+                    self.assertEqual(shown["steps"][-1].get("current"), "step")
+                    self.assertIn("running" if language == "en" else "进行中", shown["steps"][-1]["text"])
+                    self.assertTrue(all(s.get("current") != "step" for s in shown["steps"][:-1]))
+
+    def test_task_box_steps_sparse_history_and_check_outcomes(self):
+        for language in ("en", "zh"):
+            for result, word in (({"ok": False, "exit": 2, "at": 1700000390, "seconds": 30},
+                                  "failed" if language == "en" else "没通过"),
+                                 ({"ok": False, "note": "stopped on request", "at": 1700000390, "seconds": 30},
+                                  "cancelled" if language == "en" else "已取消")):
+                with self.subTest(language=language, outcome=word):
+                    meta = self.task_steps_record(state="done", merged=None,
+                        check={"ok": None, "could_not_run": True, "seconds": 0, "note": "sandbox unavailable"},
+                        check_started=None, merge_check_result=result,
+                        attempts=[{"provider": "old-provider", "at": 1700000050, "error": "old record has no start"}],
+                        earlier_runs=[{"provider": "lost-provider", "ran_from": 1700000060, "ended": 1700000100,
+                                       "why": "server stopped"}])
+                    shown = self.task_steps_page(meta, language)
+                    self.assertEqual([s["step"] for s in shown["steps"]],
+                                     ["queued", "run", "run", "run", "check", "merge-check"])
+                    self.assertEqual(shown["steps"][1]["times"], [])
+                    self.assertIn("lost-provider", shown["steps"][2]["text"])
+                    self.assertIn("server stopped", shown["steps"][2]["text"])
+                    check, merge = shown["steps"][-2:]
+                    self.assertIn("could not run" if language == "en" else "没跑成", check["text"])
+                    self.assertIn("bad", check["tone"].split())
+                    self.assertEqual(check["times"], [])
+                    self.assertIn(word, merge["text"])
+                    self.assertIn("bad", merge["tone"].split())
+            with self.subTest(language=language, history="last failed attempt"):
+                meta = self.task_steps_record(state="failed", merged=None, check=None, merge_check_result=None,
+                    error="provider refused", attempts=[{"provider": "example-provider", "at": 1700000300,
+                                                         "error": "provider refused", "kind": "refused"}],
+                    earlier_runs=[{"provider": "lost-provider", "ran_from": 1700000060, "ended": 1700000100,
+                                   "why": "server stopped"}])
+                steps = self.task_steps_page(meta, language)["steps"]
+                self.assertEqual([s["step"] for s in steps], ["queued", "run", "run"])
+                self.assertIn("refused", steps[-1]["text"])
+                self.assertIn("3 min" if language == "en" else "3 分钟", steps[-1]["text"])
+                self.assertIn("bad", steps[-1]["tone"].split())
+
+    def test_task_box_steps_current_queue_verification_and_merge(self):
+        for language in ("en", "zh"):
+            for state, phase, expected in (("queued", "", "queued"), ("merging", "queued", "merge-check"),
+                                           ("merging", "running", "merge-check")):
+                with self.subTest(language=language, state=state, phase=phase):
+                    meta = self.task_steps_record(state=state, merged=None, merge_check_result=None,
+                        merge_check={"phase": phase, "queued": 1700000350,
+                                     "started": 1700000360 if phase == "running" else None} if state == "merging" else None)
+                    if state == "queued":
+                        meta.update(started=None, finished=None, check=None)
+                    steps = self.task_steps_page(meta, language)["steps"]
+                    self.assertEqual(steps[-1]["step"], expected)
+                    self.assertEqual(steps[-1].get("current"), "step")
+                    self.assertIn("running" if language == "en" else "进行中", steps[-1]["text"])
+            with self.subTest(language=language, verification="running"):
+                meta = self.task_steps_record(state="done", verify="t0002", merged=None, merge_check_result=None)
+                related = {"id": "t0002", "kind": "verify", "state": "running", "created": 1700000310,
+                           "started": 1700000320, "provider": "verifier", "parent": "t0042"}
+                steps = self.task_steps_page(meta, language, {"t0002": related})["steps"]
+                self.assertEqual(steps[-1]["step"], "verification")
+                self.assertEqual(steps[-1].get("current"), "step")
+            with self.subTest(language=language, merge="no check ran"):
+                meta = self.task_steps_record(merge_check_result={"waited": True, "ok": False})
+                self.assertEqual([s["step"] for s in self.task_steps_page(meta, language)["steps"]],
+                                 ["queued", "run", "check", "merged"])
+            for kind in ("check", "merge-check"):
+                with self.subTest(language=language, retry=kind):
+                    first = {"ok": False, "exit": 137, "seconds": 22, "at": 1700000350, "note": "killed"}
+                    meta = self.task_steps_record(state="running" if kind == "check" else "merging", merged=None,
+                        phase="checking", merge_check_result=None,
+                        check={**first, "rerun_started": True} if kind == "check" else {"ok": True, "seconds": 15},
+                        check_retry=first if kind == "check" else None,
+                        merge_check={"phase": "running", "started": 1700000360, "retried": first} if kind == "merge-check" else None)
+                    step = self.task_steps_page(meta, language)["steps"][-1]
+                    self.assertEqual(step["step"], kind)
+                    self.assertEqual(step.get("current"), "step")
+                    self.assertIn("137", "".join(step["failures"]))
+            with self.subTest(language=language, verification="unavailable"):
+                meta = self.task_steps_record(state="done", verify="t0002", merged=None, merge_check_result=None)
+                step = self.task_steps_page(meta, language, {"t0002": None})["steps"][-1]
+                self.assertIn("unavailable" if language == "en" else "不可用", step["text"])
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_cost_page_periods_breakdowns_warnings_and_csv_round_trip(self):
