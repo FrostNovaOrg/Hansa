@@ -89,6 +89,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa cost [--days N \| --since HH:MM] [--by seat\|lane\|task\|...]` | tokens and their worth at the principal's prices |
 | `hansa ask "<request>"` / `--close N "<why>"` | a request on the principal's page / close #N when done another way |
 | `hansa release [L [TARGET] ["<note>"]]`, `--stop ID`, `yes\|no ID CODE` | ask for, list, call off or answer a release |
+| `hansa changelog L [TARGET]` | list workers' changelog lines for the next release |
 | `hansa notes [PATH]` / `notes archive FILE HEADING` | notes/ with headings / move a section out |
 | `hansa gaps [--all]` / `gaps show ID` / `gaps mark ID fixed\|later\|wontfix "why"` | notes |
 | `hansa help [command \| topic \| card \| topics]` | a command's help, a topic of hansa's docs, this card, the topics |
@@ -260,8 +261,9 @@ or ask `scout` when reading is enough; say what you need back.
   trust them. More: `hansa help linux-root`.
 - A lane runs one task at a time, in its own full worktree (the repository's disk space again). For
   several at once, add lanes on the same repository and base (`hansa concurrency` caps them all); to
-  split work among providers, give each its own lane. `CHANGELOG.md merge=union` in `.gitattributes`
-  keeps lanes that each add to a CHANGELOG from conflicting there.
+  split work among providers, give each its own lane. Rather than every task adding to a CHANGELOG,
+  workers' lines are collected: `hansa changelog L [TARGET]` lists those the next release sends,
+  for one task to write up.
 - Free space rather than lower the floor: a lane whose builds leave large outputs in its worktree
   (`target/`, `build/`, `node_modules/`) or fill a cache of its own should clean them in its setup.
   More: `hansa help free-space`, `hansa help desk-files`.

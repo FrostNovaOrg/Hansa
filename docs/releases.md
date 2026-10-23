@@ -102,6 +102,18 @@ Put a step that cannot be taken back (pushing a tag, publishing a package) last 
 command, after the build it depends on has passed, so that a target that fails halfway has published
 nothing.
 
+### Collecting changelog lines
+
+Workers end reports with `Changelog: SENTENCE` for users, or `Changelog: none`.
+Follow-ups describe the whole branch change; verifications supply no line.
+`hansa changelog L [TARGET]` lists changes since that target's last done release,
+across lanes sharing the repository and base, for one task to write up once per release.
+TARGET is required with several targets. The header names the range; without a done
+release, all history counts. A release outside base history is noted; git's range still applies.
+The last marker counts, ignoring case and accepting bold or bullet formatting.
+`none` (with optional backticks or period) and `-` ids appear last. Missing lines,
+direct commits and unidentifiable task commits are flagged. Verification reports are never read.
+
 ### A release gated on a full build on another desk
 
 A release that should go on only if a full build passes on another desk's

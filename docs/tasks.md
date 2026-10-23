@@ -29,6 +29,9 @@ turn.
 A failed write in `hansa serve` does not keep it from stopping runs at their time limit: see
 [Free space](desk.md#free-space).
 
+A worker's report ends with `Changelog: SENTENCE` for users, or `Changelog: none`.
+Follow-ups describe the whole change on their branch. Verifications need no changelog line.
+
 A worker ends with a short report: its last message before a notice from its
 own background work (a watch it started timing out, say) opened another turn
 after it had stopped. Text it wrote answering such a notice follows the

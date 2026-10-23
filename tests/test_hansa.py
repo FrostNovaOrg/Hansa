@@ -24698,6 +24698,281 @@ def save():'''))
 
 
     # -- releases (hansa release; hansa/release.py) --------------------------------------------------------------
+    def changelog_commit(self, subject, *parents):
+        tree = self.git_out("rev-parse", "HEAD^{tree}")
+        args = [x for p in parents for x in ("-p", p)]
+        return sh_out("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree,
+                  *args, "-m", subject, cwd=self.repo).strip()
+
+    def changelog_task(self, report, title="Adds X", lane="a", start=None, **opts):
+        before = self.git_out("rev-parse", "HEAD")
+        base = start or before
+        head = self.changelog_commit(title, base)
+        merge = self.changelog_commit("Landing without a task id", before, head)
+        sh("git", "update-ref", "refs/heads/main", merge, cwd=self.repo)
+        tid = self.desk.new_task(title, lane=lane, base=base, head=head, **opts)
+        self.desk.update(tid, state="merged", merged=now(), merge_commit=merge,
+                         merge_repo=str(self.repo.resolve()), merge_base="main")
+        (self.desk.tasks_dir / tid / "result.md").write_text(report)
+        return tid
+
+    def changelog_release(self, commit, state="done", lane="a", target="default"):
+        from hansa import release
+        rs = release.releases(self.desk)
+        rid = len(rs) + 1
+        write_json(release.releases_file(self.desk), [*rs, {
+            "id": rid, "lane": lane, "target": target, "state": state,
+            "repo": str(self.repo.resolve()), "base": "main", "commit": commit}])
+        return rid
+
+    def test_changelog_lists_task_lines_in_merge_order_and_the_first_release_history(self):
+        self.with_release("true")
+        first = self.changelog_task("Checked.\nChangelog: Adds X.")
+        second = self.changelog_task("Changelog: Adds Y.")
+        out = self.hansa("changelog", "a")
+        header = out.splitlines()[0]
+        self.assertIn("lane a", header)
+        self.assertIn("target default", header)
+        self.assertIn("no done release yet", header)
+        self.assertIn("every commit up to", header)
+        self.assertIn("main's tip", header)
+        tip = self.git_out("rev-parse", "HEAD")
+        self.assertIn(tip[:7], header)
+        self.assertNotIn(tip, header)
+        self.assertLess(out.index(f"- Adds X. ({first})"), out.index(f"- Adds Y. ({second})"))
+        initial = self.git_out("rev-list", "--max-parents=0", "HEAD")
+        self.assertIn(f"- [no task] init ({initial[:7]})", out)
+        self.assertNotIn("Landing without", out)
+        self.assertNotIn("[no task] Adds", out)
+
+    def test_changelog_uses_the_last_marker_case_insensitively_and_accepts_markdown(self):
+        self.with_release("true")
+        for report in ("Changelog: Old.\ncHaNgElOg: Adds X.", "**Changelog:** Adds X.",
+                       "- Changelog: Adds X.", "**CHANGELOG:** Old.\n- changelog: Adds X.\nChecked."):
+            with self.subTest(report=report):
+                tid = self.changelog_task(report)
+                out = self.hansa("changelog", "a")
+                self.assertIn(f"- Adds X. ({tid})", out)
+                self.assertNotIn("Old.", out)
+
+    def test_changelog_collects_none_ids_on_the_last_line(self):
+        self.with_release("true")
+        ids = [self.changelog_task(f"Changelog: {s}") for s in ("none", "None", "-")]
+        out = self.hansa("changelog", "a")
+        for tid in ids:
+            self.assertIn(tid, out.splitlines()[-1])
+            self.assertNotIn(f"({tid})", out)
+        self.assertIn("none", out.splitlines()[-1].lower())
+
+    def test_changelog_reads_none_with_a_period_as_none(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Old.\nChangelog: none.")
+        out = self.hansa("changelog", "a")
+        self.assertEqual(out.splitlines()[-1], f"Tasks saying none: {tid}")
+        self.assertNotIn(f"({tid})", out)
+
+    def test_changelog_reads_backticked_none_as_none(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Old.\nChangelog: `none`")
+        out = self.hansa("changelog", "a")
+        self.assertEqual(out.splitlines()[-1], f"Tasks saying none: {tid}")
+        self.assertNotIn(f"({tid})", out)
+
+    def test_changelog_reads_backticked_none_with_a_period_as_none(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Old.\nChangelog: `none`.")
+        out = self.hansa("changelog", "a")
+        self.assertEqual(out.splitlines()[-1], f"Tasks saying none: {tid}")
+        self.assertNotIn(f"({tid})", out)
+
+    def test_changelog_accepts_a_colon_after_the_bold_label(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Old.\n**Changelog**: Adds X.")
+        out = self.hansa("changelog", "a")
+        self.assertIn(f"- Adds X. ({tid})", out)
+        self.assertNotIn("Old.", out)
+
+    def test_changelog_accepts_an_asterisk_bullet(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Old.\n* Changelog: Adds X.")
+        out = self.hansa("changelog", "a")
+        self.assertIn(f"- Adds X. ({tid})", out)
+        self.assertNotIn("Old.", out)
+
+    def test_changelog_preserves_backticks_in_a_sentence(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Adds `x` support.")
+        self.assertIn(f"- Adds `x` support. ({tid})", self.hansa("changelog", "a"))
+
+    def test_changelog_does_not_accept_a_space_before_the_colon(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog : Adds X.", title="Space before colon")
+        self.assertIn(f"- [no changelog line] Space before colon ({tid})", self.hansa("changelog", "a"))
+        (self.desk.tasks_dir / tid / "result.md").write_text("Changelog: Kept.\nChangelog : Adds X.")
+        self.assertIn(f"- Kept. ({tid})", self.hansa("changelog", "a"))
+
+    def test_changelog_marks_old_reports_without_a_line(self):
+        self.with_release("true")
+        tid = self.changelog_task("Checked the change.", title="Old task title")
+        self.assertIn(f"- [no changelog line] Old task title ({tid})", self.hansa("changelog", "a"))
+
+    def test_changelog_reads_only_the_merged_followup_for_the_whole_change(self):
+        self.with_release("true")
+        base = self.git_out("rev-parse", "HEAD")
+        head = self.changelog_commit("Earlier work", base)
+        old = self.desk.new_task("Earlier", lane="a", base=base, head=head)
+        (self.desk.tasks_dir / old / "result.md").write_text("Changelog: Earlier.")
+        tid = self.changelog_task("Changelog: Adds the whole change.", start=head, parent=old)
+        self.desk.update(old, state="replaced", replaced_by=tid)
+        out = self.hansa("changelog", "a")
+        self.assertIn(f"- Adds the whole change. ({tid})", out)
+        self.assertNotIn("Earlier", out)
+        self.assertNotIn(old, out)
+
+    def test_changelog_includes_other_lanes_on_the_same_repository_and_base(self):
+        self.with_release("true")
+        s = self.desk.settings()
+        s["lanes"]["b"] = dict(s["lanes"]["a"])
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.changelog_task("Changelog: Adds X.", lane="b")
+        self.assertIn(f"- Adds X. ({tid})", self.hansa("changelog", "a"))
+
+    def test_changelog_counts_from_the_last_done_release_of_this_lane_and_target(self):
+        self.with_release("true")
+        old = self.changelog_task("Changelog: Old.")
+        since = self.git_out("rev-parse", "HEAD")
+        self.changelog_release(since)
+        tid = self.changelog_task("Changelog: Adds X.")
+        for state in ("failed", "void", "stopped", "refused"):
+            self.changelog_release(self.git_out("rev-parse", "HEAD"), state)
+        self.changelog_release(self.git_out("rev-parse", "HEAD"), target="elsewhere")
+        self.changelog_release(self.git_out("rev-parse", "HEAD"), lane="b")
+        # Remote tracking refs must not subtract commits from this command's release range.
+        sh("git", "update-ref", "refs/remotes/origin/main", self.git_out("rev-parse", "HEAD"), cwd=self.repo)
+        out = self.hansa("changelog", "a", "default")
+        self.assertIn("release #1", out.splitlines()[0])
+        self.assertIn(f"{since}..{self.git_out('rev-parse', 'HEAD')}", out.splitlines()[0])
+        self.assertIn(f"- Adds X. ({tid})", out)
+        self.assertNotIn(old, out)
+        self.assertNotIn("[no task]", out)
+
+    def test_changelog_lists_direct_commits_but_not_hand_merge_commits(self):
+        self.with_release("true")
+        before = self.git_out("rev-parse", "HEAD")
+        self.changelog_release(before)
+        direct = self.changelog_commit("Direct change", before)
+        side = self.changelog_commit("Side change", before)
+        merge = self.changelog_commit("Hand merge", direct, side)
+        sh("git", "update-ref", "refs/heads/main", merge, cwd=self.repo)
+        out = self.hansa("changelog", "a")
+        self.assertIn(f"- [no task] Direct change ({direct[:7]})", out)
+        self.assertIn(f"- [no task] Side change ({side[:7]})", out)
+        self.assertNotIn("Hand merge", out)
+
+    def test_changelog_requires_an_existing_unambiguous_target(self):
+        self.assertIn("no release target", self.refused("changelog", "a"))
+        self.with_release("true")
+        self.hansa("lane", "target", "a", "prod", "true")
+        said = self.refused("changelog", "a")
+        self.assertIn("default", said)
+        self.assertIn("prod", said)
+        self.assertIn("no release target missing", self.refused("changelog", "a", "missing"))
+        self.assertIn("target prod", self.hansa("changelog", "a", "prod").splitlines()[0])
+
+    def test_changelog_warns_when_the_done_release_is_outside_base_history(self):
+        self.with_release("true")
+        other = self.changelog_commit("Unrelated release")
+        self.changelog_release(other)
+        tid = self.changelog_task("Changelog: Adds X.")
+        out = self.hansa("changelog", "a")
+        self.assertIn("not in", out.splitlines()[0])
+        self.assertIn("history", out.splitlines()[0])
+        self.assertIn(f"{other}..", out.splitlines()[0])
+        self.assertIn(f"- Adds X. ({tid})", out)
+        self.assertIn("[no task] init", out)
+
+    def test_changelog_never_reads_verification_reports(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Adds X.")
+        m = self.desk.meta(tid)
+        vid = self.desk.new_task("Verification", lane="a", kind="verify", parent=tid,
+                                 head=m["head"], merge_commit=m["merge_commit"])
+        self.desk.update(vid, state="merged", merged=now())
+        path = self.desk.tasks_dir / vid / "result.md"
+        path.write_text("Changelog: Verification must never appear.")
+        read = Path.read_text
+
+        def read_report(p, *args, **kwargs):
+            self.assertNotEqual(p, path, "read a verification's report")
+            return read(p, *args, **kwargs)
+
+        with unittest.mock.patch.object(Path, "read_text", read_report):
+            out = self.hansa("changelog", "a")
+        self.assertIn(f"- Adds X. ({tid})", out)
+        self.assertNotIn("Verification", out)
+
+    def test_changelog_reports_when_a_task_commit_cannot_be_identified(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Adds X.")
+        self.desk.update(tid, head=None, merge_commit=None)
+        out = self.hansa("changelog", "a")
+        self.assertIn(tid, out)
+        self.assertIn("cannot", out)
+        self.assertIn("record", out)
+
+    def test_changelog_attributes_a_recorded_head_without_a_merge_commit(self):
+        self.with_release("true")
+        base = self.git_out("rev-parse", "HEAD")
+        self.changelog_release(base)
+        head = self.changelog_commit("Task commit", base)
+        sh("git", "update-ref", "refs/heads/main", head, cwd=self.repo)
+        tid = self.desk.new_task("Task", lane="a", base=base, head=head)
+        self.desk.update(tid, state="merged", merged=now())
+        (self.desk.tasks_dir / tid / "result.md").write_text("Changelog: Adds X.")
+        out = self.hansa("changelog", "a")
+        self.assertIn(f"- Adds X. ({tid})", out)
+        self.assertNotIn("[no task]", out)
+
+    def test_changelog_attributes_a_task_from_its_recorded_merge_without_a_head(self):
+        self.with_release("true")
+        tid = self.changelog_task("Changelog: Adds X.")
+        self.desk.update(tid, head=None)
+        out = self.hansa("changelog", "a")
+        self.assertIn(f"- Adds X. ({tid})", out)
+        self.assertNotIn("[no task] Adds X", out)
+
+    def test_changelog_uses_recorded_merge_location_after_a_lane_changes(self):
+        self.with_release("true")
+        s = self.desk.settings()
+        s["lanes"]["b"] = dict(s["lanes"]["a"])
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.changelog_task("Changelog: Adds X.", lane="b")
+        s["lanes"]["b"]["base"] = "elsewhere"
+        self.assertEqual(self.desk.save_settings(s), [])
+        elsewhere = self.desk.new_task("Different base", lane="b", head=self.desk.meta(tid)["head"])
+        self.desk.update(elsewhere, state="merged", merged=now(), merge_base="elsewhere")
+        (self.desk.tasks_dir / elsewhere / "result.md").write_text("Changelog: Must not appear.")
+        out = self.hansa("changelog", "a")
+        self.assertIn(f"- Adds X. ({tid})", out)
+        self.assertNotIn("Must not appear", out)
+        self.assertNotIn(elsewhere, out)
+
+    def test_changelog_help_reaches_the_release_notes_instructions(self):
+        self.assertIn("changelog", self.hansa("help"))
+        self.assertIn("release-flow", self.hansa("help", "changelog"))
+        self.assertIn("hansa changelog L [TARGET]", self.hansa("help", "release-flow"))
+
+    def test_changelog_instruction_is_for_task_workers_and_whole_followups_only(self):
+        from hansa import run
+        self.assertIn("Changelog: ", run.PROTOCOL)
+        self.assertIn("Changelog: none", run.PROTOCOL)
+        self.assertIn("last line", run.PROTOCOL)
+        self.assertIn("whole change", run.PROTOCOL)
+        self.assertIn("follow-up", run.PROTOCOL.lower())
+        self.assertIn("The report's numbers", run.PROTOCOL)
+        self.assertIn("before you write the report", run.PROTOCOL)
+        self.assertNotIn("Changelog:", run.VERIFY_PROTOCOL)
+
     def commit_in_repo(self, name, text, message=None):
         (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
         (self.repo / name).write_text(text)
