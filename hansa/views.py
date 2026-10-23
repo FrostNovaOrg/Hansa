@@ -2,6 +2,7 @@
 Each view returns plain data; the *_text helpers turn it into short lines."""
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import statistics
@@ -516,6 +517,298 @@ def killed_last(m: dict) -> dict:
     queuing it again for another cause since gives it another."""
     a = (m.get("attempts") or [{}])[-1]
     return {"last_run": m["error"]} if a.get("kind") == "killed" and a.get("error") == m.get("error") else {}
+
+
+_TIMELINE_BOUNDARIES = {}  # Per log: only older starts (or missing starts) needed by ends still in the window.
+
+
+def timeline_events(path: Path, since: float, *, tasks=(), releases=(), tries=None) -> list:
+    """Read the window backwards; prefer recorded starts and bound/cache older lookups."""
+    starts = {"task_started": "task", "check_started": "check", "merge_check_started": "merge",
+              "lane_try_started": "try", "release_started": "release"}
+    ends = {"task_finished": "task", "task_checked": "check", "check_killed": "check",
+            "merge_checked": "merge", "merge_check_ended": "merge", "merge_check_killed": "merge",
+            "lane_tried": "try", "release_ended": "release", "release_stopped": "release"}
+
+    def identity(event, kind):
+        return kind, event.get("id") if kind == "release" else event.get("lane") if kind == "try" else event.get("task")
+
+    saved = {}
+    meta = {m["id"]: m for m in tasks}
+    def remember(name, started, ended=None, **fields):
+        if started is not None:
+            event = {"event": name, "ts": started, **fields}
+            saved.setdefault(identity(event, starts[name]), []).append((event, ended))
+
+    for m in tasks:
+        fields = {"task": m["id"], "lane": m.get("lane")}
+        remember("task_started", m.get("started"), m.get("finished"), **fields)
+        for run in [*(m.get("attempts") or []), *(m.get("earlier_runs") or [])]:
+            remember("task_started", run.get("ran_from"), run.get("ended") or run.get("at"),
+                     **{**fields, "lane": run.get("lane", m.get("lane"))})
+        check = m.get("check") or {}
+        began = m.get("check_started")
+        remember("check_started", began, began + check["seconds"] if began is not None and
+                 check.get("seconds") is not None else None, **fields)
+        mc = m.get("merge_check") or {}
+        remember("merge_check_started", mc.get("started"),
+                 **{**fields, "lane": mc.get("lane") or m.get("lane"), "members": mc.get("members") or [m["id"]]})
+        result = m.get("merge_check_result") or {}
+        if result.get("at") is not None and result.get("seconds") is not None and not result.get("waited"):
+            remember("merge_check_started", result["at"] - result["seconds"], result["at"],
+                     **{**fields, "lane": result.get("lane") or m.get("lane"), "members": result.get("batch") or [m["id"]]})
+    for r in releases:
+        remember("release_started", r.get("started"), r.get("ended"),
+                 id=r["id"], lane=r.get("lane"), target=r.get("target"))
+    for lane, trial in (tries or {}).items():
+        remember("lane_try_started", trial.get("started"), trial.get("ended"), lane=lane)
+
+    def never_started(event):
+        # These end events explicitly describe work refused before launch: there is no older start.
+        return (event.get("could_not_run") or event.get("waited") or event.get("ran") is False or
+                event.get("event") == "task_finished" and "cancelled before it started" in event.get("error", "") or
+                event.get("event") == "task_checked" and "could not run" in event.get("note", ""))
+
+    recent, older = [], []
+    try:
+        stat = path.stat()
+        file_id = (stat.st_dev, stat.st_ino)
+        cached_id, cached_size, lookups = _TIMELINE_BOUNDARIES.get(str(path), (None, 0, {}))
+        if cached_id != file_id or stat.st_size < cached_size:
+            lookups = {}
+        lookups = {signature: start for signature, start in lookups.items() if signature[1] >= since}
+        with open(path, "rb") as source:
+            def backwards():
+                pos, pending = source.seek(0, 2), b""
+                while pos:
+                    size = min(pos, 65536)
+                    pos -= size
+                    source.seek(pos)
+                    lines = (source.read(size) + pending).split(b"\n")
+                    pending = lines.pop(0) if pos else b""
+                    for line in reversed(lines):
+                        event = event_record(line)
+                        if event and isinstance(event.get("ts"), (int, float)):
+                            yield event
+
+            stream, boundary = backwards(), None
+            for event in stream:
+                if event["ts"] < since:
+                    boundary = event
+                    break
+                recent.append(event)
+            waiting, end_events = {}, {}
+            for event in recent:  # newest first; only ends without their start need an older lookup
+                name = event.get("event")
+                if name in starts:
+                    waiting.pop(identity(event, starts[name]), None)
+                elif name in ends and not never_started(event):
+                    key = identity(event, ends[name])
+                    signature = waiting.setdefault(key, (key, event["ts"]))
+                    end_events.setdefault(signature, event)
+            for key, signature in list(waiting.items()):
+                candidates = [start for start, end in saved.get(key, []) if start["ts"] <= signature[1]
+                              and (end is None or signature[1] <= end + 2)]
+                if candidates:
+                    start = max(candidates, key=lambda e: e["ts"])
+                    older.append(start)
+                    lookups[signature] = start
+                    del waiting[key]
+                elif signature in lookups:
+                    if lookups[signature]:
+                        older.append(lookups[signature])
+                    del waiting[key]
+            if waiting:
+                for event in itertools.chain([boundary] if boundary else [], stream):
+                    if event["ts"] < since - 7 * 86400:
+                        break
+                    name = event.get("event")
+                    if name in starts and (key := identity(event, starts[name])) in waiting:
+                        lookups[waiting.pop(key)] = event
+                        older.append(event)
+                        if not waiting:
+                            break
+                    elif name in ends and (key := identity(event, ends[name])) in waiting:
+                        # This older run already ended: a newer refused/aborted operation never started.
+                        lookups[waiting.pop(key)] = None
+                        if not waiting:
+                            break
+                for key, signature in waiting.items():
+                    # The true start is unavailable within the bounded history. Draw a cut interval.
+                    end = end_events[signature]
+                    start = {**end, "event": next(name for name, kind in starts.items() if kind == key[0]),
+                             "ts": since, "lane": end.get("lane") or meta.get(end.get("task"), {}).get("lane")}
+                    lookups[signature] = start
+                    older.append(start)
+        _TIMELINE_BOUNDARIES[str(path)] = (file_id, stat.st_size, lookups)
+    except FileNotFoundError:
+        pass
+    return sorted(older + recent, key=lambda e: e["ts"])
+
+
+def timeline_data(lanes, tasks: list, events: list, releases: list, tries: dict, at: float) -> dict:
+    """The page's rolling day. Records supply crossing/live work; event pairs retain every earlier run.
+
+    Times are Unix seconds. started/ended retain the original interval; start/end are clipped for drawing.
+    No status view or command uses this data.
+    """
+    since = at - 86400
+    rows = {lane: [] for lane in lanes}
+    meta = {m["id"]: m for m in tasks}
+    records, paired = [], []
+
+    def segment(kind, lane, started, ended=None, ids=(), result="running", failed=False,
+                could_not_run=False, release_info=None):
+        if lane not in rows or started is None or started > at or (ended is not None and ended < since):
+            return None
+        finish = min(at, ended if ended is not None else at)
+        if finish < started:
+            return None
+        return {"kind": kind, "lane": lane, "started": started, "ended": ended,
+                "start": max(since, started), "end": finish, "minutes": round((finish - started) / 60, 2),
+                "running": ended is None, "failed": bool(failed), "could_not_run": bool(could_not_run),
+                "result": result, "tasks": [{"id": tid, "title": meta.get(tid, {}).get("title", "")} for tid in ids],
+                "release": release_info}
+
+    def keep(*args, **kwargs):
+        item = segment(*args, **kwargs)
+        if item:
+            records.append(item)
+
+    for m in tasks:
+        tid, lane = m["id"], m.get("lane")
+        kind = "verification" if m.get("kind") == "verify" else "worker"
+        for run in [*(m.get("attempts") or []), *(m.get("earlier_runs") or [])]:
+            keep(kind, run.get("lane", lane), run.get("ran_from"), run.get("ended") or run.get("at"),
+                 [tid], "failed", True)
+        started, ended = m.get("started"), m.get("finished")
+        if ended is not None or m.get("state") == "running":
+            result = "running" if ended is None else (m.get("verdict") if kind == "verification" else "") or (
+                "failed" if m.get("state") in ("failed", "queued", "cancelled") else "done")
+            keep(kind, lane, started, ended, [tid], result, result in ("failed", "does not hold"))
+        check = m.get("check") or {}
+        check_start = m.get("check_started")
+        if check_start:
+            live = m.get("state") == "running" and m.get("phase") == "checking"
+            keep("check", lane, check_start, None if live else check_start + check.get("seconds", 0), [tid],
+                 "running" if live else "could_not_run" if check.get("could_not_run") else "passed" if check.get("ok") else "failed",
+                 not live and check.get("ok") is False, check.get("could_not_run", False))
+        mc = m.get("merge_check") or {}
+        if mc.get("phase") in ("starting", "running"):
+            keep("merge", mc.get("lane") or lane, mc.get("started"), ids=mc.get("members") or [tid])
+        result = m.get("merge_check_result") or {}
+        if result.get("at") and result.get("seconds") is not None and not result.get("waited"):
+            keep("merge", result.get("lane") or lane, result["at"] - result["seconds"], result["at"],
+                 result.get("batch") or [tid], "passed" if result.get("ok") else "failed", not result.get("ok"))
+    for r in releases:
+        keep("release", r.get("lane"), r.get("started"), r.get("ended"),
+             result="running" if r.get("ended") is None else r.get("state", "done"),
+             failed=r.get("state") in ("failed", "stopped"), release_info={"id": r["id"], "target": r.get("target") or "default"})
+    for lane, trial in tries.items():
+        keep("try", lane, trial.get("started"), trial.get("ended"),
+             result="running" if trial.get("phase") == "running" else "passed" if trial.get("ok") else "failed",
+             failed=trial.get("phase") != "running" and not trial.get("ok"))
+
+    def key(item):
+        return item["kind"], (item["tasks"][0]["id"] if item["tasks"] else
+                              item["release"]["id"] if item["release"] else item["lane"])
+
+    record_keys = {}
+    for item in records:
+        record_keys.setdefault(key(item), []).append(item)
+
+    def recovered(item):
+        # A server may save an end before it can append its event (or save a lost run in earlier_runs).
+        saved = next((r for r in record_keys.get(key(item), []) if r["ended"] is not None
+                      and (abs(r["started"] - item["started"]) < 2 or
+                           r["started"] <= item["started"] < r["ended"])), None)
+        if saved is None:
+            return item
+        return {**saved, "started": item["started"], "start": item["start"], "lane": item["lane"],
+                "minutes": round((saved["end"] - item["started"]) / 60, 2)}
+
+    active = {key(s): s for s in records if s["started"] < since}
+    starts = {"task_started": "worker", "check_started": "check", "merge_check_started": "merge",
+              "lane_try_started": "try", "release_started": "release"}
+    ends = {"task_finished": "worker", "task_checked": "check", "check_killed": "check",
+            "merge_checked": "merge", "merge_check_ended": "merge", "merge_check_killed": "merge",
+            "lane_tried": "try", "release_ended": "release", "release_stopped": "release"}
+    for event in sorted(events, key=lambda e: e["ts"]):
+        ts, name = event["ts"], event.get("event")
+        if ts > at or name not in starts and name not in ends:
+            continue
+        kind = starts.get(name) or ends[name]
+        tid = event.get("task")
+        m = meta.get(tid, {})
+        if kind == "worker" and m.get("kind") == "verify":
+            kind = "verification"
+        identity = (kind, tid if tid else event.get("id") if kind == "release" else event.get("lane"))
+        if name in starts:
+            ids = event.get("members") or ([tid] if tid else [])
+            item = segment(kind, event.get("lane") or m.get("lane"), ts, ids=ids,
+                           release_info={"id": event["id"], "target": event.get("target") or "default"} if kind == "release" else None)
+            if item:
+                previous = active.pop(identity, None)
+                if previous and ts >= since:
+                    previous = recovered(previous)
+                    if previous["running"]:
+                        previous = {**previous, "ended": ts, "end": ts, "running": False, "failed": True,
+                                    "result": "failed", "minutes": round((ts - previous["started"]) / 60, 2)}
+                    paired.append(previous)
+                active[identity] = item
+            continue
+        item = active.pop(identity, None)
+        # A check refused before launch has no check_started. Keep its labelled, zero-duration marker.
+        if item is None and kind == "check" and name == "task_checked":
+            item = segment(kind, event.get("lane") or m.get("lane"), ts, ids=[tid])
+        if item is None:
+            continue
+        result = event.get("state") or ("passed" if event.get("ok") else "failed")
+        if kind in ("worker", "verification"):
+            result = "done" if result == "checking" else result
+            if kind == "verification" and abs((m.get("finished") or 0) - ts) < 2:
+                result = m.get("verdict") or result
+        cannot = bool(event.get("could_not_run")) or (kind == "check" and "could not" in event.get("note", ""))
+        if cannot:
+            result = "could_not_run"
+        if name == "release_stopped":
+            result = "stopped"
+        step_failed = kind == "try" and any(isinstance(event.get(step), dict) and event[step].get("exit") not in (0, None)
+                                            for step in ("setup", "check", "merge_check"))
+        if step_failed:
+            result = "failed"
+        item = {**item, "ended": ts, "end": min(ts, at), "running": False,
+                "minutes": round((ts - item["started"]) / 60, 2), "result": result,
+                "could_not_run": cannot, "failed": event.get("ok") is False or
+                result in ("failed", "cancelled", "queued", "stopped", "does not hold")}
+        paired.append(item)
+    paired.extend(recovered(item) for item in active.values())
+    # Prefer event boundaries to records (whose finished/state may later describe cancellation or merging).
+    by_key = {}
+    for item in paired:
+        by_key.setdefault(key(item), []).append(item)
+    for item in records:
+        if not any(abs(other["started"] - item["started"]) < 2 or
+                   (other["started"] < (item["ended"] or at) and item["started"] < (other["ended"] or at)
+                    and other["started"] != other["ended"])
+                   for other in by_key.get(key(item), [])):
+            paired.append(item)
+    seen = set()
+    for item in sorted(paired, key=lambda s: s["started"]):
+        signature = (key(item), item["started"], item["ended"])
+        if item["end"] >= since and signature not in seen:
+            rows[item["lane"]].append(item)
+            seen.add(signature)
+    return {"start": since, "end": at, "lanes": [{"lane": lane, "segments": segments} for lane, segments in rows.items()]}
+
+
+def timeline(desk: Desk, *, at: float | None = None) -> dict:
+    at = time.time() if at is None else at
+    lanes = desk.settings()["lanes"]
+    trials = {lane: read_json(desk.state_dir / "tries" / f"{lane}.json", {}) or {} for lane in lanes}
+    tasks, releases = desk.tasks(), release.releases(desk)
+    events = timeline_events(desk.events_path, at - 86400, tasks=tasks, releases=releases, tries=trials)
+    return timeline_data(lanes, tasks, events, releases, trials, at)
 
 
 def status(desk: Desk) -> dict:

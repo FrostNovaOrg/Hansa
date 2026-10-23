@@ -28517,7 +28517,24 @@ function openPage(search = "") {
 let ctx = openPage(preferences.search);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 const stateBeforeCost = document.querySelector("#state").textContent;
-if (ask.startsWith("status-picture")) (async () => {
+if (ask === "timeline") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  await run("loadStatus()"); await run("loadTimeline()");
+  await run("loadStatus()"); await run("loadTimeline()");
+  const root = ids["#status-timeline"], segments = [];
+  walk(root, el => { if (el.attrs["data-timeline-kind"]) segments.push(el); });
+  if (segments.length) { await segments[0].click(); await new Promise(resolve => setImmediate(resolve)); }
+  const gets = [...apiGets];
+  await run("timelineFetchedAt = Date.now() - 61000; loadTimeline()");
+  const refreshGets = apiGets.filter(p => p === "/api/timeline").length;
+  await run("current = 'settings'; show('status')"); await run("loadTimeline()");
+  console.log(JSON.stringify({text:root.textContent, gets, refreshGets, reopenGets:apiGets.filter(p => p === "/api/timeline").length,
+    rows:descendants(root, "div").filter(el => el.attrs["data-timeline-lane"]).map(el => el.attrs["data-timeline-lane"]),
+    segments:segments.map(el => ({kind:el.attrs["data-timeline-kind"], tone:el.className, label:el.attrs.title, style:el.attrs.style})),
+    marks:descendants(root, "span").filter(el => el.className === "timeline-hour").map(el => el.textContent),
+    css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask.startsWith("status-picture")) (async () => {
   const run = code => vm.runInContext(code, ctx);
   await run("loadStatus()").catch(e => { if (ask !== "status-picture-initial-error") throw e; });
   const snapshot = async () => {
@@ -29457,6 +29474,369 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 counts = {box["step"]: box["count"] for box in page["boxes"]}
                 self.assertEqual((counts["review"], counts["verification"]), (2, 1))
                 self.assertEqual(page["lists"]["review"], 3)  # all review links remain available
+
+    def timeline_fixture(self):
+        at = 200000
+        tasks = [{"id": "t0001", "title": "Two runs <&>", "lane": "a", "state": "done",
+                  "started": at - 6000, "finished": at - 5400},
+                 {"id": "t0002", "title": "Verify it", "lane": "v", "kind": "verify",
+                  "state": "done", "verdict": "does not hold", "started": at - 5000, "finished": at - 4700}]
+        events = []
+        def event(offset, kind, **fields):
+            events.append({"ts": at - offset, "event": kind, **fields})
+        event(9000, "task_started", task="t0001", lane="a")
+        event(8000, "task_finished", task="t0001", state="queued", error="connection failed")
+        event(6000, "task_started", task="t0001", lane="a")
+        event(5400, "task_finished", task="t0001", state="checking")
+        event(5300, "check_started", task="t0001", lane="a")
+        event(5100, "task_checked", task="t0001", ok=False, exit=1)
+        event(5000, "task_started", task="t0002", lane="v")
+        event(4700, "task_finished", task="t0002", state="done")
+        event(4500, "merge_check_started", task="t0001", lane="m", members=["t0001", "t0002"])
+        event(4200, "merge_checked", task="t0001", ok=False, members=["t0001", "t0002"])
+        event(4199, "merge_check_ended", task="t0001", ok=False)
+        event(4000, "lane_try_started", lane="a")
+        event(3700, "lane_tried", lane="a", ok=False, check={"exit": 1, "seconds": 300})
+        event(3500, "release_started", id=7, lane="a", target="preview")
+        event(3200, "release_stopped", id=7, lane="a", target="preview")
+        event(3000, "task_checked", task="t0001", ok=None, could_not_run=True)
+        event(2500, "task_started", task="removed-task", lane="removed")
+        releases = [{"id": 7, "lane": "a", "target": "preview", "state": "stopped",
+                     "started": at - 3500, "ended": at - 3200}]
+        return at, tasks, events, releases
+
+    def test_timeline_kinds_history_batch_and_empty_lane(self):
+        at, tasks, events, releases = self.timeline_fixture()
+        data = views.timeline_data(["a", "v", "m", "empty"], tasks, events, releases, {}, at)
+        self.assertEqual((data["start"], data["end"]), (at - 86400, at))
+        rows = {row["lane"]: row["segments"] for row in data["lanes"]}
+        self.assertEqual(list(rows), ["a", "v", "m", "empty"])
+        self.assertEqual(rows["empty"], [])
+        runs = [s for s in rows["a"] if s["kind"] == "worker"]
+        self.assertEqual([(s["started"], s["ended"], s["failed"]) for s in runs],
+                         [(at - 9000, at - 8000, True), (at - 6000, at - 5400, False)])
+        self.assertEqual(runs[0]["tasks"], [{"id": "t0001", "title": "Two runs <&>"}])
+        self.assertEqual(len(rows["m"]), 1)
+        self.assertEqual([t["id"] for t in rows["m"][0]["tasks"]], ["t0001", "t0002"])
+        self.assertEqual(rows["m"][0]["started"], at - 4500)
+        self.assertEqual(rows["m"][0]["ended"], at - 4200)
+        self.assertTrue(rows["v"][0]["failed"])
+        self.assertEqual(rows["v"][0]["result"], "does not hold")
+        segments = [s for row in rows.values() for s in row]
+        self.assertEqual({s["kind"] for s in segments}, {"worker", "check", "verification", "merge", "try", "release"})
+        self.assertTrue(all(s["failed"] for s in segments if s["kind"] in ("merge", "try", "release")))
+        self.assertEqual(next(s for s in segments if s["kind"] == "release")["release"], {"id": 7, "target": "preview"})
+        self.assertTrue(any(s["could_not_run"] for s in rows["a"] if s["kind"] == "check"))
+
+    def test_timeline_clips_records_and_keeps_live_work(self):
+        at = 200000
+        tasks = [{"id": "t0001", "lane": "a", "title": "Across midnight", "state": "done",
+                  "started": at - 90000, "finished": at - 86000},
+                 {"id": "t0002", "lane": "a", "title": "Still working", "state": "running", "started": at - 60},
+                 {"id": "old", "lane": "a", "state": "done", "started": 1, "finished": 2}]
+        data = views.timeline_data(["a", "empty"], tasks, [], [], {}, at)
+        cut, live = data["lanes"][0]["segments"]
+        self.assertEqual((cut["start"], cut["started"], cut["end"]), (at - 86400, at - 90000, at - 86000))
+        self.assertEqual((live["end"], live["ended"], live["running"], live["minutes"]), (at, None, True, 1))
+        self.assertEqual(data["lanes"][1]["segments"], [])
+
+    def test_timeline_records_cover_live_checks_merge_tries_and_releases(self):
+        at = 200000
+        tasks = [{"id": "check", "lane": "a", "state": "running", "phase": "checking", "check_started": at - 120},
+                 {"id": "merge", "lane": "a", "state": "merging",
+                  "merge_check": {"lane": "m", "phase": "running", "started": at - 180}},
+                 {"id": "older", "lane": "a", "state": "done", "attempts": [{"ran_from": at - 90000, "ended": at - 86000}],
+                  "merge_check_result": {"lane": "m", "at": at - 600, "seconds": 60, "ok": True}}]
+        trials = {"t": {"phase": "running", "started": at - 60}}
+        releases = [{"id": 1, "lane": "r", "target": "preview", "state": "running", "started": at - 240}]
+        data = views.timeline_data(["a", "m", "t", "r"], tasks, [], releases, trials, at)
+        rows = {row["lane"]: row["segments"] for row in data["lanes"]}
+        self.assertEqual([s["kind"] for s in rows["a"]], ["worker", "check"])
+        self.assertEqual(rows["a"][0]["start"], at - 86400)
+        self.assertTrue(rows["a"][0]["failed"])
+        self.assertEqual([(s["kind"], s["running"]) for s in rows["m"]], [("merge", False), ("merge", True)])
+        for lane in ("a", "m", "t", "r"):
+            self.assertTrue(rows[lane][-1]["running"])
+            self.assertEqual(rows[lane][-1]["end"], at)
+
+    def test_timeline_check_retries_and_release_results(self):
+        at, tasks, events, releases = self.timeline_fixture()
+        extra = [
+            {"ts": at - 2800, "event": "check_started", "task": "t0001", "lane": "a"},
+            {"ts": at - 2700, "event": "check_killed", "task": "t0001", "exit": 137},
+            {"ts": at - 2600, "event": "check_started", "task": "t0001", "lane": "a"},
+            {"ts": at - 2500, "event": "task_checked", "task": "t0001", "ok": True},
+            {"ts": at - 2400, "event": "release_started", "id": 8, "lane": "a", "target": "live"},
+            {"ts": at - 2300, "event": "release_ended", "id": 8, "ok": True},
+            {"ts": at - 2200, "event": "release_started", "id": 9, "lane": "a", "target": "live"},
+            {"ts": at - 2100, "event": "release_ended", "id": 9, "ok": False},
+            {"ts": at - 2000, "event": "lane_try_started", "lane": "a"},
+            {"ts": at - 1900, "event": "lane_tried", "lane": "a", "ok": True, "setup": {"exit": 1}},
+            {"ts": at + 1, "event": "task_started", "task": "future", "lane": "a"}]
+        data = views.timeline_data(["a", "v", "m"], tasks, events + extra, releases, {}, at)
+        segments = data["lanes"][0]["segments"]
+        checks = [s for s in segments if s["kind"] == "check"]
+        self.assertEqual([s["failed"] for s in checks], [True, False, True, False])
+        self.assertEqual([s["failed"] for s in segments if s["kind"] == "release"], [True, False, True])
+        self.assertTrue([s for s in segments if s["kind"] == "try"][-1]["failed"])
+        self.assertFalse(any(t["id"] == "future" for s in segments for t in s["tasks"]))
+
+    def test_timeline_recovers_recorded_ends_when_a_finish_event_is_missing(self):
+        at = 200000
+        tasks = [{"id": "t0001", "lane": "a", "state": "done", "started": at - 120, "finished": at - 60,
+                  "earlier_runs": [{"ran_from": at - 600, "ended": at - 300}]}]
+        events = [{"ts": at - 600, "event": "task_started", "task": "t0001", "lane": "a"},
+                  {"ts": at - 120, "event": "task_started", "task": "t0001", "lane": "a"}]
+        segments = views.timeline_data(["a"], tasks, events, [], {}, at)["lanes"][0]["segments"]
+        self.assertEqual([(s["started"], s["ended"], s["failed"]) for s in segments],
+                         [(at - 600, at - 300, True), (at - 120, at - 60, False)])
+        tasks[0]["earlier_runs"][0]["ended"] = at - 120
+        tasks[0].update(state="running", finished=None)
+        segments = views.timeline_data(["a"], tasks, events, [], {}, at)["lanes"][0]["segments"]
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0]["ended"], at - 120)
+        self.assertTrue(segments[1]["running"])
+
+    def test_timeline_get_uses_the_existing_key_check_without_a_server(self):
+        from hansa import web
+        # Capture the real handler class without creating a socket or starting a thread.
+        with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
+                unittest.mock.patch.object(web.threading, "Thread"):
+            web.start_web(self.desk)
+        handler = object.__new__(server.call_args.args[1])
+        handler.headers = {}
+        replies = []
+        handler._send = lambda code, body, *args, **kwargs: replies.append((code, body))
+        handler.path = "/api/timeline"
+        with unittest.mock.patch.object(views, "timeline", return_value={"lanes": []}) as view:
+            handler.do_GET()
+            self.assertEqual(replies.pop()[0], 403)
+            view.assert_not_called()
+            handler.path += "?t=" + self.desk.web_token()
+            handler.do_GET()
+            self.assertEqual(replies.pop(), (200, {"lanes": []}))
+            view.assert_called_once_with(self.desk)
+            handler.headers = {"Content-Length": "2", "X-Hansa": "1"}
+            handler.rfile = io.BytesIO(b"{}")
+            handler.do_POST()
+            self.assertEqual(replies.pop()[0], 404)
+            view.assert_called_once_with(self.desk)
+
+    def test_timeline_tail_handles_blocks_unicode_damage_and_missing_files(self):
+        self.assertEqual(views.timeline_events(self.tmp / "missing.jsonl", 100), [])
+        recent = [{"ts": 100 + i, "event": "note", "text": "中é\u2028" * 200} for i in range(200)]
+        self.desk.events_path.write_bytes(b'{"ts":1}\n' + b'\xff\n' + b'[]\n' + b'{"ts":"bad"}\n' +
+            b"\n".join(json.dumps(e, ensure_ascii=False).encode() for e in recent) + b'\nbroken\n')
+        self.assertEqual(views.timeline_events(self.desk.events_path, 100), recent)
+
+    def test_timeline_remembers_a_crossing_try_start_after_its_record_was_replaced(self):
+        at = 200000
+        events = [{"ts": at - 90000, "event": "lane_try_started", "lane": "a"}]
+        events += [{"ts": at - 89999 + i / 3, "event": "old_note"} for i in range(10000)]
+        events += [{"ts": at - 86000, "event": "lane_tried", "lane": "a", "ok": True,
+                    "check": {"exit": 0, "seconds": 4000}},
+                   {"ts": at - 60, "event": "lane_try_started", "lane": "a"}]
+        raw = b"\n".join(json.dumps(e).encode() for e in events) + b"\n"
+        self.desk.events_path.write_bytes(raw)
+        found = views.timeline_events(self.desk.events_path, at - 86400)
+        segments = views.timeline_data(["a"], [], found, [], {}, at)["lanes"][0]["segments"]
+        self.assertEqual(len(segments), 2)
+        self.assertEqual((segments[0]["started"], segments[0]["start"], segments[0]["ended"]),
+                         (at - 90000, at - 86400, at - 86000))
+        self.assertTrue(segments[1]["running"])
+        # The older start is retained, so each minute's refresh reads only the current tail.
+        source = io.BytesIO(raw)
+        source.read = unittest.mock.Mock(wraps=source.read)
+        with unittest.mock.patch("builtins.open", return_value=source):
+            self.assertEqual(views.timeline_events(self.desk.events_path, at - 86400), found)
+        self.assertLessEqual(sum(call.args[0] for call in source.read.call_args_list), 65536)
+        # Replacing or truncating a log invalidates its remembered boundaries.
+        replacement = self.tmp / "replacement.jsonl"
+        replacement.write_bytes(raw.replace(b'"ts": 110000,', b'"ts": 109000,', 1))
+        replacement.replace(self.desk.events_path)
+        self.assertEqual(views.timeline_events(self.desk.events_path, at - 86400)[0]["ts"], at - 91000)
+        events = [{"ts": at - 92000, "event": "lane_try_started", "lane": "a"}, events[-2]]
+        self.desk.events_path.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+        self.assertEqual(views.timeline_events(self.desk.events_path, at - 86400)[0]["ts"], at - 92000)
+
+    def test_timeline_does_not_attach_an_aborted_merge_to_an_older_completed_check(self):
+        events = [{"ts": 1, "event": "merge_check_started", "task": "t0001", "lane": "a"},
+                  {"ts": 2, "event": "merge_checked", "task": "t0001", "ok": True},
+                  {"ts": 200000, "event": "merge_check_ended", "task": "t0001", "ok": False}]
+        self.desk.events_path.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+        for _ in range(2):
+            found = views.timeline_events(self.desk.events_path, 200000 - 86400)
+            self.assertEqual(found, events[-1:])
+            data = views.timeline_data(["a"], [{"id": "t0001", "lane": "a"}], found, [], {}, 200000)
+            self.assertEqual(data["lanes"][0]["segments"], [])
+
+    def timeline_counted(self, at):
+        """Call the endpoint view and count actual event-log bytes, including its first lookup."""
+        original, reads = open, []
+        def tracked(path, *args, **kwargs):
+            source = original(path, *args, **kwargs)
+            if Path(path) == self.desk.events_path:
+                read = source.read
+                def counted(size=-1):
+                    data = read(size)
+                    reads.append(len(data))
+                    return data
+                source.read = counted
+            return source
+        with unittest.mock.patch("builtins.open", tracked):
+            data = views.timeline(self.desk, at=at)
+        return data, sum(reads)
+
+    def test_timeline_unstarted_ends_read_only_recent_tail(self):
+        at = 4000000
+        old = (json.dumps({"ts": 1, "event": "old"}) + "\n").encode() * 199998
+        task = self.desk.new_task("Cancelled before launch", lane="a", state="cancelled")
+        check = self.desk.new_task("Refused check", lane="a", state="failed")
+        events = [{"ts": at - 120, "event": "task_finished", "task": task, "state": "cancelled",
+                   "error": "cancelled before it started"},
+                  {"ts": at - 60, "event": "task_checked", "task": check, "ok": False,
+                   "exit": None, "note": "the lane's check could not run: unavailable"}]
+        self.desk.events_path.write_bytes(old + b"".join((json.dumps(e) + "\n").encode() for e in events))
+        for refresh in range(2):
+            with self.subTest(refresh=refresh):
+                if refresh:
+                    # A newly refused check must not incur a fresh search through all history.
+                    with self.desk.events_path.open("a") as log:
+                        log.write(json.dumps({**events[-1], "ts": at - 30}) + "\n")
+                data, count = self.timeline_counted(at)
+                self.assertLessEqual(count, 65536)
+                segments = data["lanes"][0]["segments"]
+                self.assertEqual(len(segments), 1 + refresh)
+                self.assertTrue(all(s["kind"] == "check" and s["could_not_run"] and s["failed"]
+                                    and s["start"] == s["end"] for s in segments))
+
+    def test_timeline_recorded_crossing_starts_read_only_recent_tail(self):
+        from hansa import release
+        at, started = 4000000, 1000000
+        task = self.desk.new_task("Long worker run", lane="a", state="done")
+        earlier = self.desk.new_task("Earlier long run", lane="a", state="running")
+        self.desk.update(task, started=started, finished=at - 120)
+        self.desk.update(earlier, started=at - 30, earlier_runs=[{"ran_from": started + 1, "ended": at - 100}])
+        releases = [{"id": 1, "lane": "a", "target": "preview", "state": "done",
+                     "started": started + 2, "ended": at - 60}]
+        release.releases_file(self.desk).write_text(json.dumps(releases))
+        events = [{"ts": started, "event": "task_started", "task": task, "lane": "a"},
+                  {"ts": started + 1, "event": "task_started", "task": earlier, "lane": "a"},
+                  {"ts": started + 2, "event": "release_started", "id": 1, "lane": "a"}]
+        ends = [{"ts": at - 120, "event": "task_finished", "task": task, "state": "done"},
+                {"ts": at - 100, "event": "task_finished", "task": earlier, "state": "queued"},
+                {"ts": at - 60, "event": "release_ended", "id": 1, "ok": True}]
+        raw = b"".join((json.dumps(e) + "\n").encode() for e in events)
+        raw += (json.dumps({"ts": started + 3, "event": "old"}) + "\n").encode() * 199994
+        raw += b"".join((json.dumps(e) + "\n").encode() for e in ends)
+        self.desk.events_path.write_bytes(raw)
+        data, count = self.timeline_counted(at)
+        self.assertLessEqual(count, 65536)
+        cut = [s for s in data["lanes"][0]["segments"] if not s["running"]]
+        self.assertEqual([(s["started"], s["start"], s["ended"]) for s in cut],
+                         [(started + i, at - 86400, e["ts"]) for i, e in enumerate(ends)])
+
+    def test_timeline_missing_crossing_start_search_stops_at_seven_days(self):
+        at = 4000000
+        task = self.desk.new_task("Lost start record", lane="a", state="done")
+        events = [{"ts": 1, "event": "task_started", "task": task, "lane": "a"},
+                  {"ts": at - 86400 - 7 * 86400 - 1, "event": "old"}]
+        raw = (json.dumps(events[0]) + "\n").encode()
+        raw += (json.dumps(events[1]) + "\n").encode() * 199997
+        raw += (json.dumps({"ts": at - 90000, "event": "note"}) + "\n").encode()
+        raw += (json.dumps({"ts": at - 60, "event": "task_finished", "task": task, "state": "done"}) + "\n").encode()
+        self.desk.events_path.write_bytes(raw)
+        data, count = self.timeline_counted(at)
+        self.assertLessEqual(count, 65536)
+        segment = data["lanes"][0]["segments"][0]
+        self.assertEqual((segment["start"], segment["started"], segment["end"]), (at - 86400, at - 86400, at - 60))
+
+    def test_timeline_stopped_release_is_red_from_record_alone(self):
+        at = 200000
+        records = [{"id": 7, "lane": "a", "target": "preview", "state": "stopped",
+                    "started": at - 120, "ended": at - 60}]
+        segment = views.timeline_data(["a"], [], [], records, {}, at)["lanes"][0]["segments"][0]
+        self.assertTrue(segment["failed"])
+        self.assertFalse(segment["running"])
+        self.assertEqual((segment["kind"], segment["result"]), ("release", "stopped"))
+
+    def test_timeline_endpoint_view_reads_only_recent_log_tail(self):
+        at = 200000
+        self.desk.events_path.write_bytes((json.dumps({"ts": 1, "event": "old"}) + "\n").encode() * 200000 +
+            b'broken\n' + (json.dumps({"ts": at - 120, "event": "lane_try_started", "lane": "a"}) + "\n" +
+            json.dumps({"ts": at - 60, "event": "lane_tried", "lane": "a", "ok": True}) + "\n").encode())
+        opened = []
+        original = open
+        class Reader:
+            def __init__(self, file): self.file, self.count = file, 0
+            def __enter__(self): return self
+            def __exit__(self, *args): self.file.close()
+            def seek(self, *args): return self.file.seek(*args)
+            def read(self, size=-1):
+                self.count += size if size >= 0 else self.file.seek(0, 2)
+                return self.file.read(size)
+        def tracked(path, *args, **kwargs):
+            file = original(path, *args, **kwargs)
+            if Path(path) == self.desk.events_path:
+                file = Reader(file); opened.append(file)
+            return file
+        with unittest.mock.patch("builtins.open", tracked):
+            data = views.timeline(self.desk, at=at)
+        self.assertEqual(data["lanes"][0]["segments"][0]["kind"], "try")
+        self.assertLess(sum(f.count for f in opened), 131072)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_status_timeline_kinds_and_empty_window_in_both_languages(self):
+        from hansa import web
+        at, tasks, events, releases = self.timeline_fixture()
+        # A wire fixture independent of the view: this test also runs before the view exists.
+        kinds = ["worker", "check", "verification", "merge", "try", "release"]
+        segments = [{"kind": kind, "start": at - 3600, "end": at - 1800, "started": at - 3600,
+                     "ended": at - 1800, "minutes": 30, "running": False, "failed": kind == "check",
+                     "could_not_run": kind == "check", "result": "failed" if kind == "check" else "done",
+                     "tasks": [] if kind in ("try", "release") else [{"id": "t0001", "title": "Two runs <&>"}],
+                     "release": {"id": 7, "target": "preview"} if kind == "release" else None} for kind in kinds]
+        segments[0].update(running=True, ended=None, end=at)
+        harness = self.tmp / "timeline-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            for empty in (False, True):
+                with self.subTest(language=language, empty=empty):
+                    timeline = {"start": at - 86400, "end": at, "lanes": [
+                        {"lane": "a", "segments": [] if empty else segments}, {"lane": "empty", "segments": []}]}
+                    result = subprocess.run(["node", str(harness), str(web.UI), "timeline", language],
+                        input=json.dumps({"/api/status": self.picture_status(), "/api/timeline": timeline,
+                                          "/api/events": [], "/api/task": {"text": "Task opened"}}),
+                        capture_output=True, text=True, timeout=60, env={**os.environ, "TZ": "Asia/Kolkata"})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    page = json.loads(result.stdout)
+                    self.assertEqual(page["rows"], ["a", "empty"])
+                    self.assertEqual([s["kind"] for s in page["segments"]], [] if empty else kinds)
+                    self.assertEqual(page["gets"].count("/api/timeline"), 1)
+                    self.assertEqual(page["refreshGets"], 2)
+                    self.assertEqual(page["reopenGets"], 3)
+                    self.assertEqual(len(page["marks"]), 24)
+                    self.assertTrue(all(label.endswith(":00") for label in page["marks"]))
+                    self.assertIn("24", page["text"])
+                    if empty:
+                        self.assertIn("No work" if language == "en" else "没有工作", page["text"])
+                    else:
+                        labels = ["Worker", "Check", "Verification", "Merge check", "Lane try", "Release"] if language == "en" else ["执行", "验收", "核对", "合并验收", "工作线试跑", "发布"]
+                        for segment, label in zip(page["segments"], labels):
+                            self.assertIn(label, segment["label"])
+                            self.assertIn("30 min" if language == "en" else "30 分钟", segment["label"])
+                        self.assertEqual(len({re.search(r"top:(\d+)px", s["style"])[1] for s in page["segments"]}), 6)
+                        self.assertIn("timeline-failed", page["segments"][1]["tone"])
+                        self.assertIn("timeline-running", page["segments"][0]["tone"])
+                        self.assertIn("could not run" if language == "en" else "无法运行", page["segments"][1]["label"])
+                        self.assertIn("Two runs <&>", page["segments"][0]["label"])
+                        self.assertIn("preview", page["segments"][-1]["label"])
+                        self.assertIn("/api/task?id=t0001", page["gets"])
+                        self.assertIn("Task opened", page["text"])
+                    for css in (".timeline-row { display:grid; grid-template-columns:72px minmax(0,1fr)",
+                                ".timeline-track { position:relative; min-width:0;", ".timeline-legend { display:flex; flex-wrap:wrap;",
+                                '.timeline-hour:not([data-mobile="true"]) { font-size:0; }'):
+                        self.assertIn(css, page["css"])
 
     def test_status_picture_running_limits_follow_server(self):
         settings = self.desk.settings()

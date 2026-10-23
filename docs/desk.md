@@ -59,6 +59,70 @@ wrap between words, the principal box follows below the stages, and tracks fit
 the page without horizontal scrolling.
 The picture has no animation and uses the page's English and Chinese dictionaries.
 
+The Status tab also shows a rolling 24-hour timeline, one row per current lane
+(including empty lanes), with hourly marks from 24 hours ago to now. Removed
+lanes are omitted. Workers, lane checks, verifications, merge checks, lane tries
+and releases each have a palette colour; failures are red. Running work extends
+to now with a fading, dashed end. Work crossing the left edge is clipped there.
+Hover, focus or tap a segment for its kind, task IDs and titles (or release number
+and target), original start, minutes and result. Clicking a task segment opens
+the same task details as its ID elsewhere; a merge batch names all its tasks.
+Concurrent pieces stack within their lane's row so each remains selectable.
+Checks that could not run say so. The legend and details use the page language.
+The axis fits the page on phones, with fewer hour labels but all hourly marks;
+labels have an opaque background so adjacent grid lines do not cross their text.
+History loads when Status opens and at most once a minute during its regular
+five-second updates; it does not hold up the rest of Status.
+
+`GET /api/timeline` uses the same desk key or cookie as the other page endpoints
+and only reads records. Its top-level `start` and `end` are Unix seconds bounding
+the window. `lanes` is an ordered list of `{lane, segments}`. Each segment has:
+
+- `kind`: `worker`, `check`, `verification`, `merge`, `try` or `release`;
+- `lane`: the lane that executed it, including a dedicated merge lane;
+- `started`, `ended`: original Unix times (`ended: null` for running work);
+  an unknown older start uses the window's left edge;
+- `start`, `end`: drawing times clipped to the window;
+- `minutes`: elapsed minutes from the original start, to two decimal places;
+- `running`, `failed`, `could_not_run`: flags for presentation;
+- `result`: the recorded state/verdict, or `running`, `done`, `passed`, `failed`,
+  `stopped`, `queued`, `cancelled` or `could_not_run`;
+- `tasks`: `{id, title}` entries, including every member of a merge batch;
+- `release`: `{id, target}` for a release, otherwise `null`.
+
+The view is `hansa.views.timeline(desk)`; `timeline_data(lanes, tasks, events,
+releases, tries, at)` builds the same data from records without a web server.
+Worker and verification boundaries come from `task_started` / `task_finished`;
+`started` / `finished` and earlier attempts' `ran_from` / `ended` supply record
+boundaries. A verification uses its task's verdict. Lane checks pair
+`check_started` with `task_checked` (or `check_killed` before a retry); records
+retain `check_started` and the check's `seconds`. A refused check without a
+start is a labelled point at `task_checked`. Merge checks pair
+`merge_check_started` with `merge_checked`, `merge_check_ended` or
+`merge_check_killed`; `members` makes a batch one segment. Their records retain
+`merge_check.started` or a result's `at` and `seconds`, and the execution `lane`.
+Lane tries pair `lane_try_started` / `lane_tried`, supplemented by the lane's
+try record's `started` / `ended`. Releases pair `release_started` with
+`release_ended` or `release_stopped`, supplemented by their `started` / `ended`.
+Records supply running and crossing work and ends saved before a finish event
+could be appended. Event pairs preserve earlier runs and retries; an end
+following another end does not duplicate a merge check.
+
+The endpoint reads the event log backwards in 64 KiB blocks to the start of the
+window, skipping damaged lines. An end explicitly saying that work never
+started (a task cancelled before launch, a refused check or an unstarted release)
+does not trigger an older-history search. A refused check remains a labelled
+point at its end. For a crossing pair, the endpoint first takes the start from
+the task, earlier run, release or lane try record. Only when no matching record
+supplies it does it search older events, stopping seven days before the window.
+If no start is found within that limit, the segment begins at the window's left
+edge; its minutes then count from that edge. It keeps recovered boundaries in
+memory until their ends leave the window, including earlier tries whose lane
+record has since been replaced. A replaced or truncated log invalidates the
+remembered boundaries. Thus neither a server restart nor a new unmatched end
+causes a search through the desk's entire history. Existing status responses
+and command output do not include timeline data.
+
 Status also shows the last 24 hours in summary cards, keeps dispatch controls separate
 from task lists, and places release decisions and requests near the top. Empty
 states explain where new activity will appear. Task details remain open across
