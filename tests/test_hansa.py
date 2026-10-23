@@ -28659,7 +28659,8 @@ else if (ask === "cost-chart") vm.runInContext("loadCost()", ctx).then(async () 
   console.log(JSON.stringify({charts:charts.length, text:chart?.textContent, name:chart?.attrs["aria-label"],
     plot:plots[0]?.attrs.style,
     bars:bars.map(el => ({label:el.attrs["aria-label"], title:el.attrs.title, style:el.attrs.style, tone:el.className})),
-    labels:labels.map(el => ({text:el.textContent, mobile:el.attrs["data-mobile"] === "true"})), order,
+    labels:labels.map(el => ({text:el.textContent, mobile:el.attrs["data-mobile"] === "true",
+      edge:el.attrs["data-edge"], style:el.attrs.style})), order,
     table:dayTable ? descendants(dayTable, "tr").slice(1).map(el => el.kids.map(cell => cell.textContent)) : [],
     gets:apiGets, css:page.slice(page.indexOf("<style>"), page.indexOf("</style>"))}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
@@ -30167,6 +30168,47 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                  '.cost-chart-label:not([data-mobile="true"]) { display:none; }'):
                         self.assertIn(rule, output["css"])
 
+    def test_cost_chart_last_label_has_width_and_does_not_wrap_in_both_languages(self):
+        for language in ("en", "zh"):
+            for days in (7, 30):
+                with self.subTest(language=language, days=days):
+                    rows = {f"2026-10-{day:02}": {"tokens": 100, "usd": 1.25, "unpriced_tokens": 0}
+                            for day in range(1, days + 1)}
+                    output = self.cost_chart_page(days, rows, language)
+                    last = output["labels"][-1]
+                    self.assertEqual(last["edge"], "last")
+                    self.assertEqual(last["text"], f"10-{days:02}$1.25")
+                    # The harness cannot lay out text: require a right anchor, real width and no wrapping.
+                    self.assertEqual(last["style"], "right:0")
+                    rule = re.search(r"\.cost-chart-label\[data-edge=last\]\s*\{([^}]+)\}", output["css"])[1]
+                    declarations = dict(part.strip().split(":", 1) for part in rule.split(";") if part.strip())
+                    self.assertEqual(declarations["width"], "33%")
+                    self.assertEqual(declarations["white-space"], "nowrap")
+                    self.assertEqual(declarations["transform"], "none")
+
+    def test_cost_chart_fills_interior_date_gaps_in_both_languages(self):
+        for language in ("en", "zh"):
+            for days, dates in ((7, ["2026-10-31", "2026-11-01", "2026-11-02"]),
+                                (30, ["2028-02-28", "2028-02-29", "2028-03-01"]),
+                                (7, ["2026-12-31", "2027-01-01", "2027-01-02"]),
+                                (7, ["2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22"])):
+                with self.subTest(language=language, days=days, dates=dates):
+                    rows = {dates[-1]: {"tokens": 200, "usd": 2, "unpriced_tokens": 0},
+                            dates[0]: {"tokens": 100, "usd": 1, "unpriced_tokens": 0}}
+                    output = self.cost_chart_page(days, rows, language)
+                    self.assertEqual(len(output["bars"]), len(dates), "interior empty days must keep their own tracks")
+                    self.assertEqual(output["plot"], f"grid-template-columns:repeat({len(dates)},minmax(0,1fr))")
+                    self.assertEqual([bar["label"] for bar in output["bars"]],
+                                     [f"{dates[0]} · $1.00", *dates[1:-1], f"{dates[-1]} · $2.00"])
+                    for bar, day in zip(output["bars"][1:-1], dates[1:-1]):
+                        self.assertEqual(bar["title"], day)
+                        self.assertEqual(bar["style"], "height:0%")
+                        self.assertNotIn("unpriced", bar["tone"].split())
+                    self.assertEqual([label["text"] for label in output["labels"]],
+                                     [f"{dates[0][5:]}$1.00", *[day[5:] for day in dates[1:-1]], f"{dates[-1][5:]}$2.00"])
+                    self.assertEqual(output["table"], [[day, str(row["tokens"]), f"{row['usd']:.2f}", ""]
+                                                       for day, row in rows.items()])
+
     def test_cost_chart_marks_days_with_unpriced_tokens_in_both_languages(self):
         unpriced = {"2026-10-20": {"tokens": 1200, "usd": 0, "unpriced_tokens": 1200}}
         mixed = {**unpriced, "2026-10-22": {"tokens": 3000, "usd": 1.75, "unpriced_tokens": 500}}
@@ -30175,9 +30217,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 with self.subTest(language=language, rows=len(rows)):
                     output = self.cost_chart_page(7, rows, language)
                     self.assertEqual(output["charts"], 1, "daily cost chart missing for unpriced usage")
-                    self.assertEqual(len(output["bars"]), len(rows))  # No invented dates between sparse rows.
+                    self.assertEqual(len(output["bars"]), 1 if len(rows) == 1 else 3)
                     warning = "token 没价目" if language == "zh" else "tokens without a price"
-                    for bar, (day, row) in zip(output["bars"], rows.items()):
+                    bars_by_day = {bar["label"][:10]: bar for bar in output["bars"]}
+                    for day, row in rows.items():
+                        bar = bars_by_day[day]
                         self.assertIn(f"{day} · ${row['usd']:.2f}", bar["label"])
                         self.assertIn(warning, bar["label"])
                         self.assertIn(format(row["unpriced_tokens"], ","), bar["label"])
