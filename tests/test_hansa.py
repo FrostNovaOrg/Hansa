@@ -28523,15 +28523,28 @@ if (ask === "timeline") (async () => {
   await run("loadStatus()"); await run("loadTimeline()");
   const root = ids["#status-timeline"], segments = [];
   walk(root, el => { if (el.attrs["data-timeline-kind"]) segments.push(el); });
-  if (segments.length) { await segments[0].click(); await new Promise(resolve => setImmediate(resolve)); }
+  const inspector = descendants(root, "div").find(el => el.className === "timeline-inspector");
+  const interactions = [];
+  for (const segment of segments) {
+    inspector.replaceChildren(); segment.on.pointerenter();
+    const hover = inspector.textContent;
+    inspector.replaceChildren(); await segment.click();
+    await new Promise(resolve => setImmediate(resolve));
+    const detail = ids["#" + segment.attrs["aria-controls"]];
+    interactions.push({hover, tap:inspector.textContent, opened:detail ? !detail.hidden : false,
+      detail:detail?.textContent});
+  }
   const gets = [...apiGets];
   await run("timelineFetchedAt = Date.now() - 61000; loadTimeline()");
   const refreshGets = apiGets.filter(p => p === "/api/timeline").length;
   await run("current = 'settings'; show('status')"); await run("loadTimeline()");
   console.log(JSON.stringify({text:root.textContent, gets, refreshGets, reopenGets:apiGets.filter(p => p === "/api/timeline").length,
     rows:descendants(root, "div").filter(el => el.attrs["data-timeline-lane"]).map(el => el.attrs["data-timeline-lane"]),
-    segments:segments.map(el => ({kind:el.attrs["data-timeline-kind"], tone:el.className, label:el.attrs.title, style:el.attrs.style})),
+    segments:segments.map((el, i) => ({kind:el.attrs["data-timeline-kind"], tone:el.className, label:el.attrs.title,
+      text:el.textContent, aria:el.attrs["aria-label"], style:el.attrs.style, ...interactions[i]})),
     marks:descendants(root, "span").filter(el => el.className === "timeline-hour").map(el => el.textContent),
+    hourMarks:descendants(root, "span").filter(el => el.className === "timeline-hour").map(el =>
+      ({text:el.textContent, style:el.attrs.style, labelClass:el.kids[0].className})),
     css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask.startsWith("status-picture")) (async () => {
@@ -29823,8 +29836,18 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     else:
                         labels = ["Worker", "Check", "Verification", "Merge check", "Lane try", "Release"] if language == "en" else ["执行", "验收", "核对", "合并验收", "工作线试跑", "发布"]
                         for segment, label in zip(page["segments"], labels):
+                            self.assertEqual(segment["text"], "")
+                            self.assertEqual(segment["aria"], segment["label"])
+                            self.assertEqual(segment["hover"], segment["label"])
+                            self.assertEqual(segment["tap"], segment["label"])
                             self.assertIn(label, segment["label"])
                             self.assertIn("30 min" if language == "en" else "30 分钟", segment["label"])
+                            self.assertIn("Started" if language == "en" else "开始", segment["label"])
+                            self.assertIn(("could not run" if language == "en" else "无法运行") if segment["kind"] == "check"
+                                          else ("Done" if language == "en" else "完成"), segment["label"])
+                            if segment["kind"] not in ("try", "release"):
+                                self.assertTrue(segment["opened"])
+                                self.assertEqual(segment["detail"], "Task opened")
                         self.assertEqual(len({re.search(r"top:(\d+)px", s["style"])[1] for s in page["segments"]}), 6)
                         self.assertIn("timeline-failed", page["segments"][1]["tone"])
                         self.assertIn("timeline-running", page["segments"][0]["tone"])
@@ -29837,6 +29860,36 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                 ".timeline-track { position:relative; min-width:0;", ".timeline-legend { display:flex; flex-wrap:wrap;",
                                 '.timeline-hour:not([data-mobile="true"]) { font-size:0; }'):
                         self.assertIn(css, page["css"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_status_timeline_last_hour_label_stays_inside_in_both_languages(self):
+        from datetime import datetime, timezone
+        from hansa import web
+        at = datetime(2026, 10, 23, 22, 8, tzinfo=timezone.utc).timestamp()
+        harness = self.tmp / "timeline-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(web.UI), "timeline", language],
+                    input=json.dumps({"/api/status": self.picture_status(), "/api/events": [],
+                                      "/api/timeline": {"start": at - 86400, "end": at, "lanes": []}}),
+                    capture_output=True, text=True, timeout=60, env={**os.environ, "TZ": "UTC"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                page = json.loads(result.stdout)
+                last = page["hourMarks"][-1]
+                self.assertEqual(last["text"], "22:00")
+                self.assertEqual(last["labelClass"], "timeline-hour-label")
+                self.assertAlmostEqual(float(re.search(r"left:([\d.]+)%", last["style"])[1]),
+                                       (1 - 8 / 1440) * 100)
+                # PAGE_HARNESS has no layout engine. Guard the rendered label's CSS:
+                # auto margin holds it at its tick when it fits; flex-end aligns it
+                # to the track's right edge when the remaining 8 minutes are too narrow.
+                hour_css = re.search(r"\.timeline-hour\s*\{([^}]+)\}", page["css"])[1]
+                label_css = re.search(r"\.timeline-hour-label\s*\{([^}]+)\}", page["css"])[1]
+                for declaration in ("right:0;", "display:flex;", "justify-content:flex-end;"):
+                    self.assertIn(declaration, hour_css)
+                for declaration in ("white-space:nowrap;", "flex-shrink:0;", "margin-right:auto;"):
+                    self.assertIn(declaration, label_css)
 
     def test_status_picture_running_limits_follow_server(self):
         settings = self.desk.settings()

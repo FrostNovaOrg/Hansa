@@ -331,8 +331,9 @@ td .task-detail { min-width:200px; }
 .timeline-row { display:grid; grid-template-columns:72px minmax(0,1fr); gap:8px; min-width:0; margin:5px 0; }
 .timeline-lane { font-size:12px; align-self:center; min-width:0; }
 .timeline-track { position:relative; min-width:0; min-height:32px; overflow:hidden; background:var(--surface); border-right:1px solid var(--line); }
-.timeline-hour { position:absolute; top:0; bottom:0; border-left:1px solid var(--line); font-size:10px; color:var(--muted); padding-left:2px; }
-.timeline-hour-label { position:relative; z-index:1; background:var(--card); padding-right:2px; }
+/* Auto margin keeps a label at its tick; flex-end keeps an overflowing one inside the right edge. */
+.timeline-hour { position:absolute; top:0; bottom:0; right:0; display:flex; justify-content:flex-end; align-items:flex-start; border-left:1px solid var(--line); font-size:10px; color:var(--muted); padding-left:2px; }
+.timeline-hour-label { position:relative; z-index:1; background:var(--card); padding-right:2px; white-space:nowrap; flex-shrink:0; margin-right:auto; }
 .timeline-axis { height:24px; background:none; }
 .timeline-ends { display:flex; justify-content:space-between; gap:8px; font-size:11px; color:var(--muted); }
 .timeline-segment, button.timeline-segment { position:absolute; top:5px; height:22px; min-height:0; min-width:3px; max-width:100%; margin:0; padding:0; border:0; border-radius:3px; background:var(--segment); color:var(--card); overflow:hidden; font-size:10px; white-space:nowrap; text-overflow:ellipsis; text-decoration:none; display:block; }
@@ -1125,7 +1126,7 @@ function renderTimeline(report) {
         T.timelineMinutes(item.minutes), item.could_not_run ? T.timeline_could_not_run : result].join(" · ");
       const [button, box] = item.tasks.length ? taskLink(item.tasks[0].id) : [h("button", {}), null];
       button.className = `timeline-segment timeline-${item.kind}${item.failed ? " timeline-failed" : ""}${item.running ? " timeline-running" : ""}`;
-      button.textContent = names;
+      button.textContent = "";
       button.setAttribute("title", label); button.setAttribute("aria-label", label);
       button.setAttribute("data-timeline-kind", item.kind);
       button.setAttribute("style", `top:${5 + level * 28}px;left:clamp(0px,${(item.start - report.start) / span * 100}%,calc(100% - 3px));width:${Math.max(0, (item.end - item.start) / span * 100)}%;`);
