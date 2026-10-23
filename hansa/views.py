@@ -593,6 +593,7 @@ def status(desk: Desk) -> dict:
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
                      "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
+                     "limit_min": s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240),
                      "effort": m.get("effort_used", ""), "effort_from": m.get("effort_from"),
                      "effort_said": effort_text(m.get("effort_used", ""), m.get("effort_from"),
                                                 s["providers"].get(m.get("provider") or "")),
@@ -609,6 +610,7 @@ def status(desk: Desk) -> dict:
                      **({"waiting_for": merge_lane_wait(desk, m, tasks)} if merge_check_lane(s, m) != m.get("lane") else {}),
                      "phase": (m.get("merge_check") or {}).get("phase", "queued"),
                      "minutes": _mins((m.get("merge_check") or {}).get("started")),
+                     "limit_min": merge_minutes(s["lanes"].get(occupied_lane(m), {})),
                      "busy_with": merge_check_busy_with(desk, m, tasks),
                      "waits_for": {"id": x["id"], "lane": merge_check_lane(s, x)}
                      if (x := merge_check_ahead(s, m, tasks)) else None,

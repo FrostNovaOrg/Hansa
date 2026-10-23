@@ -20,9 +20,12 @@ on its own. On the Chinese page, the desk and version items are labelled
 `工作台` and `hansa 版本`; the English current-time item uses `now`, as `hansa status` does.
 
 Status starts with a pipeline strip: queued tasks, running workers, running checks,
-awaiting review, running verifications and merge checks. Counts come from the
-matching status lists; review includes tasks whose verification is still running,
-and merge checks include those queued. A separate box counts waiting releases
+awaiting review, running verifications and merge checks. Queued counts the queued
+list; workers and checks split the running tasks by their current step, excluding
+verifications. Awaiting review counts review tasks with no verification running
+(including those whose verification is queued); running verifications counts their
+running verifier tasks, including a verifier's check. Each task appears in one box.
+Merge checks include those queued. A separate box counts waiting releases
 plus open requests. Clicking a box scrolls to its list (running stages use the lane
 tracks). Zero counts are dimmed.
 
@@ -31,16 +34,25 @@ sent by status. Each retains the providers in order, their models, the active
 provider and model, task link and title, browser marker and check timing. The
 merge and verify lanes also name the lanes they serve and the work they accept.
 The marked step distinguishes workers, checks, verifications (with their parent task)
-and merge checks. The elapsed bar uses the current step's minutes against the
-lane's `timeout_min` (240 by default), warning past three quarters. The line below
+and merge checks. A running merge check still appears on its occupied lane if that
+lane is unmarked as a merge lane. The elapsed bar uses the current step's minutes
+against the running item's `limit_min` from `/api/status`: tasks and verifications
+use their lane's `timeout_min` (240 by default); merge checks use the occupied
+lane's `merge_timeout_min`, falling back to its `timeout_min` and then 240.
+The bar warns past three quarters. The line below
 shows the estimated start time, replies, idle minutes, last note and lane queue
-count; unavailable progress reads `—`. Free and queued lanes are dimmed, tries
-are named, and sandbox holds show their reasons. When `hansa serve` is stopped,
+count; unavailable progress reads `—`. Free lanes with no queue show their
+name, providers and models, and free pill, without a step track; a free merge or
+verify lane also shows its role sentence in the same line. Free and queued lanes
+are dimmed, tries are named, and sandbox holds have a held pill and show their reasons.
+When `hansa serve` is stopped,
 the picture still shows the desk's records; the page's status line warns once
 that new tasks will not start. When fetching `/api/status` fails, both parts show
 an error in place of their previous figures. An events fetch failure appears in
 Recent events and leaves the status picture visible.
-At widths up to 640 px the strip's stages take two lines; tracks fit the page.
+At widths up to 640 px the strip's stages and lane steps take two rows; labels
+wrap between words, the principal box follows below the stages, and tracks fit
+the page without horizontal scrolling.
 The picture has no animation and uses the page's English and Chinese dictionaries.
 
 Status also shows the last 24 hours in summary cards, keeps dispatch controls separate

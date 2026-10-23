@@ -259,6 +259,7 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .pipeline-strip { display:grid; grid-template-columns:minmax(0,6fr) minmax(0,1.25fr); gap:24px; }
 .pipeline-stages { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:16px; }
 .pipeline-box { position:relative; min-width:0; flex-direction:column; padding:10px 5px; background:var(--surface); text-align:center; line-height:1.4; }
+.pipeline-box, .lane-steps .status-pill { overflow-wrap:normal; }
 .pipeline-box strong { font-size:22px; font-variant-numeric:tabular-nums; }
 .pipeline-stages .pipeline-box:not(:last-child)::after { content:"→"; position:absolute; right:-15px; color:var(--muted); }
 .pipeline-strip > .pipeline-box { border-color:var(--control-line); }
@@ -283,12 +284,12 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .lane-task, .lane-track-head > * { min-width:0; }
 .lane-task .task-detail { min-width:0; }
 @media (max-width:640px) {
-  .pipeline-strip { gap:18px; grid-template-columns:minmax(0,3fr) minmax(0,1fr); }
+  .pipeline-strip { gap:18px; grid-template-columns:minmax(0,1fr); }
   .pipeline-stages { grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px 14px; }
   .pipeline-box { font-size:10px; }
   .pipeline-stages .pipeline-box:nth-child(3)::after { content:"↓"; right:50%; top:100%; line-height:10px; }
   .lane-track { padding:10px; }
-  .lane-steps { gap:3px; }
+  .lane-steps { grid-template-columns:repeat(3,minmax(0,1fr)); gap:3px; }
   .lane-time > span { width:100%; }
 }
 @media (prefers-reduced-motion:reduce) {
@@ -740,7 +741,7 @@ function pictureError(message) {
   else $("#tab-status").replaceChildren(statusPicture = h("div", {id:"status-picture"}, parts));
 }
 function pipelineStrip(st) {
-  const counts = {queued:st.queued.length, review:st.review.length, merge:(st.merging || []).length,
+  const counts = {queued:st.queued.length, review:st.review.filter(m => m.verify?.state !== "running").length, merge:(st.merging || []).length,
     worker:0, check:0, verification:0,
     principal:(st.releases || []).filter(r => r.state === "waiting").length + st.asks.length};
   for (const m of st.running) counts[runningStep(st, m)]++;
@@ -760,10 +761,13 @@ function laneTracks(st) {
     h("div", {class:"section-head"}, h("h2", {}, icon("lanes"), T.laneTracks), h("span", {class:"count-badge"}, st.lanes.length)),
     st.lanes.length ? st.lanes.map(l => {
       const worker = st.running.find(m => m.lane === l.name);
-      const merge = (st.merging || []).find(m => m.lane === l.name && ["starting", "running"].includes(m.phase));
+      const merge = (st.merging || []).find(m => (m.lane === l.name || m.id === l.task) && ["starting", "running"].includes(m.phase));
       const m = worker || merge, parent = worker && verificationParent(st, worker.id);
       const step = worker ? runningStep(st, worker) : merge ? "merge" : "";
       const queued = st.queued.filter(q => q.lane === l.name);
+      const held = Object.values(l.held || {});
+      const compact = !m && !l.task && !l.trying && !held.length && !queued.length;
+      const role = [l.merge_lane ? T.mergeLane(l.merge_for || []) : "", l.verify_for?.length ? T.verifyLane(l.verify_for) : ""].filter(Boolean).join(" · ");
       const minutes = worker?.checking ? worker.check_minutes : m?.minutes;
       const providers = (l.providers || []).map(name => {
         const p = st.providers.find(p => p.name === name);
@@ -773,31 +777,32 @@ function laneTracks(st) {
       const p = worker?.progress;
       const note = (p?.note || "").split(/\r?\n/)[0];
       return h("article", {id:"status-lane-" + l.name, class:"lane-track" + (!m && !l.trying ? " dimmed" : ""),
-        "data-lane-track":l.name, "data-step":step},
+        "data-lane-track":l.name, "data-step":step, title:compact && role ? role : null},
         h("div", {class:"lane-track-head"}, h("strong", {}, l.name),
           h("span", {class:"muted"}, providers || "—"),
           worker?.provider ? statusPill(`${worker.provider} (${worker.model || "—"})`) : null,
-          !m ? statusPill(l.trying ? T.laneTrying : queued.length ? T.laneQueued(queued.length) : T.free, l.trying ? "warn" : "") : null),
-        l.merge_lane ? h("div", {class:"muted"}, T.mergeLane(l.merge_for || [])) : null,
-        l.verify_for?.length ? h("div", {class:"muted"}, T.verifyLane(l.verify_for)) : null,
-        h("div", {class:"lane-steps", "aria-label":T.taskFlow}, FLOW_STEPS.map(s => h("span", {
-          class:"status-pill" + (s === step ? " current-step" : ""), "aria-current":s === step ? "step" : null}, flowLabel(s)))),
+          !m ? statusPill(held.length ? T.laneHeld : l.trying ? T.laneTrying : queued.length ? T.laneQueued(queued.length) : T.free, held.length || l.trying ? "warn" : "") : null,
+          compact && role ? h("span", {class:"muted"}, role) : null),
+        !compact && l.merge_lane ? h("div", {class:"muted"}, T.mergeLane(l.merge_for || [])) : null,
+        !compact && l.verify_for?.length ? h("div", {class:"muted"}, T.verifyLane(l.verify_for)) : null,
+        !compact ? h("div", {class:"lane-steps", "aria-label":T.taskFlow}, FLOW_STEPS.map(s => h("span", {
+          class:"status-pill" + (s === step ? " current-step" : ""), "aria-current":s === step ? "step" : null}, flowLabel(s)))) : null,
         m ? h("div", {class:"lane-task"}, taskLink(m.id), " · ", m.title,
           parent ? [" · ", T.verifyingTask, " ", taskLink(parent.id)] : null,
           worker?.browser ? T.withBrowser : null,
           worker?.checking ? h("span", {class:"muted"}, " · " + T.checkingWork) : null) : l.task ? taskLink(l.task) : null,
-        m ? h("div", {class:"lane-time"}, h("progress", {class:"lane-budget" + (minutes > l.timeout_min * .75 ? " warn" : ""),
-          value:minutes || 0, max:l.timeout_min, "aria-label":T.timeBudget(minutes || 0, l.timeout_min)}),
+        m ? h("div", {class:"lane-time"}, h("progress", {class:"lane-budget" + (minutes > m.limit_min * .75 ? " warn" : ""),
+          value:minutes || 0, max:m.limit_min, "aria-label":T.timeBudget(minutes || 0, m.limit_min)}),
           h("span", {}, worker?.checking ? T.checkMinutes(worker.check_minutes, worker.minutes)
-            : `${minutes || 0} ${T.minutes}`, " / ", `${l.timeout_min} ${T.minutes}`)) : null,
-        h("div", {class:"lane-meta muted"},
+            : `${minutes || 0} ${T.minutes}`, " / ", `${m.limit_min} ${T.minutes}`)) : null,
+        !compact ? h("div", {class:"lane-meta muted"},
           started ? h("time", {datetime:started.toISOString()}, T.startedAt + " " + started.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})) : null,
           m ? h("span", {}, T.laneReplies(p?.replies ?? "—")) : null,
           m ? h("span", {}, T.laneIdle(p?.idle_min ?? "—")) : null,
           m ? h("span", {class:"lane-note", title:note}, T.lastNote + " " + (note || "—")) : null,
-          h("span", {}, T.laneQueued(queued.length))),
+          h("span", {}, T.laneQueued(queued.length))) : null,
         !m && queued.length ? h("div", {class:"muted"}, queued[0].waiting) : null,
-        Object.values(l.held || {}).map(held => h("div", {class:"warn lane-held"}, T.laneHeld + ": " + held.why)));
+        held.map(held => h("div", {class:"warn lane-held"}, T.laneHeld + ": " + held.why)));
     }) : emptyState(T.noLanes, T.noLanesNote, "lanes"));
 }
 
