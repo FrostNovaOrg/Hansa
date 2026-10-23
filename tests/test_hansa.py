@@ -28607,6 +28607,22 @@ else if (["desk-name", "desk-count", "status-parts", "notify-status"].includes(a
   }
   console.log(JSON.stringify(snapshots));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "task-table-boxes") (async () => {
+  await vm.runInContext("loadStatus()", ctx);
+  const boxes = [];
+  for (const cell of descendants(ids["#tab-status"], "td")) {
+    const button = descendants(cell, "button").find(el => el.attrs["aria-controls"]?.startsWith("task-detail-"));
+    if (!button) continue;
+    await button.click();
+    await new Promise(resolve => setImmediate(resolve));
+    const box = ids["#" + button.attrs["aria-controls"]];
+    let scroller = cell.parentElement;
+    while (scroller && !scroller.className.split(" ").includes("scroll")) scroller = scroller.parentElement;
+    boxes.push({id:button.textContent, inCell:box.parentElement === cell, scroll:!!scroller,
+      open:!box.hidden, pre:descendants(box, "pre")[0]?.textContent});
+  }
+  console.log(JSON.stringify({boxes, css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "task-steps") (async () => {
   const flush = () => new Promise(resolve => setImmediate(resolve));
   const [button, box] = vm.runInContext('taskLink("t0042")', ctx);
@@ -30430,8 +30446,37 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual(steps[3]["times"], ["2023-11-14T22:19:20.000Z"])
                 self.assertIn("abcdef012345", steps[4]["text"])
                 self.assertNotIn("abcdef0123456789", steps[4]["text"])
-                self.assertRegex(shown["css"], r"\.task-steps\s*\{[^}]*flex-wrap:wrap")
-                self.assertRegex(shown["css"], r"\.task-detail\s*\{[^}]*min-width:0")
+                self.assertRegex(shown["css"], r"@media \(max-width:640px\)\s*\{\s*\.task-steps\s*\{[^}]*flex-wrap:wrap")
+                self.assertRegex(shown["css"], r"\.task-detail\s*\{[^}]*max-width:100%")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_task_box_in_table_keeps_readable_phone_width(self):
+        status = views.status(self.desk)
+        task = {"lane": "a", "title": "Task with a long report", "waiting": "paused", "error": "failed"}
+        for field, tid in (("queued", "t0042"), ("review", "t0043"), ("merging", "t0044"), ("failed", "t0045")):
+            status[field] = [{**task, "id": tid}]
+        text = "Unchanged report with a long path: " + "directory/" * 40
+        replies = {"/api/status": status, "/api/events": [],
+                   "/api/task": {"meta": self.task_steps_record(), "text": text}}
+        harness = self.tmp / "task-table-boxes.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), "task-table-boxes", language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                shown = json.loads(result.stdout)
+                self.assertEqual(shown["boxes"], [
+                    {"id": tid, "inCell": True, "scroll": True, "open": True, "pre": text}
+                    for tid in ("t0042", "t0044", "t0043", "t0045")])
+                # PAGE_HARNESS has no layout engine. Guard the CSS that keeps these cells
+                # readable at 390 px and contains a wide table inside its scroll wrapper.
+                width = re.search(r"td\s+\.task-detail\s*\{[^}]*min-width:\s*(\d+)px", shown["css"])
+                self.assertIsNotNone(width, "table task boxes need a readable minimum width")
+                self.assertGreaterEqual(int(width.group(1)), 200)
+                self.assertRegex(shown["css"], r"\.scroll\s*\{[^}]*overflow-x:auto;[^}]*max-width:100%")
+                self.assertRegex(shown["css"], r"@media \(max-width:640px\)\s*\{\s*\.task-steps\s*\{[^}]*flex-wrap:wrap")
 
     def test_task_box_steps_two_runs_and_retried_check(self):
         meta = self.task_steps_record(attempts=[{"provider": "first-provider", "ran_from": 1700000060,
