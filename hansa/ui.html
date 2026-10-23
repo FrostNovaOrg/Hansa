@@ -305,6 +305,33 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
   .lane-steps { grid-template-columns:repeat(3,minmax(0,1fr)); gap:3px; }
   .lane-time > span { width:100%; }
 }
+/* The lane timeline keeps a flexible time axis even on narrow screens. */
+.timeline-legend { display:flex; flex-wrap:wrap; gap:6px 14px; margin-bottom:14px; font-size:11px; }
+.timeline-legend span { display:inline-flex; align-items:center; gap:5px; }
+.timeline-swatch { display:inline-block; width:12px; height:10px; background:var(--segment); border-radius:2px; }
+.timeline-worker { --segment:var(--accent); }
+.timeline-check { --segment:var(--ok); }
+.timeline-verification { --segment:var(--warn); }
+.timeline-merge { --segment:var(--muted); }
+.timeline-try { --segment:var(--control-line); }
+.timeline-release { --segment:var(--fg); }
+.timeline-failed { --segment:var(--bad); }
+.timeline-row { display:grid; grid-template-columns:72px minmax(0,1fr); gap:8px; min-width:0; margin:5px 0; }
+.timeline-lane { font-size:12px; align-self:center; min-width:0; }
+.timeline-track { position:relative; min-width:0; min-height:32px; overflow:hidden; background:var(--surface); border-right:1px solid var(--line); }
+.timeline-hour { position:absolute; top:0; bottom:0; border-left:1px solid var(--line); font-size:10px; color:var(--muted); padding-left:2px; }
+.timeline-axis { height:24px; background:none; }
+.timeline-ends { display:flex; justify-content:space-between; gap:8px; font-size:11px; color:var(--muted); }
+.timeline-segment, button.timeline-segment { position:absolute; top:5px; height:22px; min-height:0; min-width:3px; max-width:100%; margin:0; padding:0; border:0; border-radius:3px; background:var(--segment); color:var(--card); overflow:hidden; font-size:10px; white-space:nowrap; text-overflow:ellipsis; text-decoration:none; display:block; }
+.timeline-segment:hover, button.timeline-segment:hover { background:var(--segment); outline:2px solid var(--fg); outline-offset:1px; }
+.timeline-running::after { content:""; position:absolute; inset:0; background:linear-gradient(90deg,transparent 50%,var(--card)); opacity:.65; border-right:2px dashed var(--fg); }
+.timeline-inspector { margin-top:12px; font-size:12px; white-space:pre-line; }
+.timeline-details .task-detail { max-width:100%; }
+@media (max-width:640px) {
+  .timeline-row { grid-template-columns:48px minmax(0,1fr); gap:5px; }
+  .timeline-hour:not([data-mobile="true"]) { font-size:0; }
+  .timeline-segment, button.timeline-segment { font-size:0; }
+}
 @media (prefers-reduced-motion:reduce) {
   *, *::before, *::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; }
 }
@@ -714,11 +741,19 @@ Object.assign(T, ZH ? {
 });
 Object.assign(T, ZH ? {
   pipeline:"工作流水线", laneTracks:"工作线进度", principalWaiting:"等主理人答复", flow_queued:"排队", flow_worker:"执行", flow_check:"验收", flow_review:"待审", flow_verification:"核对", flow_merge:"合并验收",
+  timeline:"工作线最近 24 小时", timelineAgo:"24 小时前", timelineNow:"现在", timelineEmpty:"最近 24 小时没有工作",
+  timelineLoading:"正在加载工作线历史…", timelineError:"工作线历史加载失败", timelineMinutes:n => `${n} 分钟`,
+  timeline_worker:"执行", timeline_check:"验收", timeline_verification:"核对", timeline_merge:"合并验收", timeline_try:"工作线试跑", timeline_release:"发布",
+  timeline_failed:"失败", timeline_running:"进行中", timeline_done:"完成", timeline_passed:"通过", timeline_stopped:"已停止", timeline_cancelled:"已取消", timeline_queued:"运行失败，重新排队", timeline_could_not_run:"无法运行",
   pipeline_worker:"执行中", pipeline_check:"验收中", pipeline_verification:"核对中",
   laneTrying:"试跑中", laneHeld:"沙箱暂缓", startedAt:"开始", lastNote:"最近留言", verifyingTask:"核对任务",
   laneQueued:n => `${n} 件排队`, laneReplies:n => `${n} 轮回复`, laneIdle:n => `空闲 ${n} 分钟`, timeBudget:(n, limit) => `已用 ${n} 分钟，时限 ${limit} 分钟`
 } : {
   pipeline:"Work pipeline", laneTracks:"Lane tracks", principalWaiting:"Waiting on principal", flow_queued:"Queued", flow_worker:"Worker", flow_check:"Check", flow_review:"Awaiting review", flow_verification:"Verification", flow_merge:"Merge check",
+  timeline:"Lanes over the last 24 hours", timelineAgo:"24 hours ago", timelineNow:"Now", timelineEmpty:"No work in the last 24 hours",
+  timelineLoading:"Loading lane history…", timelineError:"Could not load lane history", timelineMinutes:n => `${n} min`,
+  timeline_worker:"Worker", timeline_check:"Check", timeline_verification:"Verification", timeline_merge:"Merge check", timeline_try:"Lane try", timeline_release:"Release",
+  timeline_failed:"Failed", timeline_running:"Running", timeline_done:"Done", timeline_passed:"Passed", timeline_stopped:"Stopped", timeline_cancelled:"Cancelled", timeline_queued:"Run failed; queued again", timeline_could_not_run:"could not run",
   pipeline_worker:"Worker running", pipeline_check:"Check running", pipeline_verification:"Verification running",
   laneTrying:"trying", laneHeld:"Sandbox held", startedAt:"Started", lastNote:"Last note", verifyingTask:"Verifying task",
   laneQueued:n => `${n} queued`, laneReplies:n => `${n} replies`, laneIdle:n => `${n} min idle`, timeBudget:(n, limit) => `${n} min elapsed, ${limit} min limit`
@@ -783,6 +818,7 @@ async function api(path, body) {
 /* ---------- tabs ---------- */
 let current = "status";
 function show(tab) {
+  if (tab === "status") timelineFetchedAt = 0;
   current = tab;
   keepChoice("sessionStorage", "hansa.tab", tab);
   for (const b of document.querySelectorAll("#tabs button")) {
@@ -921,6 +957,81 @@ function laneTracks(st) {
     }) : emptyState(T.noLanes, T.noLanesNote, "lanes"));
 }
 
+let timelinePanel = null, timelineReport = null, timelineFetchedAt = 0, timelinePending = null;
+const TIMELINE_KINDS = ["worker", "check", "verification", "merge", "try", "release"];
+function timelineSection() {
+  if (!timelinePanel) {
+    timelinePanel = dashboardPanel(T.timeline, "status", null, h("p", {class:"muted"}, T.timelineLoading));
+    timelinePanel.id = "status-timeline";
+  }
+  return timelinePanel;
+}
+function renderTimeline(report) {
+  const root = timelineSection(), span = report.end - report.start;
+  const axis = h("div", {class:"timeline-track timeline-axis", "aria-label":T.last24h});
+  const hour = t => new Date(t * 1000).toLocaleTimeString(ZH ? "zh-CN" : "en", {hour:"2-digit", minute:"2-digit", hour12:false});
+  const first = new Date(report.start * 1000); first.setMinutes(0, 0, 0);
+  const firstHour = first.getTime() / 1000 + (first.getTime() / 1000 < report.start ? 3600 : 0);
+  for (let t = firstHour; t < report.end; t += 3600) {
+    const date = new Date(t * 1000);
+    axis.append(h("span", {class:"timeline-hour", "data-mobile":date.getHours() % 6 === 0 ? "true" : "false",
+      style:`left:${(t - report.start) / span * 100}%;`, title:new Date(t * 1000).toLocaleString()}, hour(t)));
+  }
+  const inspector = h("div", {class:"timeline-inspector", role:"status", "aria-live":"polite"});
+  const details = h("div", {class:"timeline-details"});
+  const rows = report.lanes.map(row => {
+    const track = h("div", {class:"timeline-track"}), levels = [];
+    // Hour lines share the axis's positions; they do not add labels to each lane.
+    for (let t = firstHour; t < report.end; t += 3600)
+      track.append(h("span", {class:"timeline-grid", style:`position:absolute;top:0;bottom:0;border-left:1px solid var(--line);left:${(t - report.start) / span * 100}%;`}));
+    for (const item of row.segments) {
+      let level = levels.findIndex(end => end <= item.start);
+      if (level < 0) level = levels.length;
+      levels[level] = Math.max(item.start + 1, item.end);
+      const kind = T["timeline_" + item.kind], result = T["timeline_" + item.result] || T["v_" + item.result] || item.result;
+      const names = item.tasks.map(task => `${task.id} ${task.title}`).join(", ") ||
+        (item.release ? `#${item.release.id} ${item.release.target}` : row.lane);
+      const label = [kind, names, `${T.startedAt}: ${new Date(item.started * 1000).toLocaleString(ZH ? "zh-CN" : "en")}`,
+        T.timelineMinutes(item.minutes), item.could_not_run ? T.timeline_could_not_run : result].join(" · ");
+      const [button, box] = item.tasks.length ? taskLink(item.tasks[0].id) : [h("button", {}), null];
+      button.className = `timeline-segment timeline-${item.kind}${item.failed ? " timeline-failed" : ""}${item.running ? " timeline-running" : ""}`;
+      button.textContent = names;
+      button.setAttribute("title", label); button.setAttribute("aria-label", label);
+      button.setAttribute("data-timeline-kind", item.kind);
+      button.setAttribute("style", `top:${5 + level * 28}px;left:clamp(0px,${(item.start - report.start) / span * 100}%,calc(100% - 3px));width:${Math.max(0, (item.end - item.start) / span * 100)}%;`);
+      const inspect = () => inspector.replaceChildren(...shown([label,
+        item.tasks.length > 1 ? h("div", {}, item.tasks.map(task => taskLink(task.id))) : null]));
+      button.addEventListener("pointerenter", inspect); button.addEventListener("focus", inspect); button.addEventListener("click", inspect);
+      track.append(button); if (box) details.append(box);
+    }
+    if (levels.length) track.setAttribute("style", `min-height:${levels.length * 28 + 4}px;`);
+    return h("div", {class:"timeline-row", "data-timeline-lane":row.lane}, h("span", {class:"timeline-lane"}, row.lane), track);
+  });
+  root.replaceChildren(...shown([
+    h("div", {class:"section-head"}, h("h2", {}, icon("status"), T.timeline)),
+    h("div", {class:"timeline-legend"}, [...TIMELINE_KINDS, "failed"].map(kind =>
+      h("span", {}, h("i", {class:`timeline-swatch timeline-${kind}`, "aria-hidden":"true"}), T["timeline_" + kind]))),
+    h("div", {class:"timeline-row"}, h("span", {}), h("div", {class:"timeline-ends"}, T.timelineAgo, h("span", {}, T.timelineNow))),
+    h("div", {class:"timeline-row"}, h("span", {}), axis), rows,
+    !report.lanes.some(row => row.segments.length) ? h("p", {class:"muted"}, T.timelineEmpty) : null,
+    inspector, details
+  ]));
+}
+function loadTimeline() {
+  if (timelinePending) return timelinePending;
+  if (Date.now() - timelineFetchedAt < 60000) return Promise.resolve();
+  timelineFetchedAt = Date.now();
+  timelinePending = api("/api/timeline").then(report => {
+    timelineReport = report; renderTimeline(report);
+  }).catch(error => {
+    const note = h("p", {class:"bad", role:"alert"}, T.timelineError + ": " + String(error.message || error));
+    if (timelineReport) renderTimeline(timelineReport);
+    else timelineSection().replaceChildren(h("h2", {}, T.timeline));
+    timelineSection().append(note);
+  }).finally(() => { timelinePending = null; });
+  return timelinePending;
+}
+
 async function loadStatus() {
   const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
   if (status.status === "rejected") {
@@ -961,6 +1072,7 @@ async function loadStatus() {
   statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));
   $("#tab-status").replaceChildren(...shown([
     statusPicture,
+    timelineSection(),
     pageHeading("status", T.statusIntro, statusPill(T.autoUpdates, "", "reload")),
     h("div", {class:"metric-caption"}, T.last24h),
     h("div", {class:"metric-grid", "aria-label":T.last24h},
@@ -1003,6 +1115,7 @@ async function loadStatus() {
       ? h("div", {class:"bad", role:"alert"}, String(events.reason.message || events.reason))
       : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(eventRow)) : emptyState(T.noEvents, T.noEventsNote, "status"))
   ]));
+  if (current === "status") loadTimeline();
 }
 function asksSection(st) {
   if (!st.asks.length && !(st.asks_closed || []).length) return null;

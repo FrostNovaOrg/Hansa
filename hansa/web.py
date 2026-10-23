@@ -144,6 +144,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 return self._send(200, UI.read_bytes(), "text/html; charset=utf-8", cookie=True)
             if url.path == "/api/status":
                 return self._send(200, views.status(desk))
+            if url.path == "/api/timeline":
+                return self._send(200, views.timeline(desk))
             if url.path == "/api/settings":
                 # with the free space of the desk's volume, shown beside the floor (hansa/disk.py)
                 return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0]})
