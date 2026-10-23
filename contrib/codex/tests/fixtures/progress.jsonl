@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"progress-thread"}
+{"type":"item.started","item":{"id":"command-1","type":"command_execution","command":"cat README.md"}}
+{"type":"item.completed","item":{"id":"command-1","type":"command_execution","exit_code":0}}
+{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"Checking the greeting.\nDetails on another line."}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}

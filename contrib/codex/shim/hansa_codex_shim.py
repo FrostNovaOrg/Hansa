@@ -802,6 +802,40 @@ def emit(ans: dict) -> int:
     return 0 if ans["subtype"] == "success" else 1
 
 
+class Progress:
+    """Best-effort progress for hansa, replaced whole while Codex events arrive."""
+
+    def __init__(self, home: str, sid: str):
+        self.path = Path(home) / "progress" / f"{sid}.json" if home else None
+        self.changed, self.wrote = None, None
+
+    def event(self, replies: int, said: str):
+        if self.path is None:
+            return
+        last = time.time()
+        said = said.strip()
+        note = said.splitlines()[0] if said else ""
+        if self.changed == (replies, note) and last - self.wrote < 10:
+            return
+        self.changed, self.wrote = (replies, note), last
+        tmp = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent,
+                                             prefix=f".{self.path.name}.", delete=False) as f:
+                tmp = Path(f.name)
+                json.dump({"replies": replies, "last": last, "note": note}, f)
+            os.replace(tmp, self.path)
+        except (OSError, UnicodeError):
+            pass  # progress must never fail a task (a full disk, for example)
+        finally:
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
 def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
     """A worker run on the Codex provider, or (`check`) hansa's provider check on it: codex exec once, in srt,
     answered as Claude Code answers. A check runs in a new empty folder of its own, which is its working folder
@@ -929,6 +963,7 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
         unmasked()
     sys.stderr.write(f"hansa-codex-shim: Codex's output is kept in {logs}/{name}.jsonl and .err\n")
     seen, said, errors, failure, usage, thread, done, over = set(), "", [], None, None, "", False, False
+    progress = Progress(env.get("CLAUDE_CONFIG_DIR", "") if not check else "", sid)
     retries, warnings = [], []
     looked, partial, ended = 0.0, b"", False
     # Complete lines as they arrive; a partial last one is kept until its newline does
@@ -960,9 +995,8 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
                 seen.add(item.get("id") or f"#{len(seen)}")
                 if len(seen) > max_turns:
                     over = True
-                    stop_tree(proc.pid, proc, seen=Run.seen)
-                    break
-            elif t == "item.completed" and item.get("type") == "agent_message" and item.get("text"):
+            elif (t == "item.completed" and item.get("type") == "agent_message"
+                  and isinstance(item.get("text"), str) and item["text"]):
                 said = item["text"]
             elif t == "item.completed" and item.get("type") == "error" and item.get("message"):
                 warnings.append(str(item["message"]))  # a warning (Model metadata for `x` not found), not a failure
@@ -975,6 +1009,10 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
             elif t == "error":
                 m = str(ev.get("message") or "")
                 (retries if RETRY.match(m) else errors).append(m)
+            progress.event(len(seen), said)
+            if over:
+                stop_tree(proc.pid, proc, seen=Run.seen)
+                break
     follow.close()
     code = proc.wait()
     stop_tree(proc.pid, None, grace=0, seen=Run.seen)  # what codex left running

@@ -1,0 +1,4 @@
+{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"Real progress note."}}
+{"type":"item.completed","item":{"id":"m2","type":"agent_message","text":""}}
+{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"cat README.md","exit_code":0}}
+{"type":"item.completed","item":{"id":"c2","type":"command_execution","command":"git diff","exit_code":0}}

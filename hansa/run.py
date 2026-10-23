@@ -16,6 +16,7 @@ import fcntl
 import functools
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -1482,9 +1483,22 @@ def progress_of(desk: Desk, m: dict) -> dict:
     """How far a running worker has got: model replies so far, minutes since it last did
     anything, and the last thing it wrote. hansa records turns and tokens only at the end."""
     p = desk.settings()["providers"].get(m.get("provider") or "")
-    texts, replies, last, _ = _record(config_home(desk, m["provider"], p), m.get("session_id", "")) if p else ([], 0, None, {})
-    return {"replies": replies, "idle_min": int((time.time() - last) // 60) if last else None,
-            "note": desk.redact(texts[-1].splitlines()[0][:160]) if texts else ""}
+    home = config_home(desk, m["provider"], p) if p else None
+    sid = m.get("session_id", "")
+    texts, replies, last, _ = _record(home, sid) if home else ([], 0, None, {})
+    note = texts[-1].splitlines()[0] if texts else ""
+    if last is None and home and sid:
+        try:
+            d = json.loads((home / "progress" / f"{sid}.json").read_text(encoding="utf-8"))
+            if (not isinstance(d, dict) or type(d.get("replies")) is not int
+                    or type(d.get("last")) not in (int, float) or not math.isfinite(d["last"])
+                    or not isinstance(d.get("note"), str)):
+                raise ValueError("malformed progress")
+            replies, last, note = d["replies"], d["last"], d["note"]
+        except (OSError, ValueError, UnicodeError, OverflowError):
+            pass
+    return {"replies": replies, "idle_min": int((time.time() - last) // 60) if last is not None else None,
+            "note": desk.redact(note[:160])}
 
 
 def provider_env(desk: Desk, name: str, p: dict) -> dict:

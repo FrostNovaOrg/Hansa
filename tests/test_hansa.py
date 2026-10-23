@@ -23710,6 +23710,73 @@ def save():'''))
         tid = self.settle(Dispatcher(self.desk), self.desk.new_task("Add docs/conf.py"))["id"]
         self.assertIn(f"note: nothing verified this change: {tid} changed docs/conf.py", self.hansa("merge", tid))
 
+    def running_task_progress_file(self):
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Look at something slowly")
+        self.desk.update(tid, state="running", lane="a", provider="mimo", started=time.time() - 600,
+                         session_id="sid-1", pid=None)
+        path = self.desk.state_dir / "claude-mimo" / "progress" / "sid-1.json"
+        path.parent.mkdir(parents=True)
+        return tid, path
+
+    def test_a_running_task_reads_adapter_progress(self):
+        tid, path = self.running_task_progress_file()
+        path.write_text(json.dumps({"replies": 3, "last": time.time() - 185, "note": "Now the tests."}))
+        progress = views.status(self.desk)["running"][0]["progress"]
+        self.assertEqual(progress, {"replies": 3, "idle_min": 3, "note": "Now the tests."})
+        for shown in (views.status_text(views.status(self.desk)), views.show_text(self.desk, tid),
+                      views.progress_text(self.desk, self.desk.meta(tid))):
+            self.assertIn("3 model replies, last activity 3 min ago; last note: Now the tests.", shown)
+        key = "sk-progress-private-1234567890"
+        self.desk.write_key("mimo", key)
+        note = key + " " + "x" * 200
+        path.write_text(json.dumps({"replies": 0, "last": 0, "note": note}))
+        with unittest.mock.patch("hansa.run.time.time", return_value=180):
+            progress = views.status(self.desk)["running"][0]["progress"]
+        self.assertEqual(progress, {"replies": 0, "idle_min": 3, "note": self.desk.redact(note[:160])})
+        self.assertNotIn(key, progress["note"])
+
+    def test_bad_adapter_progress_shows_no_reply_yet(self):
+        tid, path = self.running_task_progress_file()
+        meta = self.desk.meta(tid)
+        self.assertEqual(views.progress_text(self.desk, meta), "no reply from the model yet")
+        good = {"replies": 3, "last": time.time(), "note": "A note"}
+        bad = ["not JSON", "[]", *[json.dumps({k: v for k, v in good.items() if k != missing})
+                                   for missing in good],
+               *[json.dumps({**good, key: value}) for key, value in
+                 (("replies", "3"), ("replies", True), ("last", "now"), ("last", float("nan")),
+                  ("last", float("inf")), ("last", True), ("note", None))]]
+        for content in bad:
+            with self.subTest(content=content):
+                path.write_text(content)
+                self.assertEqual(views.progress_text(self.desk, meta), "no reply from the model yet")
+        path.write_bytes(b"\xff")
+        self.assertEqual(views.progress_text(self.desk, meta), "no reply from the model yet")
+        read_text = Path.read_text
+
+        def unreadable(p, *args, **kwargs):
+            if p == path:
+                raise PermissionError
+            return read_text(p, *args, **kwargs)
+
+        with unittest.mock.patch("pathlib.Path.read_text", unreadable):
+            self.assertEqual(views.progress_text(self.desk, meta), "no reply from the model yet")
+
+    def test_claude_record_wins_over_adapter_progress(self):
+        tid, path = self.running_task_progress_file()
+        path.write_text(json.dumps({"replies": 99, "last": time.time() - 185, "note": "Adapter note"}))
+        rec = path.parent.parent / "projects" / "-work" / "sid-1.jsonl"
+        rec.parent.mkdir(parents=True)
+        rec.write_text(json.dumps({"type": "assistant", "message": {"id": "m1", "content": [
+            {"type": "text", "text": "Claude note\nSecond line"}]}}) + "\n")
+        self.assertEqual(views.status(self.desk)["running"][0]["progress"],
+                         {"replies": 1, "idle_min": 0, "note": "Claude note"})
+        rec.write_text("")  # even a record with no assistant reply wins
+        self.assertEqual(views.status(self.desk)["running"][0]["progress"],
+                         {"replies": 0, "idle_min": 0, "note": ""})
+
     def test_a_running_task_shows_how_far_the_worker_has_got(self):
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}

@@ -75,6 +75,12 @@ class ProviderCheck(Scratch):
         self.assertTrue(logs and all(n.startswith("check-") for n in logs), logs)
         self.assertTrue(self.desk.provider_state()["codex"]["check"]["ok"])
 
+    def test_provider_check_writes_no_progress(self):
+        r = self.check()
+        self.assertTrue(r["ok"], r)
+        self.assert_codex_ran()
+        self.assertEqual(list(self.desk.state_dir.rglob("progress/*.json")), [])
+
     def test_a_check_that_hits_a_usage_limit(self):
         r = self.check("usage_limit.jsonl")
         self.assertFalse(r["ok"])

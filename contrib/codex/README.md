@@ -99,6 +99,12 @@ hansa's five-second grace. If the adapter is killed outright, a watchdog in a se
 A run killed by a signal the adapter did not send (the out-of-memory killer, say) gets no answer and exits
 128 + n, as a killed claude does, so hansa runs it again.
 
+**Live progress.** Worker runs atomically replace `CLAUDE_CONFIG_DIR/progress/<session-id>.json` with
+`{"replies": <turn count>, "last": <event epoch seconds>, "note": "<latest agent message's first line>"}`.
+The note starts empty. Writes follow count or note changes, otherwise at most every ten seconds while events
+arrive. Write failures do not fail the run. Provider checks write no progress file. hansa shows this in
+`status`, `show` and the page.
+
 ## What it closes, and what it cannot
 
 srt's settings are built from the `--settings` hansa gives the worker, and checked before each run:
@@ -128,8 +134,7 @@ What it cannot close:
 - **Codex and the commands it runs share one sandbox**, so a run's own commands can read the Codex login and
   write the rest of the home: Codex refreshes its token into `auth.json` during a run. Claude workers cannot read
   it (setup, step 3).
-- **No progress or notes while a task runs:** hansa reads them from Claude Code's session records, which Codex
-  does not write. A task stopped at a ceiling has only Codex's last message.
+- A task stopped at a ceiling has only Codex's last message.
 - **None of hansa's tool rules** (`--allowedTools`, `--disallowedTools`, Read denials) and no browser
   (`--mcp-config` is ignored): srt's file and network rules are the boundary. `permission_denials` is always empty.
 - **Cost is 0**; the tokens are counted from `turn.completed`. A failed run's usage is unknown and shown as zero.
