@@ -6617,8 +6617,9 @@ def key_stamp(desk: Desk, name: str) -> tuple:
     return st.st_ino, st.st_mtime_ns
 
 
-def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
-    """Send one tiny request through a provider and record whether it answered."""
+def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -> dict:
+    """Send one tiny request through a provider and record whether it answered, through `claude` when it is given
+    (the program a recorded hansa serve start runs), else through this process's."""
     s = desk.settings()
     p = s["providers"].get(name)
     if not p:
@@ -6629,7 +6630,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90) -> dict:
     tmp = desk.state_dir / "check"
     tmp.mkdir(parents=True, exist_ok=True)
     # no tools: a model behind a compatible endpoint often calls one before it answers, and one turn ends there
-    argv = [claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"], "--tools", ""]
+    argv = [claude or claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"], "--tools", ""]
     argv += isolated(tmp)
     t0 = time.time()
     stamp = (key_stamp(desk, name), json.dumps(p, sort_keys=True))

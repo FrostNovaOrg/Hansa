@@ -147,8 +147,9 @@ ssh -L 8765:127.0.0.1:8765 HOST /path/to/hansa/bin/hansa --desk /path/to/desk we
 `hansa serve` serves it now. On the page, under Settings, add providers (a Claude Code login, or any endpoint that speaks the
 Anthropic API, with its key), their models and effort defaults, and the prices hansa counts tokens at. A new
 desk starts with one provider, `claude`: the Claude Code login of the account hansa runs as.
-`hansa ping [PROVIDER]` sends one tiny request through a provider (all when omitted) to see that it answers. The page follows the
-browser's language: English, or Chinese.
+`hansa ping [PROVIDER]` sends one tiny request through a provider (all when omitted) to see that it answers.
+Run from a shell, it uses the `claude` program the recorded `hansa serve` start used, not whichever one that
+shell would find, and says so when the two differ. The page follows the browser's language: English, or Chinese.
 
 ### 5. Start the coordinator
 
