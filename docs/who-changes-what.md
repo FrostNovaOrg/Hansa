@@ -21,7 +21,8 @@ The page also shows what goes on, and asks the principal about each release
 
 What workers may not read, no worker, verifier, setup or check reads, and Read
 is denied there to the session `hansa coordinator` starts too. No lane's
-repository or write list may be such a folder, inside one or above one. What
+repository may be such a folder or inside one (an entry inside a repository is
+allowed), and no write list entry such a folder, inside one or above one. What
 the page refuses on that list, and what a saved entry that can no longer be
 applied does, is in [Workers and the sandbox](sandbox.md#what-workers-and-verifiers-may-touch).
 
@@ -68,8 +69,8 @@ The deny list:
 - a package or image registry's: `npm publish`, `pnpm publish`, `yarn publish`,
   `yarn npm publish`, `twine upload`, `uv publish`, `poetry publish`,
   `cargo publish`, `gem push`, `docker push`, `podman push`;
-- Maven's: the `deploy` goal and the deploy plugin's `deploy:` goals
-  (`deploy:deploy-file`), through `mvn` or a wrapper in any folder (`mvnw`,
+- Maven's: the `deploy` goal and the deploy plugin's goals starting with
+  `deploy:d` (`deploy:deploy-file`; not `deploy:help`), through `mvn` or a wrapper in any folder (`mvnw`,
   `./mvnw`, `../mvnw`);
 - Gradle's: tasks whose name starts with `publish` (`publish`,
   `publishToMavenLocal`, a project's own `:sub:publish`), through `gradle` or a
@@ -79,11 +80,12 @@ Each is denied written plainly or with options, goals or subcommands before it
 (`git -C DIR push`, `git subtree push`, `mvn clean deploy`,
 `./gradlew :sub:publishToMavenLocal`).
 
-The list stops the plain forms only. A Maven goal named in full
+The list catches these commands and goals only. A Maven goal named in full
 (`org.apache.maven.plugins:maven-deploy-plugin:3.1.1:deploy-file`),
 `mvn release:perform` or `site:deploy`, a plugin's own publishing goal
-(`nexus-staging:deploy`), or Gradle's abbreviated task names (`./gradlew pTML`)
-are not caught: the principal's yes on a release is what stands between the
+(`nexus-staging:deploy`), Gradle's abbreviated task names (`./gradlew pTML`),
+and tools that publish by themselves (`docker buildx --push`, `gh api`,
+`npx semantic-release`) are not caught: the principal's yes on a release is what stands between the
 coordinator and an outside server.
 
 Since the rules match words anywhere after the program, they also refuse, in
@@ -95,15 +97,17 @@ it only reads (`git log --grep push`, `git grep push`): the coordinator reads a
 repository through `hansa git`.
 
 Claude Code also matches these rules after a plain `xargs` and after wrappers
-such as `env`, `nice` or `timeout` (`xargs git push` is denied). Run through
-another shell (`bash -c "git push"`), a script, or an `xargs` given options of
-its own before the command (`xargs -n1 git push`), they are not caught; in
+such as `env`, `nice` or `timeout` (`xargs git push` is denied). Run by its
+full path (`/usr/bin/git push`), through `sudo`, `command`, `python -m` or a
+git alias, through another shell (`bash -c "git push"`), a script, or an
+`xargs` given options of its own before the command (`xargs -n1 git push`),
+they are not caught; in
 manual mode such a command asks the principal.
 
 ### What runs outside the worker, and what stays closed to the coordinator
 
-Setup, check, merge check run outside the worker, so each change to them is
-recorded and the coordinator tells the principal about it. It is not a
+Setup, check and merge check run outside the worker, in the lane's sandbox (srt), and each change to
+them is recorded and told to the principal by the coordinator. The coordinator is not a
 worker: it runs on this machine outside any sandbox, and besides `hansa` it
 may run other commands the principal's work needs, such as installing
 software a lane needs or setting up a tool. Claude Code asks the principal
@@ -165,10 +169,10 @@ by it.
 
 `hansa lane remove L --keep` puts what each of the lane's worktrees holds
 (changes not committed, or commits no branch keeps) on a new branch
-`hansa-kept/NAME-DATE` of its repository (NAME the worktree's folder, `L`), in one commit, `Left in worktree NAME when
-lane L was removed`, with the identity the lane had before it was removed (else
-the repository's own, else `hansa <hansa@localhost>`), and then removes the
-worktree.
+`hansa-kept/NAME-DATE` of its repository (NAME the worktree's folder, `L`), and then removes the worktree.
+The branch keeps the worktree's commits; changes not committed go in one more commit, `Left in worktree NAME
+when lane L was removed`, with the identity the lane had before it was removed (else
+the repository's own, else `hansa <hansa@localhost>`). With a clean tree no commit is made.
 
 ## A Claude Code session's identity, and the page's token
 

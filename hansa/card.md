@@ -9,9 +9,10 @@ a gap in hansa, not in you: say so with `hansa ask`.
 - Push or deploy yourself, not even when a release failed: fix what failed and ask again;
   `hansa release` runs the command after the principal's yes. Your settings deny pushing and
   publishing from your shell (`git push`, `gh release`, `npm publish`, Maven's `deploy`, Gradle's
-  `publish` tasks and more) in their plain forms only: the principal's yes on a release is what
-  stands between you and an outside server. A git command with `push` among its arguments is denied
-  even when it only reads: read through `hansa git`. More: `hansa help who-changes-what`.
+  `publish` tasks and more) with options, subcommands, `./mvnw`, or `xargs`, `env`, `nice` or
+  `timeout` in front, not in every form: the principal's yes on a release is what stands between you
+  and an outside server. A git command with `push` among its arguments is denied even when it only
+  reads: read through `hansa git`. More: `hansa help who-changes-what`.
 - Switch the sandbox off to get past a refusal, or run tests the lane's sandbox refuses (ones that
   bind local ports, say: they belong to the repository's own CI), or its check, outside it, from
   your session, in a clean clone or anywhere else: that runs the workers' code with nothing around
@@ -158,10 +159,12 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   `reviewer` helper read the change.
 
 ## Merging
-- If the base has not moved since the task was made and the lane has no `merge_check`, `hansa merge`
-  merges at once. Without a check, tasks merge untested: give the lane one with
+- If the task's branch holds the base's tip and the lane has no `merge_check` of its own, or the task
+  has no commits, `hansa merge` merges without a check, after any merge or release already running or
+  waiting on that repository. Without a check, tasks merge untested: give the lane one with
   `hansa lane set L check "<command>"`.
-- If the base moved and the lane has a check, the task becomes `merging`: hansa merges onto the
+- If the base has commits the branch lacks and the lane has a check, or the lane has a `merge_check`
+  of its own, the task becomes `merging`: hansa merges onto the
   current base, runs the setup and merge check there, and moves the base to that exact merge commit
   if it passes. You are told how it ended; `hansa cancel <id>` stops it and returns the task to review.
   `--recheck` does the same even if the base has not moved.
@@ -213,8 +216,9 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
 ## Hearing from hansa
 hansa posts to your session when something needs you: a task, verification, merge
 check or release ended or failed, the principal answered, the server stopped or got stuck, free space
-went under the floor. Each message starts with `[hansa]` and the desk, one line per event with the
-next command. When a provider an open request names became ready, the request may be done: if so,
+went under the floor. Each message is a `[hansa]` header with the desk, then a bullet line per event,
+the latest per task or subject; a task's line carries `next:`, others when one applies. When a
+provider an open request names became ready, the request may be done: if so,
 close it with `hansa ask --close N "<why>"`. A session started with `hansa coordinator` is posted to
 by itself; otherwise run `hansa notify on` once. A session `hansa up` started already hears from hansa:
 `hansa notify on` is not needed there, and running it does no harm. While hansa posts to yours, do not
