@@ -28582,7 +28582,7 @@ if (ask === "timeline") (async () => {
       text:el.textContent, aria:el.attrs["aria-label"], style:el.attrs.style, ...interactions[i]})),
     marks:descendants(root, "span").filter(el => el.className === "timeline-hour").map(el => el.textContent),
     hourMarks:descendants(root, "span").filter(el => el.className === "timeline-hour").map(el =>
-      ({text:el.textContent, style:el.attrs.style, labelClass:el.kids[0].className})),
+      ({text:el.textContent, title:el.attrs.title, style:el.attrs.style, labelClass:el.kids[0].className})),
     css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask.startsWith("status-picture")) (async () => {
@@ -29898,6 +29898,24 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                 ".timeline-track { position:relative; min-width:0;", ".timeline-legend { display:flex; flex-wrap:wrap;",
                                 '.timeline-hour:not([data-mobile="true"]) { font-size:0; }'):
                         self.assertIn(css, page["css"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_status_timeline_hour_titles_follow_page_language(self):
+        from hansa import web
+        harness = self.tmp / "timeline-hour-language.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language, title in (("zh-CN", "2026/10/23 18:00:00"), ("en", "10/23/2026, 6:00:00 PM")):
+            with self.subTest(language=language):
+                replies = {"/api/status": self.picture_status(), "/api/events": [],
+                           "/api/timeline": {"start": 1792781777 - 3600, "end": 1792781777, "lanes": []},
+                           "pagePreferences": {"local": {"hansa.language": language}},
+                           "pageClock": {"now": "2026-10-23T18:56:17Z", "browserLanguage": "en"}}
+                result = subprocess.run(["node", str(harness), str(web.UI), "timeline", "en"],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60,
+                                        env={**os.environ, "TZ": "UTC"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                shown = json.loads(result.stdout)
+                self.assertEqual([mark["title"] for mark in shown["hourMarks"]], [title])
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_status_timeline_last_hour_label_stays_inside_in_both_languages(self):
