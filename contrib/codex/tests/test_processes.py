@@ -10,14 +10,18 @@ class TurnCeiling(Scratch):
     def test_more_items_than_max_turns_stops_codex(self):
         done = self.root / "codex-finished"
         t0 = time.time()
-        run, code = self.run_worker("many_items.jsonl", argv=self.worker_argv(max_turns=3),
+        # many_items_long.jsonl: many_items.jsonl with 150 more lines before its end, 30 s more at 0.2 s a line,
+        # so codex cannot reach its end before the turn ceiling stops it, however slow the shim is to react
+        run, code = self.run_worker("many_items_long.jsonl", argv=self.worker_argv(max_turns=3),
                                     FAKE_CODEX_DELAY="0.2", FAKE_CODEX_DONE=str(done))
-        self.assertLess(time.time() - t0, 5.5, "stopped, not waited for: the whole replay takes 6 s")
+        self.assertLess(time.time() - t0, 60, "a hang guard only: that codex was stopped, not waited for, is below")
         self.assertEqual(code, 1)
         self.assertEqual((run["subtype"], run["is_error"], run["num_turns"]), ("error_max_turns", True, 4))
         self.assertEqual(run["result"], "Done step 2.")
-        time.sleep(0.3)
-        self.assertFalse(alive(self.codex_called()["pid"]), "codex was stopped")
+        pid, end = self.codex_called()["pid"], time.time() + 10
+        while alive(pid) and time.time() < end:
+            time.sleep(0.1)
+        self.assertFalse(alive(pid), "codex was stopped")
         self.assertFalse(done.exists(), "codex never got to its end")
         # hansa's finish: error_max_turns is its turn ceiling, whatever the rest says
         self.assertEqual(run.get("subtype"), "error_max_turns")
