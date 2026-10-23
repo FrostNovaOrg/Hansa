@@ -79,6 +79,23 @@ Workers see their checkout's own CLAUDE.md and settings, and hansa's instruction
 and not the settings, plugins, hooks or MCP servers of the account they run as. Nor may they, a
 verifier read the card or `notes/`.
 
+## Headless browsers
+
+Measured 2026-10-23, srt 0.0.77, as lane checks (`hansa lane try`):
+
+- **Linux:** a lane's server and chrome-headless-shell ran together: a page on
+  127.0.0.1 ran its script, gave a screenshot. The server needs no network-list
+  entry (each sandbox has its own loopback). Its setup downloaded the
+  browser into a write-list folder, its host on the list.
+- **macOS:** chrome-headless-shell needs `--single-process` (else the sandbox
+  refuses the Mach service it registers), then opens `file://` pages, runs scripts,
+  takes screenshots. Google Chrome fails even then: its profile needs a
+  Unix socket. A local server needs [`localhost`](#a-lanes-network-list), opening
+  the machine's loopback; srt cannot open one port.
+
+So browser tests needing a local server go on Linux lanes; macOS lanes test
+built pages as files.
+
 ## Git's folders
 
 What each run may write in git's folders, and what hansa checks before it runs git in a worktree itself.
