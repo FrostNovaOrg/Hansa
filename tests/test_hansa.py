@@ -32276,6 +32276,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def test_a_running_release_that_ignores_term_is_killed_after_the_grace(self):
         from hansa import alert, release
+        from hansa.run import group_running
         out = self.alert_fake()
         self.fixed_target("install", "trap '' TERM; echo started; sleep 60")
         self.hansa("release", "a", "install")
@@ -32285,15 +32286,17 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.soon(lambda: "started" in (self.desk.state_dir / "releases" / "1.log").read_text())
         self.assertEqual(release.stop_release(self.desk, 1, "not tonight", by="page"), {"ok": True, "state": "stopping"})
         self.assertFalse(release.stop_release(self.desk, 1, "again", by="page")["ok"])  # once
-        with unittest.mock.patch("hansa.release.STOP_GRACE", 1):
-            d.tick()
-            time.sleep(0.5)
+        with unittest.mock.patch("hansa.release.STOP_GRACE", 3600):  # a grace no tick outlasts
+            d.tick()  # TERM
+            self.assertTrue(release.get(self.desk, 1).get("termed"))
             d.tick()  # within the grace: what ignores TERM still runs
             self.assertEqual(release.get(self.desk, 1)["state"], "running")
+            self.assertFalse(release.get(self.desk, 1).get("killed"))
+            self.assertTrue(group_running(pid))
+        with unittest.mock.patch("hansa.release.STOP_GRACE", 0):  # the grace is over
             r = self.settle_release(d, 1, timeout=20)
         self.assertEqual((r["state"], r["stopped_by"], r["stop_reason"]), ("stopped", "page", "not tonight"), r)
         self.assertTrue(r.get("killed"))
-        from hansa.run import group_running
         self.assertFalse(group_running(pid))
         self.assertEqual(self.checkouts(), [])
         self.assertIn("stopped by the principal", release.state_text(self.desk, r))
