@@ -297,8 +297,9 @@ or ask `scout` when reading is enough; say what you need back.
   rest. Credit rests until the principal confirms a top-up on the page or saves a new key.
   `hansa show` says when or why it waits. More: `hansa help provider-limits`.
 - While a task runs, `hansa status` and `hansa show <id>` say how far it got (replies, minutes idle,
-  its last note). Some providers take minutes per reply; a task is stuck only when nothing has
-  happened for a long while. Where a run's effort came from: `hansa help effort`.
+  its last note); Codex counts commands and file changes as replies. Some providers take minutes per reply;
+  a task is stuck only when nothing has happened for a long while. Where a run's effort came from:
+  `hansa help effort`.
 - Every JVM in a lane prints `Picked up JAVA_TOOL_OPTIONS: ...` first on stderr, so a script that
   reads a version must look for the line holding `version "`. More: `hansa help java`.
 - Each task stops at its lane's ceiling of turns and minutes, set high: reaching it means the task

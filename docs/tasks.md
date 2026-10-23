@@ -4,6 +4,12 @@ Time limits and resumes, retries after a dropped connection or a provider's usag
 effort, merging, what work costs, and the states a task goes through. The
 [README](../README.md#how-it-works) has the overview of a task's life.
 
+`hansa status`, `hansa show ID` and the page show replies, idle minutes and the last note while a worker runs.
+Claude Code's session record wins; otherwise hansa reads `progress/<session-id>.json` in the provider's Claude
+home (`.hansa/claude-<provider>` for compatible providers): `{"replies": 3, "last": 1790000000, "note": "Checking tests."}`.
+`last` is epoch seconds. Missing, unreadable or malformed progress means no reply yet. Notes are redacted and
+cut to 160 characters. Codex counts commands and file changes as replies.
+
 ## Time limits, and work left running in the background
 
 New lanes stop at 200 turns; saved lanes keep their limits (`hansa lane set L max_turns 200` lowers one).
