@@ -54,7 +54,7 @@ flowchart TB
    coordinator's session that the task ended.
 4. **The coordinator reviews**: `hansa show` and `hansa diff`, and `hansa verify` to have another worker run
    the change and see whether it holds. Then `hansa merge`, or `hansa retry` with what to change. When the base
-   branch moved meanwhile and the lane has a check, hansa checks the two together before the merge lands.
+   branch gained commits the task's branch lacks and the lane has a check, hansa checks the two together first.
 5. **The principal releases.** hansa merges into the lane's base branch and stops there. `hansa release`
    asks the principal, who answers on the page, or in the conversation with the one-time code their alert
    carried. Only after the yes (or for a target the principal ticked to go out without asking) does hansa
@@ -234,9 +234,9 @@ Settings set with newer commands are best undone before going back.
   `secrets/`; reading or editing the files directly in the Claude Code folder it runs from (its login among
   them) and its `sessions/`; and editing code in the lanes' repositories, so code changes go through workers
   and each gets a branch, the lane's check and a merge. They also deny pushing and publishing from its own
-  shell (`git push`, `npm publish`, `mvn deploy` and more; the full list is in [Who changes what](docs/who-changes-what.md#the-coordinator)), in their plain
-  forms only: run another way (`bash -c "git push"`, a script), such a command is not caught, and only
-  Claude Code's own asking puts it before the principal. More: [Who changes what](docs/who-changes-what.md).
+  shell (`git push`, `npm publish`, `mvn deploy` and more; the full list is in [Who changes what](docs/who-changes-what.md#the-coordinator)), with
+  options, subcommands, a build wrapper, or `xargs` or `env` in front, but run another way (`bash -c "git push"`, a
+  script), such a command is not caught, and only Claude Code's own asking puts it before the principal. More: [Who changes what](docs/who-changes-what.md).
 - **Nothing goes out without the principal.** hansa merges into a lane's base branch and stops there. A
   release runs only after the principal's yes, on the page or by the one-time code that only their alert
   carries, or for a target the principal ticked to go out without asking; only while the base branch and
@@ -300,7 +300,7 @@ More: [The desk: files, keys and notes](docs/desk.md).
   read-only for the run and fails a run that changed them, but a commit that landed there stays.
 - A release's command runs outside the sandbox, as the desk's account, and so does what it builds and
   starts from the base branch: list a lane's build and release files as its `release_files`.
-- The coordinator's rules against pushing and publishing catch the plain forms only; a command run another
+- The coordinator's rules against pushing and publishing catch only the forms they name; a command run another
   way waits for the principal only where Claude Code asks before running it.
 - hansa replaces the principal's keys wherever it shows or records text, and will not merge a change that
   holds one. It cannot see into compressed files, and the event log keeps what it recorded before a key was

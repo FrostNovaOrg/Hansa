@@ -100,7 +100,8 @@ lane, or waits for one.
   UTC`), a Unix time (`usage limit reached|1760000000`, `resets_at`), a `retry-after` value given in the
   message, and "in N minutes" or "in N hours" (`Please try again in 20 minutes`). A time without a zone is
   the machine's local time; a month and day without a year is in the year that puts it nearest to now.
-  A form hansa is unsure of, a time already past, or a line it cannot read gets the fixed length below.
+  A time up to an hour past gives about a minute's rest, and a clock time further past means tomorrow's;
+  a form hansa is unsure of, a dated time more than an hour past, or a line it cannot read gets the length below.
 - **Else for the desk's `cool_minutes`**, 30 by default.
 - **No lost tries.** A task whose run ended on its provider's usage limit goes back to the queue without
   using one of its 3 tries, 5 times; after that, each such end counts as a try, so a provider that hits its
@@ -257,13 +258,15 @@ even when the base moved; it never overrides release files or a key.
 
 A [merge lane](desk.md) serves its repository and base's checks with its own worktree, sandbox, env, setup, command and limit; otherwise they use the task's lane as below. With a merge lane, a command of its own means its merge command differs from the task lane's check, which the task already passed. For long merge checks and busy task lanes: `hansa lane add m --like a`, its own caches through `write` and `env`, then `hansa lane set m merge_lane true`. One per repository and base, it takes no work (a lane with work queued or running cannot become one) and holds only itself, keeping the task lane free; it keeps the task lane's merge message and identity. It is chosen when the check starts: unmarking or removing it while queued restores the task lane, and a check already running keeps the lane it recorded. With every concurrency slot busy, a merge check takes the next slot before new work when a task ends anywhere, and that task's lane waits about one merge check; raising concurrency by one removes the wait if the machine can run the check beside the lanes' work.
 
-- **When it merges at once.** When the lane's base has not moved since the task
-  was made and the lane has no merge check of its own (below), or when the lane
-  has neither a check nor a `merge_check`, `hansa merge` merges at once. A lane
+- **When it merges at once.** When the base's tip is already in the task's
+  recorded head and the lane has no merge check of its own (below), when the
+  task has no commits, or when the lane has neither a check nor a `merge_check`,
+  `hansa merge` merges with no check; it still waits its turn behind other
+  merges into that repository and base, or while a release runs there. A lane
   without a check has its tasks merged untested: give it one with `hansa lane
   set L check "<command>"`.
 - **When the base has moved.** When the base has moved (another task was merged
-  meanwhile, say) and the lane has a check, the two together were never
+  meanwhile, say) and the lane has a check or a `merge_check`, the two together were never
   checked, and two changes that each pass can fail together. Then `hansa merge`
   does not merge at once: the task becomes `merging`, and its merge check waits
   for the lane to be free. hansa merges the task onto the base as it is then, in

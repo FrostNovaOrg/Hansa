@@ -307,12 +307,13 @@ A lane's env reaches the lane's commands, which run in the sandbox (setup,
 check, `hansa lane try` and the worker's Bash commands), not Claude
 Code itself and not hansa's own programs: srt, the scripts around a setup or
 check and their git, and Claude Code (with its git, shell, helpers and MCP
-servers) run with the environment of `hansa serve`, and
+servers) get only `HOME`, `PATH`, `LANG`, `LC_ALL`, `USER`, `LOGNAME`, `SHELL`
+and `TMPDIR` of `hansa serve`'s environment, plus what hansa sets, and
 the worker's commands get the lane's env from a file hansa writes
 (`CLAUDE_ENV_FILE`), readable by the desk's account alone (mode 0600). So a
 lane's `PATH` does not find srt or node for hansa, and a setting meant for
-Claude Code goes in the environment `hansa serve` is
-started with, not in a lane's env.
+Claude Code reaches it neither from a lane's env nor from the rest of
+`hansa serve`'s environment.
 
 As a second line, what any lane's env on the desk names is closed to workers,
 as what hansa's own environment names is, so no worker writes where a lane's
@@ -331,8 +332,9 @@ sandbox. So are the names sh, bash or zsh keep for themselves (read-only or
 special, such as `UID`, `EUID`, `PPID`, `SHELLOPTS`, `IFS`, `PWD` and zsh's
 `path`, `keymaps` and `dis_aliases`; each one tried in sh, bash and zsh):
 setting one would stop every command of the lane's workers. A saved env that
-holds a name refused now is not passed on whole: a run leaves that variable
-out, with a line in `hansa show`.
+holds a name or value refused now (a `PATH` entry that is not a full path, a
+value naming the desk or a place in it, a value that is not text) is not passed
+on whole: a run leaves out each such variable, and `hansa show` lists each.
 
 The locale (`LANG`, `LC_ALL`) of a lane's setup, check, merge check
 and workers is that of whoever started hansa: `hansa serve`'s environment
@@ -362,7 +364,8 @@ Claude Code's web tools are given on the allow list instead (below).
   service listening there, local proxies among them, which reach the internet
   whatever the list says. List it only on a Mac whose loopback holds nothing a
   worker must not reach. A `hansa lane set` (or `hansa lane add`) that puts
-  `localhost` on the list prints that warning with what listens on the
+  a local entry on the list (`localhost` or `127.0.0.1`, with or without a
+  port) prints that warning with what listens on the
   loopback now, one line per server (and how many processes of other accounts
   it could not look at, which a worker can reach too).
 - **On Linux** each sandbox has a loopback of its own: workers' own local

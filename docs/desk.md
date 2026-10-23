@@ -63,7 +63,7 @@ Status also shows the last 24 hours in summary cards, keeps dispatch controls se
 from task lists, and places release decisions and requests near the top. Empty
 states explain where new activity will appear. Task details remain open across
 refreshes. The page refreshes every five seconds while Status is visible, unless
-you are filling in an input. Release approvals, refusals, stops and request replies
+the principal is filling in an input. Release approvals, refusals, stops and request replies
 use the same actions as before.
 
 Queued tasks show their waiting reason in the page's language, both in the queue
@@ -184,12 +184,12 @@ Save settings writes them; a failed save keeps them. During a save the settings
 form is disabled until the saved settings have been reloaded. Discard confirms
 before replacing a draft with the desk's latest settings; with no draft it simply
 reloads them. If a save meets newer settings, the server refuses it. The page
-reloads the latest settings and keeps each top-level setting changed in your
+reloads the latest settings and keeps each top-level setting changed in the principal's
 draft, taking the others from the new copy. It names the settings changed
 elsewhere and those changed by both using the page's group names in its language,
-and shows any problems returned with the new copy alongside the notice. Your
+and shows any problems returned with the new copy alongside the notice. The principal's
 draft value is kept for settings changed by both. Typed
-keys remain. Nothing is saved until you press Save again. A failed reload keeps
+keys remain. Nothing is saved until the principal presses Save again. A failed reload keeps
 the draft too. Unsaved markers compare values regardless of object key order;
 a blank optional field counts as unset. Names typed for a new provider or price
 also count as drafts, even before Add. If a save succeeds but its reload fails,
@@ -200,8 +200,8 @@ input stays in memory across page and group switches, and across a settings save
 it is never included in the settings request or put in browser storage. A
 confirmed discard clears those inputs too. Keys already saved are unaffected.
 The eye button shows or hides the current key input without saving or changing it.
-With no draft, returning to Settings refreshes it from the desk. If you start
-editing before that reply arrives, the reply leaves your new draft alone.
+With no draft, returning to Settings refreshes it from the desk. If the principal starts
+editing before that reply arrives, the reply leaves their new draft alone.
 
 ## Starting the server and the coordinator again
 
@@ -503,8 +503,9 @@ that it is back over it. A server busy for less than that is not news, and
 nothing the coordinator did itself and saw is posted to it.
 Time the machine sleeps does not count toward a server being busy or stuck.
 
-Each message starts with `[hansa]` and the desk, with one line per event and the
-next command; events seconds apart come in one message, and past 10 lines the
+Each message is a `[hansa]` header line with the desk, then a bullet line per
+event, only the latest for each task or subject; a task's line carries `next:`,
+other lines only when one applies; events seconds apart come in one message, and past 10 lines the
 rest are counted (`hansa status` has them). A follower does the posting: a small
 background process per session and desk, which reads the event log from where it
 left off and ends when the session's process does; one that starts after

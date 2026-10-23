@@ -9,7 +9,7 @@ and what the kernel stops first when memory runs out.
 There the coordinator runs as root, so it can install software and set up the
 machine, but workers do not: Claude Code's sandbox cannot start as root. The
 desk, the lanes' repositories and the provider logins belong to an ordinary
-account instead, and everything hansa starts runs as that account.
+account instead: hansa's server and workers run as that account, but root's follower and its files stay root's.
 ```sh
 useradd --system --create-home hansa                   # the account
 bin/hansa init /path/to/desk --user hansa              # a desk that is the account's
@@ -22,14 +22,14 @@ Install Claude Code where the account can run it (not only under root's home),
 and log each subscription provider in as the account: `runuser -u hansa -- claude`
 (with `env CLAUDE_CONFIG_DIR=...` before `claude` when the provider has a
 config_dir). Then run `hansa serve` in the desk; started from root, it and every
-other `hansa` command switch to the account by themselves (that needs `runuser`,
-from util-linux). Run `hansa coordinator` as root: it stays root, uses root's own
+other `hansa` command but `coordinator`, `init`, `notify`, `notify-follow` and `up`
+switch to the account by themselves (that needs `runuser`, from util-linux). Run `hansa coordinator` as root: it stays root, uses root's own
 Claude Code login and folder (the first time, log in inside the session), and
 writes nothing in the desk as root: hansa does the coordinator's part there as
 the account. Its own usage then is not in `hansa cost`,
 because Claude Code keeps root's records where the account cannot read them.
 
-`hansa` commands run as the account by themselves, but the coordinator stays
+Most `hansa` commands run as the account by themselves, but the coordinator stays
 root: it changes the desk only through `hansa`, never with its own tools. Git
 refuses to work for root in a repository another account owns, so the
 coordinator reads the lanes' repositories with `hansa git LANE ...` (which runs
