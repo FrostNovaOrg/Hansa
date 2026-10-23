@@ -41,10 +41,10 @@ use their lane's `timeout_min` (240 by default); merge checks use the occupied
 lane's `merge_timeout_min`, falling back to its `timeout_min` and then 240.
 The bar warns past three quarters. The line below
 shows the estimated start time, replies, idle minutes, last note and lane queue
-count; unavailable progress reads `—`. Free lanes with no queue show only their
+count; unavailable progress reads `—`. Free lanes with no queue show their
 name, providers and models, and free pill, without a step track; a free merge or
-verify lane's role remains in its tooltip. Free and queued lanes are dimmed, tries
-are named, and sandbox holds have a held pill and show their reasons.
+verify lane also shows its role sentence in the same line. Free and queued lanes
+are dimmed, tries are named, and sandbox holds have a held pill and show their reasons.
 When `hansa serve` is stopped,
 the picture still shows the desk's records; the page's status line warns once
 that new tasks will not start. When fetching `/api/status` fails, both parts show

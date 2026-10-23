@@ -781,7 +781,8 @@ function laneTracks(st) {
         h("div", {class:"lane-track-head"}, h("strong", {}, l.name),
           h("span", {class:"muted"}, providers || "—"),
           worker?.provider ? statusPill(`${worker.provider} (${worker.model || "—"})`) : null,
-          !m ? statusPill(held.length ? T.laneHeld : l.trying ? T.laneTrying : queued.length ? T.laneQueued(queued.length) : T.free, held.length || l.trying ? "warn" : "") : null),
+          !m ? statusPill(held.length ? T.laneHeld : l.trying ? T.laneTrying : queued.length ? T.laneQueued(queued.length) : T.free, held.length || l.trying ? "warn" : "") : null,
+          compact && role ? h("span", {class:"muted"}, role) : null),
         !compact && l.merge_lane ? h("div", {class:"muted"}, T.mergeLane(l.merge_for || [])) : null,
         !compact && l.verify_for?.length ? h("div", {class:"muted"}, T.verifyLane(l.verify_for)) : null,
         !compact ? h("div", {class:"lane-steps", "aria-label":T.taskFlow}, FLOW_STEPS.map(s => h("span", {

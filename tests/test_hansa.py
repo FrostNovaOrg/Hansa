@@ -29428,6 +29428,14 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertEqual(row["text"], row["heads"][0])
                     self.assertEqual(row["pills"], ["free" if language == "en" else "空闲"])
                     self.assertIn("claude (" + st["providers"][0]["model"] + ")", row["text"])
+                    if row["lane"] == "m":
+                        for word in (("merge lane", "lanes a", "takes no work") if language == "en"
+                                     else ("工作线 a", "合并验收线", "不接活")):
+                            self.assertIn(word, row["text"])
+                    elif row["lane"] == "v":
+                        for word in (("verify lane", "lanes a", "takes only verifications") if language == "en"
+                                     else ("工作线 a", "核对线", "只接核对")):
+                            self.assertIn(word, row["text"])
 
     def test_status_picture_sandbox_hold_pill_is_held(self):
         st = self.picture_status()
@@ -29507,10 +29515,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 st["review"] = [{"id": "parent", "lane": "b", "title": "Original", "check": True,
                                  "verify": {"task": "t0042", "state": "running", "lane": "a"}}]
             for language, [page] in self.picture_pages(st):
-                row = page["rows"][0]
-                for word in (("verify lane", "b, c", "takes only verifications") if language == "en"
-                             else ("工作线 b、c", "核对线", "只接核对")):
-                    self.assertIn(word, row["text"] if running else row["role"])
+                with self.subTest(language=language, running=running):
+                    row = page["rows"][0]
+                    for word in (("verify lane", "b, c", "takes only verifications") if language == "en"
+                                 else ("工作线 b、c", "核对线", "只接核对")):
+                        self.assertIn(word, row["text"])
 
     def test_status_picture_merge_lane_uses_merge_task_minutes(self):
         st = self.picture_status()
