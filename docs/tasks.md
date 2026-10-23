@@ -121,6 +121,12 @@ The task moves to the lane's next provider without using a try; if all rest, it 
 Once per credit rest, hansa posts a line to the coordinator and runs the principal's alert command,
 if set. `status`, `show`, `explain provider P`, and the provider's page row say why and since when.
 
+After `hansa lane set L providers ...`, queued tasks, including those waiting for a resting provider,
+use the new order: first ready provider excluding prior refusals; otherwise they wait. A
+dropped-connection retry keeps its provider if still listed. Running work keeps its provider.
+`hansa retry` uses its destination lane's current order. Verification on L uses L's current order;
+on a verify lane, that lane's order. Neither inherits the parent's provider; readiness decides which runs.
+
 ## A check's output
 
 `hansa show ID` gives a failed check's failing tests and its last lines. `hansa show ID --check` gives the task's
