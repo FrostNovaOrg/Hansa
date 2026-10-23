@@ -29,13 +29,17 @@ tracks). Zero counts are dimmed.
 Below the strip, lane tracks replace the Lanes and Running tables, in the order
 sent by status. Each retains the providers in order, their models, the active
 provider and model, task link and title, browser marker and check timing. The
-marked step distinguishes workers, checks, verifications (with their parent task)
+merge and verify lanes also name the lanes they serve and the work they accept.
+The marked step distinguishes workers, checks, verifications (with their parent task)
 and merge checks. The elapsed bar uses the current step's minutes against the
 lane's `timeout_min` (240 by default), warning past three quarters. The line below
 shows the estimated start time, replies, idle minutes, last note and lane queue
 count; unavailable progress reads `—`. Free and queued lanes are dimmed, tries
-are named, and sandbox holds show their reasons. When the server is down or a
-status refresh fails, both parts show an error in place of their previous figures.
+are named, and sandbox holds show their reasons. When `hansa serve` is stopped,
+the picture still shows the desk's records; the page's status line warns once
+that new tasks will not start. When fetching `/api/status` fails, both parts show
+an error in place of their previous figures. An events fetch failure appears in
+Recent events and leaves the status picture visible.
 At widths up to 640 px the strip's stages take two lines; tracks fit the page.
 The picture has no animation and uses the page's English and Chinese dictionaries.
 

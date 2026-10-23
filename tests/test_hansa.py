@@ -28511,7 +28511,8 @@ if (ask.startsWith("status-picture")) (async () => {
     for (const box of boxes) {
       await box.click(); clicks.push(!!ids["#" + box.attrs["aria-controls"]]?.scrolled);
     }
-    return {rows, lists, boxes:boxes.map(el => ({step:el.attrs["data-pipeline-step"], count:Number(el.attrs["data-count"]),
+    return {rows, lists, text:root.textContent, state:ids["#state"].textContent,
+      boxes:boxes.map(el => ({step:el.attrs["data-pipeline-step"], count:Number(el.attrs["data-count"]),
       text:el.textContent, tone:el.className})), clicks, tables, first:root.kids[0]?.id,
       alerts:descendants(ids["#status-picture"], "div").filter(el => el.attrs.role === "alert").map(el => el.textContent)};
   };
@@ -28525,6 +28526,7 @@ if (ask.startsWith("status-picture")) (async () => {
     statusGetError = "status connection lost";
     await run("loadStatus()").catch(() => {}); snapshots.push(await snapshot());
     statusFailPath = "/api/events";
+    statusGetError = "events connection lost";
     await run("loadStatus()").catch(() => {}); snapshots.push(await snapshot());
     statusGetError = null; await run("loadStatus()"); snapshots.push(await snapshot());
   }
@@ -28920,9 +28922,13 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     } else if (ask === "settings-fix-dead") {
       const body = script.slice(script.indexOf("const EFFORTS"));
       const refs = new Set([...body.matchAll(/\bT\.([A-Za-z0-9_]+)/g)].map(m => m[1]));
-      for (const name of run("Object.keys(T)")) {
-        check(refs.has(name) || /^(status$|settings$|cost$|v_|seat_|helper_|by)/.test(name), "unused string: " + name);
+      // The status picture looks up its step labels by the finite list of flow steps.
+      for (const step of run("FLOW_STEPS")) {
+        refs.add("flow_" + step); refs.add("pipeline_" + step);
       }
+      const unused = run("Object.keys(T)").filter(name =>
+        !refs.has(name) && !/^(status$|settings$|cost$|v_|seat_|helper_|by)/.test(name));
+      check(!unused.length, "unused strings: " + unused.join(", "));
     } else if (ask === "settings-fix-reload") {
       change(number(), "38"); settingsGetError = "reload unavailable";
       await run("saveSettings()"); settingsGetError = null;
@@ -29384,6 +29390,20 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertIn("t0042", row["text"])
             self.assertEqual(row["marked"], ["Verification" if language == "en" else "核对"])
 
+    def test_status_picture_verify_lane_keeps_its_role_when_free_or_running(self):
+        st = self.picture_status()
+        st["lanes"][0]["verify_for"] = ["b", "c"]
+        for running in (False, True):
+            if running:
+                st["running"] = [self.picture_worker()]
+                st["review"] = [{"id": "parent", "lane": "b", "title": "Original", "check": True,
+                                 "verify": {"task": "t0042", "state": "running", "lane": "a"}}]
+            for language, [page] in self.picture_pages(st):
+                row = page["rows"][0]
+                for word in (("verify lane", "b, c", "takes only verifications") if language == "en"
+                             else ("工作线 b、c", "核对线", "只接核对")):
+                    self.assertIn(word, row["text"])
+
     def test_status_picture_merge_lane_uses_merge_task_minutes(self):
         st = self.picture_status()
         st["lanes"][0].update(merge_lane=True, merge_for=["b", "c"], task="t0042")
@@ -29392,6 +29412,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             row = page["rows"][0]
             self.assertEqual((row["step"], row["bars"][0]["value"]), ("merge", "5"))
             for word in ("t0042", "Merge task", "b", "c"):
+                self.assertIn(word, row["text"])
+            for word in (("merge lane", "b, c", "takes no work") if language == "en"
+                         else ("工作线 b、c", "合并验收线", "不接活")):
                 self.assertIn(word, row["text"])
             self.assertEqual(row["marked"], ["Merge check" if language == "en" else "合并验收"])
 
@@ -29435,16 +29458,43 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         for _, [page] in self.picture_pages(st):
             self.assertEqual(page["rows"][0]["bars"][0]["max"], "27")
 
-    def test_status_picture_server_and_fetch_failure_clear_counts_and_recover(self):
+    def test_status_picture_server_down_keeps_lane_tasks_and_warns_once(self):
+        st = self.picture_status()
+        st["server_up"] = False
+        st["lanes"] += [{**st["lanes"][0], "name": "v", "verify_for": ["a"]},
+                        {**st["lanes"][0], "name": "m", "merge_lane": True, "merge_for": ["a"]}]
+        st["running"] = [self.picture_worker(), self.picture_worker(id="verifier", lane="v", title="Verify task")]
+        st["review"] = [{"id": "parent", "lane": "a", "title": "Original", "check": True,
+                         "verify": {"task": "verifier", "state": "running", "lane": "v"}}]
+        st["merging"] = [{"id": "merge", "lane": "m", "title": "Merge task", "phase": "running", "minutes": 5}]
+        for language, [page] in self.picture_pages(st):
+            self.assertEqual([row["lane"] for row in page["rows"]], ["a", "v", "m"])
+            for row, tid, title in zip(page["rows"], ("t0042", "verifier", "merge"),
+                                       ("Picture task <&>", "Verify task", "Merge task")):
+                self.assertIn(tid, row["text"])
+                self.assertIn(title, row["text"])
+            self.assertEqual(len(page["boxes"]), 7)
+            self.assertFalse(page["alerts"])
+            warning = "new tasks will not start" if language == "en" else "新活不会开始"
+            self.assertEqual((page["state"] + page["text"]).count(warning), 1)
+
+    def test_status_picture_fetch_failure_clears_counts_and_recovers(self):
         st = self.picture_status()
         st["running"] = [self.picture_worker()]
-        for language, pages in self.picture_pages(st, "status-picture-errors"):
-            for page, word in zip(pages[1:4], ("server not running" if language == "en" else "后台没在运行", "status connection lost", "status connection lost")):
-                self.assertFalse(page["boxes"])
-                self.assertFalse(page["rows"])
-                self.assertEqual(len(page["alerts"]), 2)
-                self.assertTrue(all(word in a for a in page["alerts"]))
-            self.assertEqual(pages[0]["boxes"], pages[4]["boxes"])
+        for _, pages in self.picture_pages(st, "status-picture-errors"):
+            failed = pages[2]
+            self.assertFalse(failed["boxes"])
+            self.assertFalse(failed["rows"])
+            self.assertEqual(failed["alerts"], ["status connection lost"] * 2)
+            # Stopped dispatch and unavailable events still leave the desk's records available.
+            for page in (pages[1], pages[3], pages[4]):
+                self.assertEqual(pages[0]["boxes"], page["boxes"])
+                for row, original in zip(page["rows"], pages[0]["rows"]):
+                    self.assertEqual({k: v for k, v in row.items() if k != "start"},
+                                     {k: v for k, v in original.items() if k != "start"})
+                self.assertEqual(len(page["rows"]), len(pages[0]["rows"]))
+                self.assertFalse(page["alerts"])
+            self.assertIn("events connection lost", pages[3]["text"])
 
     def test_status_picture_initial_fetch_failure_recovers(self):
         st = self.picture_status()

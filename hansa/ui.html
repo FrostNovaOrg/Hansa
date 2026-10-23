@@ -332,8 +332,8 @@ const T = ZH ? {
   dispatchOn:"正在派活", paused:"已暂停", pause:"暂停派活", resume:"恢复派活", pauseReason:"暂停原因（可不填）",
   serverUp:"后台在运行", serverDown:"后台没在运行：新活不会开始",
   serverStuck:(pid, m) => `后台（pid ${pid}）已 ${m} 分钟没跑完一轮：在忙或卡住了`,
-  lanes:"工作线", lane:"工作线", order:"用哪家（按顺序，前一家额度用完换下一家）", now:"现在", free:"空闲", trying:"试运行中", busyWith:"在做",
-  running:"正在做", queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", minutes:"分钟",
+  lanes:"工作线", lane:"工作线", now:"现在", free:"空闲",
+  queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", minutes:"分钟",
   task:"任务", provider:"供应", titleCol:"内容", changes:"改动", refused:"被拒的命令", error:"原因",
   asks:"智能体提的请求", answer:"回复（可不填）", close:"处理完", closedByCoordinator:"已由协调者关闭：",
   providers:"模型供应", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
@@ -355,11 +355,12 @@ const T = ZH ? {
   env:"给执行层的环境变量（每行 名字=值；一般不用动，装了新工具要让执行层找得到时才加）",
   allow:"这条线的执行层和核验不用问就能用的规则（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着命令规则。网页工具在沙箱的网络名单之外联网：每个网站写一条 WebFetch(domain:docs.python.org)，光写 WebFetch 会被拒绝；WebSearch 会把搜索词发到本机之外。git 的规则写了也不算：提交由框架来做）",
   network:"执行层做活时能连的主机", write:"执行层还能写的文件夹（工作树以外）",
-  laneCheck:"验收命令：每件活做完后由框架自己在工作树里跑，不经执行层；不通过就不让合并（空＝不验收）", checkCol:"验收", passed:"通过", notPassed:"没通过", couldNotRun:"没跑成（机器的问题，不是活的问题）", verifyCol:"实跑核对", v_holds:"成立", "v_holds, with notes":"成立，附注", "v_does not hold":"不成立", v_unsure:"拿不准", v_running:"正在核对", v_none:"没给结论", checkingWork:"执行层已做完，正在验收", withBrowser:"（带浏览器）", progressFmt:(n, idle) => idle == null ? "模型还没回话" : `已回 ${n} 轮，${idle} 分钟前还有动作`,
+  laneCheck:"验收命令：每件活做完后由框架自己在工作树里跑，不经执行层；不通过就不让合并（空＝不验收）", checkCol:"验收", passed:"通过", notPassed:"没通过", couldNotRun:"没跑成（机器的问题，不是活的问题）", verifyCol:"实跑核对", v_holds:"成立", "v_holds, with notes":"成立，附注", "v_does not hold":"不成立", v_unsure:"拿不准", v_running:"正在核对", v_none:"没给结论", checkingWork:"执行层已做完，正在验收", withBrowser:"（带浏览器）",
   setup:"每个任务开工前装依赖的命令（比如 pnpm install；空＝不用装）",
   providersList:"用哪几家（按顺序）", briefNote:"每条工作线的常驻说明由协调席用 hansa lane brief 设定，存在 lanes/工作线名/brief.md。",
   lanesNote:"工作线由协调席用 hansa lane 设定，这里只能看。要改哪条工作线，在对话里跟协调席说。",
   mergeLane: lanes => `工作线 ${lanes.join("、") || "（还没有）"} 的合并验收线；不接活`,
+  verifyLane: lanes => `工作线 ${lanes.join("、")} 的核对线；只接核对`,
   mcQueuedSlot:"合并验收在排队：等待空闲的并发名额", mcQueuedTry: lane => `合并验收在排队：工作线 ${lane} 正在试跑`,
   laneWarnings:"这些工作线的允许命令里有现在不收的规则：运行时会被略去，别的设置照样能保存。要删掉它们，请协调席执行下面写的命令：",
   concurrencyNote:"由协调席用 hansa concurrency 设定，这里只能看；要改，在对话里跟协调席说。",
@@ -430,8 +431,8 @@ const T = ZH ? {
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
   serverUp:"server running", serverDown:"server not running: new tasks will not start",
   serverStuck:(pid, m) => `hansa serve (pid ${pid}) has not finished a round for ${m} min: busy or stuck`,
-  lanes:"Lanes", lane:"Lane", order:"Providers in order (the next takes over when one runs out)", now:"Now", free:"free", trying:"held by a try", busyWith:"on",
-  running:"Running", queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", minutes:"min",
+  lanes:"Lanes", lane:"Lane", now:"Now", free:"free",
+  queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", minutes:"min",
   task:"Task", provider:"Provider", titleCol:"Task", changes:"Changes", refused:"Refused", error:"Why",
   asks:"Requests from agents", answer:"answer (optional)", close:"Done", closedByCoordinator:"closed by the coordinator: ",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
@@ -445,11 +446,12 @@ const T = ZH ? {
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
   allow:"Rules the lane's workers and verifiers are given without asking (one per line; Bash(pnpm test:*) means any command starting with pnpm test). Workers work in a sandbox and need no command rule. Web tools reach the network outside the sandbox: WebFetch(domain:docs.python.org) for each site (a bare WebFetch is refused), WebSearch sends search queries out of the machine. Git rules count for nothing: hansa does the committing",
   network:"Hosts workers may reach during a task", write:"Extra folders workers may write to (besides the worktree)",
-  laneCheck:"Check command: hansa runs it in the worktree after each task, not the worker; a failed check blocks the merge (blank = none)", checkCol:"Check", passed:"passed", notPassed:"failed", couldNotRun:"could not run (the machine, not the task)", verifyCol:"Verified by running", v_holds:"holds", "v_holds, with notes":"holds, with notes", "v_does not hold":"does not hold", v_unsure:"unsure", v_running:"verifying", v_none:"no verdict", checkingWork:"worker done, checking", withBrowser:" (with a browser)", progressFmt:(n, idle) => idle == null ? "no reply from the model yet" : `${n} replies, active ${idle} min ago`,
+  laneCheck:"Check command: hansa runs it in the worktree after each task, not the worker; a failed check blocks the merge (blank = none)", checkCol:"Check", passed:"passed", notPassed:"failed", couldNotRun:"could not run (the machine, not the task)", verifyCol:"Verified by running", v_holds:"holds", "v_holds, with notes":"holds, with notes", "v_does not hold":"does not hold", v_unsure:"unsure", v_running:"verifying", v_none:"no verdict", checkingWork:"worker done, checking", withBrowser:" (with a browser)",
   setup:"Command that installs dependencies before each task, e.g. pnpm install (blank = none)",
   providersList:"Providers, in order", briefNote:"The coordinator sets each lane's standing instructions with hansa lane brief; they are kept in lanes/<lane>/brief.md.",
   lanesNote:"The coordinator sets lanes with hansa lane; here you can only look. To change a lane, ask the coordinator in the conversation.",
   mergeLane: lanes => `merge lane for lanes ${lanes.join(", ") || "(none yet)"}; takes no work`,
+  verifyLane: lanes => `verify lane for lanes ${lanes.join(", ")}; takes only verifications`,
   mcQueuedSlot:"merge check queued: waits for a free concurrency slot", mcQueuedTry: lane => `merge check queued: waits for lane ${lane}, held by a try`,
   laneWarnings:"These lanes' allowed commands hold rules no longer accepted: runs leave them out, and the other settings save all the same. To remove them, ask the coordinator to run the command named:",
   concurrencyNote:"set by the coordinator with hansa concurrency; here you can only look. To change it, ask the coordinator in the conversation.",
@@ -777,6 +779,7 @@ function laneTracks(st) {
           worker?.provider ? statusPill(`${worker.provider} (${worker.model || "—"})`) : null,
           !m ? statusPill(l.trying ? T.laneTrying : queued.length ? T.laneQueued(queued.length) : T.free, l.trying ? "warn" : "") : null),
         l.merge_lane ? h("div", {class:"muted"}, T.mergeLane(l.merge_for || [])) : null,
+        l.verify_for?.length ? h("div", {class:"muted"}, T.verifyLane(l.verify_for)) : null,
         h("div", {class:"lane-steps", "aria-label":T.taskFlow}, FLOW_STEPS.map(s => h("span", {
           class:"status-pill" + (s === step ? " current-step" : ""), "aria-current":s === step ? "step" : null}, flowLabel(s)))),
         m ? h("div", {class:"lane-task"}, taskLink(m.id), " · ", m.title,
@@ -799,9 +802,12 @@ function laneTracks(st) {
 }
 
 async function loadStatus() {
-  let st, ev;
-  try { [st, ev] = await Promise.all([api("/api/status"), api("/api/events")]); }
-  catch (e) { pictureError(String(e.message || e)); err(e); throw e; }
+  const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
+  if (status.status === "rejected") {
+    const e = status.reason;
+    pictureError(String(e.message || e)); err(e); throw e;
+  }
+  const st = status.value, ev = events.status === "fulfilled" ? events.value : [];
   const name = st.desk.split("/").filter(Boolean).slice(-2).join("/") || "/";
   const waiting = (st.releases || []).filter(r => r.state === "waiting").length + st.asks.length;
   document.title = (waiting ? `(${waiting}) ` : "") + "Hansa · " + name;
@@ -829,9 +835,7 @@ async function loadStatus() {
   $("#state").className = parts.some(p => p.className === "warn") ? "warn" : "muted";
   const reason = h("input", {placeholder:T.pauseReason, "aria-label":T.pauseReason});
   const t = st.last_24h;
-  statusPicture = h("div", {id:"status-picture"});
-  if (st.server_up) statusPicture.append(pipelineStrip(st), laneTracks(st));
-  else pictureError(T.serverDown);
+  statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));
   $("#tab-status").replaceChildren(...shown([
     statusPicture,
     pageHeading("status", T.statusIntro, statusPill(T.autoUpdates, "", "reload")),
@@ -872,7 +876,9 @@ async function loadStatus() {
       p.problem ? statusPill(p.problem, "warn", "error") : statusPill(T.ready, "ok"),
       p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${p.check.detail} (${when(p.check.at)})`) : "",
       checkButton(p.name, loadStatus)])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
-    dashboardPanel(T.events, "status", Math.min(ev.length, 20), ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(e => h("div", {class:"event-row"},
+    dashboardPanel(T.events, "status", Math.min(ev.length, 20), events.status === "rejected"
+      ? h("div", {class:"bad", role:"alert"}, String(events.reason.message || events.reason))
+      : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(e => h("div", {class:"event-row"},
       h("span", {class:"event-time"}, when(e.ts)), h("span", {class:"event-name"}, e.event),
       h("div", {class:"event-data mono"}, Object.entries(e).filter(([k]) => k !== "ts" && k !== "event")
         .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" "))))) : emptyState(T.noEvents, T.noEventsNote, "status"))
