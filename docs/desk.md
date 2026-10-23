@@ -35,8 +35,11 @@ provider and model, task link and title, browser marker and check timing. The
 merge and verify lanes also name the lanes they serve and the work they accept.
 The marked step distinguishes workers, checks, verifications (with their parent task)
 and merge checks. A running merge check still appears on its occupied lane if that
-lane is unmarked as a merge lane. The elapsed bar uses the current step's minutes
-against the running item's `limit_min` from `/api/status`: tasks and verifications
+lane is unmarked as a merge lane. The elapsed bar counts from the same start as
+the server's timeout: the task's start through its first check, and the check's
+start for a retried check (`check_retry` in `/api/status`). The row's check text
+still shows the check's own minutes and the task's total minutes. The bar uses
+the running item's `limit_min` from `/api/status`: tasks and verifications
 use their lane's `timeout_min` (240 by default); merge checks use the occupied
 lane's `merge_timeout_min`, falling back to its `timeout_min` and then 240.
 The bar warns past three quarters. The line below
@@ -45,6 +48,7 @@ count; unavailable progress reads `—`. Free lanes with no queue show their
 name, providers and models, and free pill, without a step track; a free merge or
 verify lane also shows its role sentence in the same line. Free and queued lanes
 are dimmed, tries are named, and sandbox holds have a held pill and show their reasons.
+Warning pills, including sandbox holds and queued counts, use a warning triangle.
 When `hansa serve` is stopped,
 the picture still shows the desk's records; the page's status line warns once
 that new tasks will not start. When fetching `/api/status` fails, both parts show
@@ -61,6 +65,52 @@ states explain where new activity will appear. Task details remain open across
 refreshes. The page refreshes every five seconds while Status is visible, unless
 you are filling in an input. Release approvals, refusals, stops and request replies
 use the same actions as before.
+
+Queued tasks show their waiting reason in the page's language, both in the queue
+and under a lane's queued count. `/api/status` keeps the English `waiting` field
+and adds `waiting_code` and `waiting_values`. The command views still use the
+same English sentence. Codes and values are:
+
+| Code | Values |
+|---|---|
+| `paused`, `no_lanes`, `no_work_lanes`, `slot` | none |
+| `ready` | `lane`, `provider`, `server` (up, busy, gone or stuck), `seconds` since the last round |
+| `disk` | `volumes`: each has `mount`, `free`, `floor`, `again` (the free space needed to resume) |
+| `memory` | `available`, `floor`, `again` |
+| `lanes` | `reasons`: ordered `{code, values, text}` objects, with each English clause in `text` |
+
+Lane reasons use `missing_lane`, `merge_lane`, `verify_lane` or `busy` with
+`lane`; `sandbox` has `lane`, `kind` and the sandbox's `why`; `providers` has
+`lane` and ordered `providers` reason objects. Provider codes are `refused`,
+`missing_provider`, `no_endpoint`, `no_key`, `credit`, `rest`, `unreachable` and
+`unknown`. Their values have `provider`, `since`, `until`, `minutes`, `how`
+(fixed, reset, credit or blank) and `why`; unused values can be null or blank.
+Sizes include their units, and times are Unix seconds. Unknown codes, including
+nested ones, keep the server's English sentence. Error details and names remain
+as the server sent them.
+
+The status line also warns about `serve_code`, `alert_failed` and every line of
+`unreached`, with short translated labels and the server's original text.
+
+Recent events keeps the newest 20, with their times. These kinds use a short
+sentence in the page's language and a task link when they carry `task`:
+
+- Tasks: `task_started`, `task_finished`, `task_merged`.
+- Checks and verifications: `check_started`, `task_checked`, `check_killed`,
+  `check_rerun_queued`, `verification_closed`.
+- Merge checks: `merge_queued`, `merge_check_queued`, `merge_check_started`,
+  `merge_checked`, `merge_check_ended`, `merge_check_killed`,
+  `merge_check_cancel`, `merge_check_base_moved`, `merge_batch_split`.
+- Releases: `release_asked`, `release_answered`, `release_started`,
+  `release_ended`, `release_void`, `release_forbidden`, `release_waits`,
+  `release_stopping`, `release_stopped`.
+- Lane tries: `lane_try_queued`, `lane_try_started`, `lane_tried`,
+  `lane_try_withdrawn`.
+- Sandbox holds: `sandbox_held`, `sandbox_ready`.
+- Provider rests and the server: `provider_credit`, `server_stopped`.
+
+Other kinds retain their raw event name and `key=value` text. A missing check
+result reads as unknown; a check that could not run says so.
 
 Cost offers the last 1, 7 or 30 days, with token usage, estimated value and unpriced
 tokens above the six category tables. Unpriced models and unreadable coordinator
