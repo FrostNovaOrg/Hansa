@@ -28642,6 +28642,28 @@ else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(as
   same(postedTo("/api/release/stop"), {id:18, reason:"Stop this run"}, "release stop payload changed");
   console.log(JSON.stringify({pause:true, resume:true, details:true, asks:true, releases:true}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "cost-chart") vm.runInContext("loadCost()", ctx).then(async () => {
+  const days = given["/api/cost"].days;
+  const select = ids["#cost-period"]; select.value = String(days); select.on.change({target:select});
+  await new Promise(resolve => setImmediate(resolve));
+  const charts = [], plots = [], bars = [], labels = [], tables = [];
+  walk(ids["#tab-cost"], el => {
+    if (el.className.split(" ").includes("cost-chart")) charts.push(el);
+    if (el.className.split(" ").includes("cost-chart-plot")) plots.push(el);
+    if (el.className.split(" ").includes("cost-chart-bar")) bars.push(el);
+    if (el.className.split(" ").includes("cost-chart-label")) labels.push(el);
+    if (el.tag === "table") tables.push(el);
+  });
+  const chart = charts[0], dayTable = tables.find(el => descendants(el, "th")[0]?.textContent === vm.runInContext("T.dayColumn", ctx));
+  const order = []; walk(ids["#tab-cost"], el => { if (el === chart) order.push("chart"); if (el === dayTable) order.push("table"); });
+  console.log(JSON.stringify({charts:charts.length, text:chart?.textContent, name:chart?.attrs["aria-label"],
+    plot:plots[0]?.attrs.style,
+    bars:bars.map(el => ({label:el.attrs["aria-label"], title:el.attrs.title, style:el.attrs.style, tone:el.className})),
+    labels:labels.map(el => ({text:el.textContent, mobile:el.attrs["data-mobile"] === "true",
+      edge:el.attrs["data-edge"], style:el.attrs.style})), order,
+    table:dayTable ? descendants(dayTable, "tr").slice(1).map(el => el.kids.map(cell => cell.textContent)) : [],
+    gets:apiGets, css:page.slice(page.indexOf("<style>"), page.indexOf("</style>"))}));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "cost-interactions") vm.runInContext("loadCost()", ctx).then(async () => {
   const check = (ok, why) => { if (!ok) throw new Error(why); };
   const run = code => vm.runInContext(code, ctx);
@@ -30096,6 +30118,129 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual(output["name"], "cost-30d.csv")
                 self.assertEqual(list(csv.reader(io.StringIO(output["csv"]))),
                                  [columns, ["" if row[column] is None else str(row[column]) for column in columns]])
+
+    def cost_chart_page(self, days, rows, language):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        report = {"days": days, "by": {"day": rows}, "unpriced_models": [],
+                  "total": {"tokens": sum(row["tokens"] for row in rows.values()),
+                            "usd": sum(row["usd"] for row in rows.values())}}
+        harness = self.tmp / "cost-chart-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        result = subprocess.run(["node", str(harness), str(page), "cost-chart", language],
+                                input=json.dumps({"/api/cost": report}), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_cost_chart_bars_match_day_rows_for_each_period_in_both_languages(self):
+        for language in ("en", "zh"):
+            for days in (1, 7, 30):
+                with self.subTest(language=language, days=days):
+                    # Reverse the reply to check chronological bars without reordering the day table.
+                    rows = {f"2026-10-{day:02}": {"tokens": day * 100, "usd": 0 if day == 2 else day * 0.25,
+                                                 "unpriced_tokens": 0} for day in range(days, 0, -1)}
+                    output = self.cost_chart_page(days, rows, language)
+                    self.assertEqual(output["charts"], 1, "daily cost chart missing")
+                    self.assertEqual(output["name"], "每日折算金额" if language == "zh" else "Daily estimated value")
+                    self.assertEqual(len(output["bars"]), days)
+                    self.assertEqual(output["plot"], f"grid-template-columns:repeat({days},minmax(0,1fr))")
+                    maximum = max(row["usd"] for row in rows.values()) or 1
+                    for bar, (day, row) in zip(output["bars"], sorted(rows.items())):
+                        self.assertEqual(bar["label"], f"{day} · ${row['usd']:.2f}")
+                        self.assertEqual(bar["title"], bar["label"])
+                        height = float(re.search(r"height:([\d.]+)%", bar["style"])[1])
+                        self.assertAlmostEqual(height, row["usd"] / maximum * 100)
+                    self.assertEqual(output["table"], [[day, format(row["tokens"], ","), f"{row['usd']:.2f}", ""]
+                                                       for day, row in rows.items()])
+                    self.assertEqual(output["order"], ["chart", "table"])
+                    self.assertEqual(output["gets"][-1], f"/api/cost?days={days}")
+                    self.assertEqual(sum(label["mobile"] for label in output["labels"]), min(3, days))
+                    self.assertTrue(output["labels"][0]["mobile"] and output["labels"][-1]["mobile"])
+                    for label in output["labels"]:
+                        day = "2026-" + label["text"][:5]
+                        self.assertEqual(label["text"], f"{day[5:]}${rows[day]['usd']:.2f}")
+                    if days == 30:
+                        self.assertLess(len(output["labels"]), days)
+                    # PAGE_HARNESS has no layout engine: verify shrinking tracks and mobile label thinning.
+                    for rule in ("minmax(0,1fr)", ".cost-chart { min-width:0; max-width:100%;",
+                                 ".cost-chart-bar { width:100%;", "@media (max-width:640px)",
+                                 '.cost-chart-label:not([data-mobile="true"]) { display:none; }'):
+                        self.assertIn(rule, output["css"])
+
+    def test_cost_chart_last_label_has_width_and_does_not_wrap_in_both_languages(self):
+        for language in ("en", "zh"):
+            for days in (7, 30):
+                with self.subTest(language=language, days=days):
+                    rows = {f"2026-10-{day:02}": {"tokens": 100, "usd": 1.25, "unpriced_tokens": 0}
+                            for day in range(1, days + 1)}
+                    output = self.cost_chart_page(days, rows, language)
+                    last = output["labels"][-1]
+                    self.assertEqual(last["edge"], "last")
+                    self.assertEqual(last["text"], f"10-{days:02}$1.25")
+                    # The harness cannot lay out text: require a right anchor, real width and no wrapping.
+                    self.assertEqual(last["style"], "right:0")
+                    rule = re.search(r"\.cost-chart-label\[data-edge=last\]\s*\{([^}]+)\}", output["css"])[1]
+                    declarations = dict(part.strip().split(":", 1) for part in rule.split(";") if part.strip())
+                    self.assertEqual(declarations["width"], "33%")
+                    self.assertEqual(declarations["white-space"], "nowrap")
+                    self.assertEqual(declarations["transform"], "none")
+
+    def test_cost_chart_fills_interior_date_gaps_in_both_languages(self):
+        for language in ("en", "zh"):
+            for days, dates in ((7, ["2026-10-31", "2026-11-01", "2026-11-02"]),
+                                (30, ["2028-02-28", "2028-02-29", "2028-03-01"]),
+                                (7, ["2026-12-31", "2027-01-01", "2027-01-02"]),
+                                (7, ["2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22"])):
+                with self.subTest(language=language, days=days, dates=dates):
+                    rows = {dates[-1]: {"tokens": 200, "usd": 2, "unpriced_tokens": 0},
+                            dates[0]: {"tokens": 100, "usd": 1, "unpriced_tokens": 0}}
+                    output = self.cost_chart_page(days, rows, language)
+                    self.assertEqual(len(output["bars"]), len(dates), "interior empty days must keep their own tracks")
+                    self.assertEqual(output["plot"], f"grid-template-columns:repeat({len(dates)},minmax(0,1fr))")
+                    self.assertEqual([bar["label"] for bar in output["bars"]],
+                                     [f"{dates[0]} · $1.00", *dates[1:-1], f"{dates[-1]} · $2.00"])
+                    for bar, day in zip(output["bars"][1:-1], dates[1:-1]):
+                        self.assertEqual(bar["title"], day)
+                        self.assertEqual(bar["style"], "height:0%")
+                        self.assertNotIn("unpriced", bar["tone"].split())
+                    self.assertEqual([label["text"] for label in output["labels"]],
+                                     [f"{dates[0][5:]}$1.00", *[day[5:] for day in dates[1:-1]], f"{dates[-1][5:]}$2.00"])
+                    self.assertEqual(output["table"], [[day, str(row["tokens"]), f"{row['usd']:.2f}", ""]
+                                                       for day, row in rows.items()])
+
+    def test_cost_chart_marks_days_with_unpriced_tokens_in_both_languages(self):
+        unpriced = {"2026-10-20": {"tokens": 1200, "usd": 0, "unpriced_tokens": 1200}}
+        mixed = {**unpriced, "2026-10-22": {"tokens": 3000, "usd": 1.75, "unpriced_tokens": 500}}
+        for language in ("en", "zh"):
+            for rows in (unpriced, mixed):
+                with self.subTest(language=language, rows=len(rows)):
+                    output = self.cost_chart_page(7, rows, language)
+                    self.assertEqual(output["charts"], 1, "daily cost chart missing for unpriced usage")
+                    self.assertEqual(len(output["bars"]), 1 if len(rows) == 1 else 3)
+                    warning = "token 没价目" if language == "zh" else "tokens without a price"
+                    bars_by_day = {bar["label"][:10]: bar for bar in output["bars"]}
+                    for day, row in rows.items():
+                        bar = bars_by_day[day]
+                        self.assertIn(f"{day} · ${row['usd']:.2f}", bar["label"])
+                        self.assertIn(warning, bar["label"])
+                        self.assertIn(format(row["unpriced_tokens"], ","), bar["label"])
+                        self.assertIn("unpriced", bar["tone"].split())
+                        self.assertEqual(bar["title"], bar["label"])
+                    self.assertIn(warning, output["text"])
+                    self.assertEqual([row[-1] for row in output["table"]],
+                                     [format(row["unpriced_tokens"], ",") for row in rows.values()])
+                    self.assertIn("height:0%", output["bars"][0]["style"])
+
+    def test_cost_chart_empty_period_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                output = self.cost_chart_page(30, {}, language)
+                self.assertEqual(output["charts"], 1, "empty period has no daily chart state")
+                self.assertEqual(output["bars"], [])
+                self.assertEqual(output["labels"], [])
+                self.assertEqual(output["table"], [])
+                self.assertIn("这段时间还没有用量" if language == "zh" else "No usage in this period", output["text"])
 
     def test_both_page_languages_name_ping_and_operator(self):
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()

@@ -211,6 +211,17 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .cost-breakdowns .cost-wide table { min-width:680px; }
 .cost-breakdowns td:not(:first-child), .cost-breakdowns th:not(:first-child) { text-align:right; font-variant-numeric:tabular-nums; }
 .cost-breakdowns td:first-child { min-width:125px; }
+.cost-chart { min-width:0; max-width:100%; margin-bottom:16px; }
+.cost-chart h3 { margin:0 0 4px; }
+.cost-chart-plot { display:grid; gap:3px; height:160px; margin-top:16px; border-bottom:1px solid var(--line); }
+.cost-chart-track { min-width:0; display:flex; align-items:flex-end; }
+.cost-chart-bar { width:100%; position:relative; background:var(--accent); border-radius:3px 3px 0 0; }
+.cost-chart-bar.unpriced::after { content:""; position:absolute; bottom:0; left:0; width:100%; height:3px; background:var(--warn); }
+.cost-chart-labels { position:relative; height:52px; margin-top:6px; font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.cost-chart-label { position:absolute; display:grid; text-align:center; transform:translateX(-50%); max-width:33%; overflow-wrap:anywhere; }
+.cost-chart-label[data-edge=first] { transform:none; text-align:left; }
+.cost-chart-label[data-edge=last] { transform:none; text-align:right; width:33%; white-space:nowrap; }
+.cost-chart-label[data-edge=only] { transform:translateX(-50%); }
 @media (max-width:860px) {
   header { gap:12px; padding:12px 18px; }
   #state { flex-basis:100%; max-width:100%; margin-left:0; font-size:11px; }
@@ -247,6 +258,8 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
   .page-head > .status-pill { max-width:110px; }
   .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); margin-bottom:20px; }
   .cost-metrics .metric-card:last-child { grid-column:1 / -1; }
+  .cost-chart-plot { gap:2px; }
+  .cost-chart-label:not([data-mobile="true"]) { display:none; }
   .metric-value { font-size:25px; }
   .dashboard-panel { padding:16px; margin-bottom:16px; }
   .runtime-actions { width:100%; }
@@ -598,6 +611,7 @@ Object.assign(T, ZH ? {
   period:"统计范围", periodDays:n => `最近 ${n} 天`, estimatedCost:"折算金额", totalTokens:"Token 用量", unpricedTokens:"没有价目的 token",
   unpricedNote:"未计入折算金额", usdNote:"USD · 按设置中的价目折算", costLoading:"正在加载用量…", costReady:"按所选时间范围统计。",
   costLoadFailed:"用量加载失败，请重试。", costRetained:n => `仍显示最近 ${n} 天的上次结果。`, retry:"重试", exporting:"正在导出…", exported:"CSV 已导出。", exportFailed:"导出失败，请重试。",
+  dailyValue:"每日折算金额", chartDaysNote:"USD · 显示首末用量记录之间的日期；无记录的日期不显示金额。",
   noCost:"这段时间还没有用量", noCostNote:"模型调用产生用量后，会按席位、日期、模型、工作线、供应和任务显示明细。", seatColumn:"席位", dayColumn:"日期"
 } : {
   statusIntro:"Follow tasks, lanes and the decisions that need your attention.", costIntro:"Explore token usage and its estimated value by period and category.",
@@ -609,6 +623,7 @@ Object.assign(T, ZH ? {
   period:"Time range", periodDays:n => `Last ${n} days`, estimatedCost:"Estimated value", totalTokens:"Token usage", unpricedTokens:"Unpriced tokens",
   unpricedNote:"Excluded from the estimated value", usdNote:"USD · using the Settings price table", costLoading:"Loading usage…", costReady:"Totals for the selected period.",
   costLoadFailed:"Could not load usage. Try again.", costRetained:n => `Still showing the previous ${n}-day report.`, retry:"Retry", exporting:"Exporting…", exported:"CSV exported.", exportFailed:"Could not export. Try again.",
+  dailyValue:"Daily estimated value", chartDaysNote:"USD · From first to last recorded day; gaps have no amount.",
   noCost:"No usage in this period", noCostNote:"Model usage will appear by seat, day, model, lane, provider and task.", seatColumn:"Seat", dayColumn:"Date"
 });
 Object.assign(T, ZH ? {
@@ -1555,14 +1570,52 @@ async function loadCost() {
     }
   }
 }
+function costDayChart(dayRows) {
+  const byDay = new Map(dayRows), dates = [...byDay.keys()].sort();
+  const chart = h("div", {class:"cost-chart", role:"group", "aria-label":T.dailyValue}, h("h3", {}, T.dailyValue));
+  if (!dates.length) {
+    chart.append(emptyState(T.noCost, T.noCostNote, "cost"));
+    return chart;
+  }
+  // Use UTC only for calendar arithmetic on date keys, without shifting them to the browser's timezone.
+  // The API supplies no period bounds: fill interior gaps only, keeping missing rows distinct from $0.
+  const rows = [], cursor = new Date(dates[0] + "T00:00:00Z");
+  let day = dates[0];
+  while (day <= dates[dates.length - 1]) {
+    rows.push([day, byDay.get(day) || null]);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+    day = cursor.toISOString().slice(0, 10);
+  }
+  const maximum = Math.max(...rows.map(([, row]) => row?.usd || 0)) || 1;
+  const mobileIndices = new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1]);
+  const labelIndices = new Set([0, 0.25, 0.5, 0.75, 1].map(fraction => Math.floor((rows.length - 1) * fraction)));
+  const labels = [];
+  chart.append(h("p", {class:"cost-explanation"}, T.chartDaysNote),
+    h("div", {class:"cost-chart-plot", style:`grid-template-columns:repeat(${rows.length},minmax(0,1fr))`}, rows.map(([day, row], index) => {
+      const amount = row ? "$" + row.usd.toFixed(2) : "", unpriced = row?.unpriced_tokens;
+      const label = day + (row ? ` · ${amount}` : "") + (unpriced ? ` · ${T.tokensNoPrice}: ${fmt(unpriced)}` : "");
+      const mobile = mobileIndices.has(index);
+      if (rows.length <= 7 || labelIndices.has(index)) {
+        const edge = rows.length === 1 ? "only" : index === 0 ? "first" : index === rows.length - 1 ? "last" : "";
+        const position = edge === "last" ? "right:0" : `left:${edge === "first" ? 0 : (index + 0.5) / rows.length * 100}%`;
+        labels.push(h("span", {class:"cost-chart-label", "data-mobile":String(mobile), "data-edge":edge, style:position},
+          h("span", {}, day.slice(5)), row ? h("span", {}, amount + (unpriced ? " *" : "")) : null));
+      }
+      return h("div", {class:"cost-chart-track"}, h("div", {class:"cost-chart-bar" + (unpriced ? " unpriced" : ""),
+        role:"img", tabindex:"0", title:label, "aria-label":label, style:`height:${(row?.usd || 0) / maximum * 100}%`}));
+    })), h("div", {class:"cost-chart-labels", "aria-hidden":"true"}, labels));
+  if (rows.some(([, row]) => row?.unpriced_tokens)) chart.append(h("p", {class:"cost-explanation warn"}, "* " + T.tokensNoPrice));
+  return chart;
+}
 function renderCost(r) {
   const seatName = k => k.startsWith("helper:") ? `${T.seat_helper}: ${T["helper_" + k.slice(7)] || k.slice(7)}` : T["seat_" + k] || k;
   const block = key => {
     const rows = Object.entries(r.by[key] || {});
-    if (!rows.length) return null;
+    if (!rows.length) return key === "day" ? dashboardPanel(T.byday, "cost", 0, costDayChart(rows)) : null;
     const tries = key === "task";  // every run of a task counts: its earlier tries too
     const label = {seat:T.seatColumn, day:T.dayColumn, model:T.model, lane:T.lane, provider:T.provider, task:T.task}[key];
     const panel = dashboardPanel(T["by" + key], key === "provider" ? "providers" : key === "lane" ? "lanes" : "cost", rows.length,
+      key === "day" ? costDayChart(rows) : null,
       table([label, T.tokens, "$ " + T.listValue, T.tokensNoPrice, ...(tries ? [T.runs, T.turns] : [])],
         rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : "",
           ...(tries ? [v.runs ? fmt(v.runs) : "", v.runs ? fmt(v.turns) : ""] : [])])));
