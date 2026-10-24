@@ -279,6 +279,15 @@ explanations and other read-only lane fields expand in place. Network, write and
 allowed-command rules remain visible, as do the warnings needed before saving.
 Providers includes the rest minutes that apply to every provider.
 The save bar applies to all editable settings groups.
+After saving, it describes the timing for each kind of setting changed:
+prices apply immediately on the next report read, recalculating past usage too;
+provider settings apply to new worker/verifier runs and the next coordinator start;
+rest minutes apply when a new rest begins, keeping existing rest end times;
+not-read rules apply at the next worker, verifier or coordinator start, leaving
+running processes' access as it was. Coordinator model, provider, effort and
+working compaction apply at its next start; idle compaction reads its threshold
+at the mod's next decision. Release rules apply at the next relevant task-title,
+merge or release check, and alert settings at the next alert check.
 The visible not-read warning says that while the list holds an entry containing
 `()[]{}*?\`, hansa starts no worker, verifier or coordinator until it is changed here.
 

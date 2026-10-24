@@ -29236,7 +29236,32 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     };
     const visibleText = (text, root) => !!find(el => el.textContent.includes(text) &&
       !el.kids.some(k => k instanceof El && k.textContent.includes(text)) && visible(el, root), root);
-    if (ask === "settings-fix-stale") {
+    if (ask.startsWith("settings-fix-saved-")) {
+      const zh = process.argv[4] === "zh";
+      const cases = ask.endsWith("prices") ? [
+        ['S.prices["example/engine"].in = 3; KEY_DRAFTS.compatible = "sk-unsaved"',
+          zh ? ["价目", "立即", "历史用量", "重算", "密钥"] : ["Prices", "immediately", "past usage", "recalculated", "key"]]
+      ] : ask.endsWith("security") ? [
+        ['S.workers_may_not_read = ["/private/example-hidden"]',
+          zh ? ["禁读", "下次", "工作者", "验证者", "协调席", "正在运行"] : ["Not-read", "next", "worker", "verifier", "coordinator", "running"]],
+        ['S.providers.compatible.model = "new-model"; S.cool_minutes = 38; S.release_direct = "hold"; S.alert.command = "echo example"',
+          zh ? ["供应", "新运行", "休息", "下次", "发布", "检查", "提醒"] : ["Provider", "new runs", "rest", "next", "Release", "check", "Alert"]]
+      ] : [
+        ['S.coordinator.model = "new-model"', zh ? ["协调席", "下次启动"] : ["Coordinator", "next start"]],
+        ['S.coordinator_compact.working_at = 600000', zh ? ["工作中压缩", "下次启动"] : ["working compaction", "next start"]],
+        ['S.coordinator_compact.idle_at = 300000', zh ? ["空闲压缩", "下次判断"] : ["Idle compaction", "next decision"]]
+      ];
+      for (const [edit, parts] of cases) {
+        run(edit); settingsPostReply = {ok:false, problems:["example refusal"]};
+        await run("saveSettings()"); check(!run("settingsMessage"), "failed save announced effective settings");
+        settingsPostReply = {ok:true}; await run("saveSettings()");
+        const message = run("settingsSaveState.textContent");
+        for (const part of parts) check(message.includes(part), "save timing missing: " + part + ": " + message);
+        check(!message.includes(zh ? "下一件活起生效" : "applies from the next task"), "blanket timing remains");
+        run('KEY_DRAFTS = {}'); await run("saveSettings()");
+        check(run("settingsMessage === T.saved"), "unchanged save repeated old timing or key advice");
+      }
+    } else if (ask === "settings-fix-stale") {
       change(number(), "38"); change(key(), "sk-still-typed");
       run('S.coordinator.model = "draft-model"; S.release_direct = "hold"; refreshSettingsState()');
       const next = given["/api/settings"];
@@ -31201,6 +31226,15 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def test_successful_save_reports_a_failed_reload_as_saved(self):
         self.run_settings_fix_scenario("reload")
+
+    def test_price_save_explains_immediate_historical_repricing_with_pending_key(self):
+        self.run_settings_fix_scenario("saved-prices")
+
+    def test_security_save_explains_new_runs_and_other_changed_settings(self):
+        self.run_settings_fix_scenario("saved-security")
+
+    def test_coordinator_save_distinguishes_next_start_from_idle_decision(self):
+        self.run_settings_fix_scenario("saved-coordinator")
 
     def test_discard_confirms_unadded_provider_and_price_names(self):
         self.run_settings_fix_scenario("discard")
