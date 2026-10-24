@@ -4,6 +4,7 @@ from __future__ import annotations
 import glob
 import hashlib
 import os
+import re
 import shlex
 import stat
 from pathlib import Path
@@ -11,50 +12,119 @@ from pathlib import Path
 MAX_BYTES = 16 * 1024 * 1024
 
 
-def _input_word(word, spelling):
-    """Keep shell pattern characters active only outside quotes and escapes."""
-    decoded, pattern, quote, active, dynamic = [], [], "", False, False
-    index = 0
-    while index < len(spelling):
-        char = spelling[index]
-        index += 1
-        if char == "\\" and quote != "'" and index < len(spelling):
-            following = spelling[index]
-            if not quote or following in '$`"\\\n':
-                index += 1
-                if following != "\n":
-                    decoded.append(following)
-                    pattern.append(glob.escape(following))
-                continue
-        if char == quote:
-            quote = ""
-        elif char in "'\"" and not quote:
-            quote = char
-        else:
-            decoded.append(char)
-            dynamic |= char in "$`" and quote != "'"
-            magic = not quote and char in "*?["
-            active |= magic
-            pattern.append(char if magic else glob.escape(char))
-    if quote:
-        return word, None, True
-    return "".join(decoded), "".join(pattern) if active else None, dynamic
+def _input_word(spelling):
+    """Decode shell fragments while keeping quoted and escaped pattern characters literal."""
+    decoded, patterns, dynamic = [], [], False
+    for token in re.findall(r'''\\[\s\S]|'[^']*'|"(?:\\[\s\S]|[^"\\])*"|[^\\'"]+''', spelling):
+        quote = token[0]
+        dynamic |= quote != "'" and bool(re.search(r"[$`]", re.sub(r"\\[\s\S]", "", token)))
+        value = token[1:-1] if quote in "'\"" else token[1:].replace("\n", "") if quote == "\\" else token
+        if quote == '"':
+            value = re.sub(r'\\([$`"\\\n])', lambda m: m[1] if m[1] != "\n" else "", value)
+        decoded.append(value)
+        patterns.append(glob.escape(value) if quote in "'\"\\" else value)
+    return "".join(decoded), "".join(patterns), dynamic
 
 
-def _paths(command: str, content_inputs: bool = False, repository=None, directory_change=None):
-    """Read quoted words too, including a shell command passed as one word to bash -c.
-    Content inputs carry their optional shell pattern alongside the path.
-    """
-    pending, seen = [(command, Path("."))], set()
+def _input_paths(command: str, directory_change):
+    """Recognized content inputs, with literal quoting and possible shell working directories."""
+    pending = [(command, frozenset({Path(".")}))]
     while pending:
-        line, directory = pending.pop()
-        if (line, directory) in seen:
+        line, locations = pending.pop()
+        # A word consists of unquoted characters, escapes and quoted fragments; operators stand alone.
+        words = re.findall(r'''(?:[^\s;&|()<>'"\\]|\\[\s\S]|'[^']*'|"(?:\\[\s\S]|[^"\\])*")+|[;&|()<>\n]+''', line)
+        output, first, reads, cd_next, input_file, physical, skip_option = False, True, False, False, False, False, False
+        stack, pipeline, piped, before, ambiguous, name, redirected = [], locations, False, locations, False, "", False
+        for index, spelling in enumerate(words):
+            word, pattern, dynamic = _input_word(spelling)
+            if dynamic and ("$(" in word or "`" in word):
+                pending.append((word.replace("`", " "), locations))
+            if output:
+                output = False
+                continue
+            if word.isdecimal() and words[index + 1:index + 2] and words[index + 1] in ("<", "<>", ">", ">>", ">|", ">&"):
+                continue
+            if spelling in (">", ">>", ">|", "&>", "&>>", ">&", "<", "<>"):
+                output, input_file, redirected = spelling not in ("<", "<>"), spelling in ("<", "<>"), True
+                if name == "cd":
+                    ambiguous, locations = True, locations | before
+                continue
+            if spelling and all(c in ";&|()\n" for c in spelling):
+                ambiguous |= "||" in spelling or ("&&" in spelling and name != "cd")
+                for char in spelling.replace("&&", ";").replace("||", ";"):
+                    if char == "(":
+                        stack.append((locations, pipeline, piped))
+                        pipeline, piped = locations, False
+                    elif char == ")" and stack:
+                        locations, pipeline, piped = stack.pop()
+                    elif char == "|":
+                        locations, piped = pipeline, True
+                    else:
+                        locations = pipeline if piped else locations
+                        pipeline, piped = locations, False
+                first, reads, cd_next, name, redirected, before, skip_option = True, False, False, "", False, locations, False
+                continue
+            ambiguous |= first and word in ("if", "elif", "else", "for", "while", "until", "case", "{", "}")
+            if first and not input_file and word in ("if", "then", "elif", "else", "while", "until", "do", "!"):
+                continue
+            if first and not input_file and re.match(r"^[a-zA-Z_][a-zA-Z_0-9]*=", word):
+                continue
+            read_word, change_dir = input_file or reads, False
+            if name in ("sed", "awk", "gawk", "mawk") and word in ("-f", "--file"):
+                input_file = True
+                continue
+            read_word |= name == "sed" and word.startswith(("-f", "--file="))
+            if first and not input_file:
+                if name and (word.startswith("-") or skip_option):
+                    skip_option = not skip_option and word in ("-u", "--unset", "-g", "--group", "--user", "-n", "-a")
+                    continue
+                name = Path(word).name or word
+                reads = name in ("sh bash dash zsh ksh ash python python3 python2 perl ruby node php lua . source "
+                                 "cat awk gawk mawk env sudo command exec nohup timeout xargs find").split()
+                reads |= bool(re.fullmatch(r"python[0-9.]+", name))
+                cd_next, physical, first, read_word = word == "cd", False, name in ("env", "sudo", "command", "exec", "nohup", "nice"), True
+                ambiguous |= cd_next and redirected
+            elif cd_next and word in ("-P", "-L"):
+                physical = word == "-P"
+            else:
+                if name == "cd" and (not cd_next or (word.startswith("-") and word != "--")):
+                    ambiguous, locations = True, locations | before
+                change_dir = not input_file and cd_next and not word.startswith("-")
+                cd_next &= not change_dir
+            if name in ("sed", "awk", "gawk", "mawk") and word.startswith("-f") and len(word) > 2:
+                value, shell_pattern = word[2:], pattern[2:]
+            else:
+                value = word.split("=", 1)[-1] if word.startswith("-") and not input_file else word
+                shell_pattern = pattern.split("=", 1)[-1] if word.startswith("-") and not input_file else pattern
+            if dynamic:
+                for prefix in ("${HOME}/", "$HOME/"):
+                    value = value.replace(prefix, str(Path.home()) + "/")
+                    shell_pattern = shell_pattern.replace(prefix, glob.escape(str(Path.home())) + "/")
+            if not (dynamic and ("$" in value or "`" in value)) and not (value.startswith("~") and not value.startswith("~/")):
+                p = Path(value).expanduser()
+                if shell_pattern.startswith("~/"):
+                    shell_pattern = glob.escape(str(Path.home())) + shell_pattern[1:]
+                if read_word:
+                    for location in sorted(locations, key=str):
+                        yield location / p, location / Path(shell_pattern).expanduser()
+                if change_dir:
+                    changed = frozenset(directory_change(location / p, physical) or location for location in locations)
+                    locations = locations | changed if ambiguous else changed
+            input_file = False
+            if read_word and word != line and any(c.isspace() or c in "'\";&|()<>" for c in word):
+                pending.append((word, locations))
+
+
+def _paths(command: str):
+    """Read quoted words too, including a shell command passed as one word to bash -c."""
+    pending, seen = [command], set()
+    while pending:
+        line = pending.pop()
+        if line in seen:
             continue
-        seen.add((line, directory))
+        seen.add(line)
         try:
-            lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>" + ("\n" if content_inputs else ""))
-            if content_inputs:
-                lex.whitespace = " \t\r"
+            lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
             lex.whitespace_split = True
             lex.commenters = ""
             words = []
@@ -66,126 +136,31 @@ def _paths(command: str, content_inputs: bool = False, repository=None, director
                 if word is None:
                     break
                 end = lex.instream.tell() - len(lex._pushback_chars)
-                words.append((word, line[start:end].strip(" \t\r" if content_inputs else None)))
+                words.append((word, line[start:end].strip()))
         except ValueError:
             words = [(word, word) for word in line.split()]
-        output, first, reads, cd_next, input_file, physical = False, True, True, False, False, False
-        directories = []
-        pipeline_directory, piped = directory, False
-        history, ambiguous, command_name, redirected = {directory}, False, "", False
+        output = False
         for word, spelling in words:
             if output:
                 output = False
-                if content_inputs:
-                    word, _, dynamic = _input_word(word, spelling)
-                    if dynamic and ("$(" in word or "`" in word):
-                        pending.extend((word.replace("`", " "), location)
-                                       for location in (history | {directory} if ambiguous else {directory}))
                 continue
             if spelling in (">", ">>", ">|", "&>", "&>>", ">&"):
-                redirected = True
-                ambiguous |= command_name == "cd"
                 output = True
                 continue
-            word, pattern, dynamic = _input_word(word, spelling) if content_inputs else (word, None, True)
-            read_word, change_dir = input_file or reads, False
-            assignment = (first and "=" in word and word.split("=", 1)[0].isascii() and
-                          word.split("=", 1)[0].isidentifier())
-            if content_inputs:
-                if spelling in ("<", "<>"):
-                    redirected = True
-                    ambiguous |= command_name == "cd"
-                    input_file = True
-                    continue
-                if spelling and all(c in ";&|()\n" for c in spelling):
-                    ambiguous |= "||" in spelling or ("&&" in spelling and command_name != "cd")
-                    for char in spelling.replace("&&", ";").replace("||", ";"):
-                        if char == "(":
-                            directories.append((directory, pipeline_directory, piped))
-                            pipeline_directory, piped = directory, False
-                        elif char == ")" and directories:
-                            directory, pipeline_directory, piped = directories.pop()
-                        elif char == "|":
-                            directory, piped = pipeline_directory, True
-                        else:
-                            if piped:
-                                directory = pipeline_directory
-                            pipeline_directory, piped = directory, False
-                    first, reads, cd_next = True, True, False
-                    command_name, redirected = "", False
-                    continue
-                if first and word in ("if", "elif", "else", "for", "while", "until", "case", "{", "}"):
-                    ambiguous = True
-                if first and not input_file and word in ("if", "then", "elif", "else", "while", "until", "do", "!"):
-                    continue
-                if first and not input_file and not assignment:
-                    # These commands write files or text, or test metadata; their operands are not content inputs.
-                    reads = word not in ("touch", "/bin/touch", "/usr/bin/touch", "echo", "printf", "test", "[")
-                    cd_next = word == "cd"
-                    command_name = word
-                    ambiguous |= cd_next and redirected
-                    physical = False
-                    first = False
-                    read_word = True
-                else:
-                    if cd_next and word in ("-P", "-L"):
-                        physical = word == "-P"
-                    elif command_name == "cd" and (not cd_next or (word.startswith("-") and word != "--")):
-                        ambiguous = True
-                    change_dir = not input_file and cd_next and not word.startswith("-")
-                    if change_dir:
-                        cd_next = False
-                input_file = False
             # Options and assignments can hold a path after '='. No variable but HOME is read.
             if word.startswith(("/", "~/", "$HOME/", "${HOME}/", "./", "../")) or "=" not in word:
                 values = [word]
             else:
                 values = word.split("=")[1:]
-            # An operand may be a filename containing '=', as well as an option holding a path.
-            if content_inputs and not assignment and values != [word] and not word.startswith("-"):
-                values.insert(0, word)
-            patterns = ([pattern] if len(values) == 1 and values[0] == word else
-                        ([pattern] if values[0] == word else []) + pattern.split("=")[1:]
-                        if pattern else [None] * len(values))
-            for value, shell_pattern in zip(values, patterns):
-                if dynamic:
-                    value = value.replace("${HOME}/", str(Path.home()) + "/").replace("$HOME/", str(Path.home()) + "/")
-                if shell_pattern and dynamic:
-                    shell_pattern = shell_pattern.replace("${HOME}/", str(Path.home()) + "/").replace("$HOME/", str(Path.home()) + "/")
-                if (dynamic and ("$" in value or "`" in value)) or (value.startswith("~") and not value.startswith("~/")):
+            for value in values:
+                value = value.replace("${HOME}/", str(Path.home()) + "/").replace("$HOME/", str(Path.home()) + "/")
+                if "$" in value or "`" in value or (value.startswith("~") and not value.startswith("~/")):
                     continue
                 p = Path(value).expanduser()
                 # Bare names can be repository links leading outside too; inspect resolves them.
-                if read_word:
-                    if content_inputs:
-                        for location in sorted(history | {directory} if ambiguous else {directory}, key=str):
-                            yield location / p, location / Path(shell_pattern).expanduser() if shell_pattern else None
-                    else:
-                        yield p
-                if change_dir:
-                    new_directory = directory / p
-                    try:
-                        if directory_change:
-                            if ambiguous:
-                                for previous in list(history):
-                                    changed = directory_change(previous / p, physical)
-                                    if changed is not None:
-                                        history.add(changed)
-                            changed = directory_change(new_directory, physical)
-                            if changed is not None:
-                                directory = changed
-                        else:
-                            location = Path(repository or ".") / new_directory
-                            if location.is_dir() and os.access(location, os.X_OK):
-                                directory = new_directory
-                        history.add(directory)
-                    except (OSError, RuntimeError, ValueError):
-                        pass
-            nested = content_inputs and ((dynamic and ("$(" in word or "`" in word)) or
-                                         (read_word and any(c in word for c in ";&|()<>")))
-            if word != line and (nested or (read_word and any(c.isspace() or c in "'\"" for c in word))):
-                pending.extend((word.replace("`", " ") if nested else word, location)
-                               for location in (history | {directory} if ambiguous else {directory}))
+                yield p
+            if word != line and any(c.isspace() or c in "'\"" for c in word):
+                pending.append(word)
 
 
 def inspect(command: str, repository, fingerprint: bool = True, directory=None) -> dict:

@@ -42,7 +42,6 @@ A stopped release went out for no `--after`: like a failed one, it lets no other
 from __future__ import annotations
 
 import contextlib
-import fnmatch
 import glob
 import hashlib
 import hmac
@@ -52,7 +51,6 @@ import re
 import secrets
 import shutil
 import signal
-import stat
 import subprocess
 import tempfile
 import threading
@@ -720,153 +718,76 @@ def _has_commit(repo, sha: str) -> bool:
 
 
 # -- asking ------------------------------------------------------------------------------------------------------
-class _RepositoryInputs:
-    """Read named paths in a checkout or in the release tree, following each link before '..'."""
-    def __init__(self, repository, commit):
-        self.root = Path(repository).resolve()
-        self.entries, self.sources, self.gitlinks, self.loaded = {}, {}, {}, set()
-        self._load(self.root, commit)
+def repository_input(command: str, repository, commit: str, fixed: bool = False, directory=None) -> tuple:
+    """Check recognized repository inputs. Fixed relative inputs are checked in their actual checkout."""
+    root = Path(repository).resolve()
+    cwd = Path(directory).resolve() if directory else root
+    entries = {}
 
-    @staticmethod
-    def _read(repository, *args):
-        result = subprocess.run(["git", *args], cwd=repository, capture_output=True, stdin=subprocess.DEVNULL)
+    def load(repository, revision):
+        result = subprocess.run(["git", "ls-tree", "-r", "-z", revision], cwd=repository, capture_output=True,
+                                stdin=subprocess.DEVNULL)
         if result.returncode:
             raise RuntimeError("cannot read release input tree")
-        return os.fsdecode(result.stdout)
-
-    def _load(self, repository, commit):
-        for row in self._read(repository, "ls-tree", "-r", "-t", "-z", commit).split("\0"):
-            if row:
-                info, name = row.split("\t", 1)
-                mode, _, oid = info.split()
-                path = repository / name
-                self.entries[path] = int(mode, 8), oid
-                self.sources[path] = repository, commit, name
-                if mode == "160000":
-                    self.gitlinks[path] = oid
-
-    def _ensure(self, path):
-        """A gitlink binds its initialized submodule's files to the recorded submodule commit."""
-        while True:
-            pending = [p for p in self.gitlinks if p not in self.loaded and (p == path or p in path.parents)]
-            if not pending:
-                return
-            for submodule in pending:
-                self.loaded.add(submodule)
+        for row in filter(None, os.fsdecode(result.stdout).split("\0")):
+            info, name = row.split("\t", 1)
+            _, kind, oid = info.split()
+            path = repository / name
+            if kind == "blob":
+                entries[path] = repository, revision, name
+            else:  # An initialized submodule's files are bound by its recorded commit.
                 try:
-                    if not self._read(submodule, "rev-parse", "--show-prefix").strip():
-                        self._load(submodule, self.gitlinks[submodule])
+                    if not git("rev-parse", "--show-prefix", cwd=path):
+                        load(path, oid)
                 except (OSError, RuntimeError):
                     pass
+    load(root, commit)
 
-    def resolve(self, candidate, snapshot=False):
-        """Return the destination, its mode, and repository file/link dependencies with their source."""
-        candidate = Path(candidate)
-        cursor = Path(candidate.anchor) if candidate.is_absolute() else self.root
-        parts = list(candidate.parts[1:] if candidate.is_absolute() else candidate.parts)
-        dependencies, links, mode = [], 0, stat.S_IFDIR
+    def dependencies(candidate):
+        candidate = cwd / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_file() or root not in resolved.parents:
+                return []
+        except (OSError, RuntimeError, ValueError):
+            return []
+        cursor, parts, links = Path(candidate.anchor), list(candidate.parts[1:]), []
         while parts:
             part = parts.pop(0)
             if part == "..":
                 cursor = cursor.parent
-                snapshot &= cursor == self.root or self.root in cursor.parents
                 continue
             path = cursor / part
-            try:
-                if snapshot:
-                    self._ensure(path)
-                    mode, oid = self.entries.get(path, (0, ""))
-                    target = self._read(self.sources[path][0], "cat-file", "blob", oid) if stat.S_ISLNK(mode) else ""
-                    if mode == 0o160000:
-                        mode = stat.S_IFDIR
-                else:
-                    mode = path.lstat().st_mode
-                    target = os.readlink(path) if stat.S_ISLNK(mode) else ""
-            except (OSError, RuntimeError, ValueError):
-                return path, 0, dependencies, snapshot
-            if stat.S_ISLNK(mode):
-                dependencies.append((path, not snapshot))
-                links += 1
-                if links > 40:
-                    return path, 0, dependencies, snapshot
-                target = Path(target)
+            if path.is_symlink():
+                links.append(path)
+                target = Path(os.readlink(path))
+                parts = list(target.parts) + parts
                 if target.is_absolute():
-                    cursor, snapshot = Path(target.anchor), False
-                    parts = list(target.parts[1:]) + parts
-                else:
-                    parts = list(target.parts) + parts
-                continue
-            if not mode or (parts and not stat.S_ISDIR(mode)):
-                return path, 0, dependencies, snapshot
-            cursor = path
-        if stat.S_ISREG(mode):
-            dependencies.append((cursor, not snapshot))
-        return cursor, mode, dependencies, snapshot
+                    cursor = Path(parts.pop(0))
+            else:
+                cursor = path
+        return links + [resolved]
 
-    def expand(self, candidate, pattern, snapshot=False):
-        if pattern is None:
-            return [candidate]
-        pattern = Path(pattern)
-        paths = [Path(pattern.anchor) if pattern.is_absolute() else Path(".")]
-        for part in pattern.parts[1:] if pattern.is_absolute() else pattern.parts:
-            expanded = []
-            for path in paths:
-                if not glob.has_magic(part):
-                    expanded.append(path / part)
-                    continue
-                directory, mode, _, in_tree = self.resolve(path, snapshot)
-                if not stat.S_ISDIR(mode):
-                    continue
-                try:
-                    names = ([p.name for p in self.entries if p.parent == directory] if in_tree else
-                             [p.name for p in directory.iterdir()])
-                except OSError:
-                    continue
-                expanded += [path / name for name in names if fnmatch.fnmatchcase(name, part) and
-                             (not name.startswith(".") or part.startswith("."))]
-            paths = expanded
-        return paths or [candidate]  # An unmatched shell pattern is a literal word.
+    def change_directory(path, physical):
+        candidate = cwd / (path if physical else os.path.normpath(path))
+        if candidate.is_dir() and os.access(candidate, os.X_OK):
+            return candidate.resolve() if physical else Path(os.path.normpath(path))
+        return None
 
-    def directory(self, path, physical, fixed):
-        if not physical:
-            path = Path(os.path.normpath(path))
-        resolved, mode, _, in_tree = self.resolve(path, fixed and not path.is_absolute())
-        if not stat.S_ISDIR(mode) or (not in_tree and not os.access(resolved, os.X_OK)):
-            return None
-        if physical:
-            return resolved.relative_to(self.root) if in_tree else resolved
-        return path
-
-
-def repository_input(command: str, repository, commit: str, fixed: bool = False) -> tuple:
-    """Explicit repository file inputs must belong to the release commit, including paths through links.
-    Use the same word parsing as outside inputs; outputs, metadata tests and unnamed dependencies are excluded.
-    """
-    inputs, seen = _RepositoryInputs(repository, commit), set()
-    root = inputs.root
-    for word, pattern in outside._paths(command, content_inputs=True, repository=root,
-                                        directory_change=lambda path, physical: inputs.directory(path, physical, fixed)):
-        snapshot = fixed and not word.is_absolute()
-        for candidate in inputs.expand(word, pattern, snapshot):
-            resolved, mode, dependencies, _ = inputs.resolve(candidate, snapshot)
-            if snapshot and not mode:
-                # A named local file absent from the release tree is not a committed input.
-                resolved, mode, dependencies, _ = inputs.resolve(candidate)
-            if root not in resolved.parents or not stat.S_ISREG(mode):
-                continue
-            for path, live in dependencies:
-                key = path, fixed and live
-                if root not in path.parents or key in seen:
+    for word, pattern in outside._input_paths(command, directory_change=(
+            (lambda path, physical: path) if fixed and directory is None else change_directory)):
+        if fixed and directory is None and not word.is_absolute():
+            continue
+        matches = glob.glob(str(Path(glob.escape(str(cwd))) / pattern))
+        for candidate in matches or [word]:
+            for path in dependencies(candidate):
+                if root not in path.parents:
                     continue
-                seen.add(key)
                 relative = path.relative_to(root).as_posix()
                 try:
-                    inputs._ensure(path)
-                    entry_mode, _ = inputs.entries.get(path, (0, ""))
-                    if stat.S_ISREG(entry_mode) or stat.S_ISLNK(entry_mode):
-                        # Absolute paths and absolute links still read the original checkout with --fixed.
-                        if fixed and live:
-                            source, revision, name = inputs.sources[path]
+                    if path in entries:
+                        if fixed:
+                            source, revision, name = entries[path]
                             git("diff", "--quiet", "--no-ext-diff", "--no-textconv", revision, "--",
                                 f":(literal){name}", cwd=source)
                         continue
@@ -1069,9 +990,6 @@ def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
     if repo_key(ln["repo"]) != r.get("repo") or (ln.get("base") or "main") != r.get("base"):
         return (f"lane {r['lane']}'s repository or base branch changed since it was asked",
                 f"工作线 {r['lane']} 的仓库或基础分支在请求之后改了")
-    why = repository_input(r.get("command") or "", ln["repo"], r["commit"], bool(r.get("fixed")))
-    if why[0]:
-        return why
     files = outside.inspect(r.get("command") or "", ln["repo"])["outside"]
     if "outside" not in r and files:
         path = files[0]["path"]
@@ -1083,6 +1001,9 @@ def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
                 f"仓库外的文件 {path} 在请求发布之后变了")
     try:
         tip = git("rev-parse", "--verify", f"refs/heads/{r['base']}^{{commit}}", cwd=r["repo"])
+        why = repository_input(r.get("command") or "", ln["repo"], r["commit"], bool(r.get("fixed")))
+        if why[0]:
+            return why
     except (RuntimeError, OSError) as e:
         return (desk.redact(f"{r['base']} cannot be read in {r['repo']} ({e})")[:400],
                 desk.redact(f"{r['base']} 在 {r['repo']} 里读不出来（{e}）")[:400])
@@ -1542,6 +1463,11 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
         git("worktree", "add", "--detach", str(path), r["commit"], cwd=r["repo"])
         if (get(desk, rid) or {}).get("stop_asked"):  # stopped meanwhile: its command never runs
             finish(desk, rid, ran=False)
+            return None
+        why, why_zh = repository_input(r["command"], r["repo"], r["commit"], True, directory=path)
+        if why:
+            void(desk, rid, why, ("starting",), why_zh)
+            drop_checkout(desk, rid, r["repo"])
             return None
         proc = _launch(desk, r, token, path)
     desk.event("release_started", id=rid, lane=r["lane"], target=target, commit=r["commit"])

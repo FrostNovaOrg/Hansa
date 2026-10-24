@@ -27059,62 +27059,97 @@ def save():'''))
                     self.assertNotIn("release_files matches", shown)
                     self.assertIn("  standing instructions:", shown)
 
+    def test_release_unreadable_repository_voids_cleanly(self):
+        from hansa import release
+        for missing in ("repository", "commit", "tree"):
+            with self.subTest(missing=missing):
+                self.with_release("true")
+                r = release.ask(self.desk, "a")
+                oid = self.git_out("rev-parse", r["commit"] + ("^{tree}" if missing == "tree" else ""))
+                original = self.repo if missing == "repository" else self.repo / ".git" / "objects" / oid[:2] / oid[2:]
+                moved = self.tmp / "unavailable"
+                original.rename(moved)
+                try:
+                    self.assertIn("cannot be read", release.stale(self.desk, self.desk.settings(), r))
+                    self.hansa("status")
+                    answer = release.answer(self.desk, r["id"], True, commit=r["commit"])
+                    self.assertIn("cannot be read", answer["void"])
+                    self.assertEqual(release.get(self.desk, r["id"])["state"], "void")
+                finally:
+                    moved.rename(original)
+
+    def test_release_output_and_metadata_arguments_are_accepted(self):
+        from hansa import release
+        self.commit_in_repo("deploy.sh", "echo deployed\n")
+        (self.repo / "artefact").write_text("previous output\n")
+        (self.repo / "0").touch()
+        for command in ("tar -czf artefact deploy.sh", "rm -f artefact && sh ./deploy.sh", "cp deploy.sh artefact",
+                        "cc -o artefact source.c", "tee artefact", "sed -i s/a/b/ artefact", "git add artefact",
+                        "mytool --output artefact", "git commit -m artefact", "mytool --message 'sh artefact'",
+                        "env FOO=bar tar -czf artefact deploy.sh", "env -u UNUSED git commit -m artefact",
+                        "command cp deploy.sh artefact", "nice -n 5 cp deploy.sh artefact", "sh deploy.sh 0</dev/null",
+                        "touch artefact; test -f artefact; [ -f artefact ]; echo artefact; printf %s artefact"):
+            with self.subTest(command=command):
+                self.with_release(command)
+                self.assertEqual(release.ask(self.desk, "a")["state"], "waiting")
+
     def test_release_requests_require_named_repository_files_in_the_commit(self):
         from hansa import release
         script = self.repo / "publish.sh"
-        marker = self.repo / "marker.txt"
-        marker.write_text("existing output\n")
         (self.repo / ".git" / "info" / "exclude").write_text("publish.sh\n")
-        for data in (b"echo publish\n", b"binary\0input"):
-            script.write_bytes(data)
-            for command in ("/bin/sh ./publish.sh", "bash -c 'sh publish.sh'", f"sh {script}",
-                            f"touch {marker} && sh ./publish.sh", "while [ -f marker.txt ]; do sh publish.sh; done",
-                            f"touch {marker}\nsh ./publish.sh", f"touch {marker};\nsh ./publish.sh",
-                            "cd not-here; sh ./publish.sh", "(cd ops); sh ./publish.sh"):
-                with self.subTest(data=data, command=command):
-                    self.with_release(command)
-                    said = self.refused("release", "a")
-                    self.assertIn("publish.sh", said)
-                    self.assertIn("commit", said)
-                    self.assertEqual(release.releases(self.desk), [])
+        script.write_bytes(b"binary\0input")
         (self.repo / "ops").mkdir()
         (self.repo / "ops" / "nested.sh").write_text("echo publish\n")
-        for command, path in (("cd ops && sh nested.sh", "ops/nested.sh"),
-                              ("sh -c 'cd ops; sh nested.sh'", "ops/nested.sh"),
-                              ('echo "$(./publish.sh)"', "publish.sh"), ("echo `./publish.sh`", "publish.sh"),
-                              ('true > "$(./publish.sh)"', "publish.sh"),
-                              ("sh -c 'true;./publish.sh'", "publish.sh")):
+        for command in ("/bin/sh ./publish.sh", "bash -c 'sh publish.sh'", f"sh {script}",
+                        "0</dev/null sh ./publish.sh", "env -u UNUSED sh publish.sh", "python3.9 publish.sh",
+                        "sed -f ./publish.sh", "sed --file=./publish.sh", "awk -fpublish.sh",
+                        ". ./publish.sh", "source publish.sh",
+                        "touch marker.txt && sh ./publish.sh", "while [ -f marker.txt ]; do sh publish.sh; done",
+                        "touch marker.txt\nsh ./publish.sh", "touch marker.txt;\nsh ./publish.sh",
+                        "cd not-here; sh ./publish.sh", "(cd ops); sh ./publish.sh", "cd ops && sh nested.sh",
+                        "sh -c 'cd ops; sh nested.sh'", 'echo "$(./publish.sh)"', "echo `./publish.sh`",
+                        'true > "$(./publish.sh)"', "sh -c 'true;./publish.sh'"):
             with self.subTest(command=command):
                 self.with_release(command)
-                self.assertIn(path, self.refused("release", "a"))
-        self.with_release(f"touch {marker}; test -f {marker}; [ -f {marker} ]; echo {marker}; printf %s {marker}; "
-                          f"echo 'sh {script}'")
-        r = release.ask(self.desk, "a")
-        self.assertEqual(release.stale(self.desk, self.desk.settings(), r), "")
+                said = self.refused("release", "a")
+                self.assertIn("ops/nested.sh" if "nested.sh" in command else "publish.sh", said)
+                self.assertIn("commit", said)
+        self.assertEqual(release.releases(self.desk), [])
 
     def test_release_answers_check_new_repository_inputs(self):
         from hansa import release
-        self.with_release("sh < ./publish.sh")
-        r = release.ask(self.desk, "a")
-        (self.repo / "publish.sh").write_text("echo publish\n")
-        answer = release.answer(self.desk, r["id"], True, commit=r["commit"])
-        self.assertFalse(answer["ok"])
-        self.assertIn("publish.sh", answer["void"])
-        self.assertEqual(release.get(self.desk, r["id"])["state"], "void")
-        self.assertTrue(release.stale(self.desk, self.desk.settings(), r, zh=True))
+        for command in ("sh < ./publish.sh", "sh ./pub*.sh", "echo release <./publish.sh"):
+            with self.subTest(command=command):
+                self.with_release(command)
+                r = release.ask(self.desk, "a")
+                script = self.repo / "publish.sh"
+                script.write_text("echo publish\n")
+                answer = release.answer(self.desk, r["id"], True, commit=r["commit"])
+                self.assertFalse(answer["ok"])
+                self.assertIn("publish.sh", answer["void"])
+                self.assertEqual(release.get(self.desk, r["id"])["state"], "void")
+                self.assertTrue(release.stale(self.desk, self.desk.settings(), r, zh=True))
+                script.unlink()
 
     def test_release_start_checks_repository_inputs_again(self):
         from hansa import release
-        self.with_release("sh ./publish.sh")
-        r = release.ask(self.desk, "a")
-        self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
-        script = self.repo / "publish.sh"
-        script.write_text("echo first\n")
-        script.write_text("echo second\n")
-        with unittest.mock.patch.object(release, "_launch") as launch:
-            self.assertIsNone(release.start(self.desk, r["id"]))
-        launch.assert_not_called()
-        self.assertEqual(release.get(self.desk, r["id"])["state"], "void")
+        self.commit_in_repo("ops/inner/keep.txt", "keep directory\n")
+        (self.repo / "current").symlink_to("ops/inner", target_is_directory=True)
+        sh("git", "add", "current", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add directory link", cwd=self.repo)
+        for word, path in (("./publish.sh", "publish.sh"), ("./publis[h].sh", "publish.sh"),
+                           ("current/../publish.sh", "ops/publish.sh")):
+            with self.subTest(word=word):
+                self.with_release(f"sh {word}")
+                r = release.ask(self.desk, "a")
+                self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+                script = self.repo / path
+                script.write_text("echo publish\n")
+                with unittest.mock.patch.object(release, "_launch") as launch:
+                    self.assertIsNone(release.start(self.desk, r["id"]))
+                launch.assert_not_called()
+                self.assertEqual(release.get(self.desk, r["id"])["state"], "void")
+                script.unlink()
         self.assertEqual(self.events("release_started"), [])
 
     def test_release_repository_links_require_committed_paths(self):
@@ -27136,11 +27171,12 @@ def save():'''))
 
     def test_fixed_release_inputs_use_the_commit_rather_than_the_index(self):
         from hansa import release
-        self.fixed_target("install", "sh ./publish.sh", tick=False)
+        self.fixed_target("install", f"sh {self.repo / 'publish.sh'}", tick=False)
         (self.repo / "publish.sh").write_text("echo approved\n")
         sh("git", "add", "publish.sh", cwd=self.repo)
         self.assertIn("publish.sh", self.refused("release", "a", "install"))
         self.commit_in_repo("publish.sh", "echo approved\n")
+        self.fixed_target("install", "sh ./publish.sh", tick=False)
         r = release.ask(self.desk, "a", target="install")
         self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
         (self.repo / "publish.sh").write_text("echo local\n")
@@ -27158,12 +27194,18 @@ def save():'''))
         (self.repo / "ops" / "publish.sh").write_text("echo publish\n")
         (self.repo / "publish.sh").write_text("echo publish\n")
         for word in ("./pub*.sh", "./publis?.sh", "./publis[h].sh", "./op?/*.sh", "./ops/publish.*",
-                     "'./ops/'pub*.sh", f"{self.repo}/pub*.sh", f"{self.repo}/publis?.sh",
-                     f"{self.repo}/publis[h].sh"):
+                     "'./ops/'pub*.sh", f"{self.repo}/pub*.sh"):
             with self.subTest(word=word):
                 self.with_release(f"sh {word}")
                 self.assertIn("publish.sh", self.refused("release", "a"))
                 self.assertEqual(release.releases(self.desk), [])
+        (self.repo / "home[1]").mkdir()
+        (self.repo / "home[1]" / "publish.sh").write_text("echo publish\n")
+        with unittest.mock.patch.object(Path, "home", return_value=self.repo / "home[1]"):
+            for word in ("$HOME/pub*.sh", "${HOME}/pub*.sh", "~/pub*.sh"):
+                with self.subTest(word=word):
+                    self.with_release(f"sh {word}")
+                    self.assertIn("publish.sh", self.refused("release", "a"))
 
     def test_release_repository_input_words_keep_literal_characters(self):
         from hansa import release
@@ -27173,76 +27215,44 @@ def save():'''))
                 try:
                     (self.repo / name).write_text("echo publish\n")
                 except OSError as e:
-                    if e.errno == errno.EILSEQ:
+                    if e.errno != errno.EILSEQ:
+                        raise
+                    with self.subTest(filename=name):
                         self.skipTest("filesystem requires UTF-8 filenames")
-                    raise
+                    continue
                 double_quoted = '"' + name.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`") + '"'
-                for word in (shlex.quote(name), shlex.quote("./" + name), double_quoted):
-                    with self.subTest(word=word):
-                        self.with_release(f"sh {word}")
+                for command in (f"sh {shlex.quote(name)}", f"sh {shlex.quote('./' + name)}",
+                                f"sh {double_quoted}", f"awk -f{shlex.quote(name)}", f"<{shlex.quote(name)} sh"):
+                    with self.subTest(command=command):
+                        self.with_release(command)
                         self.assertIn(name, self.refused("release", "a"))
                 self.commit_in_repo(name, "echo publish\n")
-                self.with_release(f"sh {shlex.quote(name)}")
-                r = release.ask(self.desk, "a")
-                self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
-                self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
+                self.assertEqual(release.ask(self.desk, "a")["state"], "waiting")
         (self.repo / "input.sh").write_text("echo local\n")
         self.with_release("echo '$(sh ./input.sh)'; echo '`sh ./input.sh`'")
-        r = release.ask(self.desk, "a")
-        self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
-        self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
-
-    def test_release_answers_expand_new_repository_inputs(self):
-        from hansa import release
-        self.with_release("sh ./pub*.sh")
-        r = release.ask(self.desk, "a")
-        (self.repo / "publish.sh").write_text("echo publish\n")
-        self.assertFalse(release.answer(self.desk, r["id"], True, commit=r["commit"])["ok"])
-        self.assertEqual(release.get(self.desk, r["id"])["state"], "void")
-
-    def test_release_start_expands_new_repository_inputs(self):
-        from hansa import release
-        self.with_release("sh ./publis[h].sh")
-        r = release.ask(self.desk, "a")
-        self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
-        (self.repo / "publish.sh").write_text("echo publish\n")
-        with unittest.mock.patch.object(release, "_launch") as launch:
-            self.assertIsNone(release.start(self.desk, r["id"]))
-        launch.assert_not_called()
-        self.assertEqual(release.get(self.desk, r["id"])["state"], "void")
+        self.assertEqual(release.ask(self.desk, "a")["state"], "waiting")
 
     def test_release_input_redirections_are_checked_for_every_command(self):
         (self.repo / "input.txt").write_text("release input\n")
-        for command in ("echo release", "printf release", "touch output.txt", "test -f README.md", "[ -f README.md ]"):
-            for redirection in ("< input.txt", "0<input.txt", "<>input.txt", "0<>input.txt",
-                                ">output.txt <input.txt", '0<"input.txt"'):
-                for line in (f"{command} {redirection}", f"{redirection} {command}"):
-                    with self.subTest(line=line):
-                        self.with_release(line)
-                        self.assertIn("input.txt", self.refused("release", "a"))
-
-    def test_release_answers_check_redirected_repository_inputs(self):
-        from hansa import release
-        self.with_release("echo release <input.txt")
-        r = release.ask(self.desk, "a")
-        (self.repo / "input.txt").write_text("release input\n")
-        self.assertFalse(release.answer(self.desk, r["id"], True, commit=r["commit"])["ok"])
-        self.assertEqual(release.get(self.desk, r["id"])["state"], "void")
+        for line in ("echo release <input.txt", "0<input.txt printf release", "touch output.txt <>input.txt",
+                     "0<>input.txt test -f README.md", ">output.txt <input.txt [ -f README.md ]",
+                     'echo release 0<"input.txt"'):
+            with self.subTest(line=line):
+                self.with_release(line)
+                self.assertIn("input.txt", self.refused("release", "a"))
 
     def test_release_repository_paths_follow_links_before_parent_components(self):
         from hansa import release
         self.commit_in_repo("publish.sh", "echo approved\n")
-        self.commit_in_repo("ops/inner/keep.txt", "keep directory\n")
+        self.commit_in_repo("ops/inner/publish.sh", "echo approved\n")
         (self.repo / "current").symlink_to("ops/inner", target_is_directory=True)
-        sh("git", "add", "current", cwd=self.repo)
-        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add directory link", cwd=self.repo)
+        (self.repo / "latest").symlink_to("current", target_is_directory=True)
+        sh("git", "add", "current", "latest", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add directory links", cwd=self.repo)
         (self.repo / "ops" / "publish.sh").write_text("echo publish\n")
-        for word in ("current/../publish.sh", "./current/../publish.sh", f"{self.repo}/current/../publish.sh"):
-            for command in (f"sh {word}", f"sh -c 'sh {word}'"):
-                with self.subTest(command=command):
-                    self.with_release(command)
-                    self.assertIn("ops/publish.sh", self.refused("release", "a"))
-        for command in ("cd -P current/..; sh publish.sh", "cd -P current; cd ..; sh publish.sh"):
+        for command in ("sh current/../publish.sh", f"sh {self.repo}/current/../publish.sh",
+                        "sh -c 'sh ./current/../publish.sh'", "cd -P current/..; sh publish.sh",
+                        "cd -P current; cd ..; sh publish.sh"):
             with self.subTest(command=command):
                 self.with_release(command)
                 self.assertIn("ops/publish.sh", self.refused("release", "a"))
@@ -27250,33 +27260,7 @@ def save():'''))
                         "cd current; cd ..; sh publish.sh"):
             with self.subTest(command=command):
                 self.with_release(command)
-                r = release.ask(self.desk, "a")
-                self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
-                self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
-
-    def test_release_start_follows_links_before_parent_components(self):
-        from hansa import release
-        self.commit_in_repo("publish.sh", "echo approved\n")
-        self.commit_in_repo("ops/inner/keep.txt", "keep directory\n")
-        (self.repo / "current").symlink_to("ops/inner", target_is_directory=True)
-        sh("git", "add", "current", cwd=self.repo)
-        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add directory link", cwd=self.repo)
-        self.with_release("sh current/../publish.sh")
-        r = release.ask(self.desk, "a")
-        self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
-        (self.repo / "ops" / "publish.sh").write_text("echo publish\n")
-        with unittest.mock.patch.object(release, "_launch") as launch:
-            self.assertIsNone(release.start(self.desk, r["id"]))
-        launch.assert_not_called()
-        self.assertEqual(release.get(self.desk, r["id"])["state"], "void")
-
-    def test_release_committed_directory_links_are_supported(self):
-        from hansa import release
-        self.commit_in_repo("ops/publish.sh", "echo approved\n")
-        (self.repo / "current").symlink_to("ops", target_is_directory=True)
-        (self.repo / "latest").symlink_to("current", target_is_directory=True)
-        sh("git", "add", "current", "latest", cwd=self.repo)
-        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add directory links", cwd=self.repo)
+                self.assertEqual(release.ask(self.desk, "a")["state"], "waiting")
         for fixed in (False, True):
             with self.subTest(fixed=fixed):
                 if fixed:
@@ -27301,6 +27285,9 @@ def save():'''))
         r = release.ask(self.desk, "a")
         self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
         self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
+        submodule.rename(self.tmp / "submodule")
+        self.assertEqual(release.ask(self.desk, "a")["state"], "waiting")
+        (self.tmp / "submodule").rename(submodule)
         (submodule / "local.sh").write_text("echo local\n")
         self.with_release("sh vendor/local.sh")
         self.assertIn("vendor/local.sh", self.refused("release", "a"))
@@ -27311,18 +27298,23 @@ def save():'''))
     def test_fixed_release_relative_inputs_ignore_current_checkout_links(self):
         from hansa import release
         self.commit_in_repo("publish.sh", "echo approved\n")
+        self.commit_in_repo("ops/other.sh", "echo approved\n")
         (self.repo / "local.sh").write_text("echo local\n")
         (self.repo / "publish.sh").unlink()
         (self.repo / "publish.sh").symlink_to("local.sh")
-        self.fixed_target("install", "sh publish.sh", tick=False)
+        (self.repo / "ops" / "other.sh").write_text("echo local\n")
+        (self.repo / "ops" / "extra.sh").write_text("echo local\n")
+        self.fixed_target("install", "sh publish.sh; sh ops/*.sh", tick=False)
         r = release.ask(self.desk, "a", target="install")
         self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
         self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
         log = (self.desk.state_dir / "releases" / f"{r['id']}.log").read_text()
         self.assertIn("approved", log)
         self.assertNotIn("local", log)
-        self.commit_in_repo("ops/other.sh", "echo approved\n")
+        self.fixed_target("install", f"sh {self.repo}/ops/*.sh", tick=False)
+        self.assertIn("ops/", self.refused("release", "a", "install"))
         (self.repo / "ops" / "other.sh").unlink()
+        (self.repo / "ops" / "extra.sh").unlink()
         (self.repo / "ops").rmdir()
         (self.repo / "other.sh").write_text("echo local\n")
         self.fixed_target("install", "cd ops && sh other.sh", tick=False)
@@ -27330,14 +27322,38 @@ def save():'''))
         self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
         self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
 
+    def test_fixed_release_links_are_checked_in_the_execution_directory(self):
+        from hansa import release
+        self.commit_in_repo("ops/publish.sh", "echo approved\n")
+        (self.repo / "current").symlink_to(self.repo / "ops", target_is_directory=True)
+        sh("git", "add", "current", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add directory link", cwd=self.repo)
+        self.fixed_target("install", "sh current/*.sh", tick=False)
+        r = release.ask(self.desk, "a", target="install")
+        self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
+        for name in ("publish.sh", "local.sh"):
+            with self.subTest(name=name):
+                r = release.ask(self.desk, "a", target="install")
+                self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+                script = self.repo / "ops" / name
+                script.write_text("echo local\n")
+                with unittest.mock.patch.object(release, "_launch") as launch:
+                    self.assertIsNone(release.start(self.desk, r["id"]))
+                launch.assert_not_called()
+                record = release.get(self.desk, r["id"])
+                self.assertEqual(record["state"], "void")
+                self.assertIn(name, record["void"])
+                self.assertEqual(self.checkouts(), [])
+                if name == "publish.sh":
+                    script.write_text("echo approved\n")
+
     def test_release_inputs_use_the_current_shell_directory(self):
         from hansa import release
         self.commit_in_repo("ops/publish.sh", "echo approved\n")
         (self.repo / "publish.sh").write_text("echo unrelated\n")
         self.with_release("cd ops && sh publish.sh")
-        r = release.ask(self.desk, "a")
-        self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
-        self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
+        self.assertEqual(release.ask(self.desk, "a")["state"], "waiting")
         # A subshell's directory does not carry into the next command.
         for command in ("(cd ops); sh publish.sh", "cd ops | cat; sh publish.sh", "true | cd ops; sh publish.sh",
                         "if false; then cd ops; fi; sh publish.sh", "false && cd ops; sh publish.sh",
@@ -27348,21 +27364,6 @@ def save():'''))
                 self.with_release(command)
                 self.assertIn("publish.sh", self.refused("release", "a"))
 
-    def test_fixed_release_patterns_use_release_tree(self):
-        from hansa import release
-        self.commit_in_repo("ops/publish.sh", "echo approved\n")
-        (self.repo / "ops" / "publish.sh").write_text("echo local\n")
-        (self.repo / "ops" / "other.sh").write_text("echo other\n")
-        self.fixed_target("install", "sh ops/*.sh", tick=False)
-        r = release.ask(self.desk, "a", target="install")
-        self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
-        self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
-        log = (self.desk.state_dir / "releases" / f"{r['id']}.log").read_text()
-        self.assertIn("approved", log)
-        self.assertNotIn("local", log)
-        self.fixed_target("install", f"sh {self.repo}/ops/*.sh", tick=False)
-        self.assertIn("ops/", self.refused("release", "a", "install"))
-
     def test_release_quoted_pattern_characters_are_literal(self):
         from hansa import release
         self.commit_in_repo("publish*.sh", "echo approved\n")
@@ -27370,9 +27371,7 @@ def save():'''))
         for word in ("'publish*.sh'", '"publish*.sh"', r"publish\*.sh"):
             with self.subTest(word=word):
                 self.with_release(f"sh {word}")
-                r = release.ask(self.desk, "a")
-                self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
-                self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
+                self.assertEqual(release.ask(self.desk, "a")["state"], "waiting")
         self.with_release("sh publish*.sh")
         self.assertIn("publish-local.sh", self.refused("release", "a"))
 

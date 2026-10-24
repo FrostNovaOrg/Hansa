@@ -321,38 +321,36 @@ repeated by the actual merge command, and counts of merged tasks touching each
 `release_files` entry in the last 14 days, including renamed-away files, from
 existing records and git when asked, never in an idle round.
 
-Before recording, approving or starting a release, hansa checks existing
-regular repository files recognized as content inputs by its command-word
-scan, including binary and ignored files. Each such file and each repository
-link followed to reach it must occur in the release commit; staging a new file
-alone does not count. Links in directory components are followed before `..`.
-For an initialized submodule, membership is checked against its recorded
-gitlink commit; creating a fixed checkout does not initialize its submodules.
-A request is refused otherwise; the same check before approval and before
-starting voids a request that no longer meets it.
+Before recording, approving or starting a release, hansa checks recognized
+inputs that are existing regular repository files, including binary and
+ignored files. Each file and repository link followed to reach it must occur
+in the release commit; staging alone does not count. For initialized submodules,
+their recorded gitlink commits apply. Otherwise the request is refused or voided;
+the message explains how to ask again.
 
-The scan reads command words as described below, also expanding unquoted
-shell filename patterns (`*`, `?`, `[abc]`). Quoted and escaped pattern
-characters are literal. It excludes output redirection destinations, `touch`
-operands, `echo`/`printf` output, and `test`/`[` metadata-test operands; `<`
-and `<>` files are content inputs even with those commands. Recognized `cd`
-paths set the directory for subsequent words, with `-L` (the default) and
-`-P` handling `..` logically or physically; parentheses and pipelines restore
-the enclosing directory. Where control flow or a `cd` result is uncertain,
-the scan can check several directories. This is a scan of words, not shell
-evaluation or a complete list of dependencies: it does not resolve variables
-other than HOME, programs found on PATH, computed filenames, or what a script
-reads or runs in turn.
-Files whose names appear in words, including words read inside quoted text,
-can be checked even when the command would not read them.
+The scan checks command names, operands of recognized shells and interpreters
+(`sh`, `bash`, `dash`, `zsh`, `ksh`, `ash`, `python` and numbered variants,
+`perl`, `ruby`, `node`, `php`, `lua`),
+`source`/`.` and `cat`/`awk`/`gawk`/`mawk`, `sed` script-file options, and
+`timeout`/`xargs`/`find` operands. It follows common command prefixes (`env`,
+`sudo`, `command`, `exec`, `nohup`, `nice`). Other commands' ordinary operands, including
+output and metadata arguments, are left alone. Input redirections (`<`, `<>`)
+are checked with every command; literal output destinations are left alone.
+Unquoted filename patterns (`*`, `?`, `[abc]`) expand; quoted or escaped pattern
+characters stay literal. Recognized `cd` paths set subsequent working directories,
+with logical `-L` (the default) or physical `-P` handling of `..`; parentheses
+and pipelines restore the enclosing directory. Uncertain control flow can mean
+checking several directories. This is a scan of words, including nested command
+text, not shell evaluation or a complete list of dependencies. It does not resolve
+variables other than HOME, programs on PATH, computed filenames, or what a
+script reads or runs in turn. Use committed command inputs and review the rest.
 
-Prefer `--fixed` with relative inputs within the release tree: those paths,
-links and filename patterns are read from the release tree, even if the
-original checkout's versions change or disappear. Absolute paths, including absolute link
-destinations, still read the original checkout; recognized repository files
-there must match the commit. An ordinary target also requires the repository
-to be on the base branch with no tracked changes when it starts. These checks
-do not certify all local files or inputs that the scan does not recognize.
+Prefer `--fixed` with relative inputs: these are checked in the actual fixed
+checkout just before launch, independently of the original working copy.
+Recognized inputs that reach back into the original repository must match the commit.
+Creating a fixed checkout does not initialize submodules. An ordinary target
+also requires the base branch and no tracked changes at start. These checks
+do not certify inputs the scan does not recognize.
 
 A command can also name a file outside the lane's repository: hansa looks
 in its words, inside quotes too, for absolute paths, `~/`, `$HOME/` or
