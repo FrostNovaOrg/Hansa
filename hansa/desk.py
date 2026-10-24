@@ -2999,10 +2999,13 @@ class Desk:
 
     def web_token(self) -> str:
         f = self.state_dir / "web-token"
-        if not f.is_file():
-            self.state_dir.mkdir(exist_ok=True)
-            write_text(f, _secrets.token_urlsafe(18), mode=0o600)
-        return f.read_text().strip()
+        with self.lock():
+            token = f.read_text().strip() if f.is_file() else ""
+            # The version belongs to the page's explicit bearer authentication protocol.
+            if not re.fullmatch(r"v2_[A-Za-z0-9_-]{43}", token):
+                token = "v2_" + _secrets.token_urlsafe(32)
+                write_text(f, token, mode=0o600)
+            return token
 
 
 def public_settings(desk: Desk) -> dict:

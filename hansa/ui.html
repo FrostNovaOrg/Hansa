@@ -375,6 +375,17 @@ function keptChoice(storage, key, choices, fallback) {
 function keepChoice(storage, key, value) {
   try { globalThis[storage].setItem(key, String(value)); } catch (_) {}
 }
+// sessionStorage belongs to this origin and tab; an unavailable store still permits this load.
+const tokenQuery = new URLSearchParams(location.search);
+const tokenAddress = tokenQuery.has("t");
+let pageToken = "";
+if (tokenAddress) {
+  pageToken = tokenQuery.get("t");
+  keepChoice("sessionStorage", "hansa.token", pageToken);
+  history.replaceState(null, "", "/");
+} else {
+  try { pageToken = sessionStorage.getItem("hansa.token") || ""; } catch (_) {}
+}
 const TABS = ["status", "settings", "cost"], COST_PERIODS = [1, 7, 30];
 const language = keptChoice("localStorage", "hansa.language", ["zh-CN", "en"],
   (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en");
@@ -829,7 +840,12 @@ const emptyState = (title, note, symbol) => h("div", {class:"empty-state"}, icon
 const fmt = n => (n || 0).toLocaleString();
 const when = ts => ts ? new Date(ts * 1000).toLocaleString(language) : "";
 async function api(path, body) {
-  const opt = body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json", "X-Hansa":"1"}, body:JSON.stringify(body)};
+  const opt = {credentials:"omit", mode:"same-origin", headers:{Authorization:"Bearer " + pageToken}};
+  if (body !== undefined) {
+    opt.method = "POST";
+    Object.assign(opt.headers, {"Content-Type":"application/json", "X-Hansa":"1"});
+    opt.body = JSON.stringify(body);
+  }
   const r = await fetch(path, opt);
   if (r.status === 403) throw new Error(T.forbidden);
   return r.json();
@@ -2034,8 +2050,6 @@ if (typeof ResizeObserver !== "undefined") {
   const header = document.querySelector("header");
   new ResizeObserver(() => document.documentElement.style.setProperty("--header-height", header.getBoundingClientRect().height + "px")).observe(header);
 }
-const tokenAddress = /(?:^|[?&])t=/.test(location.search);
-if (tokenAddress) history.replaceState(null, "", "/");
 const initialTab = tokenAddress ? "status" : keptChoice("sessionStorage", "hansa.tab", TABS, "status");
 show(initialTab);
 // The shared header and browser title need status even when another tab is restored.

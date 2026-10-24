@@ -1,21 +1,14 @@
 """The principal's web page: status, settings (including keys) and cost.
 
 It only reads and writes the desk's files and never calls a model. It listens on
-127.0.0.1; open it through an SSH tunnel with the address `hansa web` prints. The
-token in that address becomes a cookie; changes also need a header that only
-this page sends, so another site cannot submit them.
-
-Each desk's cookie has a name of its own, from a short hash of its token (which
-tells nothing of the token), and its page accepts only that one: browsers keep
-cookies by host, not by port, so two desks' pages open side by side at
-127.0.0.1, or through tunnels to other machines, no longer log each other out.
-A page left open from before that (when every desk's cookie was `hansa_t`)
-asks once more for the address `hansa web` prints.
+127.0.0.1; open it through an SSH tunnel with the address `hansa web` prints.
+The page keeps the address's token in sessionStorage for its origin and tab,
+and sends it explicitly in Authorization. Changes also need X-Hansa: 1.
+The HTML shell is public; every API request requires the bearer token.
 """
 from __future__ import annotations
 
-import hashlib
-import http.cookies
+import hmac
 import http.server
 import json
 import os
@@ -104,11 +97,6 @@ def _save_settings(desk: Desk, body: dict) -> dict:
     return {"ok": not problems, "problems": problems, **({"lane_warnings": warnings} if warnings else {})}
 
 
-def cookie_name(token: str) -> str:
-    """The name of this desk's cookie: no other desk's page uses it, and it tells nothing of the token."""
-    return "hansa_t_" + hashlib.sha256(token.encode()).hexdigest()[:12]
-
-
 def _top_up_provider(desk: Desk, name: str) -> dict:
     """Only the authenticated principal's page calls this; no coordinator command clears credit rests."""
     with desk.lock():
@@ -123,7 +111,6 @@ def _top_up_provider(desk: Desk, name: str) -> dict:
 
 def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
     token = desk.web_token()
-    name = cookie_name(token)
 
     class Page(http.server.BaseHTTPRequestHandler):
         server_version = "hansa"
@@ -132,30 +119,29 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             pass
 
         def _authed(self) -> bool:
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            if q.get("t", [""])[0] == token:
-                return True
-            c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
-            return bool(c.get(name)) and c[name].value == token
+            return hmac.compare_digest(self.headers.get("Authorization", "").encode(),
+                                       ("Bearer " + token).encode())
 
-        def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", cookie: bool = False):
+        def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8"):
             data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
-            if cookie:
-                self.send_header("Set-Cookie", f"{name}={token}; HttpOnly; SameSite=Strict; Path=/")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
             self.wfile.write(data)
 
+        def _bad_request(self, code: str, field: str, problem: str):
+            return self._send(400, {"ok": False, "code": code, "field": field, "problems": [problem]})
+
         def do_GET(self):
+            url = urllib.parse.urlparse(self.path)
+            if url.path == "/":
+                return self._send(200, UI.read_bytes(), "text/html; charset=utf-8")
             if not self._authed():
                 return self._send(403, b"Open the address that `hansa web` prints.", "text/plain; charset=utf-8")
-            url = urllib.parse.urlparse(self.path)
-            q = urllib.parse.parse_qs(url.query)
-            if url.path == "/":
-                return self._send(200, UI.read_bytes(), "text/html; charset=utf-8", cookie=True)
+            q = urllib.parse.parse_qs(url.query, keep_blank_values=True)
             if url.path == "/api/status":
                 return self._send(200, views.status(desk))
             if url.path == "/api/timeline":
@@ -164,7 +150,11 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 # with the free space of the desk's volume, shown beside the floor (hansa/disk.py)
                 return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0]})
             if url.path == "/api/cost":
-                rep = cost.report(desk, max(1, min(90, int(q.get("days", ["7"])[0]))))
+                try:
+                    days = max(1, min(90, int(q.get("days", ["7"])[0])))
+                except ValueError:
+                    return self._bad_request("invalid_query", "days", "days must be a whole number")
+                rep = cost.report(desk, days)
                 if q.get("rows", ["0"])[0] != "1":
                     rep.pop("rows")
                 return self._send(200, rep)
@@ -186,7 +176,13 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if not self._authed() or self.headers.get("X-Hansa") != "1":
                 return self._send(403, {"error": "forbidden"})
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                data = self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}"
+                try:
+                    body = json.loads(data)
+                except ValueError:
+                    return self._bad_request("invalid_json", "body", "body must be valid JSON")
+                if not isinstance(body, dict):
+                    return self._bad_request("invalid_type", "body", "body must be a JSON object")
                 path = urllib.parse.urlparse(self.path).path
                 if path == "/api/settings":
                     return self._send(200, _save_settings(desk, body))

@@ -39,7 +39,7 @@ from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, validate, write_json, write_problems  # noqa: E402
 from hansa.run import (Dispatcher, provider_problem, text_only,  # noqa: E402
                        waiting_reason)
-from hansa.web import cookie_name, start_web  # noqa: E402
+from hansa.web import start_web  # noqa: E402
 from hansa.web import _save_settings as save_from_page  # noqa: E402
 from hansa.run import WORKER_TMP_ROOT  # noqa: E402 - as hansa has it, before a test points it elsewhere
 from hansa.run import RUN_TMP_DIR  # noqa: E402
@@ -8425,8 +8425,9 @@ def save():'''))
             start_web(self.desk, "127.0.0.1", 0)
         page = object.__new__(server.call_args.args[1])
         body = json.dumps({"provider": "mimo", "key": key}).encode()
-        page.path = f"/api/key?t={self.desk.web_token()}"
-        page.headers = {"X-Hansa": "1", "Content-Length": str(len(body))}
+        page.path = "/api/key"
+        page.headers = {"Authorization": "Bearer " + self.desk.web_token(),
+                        "X-Hansa": "1", "Content-Length": str(len(body))}
         page.rfile = io.BytesIO(body)
         page._send = unittest.mock.Mock()
         with unittest.mock.patch("hansa.desk.write_bytes", side_effect=writer):
@@ -15402,8 +15403,9 @@ def save():'''))
         self.desk.write_key("mimo", "sk-mimo-12345678")
         httpd = start_web(self.desk, "127.0.0.1", 0)
         try:
-            req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/api/ask/close?t="
-                                         f"{self.desk.web_token()}", method="POST", headers={"X-Hansa": "1"},
+            req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/api/ask/close",
+                                         method="POST", headers={"X-Hansa": "1",
+                                                                "Authorization": "Bearer " + self.desk.web_token()},
                                          data=json.dumps({"id": 1, "answer": "Yes; its key is sk-mimo-12345678"}).encode())
             with urllib.request.urlopen(req) as r:
                 self.assertTrue(json.load(r)["ok"])
@@ -24330,7 +24332,8 @@ def save():'''))
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
             with self.assertRaises(urllib.error.HTTPError) as e:
-                urllib.request.urlopen(f"{base}/api/task?t={self.desk.web_token()}&id=../x")
+                urllib.request.urlopen(urllib.request.Request(f"{base}/api/task?id=../x",
+                                       headers={"Authorization": "Bearer " + self.desk.web_token()}))
             self.assertEqual(e.exception.code, 404)
         finally:
             httpd.shutdown()
@@ -24364,7 +24367,8 @@ def save():'''))
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         tok = self.desk.web_token()
         try:
-            with urllib.request.urlopen(f"{base}/api/status?t={tok}") as r:
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/api/status",
+                                        headers={"Authorization": "Bearer " + tok})) as r:
                 status = json.load(r)
                 merging = {m["id"]: m for m in status["merging"]}
             with urllib.request.urlopen(f"{base}/?t={tok}") as r:
@@ -24413,7 +24417,8 @@ def save():'''))
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         tok = self.desk.web_token()
         try:
-            with urllib.request.urlopen(f"{base}/api/status?t={tok}") as r:
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/api/status",
+                                        headers={"Authorization": "Bearer " + tok})) as r:
                 running = {m["id"]: m for m in json.load(r)["running"]}
             with urllib.request.urlopen(f"{base}/?t={tok}") as r:
                 page = r.read().decode()
@@ -24428,6 +24433,168 @@ def save():'''))
             self.assertEqual((row["step"], row["bars"][0]["value"]), ("check", "8"))
             self.assertIn("1 min so far (8 min in all)" if language == "en" else "验收已跑 1 分钟（一共 8 分钟）", row["text"])
 
+    def web_request(self, path, *, method="GET", headers=None, data=b""):
+        """Run the real request handler and response writer without opening a socket."""
+        from hansa import web
+        with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
+                unittest.mock.patch.object(web.threading, "Thread"):
+            start_web(self.desk, "127.0.0.1", 0)
+        page = object.__new__(server.call_args.args[1])
+        page.path = path
+        page.headers = {"Content-Length": str(len(data)), **(headers or {})}
+        page.rfile, page.wfile = io.BytesIO(data), io.BytesIO()
+        page.send_response, page.send_header, page.end_headers = (unittest.mock.Mock() for _ in range(3))
+        getattr(page, "do_" + method)()
+        code = page.send_response.call_args.args[0]
+        outgoing = dict(call.args for call in page.send_header.call_args_list)
+        body = page.wfile.getvalue()
+        if outgoing["Content-Type"].startswith("application/json"):
+            body = json.loads(body)
+        return code, body, outgoing
+
+    def test_web_api_uses_bearer_authorization(self):
+        import hashlib
+        previous = "previous-page-token"
+        self.desk.state_dir.mkdir(exist_ok=True)
+        (self.desk.state_dir / "web-token").write_text(previous)
+        token = self.desk.web_token()
+        self.assertNotEqual(token, previous)
+        self.assertEqual(self.desk.web_token(), token)
+        self.assertEqual(stat.S_IMODE((self.desk.state_dir / "web-token").stat().st_mode), 0o600)
+        name = "hansa_t_" + hashlib.sha256(token.encode()).hexdigest()[:12]
+        for headers, query in (({}, ""), ({}, "?t=" + token), ({"Cookie": f"{name}={token}"}, ""),
+                               ({"Cookie": f"hansa_t={token}"}, ""),
+                               ({"Authorization": "Bearer wrong"}, ""),
+                               ({"Authorization": "Bearer " + previous}, "")):
+            with self.subTest(headers=headers, query=query):
+                self.assertEqual(self.web_request("/api/status" + query, headers=headers)[0], 403)
+                self.assertEqual(self.web_request("/api/pause" + query, method="POST",
+                                                 headers={**headers, "X-Hansa": "1"}, data=b"{}")[0], 403)
+        headers = {"Authorization": "Bearer " + token}
+        self.assertIn("lanes", self.web_request("/api/status", headers=headers)[1])
+        self.assertEqual(self.web_request("/api/pause", method="POST", headers=headers, data=b"{}")[0], 403)
+        self.assertFalse(self.desk.paused())
+        self.assertEqual(self.web_request("/api/pause", method="POST", data=b"{}",
+                                         headers={**headers, "X-Hansa": "1"})[:2], (200, {"ok": True}))
+        self.assertTrue(self.desk.paused())
+
+    def test_web_page_has_no_ambient_credentials(self):
+        token = self.desk.web_token()
+        for path in ("/?t=" + token, "/"):
+            code, page, headers = self.web_request(path)
+            self.assertEqual(code, 200)
+            self.assertIn(b"<script>", page)
+            self.assertNotIn(token.encode(), page)
+            self.assertNotIn("Set-Cookie", headers)
+            self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+        skip_unless_ports(self)
+        import http.cookiejar
+        import http.server
+        jar = http.cookiejar.CookieJar()
+        browser = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        received = []
+
+        class OtherPage(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append(dict(self.headers))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), OtherPage)
+        worker = threading.Thread(target=other.serve_forever)
+        worker.start()
+        try:
+            with browser.open(f"http://127.0.0.1:{httpd.server_address[1]}/?t={token}") as response:
+                self.assertEqual(response.status, 200)
+            with browser.open(f"http://127.0.0.1:{other.server_address[1]}/") as response:
+                self.assertEqual(response.status, 200)
+            self.assertEqual(len(jar), 0)
+            self.assertNotIn("Cookie", received[0])
+            self.assertNotIn("Authorization", received[0])
+        finally:
+            other.shutdown()
+            other.server_close()
+            worker.join()
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_web_page_authorizes_requests_after_bootstrap_and_reload(self):
+        for token in ("first-tab-token", "second-tab-token"):
+            with self.subTest(token=token):
+                output = self.page_preferences(search="?other=1&t=" + token,
+                                               actions=[{"reload": True}, {"api": "/api/pause", "body": {}}])
+                self.assertEqual(output["snapshots"][0]["session"]["hansa.token"], token)
+                self.assertEqual(output["snapshots"][1]["session"]["hansa.token"], token)
+                self.assertEqual(output["historyReplacements"], [[None, "", "/"]])
+                self.assertTrue(output["requests"])
+                for request in output["requests"]:
+                    self.assertEqual(request["headers"]["Authorization"], "Bearer " + token)
+                    self.assertEqual(request["credentials"], "omit")
+                    self.assertEqual(request["mode"], "same-origin")
+                    self.assertNotIn(token, request["path"])
+                self.assertEqual(output["requests"][-1]["headers"]["X-Hansa"], "1")
+                self.assertNotIn("hansa.token", output["snapshots"][-1]["local"])
+
+    def test_web_page_keeps_bootstrap_in_memory_when_storage_is_unavailable(self):
+        for mode in ("missing", "access", "read", "write"):
+            with self.subTest(mode=mode):
+                output = self.page_preferences(search="?t=tab%2Dtoken", sessionMode=mode,
+                                               actions=[{"api": "/api/pause", "body": {}}])
+                self.assertTrue(output["requests"])
+                self.assertTrue(all(r["headers"].get("Authorization") == "Bearer tab-token"
+                                    for r in output["requests"]))
+                self.assertNotIn("hansa.token", output["snapshots"][-1]["local"])
+
+    def test_web_cost_rejects_invalid_days_with_a_structured_error(self):
+        token = self.desk.web_token()
+        headers = {"Authorization": "Bearer " + token}
+        path = "/api/cost?t=" + token
+        for value in ("abc", "", "1.5", "NaN"):
+            with self.subTest(value=value):
+                code, body, _ = self.web_request(path + "&days=" + value, headers=headers)
+                self.assertEqual(code, 400)
+                self.assertFalse(body["ok"])
+                self.assertEqual((body["code"], body["field"]), ("invalid_query", "days"))
+                self.assertIn("whole number", body["problems"][0])
+        for query, days in (("", 7), ("&days=0", 1), ("&days=999", 90), ("&days=30", 30)):
+            with unittest.mock.patch("hansa.web.cost.report", return_value={"rows": []}) as report:
+                self.assertEqual(self.web_request(path + query, headers=headers)[:2], (200, {}))
+                report.assert_called_once_with(self.desk, days)
+        self.assertEqual(self.web_request("/api/status?t=" + token, headers=headers)[0], 200)
+
+    def test_web_post_requires_a_json_object(self):
+        token = self.desk.web_token()
+        headers = {"Authorization": "Bearer " + token, "X-Hansa": "1"}
+        for value in ([], None, "text", 1, True):
+            for path in ("/api/settings", "/api/pause"):
+                with self.subTest(value=value, path=path):
+                    code, body, _ = self.web_request(path + "?t=" + token, method="POST", headers=headers,
+                                                     data=json.dumps(value).encode())
+                    self.assertEqual(code, 400)
+                    self.assertFalse(body["ok"])
+                    self.assertEqual((body["code"], body["field"]), ("invalid_type", "body"))
+                    self.assertIn("JSON object", body["problems"][0])
+                    self.assertFalse(self.desk.paused())
+        self.assertEqual(self.web_request("/api/pause?t=" + token, method="POST", headers=headers, data=b"{}")[0], 200)
+
+    def test_web_post_reports_malformed_json_as_a_structured_error(self):
+        token = self.desk.web_token()
+        path = "/api/pause?t=" + token
+        headers = {"Authorization": "Bearer " + token, "X-Hansa": "1"}
+        for data in (b"{", b'{"reason":}', b"\xff"):
+            with self.subTest(data=data):
+                code, body, _ = self.web_request(path, method="POST", headers=headers, data=data)
+                self.assertEqual(code, 400)
+                self.assertFalse(body["ok"])
+                self.assertEqual((body["code"], body["field"]), ("invalid_json", "body"))
+                self.assertIn("JSON", body["problems"][0])
+                self.assertFalse(self.desk.paused())
+        self.assertEqual(self.web_request(path, method="POST", headers=headers)[0], 200)
+
     def test_web_needs_token_and_header(self):
         skip_unless_ports(self)
         httpd = start_web(self.desk, "127.0.0.1", 0)
@@ -24438,9 +24605,11 @@ def save():'''))
                 urllib.request.urlopen(base + "/api/status")
             self.assertEqual(e.exception.code, 403)
             tok = self.desk.web_token()
-            with urllib.request.urlopen(f"{base}/api/status?t={tok}") as r:
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/api/status",
+                                        headers={"Authorization": "Bearer " + tok})) as r:
                 self.assertIn("lanes", json.load(r))
-            req = urllib.request.Request(f"{base}/api/pause?t={tok}", data=b"{}", method="POST")
+            req = urllib.request.Request(f"{base}/api/pause", data=b"{}", method="POST",
+                                         headers={"Authorization": "Bearer " + tok})
             with self.assertRaises(urllib.error.HTTPError) as e:
                 urllib.request.urlopen(req)
             self.assertEqual(e.exception.code, 403)
@@ -24452,42 +24621,32 @@ def save():'''))
             httpd.shutdown()
             httpd.server_close()
 
-    def test_two_desks_pages_each_keep_their_own_cookie(self):
+    def test_two_desks_pages_each_use_their_own_token(self):
         skip_unless_ports(self)
         self.desk.web_token()
         tokf = self.desk.state_dir / "web-token"
         servers = []
         try:
-            for tok in ("first-desk-token", "second-desk-token"):  # two desks: each has a token of its own
+            for tok in ("v2_" + "a" * 43, "v2_" + "b" * 43):  # two desks: each has a token of its own
                 tokf.write_text(tok)
                 httpd = start_web(self.desk, "127.0.0.1", 0)
                 servers.append((httpd, f"http://127.0.0.1:{httpd.server_address[1]}", tok))
-            names = [cookie_name(tok) for _, _, tok in servers]
-            self.assertNotEqual(names[0], names[1])
-            for n, (_, _, tok) in zip(names, servers):
-                self.assertNotIn(tok, n)
-                self.assertNotEqual(n, "hansa_t")
-            # opening the address sets the desk's own cookie, as before but for its name
-            for n, (_, base, tok) in zip(names, servers):
+            for _, base, tok in servers:
                 with urllib.request.urlopen(f"{base}/?t={tok}") as r:
-                    self.assertEqual(r.headers["Set-Cookie"], f"{n}={tok}; HttpOnly; SameSite=Strict; Path=/")
+                    self.assertIsNone(r.headers.get("Set-Cookie"))
 
-            def status(base, cookie):
-                req = urllib.request.Request(f"{base}/api/status", headers={"Cookie": cookie})
+            def status(base, bearer):
+                req = urllib.request.Request(f"{base}/api/status", headers={"Authorization": "Bearer " + bearer})
                 try:
                     with urllib.request.urlopen(req) as r:
                         return r.status
                 except urllib.error.HTTPError as e:
                     self.assertEqual(e.read().decode(), "Open the address that `hansa web` prints.")
                     return e.code
-            both = "; ".join(f"{n}={tok}" for n, (_, _, tok) in zip(names, servers))
             for i, (_, base, tok) in enumerate(servers):
-                other_n, other_tok = names[1 - i], servers[1 - i][2]
-                self.assertEqual(status(base, both), 200)  # both cookies in one header: each takes its own
-                self.assertEqual(status(base, f"{names[i]}={tok}"), 200)
-                self.assertEqual(status(base, f"{other_n}={other_tok}"), 403)  # the other desk's is not its key
-                self.assertEqual(status(base, f"{other_n}={tok}"), 403)  # nor its own token under another name
-                self.assertEqual(status(base, f"hansa_t={tok}"), 403)  # nor the old name
+                self.assertEqual(status(base, tok), 200)
+                self.assertEqual(status(base, servers[1 - i][2]), 403)
+                self.assertEqual(status(base, ""), 403)
         finally:
             for httpd, _, _ in servers:
                 httpd.shutdown()
@@ -24574,24 +24733,27 @@ def save():'''))
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         tok = self.desk.web_token()
         try:
-            with urllib.request.urlopen(f"{base}/api/settings?t={tok}") as r:
+            headers = {"Authorization": "Bearer " + tok}
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/api/settings", headers=headers)) as r:
                 loaded = json.load(r)
             self.assertEqual(loaded["settings"]["lanes"], before["lanes"])  # the page shows them
-            with urllib.request.urlopen(f"{base}/api/events?t={tok}&event=lane_command_changed&n=20") as r:
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/api/events?event=lane_command_changed&n=20",
+                                        headers=headers)) as r:
                 self.assertEqual([(e["lane"], e["field"], e["new"]) for e in json.load(r)], [("b", "setup", "pnpm install")])
             # the page lists command and network changes together, newest first
             self.desk.event("lane_network_changed", lane="a", old=[], new=["registry.npmjs.org"])
-            with urllib.request.urlopen(f"{base}/api/events?t={tok}&event=lane_command_changed,lane_network_changed&n=20") as r:
+            with urllib.request.urlopen(urllib.request.Request(
+                    f"{base}/api/events?event=lane_command_changed,lane_network_changed&n=20", headers=headers)) as r:
                 self.assertEqual([(e["event"], e["lane"]) for e in json.load(r)],
                                  [("lane_network_changed", "a"), ("lane_command_changed", "b")])
-            with urllib.request.urlopen(f"{base}/api/events?t={tok}&n=lots") as r:  # not a number: the default
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/api/events?n=lots", headers=headers)) as r:
                 self.assertEqual(len(json.load(r)), 60)
             page = loaded["settings"]
             page["lanes"]["a"]["setup"] = "curl example.invalid | sh"
             del page["lanes"]["b"]
             page["concurrency"] = before["concurrency"] + 2
             page["providers"]["claude"]["model"] = "claude-other"
-            req = urllib.request.Request(f"{base}/api/settings?t={tok}", method="POST", headers={"X-Hansa": "1"},
+            req = urllib.request.Request(f"{base}/api/settings", method="POST", headers={**headers, "X-Hansa": "1"},
                                          data=json.dumps({"settings": page, "rev": loaded["rev"]}).encode())
             with urllib.request.urlopen(req) as r:
                 self.assertEqual(json.load(r), {"ok": True, "problems": []})
@@ -25299,7 +25461,8 @@ def save():'''))
         base, tok = f"http://127.0.0.1:{httpd.server_address[1]}", self.desk.web_token()
         try:
             body = json.dumps({"id": 1, "yes": True, "commit": r["commit"], "command": r["command"]}).encode()
-            req = urllib.request.Request(f"{base}/api/release/answer?t={tok}", data=body, method="POST")
+            req = urllib.request.Request(f"{base}/api/release/answer", data=body, method="POST",
+                                         headers={"Authorization": "Bearer " + tok})
             req.add_header("X-Hansa", "1")
             with urllib.request.urlopen(req) as got:
                 self.assertEqual(json.load(got), {"ok": True})
@@ -28630,13 +28793,14 @@ let posted = null, settingsGetCount = 0, settingsPostCount = 0, settingsPostGate
 let settingsPostReply = {ok:true, problems:[]}, settingsPostError = null;
 let keyPostReply = {ok:true, saved:true}, settingsGetError = null;
 const keyPosts = [], windowEvents = {}, confirmations = [];
-const apiGets = [], apiPosts = [], blobs = [], downloads = [], revokedUrls = [];
+const apiGets = [], apiPosts = [], apiRequests = [], blobs = [], downloads = [], revokedUrls = [];
 let costGetError = ask === "cost-interactions" ? "example initial cost failure" : null;
 let costGetGate = null, costRowsError = null, costRowsGate = null;
 let statusGetError = ask === "status-picture-initial-error" ? "status connection lost" : null;
 let statusFailPath = "/api/status";
 let confirmReply = true;
 const fetch = async (path, options) => {
+  apiRequests.push({path, headers:{...options?.headers}, credentials:options?.credentials, mode:options?.mode});
   if (options && options.method === "POST") apiPosts.push({path, body:JSON.parse(options.body)});
   else apiGets.push(path);
   if (options && options.method === "POST" && path === "/api/settings") {
@@ -28682,7 +28846,7 @@ function openPage(search = "") {
   for (const tab of ["status", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
   const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
   location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
-  setInterval() {}, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
+  URLSearchParams, setInterval() {}, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
     confirm(message) { confirmations.push(message); return confirmReply; }}, console,
   URL: class extends URL {
     static createObjectURL(blob) { blobs.push(blob); return "blob:page-test-" + blobs.length; }
@@ -28820,6 +28984,7 @@ else if (ask === "preferences") (async () => {
   await flush();
   const snapshots = [snapshot()];
   for (const action of preferences.actions || []) {
+    if (action.api) await run(`api(${JSON.stringify(action.api)}, ${JSON.stringify(action.body)})`);
     if (action.tab) await document.querySelectorAll("#tabs button").find(el => el.dataset.tab === action.tab).click();
     if (action.group) await run(`settingsNavButtons[${JSON.stringify(action.group)}].click()`);
     if (action.period) {
@@ -28848,7 +29013,7 @@ else if (ask === "preferences") (async () => {
     await flush(); snapshots.push(snapshot());
   }
   console.log(JSON.stringify({snapshots, reloads, historyReplacements, unloadWarnings, sessionWrites:session.writes, localWrites:local.writes,
-    posts:apiPosts}));
+    posts:apiPosts, requests:apiRequests}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (["desk-name", "desk-count", "status-parts", "notify-status"].includes(ask)) vm.runInContext("loadStatus()", ctx).then(async () => {
   const snapshot = () => ({title:document.title, caption:ids["#title"].kids.at(-1).textContent,
@@ -29826,11 +29991,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             handler.do_GET()
             self.assertEqual(replies.pop()[0], 403)
             view.assert_not_called()
-            handler.path += "?t=" + self.desk.web_token()
+            handler.headers = {"Authorization": "Bearer " + self.desk.web_token()}
             handler.do_GET()
             self.assertEqual(replies.pop(), (200, {"lanes": []}))
             view.assert_called_once_with(self.desk)
-            handler.headers = {"Content-Length": "2", "X-Hansa": "1"}
+            handler.headers.update({"Content-Length": "2", "X-Hansa": "1"})
             handler.rfile = io.BytesIO(b"{}")
             handler.do_POST()
             self.assertEqual(replies.pop()[0], 404)
@@ -32689,9 +32854,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         base, tok = f"http://127.0.0.1:{httpd.server_address[1]}", self.desk.web_token()
 
         def post(body):
-            req = urllib.request.Request(f"{base}/api/release/stop?t={tok}", data=json.dumps(body).encode(),
+            req = urllib.request.Request(f"{base}/api/release/stop", data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json", "X-Hansa": "1",
-                                                  "Cookie": f"{cookie_name(tok)}={tok}"})
+                                                  "Authorization": "Bearer " + tok})
             with urllib.request.urlopen(req) as resp:
                 return json.load(resp)
         try:
@@ -34016,7 +34181,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         data = json.dumps(body).encode()
         ours, theirs = socket.socketpair()
         with ours, theirs:
-            ours.sendall(f"POST {path}?t={self.desk.web_token()} HTTP/1.0\r\nX-Hansa: 1\r\n"
+            ours.sendall(f"POST {path} HTTP/1.0\r\nAuthorization: Bearer {self.desk.web_token()}\r\nX-Hansa: 1\r\n"
                          f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
             made["handler"](theirs, ("127.0.0.1", 0), None)
             theirs.shutdown(socket.SHUT_WR)

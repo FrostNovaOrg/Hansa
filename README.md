@@ -250,7 +250,7 @@ Settings set with newer commands are best undone before going back.
 - **Keys stay out of sight.** They live in the desk's `secrets/` (mode 600) and go only to the provider's
   endpoint, as that worker's environment. hansa replaces a key with `[key of <provider>]` wherever it would
   show, and refuses to merge a change that holds one.
-- **The page is local.** `hansa serve` serves it on 127.0.0.1 by default, and it opens only with the token
+- **The page is local.** `hansa serve` serves it on 127.0.0.1 by default; its data and actions require the token
   in the address `hansa web` prints.
 
 Each of these has limits; they are listed under [Limits](#limits) and in the documents linked above.
