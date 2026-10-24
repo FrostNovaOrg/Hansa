@@ -4955,6 +4955,61 @@ def save():'''))
                       "answering now", said)
         self.assertNotIn("served now", said)
 
+    def test_init_refuses_a_missing_base_before_making_a_desk(self):
+        for existing in (False, True):
+            root = self.tmp / f"new-{existing}"
+            if existing:
+                root.mkdir()
+                (root / "keep.txt").write_text("keep me\n")
+            with self.assertRaises(SystemExit) as e:
+                main(["init", str(root), "--repo", str(self.repo), "--base", "does-not-exist"])
+            for word in ("does-not-exist", str(self.repo), "commit", "branch", "no desk was made"):
+                self.assertIn(word, str(e.exception))
+            if existing:
+                self.assertEqual(list(root.iterdir()), [root / "keep.txt"])
+                self.assertEqual((root / "keep.txt").read_text(), "keep me\n")
+            else:
+                self.assertFalse(root.exists())
+
+    def test_init_refuses_a_base_without_a_commit_but_keeps_valid_git_refs(self):
+        root = self.tmp / "new"
+        for base in ("HEAD:README.md", "HEAD^{tree}", "--help"):
+            with self.assertRaises(SystemExit) as e:
+                main(["init", str(root), "--repo", str(self.repo), f"--base={base}"])
+            self.assertIn(base, str(e.exception))
+            self.assertIn("no desk was made", str(e.exception))
+            self.assertFalse(root.exists())
+        self.git_out("branch", "other")
+        self.git_out("tag", "start")
+        for i, base in enumerate(("other", "start", self.git_out("rev-parse", "HEAD"), "HEAD")):
+            with self.subTest(base=base):
+                desk = init_desk(self.tmp / f"valid-{i}", str(self.repo), base=base)
+                self.assertEqual(desk.settings()["lanes"]["a"]["base"], base)
+
+    def test_lane_add_refuses_a_missing_base_before_changing_settings_or_briefs(self):
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        brief = self.desk.lanes_dir / "b" / "brief.md"
+        brief.parent.mkdir()
+        brief.write_text("earlier standing instructions\n")
+        for source in (("--repo", str(self.repo)), ("--like", "a")):
+            with self.assertRaises(SystemExit) as e:
+                self.hansa("lane", "add", "b", *source, "--base", "does-not-exist")
+            for word in ("does-not-exist", "commit", "nothing was changed"):
+                self.assertIn(word, str(e.exception))
+            self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+            self.assertEqual(list(brief.parent.iterdir()), [brief])
+            self.assertEqual(brief.read_text(), "earlier standing instructions\n")
+        self.git_out("branch", "other")
+        from hansa import run
+        for name, source in (("c", ("--repo", str(self.repo))), ("d", ("--like", "a"))):
+            self.hansa("lane", "add", name, *source, "--base", "other")
+            lane = self.desk.settings()["lanes"][name]
+            self.assertEqual(lane["base"], "other")
+            tid = self.desk.new_task("Work from other", lane=name)
+            wt, base = run.prepare(self.desk, name, lane, self.desk.meta(tid))
+            self.assertEqual(base, self.git_out("rev-parse", "other"))
+            self.assertEqual(run.git("rev-parse", "HEAD", cwd=wt), base)
+
     def test_init_on_a_repository_with_no_commit_says_to_make_one(self):
         empty = self.tmp / "empty"
         empty.mkdir()

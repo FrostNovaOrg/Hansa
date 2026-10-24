@@ -152,12 +152,20 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
 
 def lane_base(repo: str, base: str, nothing: str) -> str:
     """A new lane's base: base, or else the branch the checkout is on; refused in one line when it is not a git
-    checkout or has no commit yet (a lane's tasks start from a commit). nothing: what was not done, said after."""
+    checkout, has no commit yet, or an explicit base does not resolve to a commit (a lane's tasks start from
+    a commit). nothing: what was not done, said after."""
     try:
         if git("rev-parse", "--is-inside-work-tree", cwd=repo) and not subprocess.run(
                 ["git", "rev-parse", "-q", "--verify", "HEAD^{commit}"], cwd=repo, capture_output=True).stdout.strip():
             raise SystemExit(f"hansa: {repo} has no commit yet; make a first commit there (git commit), then run "
                              f"this again; {nothing}")
+        if base:
+            try:
+                git("rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}", cwd=repo)
+            except RuntimeError:
+                raise SystemExit(f"hansa: base {base!r} does not resolve to a commit in {repo}; choose an existing "
+                                 f"branch (list them with git -C {shlex.quote(repo)} branch --list), then run this "
+                                 f"again; {nothing}")
         return base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
     except (RuntimeError, OSError) as e:
         raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); {nothing}")
@@ -2040,6 +2048,8 @@ def cmd_lane(a):
                 base = lane_base(repo, a.base, "nothing was changed")
                 ln = default_lane(repo, base, given.pop("providers", None) or None)
                 ln.update({k: v for k, v in given.items() if v or isinstance(v, int)})
+            elif a.base:
+                lane_base(repo, a.base, "nothing was changed")
             new["lanes"][a.name] = ln
             _save(desk, new)
             desk.event("lane_added", lane=a.name, **({"like": a.like} if a.like else {}))
@@ -2854,7 +2864,7 @@ def main(argv=None):
     p.add_argument("dir")
     p.add_argument("--repo", help="git checkout the first lane works on")
     p.add_argument("--lane", default="a")
-    p.add_argument("--base", help="base branch (default: the checkout's current branch)")
+    p.add_argument("--base", help="base branch; must resolve to an existing commit (default: the checkout's current branch)")
     p.add_argument("--user", help="as root on a Linux server: the account the desk belongs to and hansa runs as")
     p = add("add", cmd_add, "queue a task")
     p.add_argument("text", nargs="*")
@@ -3071,7 +3081,7 @@ def main(argv=None):
                    "reach the new lane. The worktree is the new lane's own. Standing instructions an earlier lane "
                    "of this name left, when they differ, are kept as brief-before-DATE.md beside the new ones. Not "
                    "with --repo")
-    q.add_argument("--base", help="base branch (default: the checkout's current branch)")
+    q.add_argument("--base", help="base branch; must resolve to an existing commit (default: the checkout's current branch)")
     q.add_argument("--providers", help="provider order, comma-separated (default: claude)")
     q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved "
                    "unless the lane has a merge_check (/bin/sh -c)")

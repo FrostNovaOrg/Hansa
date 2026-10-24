@@ -6,6 +6,18 @@ looked at (for example, a run's sandbox closes an enclosing desk), it skips
 that folder and keeps searching. With no desk found, commands that need one
 give the usual "no desk here" refusal.
 
+## Creating a desk and lanes
+
+With `hansa init DIR --repo PATH` or `hansa lane add L --repo PATH`, the
+checkout must already have a commit. An explicit `--base` must resolve to a
+commit in that checkout; this also applies to `hansa lane add L --like OTHER
+--base BRANCH`. A missing base or a reference to a tree or file is refused
+before desk files, lane settings or standing instructions are written, so a
+base typo is caught before the first task. The refusal says how to list the
+checkout's branches and retry. Existing tags and commit IDs remain accepted.
+Without `--base`, the checkout's current branch is used, or `--like` copies
+the other lane's base.
+
 ## Status and cost on the web page
 
 The browser tab and the caption beside Hansa name the desk by its parent folder
