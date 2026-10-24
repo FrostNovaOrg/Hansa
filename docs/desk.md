@@ -25,13 +25,15 @@ and its own folder, such as `work/desk`. The tab title is `Hansa · work/desk`,
 prefixed with the number of releases waiting for approval plus open requests
 when that count is nonzero. It updates with each status refresh.
 
-Status refreshes every five seconds. While focus is inside Status (including
-buttons and expanded task details), background refreshes update the header but
-leave the tab's controls in place. The tab redraws on a later refresh after
-focus leaves it; submitting an action refreshes it immediately. Unsent request
-answers, release approval or stop reasons, and the pause reason survive these
-redraws in this page's memory. Each draft stays with its request or release and
-action, and is dropped when that action is no longer available. Reloading or
+Status refreshes every five seconds while Status is visible. While an input,
+textarea or select has focus, background refreshes update the header but leave
+the tab's fields in place. With focus on a button or link, the lists keep
+updating and focus returns to the same action on the same record, if it is
+still available. Expanded task details stay open. Submitting an action refreshes
+the tab immediately. Unsent request answers, release approval or stop reasons,
+and the pause reason survive these redraws in this page's memory. Each draft
+stays with its request or release and action, and is dropped when that action
+is no longer available. Reloading or
 closing the page discards the drafts.
 
 In the provider table, a provider without a recorded Ping says “not checked yet”
