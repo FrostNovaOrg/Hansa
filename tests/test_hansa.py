@@ -28612,8 +28612,12 @@ class El {
   // as the DOM does, what is not a node becomes text: null the text "null"
   append(...xs) { for (const x of xs) { const child = x instanceof El || x instanceof Text ? x : new Text(String(x));
     child.parentElement = this; this.kids.push(child); } }
-  replaceChildren(...xs) { this.kids = []; this.append(...xs); }
-  contains() { return false; } get nodeType() { return 1; }
+  replaceChildren(...xs) {
+    if (this.contains(document.activeElement)) document.activeElement = document.body;
+    this.kids = []; this.append(...xs);
+  }
+  contains(el) { return this === el || this.kids.some(k => k instanceof El && k.contains(el)); }
+  get nodeType() { return 1; }
 }
 class Text { constructor(s) { this.textContent = s; } get nodeType() { return 3; } }
 const ids = {};
@@ -28635,6 +28639,7 @@ let costGetError = ask === "cost-interactions" ? "example initial cost failure" 
 let costGetGate = null, costRowsError = null, costRowsGate = null;
 let statusGetError = ask === "status-picture-initial-error" ? "status connection lost" : null;
 let statusFailPath = "/api/status";
+let statusGetGate = null;
 let confirmReply = true;
 const fetch = async (path, options) => {
   if (options && options.method === "POST") apiPosts.push({path, body:JSON.parse(options.body)});
@@ -28664,6 +28669,7 @@ const fetch = async (path, options) => {
   if (path === statusFailPath && statusGetError) throw new Error(statusGetError);
   const r = reply(path); if (r === null) return new Promise(() => {});
   const snapshot = JSON.parse(JSON.stringify(r));
+  if (path === "/api/status" && statusGetGate) await statusGetGate;
   if (path === "/api/settings" && settingsGetGate) await settingsGetGate;
   return {status: 200, json: async () => JSON.parse(JSON.stringify(snapshot))};
 };
@@ -28682,7 +28688,7 @@ function openPage(search = "") {
   for (const tab of ["status", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
   const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
   location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
-  setInterval() {}, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
+  setInterval(f) { (windowEvents.interval ||= []).push(f); }, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
     confirm(message) { confirmations.push(message); return confirmReply; }}, console,
   URL: class extends URL {
     static createObjectURL(blob) { blobs.push(blob); return "blob:page-test-" + blobs.length; }
@@ -28914,6 +28920,102 @@ else if (ask === "task-steps") (async () => {
     result.gets = apiGets;
   }
   console.log(JSON.stringify(result));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provider-checks"].includes(ask)) (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const root = ids["#tab-status"], st = given["/api/status"];
+  const find = predicate => { let found; walk(root, el => { if (!found && predicate(el)) found = el; }); return found; };
+  const input = label => find(el => el.tag === "input" && el.attrs.placeholder === run("T." + label));
+  const button = label => find(el => el.tag === "button" && el.textContent === run("T." + label));
+  const labels = ["pauseReason", "answer", "releaseReason", "releaseStopReason"];
+  const draft = label => "Unsent " + label;
+  await run("loadStatus()");
+  if (ask === "status-drafts") {
+    for (const label of labels) input(label).value = draft(label);
+    // The same records change order and content, including the release approval binding.
+    st.asks.unshift({id:8, text:"New request"}); st.asks[1].note = "New note";
+    st.releases.unshift({...st.releases[0], id:19});
+    st.releases[1].commit = "b".repeat(40); st.releases[1].command = "publish revised";
+    await run("loadStatus()");
+    const answers = descendants(root, "input").filter(el => el.attrs.placeholder === run("T.answer"));
+    const reasons = descendants(root, "input").filter(el => el.attrs.placeholder === run("T.releaseReason"));
+    check(answers[0].value === "" && answers[1].value === draft("answer"), "answer draft moved to another request or vanished");
+    check(reasons[0].value === "" && reasons[1].value === draft("releaseReason"), "release draft moved to another release or vanished");
+    for (const label of ["pauseReason", "releaseStopReason"]) check(input(label).value === draft(label), label + " draft vanished");
+    // A redraw must use the refreshed release's command and commit, with its own retained reason.
+    const approvals = descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"));
+    await approvals[1].click();
+    const post = apiPosts.filter(p => p.path === "/api/release/answer").at(-1).body;
+    check(post.id === 17 && post.reason === draft("releaseReason") && post.commit === "b".repeat(40) &&
+      post.command === "publish revised", "retained draft used stale release approval data");
+  } else if (ask === "status-focus") {
+    const answer = input("answer"); answer.value = draft("answer");
+    const task = find(el => el.tag === "button" && el.textContent === "t0042");
+    await task.click(); await flush();
+    const detail = ids["#" + task.attrs["aria-controls"]];
+    for (const control of [answer, button("close"), button("releaseYes"), button("releaseStop"), task, detail]) {
+      control.focus();
+      st.build = "focused-build";
+      for (let cycle = 0; cycle < 2; cycle++) { windowEvents.interval[0](); await flush(); }
+      check(document.activeElement === control && root.contains(control), "polling replaced a focused control or detail");
+      check(ids["#state"].textContent.includes("focused-build"), "focused interaction blocked header updates");
+      check(input("answer") === answer && answer.value === draft("answer"), "polling lost draft or input identity");
+      check(!detail.hidden, "polling collapsed task details");
+    }
+    document.activeElement = document.body;
+    let finish;
+    statusGetGate = new Promise(resolve => { finish = resolve; });
+    windowEvents.interval[0](); await flush();
+    button("close").focus(); const focused = document.activeElement;
+    finish(); await flush(); statusGetGate = null;
+    check(document.activeElement === focused && root.contains(focused), "in-flight refresh replaced newly focused button");
+    // Explicit actions must still refresh their changed state even with a focused button.
+    button("pause").focus(); await button("pause").click();
+    check(button("resume"), "focused pause action did not refresh dispatch controls");
+    document.activeElement = document.body;
+    windowEvents.interval[0](); await flush();
+    check(input("answer").value === draft("answer"), "draft vanished after focus left Status");
+  } else if (ask === "status-draft-cleanup") {
+    for (const label of labels) input(label).value = draft(label);
+    // Failed fetches do not discard drafts. An unchanged record also retains a submitted draft.
+    statusGetError = "temporary status failure";
+    await run("loadStatus()").catch(() => {}); statusGetError = null;
+    await button("close").click();
+    for (const label of labels) check(input(label).value === draft(label), "failed or unchanged refresh lost " + label);
+    st.releases[1].stop_asked = true;
+    await run("loadStatus()");
+    check(!input("releaseStopReason"), "stop controls retained after stop was requested");
+    st.releases[1].stop_asked = false;
+    await run("loadStatus()");
+    check(input("releaseStopReason").value === "", "stop draft survived after its action disappeared");
+    input("releaseStopReason").value = draft("releaseStopReason");
+    const asks = st.asks, releases = st.releases;
+    st.asks = []; st.releases = releases.map(r => ({...r, state:r.state === "waiting" ? "approved" : "stopped"}));
+    st.paused = "Paused elsewhere";
+    await run("loadStatus()");
+    // Reintroducing the fixture IDs exposes any stale drafts left after closure/state changes.
+    st.asks = asks; st.releases = releases; st.paused = "";
+    await run("loadStatus()");
+    for (const label of labels) check(input(label).value === "", "obsolete draft retained for " + label);
+  } else {
+    const providerRow = () => descendants(root, "tr").find(el => el.kids[0]?.textContent === "example-provider");
+    const p = st.providers[0];
+    for (const [state, ok, problem] of [["unchecked", null, ""], ["passed", true, ""],
+      ["failed", false, ""], ["blocked", true, "credit too low"], ["resting", false, "resting until example"], ["recovered", true, ""]]) {
+      p.check = ok === null ? null : {ok, detail:"example check " + state, at:1700000000}; p.problem = problem;
+      await run("loadStatus()");
+      const cells = providerRow().kids, pill = cells[3].kids[0];
+      const expected = problem || (ok === null ? (process.argv[4] === "en" ? "not checked yet" : "尚未检查")
+        : ok ? run("T.ready") : (process.argv[4] === "en" ? "last ping failed" : "上次 Ping 未通过"));
+      check(pill.textContent === expected, state + " provider status did not distinguish check evidence");
+      check(pill.className.split(" ").includes("ok") === (ok === true && !problem), state + " provider has wrong ready colour");
+      if (ok !== null) check(cells[4].textContent.includes(p.check.detail) && cells[4].textContent.includes("2023"), "check detail or time lost");
+      else check(cells[4].textContent === "", "unchecked provider invented check evidence");
+    }
+  }
+  console.log(JSON.stringify({ok:true}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(async () => {
   const check = (ok, why) => { if (!ok) throw new Error(why); };
@@ -31128,6 +31230,42 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                         input=json.dumps(replies), capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), {"pause": True, "resume": True, "details": True, "asks": True, "releases": True})
+
+    def status_refresh_page(self, scenario):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        status = views.status(self.desk)
+        status.update(paused="", asks=[{"id": 7, "text": "Please review the account"}],
+                      queued=[{"id": "t0042", "lane": "a", "title": "Queued UI task", "waiting": "paused"}])
+        waiting = {"id": 17, "state": "waiting", "lane": "a", "target": "push", "base": "alpha",
+                   "commit": "a" * 40, "command": "publish example", "asked": 1,
+                   "runs": "in a checkout", "count": 1, "since_release": 0, "checked": 1,
+                   "commits": [], "files_count": 0, "files": []}
+        status["releases"] = [waiting, {**waiting, "id": 18, "state": "approved", "what": "approved"}]
+        status["providers"] = [{"name": "example-provider", "kind": "subscription", "model": "example-model",
+                                "effort": "", "rest_minutes": 1, "problem": "", "check": None}]
+        harness = self.tmp / "status-refresh-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        replies = {"/api/status": status, "/api/events": [], "/api/task": {"text": "Task detail from API"}}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), scenario, language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"ok": True})
+
+    def test_status_refresh_keeps_drafts_with_their_request_and_release(self):
+        self.status_refresh_page("status-drafts")
+
+    def test_status_refresh_preserves_focused_controls_and_task_details(self):
+        self.status_refresh_page("status-focus")
+
+    def test_status_refresh_discards_only_obsolete_drafts(self):
+        self.status_refresh_page("status-draft-cleanup")
+
+    def test_status_provider_distinguishes_unchecked_failed_and_successful_checks(self):
+        self.status_refresh_page("status-provider-checks")
 
     def task_steps_record(self, **fields):
         return {"id": "t0042", "kind": "task", "lane": "a", "state": "merged", "created": 1700000000,
