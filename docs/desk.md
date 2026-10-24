@@ -20,6 +20,31 @@ the other lane's base.
 
 ## Status and cost on the web page
 
+Open the address `hansa web` prints in a terminal of your own. The page keeps
+its token in `sessionStorage`, scoped to the browser tab and origin (scheme,
+host and port), and removes it from the address before requesting desk data.
+Reloading in that tab keeps access; another desk or forwarded port has its own
+storage. If session storage is unavailable, access lasts for the current page
+load; reopen the printed address after a refresh. The token is never stored in
+`localStorage` or issued as a cookie, and responses use `Referrer-Policy: no-referrer`.
+The HTML shell can load without a token; every API request must send
+`Authorization: Bearer <token>`, and POST also requires `X-Hansa: 1`.
+Query parameters and cookies do not authenticate API requests.
+
+After upgrading, restart the desk's server and reopen the printed address:
+the token is renewed automatically when its format changes. A current token
+persists across server restarts. Closing a tab discards its session storage
+unless the browser restores that session. To revoke all copies, stop the
+desk's server, delete `.hansa/web-token`, restart it and open the new address.
+No browser, proxy or server setting is needed for this authentication.
+
+The API returns HTTP 400 with JSON fields `ok: false`, `code`, `field` and `problems` for an
+invalid `days` query value (`invalid_query`, field `days`), malformed JSON
+(`invalid_json`, field `body`), or a JSON body whose top level is not an object
+(`invalid_type`, field `body`). `problems` is a list of explanations. Cost
+defaults to 7 days and clamps integer values to 1–90; invalid event counts
+continue to use the default of 60. An empty POST body still means `{}`.
+
 The browser tab and the caption beside Hansa name the desk by its parent folder
 and its own folder, such as `work/desk`. The tab title is `Hansa · work/desk`,
 prefixed with the number of releases waiting for approval plus open requests
@@ -105,7 +130,7 @@ labels have an opaque background so adjacent grid lines do not cross their text.
 History loads when Status opens and at most once a minute during its regular
 five-second updates; it does not hold up the rest of Status.
 
-`GET /api/timeline` uses the same desk key or cookie as the other page endpoints
+`GET /api/timeline` uses the same bearer authorization as the other page endpoints
 and only reads records. Its top-level `start` and `end` are Unix seconds bounding
 the window. `lanes` is an ordered list of `{lane, segments}`. Each segment has:
 
@@ -271,6 +296,15 @@ explanations and other read-only lane fields expand in place. Network, write and
 allowed-command rules remain visible, as do the warnings needed before saving.
 Providers includes the rest minutes that apply to every provider.
 The save bar applies to all editable settings groups.
+After saving, it describes the timing for each kind of setting changed:
+prices apply immediately on the next report read, recalculating past usage too;
+provider settings apply to new worker/verifier runs and the next coordinator start;
+rest minutes apply when a new rest begins, keeping existing rest end times;
+not-read rules apply at the next worker, verifier or coordinator start, leaving
+running processes' access as it was. Coordinator model, provider, effort and
+working compaction apply at its next start; idle compaction reads its threshold
+at the mod's next decision. Release rules apply at the next relevant task-title,
+merge or release check, and alert settings at the next alert check.
 The visible not-read warning says that while the list holds an entry containing
 `()[]{}*?\`, hansa starts no worker, verifier or coordinator until it is changed here.
 

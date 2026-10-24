@@ -262,20 +262,22 @@ def no_publish_with_options() -> list:
                for between in (" ", " * ")])
 
 
-def _kept_folder(args, f, st=None) -> str:
-    """The desk's folder kept from every agent that this file is in, wherever a link leads (.hansa or secrets),
-    or that holds a hard link to one of its secrets (st: the file's stat, when it is open already); '' when it is
-    in neither, or there is no desk."""
+def _file_problem(args, f, st=None) -> str:
+    """Apply the worker content admission rules to text files, including before an account handoff."""
+    from .attach import read_problem
+
     try:
         desk = Desk.find(getattr(args, "desk", None))
     except SystemExit:
         return ""
-    return desk.kept_folder(f, st)
+    try:
+        return read_problem(desk, f, st)
+    except RuntimeError as e:
+        return f"cannot be read: {e}"
 
 
-def _stdin_kept(args) -> str:
-    """_kept_folder for standard input when a shell redirected a file to it (< .hansa/web-token); a pipe or a
-    here-document is never refused."""
+def _stdin_problem(args) -> str:
+    """Check a regular file redirected to standard input; pipes carry text without a source path."""
     try:
         st = os.fstat(sys.stdin.fileno())
     except (OSError, ValueError):
@@ -287,29 +289,35 @@ def _stdin_kept(args) -> str:
         if hasattr(fcntl, "F_GETPATH"):  # macOS
             path = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0].decode()
         else:  # Linux
-            path = os.readlink("/proc/self/fd/0")
+            path = os.readlink(f"/proc/self/fd/{sys.stdin.fileno()}")
+            if path.endswith(" (deleted)"):
+                try:
+                    same = os.path.samestat(st, os.stat(path))
+                except OSError:
+                    same = False
+                if not same:  # proc appends this suffix to the name of an unlinked file
+                    path = path.removesuffix(" (deleted)")
     except (OSError, UnicodeDecodeError):
-        pass  # the inode tells it all the same
-    return _kept_folder(args, path, st)
+        pass  # private hard links can still be checked by device and inode
+    return _file_problem(args, path, st)
 
 
 def _text(args) -> str:
     if getattr(args, "file", None) == "-":  # on standard input: root hands a file's text to the desk's account so
-        kept = _stdin_kept(args)
-        if kept:
-            raise SystemExit(f"hansa: standard input is a file in the desk's {kept}/, which no agent reads, and its "
-                             f"text would go into the desk for them; nothing was changed")
+        problem = _stdin_problem(args)
+        if problem:
+            raise SystemExit(f"hansa: standard input {problem}; nothing was changed")
         return sys.stdin.read()
     if getattr(args, "file", None):
         f = Path(args.file)
         if not f.is_file():
             raise SystemExit(f"hansa: {args.file} " + ("is a folder, not a file" if f.is_dir() else "does not exist")
                              + "; nothing was changed")
-        kept = _kept_folder(args, f)
-        if kept:  # the page's token, the queued alerts with a release's one-time code, the keys: none goes into a task
-            raise SystemExit(f"hansa: {args.file} is in the desk's {kept}/, which no agent reads, and its text would go "
-                             f"into the desk for them; nothing was changed")
         try:
+            f = f.resolve(strict=True)
+            problem = _file_problem(args, f)
+            if problem:
+                raise SystemExit(f"hansa: {args.file} {problem}; nothing was changed")
             return f.read_text(encoding="utf-8")
         except OSError as e:
             raise SystemExit(f"hansa: cannot read {args.file} ({e.strerror or e}); nothing was changed")

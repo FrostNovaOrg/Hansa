@@ -175,8 +175,13 @@ passes it on, but some such endpoints do not act on it.
 
 ## Task text and options
 
-Give text inline or with `--file PATH`; add screenshots, patches or logs with repeatable `--attach PATH`.
-Copies are saved under `.hansa/` when queued, so later source edits change nothing. Retry inherits them
+Give text inline or with `--file PATH`. Text files, including a regular file redirected to `--file -`,
+follow the same worker read permissions as new attachment sources, following symbolic links and checking
+private hard links. The check applies to `add`, `retry` and `lane brief`, including before handing text
+to the desk's account. A refusal changes nothing. Inline text, pipes and here-documents remain usable.
+
+Add screenshots, patches or logs with repeatable `--attach PATH`. Copies are saved under `.hansa/`
+when queued, so later source edits change nothing. Retry inherits them
 and accepts more with `--attach`; verification inherits them too. Each run gets copies under its
 temporary `attach/`, named in its instructions by full path. `hansa show ID` lists names and sizes.
 To keep private data closed, folders, missing files, worker read denials (following links) and files
