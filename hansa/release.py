@@ -742,6 +742,8 @@ def repository_input(command: str, repository, commit: str, fixed: bool = False,
                 except (OSError, RuntimeError):
                     pass
     load(root, commit)
+    if fixed and directory and root in cwd.parents:
+        load(cwd, commit)
 
     def dependencies(candidate):
         candidate = cwd / candidate
@@ -931,7 +933,10 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
             f'The principal requires their yes for direct commits; ask with hansa release {lane} {a["target"]} '
             '--direct "<why>". Nothing was asked'))
     target, command, prev, since = a["target"], a["command"], a["prev"], a["since"]
-    why, _ = repository_input(command, a["repo"], a["commit"], a["fixed"])
+    try:
+        why, _ = repository_input(command, a["repo"], a["commit"], a["fixed"])
+    except (RuntimeError, OSError) as e:
+        raise SystemExit(f"hansa: the release inputs cannot be read ({desk.redact(str(e))}). Nothing was asked")
     if why:
         raise SystemExit(desk.redact(f"hansa: {why}. Nothing was asked"))
     rs = releases(desk)

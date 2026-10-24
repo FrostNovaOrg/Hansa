@@ -27078,6 +27078,20 @@ def save():'''))
                 finally:
                     moved.rename(original)
 
+    def test_release_request_with_unreadable_tree_is_refused_cleanly(self):
+        from hansa import release
+        self.with_release("true")
+        sh("git", "update-ref", "refs/remotes/origin/main", "HEAD", cwd=self.repo)
+        oid = self.git_out("rev-parse", "HEAD^{tree}")
+        original = self.repo / ".git" / "objects" / oid[:2] / oid[2:]
+        moved = self.tmp / "unavailable"
+        original.rename(moved)
+        try:
+            self.assertIn("cannot be read", self.refused("release", "a"))
+            self.assertEqual(release.releases(self.desk), [])
+        finally:
+            moved.rename(original)
+
     def test_release_output_and_metadata_arguments_are_accepted(self):
         from hansa import release
         self.commit_in_repo("deploy.sh", "echo deployed\n")
@@ -27329,6 +27343,33 @@ def save():'''))
         sh("git", "add", "current", cwd=self.repo)
         sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add directory link", cwd=self.repo)
         self.fixed_target("install", "sh current/*.sh", tick=False)
+        r = release.ask(self.desk, "a", target="install")
+        self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")
+        for name in ("publish.sh", "local.sh"):
+            with self.subTest(name=name):
+                r = release.ask(self.desk, "a", target="install")
+                self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
+                script = self.repo / "ops" / name
+                script.write_text("echo local\n")
+                with unittest.mock.patch.object(release, "_launch") as launch:
+                    self.assertIsNone(release.start(self.desk, r["id"]))
+                launch.assert_not_called()
+                record = release.get(self.desk, r["id"])
+                self.assertEqual(record["state"], "void")
+                self.assertIn(name, record["void"])
+                self.assertEqual(self.checkouts(), [])
+                if name == "publish.sh":
+                    script.write_text("echo approved\n")
+
+    def test_fixed_release_checkout_inside_repository_uses_its_own_commit(self):
+        from hansa import release
+        self.desk = init_desk(self.repo / "desk", str(self.repo), "a")
+        self.commit_in_repo("ops/publish.sh", "echo approved\n")
+        (self.repo / "current").symlink_to(self.repo / "ops", target_is_directory=True)
+        sh("git", "add", "current", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add directory link", cwd=self.repo)
+        self.fixed_target("install", "sh ops/publish.sh; sh current/*.sh", tick=False)
         r = release.ask(self.desk, "a", target="install")
         self.assertEqual(release.answer(self.desk, r["id"], True, commit=r["commit"]), {"ok": True})
         self.assertEqual(self.settle_release(Dispatcher(self.desk), r["id"])["state"], "done")

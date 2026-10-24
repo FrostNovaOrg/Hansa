@@ -327,6 +327,9 @@ ignored files. Each file and repository link followed to reach it must occur
 in the release commit; staging alone does not count. For initialized submodules,
 their recorded gitlink commits apply. Otherwise the request is refused or voided;
 the message explains how to ask again.
+These checks keep recognized inputs tied to the approved commit when a release
+runs with the desk account's permissions. They may be removed when the execution
+environment ensures the same binding for every recognized input.
 
 The scan checks command names, operands of recognized shells and interpreters
 (`sh`, `bash`, `dash`, `zsh`, `ksh`, `ash`, `python` and numbered variants,
