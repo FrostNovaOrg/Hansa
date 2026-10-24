@@ -705,24 +705,6 @@ def may_write(box: dict, path, rules=None) -> bool:
     return not any(re.match(sandbox_glob(x), p) if any(c in x for c in "*?[") else under(x) for x in deny)
 
 
-def python_loads() -> list:
-    """The folders the python running the tests loads modules from, taken from the python itself as hansa takes
-    them (desk._run_fence), links resolved: where it is installed decides which of the system's folders hold one."""
-    import site
-    import sysconfig
-    mods = [x for x in sys.path if x] + [sysconfig.get_paths().get(k) for k in ("stdlib", "platstdlib", "purelib", "platlib")]
-    try:
-        mods += [*site.getsitepackages(), site.getusersitepackages()]
-    except (AttributeError, OSError, TypeError):  # a python started without its site module
-        pass
-    return list(dict.fromkeys(os.path.realpath(x) for x in mods if isinstance(x, str) and x.startswith("/")))
-
-
-def overlaps(a: str, b: str) -> bool:
-    """Whether one of two full paths is the other or inside it."""
-    return a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
-
-
 def sh_out(*args, cwd) -> str:
     return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
@@ -19298,14 +19280,16 @@ def save():'''))
         loads = "which the python that runs hansa loads modules from"
         version = f"{sys.version_info[0]}.{sys.version_info[1]}"
         user = home / ".local" / "lib" / f"python{version}" / "site-packages"
-        mods = {user: loads, user.parent: loads, user / "x": loads, home / ".local" / "lib": loads,
-                Path(sysconfig.get_paths()["stdlib"]): loads, Path(sysconfig.get_paths()["stdlib"]) / "json": loads,
-                Path(sysconfig.get_paths()["purelib"]): loads, Path(site.getsitepackages()[0]) / "pkg": loads,
-                Path(package.__file__).resolve().parent: "hansa's own code",
-                Path(package.__file__).resolve().parent / "sub": "hansa's own code"}
+        bad.update({user: loads, user.parent: loads, user / "x": loads, home / ".local" / "lib": loads})
+        mods = [Path(sysconfig.get_paths()["stdlib"]), Path(sysconfig.get_paths()["stdlib"]) / "json",
+                Path(sysconfig.get_paths()["purelib"]), Path(site.getsitepackages()[0]) / "pkg",
+                Path(package.__file__).resolve().parent, Path(package.__file__).resolve().parent / "sub"]
         with as_home(home), self.left_out_together():
-            for x, why in {**bad, **mods}.items():
+            for x, why in bad.items():
                 self.assertIn("it would open", self.refused_and_left_out(x, why))
+            # Python and hansa may share an installation with another program: any fence may refuse first.
+            for x in mods:
+                self.refused_and_left_out(x, "")
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "set", "a", "write", str(home / ".m2"), str(home / ".zshenv")])
             self.assertIn(shell, str(e.exception.code))
@@ -19936,21 +19920,11 @@ def save():'''))
                 told = self.refused_and_left_out(x, "it would open " if top != "/usr" else "")
                 if top not in ("/Applications", "/Library", "/usr") or "/usr/local/share" in str(x):  # else a nearer fence may say it
                     self.assertIn(f"it would open {top}, {where}", told)
-            # the system's own: says where a cache goes. Unless the python running hansa loads modules from inside
-            # it (dist-packages under /usr/local/lib, say): then that is the reason given, which says it first
-            loaded = python_loads()
-            system = [x for x in ("/usr/local/lib", "/usr/local/lib/x", "/usr/lib/x")
-                      if not any(overlaps(os.path.realpath(x), d) for d in loaded)]
-            self.assertIn("/usr/lib/x", system)
-            for x in system:
-                self.assertIn("(a cache folder goes elsewhere, such as a tools folder of the desk's, another volume or "
-                              "/tmp)", self.refused_and_left_out(x, "the system's own settings, libraries or programs"))
-            for x in {"/usr/local/lib", "/usr/local/lib/x", "/usr/lib/x"} - set(system):
-                self.refused_and_left_out(x, "which the python that runs hansa loads modules from")
-            # and a folder that would open one of them, wherever python is installed
+            # System libraries and Python's packages may also be inside another program's installation.
+            # Keep the refusal checks at saving and run start, without choosing which fence says it first.
             import site
-            self.refused_and_left_out(Path(site.getsitepackages()[0]) / "pkg",
-                                      "which the python that runs hansa loads modules from")
+            for x in ("/usr/local/lib", "/usr/local/lib/x", "/usr/lib/x", Path(site.getsitepackages()[0]) / "pkg"):
+                self.refused_and_left_out(x, "")
             fine = ["/srv/x/tools/xdg-cache/pnpm", "/tmp/cache", "/opt/cache", "/var/cache/x", "/mnt/big/cache",
                     str(self.tmp.resolve() / "elsewhere" / "cache"), str(home / "work" / "cache")]
             self.assertEqual(write_problems(fine, str(self.repo), self.desk.root, self.desk.settings()["providers"]), [])
