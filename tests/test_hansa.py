@@ -11787,6 +11787,101 @@ def save():'''))
         self.assertEqual(r.returncode, 0, r.stderr)  # a here-document, a temporary file in some shells
         self.assertEqual(len(self.desk.tasks()), 2)
 
+    def text_source_refused(self, source, why, redirected=False):
+        tid = self.desk.new_task("Keep the greeting")
+        self.desk.update(tid, state="failed")
+        brief = self.desk.lanes_dir / "a" / "brief.md"
+        before = (self.desk.tasks(), brief.read_bytes(), self.desk.events_path.read_bytes())
+        for command in (["add"], ["retry", tid, "--fresh"], ["lane", "brief", "a"]):
+            with self.subTest(command=command, source=source), contextlib.ExitStack() as stack:
+                if redirected:
+                    stack.enter_context(unittest.mock.patch("sys.stdin", stack.enter_context(source.open())))
+                with self.assertRaises(SystemExit) as refused:
+                    self.hansa(*command, "--file", "-" if redirected else str(source))
+                self.assertIn(why, str(refused.exception.code))
+                self.assertIn("nothing was changed", str(refused.exception.code))
+                self.assertEqual((self.desk.tasks(), brief.read_bytes(), self.desk.events_path.read_bytes()), before)
+
+    def test_text_files_follow_worker_read_permissions_and_links(self):
+        private = self.tmp / "private"
+        private.mkdir()
+        source = private / "task.md"
+        source.write_text("Only for the principal")
+        link = self.tmp / "linked.md"
+        link.symlink_to(source)
+        self.hansa("hide", str(private))
+        for path in (source, link):
+            self.text_source_refused(path, "workers may not read")
+        allowed = self.tmp / "private-other.md"
+        allowed.write_text("Add hello.txt")
+        self.hansa("add", "--file", str(allowed))
+        self.assertEqual((self.desk.tasks_dir / self.desk.tasks()[-1]["id"] / "task.md").read_text(), "Add hello.txt\n")
+
+    def test_redirected_text_files_follow_worker_read_permissions(self):
+        source = self.tmp / "private.md"
+        source.write_text("Only for the principal")
+        self.hansa("hide", str(source))
+        self.text_source_refused(source, "workers may not read", redirected=True)
+        readlink = os.readlink
+        with unittest.mock.patch.object(cli, "fcntl", types.SimpleNamespace()), \
+                unittest.mock.patch.object(cli.os, "readlink", side_effect=lambda p:
+                                           str(source) + " (deleted)" if str(p).startswith("/proc/self/fd/")
+                                           else readlink(p)):
+            self.text_source_refused(source, "workers may not read", redirected=True)
+        allowed = self.tmp / "allowed.md"
+        allowed.write_text("Add hello.txt")
+        with allowed.open() as stdin, unittest.mock.patch("sys.stdin", stdin):
+            self.hansa("add", "--file", "-")
+        self.assertEqual((self.desk.tasks_dir / self.desk.tasks()[-1]["id"] / "task.md").read_text(), "Add hello.txt\n")
+        named = self.tmp / "allowed (deleted)"
+        named.write_text("Add greeting.txt")
+        with named.open() as stdin, unittest.mock.patch("sys.stdin", stdin), \
+                unittest.mock.patch.object(cli, "fcntl", types.SimpleNamespace()), \
+                unittest.mock.patch.object(cli.os, "readlink", side_effect=lambda p:
+                                           str(named) if str(p).startswith("/proc/self/fd/") else readlink(p)):
+            self.hansa("add", "--file", "-")
+        self.assertEqual((self.desk.tasks_dir / self.desk.tasks()[-1]["id"] / "task.md").read_text(), "Add greeting.txt\n")
+
+    def test_text_sources_follow_builtin_worker_read_permissions(self):
+        from hansa import run
+        home = self.tmp / "home"
+        (home / ".ssh").mkdir(parents=True)
+        login = home / ".ssh" / "id_test"
+        login.write_text("Account data")
+        note = self.desk.notes_dir / "note.md"
+        note.write_text("Coordinator notes")
+        provider = self.tmp / "provider-home"
+        provider.mkdir()
+        config = provider / "settings.json"
+        config.write_text("Provider settings")
+        settings = self.desk.settings()
+        settings["providers"]["claude"]["config_dir"] = str(provider)
+        self.assertEqual(self.desk.save_settings(settings), [])
+        with unittest.mock.patch.object(run, "account_home", lambda: str(home)):
+            for source in (login, note, config, self.desk.root / "CLAUDE.md"):
+                for redirected in (False, True):
+                    self.text_source_refused(source, "workers may not read", redirected)
+
+    def test_text_sources_require_worker_read_permissions_to_be_available(self):
+        source = self.tmp / "task.md"
+        source.write_text("Add hello.txt")
+        with unittest.mock.patch("hansa.run.worker_read_denials", side_effect=RuntimeError("read rules unavailable")):
+            for redirected in (False, True):
+                self.text_source_refused(source, "read rules unavailable", redirected)
+
+    def test_redirected_text_requires_a_path_and_is_checked_before_account_handoff(self):
+        source = self.tmp / "task.md"
+        source.write_text("Add hello.txt")
+        with unittest.mock.patch.object(cli.os, "readlink", side_effect=OSError("unavailable")), \
+                unittest.mock.patch.object(cli.fcntl, "fcntl", side_effect=OSError("unavailable")):
+            self.text_source_refused(source, "cannot determine", redirected=True)
+        self.hansa("hide", str(source))
+        self.as_root()
+        with unittest.mock.patch.object(account, "run") as handoff:
+            for redirected in (False, True):
+                self.text_source_refused(source, "workers may not read", redirected)
+        handoff.assert_not_called()
+
     def test_a_task_cancelled_while_hansa_prepares_it_never_runs(self):
         import hansa.run as run
         seen = self.tmp / "argv.jsonl"

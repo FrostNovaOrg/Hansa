@@ -10,6 +10,23 @@ MAX_FILES = 20
 MAX_BYTES = 20 * 1024 * 1024
 
 
+def read_problem(desk, path, st=None, denied=None) -> str:
+    """Whether a source may supply content to workers; st also checks open files' private hard links."""
+    from .run import worker_read_denials
+
+    real = str(Path(path).resolve()) if path else ""
+    kept = desk.kept_folder(real, st)
+    if kept:
+        return f"is a file in the desk's {kept}/, which no agent reads"
+    if not real:
+        return "cannot determine the source file's path to check worker read permissions"
+    if denied is None:
+        denied = worker_read_denials(desk)
+    if any(_above(d, real) for d in denied):
+        return "is a file workers may not read"
+    return ""
+
+
 def snapshot(desk, paths=(), parent="") -> list:
     """Read the inherited copies and new sources once, bounded in size, under the desk lock.
     Return (name, bytes) pairs; no task or attachment is written on a refusal.
@@ -44,11 +61,9 @@ def snapshot(desk, paths=(), parent="") -> list:
             if not stat.S_ISREG(st.st_mode):
                 refuse(path, "is not a regular file")
             if not inherited:
-                kept = desk.kept_folder(real, st)
-                if kept:
-                    refuse(path, f"is in the desk's {kept}/, which no agent reads")
-                if any(_above(d, str(real)) for d in denied):
-                    refuse(path, "is a file workers may not read")
+                problem = read_problem(desk, real, st, denied)
+                if problem:
+                    refuse(path, problem)
             with real.open("rb") as f:
                 data = f.read(MAX_BYTES - total + 1)
         except FileNotFoundError:

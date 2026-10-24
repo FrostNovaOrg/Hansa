@@ -2533,7 +2533,7 @@ def desk_fence_rules(desk: Desk, wt: Path, tmp: str) -> list:
 
 
 def worker_read_denials(desk: Desk) -> list:
-    """The read fence shared by worker sandboxes and attachment admission."""
+    """The read fence shared by worker sandboxes and file content admission."""
     home = Path(account_home())
     homes = [config_home(desk, n, p) for n, p in desk.settings()["providers"].items()
              if isinstance(p, dict) and isinstance(p.get("config_dir", ""), str)]

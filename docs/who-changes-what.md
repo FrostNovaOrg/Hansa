@@ -206,14 +206,13 @@ prints it only outside a Claude Code session: in one (any of the variables
 above set, the `!` prefix's shell included) it refuses, prints nothing of the
 address, and says how the principal opens the page from a terminal of their own, as the
 README's `ssh -L` line does. It refuses for `HANSA_ROLE` or `HANSA_TASK` as
-before. `--file` (`hansa add`, `retry`, `lane brief`) refuses a file
-in the desk's `.hansa/` or `secrets/`, wherever a link leads, and a hard link
-to one of their files elsewhere; `--file -` refuses the same file redirected
-to standard input (`< .hansa/web-token`), found by its path or, where that
-cannot be told, its device and inode, while a pipe or a here-document is
-read as before: they hold the
-token, alerts waiting to go out with a release's one-time code, and the keys,
-and a file's text would go into the desk where agents read it.
+before. `--file` (`hansa add`, `retry`, `lane brief`) admits only files workers may read,
+using the same rules as new attachments, including the principal's list and the built-in private
+folders. It follows symbolic links and checks private hard links. `--file -` applies those checks
+to a regular file redirected to standard input, using its path and its device and inode; if its
+path cannot be determined, it refuses. These checks keep private file content out of text agents
+receive and apply before an account handoff too; they remain necessary while commands accept file
+content for workers. Inline text, pipes and here-documents are read as before.
 
 Nothing else hansa prints holds the token or a one-time code: `hansa serve`,
 `hansa status` and `hansa explain server` give the page's host and port only; the

@@ -313,7 +313,8 @@ or ask `scout` when reading is enough; say what you need back.
 - When a run ends, hansa stops what it left running (a dev server, a watcher) before it commits and
   before the check; `hansa show` lists them. More: `hansa help leftovers`.
 - Nothing hansa starts gets a Claude Code session's identity. `hansa web` refuses in a Claude Code
-  session; `--file` refuses the desk's `.hansa/` and `secrets/`. More: `hansa help session-identity`.
+  session; `--file` (including redirected files with `--file -`) admits only files workers may read.
+  More: `hansa help session-identity`.
 - To say what one job cost, note the time `hansa status` shows when you start it, then run `hansa
   cost --since HH:MM --by seat`. Spend no turns on cost. More: `hansa help cost-figures`.
 
