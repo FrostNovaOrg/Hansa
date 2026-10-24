@@ -10,16 +10,18 @@ from pathlib import Path
 MAX_BYTES = 16 * 1024 * 1024
 
 
-def _paths(command: str):
+def _paths(command: str, content_inputs: bool = False, repository=None):
     """Read quoted words too, including a shell command passed as one word to bash -c."""
-    pending, seen = [command], set()
+    pending, seen = [(command, Path("."))], set()
     while pending:
-        line = pending.pop()
-        if line in seen:
+        line, directory = pending.pop()
+        if (line, directory) in seen:
             continue
-        seen.add(line)
+        seen.add((line, directory))
         try:
-            lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
+            lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>" + ("\n" if content_inputs else ""))
+            if content_inputs:
+                lex.whitespace = " \t\r"
             lex.whitespace_split = True
             lex.commenters = ""
             words = []
@@ -31,17 +33,36 @@ def _paths(command: str):
                 if word is None:
                     break
                 end = lex.instream.tell() - len(lex._pushback_chars)
-                words.append((word, line[start:end].strip()))
+                words.append((word, line[start:end].strip(" \t\r" if content_inputs else None)))
         except ValueError:
             words = [(word, word) for word in line.split()]
-        output = False
+        output, first, reads, cd_next = False, True, True, False
         for word, spelling in words:
             if output:
                 output = False
+                if content_inputs and ("$(" in word or "`" in word):
+                    pending.append((word.replace("`", " "), directory))
                 continue
             if spelling in (">", ">>", ">|", "&>", "&>>", ">&"):
                 output = True
                 continue
+            read_word, change_dir = True, False
+            if content_inputs:
+                if spelling and all(c in ";&|()\n" for c in spelling):
+                    first, reads, cd_next = True, True, False
+                    continue
+                if first and word in ("if", "then", "elif", "else", "while", "until", "do", "!"):
+                    continue
+                if first:
+                    # These commands write files or text, or test metadata; their operands are not content inputs.
+                    reads = word not in ("touch", "/bin/touch", "/usr/bin/touch", "echo", "printf", "test", "[")
+                    cd_next = word == "cd"
+                    first = False
+                else:
+                    read_word = reads
+                    change_dir = cd_next and not word.startswith("-")
+                    if change_dir:
+                        cd_next = False
             # Options and assignments can hold a path after '='. No variable but HOME is read.
             if word.startswith(("/", "~/", "$HOME/", "${HOME}/", "./", "../")) or "=" not in word:
                 values = [word]
@@ -53,9 +74,21 @@ def _paths(command: str):
                     continue
                 p = Path(value).expanduser()
                 # Bare names can be repository links leading outside too; inspect resolves them.
-                yield p
-            if word != line and any(c.isspace() or c in "'\"" for c in word):
-                pending.append(word)
+                if read_word:
+                    yield p
+                    if directory != Path("."):
+                        yield directory / p
+                if change_dir:
+                    location = Path(repository or ".") / directory / p
+                    try:
+                        if location.is_dir() and os.access(location, os.X_OK):
+                            directory /= p
+                    except (OSError, RuntimeError, ValueError):
+                        pass
+            nested = content_inputs and ("$(" in word or "`" in word or
+                                         (read_word and any(c in word for c in ";&|()<>")))
+            if word != line and (nested or (read_word and any(c.isspace() or c in "'\"" for c in word))):
+                pending.append((word.replace("`", " ") if nested else word, directory))
 
 
 def inspect(command: str, repository, fingerprint: bool = True, directory=None) -> dict:

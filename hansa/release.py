@@ -717,6 +717,41 @@ def _has_commit(repo, sha: str) -> bool:
 
 
 # -- asking ------------------------------------------------------------------------------------------------------
+def repository_input(command: str, repository, commit: str, fixed: bool = False) -> tuple:
+    """Explicit repository file inputs must belong to the release commit, including paths through links.
+    Use the same word parsing as outside inputs; outputs, metadata tests and unnamed dependencies are excluded.
+    """
+    root, seen = Path(repository).resolve(), set()
+    for candidate in outside._paths(command, content_inputs=True, repository=root):
+        named = Path(os.path.abspath(root / candidate))
+        try:
+            resolved = named.resolve()
+            if root not in resolved.parents or not resolved.is_file():
+                continue
+        except (OSError, RuntimeError, ValueError):
+            continue
+        for path in dict.fromkeys((named, resolved)):
+            key = path, fixed and candidate.is_absolute()
+            if root not in path.parents or key in seen:
+                continue
+            seen.add(key)
+            relative = path.relative_to(root).as_posix()
+            try:
+                if git("cat-file", "-t", f"{commit}:{relative}", cwd=root) == "blob":
+                    # An absolute path still reads the original repository, even with --fixed.
+                    if fixed and candidate.is_absolute():
+                        git("diff", "--quiet", "--no-ext-diff", "--no-textconv", commit, "--",
+                            f":(literal){relative}", cwd=root)
+                    continue
+            except (RuntimeError, OSError):
+                pass
+            return (f"repository file {relative} must match a file in release commit {commit[:10]}; "
+                    "commit it or use a path from that commit before asking again",
+                    f"仓库文件 {relative} 必须对应发布提交 {commit[:10]} 中的文件；"
+                    "请先提交，或使用该提交中的路径，再重新请求")
+    return "", ""
+
+
 def scan_key(repo, since: str, commit: str, words: list, command: str, mailboxes: bool = False,
              mailbox_allow=(), exceptions=()) -> str:
     """What a forbidden-word scan depends on, in one string: the commit, the starting point (the target's last
@@ -848,6 +883,9 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
             f'The principal requires their yes for direct commits; ask with hansa release {lane} {a["target"]} '
             '--direct "<why>". Nothing was asked'))
     target, command, prev, since = a["target"], a["command"], a["prev"], a["since"]
+    why, _ = repository_input(command, a["repo"], a["commit"], a["fixed"])
+    if why:
+        raise SystemExit(desk.redact(f"hansa: {why}. Nothing was asked"))
     rs = releases(desk)
     listed = lane_listed(s, lane, target) and not held
     r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "target": target,
@@ -904,6 +942,9 @@ def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
     if repo_key(ln["repo"]) != r.get("repo") or (ln.get("base") or "main") != r.get("base"):
         return (f"lane {r['lane']}'s repository or base branch changed since it was asked",
                 f"工作线 {r['lane']} 的仓库或基础分支在请求之后改了")
+    why = repository_input(r.get("command") or "", ln["repo"], r["commit"], bool(r.get("fixed")))
+    if why[0]:
+        return why
     files = outside.inspect(r.get("command") or "", ln["repo"])["outside"]
     if "outside" not in r and files:
         path = files[0]["path"]

@@ -321,6 +321,20 @@ repeated by the actual merge command, and counts of merged tasks touching each
 `release_files` entry in the last 14 days, including renamed-away files, from
 existing records and git when asked, never in an idle round.
 
+Existing regular files explicitly named inside the repository must belong to
+the release commit, including binary and ignored files; staging a new file
+alone does not count. For links within the repository, both the named path
+and its destination must belong to that commit. A request is refused otherwise;
+the same check before approval and before starting voids a request that no
+longer meets it. These checks tie named repository inputs to the release commit
+while targets can run in the repository or name it by absolute path.
+Prefer `--fixed` with relative paths to run the committed versions even when
+the original checkout changes. Absolute repository file paths still read that
+checkout and must match the commit. Unrelated untracked files are left alone.
+The command words are read as described below, with output redirections,
+`touch` operands, `echo`/`printf` output, and `test`/`[` metadata tests excluded.
+Explicit `cd` paths set the directory for subsequent repository inputs.
+
 A command can also name a file outside the lane's repository: hansa looks
 in its words, inside quotes too, for absolute paths, `~/`, `$HOME/` or
 `${HOME}/` paths, and relative paths that leave the repository, expanding
