@@ -165,8 +165,12 @@ page languages, including the login command or how saving a new key restores it.
 The status line also warns about `serve_code`, `alert_failed` and every line of
 `unreached`, with short translated labels and the server's original text.
 
-Recent events keeps the newest 20, with their times. These kinds use a short
-sentence in the page's language and a task link when they carry `task`:
+Recent events keeps the newest 20, with their times. The page reads the log from
+the end in 64 KiB blocks, reading each byte at most once per request even when an
+event spans many blocks. Unicode line boundaries are preserved; a damaged final
+line is skipped. Requests filtered by event kind still search the whole log.
+These kinds use a short sentence in the page's language and a task link when they
+carry `task`:
 
 - Tasks: `task_started`, `task_finished`, `task_merged`.
 - Checks and verifications: `check_started`, `task_checked`, `check_killed`,

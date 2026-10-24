@@ -35,15 +35,29 @@ def _last_lines(path, n: int, block: int = 65536) -> list:
     """The last n lines of a file, as read_text().splitlines()[-n:] gives them, read from its end: the log grows
     with the desk, and the page asks for its latest events every few seconds."""
     with open(path, "rb") as fh:
-        end = at = fh.seek(0, os.SEEK_END)
-        data = b""
+        at = fh.seek(0, os.SEEK_END)
+        parts, following, breaks = [], b"", 0
+        tail, extra = b"", False
+        # All str.splitlines() boundaries in UTF-8; count CRLF once, at its LF.
+        boundary = re.compile(rb"\n|\r(?!\n)|[\v\f\x1c-\x1e]|\xc2\x85|\xe2\x80[\xa8\xa9]")
         while at > 0:
+            end = at
             at = max(0, at - block)
             fh.seek(at)
             data = fh.read(end - at)
-            # a line before the last n, whole or not, so that each of those n starts where it does in the file
-            if at and len(data.decode("utf-8", errors="replace").splitlines()) > n:
+            parts.append(data)
+            # Two bytes from the next block complete a split Unicode boundary or CRLF.
+            scan = data + following
+            breaks += sum(m.start() < len(data) for m in boundary.finditer(scan))
+            following = scan[:2]
+            # Count an unterminated final line too, even if its last character is incomplete.
+            if len(tail) < 3:
+                tail = (data + tail)[-3:]
+                extra = not any(m.end() == len(tail) for m in boundary.finditer(tail))
+            # Keep a line before the last n so each retained line starts in the file.
+            if breaks + extra > n:
                 break
+    data = b"".join(reversed(parts))
     if at:  # cut where a character may go on: the rest of it, in the line that is left out
         data = data[next((i for i in range(min(4, len(data))) if not 0x80 <= data[i] < 0xC0), 0):]
     return data.decode("utf-8", errors="surrogateescape").splitlines()[1 if at else 0:][-n:]

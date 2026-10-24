@@ -24466,6 +24466,46 @@ def save():'''))
         self.assertEqual(opened, ["rb"])
         self.assertEqual([e["i"] for e in web._events(self.desk, 2, "filler")], [2999, 2998])  # by kind: the whole log
 
+    def counted_event_tail(self, n, block=65536, limit=None):
+        from hansa import web
+        reads = []
+        with open(self.desk.events_path, "rb") as fh:
+            def read(size):
+                data = fh.read(size)
+                reads.append(len(data))
+                return data
+            proxy = unittest.mock.MagicMock(wraps=fh)
+            proxy.__enter__.return_value = proxy
+            proxy.read.side_effect = read
+            with unittest.mock.patch("hansa.web.open", return_value=proxy, create=True):
+                lines = web._last_lines(self.desk.events_path, n, block)
+        self.assertLessEqual(sum(reads), self.desk.events_path.stat().st_size if limit is None else limit)
+        return lines
+
+    def test_event_tail_reads_long_lines_only_once(self):
+        data = b"x" * (4 * 1024 * 1024) + b"\n"
+        self.desk.events_path.write_bytes(data)
+        self.assertEqual(self.counted_event_tail(60), [data[:-1].decode()])
+
+    def test_event_tail_preserves_unicode_split_across_reads(self):
+        text = "old\r\né 中 😀\u0085next\u2028line\u2029last\v\f\x1c\x1d\x1eend\n"
+        self.desk.events_path.write_bytes(text.encode())
+        for block in (1, 2, 3, 7):
+            for n in (1, 3, 20):
+                with self.subTest(block=block, n=n):
+                    self.assertEqual(self.counted_event_tail(n, block), text.splitlines()[-n:])
+
+    def test_event_tail_preserves_an_incomplete_last_line(self):
+        from hansa import web
+        data = b'{"event":"old"}\n{"event":"good"}\n{"text":"' + b"x" * 1024 + b"\xe4\xb8"
+        self.desk.events_path.write_bytes(data)
+        self.assertEqual(self.counted_event_tail(2, 37), data.decode("utf-8", "surrogateescape").splitlines()[-2:])
+        self.assertEqual([e["event"] for e in web._events(self.desk, 2)], ["good"])
+        data = b'{"event":"good"}\n{"text":"\xe4\xb8'
+        self.desk.events_path.write_bytes(b"x" * 1024 + b"\n" + data)
+        self.assertEqual(self.counted_event_tail(2, 37, limit=37),
+                         data.decode("utf-8", "surrogateescape").splitlines())
+
     def test_the_page_cannot_change_lanes_or_concurrency(self):
         skip_unless_ports(self)
         s = self.desk.settings()
