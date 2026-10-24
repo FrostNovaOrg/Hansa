@@ -28844,8 +28844,12 @@ class El {
   // as the DOM does, what is not a node becomes text: null the text "null"
   append(...xs) { for (const x of xs) { const child = x instanceof El || x instanceof Text ? x : new Text(String(x));
     child.parentElement = this; this.kids.push(child); } }
-  replaceChildren(...xs) { this.kids = []; this.append(...xs); }
-  contains() { return false; } get nodeType() { return 1; }
+  replaceChildren(...xs) {
+    if (this.contains(document.activeElement)) document.activeElement = document.body;
+    this.kids = []; this.append(...xs);
+  }
+  contains(el) { return this === el || this.kids.some(k => k instanceof El && k.contains(el)); }
+  get nodeType() { return 1; }
 }
 class Text { constructor(s) { this.textContent = s; } get nodeType() { return 3; } }
 const ids = {};
@@ -28867,6 +28871,7 @@ let costGetError = ask === "cost-interactions" ? "example initial cost failure" 
 let costGetGate = null, costRowsError = null, costRowsGate = null;
 let statusGetError = ask === "status-picture-initial-error" ? "status connection lost" : null;
 let statusFailPath = "/api/status";
+let statusGetGate = null;
 let confirmReply = true;
 const fetch = async (path, options) => {
   apiRequests.push({path, headers:{...options?.headers}, credentials:options?.credentials, mode:options?.mode});
@@ -28897,6 +28902,7 @@ const fetch = async (path, options) => {
   if (path === statusFailPath && statusGetError) throw new Error(statusGetError);
   const r = reply(path); if (r === null) return new Promise(() => {});
   const snapshot = JSON.parse(JSON.stringify(r));
+  if (path === "/api/status" && statusGetGate) await statusGetGate;
   if (path === "/api/settings" && settingsGetGate) await settingsGetGate;
   return {status: 200, json: async () => JSON.parse(JSON.stringify(snapshot))};
 };
@@ -28915,7 +28921,7 @@ function openPage(search = "") {
   for (const tab of ["status", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
   const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
   location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
-  URLSearchParams, setInterval() {}, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
+  URLSearchParams, setInterval(f) { (windowEvents.interval ||= []).push(f); }, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
     confirm(message) { confirmations.push(message); return confirmReply; }}, console,
   URL: class extends URL {
     static createObjectURL(blob) { blobs.push(blob); return "blob:page-test-" + blobs.length; }
@@ -29148,6 +29154,180 @@ else if (ask === "task-steps") (async () => {
     result.gets = apiGets;
   }
   console.log(JSON.stringify(result));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provider-checks", "status-button-refresh"].includes(ask) || ask.startsWith("status-action-")) (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const root = ids["#tab-status"], st = given["/api/status"];
+  const find = predicate => { let found; walk(root, el => { if (!found && predicate(el)) found = el; }); return found; };
+  const input = label => find(el => el.tag === "input" && el.attrs.placeholder === run("T." + label));
+  const button = label => find(el => el.tag === "button" && el.textContent === run("T." + label));
+  const labels = ["pauseReason", "answer", "releaseReason", "releaseStopReason"];
+  const draft = label => "Unsent " + label;
+  await run("loadStatus()");
+  if (ask === "status-drafts") {
+    for (const label of labels) input(label).value = draft(label);
+    // The same records change order and content, including the release approval binding.
+    st.asks.unshift({id:8, text:"New request"}); st.asks[1].note = "New note";
+    st.releases.unshift({...st.releases[0], id:19});
+    st.releases[1].commit = "b".repeat(40); st.releases[1].command = "publish revised";
+    await run("loadStatus()");
+    const answers = descendants(root, "input").filter(el => el.attrs.placeholder === run("T.answer"));
+    const reasons = descendants(root, "input").filter(el => el.attrs.placeholder === run("T.releaseReason"));
+    check(answers[0].value === "" && answers[1].value === draft("answer"), "answer draft moved to another request or vanished");
+    check(reasons[0].value === "" && reasons[1].value === draft("releaseReason"), "release draft moved to another release or vanished");
+    for (const label of ["pauseReason", "releaseStopReason"]) check(input(label).value === draft(label), label + " draft vanished");
+    // A redraw must use the refreshed release's command and commit, with its own retained reason.
+    const approvals = descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"));
+    await approvals[1].click();
+    const post = apiPosts.filter(p => p.path === "/api/release/answer").at(-1).body;
+    check(post.id === 17 && post.reason === draft("releaseReason") && post.commit === "b".repeat(40) &&
+      post.command === "publish revised", "retained draft used stale release approval data");
+  } else if (ask.startsWith("status-action-")) {
+    const action = ask.slice("status-action-".length);
+    const [label, field, path, payload] = {
+      close:["close", "answer", "/api/ask/close", {id:7, answer:draft("answer")}],
+      yes:["releaseYes", "releaseReason", "/api/release/answer", {id:17, yes:true, reason:draft("releaseReason"), commit:st.releases[0].commit, command:st.releases[0].command}],
+      no:["releaseNo", "releaseReason", "/api/release/answer", {id:17, yes:false, reason:draft("releaseReason"), commit:st.releases[0].commit, command:st.releases[0].command}],
+      stop:["releaseStop", "releaseStopReason", "/api/release/stop", {id:18, reason:draft("releaseStopReason")}],
+      ping:["check", "answer", "/api/check", {provider:"example-provider"}]
+    }[action];
+    const fieldBefore = input(field), controlBefore = button(label);
+    fieldBefore.value = draft(field); fieldBefore.focus();
+    st.queued[0].title = "Updated immediately after action";
+    const gets = apiGets.filter(path => path === "/api/status").length;
+    // A programmatic click leaves focus in the field: only a forced refresh can redraw it.
+    await controlBefore.click();
+    check(apiGets.filter(path => path === "/api/status").length === gets + 1, action + " did not fetch status immediately");
+    check(root.textContent.includes(st.queued[0].title) && input(field) !== fieldBefore, action + " did not redraw immediately with a focused field");
+    check(input(field).value === draft(field), action + " lost its retained draft");
+    check(JSON.stringify(apiPosts.at(-1)) === JSON.stringify({path, body:payload}), action + " changed its payload");
+    // The next background refresh must also run after a mouse click leaves a button focused.
+    button(label).focus();
+    st.queued[0].title = "Updated after focused " + action;
+    windowEvents.interval[0](); await flush();
+    check(root.textContent.includes(st.queued[0].title), action + " button focus blocked background lists");
+    check(document.activeElement === button(label), action + " button focus was not restored");
+  } else if (ask === "status-button-refresh") {
+    for (const label of labels) input(label).value = draft(label);
+    // Same labels on different records must not attract focus when their order changes.
+    button("close").focus();
+    st.asks.unshift({id:8, text:"New request before the focused request"});
+    st.releases.unshift({...st.releases[0], id:19});
+    st.queued.unshift({id:"t0043", lane:"a", title:"New queued task", waiting:"paused"});
+    st.lanes.push({...st.lanes[0], name:"new-background-lane"});
+    given["/api/events"] = [{ts:1700000000, event:"new-background-event"}];
+    const previous = document.activeElement;
+    windowEvents.interval[0](); await flush();
+    check(root.textContent.includes("New queued task") && root.textContent.includes("new-background-lane") &&
+      root.textContent.includes("new-background-event"), "focused button blocked lane, task or event updates");
+    const closes = descendants(root, "button").filter(el => el.textContent === run("T.close"));
+    check(document.activeElement === closes[1] && document.activeElement !== previous, "focus moved to another request after reorder");
+    for (const label of ["releaseYes", "releaseNo", "releaseStop", "check", "pause"]) {
+      button(label).focus();
+      windowEvents.interval[0](); await flush();
+      check(document.activeElement === button(label), "focus not restored for " + label);
+    }
+    const pipelineButton = () => find(el => el.attrs["data-pipeline-step"] === "queued");
+    pipelineButton().focus(); windowEvents.interval[0](); await flush();
+    check(document.activeElement === pipelineButton(), "pipeline control lost focus");
+    // The timeline panel is reused, but removing it during the tab redraw still blurs its buttons.
+    const timeline = 'renderTimeline({start:1, end:3601, lanes:[{lane:"a", segments:[{kind:"release", result:"done", tasks:[], release:{id:17, target:"push"}, start:1, end:3601, started:1, minutes:60}]}]})';
+    run(timeline);
+    const timelineButton = find(el => el.attrs["data-timeline-kind"] === "release");
+    timelineButton.focus(); windowEvents.interval[0](); await flush();
+    check(document.activeElement === timelineButton, "retained timeline control lost focus");
+    // Its separate, less frequent data refresh also keeps focus on the same segment.
+    run(timeline);
+    check(document.activeElement === find(el => el.attrs["data-timeline-kind"] === "release"), "timeline data refresh lost segment focus");
+    // A vanished action must not move focus to the same action on a different record.
+    descendants(root, "button").filter(el => el.textContent === run("T.close"))[1].focus();
+    st.asks = st.asks.filter(a => a.id !== 7);
+    windowEvents.interval[0](); await flush();
+    check(document.activeElement === document.body, "removed request transferred focus to another record");
+  } else if (ask === "status-focus") {
+    const answer = input("answer"); answer.value = draft("answer");
+    const task = find(el => el.tag === "button" && el.textContent === "t0042");
+    await task.click(); await flush();
+    const detail = ids["#" + task.attrs["aria-controls"]];
+    // Editing fields keep their identity and selection while only the header updates.
+    const textarea = new El("textarea"), select = new El("select"); root.append(textarea, select);
+    for (const control of [answer, textarea, select]) {
+      control.focus();
+      st.build = "focused-build";
+      st.queued[0].title = "Update held while editing";
+      for (let cycle = 0; cycle < 2; cycle++) { windowEvents.interval[0](); await flush(); }
+      check(document.activeElement === control && root.contains(control), "polling replaced a focused field");
+      check(ids["#state"].textContent.includes("focused-build"), "focused interaction blocked header updates");
+      check(input("answer") === answer && answer.value === draft("answer"), "polling lost draft or input identity");
+      check(!root.textContent.includes(st.queued[0].title), "polling redrew lists while editing");
+      check(!detail.hidden, "polling collapsed task details");
+    }
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const taskButton = find(el => el.tag === "button" && el.textContent === "t0042");
+      taskButton.focus(); windowEvents.interval[0](); await flush();
+      const refreshedTask = find(el => el.tag === "button" && el.textContent === "t0042");
+      check(document.activeElement === refreshedTask, "polling lost task button focus");
+      check(refreshedTask.attrs["aria-expanded"] === "true" &&
+        ids["#" + refreshedTask.attrs["aria-controls"]].textContent.includes("Task detail from API"), "polling lost expanded task details");
+      check(input("answer").value === draft("answer"), "polling lost answer draft after button focus");
+    }
+    document.activeElement = document.body;
+    let finish;
+    statusGetGate = new Promise(resolve => { finish = resolve; });
+    windowEvents.interval[0](); await flush();
+    button("close").focus(); const focused = document.activeElement;
+    finish(); await flush(); statusGetGate = null;
+    check(document.activeElement === button("close") && document.activeElement !== focused,
+      "in-flight refresh did not redraw and restore the newly focused button");
+    // Explicit actions must still refresh their changed state even with a focused button.
+    button("pause").focus(); await button("pause").click();
+    check(button("resume"), "focused pause action did not refresh dispatch controls");
+    button("resume").focus(); windowEvents.interval[0](); await flush();
+    check(document.activeElement === button("resume"), "resume control lost focus");
+    document.activeElement = document.body;
+    windowEvents.interval[0](); await flush();
+    check(input("answer").value === draft("answer"), "draft vanished after focus left Status");
+  } else if (ask === "status-draft-cleanup") {
+    for (const label of labels) input(label).value = draft(label);
+    // Failed fetches do not discard drafts. An unchanged record also retains a submitted draft.
+    statusGetError = "temporary status failure";
+    await run("loadStatus()").catch(() => {}); statusGetError = null;
+    await button("close").click();
+    for (const label of labels) check(input(label).value === draft(label), "failed or unchanged refresh lost " + label);
+    st.releases[1].stop_asked = true;
+    await run("loadStatus()");
+    check(!input("releaseStopReason"), "stop controls retained after stop was requested");
+    st.releases[1].stop_asked = false;
+    await run("loadStatus()");
+    check(input("releaseStopReason").value === "", "stop draft survived after its action disappeared");
+    input("releaseStopReason").value = draft("releaseStopReason");
+    const asks = st.asks, releases = st.releases;
+    st.asks = []; st.releases = releases.map(r => ({...r, state:r.state === "waiting" ? "approved" : "stopped"}));
+    st.paused = "Paused elsewhere";
+    await run("loadStatus()");
+    // Reintroducing the fixture IDs exposes any stale drafts left after closure/state changes.
+    st.asks = asks; st.releases = releases; st.paused = "";
+    await run("loadStatus()");
+    for (const label of labels) check(input(label).value === "", "obsolete draft retained for " + label);
+  } else {
+    const providerRow = () => descendants(root, "tr").find(el => el.kids[0]?.textContent === "example-provider");
+    const p = st.providers[0];
+    for (const [state, ok, problem] of [["unchecked", null, ""], ["passed", true, ""],
+      ["failed", false, ""], ["blocked", true, "credit too low"], ["resting", false, "resting until example"], ["recovered", true, ""]]) {
+      p.check = ok === null ? null : {ok, detail:"example check " + state, at:1700000000}; p.problem = problem;
+      await run("loadStatus()");
+      const cells = providerRow().kids, pill = cells[3].kids[0];
+      const expected = problem || (ok === null ? (process.argv[4] === "en" ? "not checked yet" : "尚未检查")
+        : ok ? run("T.ready") : (process.argv[4] === "en" ? "last ping failed" : "上次 Ping 未通过"));
+      check(pill.textContent === expected, state + " provider status did not distinguish check evidence");
+      check(pill.className.split(" ").includes("ok") === (ok === true && !problem), state + " provider has wrong ready colour");
+      if (ok !== null) check(cells[4].textContent.includes(p.check.detail) && cells[4].textContent.includes("2023"), "check detail or time lost");
+      else check(cells[4].textContent === "", "unchecked provider invented check evidence");
+    }
+  }
+  console.log(JSON.stringify({ok:true}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(async () => {
   const check = (ok, why) => { if (!ok) throw new Error(why); };
@@ -31396,6 +31576,61 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                         input=json.dumps(replies), capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), {"pause": True, "resume": True, "details": True, "asks": True, "releases": True})
+
+    def status_refresh_page(self, scenario):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        status = views.status(self.desk)
+        status.update(paused="", asks=[{"id": 7, "text": "Please review the account"}],
+                      queued=[{"id": "t0042", "lane": "a", "title": "Queued UI task", "waiting": "paused"}])
+        waiting = {"id": 17, "state": "waiting", "lane": "a", "target": "push", "base": "alpha",
+                   "commit": "a" * 40, "command": "publish example", "asked": 1,
+                   "runs": "in a checkout", "count": 1, "since_release": 0, "checked": 1,
+                   "commits": [], "files_count": 0, "files": []}
+        status["releases"] = [waiting, {**waiting, "id": 18, "state": "approved", "what": "approved"}]
+        status["providers"] = [{"name": "example-provider", "kind": "subscription", "model": "example-model",
+                                "effort": "", "rest_minutes": 1, "problem": "", "check": None}]
+        harness = self.tmp / "status-refresh-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        replies = {"/api/status": status, "/api/events": [], "/api/task": {"text": "Task detail from API"},
+                   "/api/check": {"ok": True, "detail": "example ping"}}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), scenario, language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"ok": True})
+
+    def test_status_refresh_keeps_drafts_with_their_request_and_release(self):
+        self.status_refresh_page("status-drafts")
+
+    def test_status_refresh_preserves_focused_controls_and_task_details(self):
+        self.status_refresh_page("status-focus")
+
+    def test_status_refresh_updates_lists_and_restores_the_same_focused_button(self):
+        self.status_refresh_page("status-button-refresh")
+
+    def test_status_close_refreshes_immediately_then_keeps_background_updates(self):
+        self.status_refresh_page("status-action-close")
+
+    def test_status_release_yes_refreshes_immediately_then_keeps_background_updates(self):
+        self.status_refresh_page("status-action-yes")
+
+    def test_status_release_no_refreshes_immediately_then_keeps_background_updates(self):
+        self.status_refresh_page("status-action-no")
+
+    def test_status_stop_refreshes_immediately_then_keeps_background_updates(self):
+        self.status_refresh_page("status-action-stop")
+
+    def test_status_ping_refreshes_immediately_then_keeps_background_updates(self):
+        self.status_refresh_page("status-action-ping")
+
+    def test_status_refresh_discards_only_obsolete_drafts(self):
+        self.status_refresh_page("status-draft-cleanup")
+
+    def test_status_provider_distinguishes_unchecked_failed_and_successful_checks(self):
+        self.status_refresh_page("status-provider-checks")
 
     def task_steps_record(self, **fields):
         return {"id": "t0042", "kind": "task", "lane": "a", "state": "merged", "created": 1700000000,

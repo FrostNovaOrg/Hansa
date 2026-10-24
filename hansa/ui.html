@@ -427,7 +427,7 @@ const T = ZH ? {
   effortDefault:"默认", endpoint:"接口地址", loginDir:"登录目录（空＝默认）", key:"密钥", keySet:"已填", keyMissing:"未填",
   saveKey:"保存密钥", clearKey:"清除密钥", keyHint:"填在这里，只存在本机、谁也看不到内容", check:"Ping", checking:"Ping 中…",
   rest:"歇", toppedUp:"已充值",
-  ready:"可用", lastCheck:"上次 Ping", addProvider:"加一家供应", newName:"名字（小写字母、数字、-）", remove:"删除",
+  ready:"可用", notChecked:"尚未检查", checkFailed:"上次 Ping 未通过", lastCheck:"上次 Ping", addProvider:"加一家供应", newName:"名字（小写字母、数字、-）", remove:"删除",
   general:"总体", concurrency:"同时最多做几件", compactIdle:"空闲时压缩于（token）", compactWorking:"工作中压缩于（token）",
   compactNote:"一轮以回答结束、会话空闲后，若上下文达到第一个数，协调席的 mod 在空闲一分钟后压缩它，这时整个上下文还在提示缓存里。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第二个数时压缩（hansa coordinator 用 --autocompact 传给它）。两个数都在 100,000 到 1,000,000 token 之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或第一个数不小于第二个数），那个压缩就不会发生：Claude Code 自己先压缩了。第二个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。第一个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第二个数从会话下次启动起生效。协调席不能改它们。Claude Code（2.1.299 或更新的版本）还会自己压缩一个有 200,000 token 或更多、空闲了约 54 分钟的对话；这一项 hansa 既不设置也不读取。mod 需要 Claude Code 2.1.290 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
   modStarted:t => `协调席会话 ${t} 启动：`, modOn:"hansa 加载了协调席的 mod", modOff:why => `hansa 没有加载协调席的 mod，因为：${why}`,
@@ -580,7 +580,7 @@ const T = ZH ? {
   effortDefault:"default", endpoint:"Endpoint", loginDir:"Login directory (blank = default)", key:"Key", keySet:"set", keyMissing:"missing",
   saveKey:"Save key", clearKey:"Clear key", keyHint:"Stored on this machine only; nobody can read it back", check:"Ping", checking:"pinging…",
   rest:"rest", toppedUp:"Topped up",
-  ready:"ready", lastCheck:"last ping", addProvider:"Add provider", newName:"name (a-z, 0-9, -)", remove:"Remove",
+  ready:"ready", notChecked:"not checked yet", checkFailed:"last ping failed", lastCheck:"last ping", addProvider:"Add provider", newName:"name (a-z, 0-9, -)", remove:"Remove",
   general:"General", concurrency:"Tasks at once", compactIdle:"Compact when idle at (tokens)", compactWorking:"Compact while working at (tokens)",
   compactNote:"Once a turn has ended with an answer and the session is idle, the coordinator's mod compacts it after a minute if its context is at or above the first figure, while the whole context is still in the prompt cache. A new turn cancels the wait. While it works nothing interrupts it: Claude Code's own auto-compact compacts it at the second (hansa coordinator gives it with --autocompact). Both figures take 100,000 to 1,000,000 tokens. The defaults suit a model with a 1M-token window. A figure at or near the model's window, or a first figure at or above the second, never comes: Claude Code compacts on its own first. A second figure above the model's window is taken as that window: Claude Code compacts at the model's own limit, as with no figure. A change to the first applies from the session's next decision (when a turn ends, or a wait ends); a change to the second from the session's next start. The coordinator cannot change them. Claude Code (2.1.299 or later) also compacts by itself a conversation of 200,000 tokens or more left idle about 54 minutes; hansa neither sets nor reads that. The mod needs Claude Code 2.1.290 or later; the status line at the top says whether the session was started with it, and why not.",
   repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
@@ -763,7 +763,7 @@ Object.assign(T, ZH ? {
 });
 Object.assign(T, ZH ? {
   statusIntro:"查看任务进展、工作线和需要你处理的事项。", costIntro:"按时间与分类查看 token 用量及折算金额。",
-  autoUpdates:"自动更新", refreshNote:"页面可见时每 5 秒更新；填写内容时暂缓更新。", dispatchControl:"派活控制",
+  autoUpdates:"自动更新", refreshNote:"状态页可见时每 5 秒更新；编辑输入时暂缓重绘，其他控件重绘后保留焦点。", dispatchControl:"派活控制",
   noActiveTasks:"当前没有进行中的任务", noActiveTasksNote:"任务开始、排队或等待审核时，会显示在这里。", taskFlow:"任务进展",
   noLanes:"还没有工作线", noLanesNote:"由协调席添加工作线后，这里会显示它的状态。",
   noProviders:"还没有模型供应", noProvidersNote:"在设置中加一家供应后，这里会显示连接状态。",
@@ -775,7 +775,7 @@ Object.assign(T, ZH ? {
   noCost:"这段时间还没有用量", noCostNote:"模型调用产生用量后，会按席位、日期、模型、工作线、供应和任务显示明细。", seatColumn:"席位", dayColumn:"日期"
 } : {
   statusIntro:"Follow tasks, lanes and the decisions that need your attention.", costIntro:"Explore token usage and its estimated value by period and category.",
-  autoUpdates:"Auto updates", refreshNote:"Updates every 5 seconds while visible; pauses while you fill in a field.", dispatchControl:"Dispatch control",
+  autoUpdates:"Auto updates", refreshNote:"Updates every 5 seconds while Status is visible; keeps fields in place while editing and restores focus to other controls after redraws.", dispatchControl:"Dispatch control",
   noActiveTasks:"No tasks in progress", noActiveTasksNote:"Running, queued and review tasks will appear here.", taskFlow:"Task progress",
   noLanes:"No lanes yet", noLanesNote:"Lanes appear here after the coordinator adds them.",
   noProviders:"No providers yet", noProvidersNote:"Add a provider in Settings to see its connection status here.",
@@ -993,7 +993,7 @@ function taskLink(id, ancestry = []) {
       m.parent ? h("div", {class:"task-relations"}, m.kind === "verify" ? T.taskVerifies : T.taskReplaces, " ", taskLink(m.parent, path)) : null, text]));
   };
   if (open) load().catch(err);
-  const btn = h("button", {class:"link", "aria-expanded":String(open), "aria-controls":box.id, onclick: () => {
+  const btn = h("button", {class:"link", "data-status-focus":JSON.stringify(["task", ...path]), "aria-expanded":String(open), "aria-controls":box.id, onclick: () => {
     open = !open; box.hidden = !open;
     if (open) { detailOpen.add(id); load().catch(err); }
     else detailOpen.delete(id);
@@ -1058,7 +1058,7 @@ function pipelineStrip(st) {
   const box = step => {
     const target = targets[step] || "status-lanes";
     return h("button", {class:"pipeline-box" + (!counts[step] ? " dimmed" : step === "principal" ? " warn" : ""),
-      "data-pipeline-step":step, "data-count":counts[step], "aria-controls":target,
+      "data-pipeline-step":step, "data-status-focus":`pipeline:${step}`, "data-count":counts[step], "aria-controls":target,
       onclick:() => $("#" + target)?.scrollIntoView({block:"start"})},
       h("span", {}, step === "principal" ? T.principalWaiting : T["pipeline_" + step] || flowLabel(step)), h("strong", {}, counts[step]));
   };
@@ -1129,6 +1129,7 @@ function timelineSection() {
 }
 function renderTimeline(report) {
   const root = timelineSection(), span = report.end - report.start;
+  const restoreFocus = keepStatusFocus(root);
   const kindLabels = {worker:T.timeline_worker, check:T.timeline_check, verification:T.timeline_verification,
     merge:T.timeline_merge, try:T.timeline_try, release:T.timeline_release, failed:T.timeline_failed};
   const resultLabels = {failed:T.timeline_failed, running:T.timeline_running, done:T.timeline_done,
@@ -1164,6 +1165,7 @@ function renderTimeline(report) {
       button.textContent = "";
       button.setAttribute("title", label); button.setAttribute("aria-label", label);
       button.setAttribute("data-timeline-kind", item.kind);
+      button.setAttribute("data-status-focus", JSON.stringify(["timeline", row.lane, item.kind, item.started, item.release?.id, item.tasks.map(task => task.id)]));
       button.setAttribute("style", `top:${5 + level * 28}px;left:clamp(0px,${(item.start - report.start) / span * 100}%,calc(100% - 3px));width:${Math.max(0, (item.end - item.start) / span * 100)}%;`);
       const inspect = () => inspector.replaceChildren(...shown([label,
         item.tasks.length > 1 ? h("div", {}, item.tasks.map(task => taskLink(task.id))) : null]));
@@ -1182,6 +1184,7 @@ function renderTimeline(report) {
     !report.lanes.some(row => row.segments.length) ? h("p", {class:"muted"}, T.timelineEmpty) : null,
     inspector, details
   ]));
+  restoreFocus();
 }
 function loadTimeline() {
   if (timelinePending) return timelinePending;
@@ -1198,7 +1201,37 @@ function loadTimeline() {
   return timelinePending;
 }
 
-async function loadStatus() {
+// Keep unsent text only in this page, under the record and action it belongs to.
+const statusDrafts = new Map();
+function statusInput(key, attrs) {
+  return h("input", {...attrs, "data-status-draft":key, value:statusDrafts.get(key) || ""});
+}
+function keepStatusDrafts(st) {
+  const live = new Set(st.asks.map(a => `ask:${a.id}`));
+  if (!st.paused) live.add("pause");
+  for (const r of st.releases || []) {
+    if (r.state === "waiting") live.add(`release:${r.id}`);
+    if (["approved", "starting", "running"].includes(r.state) && !r.stop_asked) live.add(`stop:${r.id}`);
+  }
+  for (const input of document.querySelectorAll("#tab-status input")) {
+    const key = input.getAttribute("data-status-draft");
+    if (live.has(key)) statusDrafts.set(key, input.value);
+  }
+  for (const key of statusDrafts.keys()) if (!live.has(key)) statusDrafts.delete(key);
+}
+function keepStatusFocus(root) {
+  const active = document.activeElement;
+  if (!root.contains(active)) return () => {};
+  const key = active.getAttribute("data-status-focus");
+  const matchingControls = () => [...document.querySelectorAll("#tab-status button"), ...document.querySelectorAll("#tab-status a")]
+    .filter(el => root.contains(el) && el.getAttribute("data-status-focus") === key);
+  const index = key ? matchingControls().indexOf(active) : -1;
+  return () => {
+    const controls = key ? matchingControls() : [];
+    (root.contains(active) ? active : controls[index] || controls[0])?.focus({preventScroll:true});
+  };
+}
+async function loadStatus(force = false) {
   const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
   if (status.status === "rejected") {
     const e = status.reason;
@@ -1233,7 +1266,14 @@ async function loadStatus() {
   part(clearLine(st.mod, st.clear_line), st.mod && st.mod.clear && st.mod.clear.warn);
   $("#state").replaceChildren(...parts);
   $("#state").className = parts.some(p => p.className === "warn") ? "warn" : "muted";
-  const reason = h("input", {placeholder:T.pauseReason, "aria-label":T.pauseReason});
+  keepStatusDrafts(st);
+  // Check after the fetch: focus may have entered while the request was in flight.
+  // Leave fields and their selection in place while editing; redraw lists for other controls.
+  const root = $("#tab-status"), active = document.activeElement;
+  const inStatus = root.contains(active);
+  if (force !== true && inStatus && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return;
+  const restoreFocus = keepStatusFocus(root);
+  const reason = statusInput("pause", {placeholder:T.pauseReason, "aria-label":T.pauseReason});
   const t = st.last_24h;
   statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));
   $("#tab-status").replaceChildren(...shown([
@@ -1249,8 +1289,8 @@ async function loadStatus() {
         statusPill(st.paused ? T.paused : T.dispatchOn, st.paused ? "warn" : "ok", st.paused ? "pending" : "check"),
         st.paused ? h("p", {}, st.paused) : null, h("p", {}, T.refreshNote)),
       h("div", {class:"runtime-actions"},
-      st.paused ? h("button", {class:"primary", onclick: () => api("/api/resume", {}).then(loadStatus).catch(err)}, T.resume)
-                : [reason, h("button", {onclick: () => api("/api/pause", {reason:reason.value}).then(loadStatus).catch(err)}, T.pause)])),
+      st.paused ? h("button", {class:"primary", "data-status-focus":"resume", onclick: () => api("/api/resume", {}).then(() => loadStatus(true)).catch(err)}, T.resume)
+                : [reason, h("button", {"data-status-focus":"pause", onclick: () => api("/api/pause", {reason:reason.value}).then(() => loadStatus(true)).catch(err)}, T.pause)])),
     h("div", {id:"status-principal"}, releasesSection(st.releases || []), asksSection(st)),
     !st.running.length && !st.queued.length && !st.review.length && !(st.merging || []).length ? dashboardPanel(T.taskFlow, "status", 0,
       emptyState(T.noActiveTasks, T.noActiveTasksNote, "check")) : null,
@@ -1274,31 +1314,33 @@ async function loadStatus() {
     dashboardPanel(T.providers, "providers", st.providers.length, st.providers.length ? table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
       p.name, p.kind === "subscription" ? T.subscription : T.compatible,
       p.model + (p.effort ? " · " + p.effort : "") + (p.credit_since ? "" : ` · ${T.rest} ${p.rest_minutes} min (${T.providers})`),
-      p.problem ? statusPill(p.problem, "warn", "error") : statusPill(T.ready, "ok"),
+      p.problem ? statusPill(p.problem, "warn", "error") : !p.check ? statusPill(T.notChecked, "muted", "pending")
+        : p.check.ok ? statusPill(T.ready, "ok") : statusPill(T.checkFailed, "warn", "error"),
       p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${p.check.detail} (${when(p.check.at)})`) : "",
-      checkButton(p.name, loadStatus)])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
+      checkButton(p.name, () => loadStatus(true))])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
     dashboardPanel(T.events, "status", Math.min(ev.length, 20), events.status === "rejected"
       ? h("div", {class:"bad", role:"alert"}, String(events.reason.message || events.reason))
       : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(eventRow)) : emptyState(T.noEvents, T.noEventsNote, "status"))
   ]));
+  restoreFocus();
   if (current === "status") loadTimeline();
 }
 function asksSection(st) {
   if (!st.asks.length && !(st.asks_closed || []).length) return null;
   return dashboardPanel(T.asks, "alerts", st.asks.length, st.asks.map(a => {
-    const ans = h("input", {placeholder:T.answer, "aria-label":`#${a.id} · ${T.answer}`});
+    const ans = statusInput(`ask:${a.id}`, {placeholder:T.answer, "aria-label":`#${a.id} · ${T.answer}`});
     return h("div", {class:"request-card", "data-principal-request":true}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, a.text)),
       a.note ? h("span", {class:"ok"}, a.note) : null,
-      h("div", {class:"row"}, ans, h("button", {onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
-        .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close)));
+      h("div", {class:"row"}, ans, h("button", {"data-status-focus":`ask:${a.id}:close`, onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
+        .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close)));
   }), (st.asks_closed || []).length ? h("h3", {}, T.closedRequests) : null,
     (st.asks_closed || []).map(a => h("div", {class:"request-card muted"}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, a.text)),
       h("div", {class:"field-note"}, `${T.closedByCoordinator}${a.reason} (${when(a.closed)})`))));
 }
 function releaseBlock(r) {
-  const reason = h("input", {placeholder:T.releaseReason, style:"flex:1"});
+  const reason = statusInput(`release:${r.id}`, {placeholder:T.releaseReason, style:"flex:1"});
   const answer = yes => api("/api/release/answer", {id:r.id, yes, reason:reason.value, commit:r.commit, command:r.command})
-    .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err);
+    .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err);
   const named = new Set(r.named || []);
   return h("div", {class:"lane release-card", "data-principal-request":true},
     h("div", {class:"row"}, h("strong", {}, "#" + r.id), h("span", {}, `${T.lane} ${r.lane}${r.target ? ` · ${T.releaseTarget} ${r.target}` : ""} · ${r.base} @ `, h("code", {}, (r.commit || "").slice(0, 10))),
@@ -1314,8 +1356,8 @@ function releaseBlock(r) {
     h("div", {class:"muted"}, T.releaseFiles(r.files_count)),
     h("div", {class:"mono", style:"max-height:14em;overflow:auto"}, (r.files || []).map(f => named.has(f)
       ? h("div", {class:"warn"}, h("strong", {}, f), T.releaseNamed) : h("div", {}, f))),
-    h("div", {class:"row", style:"margin-top:6px"}, h("button", {class:"primary", onclick: () => answer(true)}, T.releaseYes),
-      reason, h("button", {onclick: () => answer(false)}, T.releaseNo)));
+    h("div", {class:"row", style:"margin-top:6px"}, h("button", {class:"primary", "data-status-focus":`release:${r.id}:yes`, onclick: () => answer(true)}, T.releaseYes),
+      reason, h("button", {"data-status-focus":`release:${r.id}:no`, onclick: () => answer(false)}, T.releaseNo)));
 }
 function releaseOutside(r) {
   return h("div", {class:"mono"}, (r.outside || []).map(f => h("div", {class:"warn"}, `${T.releaseOutside}: ${f.path}`,
@@ -1328,10 +1370,10 @@ function releaseOutside(r) {
 }
 function releaseStop(r) {
   if (!["approved", "starting", "running"].includes(r.state) || r.stop_asked) return null;
-  const reason = h("input", {placeholder:T.releaseStopReason});
+  const reason = statusInput(`stop:${r.id}`, {placeholder:T.releaseStopReason});
   return h("div", {class:"row", style:"margin-top:4px"}, reason,
-    h("button", {title:T.releaseStopNote, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
-      .then(x => loadStatus().then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop));
+    h("button", {title:T.releaseStopNote, "data-status-focus":`release:${r.id}:stop`, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
+      .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop));
 }
 function patternLimitReason(x) {
   if (!ZH) return x.reason;
@@ -1363,7 +1405,7 @@ function releasesSection(rel) {
         releaseStop(r))]))] : null);
 }
 function checkButton(name, after) {
-  const b = h("button", {onclick: async () => { b.disabled = true; b.textContent = T.checking;
+  const b = h("button", {"data-status-focus":`provider:${name}:ping`, onclick: async () => { b.disabled = true; b.textContent = T.checking;
     let r = null;
     try { r = await api("/api/check", {provider:name}); } catch (e) { err(e); }
     if (after) return after(r);
@@ -2087,8 +2129,7 @@ show(initialTab);
 // The shared header and browser title need status even when another tab is restored.
 if (initialTab !== "status") loadStatus().catch(err);
 setInterval(() => {
-  const typing = $("#tab-status").contains(document.activeElement) && document.activeElement.tagName === "INPUT";
-  if (current === "status" && !document.hidden && !typing) loadStatus().catch(err);
+  if (current === "status" && !document.hidden) loadStatus().catch(err);
 }, 5000);
 </script>
 </body>

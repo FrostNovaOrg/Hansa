@@ -50,6 +50,24 @@ and its own folder, such as `work/desk`. The tab title is `Hansa · work/desk`,
 prefixed with the number of releases waiting for approval plus open requests
 when that count is nonzero. It updates with each status refresh.
 
+Status refreshes every five seconds while Status is visible. While an input,
+textarea or select has focus, background refreshes update the header but leave
+the tab's fields in place. With focus on a button or link, the lists keep
+updating and focus returns to the same action on the same record, if it is
+still available. Expanded task details stay open. Submitting an action refreshes
+the tab immediately. Unsent request answers, release approval or stop reasons,
+and the pause reason survive these redraws in this page's memory. Each draft
+stays with its request or release and action, and is dropped when that action
+is no longer available. Reloading or
+closing the page discards the drafts.
+
+In the provider table, a provider without a recorded Ping says “not checked yet”
+in a neutral colour. Green “ready” requires a successful recorded check and no
+current blocking problem. A failed last check has a warning; a current problem
+(such as low credit or a rest) takes precedence. The last check's result, detail
+and time remain visible. These labels do not change which providers can be
+scheduled; an unchecked provider can still be tried.
+
 The header summary presents its facts as separate items: desk, dispatch, server,
 version, install time and current time, followed by any status notes. Each item
 that needs attention, such as paused dispatch or a stopped server, stands out
@@ -164,9 +182,8 @@ and command output do not include timeline data.
 Status also shows the last 24 hours in summary cards, keeps dispatch controls separate
 from task lists, and places release decisions and requests near the top. Empty
 states explain where new activity will appear. Task details remain open across
-refreshes. The page refreshes every five seconds while Status is visible, unless
-the principal is filling in an input. Release approvals, refusals, stops and request replies
-use the same actions as before.
+refreshes. Release approvals, refusals, stops and request replies use the same
+actions as before.
 
 Dates and times follow the page's selected Chinese or English language, including
 the lane's estimated start time. In a task box's steps row, times show hours and
