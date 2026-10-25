@@ -29307,6 +29307,8 @@ class El {
   get tagName() { return this.tag.toUpperCase(); }
   get id() { return this.attrs.id || ""; } set id(value) { this.setAttribute("id", value); }
   get type() { return this.attrs.type || ""; } set type(value) { this.setAttribute("type", value); }
+  get open() { return "open" in this.attrs; }
+  set open(value) { if (value) this.setAttribute("open", ""); else this.removeAttribute("open"); }
   set textContent(x) { this.kids = [String(x)]; } get textContent() { return this.kids.map(k => k.textContent ?? k).join(""); }
   setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith("data-")) this.dataset[k.slice(5)] = String(v);
     if (k === "id") ids["#" + v] = this;
@@ -29317,6 +29319,7 @@ class El {
   focus() { document.activeElement = this; }
   click() {
     if (this.tag === "a") downloads.push({href:this.attrs.href, name:this.attrs.download});
+    if (this.tag === "summary" && this.parentElement?.tag === "details") this.parentElement.open = !this.parentElement.open;
     return this.on.click?.({target:this, preventDefault() {}});
   }
   remove() { if (this.parentElement) this.parentElement.kids = this.parentElement.kids.filter(k => k !== this); }
@@ -29818,6 +29821,44 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
       else check(cells[4].textContent === "", "unchecked provider invented check evidence");
     }
   }
+  console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "principal-layout") vm.runInContext("loadStatus()", ctx).then(() => {
+  const tree = el => ({tag:el.tag, attrs:el.attrs, className:el.className,
+    text:el.textContent, kids:el.kids.filter(k => k instanceof El).map(tree)});
+  console.log(JSON.stringify({root:tree(ids["#tab-status"]),
+    css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))}));
+}).catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "principal-folds") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const fold = key => descendants(ids["#tab-status"], "details").find(el => el.attrs["data-principal-fold"] === key);
+  const toggle = key => { const el = fold(key); check(el, "missing fold " + key); el.kids[0].click(); };
+  const opened = ["release:17:commits", "ask:17:text"];
+  const closed = ["release:17:files", "release:18:commits", "release:18:files", "ask:18:text"];
+  const checkState = () => {
+    for (const key of opened) check(fold(key)?.open, "opened fold closed on refresh: " + key);
+    for (const key of closed) check(fold(key) && !fold(key).open, "closed fold opened on refresh: " + key);
+  };
+  await run("loadStatus()");
+  for (const key of opened) toggle(key);
+  await run("loadStatus()"); checkState();
+  // New objects and a changed order must still keep state with the kind, number and list.
+  const st = given["/api/status"];
+  st.releases = [...st.releases].reverse().map(r => ({...r}));
+  st.asks = [...st.asks].reverse().map(a => ({...a}));
+  await run("loadStatus()"); checkState();
+  toggle("release:17:commits"); toggle("release:17:files");
+  opened[0] = "release:17:files"; closed[0] = "release:17:commits";
+  await run("loadStatus(true)"); checkState();
+  await run("loadStatus()"); checkState();
+  const release = st.releases.find(r => r.id === 17), request = st.asks.find(a => a.id === 17);
+  release.state = "done"; st.asks = st.asks.filter(a => a.id !== 17);
+  await run("loadStatus()");
+  check(!fold("release:17:files") && !fold("ask:17:text"), "departed items still have folds");
+  release.state = "waiting"; st.asks.push(request);
+  await run("loadStatus()");
+  for (const key of [...opened, ...closed]) check(fold(key) && !fold(key).open, "departed item's fold state survived: " + key);
   console.log(JSON.stringify({ok:true}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(async () => {
@@ -32116,6 +32157,153 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                         input=json.dumps(replies), capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), {"pause": True, "resume": True, "details": True, "asks": True, "releases": True})
+
+    def principal_layout_page(self, releases=(), asks=(), scenario="principal-layout"):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        status = views.status(self.desk)
+        waiting = {"id": 17, "state": "waiting", "lane": "a", "target": "push", "base": "alpha",
+                   "commit": "a" * 40, "command": "git push origin alpha", "asked": 1,
+                   "note": "\n".join(f"Changelog line {i}" for i in range(8)),
+                   "runs": "in a checkout", "count": 40, "since_release": 0, "checked": 40,
+                   "commits": [{"sha": "a" * 40, "subject": f"Change {i}"} for i in range(40)],
+                   "files_count": 6, "files": [f"file-{i}.txt" for i in range(6)]}
+        status.update(releases=[{**waiting, **r} for r in releases], asks=list(asks),
+                      asks_closed=[{"id": 9, "text": "Closed request", "reason": "done", "closed": 1}])
+        harness = self.tmp / "principal-layout.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language in ("en", "zh"):
+            result = subprocess.run(["node", str(harness), str(page), scenario, language],
+                                    input=json.dumps({"/api/status": status, "/api/events": []}),
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            yield json.loads(result.stdout)
+
+    @staticmethod
+    def page_nodes(node):
+        yield node
+        for child in node["kids"]:
+            yield from DeskTest.page_nodes(child)
+
+    def assert_principal_layout(self, page, count):
+        root = page["root"]
+        principal = root["kids"][0]
+        self.assertEqual(principal["attrs"].get("id"), "status-principal")
+        self.assertEqual(root["kids"][1]["attrs"].get("id"), "status-picture")
+        cards = [n for n in self.page_nodes(principal) if "data-principal-request" in n["attrs"]]
+        self.assertEqual(len(cards), count)
+        for card in cards:
+            self.assertEqual(card["kids"][0]["className"], "request-body")
+            self.assertEqual(card["kids"][1]["className"], "principal-actions")
+            self.assertTrue(any(n["tag"] == "button" for n in self.page_nodes(card["kids"][1])))
+            # Only long lists have disclosures, initially closed.
+            for detail in (n for n in self.page_nodes(card) if n["tag"] == "details"):
+                self.assertNotIn("open", detail["attrs"])
+                self.assertEqual(detail["kids"][0]["tag"], "summary")
+        self.assertNotIn("Closed request", principal["text"])
+        self.assertIn("Closed request", root["text"])
+        return cards
+
+    def test_principal_waiting_release_controls_precede_folded_details(self):
+        for page in self.principal_layout_page(releases=[{}]):
+            [card] = self.assert_principal_layout(page, 1)
+            self.assertIn("#17", card["kids"][0]["text"])
+            self.assertIn("push", card["kids"][0]["text"])
+            # The command stays outside every disclosure, immediately after the controls and label.
+            self.assertEqual(card["kids"][3]["tag"], "pre")
+            self.assertEqual(card["kids"][3]["text"], "git push origin alpha")
+            folds = [n for n in self.page_nodes(card) if n["tag"] == "details"]
+            self.assertEqual(len(folds), 2)
+            for text in ("Change 39", "file-5.txt"):
+                self.assertTrue(any(text in n["text"] for n in folds), text)
+            self.assertIn("Changelog line 7", card["text"])
+            self.assertFalse(any("Changelog line 7" in n["text"] for n in folds))
+
+    def test_principal_release_and_two_requests_come_before_other_sections(self):
+        asks = [{"id": 7, "text": "Review account\n" + "\n".join(f"Request detail {i}" for i in range(20)),
+                 "note": "Ready now"}, {"id": 8, "text": "Review access\nSecond request detail"}]
+        for page in self.principal_layout_page(releases=[{}, {"id": 18, "state": "done", "what": "done"}], asks=asks):
+            cards = self.assert_principal_layout(page, 3)
+            self.assertEqual([c["kids"][0]["kids"][0]["text"] for c in cards], ["#17", "#7", "#8"])
+            for card, ask in zip(cards[1:], asks):
+                self.assertEqual(card["kids"][0]["text"], f'#{ask["id"]}' + ask["text"].splitlines()[0])
+                self.assertEqual(card["kids"][2]["tag"], "details" if len(ask["text"].splitlines()) > 6 else "pre")
+                self.assertIn(ask["text"].splitlines()[1], card["kids"][2]["text"])
+            self.assertNotIn("#18", page["root"]["kids"][0]["text"])
+            self.assertIn("#18", page["root"]["text"])
+            # The harness has no layout engine; check the rules applied to these rendered controls.
+            self.assertRegex(page["css"], r"\.principal-actions\s*\{[^}]*flex-wrap:wrap")
+            self.assertRegex(page["css"], r"\.principal-actions > input\s*\{[^}]*min-width:0")
+            self.assertRegex(page["css"], r"\.principal-actions > button\s*\{[^}]*max-width:100%")
+
+    def test_principal_nothing_waiting_preserves_existing_page_order(self):
+        for page in self.principal_layout_page(releases=[{"state": "done", "what": "done"}]):
+            children = page["root"]["kids"]
+            self.assertEqual(children[0]["attrs"].get("id"), "status-picture")
+            self.assertEqual(children[1]["attrs"].get("id"), "status-timeline")
+            self.assertEqual(children[2]["className"], "page-head")
+            self.assertEqual(children[3]["className"], "metric-caption")
+            self.assertEqual(children[4]["className"], "metric-grid")
+            self.assertIn("runtime-toolbar", children[5]["className"])
+            self.assertEqual(children[6]["attrs"].get("id"), "status-principal")
+            self.assertFalse(any("data-principal-request" in n["attrs"] for n in self.page_nodes(page["root"])))
+            self.assertIn("#17", children[6]["text"])
+            self.assertIn("Closed request", children[6]["text"])
+
+    def test_principal_requests_without_a_release_still_come_first(self):
+        for page in self.principal_layout_page(asks=[{"id": 7, "text": "Review account"}]):
+            [card] = self.assert_principal_layout(page, 1)
+            self.assertEqual(len(card["kids"]), 2)
+            self.assertEqual(card["kids"][0]["text"], "#7Review account")
+
+    def test_principal_release_lists_of_five_lines_need_no_extra_disclosure(self):
+        release = {"note": "\n".join(f"Note {i}" for i in range(5)),
+                   "commits": [{"sha": "a" * 40, "subject": f"Commit {i}"} for i in range(5)],
+                   "files": [f"file-{i}.txt" for i in range(5)]}
+        for page in self.principal_layout_page(releases=[release]):
+            [card] = self.assert_principal_layout(page, 1)
+            self.assertEqual(sum(n["tag"] == "details" for n in self.page_nodes(card)), 0)
+            for text in ("Note 4", "Commit 4", "file-4.txt"):
+                self.assertIn(text, card["text"])
+
+    def test_principal_folds_survive_refresh_until_closed_or_the_item_leaves(self):
+        asks = [{"id": i, "text": "Review account\n" + "\n".join(f"Detail {j}" for j in range(6))}
+                for i in (17, 18)]
+        for result in self.principal_layout_page(releases=[{}, {"id": 18}], asks=asks, scenario="principal-folds"):
+            self.assertEqual(result, {"ok": True})
+
+    def test_principal_request_details_of_five_lines_stay_visible(self):
+        text = "Review account\n" + "\n".join(f"Detail {i}" for i in range(5))
+        for page in self.principal_layout_page(asks=[{"id": 7, "text": text}]):
+            [card] = self.assert_principal_layout(page, 1)
+            self.assertEqual(card["kids"][2]["tag"], "pre")
+            self.assertEqual(card["kids"][2]["text"], text.split("\n", 1)[1])
+            self.assertFalse(any(n["tag"] == "details" for n in self.page_nodes(card)))
+
+    def test_principal_warnings_and_notes_stay_visible_and_folded_lists_keep_their_style(self):
+        release = {"moved": "\n".join(f"Moved target {i}" for i in range(8)),
+                   "outside": [{"path": f"/outside/file-{i}", "why": "not readable"} for i in range(8)],
+                   "outside_folders": [f"/outside/folder-{i}" for i in range(8)],
+                   "direct_count": 8, "direct": [{"sha": "b" * 40, "subject": f"Direct commit {i}"} for i in range(8)],
+                   "direct_reason": "\n".join(f"Direct reason {i}" for i in range(8)), "direct_hold": True,
+                   "named": ["file-5.txt"]}
+        request_note = "\n".join(f"Request note {i}" for i in range(8))
+        for page in self.principal_layout_page(releases=[release], asks=[{"id": 7, "text": "Review", "note": request_note}]):
+            card, request = self.assert_principal_layout(page, 2)
+            visible = "".join(n["text"] for n in card["kids"][4:] if n["tag"] != "details")
+            for text in ("Changelog line 7", "Moved target 7", "/outside/file-7", "/outside/folder-7",
+                         "Direct commit 7", "Direct reason 7"):
+                self.assertIn(text, visible)
+            self.assertTrue(any(n["className"] == "bad" and "Moved target 7" in n["text"] for n in card["kids"]))
+            self.assertEqual(request["kids"][2]["text"], request_note)
+            self.assertEqual(request["kids"][2]["className"], "ok")
+            for fold in (n for n in card["kids"] if n["tag"] == "details"):
+                self.assertEqual(fold["kids"][1]["className"], "mono")
+                self.assertIn("max-height:14em;overflow:auto", fold["kids"][1]["attrs"].get("style", ""))
+            self.assertRegex(page["css"], r"\.release-card > \.principal-details > \.mono\s*\{[^}]*padding:8px 10px;[^}]*background:var\(--surface\)")
+            named = next(n for n in self.page_nodes(card) if n["className"] == "warn" and "file-5.txt" in n["text"])
+            self.assertEqual(named["kids"][0]["tag"], "strong")
 
     def status_refresh_page(self, scenario):
         if not shutil.which("node"):

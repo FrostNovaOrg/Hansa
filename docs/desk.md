@@ -79,7 +79,21 @@ that needs attention, such as paused dispatch or a stopped server, stands out
 on its own. On the Chinese page, the desk and version items are labelled
 `工作台` and `hansa 版本`; the English current-time item uses `now`, as `hansa status` does.
 
-Status starts with a pipeline strip: queued tasks, running workers, running checks,
+When releases await approval or requests are open, Status puts them directly below
+the header, before the pipeline, timeline and summary cards. Each starts with its
+number and lane/target or request's first line, followed immediately by its controls.
+The release command stays visible below the controls. Only lists longer than five
+lines, such as commits, files and a request's remaining lines, fold and open on a
+click. Release notes and warnings about a moved target, files outside the repository
+and direct commits stay visible after the controls and command, whatever their length.
+Request notes also stay visible. Open folds stay open across status refreshes until
+closed or their item stops waiting; each fold stays with its item's kind, number
+and list. Folded release lists keep their styling and scrolling. Reloading or closing
+the page discards the fold state. Controls wrap in narrow windows. Recent releases
+and closed requests stay further down.
+With nothing waiting, Status keeps its usual order.
+
+Status otherwise starts with a pipeline strip: queued tasks, running workers, running checks,
 awaiting review, running verifications and merge checks. Queued counts the queued
 list; workers and checks split the running tasks by their current step, excluding
 verifications. Awaiting review counts review tasks with no verification running
@@ -185,7 +199,7 @@ causes a search through the desk's entire history. Existing status responses
 and command output do not include timeline data.
 
 Status also shows the last 24 hours in summary cards, keeps dispatch controls separate
-from task lists, and places release decisions and requests near the top. Empty
+from task lists, and puts pending release decisions and requests first. Empty
 states explain where new activity will appear. Task details remain open across
 refreshes. Release approvals, refusals, stops and request replies use the same
 actions as before.
