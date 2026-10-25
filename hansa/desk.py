@@ -330,7 +330,8 @@ def now() -> float:
 
 
 def json_text(data) -> str:
-    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    # Filesystem bytes represented by surrogates use JSON escapes; ordinary Unicode stays readable.
+    return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8", "backslashreplace").decode("utf-8") + "\n"
 
 
 def _write_target(path: Path) -> Path:

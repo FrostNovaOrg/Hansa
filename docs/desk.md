@@ -18,6 +18,11 @@ checkout's branches and retry. Existing tags and commit IDs remain accepted.
 Without `--base`, the checkout's current branch is used, or `--like` copies
 the other lane's base.
 
+Settings and JSON state files use UTF-8. Filename bytes that are not UTF-8,
+as Linux permits, are stored as JSON escapes and restored when the file is
+read. Ordinary Unicode text stays readable, and saved command lines keep
+their original spelling.
+
 ## Status and cost on the web page
 
 Open the address `hansa web` prints in a terminal of your own. The page keeps
