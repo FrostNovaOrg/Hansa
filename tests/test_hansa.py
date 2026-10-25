@@ -24152,6 +24152,122 @@ def save():'''))
         self.assertNotIn("sk-secret", pub)
         self.assertTrue(public_settings(self.desk)["keys"]["mimo"])
 
+    def test_all_tasks_thousand_records_page_to_the_oldest_without_git_or_details(self):
+        for number in range(1, 1001):
+            tid = f"t{number:04d}"
+            folder = self.desk.tasks_dir / tid
+            folder.mkdir(parents=True)
+            write_json(folder / "meta.json", {"id": tid, "title": f"Task {number}", "created": number,
+                                             "state": "merged", "lane": "a", "finished": number + 1})
+        headers = {"Authorization": "Bearer " + self.desk.web_token()}
+        with unittest.mock.patch.object(self.desk, "tasks", wraps=self.desk.tasks) as read, \
+                unittest.mock.patch.object(views, "show_text", side_effect=AssertionError("details read")), \
+                unittest.mock.patch("hansa.run.git", side_effect=AssertionError("git history read")):
+            start = time.perf_counter()
+            code, first, _ = self.web_request("/api/tasks", headers=headers)
+            elapsed = time.perf_counter() - start
+            read.assert_called_once_with()
+            self.assertEqual((code, first["page"], first["pages"], first["total"], len(first["rows"])),
+                             (200, 1, 20, 1000, 50))
+            self.assertEqual(first["rows"][0]["id"], "t1000")
+            ids = [m["id"] for m in first["rows"]]
+            for page in range(2, 21):
+                rep = views.task_list(self.desk, page=page)
+                self.assertEqual(len(rep["rows"]), 50)
+                ids.extend(m["id"] for m in rep["rows"])
+        self.assertEqual(ids, [f"t{number:04d}" for number in range(1000, 0, -1)])
+        self.assertEqual(views.task_list(self.desk, page=100)["page"], 20)
+        self.assertEqual(views.task_list(self.desk, page=-1)["page"], 1)
+        print(f"All tasks: first page of 1,000 metadata records in {elapsed:.4f}s")
+
+    def test_all_tasks_keeps_replaced_original_and_followup_and_latest_verdict_only(self):
+        original = self.desk.new_task("Original")
+        self.desk.update(original, state="done", finished=time.time() - 60)
+        self.hansa("retry", original, "--fresh", "Follow-up")
+        [followup] = [m for m in self.desk.tasks() if m["id"] != original]
+        first = self.desk.new_task("First verification", kind="verify", parent=followup["id"],
+                                   state="done", verdict="does not hold")
+        later = self.desk.new_task("Second verification", kind="verify", parent=followup["id"],
+                                   state="done", verdict="holds")
+        self.desk.update(followup["id"], verify=later)
+        rep = views.task_list(self.desk)
+        self.assertEqual([m["id"] for m in rep["rows"]], [followup["id"], original])
+        self.assertEqual([m["state"] for m in rep["rows"]], ["queued", "replaced"])
+        self.assertEqual([m["verdict"] for m in rep["rows"]], ["holds", ""])
+        self.assertNotIn(first, json.dumps(rep))
+        self.assertNotIn(later, json.dumps(rep))
+
+    def test_all_tasks_combines_state_lane_title_and_queue_periods(self):
+        at = 20000000
+        matching = self.desk.new_task("Repair <b>x</b> title")
+        self.desk.update(matching, state="merged", lane="x", created=at - 86400)
+        for state, lane, title, created in [("done", "x", "Repair title", at),
+                                           ("merged", "y", "Repair title", at),
+                                           ("merged", "x", "Other title", at),
+                                           ("merged", "x", "Repair title", at - 86401)]:
+            tid = self.desk.new_task(title)
+            self.desk.update(tid, state=state, lane=lane, created=created)
+        with unittest.mock.patch("hansa.views.time.time", return_value=at):
+            rep = views.task_list(self.desk, state="merged", lane="x", words="TITLE repair", days=1)
+            self.assertEqual([m["id"] for m in rep["rows"]], [matching])
+            code, response, _ = self.web_request("/api/tasks?state=merged&lane=x&words=TITLE+repair&days=1",
+                headers={"Authorization": "Bearer " + self.desk.web_token()})
+            self.assertEqual((code, response), (200, rep))
+            self.assertEqual(rep["rows"][0]["title"], "Repair <b>x</b> title")
+            self.assertEqual(rep["lanes"], ["x", "y"])
+            for days in (7, 30, 90, None):
+                self.assertEqual(views.task_list(self.desk, state="merged", lane="x", words="repair", days=days)["total"], 2)
+            self.assertEqual(views.task_list(self.desk, words="missing")["rows"], [])
+
+    def test_all_tasks_sparse_records_empty_desk_and_equal_queue_times(self):
+        self.assertEqual(views.task_list(self.desk),
+                         {"rows": [], "page": 1, "pages": 1, "total": 0, "states": [], "lanes": []})
+        folder = self.desk.tasks_dir / "t0001"
+        folder.mkdir(parents=True)
+        write_json(folder / "meta.json", {"id": "t0001", "verify": "t9999"})
+        row = views.task_list(self.desk)["rows"][0]
+        self.assertEqual(row, {"id": "t0001", "title": None, "lane": None, "state": None,
+                               "created": None, "finished": None, "verdict": ""})
+        self.assertEqual(views.task_list(self.desk, days=90)["total"], 0)
+        for title in ("Second", "Third"):
+            tid = self.desk.new_task(title)
+            self.desk.update(tid, created=100)
+        self.assertEqual([m["id"] for m in views.task_list(self.desk)["rows"]], ["t0003", "t0002", "t0001"])
+
+    def test_all_tasks_api_requires_page_key_and_valid_pagination_and_periods(self):
+        token = self.desk.web_token()
+        headers = {"Authorization": "Bearer " + token}
+        for path in ("/api/tasks", "/api/tasks?page=20&state=merged&lane=x&words=a&days=all", "/api/tasks?days=90"):
+            for credentials in ({}, {"Authorization": "Bearer wrong"}):
+                self.assertEqual(self.web_request(path, headers=credentials)[0], 403)
+            self.assertEqual(self.web_request(path, headers=headers)[0], 200)
+        self.assertEqual(self.web_request("/api/tasks?t=" + token)[0], 403)
+        for query in ("page=no", "page=1.5", "days=abc", "days=2", "days="):
+            code, body, _ = self.web_request("/api/tasks?" + query, headers=headers)
+            self.assertEqual((code, body["code"]), (400, "invalid_query"))
+        for period in (1, 7, 30, 90, "all"):
+            self.assertEqual(self.web_request(f"/api/tasks?days={period}", headers=headers)[0], 200)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_all_tasks_page_translates_filters_pages_plain_text_and_existing_details(self):
+        rows = [{"id": f"t{number:04d}", "title": "<b>x</b>" if number == 1000 else f"Task {number}",
+                 "lane": "x", "state": "replaced", "created": 1700000000, "finished": 1700000010,
+                 "verdict": "holds"} for number in range(1000, 950, -1)]
+        replies = {"/api/tasks": {"rows": rows, "page": 1, "pages": 2, "total": 51,
+                                  "states": list(views.STATES), "lanes": ["x"]},
+                   "/api/task?id=t1000": {"meta": {"id": "t1000", "created": 1700000000},
+                                           "text": "Report: <b>plain</b>"},
+                   "pagePreferences": {"session": {"hansa.token": "example-page-key"}}}
+        harness = self.tmp / "all-tasks-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), "all-tasks", language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"ok": True})
+
     def test_work_history_empty_desk(self):
         for days in (1, 7, 30, 90, None):
             with self.subTest(days=days):
@@ -29616,7 +29732,7 @@ function openPage(search = "") {
   for (const key of Object.keys(ids)) delete ids[key];
   document.documentElement = new El("html"); document.activeElement = null; document.title = "Hansa";
   for (const key of Object.keys(windowEvents)) delete windowEvents[key];
-  for (const tab of ["status", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
+  for (const tab of ["status", "tasks", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
   const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
   location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
   URLSearchParams, setInterval(f) { (windowEvents.interval ||= []).push(f); }, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
@@ -29754,7 +29870,7 @@ else if (ask === "preferences") (async () => {
   const flush = () => new Promise(resolve => setImmediate(resolve));
   const run = code => vm.runInContext(code, ctx);
   const snapshot = () => {
-    const tab = ["status", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
+    const tab = ["status", "tasks", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
     const selected = document.querySelectorAll("#tabs button").find(el => el.attrs["aria-current"] === "page");
     if (selected?.dataset.tab !== tab) throw new Error("tab selection and visibility disagree");
     const group = run("settingsGroup");
@@ -29815,6 +29931,73 @@ else if (["desk-name", "desk-count", "status-parts", "notify-status"].includes(a
   }
   console.log(JSON.stringify(snapshots));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "all-tasks") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  await run('show("tasks")');
+  const root = ids["#tab-tasks"], report = given["/api/tasks"];
+  const rows = () => descendants(root, "tr");
+  check(descendants(root, "h1")[0].textContent === (process.argv[4] === "zh" ? "全部任务" : "All tasks"), "task title untranslated");
+  check(rows().length === 51, "first page is not 50 tasks");
+  check(rows()[1].kids[1].textContent === "<b>x</b>" && rows()[1].kids[1].kids[0] instanceof Text, "title is not plain text");
+  check(rows()[1].kids[3].textContent === run('T.taskStates.replaced'), "replaced state missing");
+  check(rows()[1].kids[6].textContent === run('T.v_holds'), "verdict untranslated");
+  check(rows()[1].kids[4].textContent && rows()[1].kids[5].textContent, "timestamps missing");
+  const headers = rows()[0].kids.map(el => el.textContent);
+  check(JSON.stringify(headers) === JSON.stringify(run('[T.task,T.taskTitle,T.lane,T.taskState,T.queuedAt,T.endedAt,T.latestVerdict]')), "column labels untranslated");
+  const stateOptions = descendants(ids["#tasks-state"], "option");
+  for (const state of report.states) check(stateOptions.some(el => el.value === state && el.textContent === run(`T.taskStates[${JSON.stringify(state)}]`)), "state option untranslated");
+  // Click the line itself, then check that it fetched and opened the existing details and steps.
+  rows()[1].on.click({target:{closest:() => null}}); await flush();
+  const box = descendants(rows()[1], "div").find(el => el.className === "mono task-detail");
+  check(box && !box.hidden && descendants(box, "ol").length === 1, "existing task steps not opened");
+  const pre = descendants(box, "pre")[0];
+  check(pre?.textContent === "Report: <b>plain</b>" && pre.kids[0] instanceof Text, "report is not plain text");
+  const pageButton = key => descendants(root, "button").find(el => el.textContent === run("T." + key));
+  check(pageButton("newerPage").disabled && !pageButton("olderPage").disabled, "first-page controls incorrect");
+  report.rows = [{id:"t0001"}]; report.page = 2;
+  await pageButton("olderPage").click();
+  check(new URLSearchParams(apiGets.at(-1).split("?")[1]).get("page") === "2", "next page not requested");
+  check(rows().length === 2 && rows()[1].kids.slice(1).every(el => el.textContent === ""), "sparse fields not blank");
+  check(pageButton("olderPage").disabled && !pageButton("newerPage").disabled, "last-page controls incorrect");
+  report.page = 1;
+  await pageButton("newerPage").click();
+  check(new URLSearchParams(apiGets.at(-1).split("?")[1]).get("page") === "1", "previous page not requested");
+  ids["#tasks-state"].value = "merged"; ids["#tasks-lane"].value = "x"; ids["#tasks-words"].value = "words & markup";
+  for (const days of [1, 7, 30, 90, "all"]) {
+    ids["#tasks-days"].value = String(days);
+    await ids["#tasks-days"].on.change();
+    const query = new URLSearchParams(apiGets.at(-1).split("?")[1]);
+    check(query.get("state") === "merged" && query.get("lane") === "x" && query.get("words") === "words & markup" &&
+      query.get("days") === String(days) && query.get("page") === "1", "combined filters lost or not encoded");
+  }
+  const periods = descendants(ids["#tasks-days"], "option");
+  check(periods.every(el => el.textContent === run(`T.periodDays(${JSON.stringify(el.value)})`)), "queue periods untranslated");
+  const originalFetch = ctx.fetch;
+  let release, delay = true;
+  const gate = new Promise(resolve => { release = resolve; });
+  ctx.fetch = async (...args) => {
+    const response = await originalFetch(...args);
+    if (delay && args[0].startsWith("/api/tasks")) { delay = false; await gate; }
+    return response;
+  };
+  const oldRequest = run("loadTasks()"); await flush();
+  report.rows = []; report.total = 0; report.pages = 1;
+  await descendants(root, "form")[0].on.submit({preventDefault() {}});
+  release(); await oldRequest; ctx.fetch = originalFetch;
+  check(root.textContent.includes(run("T.tasksEmpty")) && !rows().length, "empty results missing");
+  check(!root.textContent.includes("t0001"), "delayed reply replaced the filtered results");
+  given["/api/tasks"] = {error:"bad response"};
+  await run("loadTasks()");
+  check(root.textContent.includes(run("T.tasksLoadFailed")), "load failure missing");
+  given["/api/tasks"] = report;
+  await pageButton("retry").click();
+  check(root.textContent.includes(run("T.tasksEmpty")), "retry did not recover");
+  check(apiRequests.filter(r => r.path.startsWith("/api/task")).every(r => r.headers.Authorization === "Bearer example-page-key"), "task requests missing page key");
+  check(!root.textContent.includes("undefined") && !root.textContent.includes("null"), "missing field leaked");
+  console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "task-table-boxes") (async () => {
   await vm.runInContext("loadStatus()", ctx);
   const boxes = [];
@@ -30524,7 +30707,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         refs.add("flow_" + step); refs.add("pipeline_" + step);
       }
       const unused = run("Object.keys(T)").filter(name =>
-        !refs.has(name) && !/^(status$|settings$|cost$|v_|seat_|helper_|by)/.test(name));
+        !refs.has(name) && !/^(status$|tasks$|settings$|cost$|v_|seat_|helper_|by)/.test(name));
       check(!unused.length, "unused strings: " + unused.join(", "));
     } else if (ask === "settings-fix-reload") {
       change(number(), "38"); settingsGetError = "reload unavailable";
@@ -31990,12 +32173,17 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
         replies = {"pagePreferences": preferences, "/api/status": views.status(self.desk),
-                   "/api/settings": public_settings(self.desk), "/api/events": [],
+                   "/api/settings": public_settings(self.desk), "/api/events": [], "/api/tasks": views.task_list(self.desk),
                    "/api/cost": {"total": {"tokens": 0, "usd": 0}, "by": {}, "unpriced_models": []}}
         result = subprocess.run(["node", str(harness), str(page), "preferences", language],
                                 input=json.dumps(replies), capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
+
+    def test_all_tasks_tab_is_restored_on_reload(self):
+        output = self.page_preferences(actions=[{"tab": "tasks"}, {"reload": True}])
+        self.assertEqual([s["tab"] for s in output["snapshots"]], ["status", "tasks", "tasks"])
+        self.assertEqual(output["snapshots"][-1]["session"]["hansa.tab"], "tasks")
 
     def test_page_keeps_cost_tab_and_period_on_reload(self):
         output = self.page_preferences(actions=[{"tab": "cost"}, {"period": 30}, {"reload": True}])
@@ -32014,7 +32202,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(output["snapshots"][-1]["period"], "1")
 
     def test_page_restored_navigation_still_populates_header(self):
-        for tab in ("settings", "cost"):
+        for tab in ("tasks", "settings", "cost"):
             with self.subTest(tab=tab):
                 output = self.page_preferences(session={"hansa.tab": tab})
                 snapshot = output["snapshots"][0]
