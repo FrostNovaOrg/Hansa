@@ -301,8 +301,8 @@ small letters, digits, `.`, `_` and `-`.
 ## A lane's write list and env
 
 A lane's write list (`hansa lane set L write PATH ...`, full paths such as
-`/Users/me/hansa-cache/desk/a/pip` for lane `a` of a desk in a folder
-named `desk`) is the folders its workers, setup and check may
+`/Users/me/hansa-cache/shop-desk/a/pip` for lane `a` of a desk in
+`/work/shop/desk`) is the folders its workers, setup and check may
 write besides the worktree and their temporary folder: a build or test tool's
 cache folders. A lane writes only folders of its own. The rule, in two lines:
 
@@ -317,8 +317,10 @@ cache folders. A lane writes only folders of its own. The rule, in two lines:
 Neither may name the desk's folder or another desk's on the account's list, or
 a folder above one, nor a folder above the account's list file itself
 (`desks.json`), which would open it to the runs. `<desk>` in `~/hansa-cache/<desk>/<lane>/<tool>` is the
-desk folder's name, so that two desks' lanes of the same name get folders of
-their own; `hansa status` warns, naming the folder and the other desk, when a
+last two folders of the desk's path joined by `-`, such as `shop-desk`
+for `/work/shop/desk` (just `desk` for `/desk`). Desks with the same last two
+folders need distinct cache folders chosen by the coordinator. `hansa status`
+warns, naming the folder and the other desk, when a
 folder on this desk's write lists is, holds or is inside one on a write list
 of another listed desk.
 
@@ -365,7 +367,7 @@ would open. `hansa explain lane L` marks each entry a run would leave out,
 with why. The coordinator tells the principal what it added and why.
 
 Point a tool at the lane's folder with the lane's env (`hansa lane set L env
-NAME=/Users/me/hansa-cache/DESK/L/TOOL`, and list that folder): pip
+NAME=/Users/me/hansa-cache/shop-desk/L/TOOL`, and list that folder): pip
 `PIP_CACHE_DIR`, npm `npm_config_cache` (env names may be in either case),
 pnpm's store `npm_config_store_dir`, yarn `YARN_CACHE_FOLDER`, cargo
 `CARGO_HOME`, go `GOMODCACHE` and `GOCACHE`, gradle `GRADLE_USER_HOME`, maven

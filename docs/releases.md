@@ -423,7 +423,11 @@ the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
 `release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `coordinator`, `credit`, `test`; comma-separated when several go
 out together)
 and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
-characters; a release's text names its lane and target.
+characters; a release's text names its lane and target. Alerts name the desk by
+the last two folders of its path, as the page title does: `[hansa] desk shop/desk: ...`
+for `/work/shop/desk`, or `[hansa] desk desk: ...` for `/desk`. Spaces and
+non-ASCII letters stay as they are. Desks with the same last two folders have
+the same alert name.
 For a release refused by the word scan, the alert gives only counts of hits
 and lines that could not be checked against patterns; the entries, lines and
 reasons stay in the page's release list and `hansa release`, so refused

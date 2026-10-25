@@ -229,7 +229,8 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
     items = sorted(items, key=lambda x: not x.get("code"))  # those holding a code first: no cut takes it
     lines = [" ".join(str(x.get("text") or "").split()) for x in items]
     codes = [x for x in items if x.get("code")]
-    head = f"[hansa] desk {desk.root.name}"
+    name = "/".join(str(desk.root).split("/")[-2:]).lstrip("/") or "/"
+    head = f"[hansa] desk {name}"
     held_text = f" ({held} held back by the limit of {MOST_RUNS} runs an hour)" if held else ""
     if len(lines) == 1:  # a code stays early: what was held back is said after it
         text = f"{head}: {lines[0]}{held_text}" if codes else f"{head}{held_text}: {lines[0]}"
