@@ -123,8 +123,8 @@ The repository needs a first commit: `hansa init` and `hansa lane add` refuse on
 refuses a desk, home folder, repository or worktree whose path holds one of `[ ] * ? \`, and a desk or
 repository whose path holds a `)` followed later by a space or a comma: its rules for the sandbox would
 read them as patterns or split them ([Paths hansa refuses](docs/sandbox.md#paths-hansa-refuses)).
-A desk has one `hansa serve`. More than one desk on a machine: each desk's `hansa serve` needs its own port
-(`hansa serve --port 8766`), and that desk's `hansa web` finds it.
+A desk has one `hansa serve`. It automatically chooses a free page port and remembers it for the next start;
+that desk's `hansa web` finds it. Use `hansa serve --port N` to require a particular port.
 
 ### 4. Open the page and add providers
 
