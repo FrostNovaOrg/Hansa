@@ -29415,6 +29415,15 @@ if (ask === "timeline") (async () => {
   await run("loadStatus()"); await run("loadTimeline()");
   await run("loadStatus()"); await run("loadTimeline()");
   const root = ids["#status-timeline"], segments = [];
+  // Refreshing the timeline starts separate reads for its expanded task details.
+  const waitForDetails = async () => {
+    const deadline = Date.now() + 10000;
+    while (descendants(root, "div").some(el => el.className === "mono task-detail" &&
+      !el.hidden && !descendants(el, "pre").length)) {
+      if (Date.now() >= deadline) throw new Error("Timeline task details did not finish loading");
+      await new Promise(resolve => setImmediate(resolve));
+    }
+  };
   walk(root, el => { if (el.attrs["data-timeline-kind"]) segments.push(el); });
   const inspector = descendants(root, "div").find(el => el.className === "timeline-inspector");
   const interactions = [];
@@ -29422,7 +29431,7 @@ if (ask === "timeline") (async () => {
     inspector.replaceChildren(); segment.on.pointerenter();
     const hover = inspector.textContent;
     inspector.replaceChildren(); await segment.click();
-    await new Promise(resolve => setImmediate(resolve));
+    await waitForDetails();
     const detail = ids["#" + segment.attrs["aria-controls"]];
     interactions.push({hover, tap:inspector.textContent, opened:detail ? !detail.hidden : false,
       detail:detail?.textContent});
@@ -29431,6 +29440,7 @@ if (ask === "timeline") (async () => {
   await run("timelineFetchedAt = Date.now() - 61000; loadTimeline()");
   const refreshGets = apiGets.filter(p => p === "/api/timeline").length;
   await run("current = 'settings'; show('status')"); await run("loadTimeline()");
+  await waitForDetails();
   console.log(JSON.stringify({text:root.textContent, gets, refreshGets, reopenGets:apiGets.filter(p => p === "/api/timeline").length,
     rows:descendants(root, "div").filter(el => el.attrs["data-timeline-lane"]).map(el => el.attrs["data-timeline-lane"]),
     segments:segments.map((el, i) => ({kind:el.attrs["data-timeline-kind"], tone:el.className, label:el.attrs.title,
@@ -30961,6 +30971,20 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                 ".timeline-track { position:relative; min-width:0;", ".timeline-legend { display:flex; flex-wrap:wrap;",
                                 '.timeline-hour:not([data-mobile="true"]) { font-size:0; }'):
                         self.assertIn(css, page["css"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_status_timeline_task_details_survive_delayed_replies(self):
+        harness = self.PAGE_HARNESS.replace(
+            'return {status: 200, json: async () => JSON.parse(JSON.stringify(snapshot))};',
+            '''return {status: 200, json: async () => {
+              if (path.startsWith("/api/task")) {
+                for (let turn = 0; turn < 3; turn++) await new Promise(resolve => setImmediate(resolve));
+              }
+              return JSON.parse(JSON.stringify(snapshot));
+            }};''')
+        self.assertNotEqual(harness, self.PAGE_HARNESS)
+        with unittest.mock.patch.object(self, "PAGE_HARNESS", harness):
+            self.test_status_timeline_kinds_and_empty_window_in_both_languages()
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_status_timeline_hour_titles_follow_page_language(self):
