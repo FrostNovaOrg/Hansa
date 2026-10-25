@@ -373,6 +373,7 @@ td .task-detail { min-width:200px; }
   <div id="tab-status"></div>
   <div id="tab-settings" hidden></div>
   <div id="tab-cost" hidden></div>
+  <div id="tab-tasks" hidden></div>
 </main>
 <script>
 "use strict";
@@ -397,13 +398,18 @@ if (tokenAddress) {
 } else {
   try { pageToken = sessionStorage.getItem("hansa.token") || ""; } catch (_) {}
 }
-const TABS = ["status", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
+const TABS = ["status", "tasks", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
 const language = keptChoice("localStorage", "hansa.language", ["zh-CN", "en"],
   (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en");
 const ZH = language === "zh-CN";
 document.documentElement.setAttribute("lang", language);
 const T = ZH ? {
   status:"状态", settings:"设置", cost:"工作与成本",
+  tasks:"全部任务", tasksIntro:"查找工作台的所有任务，按排队时间从新到旧排列。",
+  taskState:"状态", taskTitle:"标题", queuedAt:"排队时间", endedAt:"结束时间", latestVerdict:"最近核对结论",
+  taskStates:{queued:"排队中", running:"运行中", done:"做完待审", merging:"合并中", merged:"已合并", failed:"失败", cancelled:"已取消", replaced:"已被接替"},
+  anyState:"所有状态", anyLane:"所有工作线", applyFilters:"筛选", tasksLoading:"正在加载任务…", tasksEmpty:"没有符合条件的任务。",
+  tasksLoadFailed:"任务加载失败，请重试。", newerPage:"上一页", olderPage:"下一页", taskPage:(p, n, total) => `第 ${p} / ${n} 页 · 共 ${total} 件任务`,
   desk:"工作台", version:"hansa 版本", summaryNow:"现在",
   dispatchLimit:n => `正在派活，同时最多 ${n} 件`, installed:"安装于",
   dispatchOn:"正在派活", paused:"已暂停", pause:"暂停派活", resume:"恢复派活", pauseReason:"暂停原因（可不填）",
@@ -559,6 +565,11 @@ const T = ZH ? {
   laneMergeCheck:"合并验收命令：合并前由 hansa 在把这件活并上基础分支后跑，代替验收命令；每件改了东西的活合并前都跑，活做完后不跑（空＝合并验收跑验收命令）", mergeTimeout:"合并验收最长分钟（空＝同每件最长分钟）", f_merge_check:"合并验收命令"
 } : {
   status:"Status", settings:"Settings", cost:"Work and cost",
+  tasks:"All tasks", tasksIntro:"Find every desk task, newest queued first.",
+  taskState:"State", taskTitle:"Title", queuedAt:"Queued at", endedAt:"Ended at", latestVerdict:"Latest verification verdict",
+  taskStates:{queued:"Queued", running:"Running", done:"Awaiting review", merging:"Merging", merged:"Merged", failed:"Failed", cancelled:"Cancelled", replaced:"Replaced"},
+  anyState:"All states", anyLane:"All lanes", applyFilters:"Filter", tasksLoading:"Loading tasks…", tasksEmpty:"No matching tasks.",
+  tasksLoadFailed:"Could not load tasks. Try again.", newerPage:"Previous page", olderPage:"Next page", taskPage:(p, n, total) => `Page ${p} of ${n} · ${total} tasks`,
   desk:"desk", version:"hansa", summaryNow:"now",
   dispatchLimit:n => `dispatch on, ${n} at a time`, installed:"installed",
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
@@ -855,6 +866,7 @@ function h(tag, attrs, ...kids) {
 function icon(name) {
   const paths = {
     status:["M3 12h4l3-8 4 16 3-8h4"], settings:["M4 7h16M4 17h16M8 4v6m8 4v6"], cost:["M5 20v-7m7 7V4m7 16V9"],
+    tasks:["M8 6h12M8 12h12M8 18h12M3 6h1M3 12h1M3 18h1"],
     providers:["M8 8V4h8v4M6 8h12v8H6zM9 20h6m-3-4v4"],
     coordinator:["M4 5h16v12H4zM8 21h8m-4-4v4M8 9l2 2-2 2m5 0h3"], lanes:["M5 4v16m14-16v16M5 8h14M5 16h14"],
     security:["M12 3l8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM9 12l2 2 4-4"], releases:["M12 16V3m-4 4 4-4 4 4M4 13v7h16v-7"],
@@ -908,7 +920,7 @@ function show(tab) {
     b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
   }
   for (const t of TABS) $("#tab-" + t).hidden = t !== tab;
-  return ({status:loadStatus, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
+  return ({status:loadStatus, tasks:loadTasks, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
 }
 function err(e) { $("#state").textContent = String(e.message || e); $("#state").className = "bad"; }
 
@@ -2022,6 +2034,66 @@ function renderSettings(problems = settingsProblems) {
   ]));
   showSettingsGroup(settingsGroup);
   refreshSettingsState();
+}
+
+/* ---------- all tasks ---------- */
+let tasksEpoch = 0, tasksPage = 1, tasksControls, tasksResults;
+async function loadTasks() {
+  const host = $("#tab-tasks");
+  if (!tasksControls) {
+    const select = (id, label, options) => h("select", {id, "aria-label":label}, options);
+    tasksControls = {
+      state:select("tasks-state", T.taskState, []), lane:select("tasks-lane", T.lane, []),
+      words:h("input", {id:"tasks-words", type:"search", "aria-label":T.taskTitle}),
+      days:select("tasks-days", T.queuedAt, COST_PERIODS.map(n => h("option", {value:String(n), selected:n === "all"}, T.periodDays(n))))
+    };
+    tasksControls.days.value = "all";
+    const filter = () => { tasksPage = 1; return loadTasks(); };
+    for (const key of ["state", "lane", "days"]) tasksControls[key].addEventListener("change", filter);
+    tasksResults = h("div", {"aria-live":"polite"});
+    host.replaceChildren(pageHeading("tasks", T.tasksIntro),
+      h("form", {class:"cost-toolbar", onsubmit:e => { e.preventDefault(); return filter(); }},
+        Object.entries(tasksControls).map(([key, control]) => h("label", {},
+          {state:T.taskState, lane:T.lane, words:T.taskTitle, days:T.queuedAt}[key], " ", control)),
+        h("button", {type:"submit"}, T.applyFilters)), tasksResults);
+  }
+  const epoch = ++tasksEpoch;
+  const query = new URLSearchParams({page:String(tasksPage), ...Object.fromEntries(
+    Object.entries(tasksControls).map(([key, control]) => [key, control.value]))});
+  tasksResults.setAttribute("aria-busy", "true");
+  tasksResults.replaceChildren(h("p", {class:"muted"}, T.tasksLoading));
+  try {
+    const r = await api("/api/tasks?" + query);
+    if (epoch !== tasksEpoch) return;
+    if (!Array.isArray(r.rows)) throw new Error(T.tasksLoadFailed);
+    tasksPage = r.page;
+    for (const [key, options, label] of [["state", r.states, T.anyState], ["lane", r.lanes, T.anyLane]]) {
+      const control = tasksControls[key], value = control.value;
+      control.replaceChildren(h("option", {value:""}, label), ...options.map(option =>
+        h("option", {value:option}, key === "state" ? T.taskStates[option] || option : option)));
+      control.value = value;
+    }
+    const rows = r.rows.map(m => {
+      const [button, box] = taskLink(m.id);
+      return h("tr", {onclick:e => { if (!e.target.closest("button, .task-detail")) button.click(); }},
+        [[button, box], m.title || "", m.lane || "", T.taskStates[m.state] || m.state || "",
+          when(m.created), when(m.finished), m.verdict ? T["v_" + m.verdict] || m.verdict : ""].map(c => h("td", {}, c)));
+    });
+    const turn = page => { tasksPage = page; return loadTasks(); };
+    tasksResults.replaceChildren(
+      h("p", {}, T.taskPage(r.page, r.pages, r.total)),
+      rows.length ? h("div", {class:"scroll"}, h("table", {},
+        h("tr", {}, [T.task, T.taskTitle, T.lane, T.taskState, T.queuedAt, T.endedAt, T.latestVerdict].map(c => h("th", {}, c))), rows))
+        : h("p", {class:"muted"}, T.tasksEmpty),
+      h("div", {class:"cost-toolbar"},
+        h("button", {disabled:r.page <= 1, onclick:() => turn(r.page - 1)}, T.newerPage),
+        h("button", {disabled:r.page >= r.pages, onclick:() => turn(r.page + 1)}, T.olderPage)));
+  } catch (e) {
+    if (epoch === tasksEpoch) tasksResults.replaceChildren(h("p", {class:"bad"}, T.tasksLoadFailed),
+      h("button", {onclick:loadTasks}, T.retry));
+  } finally {
+    if (epoch === tasksEpoch) tasksResults.setAttribute("aria-busy", "false");
+  }
 }
 
 /* ---------- cost ---------- */

@@ -250,6 +250,29 @@ def verification(desk: Desk, m: dict):
     return {"task": vid, "state": v["state"], "verdict": v.get("verdict", ""), "lane": v.get("lane", "")}
 
 
+def task_list(desk: Desk, *, page: int = 1, state: str = "", lane: str = "", words: str = "",
+              days: int | None = None) -> dict:
+    """One page of work tasks, from metadata only; the verify pointer names the latest verification."""
+    records = desk.tasks()
+    by_id = {m.get("id"): m for m in records}
+    tasks = [m for m in records if m.get("kind") != "verify"]
+    states = sorted({m["state"] for m in tasks if m.get("state")})
+    lanes = sorted({m["lane"] for m in tasks if m.get("lane")})
+    since = time.time() - days * 86400 if days is not None else None
+    terms = words.casefold().split()
+    tasks = [m for m in tasks if (not state or m.get("state") == state)
+             and (not lane or m.get("lane") == lane)
+             and all(word in (m.get("title") or "").casefold() for word in terms)
+             and (since is None or (m.get("created") is not None and m["created"] >= since))]
+    tasks.sort(key=lambda m: (m.get("created") or 0, int(m["id"][1:])), reverse=True)
+    pages = max(1, (len(tasks) + 49) // 50)
+    page = max(1, min(page, pages))
+    rows = [{**{k: m.get(k) for k in ("id", "title", "lane", "state", "created", "finished")},
+             "verdict": (by_id.get(m.get("verify")) or {}).get("verdict", "")}
+            for m in tasks[(page - 1) * 50:page * 50]]
+    return {"rows": rows, "page": page, "pages": pages, "total": len(tasks), "states": states, "lanes": lanes}
+
+
 def _verification_line(v) -> str:
     if v["state"] in ("queued", "running"):
         return f"{v['task']} {v['state']}"

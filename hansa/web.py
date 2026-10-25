@@ -155,6 +155,16 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 return self._send(200, views.status(desk))
             if url.path == "/api/timeline":
                 return self._send(200, views.timeline(desk))
+            if url.path == "/api/tasks":
+                try:
+                    page = int(q.get("page", ["1"])[0])
+                except ValueError:
+                    return self._bad_request("invalid_query", "page", "page must be a whole number")
+                period = q.get("days", ["all"])[0]
+                if period not in ("1", "7", "30", "90", "all"):
+                    return self._bad_request("invalid_query", "days", "days must be 1, 7, 30, 90 or all")
+                return self._send(200, views.task_list(desk, page=page, days=None if period == "all" else int(period),
+                    **{k: q.get(k, [""])[0] for k in ("state", "lane", "words")}))
             if url.path == "/api/settings":
                 # with the free space of the desk's volume, shown beside the floor (hansa/disk.py)
                 return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0]})

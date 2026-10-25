@@ -55,6 +55,30 @@ and its own folder, such as `work/desk`. The tab title is `Hansa · work/desk`,
 prefixed with the number of releases waiting for approval plus open requests
 when that count is nonzero. It updates with each status refresh.
 
+All tasks lists every work task, newest queued first, 50 per page through to the
+oldest. Each line shows its number, title, lane, current state, queued time,
+ended time and latest verification verdict. These come from
+`tasks/<id>/meta.json`: `id`, `title`, `lane`, `state`, `created`,
+`finished`, and the `verdict` in the task named by `verify`. Ended is the saved
+worker finish time, not the merge time. Missing fields stay blank. Original tasks
+and their follow-ups both appear; an original's state remains Replaced.
+Verification tasks have no rows of their own. Click a line or its number to open
+the same task details used by Status: text, report, changes, check, verification
+links and steps. Titles and reports are displayed as plain text.
+
+State, lane, title words and queued-time filters combine. Title words are matched
+without case, and every word must occur in the title. Queue periods are the same
+rolling 1, 7, 30 and 90 days or all history as Work and cost; all history is the
+default. A bounded period leaves out tasks without a recorded queue time. Lane
+choices include lanes in old task records. Changing filters starts at page one;
+Previous page and Next page move toward newer and older tasks. Returning to the
+tab refreshes its records while keeping its filters for this page load.
+`/api/tasks` accepts `page` (starting at 1), `state`, `lane`, `words` and `days`
+(`1`, `7`, `30`, `90` or `all`), with the usual page key. It returns `rows`,
+`page`, `pages`, `total`, `states` and `lanes`; out-of-range pages use the nearest
+available page. Invalid page numbers or periods return HTTP 400. It reads task
+metadata once per request, without git history, reports or logs.
+
 Status refreshes every five seconds while Status is visible. While an input,
 textarea or select has focus, background refreshes update the header but leave
 the tab's fields in place. With focus on a button or link, the lists keep
@@ -354,7 +378,7 @@ spreadsheet; actual numeric values stay numeric. Both pages share the settings
 page's native CSS and JavaScript controls and reduced-motion support.
 
 The page keeps navigation for the current browser tab in `sessionStorage`:
-`hansa.tab` is written whenever Status, Settings or Work and cost is shown (including
+`hansa.tab` is written whenever Status, All tasks, Settings or Work and cost is shown (including
 startup), `hansa.settingsSection` whenever a Settings section is shown, and
 `hansa.costPeriod` when the Work and cost range changes. Reloading restores those choices;
 a fresh browser tab starts on Status. An address containing `?t=` (or `&t=`)
@@ -404,7 +428,7 @@ with field errors shown beside the control. Narrow screens use a horizontal
 group directory. Controls have visible keyboard focus, and brief transitions
 follow the browser's reduced-motion preference.
 
-Switching between Status, Settings and Work and cost, or between settings groups, keeps
+Switching between Status, All tasks, Settings and Work and cost, or between settings groups, keeps
 unsaved edits. The page marks them and asks the browser to warn before a refresh
 or close. Drafts live only in page memory: they do not survive leaving the page.
 Save settings writes them; a failed save keeps them. During a save the settings
