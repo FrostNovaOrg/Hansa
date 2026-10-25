@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 
 from . import account, alert, build, cost, gaps, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
-from .desk import (EFFORTS, Desk, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
+from .desk import (EFFORTS, Desk, SettingsError, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name, compact_settings, work_lane_problem, write_text)
@@ -3389,5 +3389,8 @@ def main(argv=None):
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
     if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up"):
         _as_desk_account(a, argv)
-    a.fn(a)
+    try:
+        a.fn(a)
+    except SettingsError as e:
+        raise SystemExit(f"hansa: {e}") from None
     return 0

@@ -18,7 +18,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import alert, cost, disk, release, views
-from .desk import Desk, KeyScrubError, event_record, lane_warnings, public_settings, read_json
+from .desk import Desk, KeyScrubError, SettingsError, event_record, lane_warnings, public_settings, read_json
 from .run import check_provider
 
 UI = Path(__file__).with_name("ui.html")
@@ -136,6 +136,15 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             return self._send(400, {"ok": False, "code": code, "field": field, "problems": [problem]})
 
         def do_GET(self):
+            try:
+                return self._get()
+            except SettingsError as e:
+                return self._settings_unavailable(e)
+
+        def _settings_unavailable(self, error):
+            return self._send(503, {"ok": False, "code": "settings_unavailable", "problems": [str(error)]})
+
+        def _get(self):
             url = urllib.parse.urlparse(self.path)
             if url.path == "/":
                 return self._send(200, UI.read_bytes(), "text/html; charset=utf-8")
@@ -212,6 +221,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     refused = desk.close_ask(int(body["id"]), body.get("answer", ""), by="page")
                     return self._send(200, {"ok": False, "problems": [refused]} if refused else {"ok": True})
                 return self._send(404, {"error": "not found"})
+            except SettingsError as e:
+                return self._settings_unavailable(e)
             except KeyScrubError as e:
                 return self._send(400, {"ok": False, "saved": True, "problems": [str(e)]})
             except (KeyError, ValueError, TypeError) as e:

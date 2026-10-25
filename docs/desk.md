@@ -300,6 +300,10 @@ explanations and other read-only lane fields expand in place. Network, write and
 allowed-command rules remain visible, as do the warnings needed before saving.
 Providers includes the rest minutes that apply to every provider.
 The save bar applies to all editable settings groups.
+Prices must be finite numbers, zero or more; zero and decimals are accepted.
+NaN, infinity and numbers too large for floating-point calculations are refused;
+use a smaller price. A saved file containing such prices also requires repair
+before hansa uses it, following [the recovery steps](#reading-and-restoring-settings).
 After saving, it describes the timing for each kind of setting changed:
 prices apply immediately on the next report read, recalculating past usage too;
 provider settings apply to new worker/verifier runs and the next coordinator start;
@@ -561,6 +565,20 @@ does not, including a start not recorded yet and what to do about it, and a
 recorded folder that is not there.
 
 ## A desk's files
+
+### Reading and restoring settings
+
+If an existing `settings.json` cannot be read as a UTF-8 JSON object, commands
+that need it refuse and the page shows recovery instructions (API: HTTP 503,
+`code: settings_unavailable`). Settings saves leave the file untouched. Stop
+`hansa serve`, keep a copy of that file, then restore a known-good copy from
+your own backup, or repair the JSON and its read permissions. Keep the desk's
+task folders and the original lane names; restoring the settings does not
+rewrite tasks. Restart the server and reload the page after repair. Recovery
+is manual: the page does not replace the file or create a backup. A missing
+settings file still uses the defaults, as when creating a desk. These checks
+keep hansa from acting on incomplete settings and remain necessary while
+settings are stored in this file.
 
 ### Where a desk's files are
 
