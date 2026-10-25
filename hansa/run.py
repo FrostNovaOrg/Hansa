@@ -1183,6 +1183,7 @@ def _reset_time(text, at):
 def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "") -> float | None:
     """Rest an unusable provider. Credit has no end time; usage limits use their reset time and a minute
     (at most REST_CAP), else cool_minutes. Record and announce a credit rest once, across task finishes."""
+    from .rests import record
     with desk.lock():
         if (desk.provider_state().get(name) or {}).get("credit_since"):
             return None  # neither another failure nor a coordinator's check can end a credit rest
@@ -1190,6 +1191,7 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
         if kind == "credit":
             desk.set_provider_state(name, credit_since=t, cool_until=0, reason=desk.redact(why),
                                     rest_how="credit", rest_minutes=None, unreachable_since=0, unreachable_reason="")
+            record(desk, name, credit_since=t, cool_until=0)
             line = (f"provider {name}: credit balance too low at {time.strftime('%H:%M', time.localtime(t))}; "
                     "it rests until you say on the page that it is topped up")
             desk.event("provider_credit", provider=name, since=t, text=line)
@@ -1210,6 +1212,7 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
             minutes = s.get("cool_minutes", 30)
             until = t + 60 * minutes
             desk.set_provider_state(name, cool_until=until, reason=why, rest_how="fixed", rest_minutes=minutes)
+        record(desk, name, cool_until=until)
         return until
 
 
@@ -1217,7 +1220,8 @@ def credit_text(st: dict) -> str:
     """The principal alone ends a credit rest; the same words on the page and in the command views."""
     since = st.get("credit_since")
     return ("rests until the principal says it is topped up on the page; credit balance too low since "
-            + time.strftime('%m-%d %H:%M', time.localtime(since))) if since else ""
+            + time.strftime('%m-%d %H:%M', time.localtime(since))
+            + ("; another desk found it" if st.get("shared_rest") else "")) if since else ""
 
 
 def rest_text(st: dict) -> str:
@@ -2451,7 +2455,8 @@ def desk_private(desk: Desk) -> list:
     """What of the desk no worker or verifier may read: its keys and state, and the
     coordinator's notes (notes/) and card (CLAUDE.md), the project's and the principal's working knowledge,
     which a task does not need."""
-    return [desk.secrets_dir, desk.state_dir, desk.notes_dir, desk.root / "CLAUDE.md"]
+    from .up import desks_file
+    return [desk.secrets_dir, desk.state_dir, desk.notes_dir, desk.root / "CLAUDE.md", desks_file().parent]
 
 
 SESSION_FILES = (".claude", "CLAUDE.md", "CLAUDE.local.md")  # a coordinator's settings, memory and copy of the card

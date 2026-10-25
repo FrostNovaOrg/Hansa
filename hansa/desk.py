@@ -2963,11 +2963,12 @@ class Desk:
 
     # -- provider state, asks, web token ------------------------------------
     def provider_state(self) -> dict:
-        return read_json(self.state_dir / "providers.json", {}) or {}
+        from .rests import include
+        return include(self, read_json(self.state_dir / "providers.json", {}) or {})
 
     def set_provider_state(self, name: str, **fields) -> None:
         with self.lock():
-            st = self.provider_state()
+            st = read_json(self.state_dir / "providers.json", {}) or {}
             st.setdefault(name, {}).update(fields)
             self.state_dir.mkdir(exist_ok=True)
             write_json(self.state_dir / "providers.json", st)

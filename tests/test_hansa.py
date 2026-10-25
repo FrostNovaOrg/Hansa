@@ -14235,6 +14235,166 @@ def save():'''))
                 self.assertEqual(count.read_text(), "1")
                 self.desk.update(tid, state="cancelled")
 
+    def shared_rest_desks(self, compatible=False):
+        """Both desks and the account state are this test's, never the caller's real desks or state."""
+        other = init_desk(self.tmp / ("other-key-desk" if compatible else "other-desk"), str(self.repo), "a")
+        for desk in (self.desk, other):
+            s = desk.settings()
+            s["providers"] = {"claude": ({"kind": "compatible", "model": "opus",
+                                         "base_url": "https://shared.example.invalid"} if compatible else
+                                        {"kind": "subscription", "model": "opus",
+                                         "config_dir": str(self.tmp / "shared-login")})}
+            s["lanes"]["a"]["providers"] = ["claude"]
+            self.assertEqual(desk.save_settings(s), [])
+            if compatible:
+                desk.write_key("claude", "sk-shared-rest-test")
+        return other
+
+    def test_shared_usage_rest_holds_another_desk_and_explains_show_and_status(self):
+        from hansa import rests, run
+        other = self.shared_rest_desks()
+        tid = other.new_task("Wait for the shared login")
+        reset = int(time.time()) + 3600
+        until = run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "out of quota",
+                                  f"usage limit reached|{reset}")
+        self.assertEqual(until, reset + 60)
+        self.assertEqual(other.provider_state()["claude"]["cool_until"], until)
+        self.assertIn("another desk", provider_problem(other, other.settings(), "claude"))
+        self.assertIn("another desk", views.show_text(other, tid))
+        self.assertIn("another desk", views.status_text(views.status(other)))
+        with unittest.mock.patch("hansa.run.start") as start:
+            Dispatcher(other).tick()
+            start.assert_not_called()
+        self.assertEqual(other.meta(tid)["state"], "queued")
+        self.assertFalse((other.state_dir / "providers.json").exists())  # shared rests stay in the account file
+        other.set_provider_state("claude", check={"ok": True})
+        self.assertNotIn("cool_until", json.loads((other.state_dir / "providers.json").read_text())["claude"])
+        self.assertEqual(other.provider_state()["claude"]["cool_until"], until)
+        # A different folder is a different subscription, even with the same provider name.
+        s = other.settings()
+        s["providers"]["claude"]["config_dir"] = str(self.tmp / "another-login")
+        self.assertEqual(other.save_settings(s), [])
+        self.assertEqual(provider_problem(other, s, "claude"), "")
+        s["providers"]["claude"]["config_dir"] = str(self.tmp / "shared-login")
+        self.assertEqual(other.save_settings(s), [])
+        with unittest.mock.patch.object(rests.time, "time", return_value=until + 1):
+            self.assertEqual(provider_problem(other, s, "claude"), "")
+
+    def test_shared_key_rest_matches_endpoint_and_key_and_stores_only_hashes_and_times(self):
+        from hansa import rests, run, up
+        other = self.shared_rest_desks(compatible=True)
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "quota",
+                          "contains sk-shared-rest-test and https://shared.example.invalid")
+        self.assertIn("another desk", provider_problem(other, other.settings(), "claude"))
+        text = rests.rests_file().read_text()
+        self.assertEqual(rests.rests_file().parent, up.desks_file().parent)
+        for secret in ("sk-shared-rest-test", "https://shared.example.invalid", str(self.tmp)):
+            self.assertNotIn(secret, text)
+        entries = json.loads(text)
+        self.assertEqual(len(entries), 1)
+        for key, entry in entries.items():
+            self.assertRegex(key, r"^[0-9a-f]{64}$")
+            self.assertRegex(entry["source"], r"^[0-9a-f]{64}$")
+            self.assertEqual(set(entry), {"source", "cool_until"})
+        s = other.settings()
+        s["providers"]["claude"]["base_url"] = "https://different.example.invalid"
+        self.assertEqual(other.save_settings(s), [])
+        self.assertEqual(provider_problem(other, s, "claude"), "")
+        s["providers"]["claude"]["base_url"] = "https://shared.example.invalid"
+        self.assertEqual(other.save_settings(s), [])
+        other.write_key("claude", "sk-different-rest-test")
+        self.assertEqual(provider_problem(other, s, "claude"), "")
+        # Provider names are local labels, not part of the login's identity.
+        other.write_key("claude", "sk-shared-rest-test")
+        s["providers"]["renamed"] = s["providers"].pop("claude")
+        s["lanes"]["a"]["providers"] = ["renamed"]
+        s["coordinator"]["provider"] = "renamed"
+        other.write_key("renamed", "sk-shared-rest-test")
+        self.assertEqual(other.save_settings(s), [])
+        self.assertIn("another desk", provider_problem(other, s, "renamed"))
+
+    def test_shared_credit_top_up_clears_both_local_and_imported_rests(self):
+        from hansa import rests, run
+        from hansa.web import _top_up_provider
+        for compatible in (False, True):
+            with self.subTest(compatible=compatible):
+                other = self.shared_rest_desks(compatible)
+                # Both desks can have recorded local credit failures before sharing was available.
+                since = time.time() - 60
+                other.set_provider_state("claude", credit_since=since, cool_until=0)
+                run.rest_provider(self.desk, self.desk.settings(), "claude", "credit", "credit too low")
+                self.assertIn("topped up", provider_problem(other, other.settings(), "claude"))
+                self.assertEqual(_top_up_provider(self.desk, "claude"), {"ok": True})
+                for desk in (self.desk, Desk(other.root)):
+                    self.assertEqual(provider_problem(desk, desk.settings(), "claude"), "")
+                # A delayed write of an older failure cannot undo the principal's confirmation.
+                rests.record(self.desk, "claude", credit_since=since, cool_until=0)
+                self.assertEqual(provider_problem(other, other.settings(), "claude"), "")
+                # A later credit failure must still hold, and a desk that only imported it can top up too.
+                run.rest_provider(self.desk, self.desk.settings(), "claude", "credit", "credit too low")
+                self.assertIn("another desk", provider_problem(other, other.settings(), "claude"))
+                self.assertEqual(_top_up_provider(other, "claude"), {"ok": True})
+                self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+
+    def test_shared_rest_unavailable_or_damaged_preserves_local_rests(self):
+        from hansa import rests, run
+        other = self.shared_rest_desks()
+        until = time.time() + 600
+        other.set_provider_state("claude", cool_until=until, reason="local rest")
+        path = rests.rests_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for bad in (None, "not JSON", "[]", '{"bad": null}'):
+            with self.subTest(bad=bad):
+                if bad is not None:
+                    path.write_text(bad)
+                self.assertIn("local rest", provider_problem(other, other.settings(), "claude"))
+                self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+        with unittest.mock.patch.object(rests, "read_json", side_effect=PermissionError("unreadable")):
+            self.assertIn("local rest", provider_problem(other, other.settings(), "claude"))
+        with unittest.mock.patch.object(rests, "write_json", side_effect=PermissionError("unwritable")):
+            run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "local limit")
+        self.assertIn("local limit", provider_problem(self.desk, self.desk.settings(), "claude"))
+        for malformed in (None, [], {"credit_since": "bad"}, {"cool_until": float("inf")}):
+            write_json(path, {rests.login(other, "claude", other.settings()["providers"]["claude"]): malformed})
+            self.assertIn("local rest", provider_problem(other, other.settings(), "claude"))
+
+    def test_shared_rests_keep_concurrent_updates_for_different_logins(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from hansa import rests, run
+        other = self.shared_rest_desks()
+        s = other.settings()
+        s["providers"]["claude"]["config_dir"] = str(self.tmp / "different-login")
+        self.assertEqual(other.save_settings(s), [])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(run.rest_provider, desk, desk.settings(), "claude", "quota", "usage limit")
+                       for desk in (self.desk, other)]
+            untils = [f.result(timeout=30) for f in futures]
+        self.assertEqual(sorted(e["cool_until"] for e in rests.read().values()), sorted(untils))
+        for desk, until in zip((self.desk, other), untils):
+            self.assertEqual(desk.provider_state()["claude"]["cool_until"], until)
+
+    def test_shared_rests_exclude_login_errors_and_top_up_preserves_usage_limits(self):
+        from hansa import run
+        from hansa.web import _top_up_provider
+        other = self.shared_rest_desks()
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "login", "not logged in")
+        self.assertEqual(provider_problem(other, other.settings(), "claude"), "")
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "usage limit")
+        self.assertEqual(_top_up_provider(other, "claude"), {"ok": True})
+        self.assertIn("another desk", provider_problem(other, other.settings(), "claude"))
+
+    def test_shared_rest_file_is_hidden_from_workers_setups_and_checks(self):
+        from hansa import rests, run, up
+        other = self.shared_rest_desks()
+        run.rest_provider(other, other.settings(), "claude", "quota", "out of quota")
+        s = self.desk.settings()
+        lane, p = s["lanes"]["a"], s["providers"]["claude"]
+        worker = run.sandbox_settings(self.desk, lane, "claude", p, self.repo)["sandbox"]["filesystem"]
+        commands = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "check"))["filesystem"]
+        for fs in (worker, commands):
+            for path in (rests.rests_file(), up.desks_file()):
+                self.assertTrue(any(path.is_relative_to(Path(d)) for d in fs["denyRead"] if "*" not in d), path)
+
     def test_the_page_top_up_control_ends_a_credit_rest(self):
         from hansa.web import _top_up_provider
         tid, d, count = self.credit_run()

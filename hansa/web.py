@@ -14,6 +14,7 @@ import json
 import os
 import re
 import threading
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -103,6 +104,8 @@ def _top_up_provider(desk: Desk, name: str) -> dict:
         if name not in desk.settings()["providers"]:
             return {"ok": False, "problems": ["no such provider"]}
         if (desk.provider_state().get(name) or {}).get("credit_since"):
+            from .rests import record
+            record(desk, name, credit_since=0, credit_cleared=time.time())
             desk.set_provider_state(name, credit_since=0, cool_until=0, reason="", rest_how="", rest_minutes=None)
             desk.event("provider_topped_up", provider=name, by="page")
     desk.ready_news()
