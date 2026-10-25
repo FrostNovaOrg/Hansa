@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from . import SESSION, SESSION_PREFIXES, account, notify, without_session
-from .desk import Desk, desks_file, desks_list_problem, listed_desks, now, program, read_json, write_json, write_text
+from .desk import Desk, _desks_entries, desks_file, desks_list_problem, listed_desks, now, program, read_json, write_json, write_text
 from .run import alive, proc_args, proc_cwd, proc_start, server_state
 
 DEFAULTS = {"host": "127.0.0.1", "port": 8765, "every": 3.0}
@@ -111,9 +111,12 @@ def record_start(desk: Desk, options) -> None:
         # Different desks may start together. Lock the stable inode, replace just the JSON.
         with open(listed.with_suffix(".lock"), "a") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
-            entries = read_json(listed, [])
-            entries = [x for x in entries if isinstance(x, dict) and x.get("desk") != str(desk.root)] \
-                if isinstance(entries, list) else []
+            entries, problem = _desks_entries()
+            if problem:  # rewriting it would drop the other desks and let runs start with nothing of them hidden
+                print(desk.redact(f"hansa serve: left the account's list of desks as it is: {problem}"),
+                      file=sys.stderr, flush=True)
+                return
+            entries = [x for x in entries if isinstance(x, dict) and x.get("desk") != str(desk.root)]
             entries.append({"desk": str(desk.root), "hansa": rec["hansa"], "at": rec["at"]})
             write_json(listed, entries)
     except OSError as e:
