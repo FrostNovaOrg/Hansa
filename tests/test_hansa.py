@@ -24960,6 +24960,86 @@ def save():'''))
             body = json.loads(body)
         return code, body, outgoing
 
+    def known_gap_records(self):
+        from hansa import gaps
+        tid = self.desk.new_task("Closed <b>task</b>", state="cancelled", closed="no further work")
+        vid = self.desk.new_task("Verify the task", kind="verify", parent=tid, state="done", closed="reviewed")
+        records = gaps.collect(self.desk, self.desk.meta(vid),
+                               "## Notes\n- <b>x</b> & <script>text</script>\n- Deferred gap.\n- Accepted gap.", now())
+        self.desk.update(vid, verification_notes=records)
+        self.hansa("gaps", "mark", f"{vid}.2", "later", "When this code changes")
+        self.hansa("gaps", "mark", f"{vid}.3", "wontfix", "<b>Outside scope</b>")
+        return tid, vid
+
+    def test_web_gaps_api_requires_page_key_and_is_read_only(self):
+        from hansa import gaps
+        token = self.desk.web_token()
+        for headers, query in (({}, ""), ({}, "?t=" + token), ({"Cookie": "hansa_t=" + token}, ""),
+                               ({"Authorization": "Bearer wrong"}, "")):
+            with unittest.mock.patch.object(gaps, "all_notes") as reader:
+                self.assertEqual(self.web_request("/api/gaps" + query, headers=headers)[0], 403)
+                reader.assert_not_called()
+        headers = {"Authorization": "Bearer " + token}
+        self.assertEqual(self.web_request("/api/gaps", headers=headers)[:2], (200, []))
+        _, vid = self.known_gap_records()
+        path = self.desk.tasks_dir / vid / "meta.json"
+        before = path.read_bytes()
+        self.assertEqual(len(self.web_request("/api/gaps", headers=headers)[1]), 3)
+        self.assertEqual(self.web_request("/api/gaps", method="POST", headers={**headers, "X-Hansa": "1"},
+                                         data=json.dumps({"id": f"{vid}.1", "kind": "fixed", "why": "No"}).encode())[0], 404)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_web_gaps_latest_mark_redacts_keys_and_keeps_closed_tasks(self):
+        from hansa import gaps
+        tid, vid = self.known_gap_records()
+        nid = f"{vid}.3"
+        key = 'example-gap-"quoted"-key'
+        self.desk.change(vid, lambda m: {"verification_notes": [
+            {**n, "text": n["text"] + key, "title": n["title"] + key} for n in m["verification_notes"]]})
+        with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "coordinator"}), \
+                unittest.mock.patch("hansa.gaps.now", return_value=1700000000):
+            self.hansa("gaps", "mark", nid, "fixed", "<i>covered-now-key</i> " + key)
+        # A key saved after the mark must also be scrubbed when the page reads the records.
+        self.desk.secrets_dir.mkdir(exist_ok=True)
+        self.desk.key_file("mimo").write_text("covered-now-key\n")
+        self.desk.key_file("other").write_text(key + "\n")
+        before = (self.desk.tasks_dir / vid / "meta.json").read_bytes()
+        self.desk = Desk(self.desk.root)
+        headers = {"Authorization": "Bearer " + self.desk.web_token()}
+        code, rows, _ = self.web_request("/api/gaps", headers=headers)
+        self.assertEqual(code, 200)
+        self.assertEqual([n["id"] for n in rows], [f"{vid}.{i}" for i in (1, 2, 3)])
+        self.assertEqual(rows, gaps.page_list(self.desk))
+        self.assertEqual(rows[2]["mark"], {"kind": "fixed", "why": "<i>[key of mimo]</i> [key of other]",
+                                           "by": "coordinator", "at": 1700000000})
+        self.assertIn("<b>x</b>", rows[0]["text"])
+        self.assertNotIn(key, json.dumps(rows))
+        self.assertNotIn("covered-now-key", json.dumps(rows))
+        self.assertEqual((self.desk.tasks_dir / vid / "meta.json").read_bytes(), before)
+        self.assertEqual(rows[0]["task"], tid)
+        self.assertIn("[key of other]", rows[0]["title"])
+        code, detail, _ = self.web_request("/api/task?id=" + tid, headers=headers)
+        self.assertEqual(code, 200)
+        self.assertEqual(detail["meta"]["closed"], "no further work")
+        self.assertIn("Closed <b>task</b>", detail["text"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_web_gaps_page_filters_translates_plain_text_and_opens_closed_task_details(self):
+        from hansa import web
+        tid, _ = self.known_gap_records()
+        headers = {"Authorization": "Bearer " + self.desk.web_token()}
+        replies = {"/api/gaps": self.web_request("/api/gaps", headers=headers)[1],
+                   "/api/task?id=" + tid: self.web_request("/api/task?id=" + tid, headers=headers)[1],
+                   "pagePreferences": {"session": {"hansa.token": "example-page-key"}}}
+        harness = self.tmp / "gaps-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(web.UI), "gaps", language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"ok": True})
+
     def test_web_notes_missing_and_empty(self):
         from hansa import notes
         (self.desk.notes_dir / "PROJECT.md").unlink()
@@ -29905,7 +29985,7 @@ function openPage(search = "") {
   for (const key of Object.keys(ids)) delete ids[key];
   document.documentElement = new El("html"); document.activeElement = null; document.title = "Hansa";
   for (const key of Object.keys(windowEvents)) delete windowEvents[key];
-  for (const tab of ["status", "tasks", "notes", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
+  for (const tab of ["status", "tasks", "gaps", "notes", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
   const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
   location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
   URLSearchParams, setInterval(f) { (windowEvents.interval ||= []).push(f); }, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
@@ -30043,7 +30123,7 @@ else if (ask === "preferences") (async () => {
   const flush = () => new Promise(resolve => setImmediate(resolve));
   const run = code => vm.runInContext(code, ctx);
   const snapshot = () => {
-    const tab = ["status", "tasks", "notes", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
+    const tab = ["status", "tasks", "gaps", "notes", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
     const selected = document.querySelectorAll("#tabs button").find(el => el.attrs["aria-current"] === "page");
     if (selected?.dataset.tab !== tab) throw new Error("tab selection and visibility disagree");
     const group = run("settingsGroup");
@@ -30155,6 +30235,70 @@ else if (ask === "notes") (async () => {
   check(root.textContent.includes(run("T.notesFailed")), "failure label missing");
   check(apiRequests.filter(r => r.path.startsWith("/api/note")).every(r => r.headers.Authorization === "Bearer example-page-key"), "note request missing page key");
   check(apiPosts.length === 0, "notes wrote to the desk");
+  console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "gaps") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const until = async ready => { const deadline = Date.now() + 10000;
+    while (!ready()) { check(Date.now() < deadline, "task details did not load"); await new Promise(resolve => setImmediate(resolve)); } };
+  await run('show("gaps")');
+  const root = ids["#tab-gaps"], notes = given["/api/gaps"];
+  const rows = () => descendants(root, "tr").slice(1);
+  const rowIds = () => rows().map(row => row.kids[0].textContent);
+  const choose = async value => { const control = descendants(root, "select")[0];
+    control.value = value; await control.on.change({target:control}); };
+  const sameIds = expected => check(JSON.stringify(rowIds()) === JSON.stringify(expected), "wrong filtered notes: " + rowIds());
+  const zh = process.argv[4] === "zh";
+  check(descendants(root, "h1")[0].textContent === (zh ? "已知缺口" : "Known gaps"), "title untranslated");
+  check(root.textContent.includes(run("T.gapsIntro")) && root.textContent.includes("hansa gaps mark"), "read-only instructions missing");
+  const labels = descendants(root, "th").map(el => el.textContent);
+  check(JSON.stringify(labels) === JSON.stringify(zh
+    ? ["附注编号", "任务", "附注", "标记", "原因", "标记者", "标记时间"]
+    : ["Note ID", "Task", "Note", "Mark", "Why", "Marked by", "Marked at"]), "columns untranslated");
+  const options = descendants(root, "option");
+  check(JSON.stringify(options.map(el => el.textContent)) === JSON.stringify(zh
+    ? ["未标记及以后处理", "全部", "尚未标记", "以后处理", "不修复", "已修复"]
+    : ["Unmarked and later", "All", "None yet", "Later", "Won’t fix", "Fixed"]), "filters untranslated");
+  check(options.find(el => el.value === "open").attrs.selected === "", "default filter not selected");
+  sameIds([notes[0].id, notes[1].id]);
+  check(rows()[0].kids[3].textContent === run("T.gapMarks.none"), "unmarked label missing");
+  await choose("all"); sameIds(notes.map(n => n.id));
+  for (const [i, row] of rows().entries()) {
+    const n = notes[i], pre = descendants(row.kids[2], "pre")[0];
+    check(pre.textContent === n.text && pre.kids[0] instanceof Text, "note not plain text");
+    if (n.mark.kind) {
+      const why = descendants(row.kids[4], "pre")[0];
+      check(why.textContent === n.mark.why && why.kids[0] instanceof Text, "reason not plain text");
+      check(row.kids[3].textContent === run(`T.gapMarks.${n.mark.kind}`), "mark not translated");
+      check(row.kids[5].textContent === n.mark.by && row.kids[6].textContent === run(`when(${n.mark.at})`), "mark attribution missing");
+    }
+  }
+  const button = descendants(rows()[0].kids[1], "button")[0];
+  check(button.textContent === notes[0].task + " · " + notes[0].title && !descendants(button, "b").length, "task title not plain text");
+  await button.click();
+  const box = ids["#" + button.attrs["aria-controls"]];
+  await until(() => descendants(box, "ol").length && descendants(box, "pre").length);
+  check(!box.hidden && descendants(box, "ol").length === 1, "closed task details not opened");
+  check(descendants(box, "pre")[0].textContent.includes("Closed <b>task</b>"), "closed task report missing");
+  await choose("none"); sameIds([notes[0].id]);
+  await choose("later"); sameIds([notes[1].id]);
+  await choose("wontfix"); sameIds([notes[2].id]);
+  // Returning to the tab reads the latest decision and preserves the selected filter.
+  notes[2].mark = {kind:"fixed", why:"New reason", by:"coordinator", at:1700000000};
+  await run('show("gaps")'); sameIds([]);
+  await choose("fixed"); sameIds([notes[2].id]);
+  check(root.textContent.includes("New reason") && !root.textContent.includes("Outside scope"), "old decision retained");
+  given["/api/gaps"] = []; await run("loadGaps()");
+  check(root.textContent.includes(zh ? "暂无已知缺口" : "No known gaps"), "empty label missing");
+  given["/api/gaps"] = {}; await run("loadGaps()");
+  check(root.textContent.includes(run("T.gapsFailed")), "failure label missing");
+  given["/api/gaps"] = notes;
+  await descendants(root, "button").find(el => el.textContent === run("T.retry")).click();
+  sameIds([notes[2].id]);
+  check(apiRequests.filter(r => r.path === "/api/gaps" || r.path.startsWith("/api/task?")).every(
+    r => r.headers.Authorization === "Bearer example-page-key"), "requests missing page key");
+  check(apiPosts.length === 0 && !descendants(root, "input").length && !descendants(root, "textarea").length, "gaps editable on page");
   console.log(JSON.stringify({ok:true}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "all-tasks") (async () => {
@@ -32399,7 +32543,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
         replies = {"pagePreferences": preferences, "/api/status": views.status(self.desk),
-                   "/api/settings": public_settings(self.desk), "/api/events": [], "/api/tasks": views.task_list(self.desk), "/api/notes": [],
+                   "/api/settings": public_settings(self.desk), "/api/events": [], "/api/tasks": views.task_list(self.desk), "/api/notes": [], "/api/gaps": [],
                    "/api/cost": {"total": {"tokens": 0, "usd": 0}, "by": {}, "unpriced_models": []}}
         result = subprocess.run(["node", str(harness), str(page), "preferences", language],
                                 input=json.dumps(replies), capture_output=True, text=True, timeout=60)
@@ -32410,6 +32554,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         output = self.page_preferences(actions=[{"tab": "tasks"}, {"reload": True}])
         self.assertEqual([s["tab"] for s in output["snapshots"]], ["status", "tasks", "tasks"])
         self.assertEqual(output["snapshots"][-1]["session"]["hansa.tab"], "tasks")
+
+    def test_known_gaps_tab_is_restored_on_reload(self):
+        output = self.page_preferences(actions=[{"tab": "gaps"}, {"reload": True}])
+        self.assertEqual([s["tab"] for s in output["snapshots"]], ["status", "gaps", "gaps"])
+        self.assertEqual(output["snapshots"][-1]["session"]["hansa.tab"], "gaps")
 
     def test_web_notes_page_is_plain_text_localized_authenticated_and_read_only(self):
         from hansa import notes, web

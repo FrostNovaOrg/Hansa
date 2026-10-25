@@ -17,7 +17,7 @@ import threading
 import urllib.parse
 from pathlib import Path
 
-from . import alert, cost, disk, notes, release, views
+from . import alert, cost, disk, gaps, notes, release, views
 from .desk import Desk, KeyScrubError, SettingsError, event_record, lane_warnings, public_settings, read_json
 from .run import check_provider
 
@@ -151,6 +151,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if not self._authed():
                 return self._send(403, b"Open the address that `hansa web` prints.", "text/plain; charset=utf-8")
             q = urllib.parse.parse_qs(url.query, keep_blank_values=True)
+            if url.path == "/api/gaps":
+                return self._send(200, gaps.page_list(desk))
             if url.path == "/api/notes":
                 return self._send(200, notes.page_list(desk, q.get("archived", ["0"])[0] == "1"))
             if url.path == "/api/note":

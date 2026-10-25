@@ -374,6 +374,7 @@ td .task-detail { min-width:200px; }
   <div id="tab-settings" hidden></div>
   <div id="tab-cost" hidden></div>
   <div id="tab-tasks" hidden></div>
+  <div id="tab-gaps" hidden></div>
   <div id="tab-notes" hidden></div>
 </main>
 <script>
@@ -399,7 +400,7 @@ if (tokenAddress) {
 } else {
   try { pageToken = sessionStorage.getItem("hansa.token") || ""; } catch (_) {}
 }
-const TABS = ["status", "tasks", "notes", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
+const TABS = ["status", "tasks", "gaps", "notes", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
 const language = keptChoice("localStorage", "hansa.language", ["zh-CN", "en"],
   (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en");
 const ZH = language === "zh-CN";
@@ -855,6 +856,17 @@ Object.assign(T, ZH ? {
   noteSize:n => `${n.toLocaleString(language)} bytes`, noteBytes:"Size", noteChanged:"Changed", noteHeadings:"Headings", noteFile:"File",
   noteBinary:"Not UTF-8 text; cannot display.", noteCut:"Truncated: showing only the first 1 MB.", notesFailed:"Could not load notes. Try again."
 });
+Object.assign(T, ZH ? {
+  gaps:"已知缺口", gapsIntro:"核对留下的附注。此处只读；请用 hansa gaps mark 标记。", noGaps:"暂无已知缺口",
+  gapId:"附注编号", gapText:"附注", gapMark:"标记", gapWhy:"原因", gapBy:"标记者", gapAt:"标记时间",
+  gapMarks:{open:"未标记及以后处理", all:"全部", none:"尚未标记", later:"以后处理", wontfix:"不修复", fixed:"已修复"},
+  gapsLoading:"正在加载已知缺口…", gapsFailed:"已知缺口加载失败，请重试。"
+} : {
+  gaps:"Known gaps", gapsIntro:"Verification notes. Read only; mark them with hansa gaps mark.", noGaps:"No known gaps",
+  gapId:"Note ID", gapText:"Note", gapMark:"Mark", gapWhy:"Why", gapBy:"Marked by", gapAt:"Marked at",
+  gapMarks:{open:"Unmarked and later", all:"All", none:"None yet", later:"Later", wontfix:"Won’t fix", fixed:"Fixed"},
+  gapsLoading:"Loading known gaps…", gapsFailed:"Could not load known gaps. Try again."
+});
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const $ = s => document.querySelector(s);
 const mainTabLabels = {};
@@ -878,6 +890,7 @@ function icon(name) {
     status:["M3 12h4l3-8 4 16 3-8h4"], settings:["M4 7h16M4 17h16M8 4v6m8 4v6"], cost:["M5 20v-7m7 7V4m7 16V9"],
     tasks:["M8 6h12M8 12h12M8 18h12M3 6h1M3 12h1M3 18h1"],
     notes:["M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7"],
+    gaps:["M12 3l9 5v8l-9 5-9-5V8zM12 7v6m0 3h.01"],
     providers:["M8 8V4h8v4M6 8h12v8H6zM9 20h6m-3-4v4"],
     coordinator:["M4 5h16v12H4zM8 21h8m-4-4v4M8 9l2 2-2 2m5 0h3"], lanes:["M5 4v16m14-16v16M5 8h14M5 16h14"],
     security:["M12 3l8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM9 12l2 2 4-4"], releases:["M12 16V3m-4 4 4-4 4 4M4 13v7h16v-7"],
@@ -931,7 +944,7 @@ function show(tab) {
     b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
   }
   for (const t of TABS) $("#tab-" + t).hidden = t !== tab;
-  return ({status:loadStatus, tasks:loadTasks, notes:loadNotes, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
+  return ({status:loadStatus, tasks:loadTasks, gaps:loadGaps, notes:loadNotes, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
 }
 function err(e) { $("#state").textContent = String(e.message || e); $("#state").className = "bad"; }
 
@@ -2073,6 +2086,29 @@ async function loadNotes() {
       [h("pre", {}, file.headings.map(([i, level, text]) => `${i + 1} ${"#".repeat(level)} ${text}`).join("\n")),
         file.binary ? h("p", {class:"muted"}, T.noteBinary) : null]])) : h("p", {}, T.noNotes));
   } catch (e) { if (epoch === notesEpoch) host.append(h("p", {class:"bad"}, T.notesFailed), h("button", {onclick:loadNotes}, T.retry)); }
+}
+
+/* ---------- known gaps ---------- */
+let gapMark = "open", gapsEpoch = 0;
+async function loadGaps() {
+  const host = $("#tab-gaps"), epoch = ++gapsEpoch, results = h("div", {"aria-live":"polite"}, T.gapsLoading);
+  const filter = h("select", {"aria-label":T.gapMark, onchange:e => { gapMark = e.target.value; return loadGaps(); }},
+    Object.entries(T.gapMarks).map(([value, label]) => h("option", {value, selected:value === gapMark}, label)));
+  host.replaceChildren(pageHeading(T.gaps, T.gapsIntro), h("label", {}, T.gapMark, " ", filter), results);
+  try {
+    const notes = await api("/api/gaps");
+    if (epoch !== gapsEpoch) return;
+    const rows = notes.filter(n => gapMark === "all" || (gapMark === "open"
+      ? !n.mark?.kind || n.mark.kind === "later" : (n.mark?.kind || "none") === gapMark));
+    results.replaceChildren(rows.length ? table([T.gapId, T.task, T.gapText, T.gapMark, T.gapWhy, T.gapBy, T.gapAt], rows.map(n => {
+      const mark = n.mark || {}, [button, box] = taskLink(n.task);
+      button.textContent = n.task + " · " + n.title;
+      return [n.id, [button, box], h("pre", {}, n.text), T.gapMarks[mark.kind || "none"],
+        h("pre", {}, mark.why || "—"), mark.by || "—", when(mark.at)];
+    })) : h("p", {}, T.noGaps));
+  } catch (e) {
+    if (epoch === gapsEpoch) results.replaceChildren(h("p", {class:"bad"}, T.gapsFailed), h("button", {onclick:loadGaps}, T.retry));
+  }
 }
 
 /* ---------- all tasks ---------- */

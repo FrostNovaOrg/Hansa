@@ -71,6 +71,17 @@ def all_notes(desk: Desk, tasks=None) -> list[dict]:
                   key=lambda n: (n["kept"], int(n["id"].split(".")[0][1:]), int(n["id"].split(".")[1])))
 
 
+def page_list(desk: Desk) -> list[dict]:
+    """The command's saved notes, with only the page's fields and current keys removed."""
+    rows = []
+    for n in all_notes(desk):
+        row = {k: desk.redact(n[k]) for k in ("id", "task", "title", "text")}
+        row["mark"] = {k: desk.redact(v) if isinstance(v, str) else v
+                       for k, v in (n.get("mark") or {}).items() if k in ("kind", "why", "by", "at")}
+        rows.append(row)
+    return rows
+
+
 def _verification(desk: Desk, nid: str) -> dict:
     match = re.fullmatch(r"(t\d+)\.[1-9]\d*", nid)
     if match and (desk.tasks_dir / match[1] / "meta.json").is_file():
