@@ -1873,9 +1873,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "When srt cannot run, the setup or check does not run either, and the task is not judged on it: its "
             "check reads \"could not run\". That is the machine's problem, not the task's. Before each setup or "
             "check, hansa looks for srt on the PATH hansa serve starts with, never on a lane's (a lane's env "
-            "reaches only the command inside the sandbox). node must be on that PATH "
+            "reaches only the command inside the sandbox). Node 22.12.0 or newer must be on that PATH "
             "too, since srt is a node script (an error such as `env: node: No such file or directory`, exit 127, "
-            "means it is not). Install srt with `npm install -g @anthropic-ai/sandbox-runtime`, or fix the "
+            "means it is not). Install srt with `npm install -g @anthropic-ai/sandbox-runtime@0.0.79`, or fix the "
             "server's PATH, then restart hansa serve. Then, for a task whose "
             "check could not run or failed for the machine's sake: hansa merge ID --recheck runs the merge check "
             "again and merges if it passes; a task whose setup could not run: hansa retry ID.",

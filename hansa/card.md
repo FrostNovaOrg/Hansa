@@ -273,8 +273,8 @@ or ask `scout` when reading is enough; say what you need back.
   More: `hansa help free-space`, `hansa help desk-files`.
 - The setup, check and merge check run with `/bin/sh -c`: POSIX shell only, no bash syntax (`[[ ]]`,
   arrays, `source`).
-- hansa needs `srt` (`npm install -g @anthropic-ai/sandbox-runtime`), with node, on the `PATH` of
-  `hansa serve` for a lane's setup and check; you may install it.
+- hansa needs `srt` (`npm install -g @anthropic-ai/sandbox-runtime@0.0.79`), with Node 22.12.0 or newer,
+  on the `PATH` of `hansa serve` for a lane's setup and check; you may install it.
 - Network list: add a host only when the lane's work needs it. `localhost`: on Linux leave it off
   (each sandbox has its own loopback); on macOS it opens every service on the machine's loopback, so
   list it only where nothing there must be kept from workers. More: `hansa help network-list`.

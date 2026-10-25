@@ -448,8 +448,9 @@ def claude_bin() -> str:
 
 
 SRT_MISSING = ("hansa needs srt (Anthropic's sandbox runtime) to run a lane's setup and check commands in a "
-               "sandbox, and srt is not on the PATH. Install it with `npm install -g @anthropic-ai/sandbox-runtime` "
-               "(the coordinator can do this). A lane with neither a setup nor a check command needs no srt.")
+               "sandbox, and srt is not on the PATH. Install it with `npm install -g @anthropic-ai/sandbox-runtime@0.0.79` "
+               "with Node 22.12.0 or newer on that PATH (the coordinator can do this). "
+               "A lane with neither a setup nor a check command needs no srt.")
 
 
 def srt_bin() -> str:

@@ -5,6 +5,42 @@ sandbox before a run, what a lane's write list, env, network list and allow list
 hansa refuses, and what hansa stops when a run ends. The [README](../README.md#what-keeps-it-safe) has the
 short version.
 
+## Tools and upgrades
+
+The Python program uses the standard library. The tools it starts have their own
+requirements; install them outside a worker's worktree and denied folders.
+The CI baseline is explicit, so a fresh run selects the same direct tool releases:
+
+| Tool | Baseline | Requirement |
+|---|---|---|
+| Node | 24.22.0 in CI | srt 0.0.79 requires 22.12.0 or newer, on hansa serve's PATH |
+| srt (`@anthropic-ai/sandbox-runtime`) | 0.0.79 | Used for setups, checks and sandbox probes; real CI runs only on macOS, started by hand |
+| Claude Code | 2.1.307 in CI | The coordinator plugin and its test kit require 2.1.290 or newer |
+| Codex CLI (optional adapter) | 0.160.0 installation example | Worker runs only on macOS; the adapter's automated suite uses fakes |
+
+These are direct release selections, not a lock of the tools' transitive dependencies
+or proof that every tool combination has been exercised. Check the installed package
+version with `npm ls -g --depth=0` as well as `node --version` and `claude --version`;
+the srt CLI's own version string may differ from its package version.
+The observations under Headless browsers below used srt 0.0.77; a new CI baseline
+does not replace those observations with results from a newer runtime.
+
+Before a release, and when updating a tool, inspect its resolved dependency tree
+(`npm ls -g --all`) and upstream release notes. To audit an npm installation, install
+the same exact packages into a disposable directory with a package lock, then run
+`npm audit` there; a global installation alone has no audit lockfile. Keep the output
+with the release checks. Update dependencies through their owning tool, checking
+compatibility before changing a dependency's major version. A direct version pin
+does not freeze dependencies declared as ranges.
+
+Change the installation examples and CI pins together, including the full action
+commit IDs. Run the Python suites and `claude plugin validate hansa/mod` and
+`claude plugin test hansa/mod`, then start the manual CI run for the real macOS
+sandbox checks. Also check the real sandbox on Linux as an ordinary user: GitHub's
+Ubuntu runners cannot run it with their default settings. Record tool versions,
+platforms and skipped checks with the results. This baseline guards against
+unreviewed tool changes; replace it after the replacement passes those checks.
+
 ## What workers and verifiers may touch
 
 Workers (task and verification workers) change files in their worktree and

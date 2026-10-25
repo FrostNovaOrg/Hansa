@@ -9,6 +9,9 @@
 #   newest, and the real srt on macOS. Only that run tests the real srt on macOS: start it (Actions, tests, Run
 #   workflow) before a release whose changes touch the sandbox (the settings hansa gives srt or a worker's
 #   sandbox) or the web page.
+# Every job also runs the Codex adapter's suite (worker runs skip off macOS) and the coordinator plugin's
+# validation and tests. Those use stand-ins too; installing Claude Code's test kit needs no login.
+# Tool versions and the upgrade checks are recorded in docs/sandbox.md, under Tools and upgrades.
 # The tests a sandboxed run cannot run are the ones that call skip_in_sandbox or skip_unless_ports
 # (tests/test_hansa.py): they listen on the loopback, make a Unix socket or run the real srt. Unlike a sandboxed
 # run, ports on the loopback work here, on Ubuntu and on macOS, so the tests that serve the web page run too;
@@ -49,14 +52,25 @@ jobs:
       HANSA_TESTS_NEED_UNIX_SOCKETS: "1"
       # not HANSA_TESTS_NEED_SRT: bubblewrap is restricted on GitHub's Ubuntu machines (above)
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.x"
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24.22.0"
+      - name: Install Claude Code's plugin test kit
+        run: npm install -g @anthropic-ai/claude-code@2.1.307
       - name: Run the tests
         run: python3 -m unittest -v tests.test_hansa
+      - name: Run the Codex adapter's tests
+        run: python3 -m unittest -v contrib.codex.tests
+      - name: Validate the coordinator plugin
+        run: claude plugin validate hansa/mod
+      - name: Run the coordinator plugin's tests
+        run: claude plugin test hansa/mod
 
   test:
     name: ${{ matrix.os }}, Python ${{ matrix.python }}
@@ -74,14 +88,25 @@ jobs:
       HANSA_TESTS_NEED_UNIX_SOCKETS: "1"
       HANSA_TESTS_NEED_SRT: ${{ startsWith(matrix.os, 'macos') && '1' || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24.22.0"
+      - name: Install Claude Code's plugin test kit
+        run: npm install -g @anthropic-ai/claude-code@2.1.307
       - name: Install srt, the sandbox runtime (macOS)
         if: runner.os == 'macOS'
-        run: npm install -g @anthropic-ai/sandbox-runtime
+        run: npm install -g @anthropic-ai/sandbox-runtime@0.0.79
       - name: Run the tests
         run: python3 -m unittest -v tests.test_hansa
+      - name: Run the Codex adapter's tests
+        run: python3 -m unittest -v contrib.codex.tests
+      - name: Validate the coordinator plugin
+        run: claude plugin validate hansa/mod
+      - name: Run the coordinator plugin's tests
+        run: claude plugin test hansa/mod

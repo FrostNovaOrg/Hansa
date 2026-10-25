@@ -96,7 +96,7 @@ belong to, or are readable by, an ordinary account, and the steps below change a
   AppArmor rules can stop it (see Claude Code's [sandboxing documentation](https://code.claude.com/docs/en/sandboxing#set-up-linux-and-wsl2)).
 - **`srt`**, [Anthropic's sandbox runtime](https://github.com/anthropics/sandbox-runtime), for any lane with
   a setup or check command: hansa runs those in the lane's sandbox with it.
-  `npm install -g @anthropic-ai/sandbox-runtime`; srt is a node script, so node must be on the `PATH` of
+  `npm install -g @anthropic-ai/sandbox-runtime@0.0.79`; srt needs Node 22.12.0 or newer on the `PATH` of
   `hansa serve`. Without it, a lane's setup fails each task before its worker starts, and its check reads
   "could not run" without judging the task; `hansa status` says so.
 
@@ -338,8 +338,9 @@ desk's task commits and merges.
 `python3 tests/run_parallel.py` runs the suite faster across processes;
 `python3 -m unittest tests.test_hansa` still works (both use a stand-in for `claude`; no model is called).
 Before each push the maintainers run the whole suite on macOS and on Linux. Every push to `alpha` or `main`
-runs, on GitHub's Ubuntu machine, the tests a sandboxed run cannot (those that listen on the loopback or make a
-Unix socket); every pull request runs the whole suite on Ubuntu, with Python 3.9 and the newest. Only a run
+runs, on GitHub's Ubuntu machine, the main tests a sandboxed run cannot (those that listen on the loopback or make a
+Unix socket); every pull request runs the whole suite on Ubuntu, with Python 3.9 and the newest. Each job also
+runs the Codex adapter's tests and the coordinator plugin's validation and tests. Only a run
 started by hand adds macOS and the real sandbox on it; start one before a release whose changes touch the
 sandbox or the web page: `.github/workflows/tests.yml`. Before you change anything, read [CONTRIBUTING.md](CONTRIBUTING.md).
 
