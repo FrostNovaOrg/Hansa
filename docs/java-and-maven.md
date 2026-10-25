@@ -78,7 +78,8 @@ Mockito documents; in the pom:
 
 **The lane.**
 - A Maven repository of the lane's own, on its write list, named in its
-  commands: `hansa lane set L write ~/hansa-cache/DESK/L/m2`, and
+  commands: `hansa lane set L write ~/hansa-cache/shop-desk/L/m2` for a desk
+  at `/work/shop/desk`, and
   `-Dmaven.repo.local=...` with that full path in the setup and check (not
   `~/.m2/repository`, which the write list refuses).
 - `repo.maven.apache.org` on the network list, and any other repository the

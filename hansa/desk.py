@@ -1120,7 +1120,7 @@ SYSTEM_TOPS = ("/System", "/dev", "/proc", "/sys")
 
 # What a refusal of a cache folder says to list instead
 ELSEWHERE = "a cache folder goes elsewhere, such as a tools folder of the desk's, another volume or /tmp"
-DESK_CACHE = "~/hansa-cache/<desk>/<lane>/<tool>"  # <desk>: the desk folder's name, so no two desks share a cache
+DESK_CACHE = "~/hansa-cache/<desk>/<lane>/<tool>"  # <desk>: the last two folders joined by -, e.g. shop-desk
 OWN_FOLDER = (f"give the lane a folder of its own, such as {DESK_CACHE}, and point the tool there with "
               "the lane's env: PIP_CACHE_DIR, npm_config_cache, UV_CACHE_DIR, CARGO_HOME, GRADLE_USER_HOME and the like")
 
@@ -1925,7 +1925,7 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
     if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
         return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as "
-                "/Users/me/hansa-cache/desk/a/pip, desk the desk folder's name"]
+                "/Users/me/hansa-cache/shop-desk/a/pip, shop-desk the last two folders joined by -"]
     if not paths:
         return []
     home = account_home()

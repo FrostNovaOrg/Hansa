@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import pwd
 import re
@@ -152,7 +153,10 @@ def log_tail(log: Path) -> str:
 
 def desk_server(desk: Desk) -> list:
     """The tmux server hansa up uses for a desk when none is recorded."""
-    return ["-L", "hansa-" + (re.sub(r"[^A-Za-z0-9_-]", "-", desk.root.name) or "desk")]
+    root = desk.root.resolve()
+    name = re.sub(r"[^A-Za-z0-9_-]", "-", root.name)[:32] or "desk"
+    digest = hashlib.sha256(os.fsencode(root)).hexdigest()[:12]
+    return ["-L", f"hansa-{name}-{digest}"]
 
 
 def pane_command(env: dict, cmd: list, log: Path = None) -> str:

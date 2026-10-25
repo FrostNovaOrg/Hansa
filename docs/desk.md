@@ -541,8 +541,13 @@ existing tmux server.
 With tmux installed (found by hansa's usual lookup, including `HANSA_TMUX`),
 `hansa up` starts a detached pane in the saved server and session. If that
 session already exists, it adds a window there. Without a saved tmux location,
-it uses a server named `hansa-<desk folder name>` (made safe) and session
-`serve`. The pane command uses `/bin/sh`, regardless of the account's shell.
+it uses a server named `hansa-<desk folder name>-<hash>` and session `serve`.
+The folder name is made safe and limited to 32 characters; the hash is the first
+12 hexadecimal characters of SHA-256 of the desk's real path, so the name stays
+the same on each start and separates desks with the same folder name. The
+coordinator uses this server too, in session `coordinator`, unless a tmux location
+was saved. Use the attach command `hansa up` prints for that desk.
+The pane command uses `/bin/sh`, regardless of the account's shell.
 Output stays in the pane and is also appended to `.hansa/serve.log`.
 Without tmux it starts a background process in its own session, with input
 from `/dev/null` and output appended to that log. Before either start, a log

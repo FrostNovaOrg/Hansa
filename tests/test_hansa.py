@@ -1997,6 +1997,69 @@ class TrySrtTest(unittest.TestCase):
                 self.assertEqual(run.srt_record(self.desk)["said"], said)
 
 
+class DeskNamesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def desk(self, relative):
+        root = self.tmp / relative
+        root.mkdir(parents=True)
+        return Desk(root)
+
+    def test_alert_names_use_the_last_two_folders_and_keep_the_rest(self):
+        from hansa import alert
+        for relative, name in (("one/desk", "one/desk"), ("two/desk", "two/desk"),
+                               ("a/shared/desk", "shared/desk"), ("b/shared/desk", "shared/desk"),
+                               ("父 目录/工 作", "父 目录/工 作")):
+            with self.subTest(relative=relative):
+                desk = self.desk(relative)
+                head = f"[hansa] desk {name}"
+                self.assertEqual(alert.text_of(desk, [{"text": "a request"}]), head + ": a request")
+                items = [{"text": "a request"}, {"text": "a release", "code": "ABC123", "release": 7}]
+                self.assertEqual(alert.text_of(desk, items, held=2), head + ": 2 alerts · #7 code ABC123"
+                                 " (2 held back by the limit of 20 runs an hour)\n- a release\n- a request")
+        # A root-level desk is represented without reading or writing outside the temporary desk.
+        for root, name in (("/desk", "desk"), ("/", "/")):
+            with self.subTest(root=root), unittest.mock.patch.object(desk, "root", Path(root)):
+                self.assertEqual(alert.text_of(desk, [{"text": "a request"}]), f"[hansa] desk {name}: a request")
+
+    def test_default_tmux_names_are_distinct_safe_and_follow_the_real_path(self):
+        from hansa import up
+        desks = [self.desk(p) for p in ("one/desk", "two/desk", "a/shared/desk", "b/shared/desk",
+                                       "父 目录/工 作", "spaces/desk with spaces", "long/" + "x" * 200)]
+        names = []
+        for desk in desks:
+            with self.subTest(root=desk.root):
+                flag, name = up.desk_server(desk)
+                self.assertEqual(flag, "-L")
+                self.assertRegex(name, r"^hansa-[A-Za-z0-9_-]+-[0-9a-f]{12}$")
+                self.assertLessEqual(len(name), 51)
+                self.assertEqual(up.desk_server(Desk(desk.root)), [flag, name])
+                names.append(name)
+        self.assertEqual(len(set(names)), len(desks))
+        alias = self.tmp / "alias"
+        alias.symlink_to(desks[0].root, target_is_directory=True)
+        self.assertEqual(up.desk_server(Desk(alias)), up.desk_server(desks[0]))
+        with unittest.mock.patch.object(desks[0], "root", Path("/desk")):
+            self.assertRegex(up.desk_server(desks[0])[1], r"^hansa-desk-[0-9a-f]{12}$")
+            self.assertNotIn(up.desk_server(desks[0])[1], names)
+        with unittest.mock.patch.object(desks[0], "root", Path("/")):
+            self.assertRegex(up.desk_server(desks[0])[1], r"^hansa-desk-[0-9a-f]{12}$")
+
+    def test_default_tmux_name_is_the_same_in_separate_processes(self):
+        from hansa import up
+        desk = self.desk("one/desk")
+        script = "from hansa import up; from hansa.desk import Desk; import sys; print(up.desk_server(Desk(sys.argv[1]))[1])"
+        for seed in ("1", "2"):
+            with self.subTest(seed=seed):
+                ran = subprocess.run([sys.executable, "-c", script, str(desk.root)],
+                                     cwd=Path(__file__).resolve().parent.parent,
+                                     env={**os.environ, "PYTHONHASHSEED": seed}, capture_output=True, text=True, timeout=30)
+                self.assertEqual(ran.returncode, 0, ran.stderr)
+                self.assertEqual(ran.stdout.strip(), up.desk_server(desk)[1])
+
+
 class UpTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -2245,7 +2308,7 @@ class UpTest(unittest.TestCase):
             said = self.say("up")
         self.assertIn("No recorded server start", said)
         argv = ran.call_args.args[0]
-        self.assertEqual(argv[:6], ["/tools/tmux", "-L", "hansa-desk-with-spaces", "new-session", "-d", "-s"])
+        self.assertEqual(argv[:6], ["/tools/tmux", *up.desk_server(self.desk), "new-session", "-d", "-s"])
         self.assertEqual(argv[6], "serve")
         self.assertEqual(ran.call_args.kwargs["env"]["HANSA_CLAUDE"], "/initial/claude")
         script = shlex.split(argv[-1])[-1]
@@ -2590,6 +2653,54 @@ class CoordinatorUpTest(unittest.TestCase):
     SESS = {"pid": 4242, "start": "boot:77"}
     KEY = "sk-desk-secret-123456"
     IDENTITY = "session-identity-0123456789"
+
+    def test_up_separates_new_desks_and_prints_their_own_attach_commands(self):
+        from hansa import up
+        names = []
+        for parent in ("one", "two"):
+            self.desk = Desk(self.tmp / parent / "desk")
+            self.desk.state_dir.mkdir(parents=True)
+            self.desk.tasks_dir.mkdir()
+            write_json(self.desk.settings_path, {})
+            (self.desk.state_dir / "web-port").write_text("8765")
+            starts = []
+            for _ in range(2):
+                with unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                        unittest.mock.patch.object(up, "server_state", side_effect=[
+                            {"state": "gone"}, {"state": "up", "pid": 123, "answers": True}]), \
+                        unittest.mock.patch.object(up, "COORDINATOR_WAIT", 0), \
+                        unittest.mock.patch.object(notify, "names", return_value=[]), \
+                        unittest.mock.patch.object(up.subprocess, "run", side_effect=[
+                            subprocess.CompletedProcess([], rc, out, "") for rc, out in
+                            ((1, ""), (0, "%5\n"), (1, ""), (0, "%6\n"), (0, "0\n"))]) as ran:
+                    said = self.say("up")
+                serve_check, serve_create, coordinator_check, coordinator_create, _ = ran.call_args_list
+                prefix = serve_check.args[0][:3]
+                self.assertEqual(prefix[:2], ["/tools/tmux", "-L"])
+                for call in (serve_create, coordinator_check, coordinator_create):
+                    self.assertEqual(call.args[0][:3], prefix)
+                self.assertEqual(serve_create.args[0][6], "serve")
+                self.assertEqual(coordinator_create.args[0][6], "coordinator")
+                self.assertIn(shlex.join([*prefix, "attach-session", "-t", "=serve"]), said)
+                self.assertIn(shlex.join([*prefix, "attach", "-t", "coordinator"]), said)
+                starts.append(prefix[2])
+            self.assertEqual(starts[0], starts[1])
+            names.append(starts[0])
+        self.assertNotEqual(names[0], names[1])
+
+    def test_up_preserves_saved_tmux_locations_instead_of_generating_a_name(self):
+        from hansa import up
+        rec = {"kind": "coordinator", "tmux": {"server": ["-L", "hansa-desk"], "session": "saved session"}}
+        with unittest.mock.patch.object(up, "desk_server", side_effect=AssertionError("must use the saved location")):
+            with unittest.mock.patch.object(up, "new_pane") as pane:
+                watch = up.launch_tmux(self.desk, rec, ["hansa", "serve"], {}, "/tools/tmux",
+                                       self.desk.state_dir / "serve.log")
+            self.assertEqual(pane.call_args.args[:2], (["/tools/tmux", "-L", "hansa-desk"], "saved session"))
+            self.assertIn("-L hansa-desk attach-session -t '=saved session'", watch)
+            said, calls, ok = self.coordinator_up(rec)
+        self.assertTrue(ok)
+        self.assertEqual(calls[0].args[0][:3], ["/tools/tmux", "-L", "hansa-desk"])
+        self.assertIn("-L hansa-desk attach -t 'saved session'", said)
 
     def own_folder(self):
         folder = self.tmp / "own folder"
@@ -3229,6 +3340,7 @@ class CoordinatorUpTest(unittest.TestCase):
                          "/tools/tmux attach -t main")  # tmux's default server
 
     def test_up_starts_a_notify_on_record_through_the_launcher_in_its_folder(self):
+        from hansa import up
         folder = self.own_folder()
         rec = {"kind": "notify", "hansa": "/saved/bin/hansa", "argv": ["claude", "--resume", "abc", "--name", "desk b"],
                "folder": str(folder), "tmux": {}, "env": {"PATH": "/saved/bin:/bin"}, "session": {"pid": 0}}
@@ -3236,14 +3348,14 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertTrue(ok)
         check, create, _ = calls
         # none recorded: the desk's tmux server from hansa up, and a session of its own
-        self.assertEqual(check.args[0], ["/tools/tmux", "-L", "hansa-desk-with-spaces", "has-session", "-t",
+        self.assertEqual(check.args[0], ["/tools/tmux", *up.desk_server(self.desk), "has-session", "-t",
                                          "=coordinator"])
-        self.assertEqual(create.args[0][:7], ["/tools/tmux", "-L", "hansa-desk-with-spaces", "new-session", "-d",
+        self.assertEqual(create.args[0][:7], ["/tools/tmux", *up.desk_server(self.desk), "new-session", "-d",
                                               "-s", "coordinator"])
         self.assertEqual(create.args[0][create.args[0].index("-c") + 1], str(folder))
         self.assertEqual(self.pane_words(create), ["/saved/bin/hansa", "--desk", str(self.desk.root), "notify-launch",
                                                    "claude", "--name", "desk b", "--continue"])
-        self.assertIn("-L hansa-desk-with-spaces attach -t coordinator", said)
+        self.assertIn(shlex.join([*up.desk_server(self.desk), "attach", "-t", "coordinator"]), said)
         # the pane ended: the start failed, and the command to run by hand
         said, _, ok = self.coordinator_up(answers=(1, "%5\n", "ended"))
         self.assertFalse(ok)
@@ -19305,7 +19417,7 @@ def save():'''))
             s["lanes"]["a"]["write"] = bad
             self.assertEqual(validate(s, self.desk.root),
                              ["lane a: write must be a list of up to 20 full paths starting with /, such as "
-                              "/Users/me/hansa-cache/desk/a/pip, desk the desk folder's name"])
+                              "/Users/me/hansa-cache/shop-desk/a/pip, shop-desk the last two folders joined by -"])
         # the desk (as given, resolved, inside it or around it) and the repository's .git
         for bad in (self.tmp / "desk", self.tmp / "desk" / "secrets", self.desk.root / ".hansa" / "runs", self.tmp,
                     self.tmp / "x" / ".." / "desk"):
@@ -35921,7 +36033,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_a_release_code_comes_within_the_first_80_characters_of_the_alert(self):
         from hansa import alert
         out = self.alert_fake()
-        self.assertLessEqual(len(self.desk.root.name), 12)  # short names, as the claim is about them
+        name = f"{self.desk.root.parent.name}/{self.desk.root.name}"
+        self.assertLessEqual(len(name), 24)  # short names, as the claim is about them
         self.with_targets(test="true", prod="true")
         # one alert: the code, then what to do with it, right after the desk's name
         self.hansa("release", "a", "test", "a note")
@@ -35929,7 +36042,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         alert.send_due(self.desk, gather=0)
         text = self.alerted(out)[-1]["text"]
         self.assertIn(f"code {code}", text[:80])
-        self.assertTrue(text.startswith(f"[hansa] desk {self.desk.root.name}: release #1 (lane a, target test) · "
+        self.assertTrue(text.startswith(f"[hansa] desk {name}: release #1 (lane a, target test) · "
                                         f"code {code}: to release it, give this code to the coordinator"), text)
         self.assertIn("; note: a note", text)
         # several in one run, what was held back too: the first line gives each waiting release's number and code
@@ -35942,7 +36055,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         alert.send_due(self.desk, gather=0, capped=False)
         text = self.alerted(out)[-1]["text"]
         first = text.splitlines()[0]
-        self.assertRegex(first, rf"^\[hansa\] desk {self.desk.root.name}: \d alerts · #")
+        self.assertRegex(first, rf"^\[hansa\] desk {re.escape(name)}: \d alerts · #")
         for rid, c in codes.items():
             self.assertIn(f"#{rid} code {c}", text[:80])
             self.assertIn(f"\n- release #{rid} (lane a, target {'prod' if rid == 2 else 'test'}) · code {c}: to release "
@@ -36431,7 +36544,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertEqual(alert.send_due(self.desk, gather=0)["ok"], True)
             [sent] = self.alerted(out)
             self.assertEqual(sent["kind"], "coordinator")
-            self.assertTrue(sent["text"].startswith("[hansa] desk desk-1: the coordinator's session cannot be reached"))
+            self.assertTrue(sent["text"].startswith(f"[hansa] desk {self.desk.root.parent.name}/desk-1: "
+                                                    "the coordinator's session cannot be reached"))
 
         def row2():
             """then a follower runs and ends, and another task ends and waits N1 minutes: a second alert"""

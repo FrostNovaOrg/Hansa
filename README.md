@@ -158,8 +158,8 @@ starts the session again as it last started, continuing its conversation. `hansa
 to run it in the current terminal instead (one or the other: both would be two coordinators):
 
 ```sh
-tmux -L hansa-desk attach -t coordinator    # the session hansa up started, as it printed
-cd ~/desk && hansa coordinator              # or run it in this terminal
+# Attach with the command hansa up printed, or run it in this terminal:
+cd ~/desk && hansa coordinator
 ```
 
 The first time Claude Code opens in a new desk, it asks whether you trust the folder: choose yes. Claude
