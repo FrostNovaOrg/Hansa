@@ -79,6 +79,18 @@ tab refreshes its records while keeping its filters for this page load.
 available page. Invalid page numbers or periods return HTTP 400. It reads task
 metadata once per request, without git history, reports or logs.
 
+Known gaps lists the verification notes kept by `hansa gaps`, oldest first,
+including notes from closed tasks. Each row shows the note ID, its task's title
+(click to open that task's details), the whole note, the latest mark (none yet,
+later, wontfix or fixed), its reason, who marked it and when. The mark filter
+defaults to unmarked notes and those marked later; All includes every note,
+and each mark can also be selected alone. An empty selection says “No known gaps”.
+This view is read-only: use `hansa gaps mark ID fixed|later|wontfix "why"`
+to mark a note. Returning to the tab refreshes its records and keeps the filter
+for this page load. Text and reasons display as plain text, with the keys hansa
+knows removed. `/api/gaps` reads the same saved notes as the command and requires
+the usual page key.
+
 Status refreshes every five seconds while Status is visible. While an input,
 textarea or select has focus, background refreshes update the header but leave
 the tab's fields in place. With focus on a button or link, the lists keep
