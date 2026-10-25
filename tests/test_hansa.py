@@ -24152,6 +24152,122 @@ def save():'''))
         self.assertNotIn("sk-secret", pub)
         self.assertTrue(public_settings(self.desk)["keys"]["mimo"])
 
+    def test_work_history_empty_desk(self):
+        for days in (1, 7, 30, 90, None):
+            with self.subTest(days=days):
+                rep = cost.report(self.desk, days)
+                self.assertEqual(len(rep["work"]), 10)
+                self.assertTrue(all(value == 0 for value in rep["work"].values()))
+                self.assertEqual(rep["total"]["tokens"], 0)
+
+    def test_work_history_counts_task_outcomes_not_tries_and_keeps_followups(self):
+        ended = time.time() - 60
+        tid = self.desk.new_task("Finish the work")
+        self.desk.update(tid, state="done", started=ended - 3600, finished=ended,
+                         attempts=[{"kind": "network", "ran_from": ended - 7200, "ended": ended - 3600}])
+        rep = cost.report(self.desk)
+        self.assertEqual((rep["work"]["finished"], rep["work"]["failed"]), (1, 0))
+        self.hansa("retry", tid, "--fresh", "Finish the follow-up")
+        [followup] = [m for m in self.desk.tasks() if m["id"] != tid]
+        self.desk.update(followup["id"], state="merged", finished=ended, merged=ended)
+        for days in (7, None):
+            work = cost.report(self.desk, days)["work"]
+            self.assertEqual((work["finished"], work["merged"], work["failed"]), (2, 1, 0))
+        self.assertEqual(self.desk.meta(tid)["ended_as"], "done")
+
+    def test_work_history_separates_finish_and_merge_periods(self):
+        boundary = time.time() - 86400
+        tid = self.desk.new_task("Merge later")
+        self.desk.update(tid, state="merged", finished=boundary - 86400, merged=boundary + 86400 - 60)
+        write_json(self.desk.state_dir / "releases.json", [
+            {"id": 1, "state": "done", "asked": boundary - 86400, "ended": boundary + 60}])
+        work = cost.report(self.desk, since=boundary)["work"]
+        self.assertEqual((work["finished"], work["merged"]), (0, 1))
+        self.assertEqual((work["releases_asked"], work["releases_out"]), (0, 1))
+        whole = cost.report(self.desk, None)["work"]
+        self.assertEqual((whole["finished"], whole["merged"]), (1, 1))
+        self.assertEqual((whole["releases_asked"], whole["releases_out"]), (1, 1))
+
+    def test_work_history_verdicts_and_release_outcomes(self):
+        ended = time.time() - 60
+        for verdict in ("holds", "holds, with notes", "does not hold", "unsure"):
+            tid = self.desk.new_task("Verify the work", kind="verify")
+            self.desk.update(tid, state="done", finished=ended, verdict=verdict, closed="reviewed")
+        write_json(self.desk.state_dir / "releases.json", [
+            {"id": i, "state": state, "asked": ended - 60, "ended": ended}
+            for i, state in enumerate(("refused", "done", "failed"), 1)])
+        for days in (7, None):
+            work = cost.report(self.desk, days)["work"]
+            self.assertEqual((work["verifications"], work["held"], work["did_not_hold"], work["unsure"]), (4, 2, 1, 1))
+            self.assertEqual((work["releases_asked"], work["releases_out"]), (3, 1))
+            self.assertEqual((work["finished"], work["merged"], work["failed"]), (0, 0, 0))
+
+    def test_work_history_period_boundaries_and_whole_history(self):
+        boundary = time.time() - 90 * 86400
+        for end in (boundary - 0.01, boundary, boundary + 0.01):
+            for state, kind in (("done", "code"), ("failed", "code"), ("done", "verify")):
+                tid = self.desk.new_task("Recorded outcome", kind=kind)
+                self.desk.update(tid, state=state, finished=end, merged=end if kind == "code" and state == "done" else None,
+                                 verdict="unsure" if kind == "verify" else "", started=end - 3600)
+        write_json(self.desk.state_dir / "releases.json", [
+            {"id": i, "state": "done", "asked": end, "ended": end}
+            for i, end in enumerate((boundary - 0.01, boundary, boundary + 0.01), 1)])
+        expected = {"finished": 2, "merged": 2, "failed": 2, "verifications": 2, "held": 0, "did_not_hold": 0,
+                    "unsure": 2, "releases_asked": 2, "releases_out": 2, "worker_hours": 6}
+        self.assertEqual(cost.report(self.desk, since=boundary)["work"], expected)
+        with unittest.mock.patch("hansa.cost.time.time", return_value=boundary + 90 * 86400):
+            self.assertEqual(cost.report(self.desk, 90)["work"], expected)
+        self.assertEqual(cost.report(self.desk, None)["work"],
+                         {key: value * 1.5 for key, value in expected.items()})
+
+    def test_work_history_run_hours_include_retries_without_usage_or_double_counting(self):
+        boundary = time.time() - 3600
+        tid = self.desk.new_task("Retry the work")
+        prior = {"ran_from": boundary - 7200, "ended": boundary - 3600}
+        attempt = {"ran_from": boundary - 3600, "ended": boundary + 1, "usage": {}}
+        self.desk.update(tid, state="queued", started=attempt["ran_from"], finished=attempt["ended"],
+                         attempts=[prior, attempt], earlier_runs=[{"ran_from": boundary - 7200, "ended": boundary}])
+        # The current timestamps remain on a queued retry, but the run has moved to its attempt record.
+        work = cost.report(self.desk, since=boundary)["work"]
+        self.assertAlmostEqual(work["worker_hours"], 3 + 1 / 3600)
+        self.assertEqual((work["finished"], work["failed"]), (0, 0))
+        self.desk.update(tid, state="done", started=boundary + 2, finished=boundary + 362)
+        vid = self.desk.new_task("Verify the work", kind="verify")
+        self.desk.update(vid, state="done", started=boundary - 1800, finished=boundary + 1800, verdict="holds")
+        running = self.desk.new_task("Still running")
+        self.desk.update(running, state="running", started=boundary, finished=None)
+        work = cost.report(self.desk, since=boundary)["work"]
+        self.assertAlmostEqual(work["worker_hours"], 4.1 + 1 / 3600)
+        self.assertAlmostEqual(cost.report(self.desk, None)["work"]["worker_hours"], 5.1 + 1 / 3600)
+
+    def test_work_history_all_omits_transcripts_but_keeps_usage_and_export_rows(self):
+        tid = self.desk.new_task("Old work")
+        self.desk.update(tid, state="done", started=1, finished=3601, provider="claude",
+                         usage={"unpriced-engine": {"in": 10, "out": 5}})
+        with unittest.mock.patch("hansa.cost.transcript_rows", side_effect=AssertionError("must not scan transcripts")), \
+                unittest.mock.patch("hansa.run.git", side_effect=AssertionError("must not read git history")):
+            rep = cost.report(self.desk, None)
+        self.assertTrue(rep["transcripts_omitted"])
+        self.assertEqual((rep["work"]["finished"], rep["work"]["worker_hours"]), (1, 1))
+        self.assertEqual(rep["total"]["tokens"], 15)
+        self.assertEqual(rep["unpriced_models"], ["unpriced-engine"])
+        self.assertEqual(rep["rows"][0]["task"], tid)
+        self.assertEqual(rep["by"]["task"][tid]["tokens"], 15)
+
+    def test_work_history_api_requires_page_key_for_every_period_and_export(self):
+        headers = {"Authorization": "Bearer " + self.desk.web_token()}
+        for period in ("90", "all"):
+            for suffix in ("", "&rows=1"):
+                path = "/api/cost?days=" + period + suffix
+                for credentials in ({}, {"Authorization": "Bearer wrong"}):
+                    self.assertEqual(self.web_request(path, headers=credentials)[0], 403)
+                code, rep, _ = self.web_request(path, headers=headers)
+                self.assertEqual(code, 200)
+                self.assertEqual(rep["days"], None if period == "all" else 90)
+                self.assertEqual(rep["transcripts_omitted"], period == "all")
+                self.assertEqual("rows" in rep, bool(suffix))
+                self.assertTrue(all(value == 0 for value in rep["work"].values()))
+
     def test_cost_counts_workers_and_coordinator_once(self):
         tid = self.desk.new_task("Add hello.txt")
         self.settle(Dispatcher(self.desk), tid)
@@ -29924,6 +30040,32 @@ else if (ask === "cost-chart") vm.runInContext("loadCost()", ctx).then(async () 
     table:dayTable ? descendants(dayTable, "tr").slice(1).map(el => el.kids.map(cell => cell.textContent)) : [],
     gets:apiGets, css:page.slice(page.indexOf("<style>"), page.indexOf("</style>"))}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "cost-history") (async () => {
+  const run = code => vm.runInContext(code, ctx), root = ids["#tab-cost"];
+  const check = (value, why) => { if (!value) throw new Error(why); };
+  await run("loadCost()");
+  const zh = process.argv[4] === "zh";
+  check(descendants(root, "h1")[0]?.textContent === (zh ? "工作与成本" : "Work and cost"), "history title missing");
+  const labels = zh ? ["完成的任务", "合并的任务", "失败的任务", "核对次数", "成立（含有附注）", "不成立", "不确定", "请求的发布", "成功的发布", "执行与核对工时"]
+    : ["Tasks finished", "Tasks merged", "Tasks failed", "Verifications", "Held (including notes)", "Did not hold", "Unsure", "Releases asked for", "Releases that went out", "Worker and verifier hours"];
+  const values = ["11", "7", "3", "4", "2", "1", "1", "3", "1", "12.50"];
+  const cards = descendants(root, "div").filter(el => el.className === "metric-card");
+  labels.forEach((label, index) => check(cards.some(el => el.kids[0]?.textContent === label && el.kids[1]?.textContent === values[index]), "history metric missing: " + label));
+  check(!root.textContent.includes(run("T.historyOmitted")), "bounded report claims to omit transcripts");
+  for (const days of [90, "all"]) {
+    given["/api/cost"].transcripts_omitted = days === "all";
+    const select = ids["#cost-period"];
+    check(descendants(select, "option").some(el => el.value === String(days)), "history period missing");
+    select.value = String(days); await select.on.change({target:select});
+    await new Promise(resolve => setImmediate(resolve));
+    check(apiGets.at(-1) === "/api/cost?days=" + days, "history period request incorrect");
+  }
+  check(root.textContent.includes(zh ? "从工作台开始至今" : "Since the desk began"), "whole-history label untranslated");
+  check(root.textContent.includes(zh ? "未计入协调席及助手" : "omit coordinator and helper"), "transcript omission not explained");
+  await run("exportCsv()");
+  check(apiGets.at(-1) === "/api/cost?days=all&rows=1" && downloads.at(-1).name === "cost-all.csv", "whole-history export missing");
+  console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "cost-export") vm.runInContext("loadCost()", ctx).then(async () => {
   await vm.runInContext("exportCsv()", ctx);
   console.log(JSON.stringify(await blobs[0].text()));
@@ -29949,7 +30091,7 @@ else if (ask === "cost-interactions") vm.runInContext("loadCost()", ctx).then(as
   const taskRow = find(el => el.tag === "tr" && el.kids[0]?.textContent === "t-cost");
   check(taskRow && JSON.stringify(taskRow.kids.slice(-2).map(el => el.textContent)) === '["3","9"]',
     "cost task breakdown lost run or turn counts");
-  for (const days of [1, 7, 30]) {
+  for (const days of [1, 7, 30, 90, "all"]) {
     const select = find(el => el.tag === "select"); check(select && select.on.change, "cost period selector missing");
     select.value = String(days); await select.on.change({target:select}); await flush();
     check(run("costDays") === days && apiGets.filter(path => path.startsWith("/api/cost") && !path.includes("rows=1")).at(-1) === "/api/cost?days=" + days,
@@ -32686,6 +32828,24 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual(output["name"], "cost-30d.csv")
                 self.assertEqual(list(csv.reader(io.StringIO(output["csv"]))),
                                  [columns, ["" if row[column] is None else str(row[column]) for column in columns]])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_work_history_page_translates_counts_periods_omissions_and_exports(self):
+        report = {"total": {"tokens": 10, "usd": 1}, "by": {}, "rows": [], "unpriced_models": [],
+                  "work": {"finished": 11, "merged": 7, "failed": 3, "verifications": 4, "held": 2,
+                           "did_not_hold": 1, "unsure": 1, "releases_asked": 3, "releases_out": 1, "worker_hours": 12.5}}
+        harness = self.tmp / "work-history-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), "cost-history", language],
+                                        input=json.dumps({"/api/cost": report}), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"ok": True})
+        for period in (90, "all"):
+            output = self.page_preferences(actions=[{"tab": "cost"}, {"period": period}, {"reload": True}])
+            self.assertEqual(output["snapshots"][-1]["period"], str(period))
 
     def cost_csv_rows(self, rows):
         if not shutil.which("node"):

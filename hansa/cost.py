@@ -23,7 +23,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from . import account
+from . import account, release
 from .desk import Desk, read_json
 
 TOKEN_FIELDS = ("in", "out", "cache_read", "cache_write")
@@ -340,11 +340,48 @@ def unassigned(r: dict) -> str:
     return "(coordinator)" if r["seat"] == "coordinator" or r["seat"].startswith("helper") else "(none)"
 
 
-def report(desk: Desk, days: int = 7, since: float | None = None) -> dict:
+def work_history(tasks: list, releases: list, since: float) -> dict:
+    """Outcomes by task, releases by request, and elapsed run time by when each ended.
+    Replaced tasks retain ended_as; attempts are runs, never extra task outcomes."""
+    out = dict.fromkeys(("finished", "merged", "failed", "verifications", "held", "did_not_hold", "unsure",
+                         "releases_asked", "releases_out"), 0)
+    seconds = 0
+    inside = lambda stamp: stamp is not None and stamp > 0 and stamp >= since
+    for m in tasks:
+        state = m.get("ended_as") if m.get("state") == "replaced" else m.get("state")
+        if m.get("kind") == "verify":
+            if state == "done" and inside(m.get("finished")):
+                out["verifications"] += 1
+                verdict = {"holds": "held", "holds, with notes": "held", "does not hold": "did_not_hold",
+                           "unsure": "unsure"}.get(m.get("verdict"))
+                if verdict:
+                    out[verdict] += 1
+        else:
+            if inside(m.get("finished")):
+                out["finished"] += state in ("done", "merged", "merging")
+                out["failed"] += state == "failed"
+            out["merged"] += inside(m.get("merged"))
+        runs = [r for r in [*(m.get("attempts") or []), *(m.get("earlier_runs") or [])] if isinstance(r, dict)]
+        # A queued retry still has the last run's timestamps, but its run is already on its attempt record.
+        if not any(r.get("ran_from") == m.get("started") and r.get("ended") for r in runs):
+            runs.append({"ran_from": m.get("started"), "ended": m.get("finished")})
+        for r in runs:
+            start, end = r.get("ran_from"), r.get("ended")
+            if start is not None and inside(end) and end >= start:
+                seconds += end - start
+    for r in releases:
+        out["releases_asked"] += inside(r.get("asked"))
+        out["releases_out"] += r.get("state") == "done" and inside(r.get("ended"))
+    return {**out, "worker_hours": seconds / 3600}
+
+
+def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict:
     window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
-              else f"last {days} day(s)")
-    since = since if since is not None else time.time() - days * 86400
-    rows = worker_rows(desk, since) + transcript_rows(desk, since)
+              else "since the desk began" if days is None else f"last {days} day(s)")
+    since = since if since is not None else 0 if days is None else time.time() - days * 86400
+    tasks = desk.tasks()
+    # Whole-history transcripts can be arbitrarily large; metadata stays proportional to the task count.
+    rows = worker_rows(desk, since, tasks=tasks) + (transcript_rows(desk, since) if days is not None else [])
     by = {}
     for key in ("day", "seat", "lane", "task", "model", "provider"):
         agg = defaultdict(lambda: {"tokens": 0, "usd": 0.0, "unpriced_tokens": 0, "turns": 0, "runs": 0})
@@ -361,6 +398,7 @@ def report(desk: Desk, days: int = 7, since: float | None = None) -> dict:
         by[key] = {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(agg.items())}
     total_usd = sum(r["usd"] for r in rows if r["usd"] is not None)
     return {"days": days, "window": window, "rows": rows, "by": by,
+            "work": work_history(tasks, release.releases(desk), since), "transcripts_omitted": days is None,
             "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": round(total_usd, 6),
                       "turns": sum(r.get("turns", 0) for r in rows), "runs": sum(r.get("runs", 0) for r in rows)},
             "unpriced_models": sorted({r["model"] for r in rows if r["usd"] is None}),

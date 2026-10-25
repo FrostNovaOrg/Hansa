@@ -392,13 +392,13 @@ if (tokenAddress) {
 } else {
   try { pageToken = sessionStorage.getItem("hansa.token") || ""; } catch (_) {}
 }
-const TABS = ["status", "settings", "cost"], COST_PERIODS = [1, 7, 30];
+const TABS = ["status", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
 const language = keptChoice("localStorage", "hansa.language", ["zh-CN", "en"],
   (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en");
 const ZH = language === "zh-CN";
 document.documentElement.setAttribute("lang", language);
 const T = ZH ? {
-  status:"状态", settings:"设置", cost:"成本",
+  status:"状态", settings:"设置", cost:"工作与成本",
   desk:"工作台", version:"hansa 版本", summaryNow:"现在",
   dispatchLimit:n => `正在派活，同时最多 ${n} 件`, installed:"安装于",
   dispatchOn:"正在派活", paused:"已暂停", pause:"暂停派活", resume:"恢复派活", pauseReason:"暂停原因（可不填）",
@@ -553,7 +553,7 @@ const T = ZH ? {
   laneTargets:"发布目标：基础分支发出去的各种方式，每个有自己的命令、时限（分钟）和必须先发的目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 的目标在为它做的提交固定检出里运行，什么都不占",
   laneMergeCheck:"合并验收命令：合并前由 hansa 在把这件活并上基础分支后跑，代替验收命令；每件改了东西的活合并前都跑，活做完后不跑（空＝合并验收跑验收命令）", mergeTimeout:"合并验收最长分钟（空＝同每件最长分钟）", f_merge_check:"合并验收命令"
 } : {
-  status:"Status", settings:"Settings", cost:"Cost",
+  status:"Status", settings:"Settings", cost:"Work and cost",
   desk:"desk", version:"hansa", summaryNow:"now",
   dispatchLimit:n => `dispatch on, ${n} at a time`, installed:"installed",
   dispatchOn:"dispatching", paused:"paused", pause:"Pause", resume:"Resume", pauseReason:"reason (optional)",
@@ -772,27 +772,35 @@ Object.assign(T, ZH ? {
   needsAttention:"Settings need attention", keySaveFailed:"Key operation incomplete. Check the error details."
 });
 Object.assign(T, ZH ? {
-  statusIntro:"查看任务进展、工作线和需要你处理的事项。", costIntro:"按时间与分类查看 token 用量及折算金额。",
+  statusIntro:"查看任务进展、工作线和需要你处理的事项。", costIntro:"按时间查看工作台的工作记录、token 用量及折算金额。",
   autoUpdates:"自动更新", refreshNote:"状态页可见时每 5 秒更新；编辑输入时暂缓重绘，其他控件重绘后保留焦点。", dispatchControl:"派活控制",
   noActiveTasks:"当前没有进行中的任务", noActiveTasksNote:"任务开始、排队或等待审核时，会显示在这里。", taskFlow:"任务进展",
   noLanes:"还没有工作线", noLanesNote:"由协调席添加工作线后，这里会显示它的状态。",
   noProviders:"还没有模型供应", noProvidersNote:"在设置中加一家供应后，这里会显示连接状态。",
   noEvents:"还没有活动记录", noEventsNote:"任务与工作台的最新变化会显示在这里。", closedRequests:"已处理的请求",
-  period:"统计范围", periodDays:n => `最近 ${n} 天`, estimatedCost:"折算金额", totalTokens:"Token 用量", unpricedTokens:"没有价目的 token",
+  period:"统计范围", periodDays:n => n === "all" ? "从工作台开始至今" : `最近 ${n} 天`, estimatedCost:"折算金额", totalTokens:"Token 用量", unpricedTokens:"没有价目的 token",
   unpricedNote:"未计入折算金额", usdNote:"USD · 按设置中的价目折算", costLoading:"正在加载用量…", costReady:"按所选时间范围统计。",
-  costLoadFailed:"用量加载失败，请重试。", costRetained:n => `仍显示最近 ${n} 天的上次结果。`, retry:"重试", exporting:"正在导出…", exported:"CSV 已导出。", exportFailed:"导出失败，请重试。",
+  costLoadFailed:"用量加载失败，请重试。", costRetained:n => `仍显示「${T.periodDays(n)}」的上次结果。`, retry:"重试", exporting:"正在导出…", exported:"CSV 已导出。", exportFailed:"导出失败，请重试。",
+  tasksFinished:"完成的任务", tasksMerged:"合并的任务", tasksFailed:"失败的任务", historyVerifications:"核对次数",
+  historyHeld:"成立（含有附注）", historyNotHeld:"不成立", historyUnsure:"不确定", releasesAsked:"请求的发布", releasesOut:"成功的发布",
+  workerHours:"执行与核对工时", workerHoursNote:"小时 · 含重试，按运行结束时间统计", historyEndNote:"按各自完成或合并的时间统计；核对单独计数。",
+  historyOmitted:"全部历史的用量与折算金额未计入协调席及助手的会话记录，以便快速加载；已计入全部工作记录及执行席、核对席的用量。",
   dailyValue:"每日折算金额", chartDaysNote:"USD · 显示首末用量记录之间的日期；无记录的日期不显示金额。",
   noCost:"这段时间还没有用量", noCostNote:"模型调用产生用量后，会按席位、日期、模型、工作线、供应和任务显示明细。", seatColumn:"席位", dayColumn:"日期"
 } : {
-  statusIntro:"Follow tasks, lanes and the decisions that need your attention.", costIntro:"Explore token usage and its estimated value by period and category.",
+  statusIntro:"Follow tasks, lanes and the decisions that need your attention.", costIntro:"Explore the desk’s work, token usage and estimated value by period.",
   autoUpdates:"Auto updates", refreshNote:"Updates every 5 seconds while Status is visible; keeps fields in place while editing and restores focus to other controls after redraws.", dispatchControl:"Dispatch control",
   noActiveTasks:"No tasks in progress", noActiveTasksNote:"Running, queued and review tasks will appear here.", taskFlow:"Task progress",
   noLanes:"No lanes yet", noLanesNote:"Lanes appear here after the coordinator adds them.",
   noProviders:"No providers yet", noProvidersNote:"Add a provider in Settings to see its connection status here.",
   noEvents:"No activity yet", noEventsNote:"New task and desk events will appear here.", closedRequests:"Closed requests",
-  period:"Time range", periodDays:n => `Last ${n} days`, estimatedCost:"Estimated value", totalTokens:"Token usage", unpricedTokens:"Unpriced tokens",
+  period:"Time range", periodDays:n => n === "all" ? "Since the desk began" : `Last ${n} days`, estimatedCost:"Estimated value", totalTokens:"Token usage", unpricedTokens:"Unpriced tokens",
   unpricedNote:"Excluded from the estimated value", usdNote:"USD · using the Settings price table", costLoading:"Loading usage…", costReady:"Totals for the selected period.",
-  costLoadFailed:"Could not load usage. Try again.", costRetained:n => `Still showing the previous ${n}-day report.`, retry:"Retry", exporting:"Exporting…", exported:"CSV exported.", exportFailed:"Could not export. Try again.",
+  costLoadFailed:"Could not load usage. Try again.", costRetained:n => `Still showing the previous report: ${T.periodDays(n)}.`, retry:"Retry", exporting:"Exporting…", exported:"CSV exported.", exportFailed:"Could not export. Try again.",
+  tasksFinished:"Tasks finished", tasksMerged:"Tasks merged", tasksFailed:"Tasks failed", historyVerifications:"Verifications",
+  historyHeld:"Held (including notes)", historyNotHeld:"Did not hold", historyUnsure:"Unsure", releasesAsked:"Releases asked for", releasesOut:"Releases that went out",
+  workerHours:"Worker and verifier hours", workerHoursNote:"Hours · retries included, by run end time", historyEndNote:"By each completion or merge time; verifications count separately.",
+  historyOmitted:"Whole-history usage and value omit coordinator and helper transcripts to load quickly; all work records and worker and verifier usage are included.",
   dailyValue:"Daily estimated value", chartDaysNote:"USD · From first to last recorded day; gaps have no amount.",
   noCost:"No usage in this period", noCostNote:"Model usage will appear by seat, day, model, lane, provider and task.", seatColumn:"Seat", dayColumn:"Date"
 });
@@ -2006,7 +2014,8 @@ function renderSettings(problems = settingsProblems) {
 }
 
 /* ---------- cost ---------- */
-let costDays = Number(keptChoice("sessionStorage", "hansa.costPeriod", COST_PERIODS.map(String), "7")), costEpoch = 0, costLoading = false, costExporting = false, costLoadError = false, costRenderedDays = null;
+const savedCostPeriod = keptChoice("sessionStorage", "hansa.costPeriod", COST_PERIODS.map(String), "7");
+let costDays = savedCostPeriod === "all" ? "all" : Number(savedCostPeriod), costEpoch = 0, costLoading = false, costExporting = false, costLoadError = false, costRenderedDays = null;
 let costSelect, costExportButton, costFeedback, costRetryButton, costPlaceholder;
 function costControlsState() {
   if (costSelect) costSelect.disabled = costLoading || costExporting;
@@ -2099,12 +2108,13 @@ function renderCost(r) {
     return panel;
   };
   costSelect = h("select", {id:"cost-period", "aria-label":T.period}, COST_PERIODS.map(days => h("option", {value:String(days), selected:days === costDays}, T.periodDays(days))));
-  costSelect.addEventListener("change", e => { costDays = Number(e.target.value); keepChoice("sessionStorage", "hansa.costPeriod", costDays); loadCost().catch(err); });
+  costSelect.addEventListener("change", e => { costDays = e.target.value === "all" ? "all" : Number(e.target.value); keepChoice("sessionStorage", "hansa.costPeriod", costDays); loadCost().catch(err); });
   costExportButton = h("button", {onclick:() => exportCsv()}, T.export);
   costRetryButton = h("button", {type:"button", hidden:true, onclick:() => loadCost().catch(err)}, T.retry);
   costFeedback = h("div", {class:"cost-feedback", role:"status", "aria-live":"polite"});
   costPlaceholder = r ? null : h("p", {class:"field-note"}, T.costLoading);
   const sections = r ? ["seat", "day", "model", "lane", "provider", "task"].map(block).filter(Boolean) : [];
+  const w = r?.work || {};
   const unpriced = r ? Object.values(r.by.model || {}).reduce((sum, value) => sum + (value.unpriced_tokens || 0), 0) : 0;
   $("#tab-cost").replaceChildren(...shown([
     pageHeading("cost", T.costIntro),
@@ -2113,8 +2123,15 @@ function renderCost(r) {
     r ? h("div", {class:"metric-grid cost-metrics", "aria-label":T.total},
       summaryCard(T.totalTokens, fmt(r.total.tokens), T.periodDays(costDays), "status"),
       summaryCard(T.estimatedCost, "$" + r.total.usd.toFixed(2), T.usdNote, "cost"),
-      summaryCard(T.unpricedTokens, fmt(unpriced), T.unpricedNote, "prices")) : null,
+      summaryCard(T.unpricedTokens, fmt(unpriced), T.unpricedNote, "prices"),
+      ...[[T.tasksFinished, w.finished], [T.tasksMerged, w.merged], [T.tasksFailed, w.failed],
+        [T.historyVerifications, w.verifications], [T.historyHeld, w.held], [T.historyNotHeld, w.did_not_hold],
+        [T.historyUnsure, w.unsure], [T.releasesAsked, w.releases_asked], [T.releasesOut, w.releases_out]]
+        .map(([label, value]) => summaryCard(label, fmt(value || 0), "", "check")),
+      summaryCard(T.workerHours, (w.worker_hours || 0).toFixed(2), T.workerHoursNote, "status")) : null,
     r ? h("section", {class:"dashboard-panel"}, h("p", {class:"cost-explanation"}, T.costNote),
+      h("p", {class:"cost-explanation"}, T.historyEndNote),
+      r.transcripts_omitted ? h("p", {class:"cost-warning"}, T.historyOmitted) : null,
       r.coordinator_uncounted ? h("div", {class:"cost-warning"}, icon("error"), h("p", {}, ZH ? T.coordinatorUncounted.replaceAll("{user}", r.coordinator_user) : r.coordinator_uncounted)) : null,
       r.unpriced_models.length ? h("div", {class:"cost-warning"}, icon("prices"), h("p", {}, T.unpriced + " " + r.unpriced_models.join(", ") + " — " + T.setPrice)) : null) : null,
     r ? sections.length ? h("div", {class:"cost-breakdowns"}, sections) : dashboardPanel(T.cost, "cost", 0, emptyState(T.noCost, T.noCostNote, "cost"))
@@ -2138,7 +2155,7 @@ async function exportCsv() {
     };
     const csv = [cols.join(",")].concat(r.rows.map(x => cols.map(c => esc(x[c])).join(","))).join("\n");
     url = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
-    const a = h("a", {href:url, download:`cost-${days}d.csv`});
+    const a = h("a", {href:url, download:days === "all" ? "cost-all.csv" : `cost-${days}d.csv`});
     document.body.append(...shown([a])); a.click(); a.remove();
     costFeedbackState("success", T.exported);
   } catch (e) {

@@ -23,7 +23,7 @@ as Linux permits, are stored as JSON escapes and restored when the file is
 read. Ordinary Unicode text stays readable, and saved command lines keep
 their original spelling.
 
-## Status and cost on the web page
+## Status, work and cost on the web page
 
 Open the address `hansa web` prints in a terminal of your own. The page keeps
 its token in `sessionStorage`, scoped to the browser tab and origin (scheme,
@@ -46,8 +46,8 @@ No browser, proxy or server setting is needed for this authentication.
 The API returns HTTP 400 with JSON fields `ok: false`, `code`, `field` and `problems` for an
 invalid `days` query value (`invalid_query`, field `days`), malformed JSON
 (`invalid_json`, field `body`), or a JSON body whose top level is not an object
-(`invalid_type`, field `body`). `problems` is a list of explanations. Cost
-defaults to 7 days and clamps integer values to 1–90; invalid event counts
+(`invalid_type`, field `body`). `problems` is a list of explanations. Work and cost
+defaults to 7 days, clamps integer values to 1–90 and accepts `all`; invalid event counts
 continue to use the default of 60. An empty POST body still means `{}`.
 
 The browser tab and the caption beside Hansa name the desk by its parent folder
@@ -265,8 +265,43 @@ result reads as unknown; a check that could not run says so.
 answer again because its target left the releases-without-asking list or no longer
 matches what that list recorded.
 
-Cost offers the last 1, 7 or 30 days, with token usage, estimated value and unpriced
-tokens above the six category tables. Unpriced models and unreadable coordinator
+Work and cost offers the last 1, 7, 30 or 90 days and **Since the desk began**,
+with token usage, estimated value and unpriced tokens above the six category tables.
+Alongside these totals it counts:
+
+- Tasks finished and failed, once per task, from `tasks/<id>/meta.json`'s
+  outcome and `finished` time; automatic retries are not extra tasks. Successful
+  tasks count as finished even after merging, including while a merge is pending.
+  A replaced task keeps its original `ended_as` outcome, so both it and its
+  follow-up count independently. Verifications count separately.
+- Tasks merged, from each task's `merged` time. Finishing and merging in different
+  periods contributes to each period's respective count.
+- Completed verifications, from tasks of kind `verify` with outcome `done`, by
+  `finished` time. Their `verdict` counts as held (`holds` or `holds, with notes`),
+  did not hold (`does not hold`) or unsure (`unsure`). A missing verdict contributes
+  only to the verification total. Closing a verification retains its result.
+- Releases asked for, from `.hansa/releases.json`'s `asked` time, including refused
+  and failed requests; releases that went out, from records with state `done`, by
+  `ended` time.
+- Worker and verifier hours, from each task's `started` to `finished`, and every
+  retry or recovered run's `ran_from` to `ended` in `attempts` and `earlier_runs`.
+  Runs without token usage still contribute time; runs without both timestamps
+  cannot. A run's entire duration counts in the period it ended, even if it
+  started earlier. Concurrent runs add their hours; checks and release commands
+  are not worker time.
+
+Periods are rolling windows of N × 24 hours, including the starting instant.
+All history uses the same records without a lower time limit and reads no git
+history. It retains worker and verifier token usage, value, warnings, all six
+tables, chart and CSV export, but omits coordinator and helper transcript usage
+and value: scanning all those transcripts can take too long. The page explicitly
+states this omission. `/api/cost?days=all` selects all history (`days: null` in
+the response); `days=90` selects 90 days. Both use the usual page key, including
+`&rows=1` for CSV data. `work` holds the new counters; `transcripts_omitted`
+identifies the all-history limitation. CSV retains its usage rows and columns;
+all-history export is named `cost-all.csv`.
+
+Unpriced models and unreadable coordinator
 usage remain explicit warnings; dollar values are an estimate, not a bill. A
 bar chart above the day table shows each returned day's USD value at the
 principal's prices, in date order. Each bar's accessible label and tooltip give
@@ -292,9 +327,9 @@ spreadsheet; actual numeric values stay numeric. Both pages share the settings
 page's native CSS and JavaScript controls and reduced-motion support.
 
 The page keeps navigation for the current browser tab in `sessionStorage`:
-`hansa.tab` is written whenever Status, Settings or Cost is shown (including
+`hansa.tab` is written whenever Status, Settings or Work and cost is shown (including
 startup), `hansa.settingsSection` whenever a Settings section is shown, and
-`hansa.costPeriod` when the Cost range changes. Reloading restores those choices;
+`hansa.costPeriod` when the Work and cost range changes. Reloading restores those choices;
 a fresh browser tab starts on Status. An address containing `?t=` (or `&t=`)
 always opens Status, where releases and requests wait for the principal.
 Unknown saved choices fall back to Status, Providers and 7 days.
@@ -342,7 +377,7 @@ with field errors shown beside the control. Narrow screens use a horizontal
 group directory. Controls have visible keyboard focus, and brief transitions
 follow the browser's reduced-motion preference.
 
-Switching between Status, Settings and Cost, or between settings groups, keeps
+Switching between Status, Settings and Work and cost, or between settings groups, keeps
 unsaved edits. The page marks them and asks the browser to warn before a refresh
 or close. Drafts live only in page memory: they do not survive leaving the page.
 Save settings writes them; a failed save keeps them. During a save the settings
