@@ -265,7 +265,11 @@ A period without rows shows the usage empty state. A failed range change
 identifies the old report that remains visible and disables
 export until a report loads successfully. Retry requests the selected range.
 CSV export keeps the original rows and columns, uses the range selected when the
-export started, and reports success or failure. Both pages share the settings
+export started, and reports success or failure. Text cells starting with `=`, `+`,
+`-` or `@`, including after leading whitespace or ASCII control characters, and
+cells starting with a tab, carriage return or newline receive an apostrophe prefix
+so spreadsheets treat them as text. Keep this prefix when opening the CSV in a
+spreadsheet; actual numeric values stay numeric. Both pages share the settings
 page's native CSS and JavaScript controls and reduced-motion support.
 
 The page keeps navigation for the current browser tab in `sessionStorage`:
