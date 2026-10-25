@@ -72,7 +72,7 @@ hansa also keeps running: its server dispatches work, runs checks and merges aro
 
 | Term | What it is |
 |---|---|
-| **Principal** | The person the desk works for. On the web page they set providers, keys, models and prices, answer the agents' requests, and approve or refuse releases (a release can also be answered in the conversation, with the one-time code the principal's alert carries). |
+| **Principal** | The person the desk works for. On the web page they set providers, keys, models and prices, read their to-dos and approve or refuse releases; they answer to-dos in the conversation and the coordinator records each outcome (a release can also be answered in the conversation, with the one-time code the principal's alert carries). |
 | **Coordinator** | An interactive Claude Code session in the desk (`hansa coordinator`). It plans, queues, reviews and merges work through `hansa`, and sets up the lanes. It runs outside the sandbox, so it can install what a lane needs; Claude Code asks the principal before each command not already allowed. Its interface is [`hansa/card.md`](hansa/card.md), and `hansa help` for the rest. |
 | **Helpers** | Three subagents in the coordinator's session: `scout` (looks something up) and `reviewer` (reads a high-stakes change) only read; `operator` does one hands-on job on the machine, such as installing software. |
 | **Worker** | One `claude -p` run per task, or per verification (`hansa verify`). It may run any command, inside Claude Code's sandbox: its commands write only in its worktree and the folders its lane allows, and reach only its lane's hosts. It never commits. |
@@ -191,7 +191,7 @@ principal's (`init`, `serve`, `web`, `coordinator`, `ping`) among them, and `han
 | `hansa release L [TARGET] ["<note>"]` | Ask for a release of lane L's base branch; it runs after the principal's yes (a target ticked to go out without asking needs none) |
 | `hansa release yes\|no ID CODE` | Pass on the principal's answer to a release, given in the conversation with their alert's one-time code |
 | `hansa lane ...`, `hansa concurrency [N]` | List, add, change or remove lanes; how many tasks run at once |
-| `hansa ask "<request>"` | Put a request on the principal's page |
+| `hansa ask "<what>"` | Record a to-do for the principal; close it with `--close N "<outcome>"` |
 | `hansa cost [--by day\|seat\|lane\|task\|model\|provider]` | Tokens, and what they are worth at the principal's prices |
 | `hansa explain [lane L \| provider P \| server \| notify]` | This desk's current settings and state, and where each comes from |
 

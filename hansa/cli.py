@@ -1164,7 +1164,7 @@ def cmd_resume(a):
 
 
 def cmd_wait(a):
-    """Return when a watched task stops running, the principal answers a request, or time is up.
+    """Return when a watched task stops running, a to-do is closed, or time is up.
     Meant to run in the background, so the session is told when there is something to look at."""
     desk = Desk.find(a.desk)
     live = lambda t: desk.meta(t)["state"] in ("queued", "running", "merging")  # noqa: E731
@@ -1213,11 +1213,11 @@ def cmd_ask(a):
             raise SystemExit("hansa: only the coordinator closes a request; a worker or verification "
                              "cannot. Say in your report that it may be done")
         Desk.find(a.desk).close_ask_as_coordinator(a.close, " ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"))
-        print(f"ask #{a.close} is closed; the principal's page shows it as closed by the coordinator, with the reason")
+        print(f"ask #{a.close} is closed; the principal's page shows it as closed by the coordinator, with the outcome")
         return
     n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"),
-                                  session=notify.session_here())
-    print(f"ask #{n} is on the principal's page")
+                                  session=notify.session_here(), why=a.why, holds=a.holds)
+    print(f"ask #{n} is on the principal's to-do list; they answer in the conversation")
 
 
 def cmd_changelog(a):
@@ -3050,20 +3050,23 @@ def main(argv=None):
     card.add_argument("--card", action="store_true", default=None,
                       help="with on: turn the desk's card copy back on (default: keep the desk's choice)")
     p.epilog = see_more("inbox")
-    p = add("wait", cmd_wait, "return when a task finishes or fails, or the principal answers; run it in the "
+    p = add("wait", cmd_wait, "return when a task finishes or fails, or a to-do closes; run it in the "
             "background when hansa does not notify the session (hansa notify)")
     p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")
     p.add_argument("--timeout", type=float, default=60, help="minutes (default 60)")
     p.add_argument("--every", type=float, default=5.0, help=argparse.SUPPRESS)
     p.epilog = see_more("inbox")
-    p = add("ask", cmd_ask, "put a request on the principal's page, or close one of yours that is done (--close)")
-    p.description = ("put a request on the principal's page: hansa ask \"<request>\". The principal answers it there, "
-                     "which closes it. When it is done some other way (the principal did it and said so in the "
-                     "conversation, say), the coordinator closes it: hansa ask --close N \"why\"; the reason is "
-                     "required, and the page shows it as closed by the coordinator, with the reason. Workers, "
-                     "verifications cannot close requests")
-    p.add_argument("text", nargs="*", help="the request; with --close, why it is closed")
-    p.add_argument("--close", type=int, metavar="N", help="close open request #N of this desk, saying why")
+    p = add("ask", cmd_ask, "record a to-do for the principal, or close it with its outcome (--close)")
+    p.description = ('Record what only the principal can do: hansa ask "<what>" [--why "<why only the principal '
+                     'can do it>"] [--holds]. Without --holds, work goes on. The page is read-only; the principal '
+                     'answers in the conversation, and the coordinator closes the to-do: hansa ask --close N '
+                     '"<outcome>". The outcome is required. Workers and verifications cannot close to-dos. '
+                     'Every to-do stays on record.')
+    p.add_argument("text", nargs="*", help="what the principal must do; with --close, the outcome")
+    p.add_argument("--why", default="", help="why only the principal can do it")
+    p.add_argument("--holds", action="store_true", help="work waits on this to-do (otherwise work goes on)")
+    p.add_argument("--close", type=int, metavar="N", help="close open to-do #N of this desk with its outcome")
+    p.epilog = see_more("inbox")
     p = add("explain", cmd_explain, "this desk's current settings and state: lane NAME | provider NAME | "
             "server | notify")
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "server", "notify"],
@@ -3393,7 +3396,8 @@ def main(argv=None):
     if a.cmd == "add" and not a.text and not a.file:
         ap.error("add needs the task text or --file")
     if a.cmd == "ask" and not a.text:
-        ap.error("ask needs the request" if a.close is None else "ask --close needs the reason: hansa ask --close N \"why\"")
+        ap.error("ask needs what the principal must do" if a.close is None else
+                 "ask --close needs the outcome: hansa ask --close N \"<outcome>\"")
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
     if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up"):
         _as_desk_account(a, argv)

@@ -949,14 +949,21 @@ def status(desk: Desk) -> dict:
         "asks": [{**a, "note": ask_note(a, ready)} for a in desk.asks() if not a.get("closed")],
         # the open releases (hansa release) and the latest that ended: the page asks the principal about each waiting one
         "releases": release.page_rows(desk, s, tasks),
-        # for the page: the latest requests the coordinator closed itself in the past week, with its reason
-        "asks_closed": [{k: a.get(k) for k in ("id", "text", "closed", "reason")} for a in desk.asks()
-                        if a.get("closed_by") == "coordinator" and a["closed"] >= time.time() - 7 * 86400][-5:],
         "last_24h": {"finished": sum((m.get("finished") or 0) >= day for m in tasks),
                      "merged": sum(m["state"] == "merged" and (m.get("merged") or 0) >= day for m in tasks),
                      "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
                      "worker_usd": round(sum(r["usd"] for r in rows if r["usd"] is not None), 2)},
     }
+
+
+def todo_list(desk: Desk, page: int = 1, state: str = "") -> dict:
+    """All to-dos, including old requests and their recorded answers; never trim history."""
+    rows = sorted((a for a in desk.asks() if not state or bool(a.get("closed")) == (state == "closed")),
+                  key=lambda a: (a.get("created") or 0, a["id"]), reverse=True)
+    total = len(rows)
+    pages = max(1, (total + 49) // 50)
+    page = min(max(1, page), pages)
+    return {"rows": rows[(page - 1) * 50:page * 50], "page": page, "pages": pages, "total": total}
 
 
 def status_text(st: dict) -> str:
