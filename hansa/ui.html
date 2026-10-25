@@ -193,6 +193,12 @@ td .task-detail { min-width:200px; }
 .request-body strong { flex:none; color:var(--muted); font-size:12px; }
 .request-card .row input { flex:1; min-width:180px; }
 .request-card .field-note { margin-top:7px; }
+.principal-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:6px 0; }
+.principal-actions > input { flex:1 1 180px; min-width:0; }
+.principal-actions > button { max-width:100%; white-space:normal; }
+.principal-details { margin-top:8px; }
+.principal-details > summary { cursor:pointer; color:var(--link); }
+.principal-details pre { margin:7px 0; }
 .release-card { background:var(--input); }
 .release-card > .mono { padding:8px 10px; background:var(--surface); border-radius:6px; margin:7px 0; }
 .release-card > .muted { font-size:12px; margin-top:8px; }
@@ -422,7 +428,7 @@ const T = ZH ? {
   taskSteps:"任务步骤", taskQueued:"排队", taskRun:n => `运行 ${n}`, taskLaneCheck:"工作线验收", taskVerification:"核对", taskMergeCheck:"合并验收", taskMerged:"已合并",
   taskRunning:"进行中", taskCompleted:"已完成", taskFailed:"失败", taskCancelled:"已取消", taskWait:"等待", taskFirstResult:"首次结果",
   taskMinutes:n => `${n} 分钟`, taskSeconds:n => `${n} 秒`, taskExit:n => `退出码 ${n}`, taskVerifies:"核对任务", taskReplaces:"接替任务", taskVerificationUnavailable:"核对记录不可用",
-  asks:"智能体提的请求", answer:"回复（可不填）", close:"处理完", closedByCoordinator:"已由协调者关闭：",
+  asks:"智能体提的请求", principalDetails:"详情", answer:"回复（可不填）", close:"处理完", closedByCoordinator:"已由协调者关闭：",
   providers:"模型供应", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
   effortDefault:"默认", endpoint:"接口地址", loginDir:"登录目录（空＝默认）", key:"密钥", keySet:"已填", keyMissing:"未填",
   saveKey:"保存密钥", clearKey:"清除密钥", keyHint:"在这里输入密钥", check:"Ping", checking:"Ping 中…",
@@ -577,7 +583,7 @@ const T = ZH ? {
   taskSteps:"Task steps", taskQueued:"Queued", taskRun:n => `Run ${n}`, taskLaneCheck:"Lane check", taskVerification:"Verification", taskMergeCheck:"Merge check", taskMerged:"Merged",
   taskRunning:"running", taskCompleted:"completed", taskFailed:"failed", taskCancelled:"cancelled", taskWait:"Wait", taskFirstResult:"First result",
   taskMinutes:n => `${n} min`, taskSeconds:n => `${n} s`, taskExit:n => `exit ${n}`, taskVerifies:"Verifies", taskReplaces:"Replaces", taskVerificationUnavailable:"Verification record unavailable",
-  asks:"Requests from agents", answer:"answer (optional)", close:"Done", closedByCoordinator:"closed by the coordinator: ",
+  asks:"Requests from agents", principalDetails:"Details", answer:"answer (optional)", close:"Done", closedByCoordinator:"closed by the coordinator: ",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
   effortDefault:"default", endpoint:"Endpoint", loginDir:"Login directory (blank = default)", key:"Key", keySet:"set", keyMissing:"missing",
   saveKey:"Save key", clearKey:"Clear key", keyHint:"Enter a key here", check:"Ping", checking:"pinging…",
@@ -1281,8 +1287,13 @@ async function loadStatus(force = false) {
   const restoreFocus = keepStatusFocus(root);
   const reason = statusInput("pause", {placeholder:T.pauseReason, "aria-label":T.pauseReason});
   const t = st.last_24h;
+  const pendingReleases = (st.releases || []).filter(r => r.state === "waiting");
+  const principal = waiting ? h("div", {id:"status-principal"},
+    pendingReleases.length ? dashboardPanel(T.releaseWaiting, "releases", pendingReleases.length, pendingReleases.map(releaseBlock)) : null,
+    asksSection({...st, asks_closed:[]})) : null;
   statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));
   $("#tab-status").replaceChildren(...shown([
+    principal,
     statusPicture,
     timelineSection(),
     pageHeading("status", T.statusIntro, statusPill(T.autoUpdates, "", "reload")),
@@ -1297,7 +1308,8 @@ async function loadStatus(force = false) {
       h("div", {class:"runtime-actions"},
       st.paused ? h("button", {class:"primary", "data-status-focus":"resume", onclick: () => api("/api/resume", {}).then(() => loadStatus(true)).catch(err)}, T.resume)
                 : [reason, h("button", {"data-status-focus":"pause", onclick: () => api("/api/pause", {reason:reason.value}).then(() => loadStatus(true)).catch(err)}, T.pause)])),
-    h("div", {id:"status-principal"}, releasesSection(st.releases || []), asksSection(st)),
+    h("div", waiting ? {} : {id:"status-principal"},
+      releasesSection((st.releases || []).filter(r => r.state !== "waiting")), asksSection({...st, asks:[]})),
     !st.running.length && !st.queued.length && !st.review.length && !(st.merging || []).length ? dashboardPanel(T.taskFlow, "status", 0,
       emptyState(T.noActiveTasks, T.noActiveTasksNote, "check")) : null,
     h("div", {id:"status-queued"}, st.queued.length ? dashboardPanel(T.queued, "pending", st.queued.length, table([T.task, T.lane, T.titleCol, T.waiting],
@@ -1335,35 +1347,42 @@ function asksSection(st) {
   if (!st.asks.length && !(st.asks_closed || []).length) return null;
   return dashboardPanel(T.asks, "alerts", st.asks.length, st.asks.map(a => {
     const ans = statusInput(`ask:${a.id}`, {placeholder:T.answer, "aria-label":`#${a.id} · ${T.answer}`});
-    return h("div", {class:"request-card", "data-principal-request":true}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, a.text)),
-      a.note ? h("span", {class:"ok"}, a.note) : null,
-      h("div", {class:"row"}, ans, h("button", {"data-status-focus":`ask:${a.id}:close`, onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
-        .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close)));
+    const [first, ...rest] = (a.text || "").split(/\r?\n/);
+    return h("div", {class:"request-card", "data-principal-request":true}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, first)),
+      h("div", {class:"principal-actions"}, ans, h("button", {"data-status-focus":`ask:${a.id}:close`, onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
+        .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close)),
+      rest.length || a.note ? h("details", {class:"principal-details"}, h("summary", {}, T.principalDetails),
+        rest.length ? h("pre", {}, rest.join("\n")) : null, a.note ? h("span", {class:"ok"}, a.note) : null) : null);
   }), (st.asks_closed || []).length ? h("h3", {}, T.closedRequests) : null,
     (st.asks_closed || []).map(a => h("div", {class:"request-card muted"}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, a.text)),
       h("div", {class:"field-note"}, `${T.closedByCoordinator}${a.reason} (${when(a.closed)})`))));
 }
 function releaseBlock(r) {
-  const reason = statusInput(`release:${r.id}`, {placeholder:T.releaseReason, style:"flex:1"});
+  const reason = statusInput(`release:${r.id}`, {placeholder:T.releaseReason});
   const answer = yes => api("/api/release/answer", {id:r.id, yes, reason:reason.value, commit:r.commit, command:r.command})
     .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err);
   const named = new Set(r.named || []);
   return h("div", {class:"lane release-card", "data-principal-request":true},
-    h("div", {class:"row"}, h("strong", {}, "#" + r.id), h("span", {}, `${T.lane} ${r.lane}${r.target ? ` · ${T.releaseTarget} ${r.target}` : ""} · ${r.base} @ `, h("code", {}, (r.commit || "").slice(0, 10))),
-      h("span", {class:"muted"}, when(r.asked))),
-    r.note ? h("div", {}, `${T.releaseNote}: ${r.note}`) : null,
+    h("div", {class:"request-body"}, h("strong", {}, "#" + r.id), h("span", {}, `${T.lane} ${r.lane}${r.target ? ` · ${T.releaseTarget} ${r.target}` : ""}`)),
+    h("div", {class:"principal-actions"}, h("button", {class:"primary", "data-status-focus":`release:${r.id}:yes`, onclick: () => answer(true)}, T.releaseYes),
+      reason, h("button", {"data-status-focus":`release:${r.id}:no`, onclick: () => answer(false)}, T.releaseNo)),
     h("div", {class:"muted"}, T.releaseCommand), h("pre", {class:"mono"}, r.command),
+    h("details", {class:"principal-details"}, h("summary", {}, T.principalDetails),
+    h("div", {class:"row"}, `${r.base} @ `, h("code", {}, (r.commit || "").slice(0, 10)), h("span", {class:"muted"}, when(r.asked))),
+    r.note ? [h("div", {class:"muted"}, T.releaseNote), principalList(T.releaseNote, r.note.split(/\r?\n/).map(line => h("div", {}, line)))] : null,
     h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs),
     releaseOutside(r),
     r.moved ? h("div", {class:"bad"}, T.releaseMoved + ((ZH && r.moved_zh) || r.moved)) : null,
     r.code ? h("div", {class:"muted"}, (ZH && r.code_zh) || r.code) : null,
     h("div", {class:"muted"}, T.releaseCommits(r.count, r.since_release), " · ", T.releaseChecked(r.checked ?? r.count, (r.commits || []).length)),
-    h("div", {class:"mono", style:"max-height:14em;overflow:auto"}, (r.commits || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`))),
+    principalList(T.releaseCommits(r.count, r.since_release), (r.commits || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`))),
     h("div", {class:"muted"}, T.releaseFiles(r.files_count)),
-    h("div", {class:"mono", style:"max-height:14em;overflow:auto"}, (r.files || []).map(f => named.has(f)
-      ? h("div", {class:"warn"}, h("strong", {}, f), T.releaseNamed) : h("div", {}, f))),
-    h("div", {class:"row", style:"margin-top:6px"}, h("button", {class:"primary", "data-status-focus":`release:${r.id}:yes`, onclick: () => answer(true)}, T.releaseYes),
-      reason, h("button", {"data-status-focus":`release:${r.id}:no`, onclick: () => answer(false)}, T.releaseNo)));
+    principalList(T.releaseFiles(r.files_count), (r.files || []).map(f => named.has(f)
+      ? h("div", {class:"warn"}, h("strong", {}, f), T.releaseNamed) : h("div", {}, f)))));
+}
+function principalList(label, lines) {
+  const list = h("div", {class:"mono"}, lines);
+  return lines.length > 5 ? h("details", {class:"principal-details"}, h("summary", {}, label), list) : list;
 }
 function releaseOutside(r) {
   return h("div", {class:"mono"}, (r.outside || []).map(f => h("div", {class:"warn"}, `${T.releaseOutside}: ${f.path}`,
