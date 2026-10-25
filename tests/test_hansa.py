@@ -29749,6 +29749,10 @@ else if (ask === "cost-chart") vm.runInContext("loadCost()", ctx).then(async () 
     table:dayTable ? descendants(dayTable, "tr").slice(1).map(el => el.kids.map(cell => cell.textContent)) : [],
     gets:apiGets, css:page.slice(page.indexOf("<style>"), page.indexOf("</style>"))}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "cost-export") vm.runInContext("loadCost()", ctx).then(async () => {
+  await vm.runInContext("exportCsv()", ctx);
+  console.log(JSON.stringify(await blobs[0].text()));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "cost-interactions") vm.runInContext("loadCost()", ctx).then(async () => {
   const check = (ok, why) => { if (!ok) throw new Error(why); };
   const run = code => vm.runInContext(code, ctx);
@@ -32315,6 +32319,37 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual(output["name"], "cost-30d.csv")
                 self.assertEqual(list(csv.reader(io.StringIO(output["csv"]))),
                                  [columns, ["" if row[column] is None else str(row[column]) for column in columns]])
+
+    def cost_csv_rows(self, rows):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        harness = self.tmp / "cost-export-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        report = {"total": {"tokens": 0, "usd": 0}, "by": {}, "unpriced_models": [], "rows": rows}
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        result = subprocess.run(["node", str(harness), str(page), "cost-export"],
+                                input=json.dumps({"/api/cost": report}), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return list(csv.DictReader(io.StringIO(json.loads(result.stdout), newline="")))
+
+    def test_cost_csv_marks_formula_text_in_every_text_column(self):
+        columns = ("day", "seat", "lane", "task", "provider", "model", "priced_by")
+        rows = [{c: prefix + '1,"two"\nnext' for c in columns} for prefix in ("=", "+", "-", "@")]
+        self.assertEqual([{c: row[c] for c in columns} for row in self.cost_csv_rows(rows)],
+                         [{c: "'" + row[c] for c in columns} for row in rows])
+
+    def test_cost_csv_marks_text_with_leading_whitespace_and_controls(self):
+        values = [prefix + "=1+1" for prefix in (" ", "\t", "\r", "\n", "\x1f", "\x7f", " \t", "\u00a0")]
+        values += ["\tplain", "\rplain", "\nplain"]
+        self.assertEqual([row["model"] for row in self.cost_csv_rows([{"model": v} for v in values])],
+                         ["'" + v for v in values])
+
+    def test_cost_csv_keeps_numeric_and_ordinary_values(self):
+        row = {"day": "2026-10-21", "seat": "worker", "lane": "", "task": None, "provider": 'a,"b"\rnext',
+               "model": "-12", "priced_by": "price table", "in": -12, "out": 0, "cache_read": 34,
+               "cache_write": 56, "usd": -0.25, "runs": 1, "turns": 2}
+        self.assertEqual(self.cost_csv_rows([row]),
+                         [{**{c: "" if v is None else str(v) for c, v in row.items()}, "model": "'-12"}])
 
     def cost_chart_page(self, days, rows, language):
         if not shutil.which("node"):

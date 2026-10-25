@@ -2092,7 +2092,11 @@ async function exportCsv() {
   try {
     const r = await api(`/api/cost?days=${days}&rows=1`);
     const cols = ["day", "seat", "lane", "task", "provider", "model", "in", "out", "cache_read", "cache_write", "usd", "priced_by", "runs", "turns"];
-    const esc = v => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const esc = v => {
+      let s = v == null ? "" : String(v);
+      if (typeof v === "string" && (/^[\s\x00-\x1f\x7f]*[=+\-@]/.test(s) || /^[\t\r\n]/.test(s))) s = "'" + s;
+      return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
     const csv = [cols.join(",")].concat(r.rows.map(x => cols.map(c => esc(x[c])).join(","))).join("\n");
     url = URL.createObjectURL(new Blob([csv], {type:"text/csv"}));
     const a = h("a", {href:url, download:`cost-${days}d.csv`});
