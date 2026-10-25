@@ -36022,6 +36022,52 @@ class OnlyUnsandboxedTest(unittest.TestCase):
         self.assertEqual([t._testMethodName for t, why in result.skipped if why == ONLY_UNSANDBOXED], ["test_other"])
 
 
+class WorkflowTest(unittest.TestCase):
+    """The CI contract, alongside the suite's selection and runner tests; no YAML dependency needed."""
+
+    def setUp(self):
+        self.workflow = (Path(__file__).resolve().parent.parent / ".github/workflows/tests.yml").read_text()
+        self.jobs = re.findall(r"(?ms)^  (\w+):\n(.*?)(?=^  \w+:\n|\Z)",
+                               self.workflow.split("\njobs:\n", 1)[1])
+
+    def test_actions_use_immutable_revisions(self):
+        actions = re.findall(r"(?m)^\s+- uses: (\S+)", self.workflow)
+        self.assertTrue(actions)
+        for action in actions:
+            with self.subTest(action=action):
+                self.assertRegex(action, r"^[\w-]+/[\w-]+@[0-9a-f]{40}$")
+
+    def test_installed_tools_have_exact_versions_and_an_explicit_node(self):
+        for name, job in self.jobs:
+            with self.subTest(job=name):
+                self.assertRegex(job, r"uses: actions/setup-node@[0-9a-f]{40}")
+                node = re.search(r'node-version: "(\d+\.\d+\.\d+)"', job)
+                self.assertIsNotNone(node)
+                self.assertGreaterEqual(tuple(map(int, node[1].split("."))), (22, 12, 0))
+                installs = re.findall(r"npm install -g (.+)", job)
+                self.assertTrue(installs)
+                for package in " ".join(installs).split():
+                    self.assertRegex(package, r"^@anthropic-ai/[\w-]+@\d+\.\d+\.\d+$")
+        self.assertRegex(self.workflow, r"@anthropic-ai/sandbox-runtime@\d+\.\d+\.\d+")
+
+    def test_existing_jobs_run_all_suites_and_keep_macos_manual(self):
+        jobs = dict(self.jobs)
+        self.assertEqual(set(jobs), {"unsandboxed", "test"})
+        self.assertIn("if: github.event_name == 'push'", jobs["unsandboxed"])
+        self.assertIn("runs-on: ubuntu-latest", jobs["unsandboxed"])
+        self.assertNotIn("matrix:", jobs["unsandboxed"])
+        self.assertIn("if: github.event_name != 'push'", jobs["test"])
+        self.assertIn("github.event_name == 'workflow_dispatch' && "
+                      "fromJSON('[\"ubuntu-latest\", \"macos-latest\"]') || fromJSON('[\"ubuntu-latest\"]')",
+                      jobs["test"])
+        for name, job in self.jobs:
+            with self.subTest(job=name):
+                for command in ("python3 -m unittest -v tests.test_hansa",
+                                "python3 -m unittest -v contrib.codex.tests",
+                                "claude plugin validate hansa/mod", "claude plugin test hansa/mod"):
+                    self.assertIn(command, job)
+
+
 class ParallelRunnerTest(unittest.TestCase):
     """The runner's public command, against disposable modules rather than this suite recursively."""
 

@@ -26,8 +26,9 @@ boundary, and some of its write denies are globs (below). On Linux srt drops eve
 
 1. **Install codex outside `~/.codex`.** hansa's sandbox denies reading `~/.codex`, and the standalone install keeps
    its program under `~/.codex/packages`, where a sandboxed run cannot start it. Install it into a folder of its
-   own, for example `npm install -g --prefix <codex tools> @openai/codex`, outside every folder workers may not
+   own, for example `npm install -g --prefix <codex tools> @openai/codex@0.160.0`, outside every folder workers may not
    read. The adapter refuses a codex under such a folder.
+   Use the Node and srt baseline and upgrade checks in [Tools and upgrades](../../docs/sandbox.md#tools-and-upgrades).
 2. **Give the adapter its own Codex home and log in there once:**
    `CODEX_HOME=<Codex home> <codex tools>/bin/codex login`. The home is a folder of its own, outside `~/.codex`
    and the worktrees, and not inside a folder workers may not read.
