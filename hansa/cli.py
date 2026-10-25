@@ -20,7 +20,7 @@ from pathlib import Path
 from . import account, alert, build, cost, gaps, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
 from .desk import (EFFORTS, Desk, SettingsError, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
-                   argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, pattern_path_problem, run_homes,
+                   argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name, compact_settings, work_lane_problem, write_text)
 from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
@@ -193,14 +193,22 @@ def permissions(desk: Desk) -> dict:
     # A desk reached through a link (/tmp on macOS is /private/tmp) gets the rule for each spelling: a path written
     # the short way matches only with both
     return {"allow": ["Bash(hansa:*)", *(f"Edit(//{x.lstrip('/')}/notes/**)" for x in desk_spellings(desk))],
-            "deny": desk_read_denials(desk) + [f"Edit({g})" for g in guarded] + no_publish_rules()}
+            "deny": desk_read_denials(desk) + [f"Edit({g})" for g in guarded] + other_desk_rules(desk, "Edit")
+            + no_publish_rules()}
 
 
 def desk_read_denials(desk: Desk) -> list:
     """Read denied on the desk's secrets/ and .hansa/: in its .claude/settings.json, and to a session hansa
-    notify-launch starts (launch_rules)."""
+    notify-launch starts (launch_rules); and on those of each other desk on the account's list (other_desk_rules)."""
     r = str(desk.root).lstrip("/")
-    return [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)"]
+    return [f"Read(//{r}/secrets/**)", f"Read(//{r}/.hansa/**)", *other_desk_rules(desk, "Read")]
+
+
+def other_desk_rules(desk: Desk, tool: str) -> list:
+    """Rules that deny `tool` the keys (secrets/) and state (.hansa/) of each other desk on the account's list
+    (desk.other_desks), in each spelling of its path; none for a spelling whose rule Claude Code would split."""
+    others = [x for d in other_desks(desk.root) for x in path_spellings(d) if not path_rule_problem(x)]
+    return [f"{tool}(//{x.lstrip('/')}/{n}/**)" for x in dict.fromkeys(others) for n in ("secrets", ".hansa")]
 
 
 def no_publish_rules() -> list:
@@ -231,7 +239,7 @@ def launch_rules(desk: Desk, home: str) -> list:
     names = sorted({*DESK_FILES, *there} - {desk.notes_dir.name, desk.worktrees_dir.name})
     r = str(desk.root).lstrip("/")
     return [*no_publish_rules(), *desk_read_denials(desk),
-            *(f"Edit(//{r}/{n}{end})" for n in names for end in ("", "/**")),
+            *(f"Edit(//{r}/{n}{end})" for n in names for end in ("", "/**")), *other_desk_rules(desk, "Edit"),
             *no_read_rules([os.path.join(home, f) for f in home_secrets()])]
 
 

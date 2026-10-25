@@ -1120,7 +1120,8 @@ SYSTEM_TOPS = ("/System", "/dev", "/proc", "/sys")
 
 # What a refusal of a cache folder says to list instead
 ELSEWHERE = "a cache folder goes elsewhere, such as a tools folder of the desk's, another volume or /tmp"
-OWN_FOLDER = ("give the lane a folder of its own, such as ~/hansa-cache/<lane>/<tool>, and point the tool there with "
+DESK_CACHE = "~/hansa-cache/<desk>/<lane>/<tool>"  # <desk>: the desk folder's name, so no two desks share a cache
+OWN_FOLDER = (f"give the lane a folder of its own, such as {DESK_CACHE}, and point the tool there with "
               "the lane's env: PIP_CACHE_DIR, npm_config_cache, UV_CACHE_DIR, CARGO_HOME, GRADLE_USER_HOME and the like")
 
 
@@ -1931,6 +1932,9 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
               *_mac_fence(home)]
     if root:
         fenced.append((str(root), _overlaps, "it is the desk's, which holds the keys and hansa's state"))
+        fenced += [(d, _overlaps, f"it is in or above {d}, another desk on this account's list (hansa up), which "
+                                  "holds that desk's keys and state") for d in other_desks(root)]
+        fenced.append((str(desks_file()), _above, "it would open the account's list of desks, which hansa up runs"))
     if isinstance(repo, str) and repo.startswith("/"):
         fenced.append((os.path.join(repo, ".git"), lambda a, b: _above(b, a),  # around it: the repository's
                        "it is the repository's .git folder, whose history hansa keeps"))
@@ -2325,6 +2329,62 @@ def lane_repos(s: dict) -> list:
     """(lane, repository) for each lane of a desk's settings that names one."""
     lanes = s.get("lanes") if isinstance(s.get("lanes"), dict) else {}
     return [(n, ln["repo"]) for n, ln in lanes.items() if isinstance(ln, dict) and isinstance(ln.get("repo"), str)]
+
+
+def desks_file() -> Path:
+    """The account's list of desks: each desk's server puts itself on it (up.record_start), and hansa up starts them."""
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "hansa" / "desks.json"
+
+
+def listed_desks() -> list:
+    """The desks on the account's list, as hansa up reads it: (folder, entry) for each folder that is a desk now."""
+    entries = read_json(desks_file(), []) or []
+    out = []
+    for rec in entries if isinstance(entries, list) else []:
+        if not isinstance(rec, dict) or not isinstance(rec.get("desk"), str) or not rec["desk"]:
+            continue
+        root = Path(rec["desk"])
+        with contextlib.suppress(OSError):
+            if (root / "settings.json").is_file() and (root / "tasks").is_dir():
+                out.append((root, rec))
+    return out
+
+
+def other_desks(root) -> list:
+    """The folders of the other desks on the account's list (listed_desks), each once: none that is this desk
+    (`root`), holds it or is inside it."""
+    return list(dict.fromkeys(str(r) for r, _ in listed_desks()
+                              if str(r).startswith("/") and not _overlaps(str(r), str(root))))
+
+
+def path_spellings(path: str) -> list:
+    """A folder's path as given, with links resolved, and on macOS without /private in front when that leads
+    to the same folder (cli.desk_spellings, for any folder)."""
+    real = resolved(path) or path
+    out = list(dict.fromkeys([path, real]))
+    for x in (path, real):
+        short = x.removeprefix("/private") if x.startswith("/private/") else ""
+        if short and short not in out and resolved(short) == real:
+            out.append(short)
+    return out
+
+
+def shared_writes(root, s: dict) -> list:
+    """A line for each folder on a write list of this desk's lanes that is, is inside or holds one on a write list
+    of another desk on the account's list (other_desks): a cache two desks' runs would share."""
+    def writes(lanes) -> list:  # (lane, folder) for each full path on a lane's write list
+        return [(n, x) for n, ln in (lanes.items() if isinstance(lanes, dict) else ()) if isinstance(ln, dict)
+                for x in (ln["write"] if isinstance(ln.get("write"), list) else []) if isinstance(x, str) and x[:1] == "/"]
+    mine, out = writes(s.get("lanes")), []
+    for d in other_desks(root) if mine else []:
+        try:
+            theirs = writes((read_json(Path(d) / "settings.json", {}) or {}).get("lanes"))
+        except (OSError, AttributeError):
+            continue
+        out += [f"lane {n}'s write folder {x} is also on a write list of desk {d} (lane {m}, {y}): the two desks' "
+                f"runs would share that cache; give each desk's lanes folders of their own, such as {DESK_CACHE}"
+                for n, x in mine for m, y in theirs if _overlaps(x, y)]
+    return out
 
 
 def run_homes(env=None) -> list:
