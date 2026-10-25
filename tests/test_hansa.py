@@ -24960,6 +24960,179 @@ def save():'''))
             body = json.loads(body)
         return code, body, outgoing
 
+    def test_web_notes_missing_and_empty(self):
+        from hansa import notes
+        (self.desk.notes_dir / "PROJECT.md").unlink()
+        self.assertEqual(notes.page_list(self.desk), [])
+        self.desk.notes_dir.rmdir()
+        self.assertEqual(notes.page_list(self.desk, True), [])
+        self.assertFalse(self.desk.notes_dir.exists())
+
+    def test_web_notes_list_headings_dates_order_and_archive(self):
+        from hansa import notes
+        root = self.desk.notes_dir
+        (root / "PROJECT.md").unlink()
+        text = "# 当前工作\n待办事项\n```\n# not a heading\n```\n## 下一步 ###\n"
+        (root / "中文.md").write_text(text, encoding="utf-8")
+        (root / "older.md").write_text("# Older\n")
+        (root / "archive").mkdir()
+        (root / "archive" / "done.md").write_text("# Done\n")
+        (root / "other").mkdir()
+        (root / "other" / "hidden.md").write_text("# Hidden\n")
+        os.utime(root / "older.md", (10, 10))
+        os.utime(root / "中文.md", (20, 20))
+        files = notes.page_list(self.desk)
+        self.assertEqual([f["name"] for f in files], ["中文.md", "older.md"])
+        self.assertEqual(files[0]["size"], len(text.encode()))
+        self.assertEqual(files[0]["modified"], 20)
+        self.assertEqual(files[0]["headings"], notes.headings(text.splitlines(keepends=True)))
+        self.assertIn("## 下一步", notes.list_text(self.desk))
+        self.assertEqual(notes.page_note(self.desk, "中文.md")["text"], text)
+        self.assertEqual(notes.page_note(self.desk, "", files[0]["id"])["text"], text)
+        self.assertEqual({f["name"] for f in notes.page_list(self.desk, True)},
+                         {"中文.md", "older.md", "archive/done.md"})
+        self.assertEqual(notes.page_note(self.desk, "archive/done.md")["text"], "# Done\n")
+
+    def test_web_notes_links_and_special_files_are_never_opened(self):
+        from hansa import notes
+        root = self.desk.notes_dir
+        (root / "PROJECT.md").unlink()
+        (root / "good.md").write_text("# Good\n")
+        outside = self.tmp / "outside-note"
+        outside.write_text("private")
+        (root / "inside-link").symlink_to(root / "good.md")
+        (root / "outside-link").symlink_to(outside)
+        os.link(outside, root / "hard-link")
+        os.mkfifo(root / "pipe")
+        real_open, opened = os.open, []
+        def tracked(path, *args, **kwargs):
+            opened.append(path)
+            return real_open(path, *args, **kwargs)
+        with unittest.mock.patch.object(notes.os, "open", tracked):
+            self.assertEqual([f["name"] for f in notes.page_list(self.desk)], ["good.md"])
+            for name in ("inside-link", "outside-link", "hard-link", "pipe"):
+                with self.subTest(name=name), self.assertRaises((OSError, ValueError)):
+                    notes.page_note(self.desk, name)
+                self.assertNotIn(name, opened)
+        self.assertEqual(outside.read_text(), "private")
+
+    def test_web_notes_refuse_directory_links(self):
+        from hansa import notes
+        root = self.desk.notes_dir
+        (root / "PROJECT.md").unlink()
+        outside = self.tmp / "outside-notes"
+        outside.mkdir()
+        (outside / "private.md").write_text("private")
+        (root / "archive").symlink_to(outside, target_is_directory=True)
+        self.assertEqual(notes.page_list(self.desk, True), [])
+        with self.assertRaises(OSError):
+            notes.page_note(self.desk, "archive/private.md")
+        (root / "archive").unlink()
+        root.rmdir()
+        root.symlink_to(outside, target_is_directory=True)
+        self.assertEqual(notes.page_list(self.desk, True), [])
+        with self.assertRaises(OSError):
+            notes.page_note(self.desk, "private.md")
+
+    def test_web_notes_refuse_paths_before_opening_anything(self):
+        from hansa import notes
+        for name in ("../settings.json", str(self.desk.settings_path), "other/note.md", "archive/../note.md",
+                     "archive/sub/note.md", "", ".", "archive/", "archive//note.md", "bad\0name"):
+            with self.subTest(name=name), unittest.mock.patch.object(notes.os, "open") as opened:
+                with self.assertRaises(ValueError):
+                    notes.page_note(self.desk, name)
+                opened.assert_not_called()
+
+    def test_web_notes_recheck_inode_when_a_file_is_replaced_during_open(self):
+        from hansa import notes
+        root = self.desk.notes_dir
+        outside = self.tmp / "outside-note"
+        outside.write_text("private")
+        original_open = os.open
+        for replacement in ("symlink", "hardlink"):
+            path = root / (replacement + ".md")
+            path.write_text("safe")
+            def swapped(name, *args, **kwargs):
+                if name == path.name:
+                    path.unlink()
+                    if replacement == "symlink":
+                        path.symlink_to(outside)
+                    else:
+                        os.link(outside, path)
+                return original_open(name, *args, **kwargs)
+            with self.subTest(replacement=replacement), unittest.mock.patch.object(notes.os, "open", swapped):
+                with self.assertRaises((OSError, ValueError)):
+                    notes.page_note(self.desk, path.name)
+            path.unlink()
+
+        (root / "fresh.md").write_text("# Safe\n")
+        original_headings = notes.headings
+        def linked_during_read(lines):
+            found = original_headings(lines)
+            os.link(root / "fresh.md", self.tmp / "second-link")
+            return found
+        with unittest.mock.patch.object(notes, "headings", linked_during_read):
+            with self.assertRaises(ValueError):
+                notes.page_note(self.desk, "fresh.md")
+
+    def test_web_notes_limit_utf8_and_list_binaries_without_text(self):
+        from hansa import notes
+        root, limit = self.desk.notes_dir, notes.PAGE_LIMIT
+        (root / "large.md").write_bytes(b"x" * (5 * limit) + b"\n# Beyond preview\n")
+        large = notes.page_note(self.desk, "large.md")
+        self.assertEqual(large["text"], "x" * limit)
+        self.assertTrue(large["truncated"])
+        self.assertEqual(large["headings"][-1][2], "Beyond preview")
+        (root / "split.md").write_bytes(b"x" * (limit - 1) + "中文".encode())
+        split = notes.page_note(self.desk, "split.md")
+        self.assertFalse(split["binary"])
+        self.assertEqual(split["text"], "x" * (limit - 1))
+        for name, raw in (("nul.bin", b"# heading\n\0"), ("invalid.bin", b"\xff\xfe"),
+                          ("tail.bin", b"x" * (limit + 1) + b"\xff")):
+            (root / name).write_bytes(raw)
+            with self.subTest(name=name):
+                item = notes.page_note(self.desk, name)
+                self.assertTrue(item["binary"])
+                self.assertEqual(item["text"], "")
+                self.assertEqual(item["headings"], [])
+                listed = next(f for f in notes.page_list(self.desk) if f["name"] == name)
+                self.assertTrue(listed["binary"])
+
+    def test_web_notes_redact_keys_in_names_headings_text_and_cut_boundary_without_writing(self):
+        from hansa import notes
+        key = "sk-test-notes-0123456789"
+        self.desk.write_key("mimo", key)
+        name = key + ".md"
+        raw = f"# {key}\n中文 <b> {key}\n".encode()
+        path = self.desk.notes_dir / name
+        path.write_bytes(raw)
+        listed = notes.page_list(self.desk)
+        self.assertNotIn(key, json.dumps(listed))
+        item = notes.page_note(self.desk, "", listed[0]["id"])
+        self.assertNotIn(key, json.dumps(item))
+        self.assertIn("[key of mimo]", item["text"])
+        self.assertEqual(path.read_bytes(), raw)
+        cut = self.desk.notes_dir / "cut.md"
+        cut.write_bytes(b"x" * (notes.PAGE_LIMIT - 10) + key.encode())
+        self.assertNotIn(key[:10], notes.page_note(self.desk, "cut.md")["text"])
+
+    def test_web_notes_api_requires_bearer_and_refuses_unsafe_names(self):
+        from hansa import notes
+        headers = {"Authorization": "Bearer " + self.desk.web_token()}
+        (self.desk.notes_dir / "read.md").write_text("# Read\n")
+        for path in ("/api/notes", "/api/notes?archived=1", "/api/note?name=read.md"):
+            for credentials in ({}, {"Authorization": "Bearer wrong"}):
+                with unittest.mock.patch.object(notes, "_page_folder") as folder:
+                    self.assertEqual(self.web_request(path, headers=credentials)[0], 403)
+                    folder.assert_not_called()
+            self.assertEqual(self.web_request(path, headers=headers)[0], 200)
+        for name in ("../settings.json", str(self.desk.settings_path), "other/note.md"):
+            with unittest.mock.patch.object(notes.os, "open") as opened:
+                self.assertEqual(self.web_request("/api/note?" + urllib.parse.urlencode({"name": name}),
+                                                 headers=headers)[0], 404)
+                opened.assert_not_called()
+        self.assertEqual(self.web_request("/api/note?id=unknown", headers=headers)[0], 404)
+
     def test_web_api_uses_bearer_authorization(self):
         import hashlib
         previous = "previous-page-token"
@@ -29732,7 +29905,7 @@ function openPage(search = "") {
   for (const key of Object.keys(ids)) delete ids[key];
   document.documentElement = new El("html"); document.activeElement = null; document.title = "Hansa";
   for (const key of Object.keys(windowEvents)) delete windowEvents[key];
-  for (const tab of ["status", "tasks", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
+  for (const tab of ["status", "tasks", "notes", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
   const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
   location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
   URLSearchParams, setInterval(f) { (windowEvents.interval ||= []).push(f); }, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
@@ -29870,7 +30043,7 @@ else if (ask === "preferences") (async () => {
   const flush = () => new Promise(resolve => setImmediate(resolve));
   const run = code => vm.runInContext(code, ctx);
   const snapshot = () => {
-    const tab = ["status", "tasks", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
+    const tab = ["status", "tasks", "notes", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
     const selected = document.querySelectorAll("#tabs button").find(el => el.attrs["aria-current"] === "page");
     if (selected?.dataset.tab !== tab) throw new Error("tab selection and visibility disagree");
     const group = run("settingsGroup");
@@ -29931,6 +30104,59 @@ else if (["desk-name", "desk-count", "status-parts", "notify-status"].includes(a
   }
   console.log(JSON.stringify(snapshots));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "notes") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  await run('show("notes")');
+  const root = ids["#tab-notes"], files = given["/api/notes"];
+  check(descendants(root, "h1")[0].textContent === (process.argv[4] === "zh" ? "笔记" : "Notes"), "untranslated title");
+  check(root.textContent.includes(run("T.notesIntro")) && root.textContent.includes(run("T.showArchived")), "untranslated controls");
+  const headers = descendants(root, "th").map(el => el.textContent);
+  check(JSON.stringify(headers) === JSON.stringify(run("[T.noteFile,T.noteBytes,T.noteChanged,T.noteHeadings]")), "untranslated columns");
+  for (const file of files) {
+    check(root.textContent.includes(run(`T.noteSize(${file.size})`)), "size missing");
+    check(root.textContent.includes(run(`when(${file.modified})`)), "modified time missing");
+    given["/api/note?"] = given.noteReplies[file.id];
+    await descendants(root, "button").find(el => el.textContent === file.name).click();
+    const query = new URLSearchParams(apiGets.at(-1).split("?")[1]);
+    check(query.get("id") === file.id, "note request used display name");
+    const note = given.noteReplies[file.id];
+    const pre = descendants(root, "section").flatMap(el => descendants(el, "pre"))[0];
+    if (note.binary) check(!pre && root.textContent.includes(run("T.noteBinary")), "binary text was shown");
+    else {
+      check(pre?.textContent === note.text && pre.kids[0] instanceof Text, "note was not plain text");
+      check(!descendants(pre, "b").length && !descendants(pre, "h1").length, "note drew Markdown or HTML");
+      check(root.textContent.includes(run("T.noteCut")) === note.truncated, "truncation label incorrect");
+    }
+  }
+  // A slower earlier selection must not replace the latest note.
+  const originalFetch = ctx.fetch;
+  let release, delayed = true;
+  const gate = new Promise(resolve => { release = resolve; });
+  ctx.fetch = async (...args) => {
+    const response = await originalFetch(...args);
+    if (delayed && args[0].startsWith("/api/note?")) { delayed = false; await gate; }
+    return response;
+  };
+  const first = files[0], last = files.at(-1);
+  given["/api/note?"] = given.noteReplies[first.id];
+  const oldSelection = descendants(root, "button").find(el => el.textContent === first.name).click();
+  given["/api/note?"] = given.noteReplies[last.id];
+  await descendants(root, "button").find(el => el.textContent === last.name).click();
+  const latest = root.textContent;
+  release(); await oldSelection; ctx.fetch = originalFetch;
+  check(root.textContent === latest, "late note reply replaced the latest selection");
+  const checkbox = descendants(root, "input")[0];
+  checkbox.checked = true; await checkbox.on.change({target:checkbox});
+  check(apiGets.at(-1) === "/api/notes?archived=1", "archive choice not requested");
+  given["/api/notes"] = []; await run("loadNotes()");
+  check(root.textContent.includes(process.argv[4] === "zh" ? "暂无笔记" : "No notes"), "empty label missing");
+  given["/api/notes"] = {error:"unavailable"}; await run("loadNotes()");
+  check(root.textContent.includes(run("T.notesFailed")), "failure label missing");
+  check(apiRequests.filter(r => r.path.startsWith("/api/note")).every(r => r.headers.Authorization === "Bearer example-page-key"), "note request missing page key");
+  check(apiPosts.length === 0, "notes wrote to the desk");
+  console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "all-tasks") (async () => {
   const run = code => vm.runInContext(code, ctx);
   const check = (ok, why) => { if (!ok) throw new Error(why); };
@@ -32173,7 +32399,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
         replies = {"pagePreferences": preferences, "/api/status": views.status(self.desk),
-                   "/api/settings": public_settings(self.desk), "/api/events": [], "/api/tasks": views.task_list(self.desk),
+                   "/api/settings": public_settings(self.desk), "/api/events": [], "/api/tasks": views.task_list(self.desk), "/api/notes": [],
                    "/api/cost": {"total": {"tokens": 0, "usd": 0}, "by": {}, "unpriced_models": []}}
         result = subprocess.run(["node", str(harness), str(page), "preferences", language],
                                 input=json.dumps(replies), capture_output=True, text=True, timeout=60)
@@ -32184,6 +32410,32 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         output = self.page_preferences(actions=[{"tab": "tasks"}, {"reload": True}])
         self.assertEqual([s["tab"] for s in output["snapshots"]], ["status", "tasks", "tasks"])
         self.assertEqual(output["snapshots"][-1]["session"]["hansa.tab"], "tasks")
+
+    def test_web_notes_page_is_plain_text_localized_authenticated_and_read_only(self):
+        from hansa import notes, web
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        root = self.desk.notes_dir
+        (root / "中文.md").write_text("# 当前工作\n<b>待办</b> & <script>text</script>\n", encoding="utf-8")
+        (root / "large.md").write_bytes(b"x" * (5 * notes.PAGE_LIMIT))
+        (root / "binary").write_bytes(b"\xff\0")
+        files = notes.page_list(self.desk)
+        replies = {"/api/notes": files, "noteReplies": {
+            f["id"]: notes.page_note(self.desk, "", f["id"]) for f in files},
+            "pagePreferences": {"session": {"hansa.token": "example-page-key"}}}
+        harness = self.tmp / "notes-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(web.UI), "notes", language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"ok": True})
+
+    def test_web_notes_tab_is_restored_on_reload(self):
+        output = self.page_preferences(actions=[{"tab": "notes"}, {"reload": True}])
+        self.assertEqual([s["tab"] for s in output["snapshots"]], ["status", "notes", "notes"])
+        self.assertEqual(output["snapshots"][-1]["session"]["hansa.tab"], "notes")
 
     def test_page_keeps_cost_tab_and_period_on_reload(self):
         output = self.page_preferences(actions=[{"tab": "cost"}, {"period": 30}, {"reload": True}])
