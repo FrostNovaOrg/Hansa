@@ -1380,6 +1380,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     out += oom_lines(m, {"verify": "verification"}.get(m.get("kind"), "worker"))
     if limit_wait(desk, m):
         out.append(limit_wait(desk, m))
+    if m["state"] == "queued":
+        s, states = desk.settings(), desk.provider_state()
+        names = {p for ln in ([m["lane"]] if m.get("lane") else s["lanes"]) if ln in s["lanes"]
+                 for p in task_providers(s, ln, m)}
+        out += [f"{p}: {provider_problem(desk, s, p)}" for p in sorted(names)
+                if states.get(p, {}).get("shared_rest")]
     report = report_of(desk, tid)
     if report:
         lines = report.splitlines()

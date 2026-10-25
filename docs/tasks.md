@@ -114,6 +114,14 @@ lane, or waits for one.
   limit again right after each rest cannot hold a task forever. Any other failure counts as before.
   `hansa show ID` says until when the task waits; `hansa status` and `hansa explain provider P` say until
   when each provider rests and why (the reset time it read, or its fixed length), and its rest length.
+- **Other desks on the same account learn the rest too.** Desks sharing a subscription's Claude Code
+  folder, or a key provider's exact endpoint and key, hold new runs until the same time. `show` and
+  `status` say when another desk found the limit. Different folders or keys do not share rests;
+  expired rests are ignored. The account's `provider-rests.json`, beside `desks.json` in
+  `$XDG_STATE_HOME/hansa` (default `~/.local/state/hansa`), holds SHA-256 login and source-desk hashes,
+  rest times and top-up confirmation times, with no key, endpoint, path or error text in clear.
+  Workers, setups and checks cannot read that folder. If the file is missing, unreadable or damaged,
+  each desk uses its own rests as before.
 - **A refusal is not a limit.** A provider that refuses one task (its content filter) does not rest: that
   task alone moves to the lane's next provider.
 - **Every try costs, and counts.** When a task goes back to the queue for another try (a usage limit, a
@@ -127,6 +135,8 @@ Credit errors (`credit balance is too low`, HTTP/API Error 402, `insufficient ba
 `insufficient_balance`, `insufficient_quota`, `余额不足`) rest indefinitely, surviving server restarts.
 Only the principal ends this rest: press **Topped up** on that provider's row in **Settings, Providers**,
 or save a new key. The coordinator cannot end it, even with `hansa ping`.
+A **Topped up** confirmation clears that login's credit rest on every desk on the account.
+Saving a different key lets this desk use that key; it leaves the old login's shared rest in place.
 The task moves to the lane's next provider without using a try; if all rest, it waits.
 Once per credit rest, hansa posts a line to the coordinator and runs the principal's alert command,
 if set. `status`, `show`, `explain provider P`, and the provider's page row say why and since when.
