@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, gaps, installed, installed_text, memory, notify, plugin, release, up
-from .desk import (DENY_AT, HOME_SECRETS, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
+from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of,
@@ -883,6 +883,7 @@ def status(desk: Desk) -> dict:
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
         "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
         "shared_writes": shared_writes(desk.root, s),  # write-list folders another listed desk's lanes write too
+        "desks_stop": desks_list_problem(),  # the account's list of desks cannot be read: no run starts
         # entries of what workers may not read that stop every run, and those left out of runs (desk.no_read_parts)
         "no_read_stop": stop_text(no_read[2]), "no_read_left_out": no_read[1],
         "concurrency": s["concurrency"],
@@ -983,6 +984,7 @@ def status_text(st: dict) -> str:
     out += [f"WARNING: {x}" for x in st.get("bad_messages") or []]
     out += [f"WARNING: {x}" for x in st.get("shared_writes") or []]
     out += [f"STOPPED: {st['no_read_stop']}"] if st.get("no_read_stop") else []
+    out += [f"STOPPED: {st['desks_stop']}"] if st.get("desks_stop") else []
     out += [f"what workers may not read, entry left out: {x.removeprefix(DENY_AT)}"
             for x in st.get("no_read_left_out") or []]
     out += [page_text(st["page"])] if st.get("page") else []
@@ -1395,6 +1397,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                  for p in task_providers(s, ln, m)}
         out += [f"{p}: {provider_problem(desk, s, p)}" for p in sorted(names)
                 if states.get(p, {}).get("shared_rest")]
+        out += [f"waits: {why}"] if (why := desks_list_problem()) else []
     report = report_of(desk, tid)
     if report:
         lines = report.splitlines()

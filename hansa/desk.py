@@ -1924,7 +1924,8 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
     (other_envs), whose PATH folders and named paths are closed the same way."""
     if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
-        return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as /Users/me/hansa-cache/a/pip"]
+        return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as "
+                "/Users/me/hansa-cache/desk/a/pip, desk the desk folder's name"]
     if not paths:
         return []
     home = account_home()
@@ -2336,9 +2337,27 @@ def desks_file() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "hansa" / "desks.json"
 
 
+def _desks_entries() -> tuple:
+    """(what the account's list of desks holds, '' or why it cannot be read): a missing list holds nothing."""
+    f = desks_file()
+    try:
+        return read_json(f, []) or [], ""
+    except (OSError, UnicodeDecodeError) as e:
+        why = e.strerror if isinstance(e, OSError) and e.strerror else type(e).__name__
+        return [], (f"hansa cannot read the account's list of desks, {f} ({why}), so it cannot tell which other "
+                    "desks to hide from runs: no run starts until that file can be read (fix its permissions, or "
+                    "move away what stands in its place)")
+
+
+def desks_list_problem() -> str:
+    """'' when the account's list of desks can be read or is missing; else why no run starts (_desks_entries)."""
+    return _desks_entries()[1]
+
+
 def listed_desks() -> list:
-    """The desks on the account's list, as hansa up reads it: (folder, entry) for each folder that is a desk now."""
-    entries = read_json(desks_file(), []) or []
+    """The desks on the account's list, as hansa up reads it: (folder, entry) for each folder that is a desk now;
+    none while the list cannot be read (desks_list_problem, which keeps runs from starting meanwhile)."""
+    entries = _desks_entries()[0]
     out = []
     for rec in entries if isinstance(entries, list) else []:
         if not isinstance(rec, dict) or not isinstance(rec.get("desk"), str) or not rec["desk"]:

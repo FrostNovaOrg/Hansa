@@ -292,7 +292,8 @@ or ask `scout` when reading is enough; say what you need back.
 - The principal's, on the page: providers, models, keys, effort defaults, when your session compacts,
   prices, what workers may not read, which targets
   go out without their yes, the forbidden words, the alert command. An entry workers may not read
-  that cannot be applied stops every run (`hansa status`: `STOPPED:`) until the principal changes it;
+  that cannot be applied stops every run (`hansa status`: `STOPPED:`) until the principal changes it,
+  and so does an account's list of desks that is there but cannot be read (`STOPPED:` names the file);
   one that came to close a lane's repository, a worktree or a `PATH` folder is left out of runs:
   settle it with the principal. More: `hansa help who-changes-what`.
 

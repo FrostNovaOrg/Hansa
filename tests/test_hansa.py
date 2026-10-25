@@ -16055,6 +16055,46 @@ def save():'''))
         self.assertTrue(len(warned) == 1 and shared in warned[0] and str(b.root) in warned[0], warned)
         self.assertIn("<desk>", warned[0])  # the convention that keeps them apart
 
+    def test_runs_wait_while_the_accounts_list_of_desks_cannot_be_read(self):
+        from hansa import up
+        listed = up.desks_file()
+        self.assertTrue(str(listed).startswith(str(self.tmp)))  # never the account's real list
+        self.other_desk()
+        kept, d = listed.read_bytes(), Dispatcher(self.desk)
+        cases = [("a folder in its place", lambda: (listed.unlink(), listed.mkdir()),
+                  lambda: (listed.rmdir(), listed.write_bytes(kept)))]
+        if os.getuid() != 0:  # root reads a file at mode 000
+            cases.insert(0, ("mode 000", lambda: listed.chmod(0), lambda: listed.chmod(0o600)))
+        for n, (case, close, reopen) in enumerate(cases):
+            with self.subTest(case):
+                close()
+                try:
+                    status = self.hansa("status")
+                    self.hansa("lane", "set", "a", "write", str(self.tmp / f"cache-{n}"))  # ends cleanly too
+                    tid = self.desk.new_task(f"Add hello{n}.txt")
+                    for _ in range(3):
+                        d.tick()
+                    self.assertEqual(self.desk.meta(tid)["state"], "queued")  # waits, not failed
+                    shown = views.show_text(self.desk, tid)
+                finally:
+                    reopen()
+                stopped = [x for x in status.splitlines() if x.startswith("STOPPED")]
+                self.assertTrue(stopped and str(listed) in stopped[0] and "no run starts" in stopped[0], status)
+                self.assertIn(f"waits: hansa cannot read the account's list of desks, {listed}", shown)
+                self.assertEqual(self.desk.settings()["lanes"]["a"]["write"], [str(self.tmp / f"cache-{n}")])
+                self.assertEqual(self.settle(d, tid)["state"], "done")  # readable again: it starts, nothing else done
+        listed.unlink()  # no list at all: nothing to hide, and runs start
+        self.assertFalse(views.status(self.desk)["desks_stop"])
+        self.assertEqual(self.settle(d, self.desk.new_task("Add hello.txt"))["state"], "done")
+
+    def test_a_write_folder_above_the_accounts_list_of_desks_is_refused(self):
+        from hansa import up
+        s = self.desk.settings()
+        for above in (up.desks_file().parent, up.desks_file().parent.parent):
+            s["lanes"]["a"]["write"] = [str(above)]
+            said = self.desk.save_settings(s)
+            self.assertTrue(said and str(above) in said[0] and "account's list of desks" in said[0], said)
+
     def test_the_session_hansa_coordinator_starts_keeps_its_rules_with_a_folder_recorded(self):
         self.record_folder((self.tmp / "own folder").resolve())
         show = self.tmp / "argv-claude"
@@ -19222,7 +19262,7 @@ def save():'''))
             s["lanes"]["a"]["write"] = bad
             self.assertEqual(validate(s, self.desk.root),
                              ["lane a: write must be a list of up to 20 full paths starting with /, such as "
-                              "/Users/me/hansa-cache/a/pip"])
+                              "/Users/me/hansa-cache/desk/a/pip, desk the desk folder's name"])
         # the desk (as given, resolved, inside it or around it) and the repository's .git
         for bad in (self.tmp / "desk", self.tmp / "desk" / "secrets", self.desk.root / ".hansa" / "runs", self.tmp,
                     self.tmp / "x" / ".." / "desk"):

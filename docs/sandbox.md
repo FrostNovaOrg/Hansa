@@ -113,8 +113,16 @@ each other listed folder that is still a desk is hidden whole, as given on the
 list, with its links resolved and, on macOS, without `/private` in front, from
 the workers' commands and Read tool, the setup and the check. A desk whose
 folder is gone, one not on the list, or one that is this desk, holds it or
-holds one of its lanes' repositories is left alone. The coordinator's session
+holds one of its lanes' repositories is left alone; so is one inside this
+desk, which this desk's own fence covers. The coordinator's session
 is denied Read and Edit on each listed desk's `secrets/` and `.hansa/` too.
+
+A list that is missing hides nothing, and runs start. One that is there but
+cannot be read (no permission, a folder in its place, another read error)
+starts no run, as hansa cannot tell which desks to hide: queued tasks wait,
+`hansa status` says why under `STOPPED:` and `hansa show` of a queued task
+under `waits:`, each naming the file, and runs start again by themselves once
+it can be read.
 
 A write-list entry that hansa would now refuse when a run starts (one saved before that refusal
 was there, or one whose link has since been pointed elsewhere) is left out of that run, and `hansa show`
@@ -284,7 +292,8 @@ small letters, digits, `.`, `_` and `-`.
 ## A lane's write list and env
 
 A lane's write list (`hansa lane set L write PATH ...`, full paths such as
-`/Users/me/hansa-cache/a/pip`) is the folders its workers, setup and check may
+`/Users/me/hansa-cache/desk/a/pip` for lane `a` of a desk in a folder
+named `desk`) is the folders its workers, setup and check may
 write besides the worktree and their temporary folder: a build or test tool's
 cache folders. A lane writes only folders of its own. The rule, in two lines:
 
@@ -297,7 +306,8 @@ cache folders. A lane writes only folders of its own. The rule, in two lines:
   another volume, `/tmp`.
 
 Neither may name the desk's folder or another desk's on the account's list, or
-a folder above one. `<desk>` in `~/hansa-cache/<desk>/<lane>/<tool>` is the
+a folder above one, nor a folder above the account's list file itself
+(`desks.json`), which would open it to the runs. `<desk>` in `~/hansa-cache/<desk>/<lane>/<tool>` is the
 desk folder's name, so that two desks' lanes of the same name get folders of
 their own; `hansa status` warns, naming the folder and the other desk, when a
 folder on this desk's write lists is, holds or is inside one on a write list
