@@ -560,6 +560,10 @@ Each server start also adds or updates one entry for its desk in this account's
 `XDG_STATE_HOME` is unset. That list holds the desk folder, the absolute hansa
 command and when it started. If the list cannot be updated, `hansa serve`
 warns on stderr and keeps serving; the desk's own start record is still saved.
+A list that is there but cannot be used (empty, not JSON, not a JSON list, a
+link that leads nowhere, unreadable) is left as it is, with the reason on
+stderr: rewriting it would drop the other desks, whose runs wait until the
+list is fixed. A missing list is made.
 Outside any desk, with no `--desk` or `HANSA_DESK`,
 `hansa up` visits every listed folder that is still a desk, printing a block
 for each. Each is started by its own installation with

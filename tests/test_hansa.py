@@ -16239,6 +16239,47 @@ def save():'''))
             self.assertFalse(views.status(self.desk)["desks_stop"], case)
             self.assertEqual(self.settle(d, self.desk.new_task(f"Add hello-{len(case)}.txt"))["state"], "done")
 
+    def test_a_server_start_leaves_an_unusable_list_of_desks_as_it_is_and_runs_keep_waiting(self):
+        from hansa import up
+        listed = up.desks_file()
+        self.assertTrue(str(listed).startswith(str(self.tmp)))  # never the account's real list
+        b = self.other_desk()
+        kept, d = listed.read_bytes(), Dispatcher(self.desk)
+        options = types.SimpleNamespace(host="127.0.0.2", port=9123, every=1.25)
+        patch = unittest.mock.patch.object(up, "record_tmux", return_value={})
+        patch.start()
+        self.addCleanup(patch.stop)
+        gone = self.tmp / "gone.json"
+        cases = [("empty", b""), ("not JSON", b"[{\"desk\": "), ("a JSON object", b'{"desk": "/x"}'),
+                 ("a link that leads nowhere", None)]
+        for n, (case, data) in enumerate(cases):
+            with self.subTest(case):
+                listed.unlink()
+                listed.symlink_to(gone) if data is None else listed.write_bytes(data)
+                try:
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        up.record_start(self.desk, options)
+                    self.assertEqual(listed.is_symlink(), data is None)
+                    self.assertFalse(gone.exists())
+                    if data is not None:
+                        self.assertEqual(listed.read_bytes(), data)  # not rewritten to hold this desk alone
+                    self.assertIn("left the account's list of desks as it is", err.getvalue())
+                    self.assertIn(str(listed), err.getvalue())
+                    tid = self.desk.new_task(f"Add hello{n}.txt")
+                    for _ in range(3):
+                        d.tick()
+                    self.assertEqual(self.desk.meta(tid)["state"], "queued")  # still waits
+                finally:
+                    listed.unlink()
+                    listed.write_bytes(kept)
+                self.assertEqual(self.settle(d, tid)["state"], "done")
+        up.record_start(self.desk, options)  # a usable list gets this desk's entry, the others kept
+        self.assertEqual({x["desk"] for x in json.loads(listed.read_text())}, {str(b.root), str(self.desk.root)})
+        listed.unlink()
+        up.record_start(self.desk, options)  # a missing one is made
+        self.assertEqual([x["desk"] for x in json.loads(listed.read_text())], [str(self.desk.root)])
+
     def test_a_write_folder_above_the_accounts_list_of_desks_is_refused(self):
         from hansa import up
         s = self.desk.settings()
