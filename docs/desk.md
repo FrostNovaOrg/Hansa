@@ -378,7 +378,7 @@ spreadsheet; actual numeric values stay numeric. Both pages share the settings
 page's native CSS and JavaScript controls and reduced-motion support.
 
 The page keeps navigation for the current browser tab in `sessionStorage`:
-`hansa.tab` is written whenever Status, All tasks, Settings or Work and cost is shown (including
+`hansa.tab` is written whenever Status, All tasks, Notes, Settings or Work and cost is shown (including
 startup), `hansa.settingsSection` whenever a Settings section is shown, and
 `hansa.costPeriod` when the Work and cost range changes. Reloading restores those choices;
 a fresh browser tab starts on Status. An address containing `?t=` (or `&t=`)
@@ -396,6 +396,31 @@ without a valid choice, a browser language starting with `zh` selects Chinese,
 and other languages select English. The HTML `lang` attribute matches the shown
 language. If storage is unavailable or throws, the page still works with its
 usual defaults for the choices it cannot read or keep.
+
+### Notes on the web page
+
+Notes shows files directly in the desk's `notes/`, most recently modified first,
+with their size, modification time and the Markdown headings that `hansa notes`
+lists (headings inside fenced code are ignored). Show archived also includes files
+directly in `notes/archive/`. A missing or empty folder shows No notes. Choosing
+a file shows its text as plain text, including Chinese; Markdown and HTML are
+never rendered. The preview contains at most the first 1 MB (1,048,576 bytes),
+with a truncation notice and any incomplete final UTF-8 character omitted.
+Files that contain invalid UTF-8 or NUL bytes are listed as non-text and cannot
+be displayed. hansa removes known keys from names, headings and previews, as it
+does from reports. Browsing never changes the notes.
+
+`GET /api/notes` lists these files; `archived=1` includes the archive. Each record
+has `name`, an opaque `id`, `size` in bytes, `modified` in Unix seconds, `binary`,
+`truncated` and `headings` (zero-based line, level, text). `GET /api/note?id=ID`
+returns the metadata and preview `text`; `name=FILE` also accepts a filename or
+`archive/FILE`. Both requests require the usual bearer page key. Invalid paths
+and unavailable files return HTTP 404. Other subfolders, absolute paths and `..`
+are refused before opening anything. Reads open directories and files without
+following symbolic links and check the opened file is regular with exactly one
+hard link. These checks prevent note browsing from exposing files elsewhere;
+keep them while the page reads notes from the filesystem. Headings and UTF-8
+validation cover the whole file even when its preview is cut.
 
 ## Settings on the web page
 
@@ -707,6 +732,8 @@ The coordinator creates and edits files under the desk's `notes/` without
 asking (its plan and findings; how it keeps them short is at the end of
 [The daily clear](#the-daily-clear)); everything else it edits asks as before,
 and the closed files stay closed.
+The principal can read these files in [Notes on the web page](#notes-on-the-web-page),
+including archived files on request; that view never edits or archives them.
 
 The project's own rules (how it builds, what may never go out, who decides what)
 go in the desk's `notes/PROJECT.md`. The card imports it with a line of its own,

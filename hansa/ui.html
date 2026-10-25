@@ -374,6 +374,7 @@ td .task-detail { min-width:200px; }
   <div id="tab-settings" hidden></div>
   <div id="tab-cost" hidden></div>
   <div id="tab-tasks" hidden></div>
+  <div id="tab-notes" hidden></div>
 </main>
 <script>
 "use strict";
@@ -398,7 +399,7 @@ if (tokenAddress) {
 } else {
   try { pageToken = sessionStorage.getItem("hansa.token") || ""; } catch (_) {}
 }
-const TABS = ["status", "tasks", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
+const TABS = ["status", "tasks", "notes", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
 const language = keptChoice("localStorage", "hansa.language", ["zh-CN", "en"],
   (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en");
 const ZH = language === "zh-CN";
@@ -845,6 +846,15 @@ Object.assign(T, ZH ? {
   laneTrying:"trying", laneHeld:"Sandbox held", startedAt:"Started", lastNote:"Last note", verifyingTask:"Verifying task",
   laneQueued:n => `${n} queued`, laneReplies:n => `${n} replies`, laneIdle:n => `${n} min idle`, timeBudget:(n, limit) => `${n} min elapsed, ${limit} min limit`
 });
+Object.assign(T, ZH ? {
+  notes:"笔记", notesIntro:"只读查看协调席的当前工作和待办事项。", showArchived:"显示归档", noNotes:"暂无笔记",
+  noteSize:n => `${n.toLocaleString(language)} 字节`, noteBytes:"大小", noteChanged:"修改时间", noteHeadings:"标题", noteFile:"文件",
+  noteBinary:"非 UTF-8 文本，无法显示。", noteCut:"内容已截断：仅显示前 1 MB。", notesFailed:"笔记加载失败，请重试。"
+} : {
+  notes:"Notes", notesIntro:"Read the coordinator’s current work and open items.", showArchived:"Show archived", noNotes:"No notes",
+  noteSize:n => `${n.toLocaleString(language)} bytes`, noteBytes:"Size", noteChanged:"Changed", noteHeadings:"Headings", noteFile:"File",
+  noteBinary:"Not UTF-8 text; cannot display.", noteCut:"Truncated: showing only the first 1 MB.", notesFailed:"Could not load notes. Try again."
+});
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const $ = s => document.querySelector(s);
 const mainTabLabels = {};
@@ -867,6 +877,7 @@ function icon(name) {
   const paths = {
     status:["M3 12h4l3-8 4 16 3-8h4"], settings:["M4 7h16M4 17h16M8 4v6m8 4v6"], cost:["M5 20v-7m7 7V4m7 16V9"],
     tasks:["M8 6h12M8 12h12M8 18h12M3 6h1M3 12h1M3 18h1"],
+    notes:["M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7"],
     providers:["M8 8V4h8v4M6 8h12v8H6zM9 20h6m-3-4v4"],
     coordinator:["M4 5h16v12H4zM8 21h8m-4-4v4M8 9l2 2-2 2m5 0h3"], lanes:["M5 4v16m14-16v16M5 8h14M5 16h14"],
     security:["M12 3l8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM9 12l2 2 4-4"], releases:["M12 16V3m-4 4 4-4 4 4M4 13v7h16v-7"],
@@ -887,8 +898,8 @@ const section = (title, ...kids) => h("section", {}, h("h2", {}, title), ...kids
 const table = (head, rows) => h("div", {class:"scroll"}, h("table", {}, h("tr", {}, head.map(x => h("th", {}, x))),
   rows.map(r => h("tr", {}, r.map(c => h("td", {}, c))))));
 const statusPill = (text, tone = "", symbol = "check") => h("span", {class:"status-pill " + tone}, icon(tone === "warn" ? "error" : symbol), text);
-const pageHeading = (tab, intro, aside) => h("div", {class:"page-head"},
-  h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T[tab]), h("h1", {}, T[tab]), h("p", {}, intro)), aside);
+const pageHeading = (title, intro, aside) => h("div", {class:"page-head"},
+  h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", title), h("h1", {}, title), h("p", {}, intro)), aside);
 const summaryCard = (label, value, note, symbol) => h("div", {class:"metric-card"},
   h("span", {class:"metric-label"}, icon(symbol), label), h("strong", {class:"metric-value"}, value), note ? h("span", {class:"metric-note"}, note) : null);
 const dashboardPanel = (title, symbol, count, ...kids) => h("section", {class:"dashboard-panel"},
@@ -920,7 +931,7 @@ function show(tab) {
     b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
   }
   for (const t of TABS) $("#tab-" + t).hidden = t !== tab;
-  return ({status:loadStatus, tasks:loadTasks, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
+  return ({status:loadStatus, tasks:loadTasks, notes:loadNotes, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
 }
 function err(e) { $("#state").textContent = String(e.message || e); $("#state").className = "bad"; }
 
@@ -1341,7 +1352,7 @@ async function loadStatus(force = false) {
     principal,
     statusPicture,
     timelineSection(),
-    pageHeading("status", T.statusIntro, statusPill(T.autoUpdates, "", "reload")),
+    pageHeading(T.status, T.statusIntro, statusPill(T.autoUpdates, "", "reload")),
     h("div", {class:"metric-caption"}, T.last24h),
     h("div", {class:"metric-grid", "aria-label":T.last24h},
       summaryCard(T.finished, fmt(t.finished), "", "check"), summaryCard(T.merged, fmt(t.merged), "", "releases"),
@@ -2036,6 +2047,34 @@ function renderSettings(problems = settingsProblems) {
   refreshSettingsState();
 }
 
+/* ---------- notes ---------- */
+let notesArchived = false, notesEpoch = 0;
+async function loadNotes() {
+  const host = $("#tab-notes"), epoch = ++notesEpoch, detail = h("div", {"aria-live":"polite"});
+  const open = async file => {
+    const selection = ++notesEpoch;
+    detail.replaceChildren();
+    try {
+      const note = await api("/api/note?" + new URLSearchParams({id:file.id}));
+      if (selection !== notesEpoch) return;
+      if (note.error) throw new Error();
+      detail.replaceChildren(section(file.name, note.binary ? h("p", {}, T.noteBinary) : [
+        note.truncated ? h("p", {class:"warn"}, T.noteCut) : null, h("pre", {}, note.text)]));
+    } catch (e) { if (selection === notesEpoch) detail.replaceChildren(h("p", {class:"bad"}, T.notesFailed)); }
+  };
+  host.replaceChildren(pageHeading(T.notes, T.notesIntro), h("label", {class:"tick"},
+    h("input", {type:"checkbox", checked:notesArchived, onchange:e => { notesArchived = e.target.checked; return loadNotes(); }}), T.showArchived), detail);
+  try {
+    const files = await api("/api/notes?archived=" + (notesArchived ? "1" : "0"));
+    if (epoch !== notesEpoch) return;
+    if (!Array.isArray(files)) throw new Error();
+    host.append(files.length ? table([T.noteFile, T.noteBytes, T.noteChanged, T.noteHeadings], files.map(file => [
+      h("button", {class:"link", onclick:() => open(file)}, file.name), T.noteSize(file.size), when(file.modified),
+      [h("pre", {}, file.headings.map(([i, level, text]) => `${i + 1} ${"#".repeat(level)} ${text}`).join("\n")),
+        file.binary ? h("p", {class:"muted"}, T.noteBinary) : null]])) : h("p", {}, T.noNotes));
+  } catch (e) { if (epoch === notesEpoch) host.append(h("p", {class:"bad"}, T.notesFailed), h("button", {onclick:loadNotes}, T.retry)); }
+}
+
 /* ---------- all tasks ---------- */
 let tasksEpoch = 0, tasksPage = 1, tasksControls, tasksResults;
 async function loadTasks() {
@@ -2051,7 +2090,7 @@ async function loadTasks() {
     const filter = () => { tasksPage = 1; return loadTasks(); };
     for (const key of ["state", "lane", "days"]) tasksControls[key].addEventListener("change", filter);
     tasksResults = h("div", {"aria-live":"polite"});
-    host.replaceChildren(pageHeading("tasks", T.tasksIntro),
+    host.replaceChildren(pageHeading(T.tasks, T.tasksIntro),
       h("form", {class:"cost-toolbar", onsubmit:e => { e.preventDefault(); return filter(); }},
         Object.entries(tasksControls).map(([key, control]) => h("label", {},
           {state:T.taskState, lane:T.lane, words:T.taskTitle, days:T.queuedAt}[key], " ", control)),
@@ -2223,7 +2262,7 @@ function renderCost(r) {
   const w = r?.work || {};
   const unpriced = r ? Object.values(r.by.model || {}).reduce((sum, value) => sum + (value.unpriced_tokens || 0), 0) : 0;
   $("#tab-cost").replaceChildren(...shown([
-    pageHeading("cost", T.costIntro),
+    pageHeading(T.cost, T.costIntro),
     h("section", {class:"dashboard-panel"}, h("div", {class:"cost-toolbar"},
       h("div", {class:"period-control"}, h("label", {for:"cost-period"}, T.period), costSelect), costExportButton), costFeedback),
     r ? h("div", {class:"metric-grid cost-metrics", "aria-label":T.total},

@@ -2,8 +2,12 @@
 it rereads without typing the section out again."""
 from __future__ import annotations
 
+import codecs
+import contextlib
+import hashlib
 import os
 import re
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -13,6 +17,102 @@ from .desk import Desk, resolved
 ARCHIVE = "archive"  # where a section goes by default: notes/archive/FILE; hansa notes lists no headings there
 HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+PAGE_LIMIT = 1024 * 1024
+
+
+@contextlib.contextmanager
+def _page_folder(desk: Desk, archived: bool = False):
+    """Anchor page reads to opened directories; never follow a notes/ or archive/ link."""
+    with contextlib.ExitStack() as stack:
+        fd = os.open(desk.notes_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        stack.callback(os.close, fd)
+        if archived:
+            fd = os.open(ARCHIVE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            stack.callback(os.close, fd)
+        yield fd
+
+
+def _page_file(desk: Desk, folder: int, name: str) -> dict:
+    """Check the opened inode before reading, including after a directory-entry swap."""
+    entry = os.stat(name, dir_fd=folder, follow_symlinks=False)
+    if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+        raise ValueError("not a regular, singly linked note")
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("not a regular, singly linked note")
+        raw = source.read(PAGE_LIMIT)
+        text, binary, heads = "", False, []
+        try:
+            text = codecs.getincrementaldecoder("utf-8")().decode(raw, final=info.st_size <= PAGE_LIMIT)
+            # Validate the whole file and list the same headings as the CLI, including beyond the preview.
+            def lines():
+                source.seek(0)
+                for raw_line in source:
+                    line = raw_line.decode("utf-8")
+                    if "\0" in line:
+                        raise UnicodeError()
+                    yield line
+            heads = headings(lines())
+        except UnicodeError:
+            binary = True
+        if os.fstat(source.fileno()).st_nlink != 1:
+            raise ValueError("note acquired another hard link")
+    # Also hide a key prefix cut by the byte limit.
+    text = desk.redact(text) if not binary else ""
+    if info.st_size > PAGE_LIMIT:
+        for provider, key in desk.keys().items():
+            for n in range(min(len(key) - 1, len(text)), 0, -1):
+                if text.endswith(key[:n]):
+                    text = text[:-n] + f"[key of {provider}]"
+                    break
+    return {"size": info.st_size, "modified": info.st_mtime, "binary": binary,
+            "truncated": info.st_size > PAGE_LIMIT, "text": text,
+            "headings": [(i, level, desk.redact(title)) for i, level, title in heads]}
+
+
+def page_list(desk: Desk, archived: bool = False) -> list:
+    """The page's shallow, read-only view of notes, using the CLI's heading parser."""
+    out = []
+    for archive in (False, True) if archived else (False,):
+        try:
+            with _page_folder(desk, archive) as folder:
+                for name in sorted(n for n in os.listdir(folder) if not n.startswith(".")):
+                    try:
+                        item = _page_file(desk, folder, name)
+                    except (OSError, ValueError):
+                        continue
+                    item.pop("text")
+                    path = (ARCHIVE + "/" if archive else "") + name
+                    out.append({"name": desk.redact(path), "id": _page_id(path), **item})
+        except OSError:
+            continue
+    return sorted(out, key=lambda item: (-item["modified"], item["name"]))
+
+
+def _page_id(name: str) -> str:
+    return hashlib.sha256(name.encode("utf-8", errors="surrogateescape")).hexdigest()
+
+
+def page_note(desk: Desk, name: str, identity: str = "") -> dict:
+    if identity:
+        for archive in (False, True):
+            try:
+                with _page_folder(desk, archive) as folder:
+                    for filename in os.listdir(folder):
+                        path = (ARCHIVE + "/" if archive else "") + filename
+                        if _page_id(path) == identity:
+                            return _page_file(desk, folder, filename)
+            except OSError:
+                continue
+        raise ValueError("no such note")
+    parts = name.split("/")
+    if (len(parts) not in (1, 2) or len(parts) == 2 and parts[0] != ARCHIVE
+            or any(p in ("", ".", "..") or "\0" in p for p in parts)):
+        raise ValueError("give a file directly in notes/ or notes/archive/")
+    with _page_folder(desk, len(parts) == 2) as folder:
+        return _page_file(desk, folder, parts[-1])
 
 
 def headings(lines: list) -> list:
