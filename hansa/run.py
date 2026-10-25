@@ -35,7 +35,7 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
-                   refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, program_candidates,
+                   refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, program_candidates,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
 from .srt_output import protected
@@ -2551,12 +2551,14 @@ def worker_read_denials(desk: Desk) -> list:
 
 def other_desks_hidden(desk: Desk) -> list:
     """The other desks on the account's list (desk.other_desks), each in every spelling, and the list itself:
-    hidden from every run, as its own desk is. Left out: a desk that holds one of this desk's lanes' repositories
-    (git's folders there are the run's), and a path with a pattern character or that would make a rule Claude
-    Code splits (no run of that desk starts either: desk_paths_problem)."""
+    hidden from every run, as its own desk is. A desk that holds this one or one of its lanes' repositories (git's
+    folders there are the run's) is hidden but for what holds them (holding_desks_parts). Left out: a path with a
+    pattern character or that would make a rule Claude Code splits (no run of that desk starts either:
+    desk_paths_problem)."""
     repos = [r for _, r in lane_repos(desk.settings()) if r.startswith("/")]
     paths = [x for d in other_desks(desk.root) if not any(_above(d, r) for r in repos) for x in path_spellings(d)]
-    return [x for x in full_paths([*paths, desks_file()]) if not path_rule_problem(x) and not pattern_chars(x)]
+    return [x for x in full_paths([*paths, *holding_desks_parts(desk.root, repos), desks_file()])
+            if not path_rule_problem(x) and not pattern_chars(x)]
 
 
 RUN_TMP_PATTERN = "hansa-*"  # the name of every run's temporary folder: make_worker_tmp's, run_tmp's, a try's

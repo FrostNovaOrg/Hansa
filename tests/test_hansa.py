@@ -16067,11 +16067,111 @@ def save():'''))
                 self.assertIn(f"Read(//{str(root).lstrip('/')}/{n}/**)", deny_co)
                 self.assertIn(f"Edit(//{str(root).lstrip('/')}/{n}/**)", deny_co)
         self.assertFalse([r for r in deny_co if str(c.root).lstrip("/") in r])
-        # its folder gone: the runs start as before, and nothing of it is asked for
+        # its folder gone, entirely: no longer a desk, so the runs start as before, nothing of it is asked for, and
+        # the coordinator is denied nothing of it
         shutil.rmtree(b.root)
         self.assertEqual(run.other_desks_hidden(self.desk), [x for x in run.full_paths([listed])])
+        self.assertFalse([r for r in cli.permissions(self.desk)["deny"] if b.root.name in r or str(link) in r])
         tid = self.desk.new_task("Add hello2.txt")
         self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        self.assertFalse([x for x in self.sandbox_of(argv)["filesystem"]["denyRead"] if b.root.name in x])
+
+    def test_a_desk_holding_this_desk_or_a_lane_repository_is_hidden_but_for_what_holds_them(self):
+        from hansa import desk as hd, run, up
+        self.assertTrue(str(up.desks_file()).startswith(str(self.tmp)))  # never the account's real list
+        up.desks_file().parent.mkdir(parents=True, exist_ok=True)
+        proj = self.tmp / "outer" / "proj"
+
+        def holds_desk():  # B at live, A at live/sub/desk
+            b = init_desk(self.tmp / "live", str(self.repo), "a")
+            return init_desk(self.tmp / "live" / "sub" / "desk", str(self.repo), "a"), b, []
+
+        def holds_repo():  # B at outer, one of A's lanes' repositories at outer/proj
+            b = init_desk(self.tmp / "outer", str(self.repo), "a")
+            proj.mkdir()
+            sh("git", "init", "-q", "-b", "main", cwd=proj)
+            sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init",
+               cwd=proj)
+            return init_desk(self.tmp / "a2", str(proj), "a"), b, [str(proj.resolve())]
+
+        for case in (holds_desk, holds_repo):
+            with self.subTest(case.__name__):
+                a, b, repos = case()
+                write_json(up.desks_file(), [{"desk": str(d.root), "hansa": "", "at": 0} for d in (a, b)])
+                seen = self.tmp / f"argv-{case.__name__}.jsonl"
+                s = a.settings()
+                s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+                self.assertEqual(a.save_settings(s), [])
+                tid = a.new_task("Add hello.txt")
+                with unittest.mock.patch.object(self, "desk", a):  # settle reads the task in self.desk
+                    self.assertEqual(self.settle(Dispatcher(a), tid)["state"], "done")  # A's own runs work as before
+                argv = json.loads(seen.read_text().splitlines()[-1])
+                deny, rules = self.sandbox_of(argv)["filesystem"]["denyRead"], self.denied_by(argv)
+                lane, p = a.settings()["lanes"]["a"], a.settings()["providers"]["claude"]
+                srt = run.srt_settings(a, lane, "claude", p, Path(lane["repo"]),
+                                       str(self.tmp / "t"))["filesystem"]["denyRead"]
+                deny_co, launch = cli.permissions(a)["deny"], cli.launch_rules(a, str(self.tmp / "home"))
+                for n in ("secrets", ".hansa", "tasks", "notes", "settings.json", "lanes", "events.jsonl",
+                          "worktrees", "CLAUDE.md"):
+                    x = str(b.root / n)
+                    self.assertIn(x, deny)  # the worker's commands
+                    self.assertIn(x, srt)  # the setup and the check
+                    self.assertIn(f"Read(//{x.lstrip('/')}/**)", rules)  # its Read tool
+                    for tool in ("Read", "Edit"):  # the coordinator's session, and one hansa notify-launch starts
+                        for end in ("", "/**"):
+                            self.assertIn(f"{tool}(//{x.lstrip('/')}{end})", deny_co)
+                    self.assertIn(f"Edit(//{x.lstrip('/')}/**)", launch)
+                # nothing that holds A or its repository, but A's own fence: not B's folder, nor those on the way
+                held = [str(a.root), *repos]
+                self.assertFalse([x for x in deny + srt if any(hd._above(x, h) for h in held)
+                                  and not hd._above(str(a.root), x)])
+                self.assertFalse([r for r in deny_co if r.endswith(f"//{str(b.root).lstrip('/')}/**)")])
+
+    def test_a_desk_inside_this_desk_is_left_to_its_fence(self):
+        from hansa import desk as hd, run, up
+        inner = init_desk(self.desk.root / "inner", str(self.repo), "a")
+        up.desks_file().parent.mkdir(parents=True, exist_ok=True)
+        write_json(up.desks_file(), [{"desk": str(d.root), "hansa": "", "at": 0} for d in (self.desk, inner)])
+        self.assertEqual(hd.holding_desks_parts(self.desk.root, [str(self.repo)]), [])
+        self.assertFalse([x for x in run.other_desks_hidden(self.desk) if x.startswith(str(inner.root))])
+        self.assertFalse([r for r in cli.permissions(self.desk)["deny"] if "/inner/" in r])
+
+    def test_other_desks_hidden_leaves_out_a_path_rules_would_misread(self):
+        from hansa import desk as hd, run, up
+        c = self.other_desk("desk C")
+        odd = []
+        for name in ("odd [1]", "split) x"):  # a pattern character; a rule Claude Code would split
+            root = (self.tmp / name / "desk")
+            (root / "tasks").mkdir(parents=True)
+            write_json(root / "settings.json", {})  # a desk there, as listed_desks sees one
+            odd.append(root.resolve())
+        entries = json.loads(up.desks_file().read_text())
+        write_json(up.desks_file(), entries + [{"desk": str(r), "hansa": "", "at": 0} for r in odd])
+        self.assertEqual(sorted(hd.other_desks(self.desk.root)), sorted([str(c.root), *map(str, odd)]))
+        hidden = run.other_desks_hidden(self.desk)
+        self.assertIn(str(c.root), hidden)
+        self.assertFalse([x for x in hidden if "odd" in x or "split" in x], hidden)
+        self.assertFalse([r for r in cli.permissions(self.desk)["deny"] if "split" in r])
+        self.assertEqual(self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))["state"], "done")
+
+    def test_init_warns_of_a_listed_desk_it_is_in_or_holds(self):
+        from hansa import up
+        c = init_desk(self.tmp / "x" / "y" / "c", str(self.repo), "a")
+        up.desks_file().parent.mkdir(parents=True, exist_ok=True)
+        write_json(up.desks_file(), [{"desk": str(d.root), "hansa": "", "at": 0} for d in (self.desk, c)])
+        for root, named, said in ((self.desk.root / "inner", self.desk.root, "holds this desk"),
+                                  (self.tmp / "x", c.root, "is inside this desk"), (self.tmp / "beside", None, "")):
+            with self.subTest(root=root):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    main(["init", str(root)])
+                self.assertTrue((root / "settings.json").is_file())  # the desk is made
+                warned = [x for x in out.getvalue().splitlines() if x.startswith("warning")]
+                if named:
+                    self.assertTrue(len(warned) == 1 and str(named) in warned[0] and said in warned[0], warned)
+                else:
+                    self.assertEqual(warned, [])
 
     def test_a_write_list_may_not_name_a_folder_in_another_listed_desk(self):
         b = self.other_desk("others/desk B")
@@ -16104,8 +16204,14 @@ def save():'''))
         self.assertTrue(str(listed).startswith(str(self.tmp)))  # never the account's real list
         self.other_desk()
         kept, d = listed.read_bytes(), Dispatcher(self.desk)
+        put = lambda data: lambda: listed.write_bytes(data)
         cases = [("a folder in its place", lambda: (listed.unlink(), listed.mkdir()),
-                  lambda: (listed.rmdir(), listed.write_bytes(kept)))]
+                  lambda: (listed.rmdir(), listed.write_bytes(kept))),
+                 # there, but not a list of desks: it cannot say which desks to hide either
+                 ("empty", put(b""), put(kept)), ("not JSON", put(b"[{\"desk\": "), put(kept)),
+                 ("a JSON object", put(b'{"desk": "/x"}'), put(kept)),
+                 ("a link that leads nowhere", lambda: (listed.unlink(), listed.symlink_to(self.tmp / "gone.json")),
+                  lambda: (listed.unlink(), listed.write_bytes(kept)))]
         if os.getuid() != 0:  # root reads a file at mode 000
             cases.insert(0, ("mode 000", lambda: listed.chmod(0), lambda: listed.chmod(0o600)))
         for n, (case, close, reopen) in enumerate(cases):
@@ -16123,12 +16229,15 @@ def save():'''))
                     reopen()
                 stopped = [x for x in status.splitlines() if x.startswith("STOPPED")]
                 self.assertTrue(stopped and str(listed) in stopped[0] and "no run starts" in stopped[0], status)
+                if case in ("empty", "not JSON", "a link that leads nowhere"):
+                    self.assertIn(f"({case})", stopped[0])
                 self.assertIn(f"waits: hansa cannot read the account's list of desks, {listed}", shown)
                 self.assertEqual(self.desk.settings()["lanes"]["a"]["write"], [str(self.tmp / f"cache-{n}")])
                 self.assertEqual(self.settle(d, tid)["state"], "done")  # readable again: it starts, nothing else done
-        listed.unlink()  # no list at all: nothing to hide, and runs start
-        self.assertFalse(views.status(self.desk)["desks_stop"])
-        self.assertEqual(self.settle(d, self.desk.new_task("Add hello.txt"))["state"], "done")
+        for case, gone in (("[]", lambda: listed.write_text("[]")), ("no list at all", listed.unlink)):
+            gone()  # nothing to hide, and runs start
+            self.assertFalse(views.status(self.desk)["desks_stop"], case)
+            self.assertEqual(self.settle(d, self.desk.new_task(f"Add hello-{len(case)}.txt"))["state"], "done")
 
     def test_a_write_folder_above_the_accounts_list_of_desks_is_refused(self):
         from hansa import up

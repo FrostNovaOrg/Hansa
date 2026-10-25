@@ -2338,15 +2338,26 @@ def desks_file() -> Path:
 
 
 def _desks_entries() -> tuple:
-    """(what the account's list of desks holds, '' or why it cannot be read): a missing list holds nothing."""
+    """(what the account's list of desks holds, '' or why it cannot be used): a missing list holds nothing; one that
+    is there but cannot be read, is empty, is not JSON or not a list, or is a link that leads nowhere, holds nothing
+    and says why."""
     f = desks_file()
     try:
-        return read_json(f, []) or [], ""
+        text = "" if f.is_symlink() and not f.exists() else f.read_text(encoding="utf-8")
+        entries = json.loads(text) if text.strip() else None
+        if isinstance(entries, list):
+            return entries, ""
+        why = ("a link that leads nowhere" if f.is_symlink() and not f.exists() else
+               "empty" if not text.strip() else "not a JSON list")
+    except FileNotFoundError:
+        return [], ""
+    except json.JSONDecodeError:
+        why = "not JSON"
     except (OSError, UnicodeDecodeError) as e:
         why = e.strerror if isinstance(e, OSError) and e.strerror else type(e).__name__
-        return [], (f"hansa cannot read the account's list of desks, {f} ({why}), so it cannot tell which other "
-                    "desks to hide from runs: no run starts until that file can be read (fix its permissions, or "
-                    "move away what stands in its place)")
+    return [], (f"hansa cannot read the account's list of desks, {f} ({why}), so it cannot tell which other "
+                "desks to hide from runs: no run starts until that file can be read as a JSON list (fix its "
+                "permissions or what it holds, or move away what stands in its place)")
 
 
 def desks_list_problem() -> str:
@@ -2374,6 +2385,29 @@ def other_desks(root) -> list:
     (`root`), holds it or is inside it."""
     return list(dict.fromkeys(str(r) for r, _ in listed_desks()
                               if str(r).startswith("/") and not _overlaps(str(r), str(root))))
+
+
+# The files and folders hansa keeps in a desk (the layout above), and the card
+DESK_LAYOUT = ("settings.json", "secrets", "lanes", "tasks", "worktrees", "notes", "events.jsonl", "asks.json",
+               "PAUSED", ".hansa", "CLAUDE.md")
+
+
+def holding_desks_parts(root, repos) -> list:
+    """For each other desk on the account's list that holds this desk (`root`) or one of its lanes' repositories
+    (`repos`), so that it is not hidden whole (other_desks, run.other_desks_hidden): its DESK_LAYOUT entries that
+    hold neither, in each spelling of its path. None for a desk inside this one: this desk's own fence covers it."""
+    keep, out = [str(root), *repos], []
+    for d in dict.fromkeys(str(r) for r, _ in listed_desks()):
+        if d.startswith("/") and not _above(str(root), d) and any(_above(d, k) for k in keep):
+            names = [n for n in DESK_LAYOUT if not any(_above(os.path.join(d, n), k) for k in keep)]
+            out += [os.path.join(x, n) for x in path_spellings(d) for n in names]
+    return list(dict.fromkeys(out))
+
+
+def listed_overlaps(root) -> list:
+    """The folders of the other desks on the account's list that hold this desk's folder (`root`) or are in it."""
+    return list(dict.fromkeys(str(r) for r, _ in listed_desks()  # one above the other, not the same folder
+                              if str(r).startswith("/") and _above(str(r), str(root)) != _above(str(root), str(r))))
 
 
 def path_spellings(path: str) -> list:

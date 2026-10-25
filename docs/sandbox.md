@@ -112,17 +112,26 @@ Nor does a run read the other desks on the account's list of desks (the one
 each other listed folder that is still a desk is hidden whole, as given on the
 list, with its links resolved and, on macOS, without `/private` in front, from
 the workers' commands and Read tool, the setup and the check. A desk whose
-folder is gone, one not on the list, or one that is this desk, holds it or
-holds one of its lanes' repositories is left alone; so is one inside this
-desk, which this desk's own fence covers. The coordinator's session
+folder is gone, one not on the list, or this desk is left alone; so is one
+inside this desk, which this desk's own fence covers. The coordinator's session
 is denied Read and Edit on each listed desk's `secrets/` and `.hansa/` too.
 
-A list that is missing hides nothing, and runs start. One that is there but
-cannot be read (no permission, a folder in its place, another read error)
-starts no run, as hansa cannot tell which desks to hide: queued tasks wait,
+A listed desk whose folder holds this desk, or one of its lanes' repositories,
+cannot be hidden whole: instead each file and folder hansa keeps there
+(`settings.json`, `secrets/`, `lanes/`, `tasks/`, `worktrees/`, `notes/`,
+`events.jsonl`, `asks.json`, `PAUSED`, `.hansa/`, `CLAUDE.md`) that holds
+neither is hidden from the runs, and the coordinator's session is denied Read
+and Edit on each. What holds this desk or the repository, and the rest of that
+folder, stays as it was. `hansa init` warns, naming the other desk, when it
+makes a desk inside a listed desk or in a folder that holds one.
+
+A list that is missing, or holds `[]`, hides nothing, and runs start. One that
+is there but cannot be used (no permission, a folder in its place, another read
+error, an empty file, text that is not JSON, JSON that is not a list, a link
+that leads nowhere) starts no run, as hansa cannot tell which desks to hide: queued tasks wait,
 `hansa status` says why under `STOPPED:` and `hansa show` of a queued task
 under `waits:`, each naming the file, and runs start again by themselves once
-it can be read.
+it is fixed.
 
 A write-list entry that hansa would now refuse when a run starts (one saved before that refusal
 was there, or one whose link has since been pointed elsewhere) is left out of that run, and `hansa show`

@@ -20,7 +20,7 @@ from pathlib import Path
 from . import account, alert, build, cost, gaps, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
 from .desk import (EFFORTS, Desk, SettingsError, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
-                   argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, path_spellings, pattern_path_problem, run_homes,
+                   argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name, compact_settings, work_lane_problem, write_text)
 from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
@@ -206,9 +206,14 @@ def desk_read_denials(desk: Desk) -> list:
 
 def other_desk_rules(desk: Desk, tool: str) -> list:
     """Rules that deny `tool` the keys (secrets/) and state (.hansa/) of each other desk on the account's list
-    (desk.other_desks), in each spelling of its path; none for a spelling whose rule Claude Code would split."""
+    (desk.other_desks), in each spelling of its path; and of each that holds this desk or one of its lanes'
+    repositories, every file and folder hansa keeps there that holds neither (holding_desks_parts). None for a
+    spelling whose rule Claude Code would split."""
     others = [x for d in other_desks(desk.root) for x in path_spellings(d) if not path_rule_problem(x)]
-    return [f"{tool}(//{x.lstrip('/')}/{n}/**)" for x in dict.fromkeys(others) for n in ("secrets", ".hansa")]
+    repos = [r for _, r in lane_repos(desk.settings()) if r.startswith("/")]
+    held = [x for x in holding_desks_parts(desk.root, repos) if not path_rule_problem(x)]
+    return [*(f"{tool}(//{x.lstrip('/')}/{n}/**)" for x in dict.fromkeys(others) for n in ("secrets", ".hansa")),
+            *(f"{tool}(//{x.lstrip('/')}{end})" for x in held for end in ("", "/**"))]
 
 
 def no_publish_rules() -> list:
@@ -341,6 +346,10 @@ def cmd_init(a):
         _init_for(a)
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base or "")
     print(f"desk ready at {desk.root}")
+    for d in listed_overlaps(desk.root):  # the runs are kept from the other desk's files, but the folders still overlap
+        where = "holds this desk" if _above(d, str(desk.root)) else "is inside this desk"
+        print(f"warning: desk {d}, on this account's list of desks, {where}: keep each desk in a folder of its own, "
+              "beside the other, so that neither desk's folder holds the other's")
     print("next: run `hansa up` there, open the page with `hansa web` and add providers and keys; "
           "the coordinator adds lanes with `hansa lane add` and queues work with `hansa add`.")
 
