@@ -120,9 +120,9 @@ def record_start(desk: Desk, options) -> None:
 
 
 def serve_command(desk: Desk, rec: dict) -> list:
-    opts = {**DEFAULTS, **rec.get("options", {})}
+    opts = {**DEFAULTS, "port": None, **rec.get("options", {})}
     return [rec.get("hansa") or hansa_command(), "--desk", str(desk.root), "serve",
-            *[str(x) for k in DEFAULTS for x in ("--" + k, opts[k])]]
+            *[str(x) for k in DEFAULTS if opts[k] is not None for x in ("--" + k, opts[k])]]
 
 
 def clean_env(desk: Desk, recorded: dict) -> dict:

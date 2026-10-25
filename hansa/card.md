@@ -62,6 +62,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | command | what it does |
 |---|---|
 | `hansa status` | whether `hansa serve` runs; when it is not running, `hansa up` starts it again as it last ran; what runs, waits (and why) or failed; lanes, providers, usage |
+| `hansa desks [--json]` | every desk on this account's list: server, page address without its key, server version, task counts and principal's waiting release/to-do counts; reads only. More: `hansa help bringing-up` |
 | `hansa add "<task>" [--lane L] [--effort E] [--model M] [--title T] [--max-turns N] [--file PATH] [--attach PATH]` | queue a task |
 | `hansa show <id> [--full \| --report \| --check \| --check-log \| --merge-check-log]` | report, changes, refused calls, check (failing tests, last lines), next step |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base; `--new`: only what a follow-up added |
@@ -95,7 +96,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa gaps [--all]` / `gaps show ID` / `gaps mark ID fixed\|later\|wontfix "why"` | notes |
 | `hansa help [command \| topic \| card \| topics]` | a command's help, a topic of hansa's docs, this card, the topics |
 
-`--json` on `status` or `cost` gives machine-readable output; `hansa <command> --help` gives all of a
+`--json` on `status`, `desks` or `cost` gives machine-readable output; `hansa <command> --help` gives all of a
 command's options.
 
 Run one plain `hansa` command per call. Loops, variables, `$(...)`, pipes into `sed` or `awk`, and

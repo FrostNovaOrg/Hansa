@@ -1997,6 +1997,117 @@ class TrySrtTest(unittest.TestCase):
                 self.assertEqual(run.srt_record(self.desk)["said"], said)
 
 
+class DesksTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        env = unittest.mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.tmp / "state")})
+        env.start()
+        self.addCleanup(env.stop)
+        from hansa.desk import desks_file
+        self.listed = desks_file()
+        self.assertTrue(self.listed.is_relative_to(self.tmp))
+        self.listed.parent.mkdir(parents=True)
+
+    def say(self, *args):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            main(["desks", *args])
+        return out.getvalue()
+
+    def desk(self, name):
+        desk = Desk(self.tmp / name)
+        desk.tasks_dir.mkdir(parents=True)
+        desk.state_dir.mkdir()
+        desk.secrets_dir.mkdir()
+        write_json(desk.settings_path, {})
+        return desk
+
+    def test_desks_shows_only_counts_addresses_and_the_running_servers_version_without_writes(self):
+        first, second = self.desk("first"), self.desk("second")
+        write_json(self.listed, [{"desk": str(d.root)} for d in (first, second)])
+        secrets = ["private-task-title", "private-task-text", "private-report", "private-note",
+                   "private-todo", "private-provider-key", "private-page-key", "private-release-code"]
+        for d in (first, second):
+            (d.secrets_dir / "provider.key").write_text(secrets[5])
+            (d.state_dir / "web-token").write_text(secrets[6])
+            for i, (state, kind) in enumerate((("running", "task"), ("queued", "task"), ("done", "task"),
+                                               ("done", "verify"), ("merged", "task"))):
+                task = d.tasks_dir / str(i)
+                task.mkdir()
+                write_json(task / "meta.json", {"state": state, "kind": kind, "title": secrets[0],
+                                                "text": secrets[1], "report": secrets[2], "note": secrets[3]})
+            write_json(d.asks_path, [{"text": secrets[4]}, {"text": secrets[4], "closed": "then"}])
+            write_json(d.state_dir / "releases.json", [{"state": "waiting", "code": secrets[7]},
+                                                       {"state": "done", "note": secrets[3]}])
+            write_json(d.state_dir / "serve-code", {"pid": 123, "build": "server-version"})
+        (first.state_dir / "web-port").write_text("9876")
+        (first.state_dir / "web-host").write_text("0.0.0.0")
+        before = {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in self.tmp.rglob("*") if p.is_file()}
+        with unittest.mock.patch.object(views, "server_state", side_effect=lambda d: {
+                "state": "up" if d.root == first.root else "gone", "pid": 123}), \
+                unittest.mock.patch.object(cli.notify, "session_here", return_value=True), \
+                unittest.mock.patch.object(cli.cost, "note_session") as note, \
+                unittest.mock.patch.object(Desk, "find", side_effect=AssertionError("account command")), \
+                unittest.mock.patch.object(Desk, "web_token", side_effect=AssertionError("private token")):
+            said, raw = self.say(), self.say("--json")
+        note.assert_not_called()
+        self.assertEqual(before, {p: (p.stat().st_mtime_ns, p.read_bytes())
+                                  for p in self.tmp.rglob("*") if p.is_file()})
+        rows = json.loads(raw)["desks"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0], {"desk": str(first.root), "server": "up", "version": "server-version",
+                                   "address": "http://127.0.0.1:9876/", "running": 1, "waiting": 1,
+                                   "review": 1, "releases": 1, "todos": 1})
+        self.assertIsNone(rows[1]["version"])
+        self.assertEqual(rows[1]["server"], "gone")
+        for word in (str(first.root), str(second.root), "not running", "server-version", "http://127.0.0.1:9876/",
+                     "1 running", "1 waiting", "1 waiting for review", "1 releases", "1 to-dos"):
+            self.assertIn(word, said)
+        for secret in secrets:
+            self.assertNotIn(secret, said + raw)
+
+    def test_desks_keeps_missing_and_unreadable_folders_and_continues(self):
+        from hansa.desk import listed_desks
+        gone, bad, good = self.tmp / "gone", self.desk("bad"), self.desk("good")
+        write_json(self.listed, [{"desk": str(p)} for p in (gone, bad.root, good.root)] + [{}, "ignored"])
+        self.assertEqual([p for p, _ in listed_desks()], [bad.root, good.root])
+        read = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == bad.settings_path:
+                raise PermissionError(errno.EACCES, "private failure text")
+            return read(path, *args, **kwargs)
+
+        with unittest.mock.patch.object(Path, "read_text", unreadable):
+            said, raw = self.say(), self.say("--json")
+        rows = json.loads(raw)["desks"]
+        self.assertEqual(rows[0], {"desk": str(gone), "problem": "folder is gone"})
+        self.assertIn("cannot be read", rows[1]["problem"])
+        self.assertEqual(rows[2]["server"], "gone")
+        self.assertIn(str(good.root), said)
+        self.assertNotIn("private failure text", said + raw)
+        self.assertEqual(sum(str(gone) in line for line in said.splitlines()), 1)
+
+    def test_desks_missing_list_and_unreadable_list_use_the_shared_reason(self):
+        from hansa.desk import desks_list_problem
+        self.assertEqual(self.say().strip(), "No desks listed")
+        self.assertEqual(json.loads(self.say("--json")), {"desks": [], "problem": ""})
+        self.listed.mkdir()
+        self.assertEqual(self.say().strip(), desks_list_problem())
+        self.assertEqual(json.loads(self.say("--json")), {"desks": [], "problem": desks_list_problem()})
+
+    def test_desks_uses_unknown_for_a_stale_server_version_and_brackets_ipv6(self):
+        d = self.desk("desk")
+        write_json(self.listed, [{"desk": str(d.root)}])
+        write_json(d.state_dir / "serve-code", {"pid": 1, "build": "old-version"})
+        (d.state_dir / "web-host").write_text("::")
+        with unittest.mock.patch.object(views, "server_state", return_value={"state": "stuck", "pid": 2}):
+            row = json.loads(self.say("--json"))["desks"][0]
+        self.assertEqual(row["server"], "stuck")
+        self.assertIsNone(row["version"])
+        self.assertEqual(row["address"], "http://[::1]:8765/")
+
+
 class UpTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -2049,6 +2160,68 @@ class UpTest(unittest.TestCase):
         rec.update(fields)
         write_json(self.desk.state_dir / "serve-start.json", rec)
         return rec
+
+    def fake_serve(self, bind, *args):
+        from hansa import web
+        dispatcher = types.SimpleNamespace(tick=unittest.mock.Mock(side_effect=KeyboardInterrupt))
+        with cli.hold_server_lock(self.desk) as held, \
+                unittest.mock.patch.object(cli, "hold_server_lock", return_value=held), \
+                unittest.mock.patch.object(cli, "desk_paths_problem", return_value=""), \
+                unittest.mock.patch.object(web, "start_web", side_effect=bind) as start, \
+                unittest.mock.patch.object(cli, "Dispatcher", return_value=dispatcher), \
+                unittest.mock.patch.object(cli, "try_srt_at_start", return_value={}), \
+                unittest.mock.patch.object(views, "srt_problem", return_value=""), \
+                unittest.mock.patch.object(cli.alert, "start_thread"), \
+                unittest.mock.patch.object(cli.signal, "signal"):
+            said = self.say("serve", *args)
+        return said, [call.args[2] for call in start.call_args_list]
+
+    def test_serve_automatically_uses_next_free_port_and_reuses_it_on_restart(self):
+        from hansa import up
+        occupied = {8765, 8766}
+
+        def bind(desk, host, port):
+            if port in occupied:
+                raise OSError(errno.EADDRINUSE, "taken")
+            return types.SimpleNamespace(server_address=(host, port))
+
+        said, tried = self.fake_serve(bind)
+        self.assertEqual(tried, [8765, 8766, 8767])
+        self.assertIn("127.0.0.1:8767", said)
+        self.assertEqual(cli.web_port(self.desk), 8767)
+        self.assertIn(":8767/", views.page_text(views.page_of(self.desk, self.running)))
+        with unittest.mock.patch.object(cli.os, "read", return_value=b""):
+            self.assertIn(":8767/", self.say("web"))
+        rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
+        self.assertIsNone(rec["options"]["port"])
+        self.assertNotIn("--port", up.serve_command(self.desk, rec))
+        self.assertNotIn("--port", up.serve_command(self.desk, {}))
+        occupied.clear()  # even the original default is free again; the saved port wins
+        self.assertEqual(self.fake_serve(bind)[1], [8767])
+        occupied.add(8767)
+        self.assertEqual(self.fake_serve(bind)[1], [8767, 8768])
+        self.assertEqual(cli.web_port(self.desk), 8768)
+
+    def test_serve_explicit_port_conflict_still_fails_without_trying_another(self):
+        attempted = []
+
+        def bind(desk, host, port):
+            attempted.append(port)
+            raise OSError(errno.EADDRINUSE, "taken")
+
+        with self.assertRaisesRegex(SystemExit, "port 9876 is in use"):
+            self.fake_serve(bind, "--port", "9876")
+        self.assertEqual(attempted, [9876])
+        self.assertFalse((self.desk.state_dir / "web-port").exists())
+
+    def test_serve_does_not_retry_other_bind_errors_or_wrap_the_last_port(self):
+        with self.assertRaises(PermissionError):
+            self.fake_serve(unittest.mock.Mock(side_effect=PermissionError(errno.EACCES, "refused")))
+        (self.desk.state_dir / "web-port").write_text("65535")
+        bind = unittest.mock.Mock(side_effect=OSError(errno.EADDRINUSE, "taken"))
+        with self.assertRaisesRegex(SystemExit, "port 65535 is in use"):
+            self.fake_serve(bind)
+        bind.assert_called_once()
 
     def test_serve_records_launch_before_starting_the_page_without_keys_or_session_identity(self):
         from hansa import up, web
@@ -36826,7 +36999,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             return held[-1]
         with unittest.mock.patch.object(web, "start_web", taken), unittest.mock.patch.object(
                 cli, "hold_server_lock", hold), self.assertRaises(SystemExit):
-            main(["--desk", str(self.desk.root), "serve"])
+            main(["--desk", str(self.desk.root), "serve", "--port", "8765"])
         held[0].close()
         self.assertEqual(json.loads((self.desk.state_dir / "serve-code").read_text()),
                          {"pid": os.getpid(), "build": hansa.build(), "installed": hansa.installed()})

@@ -528,6 +528,14 @@ foreground `hansa serve --port N` works as before and updates this record.
 The command path keeps links to the installation, so switching such a link
 makes future starts use the new installation.
 
+Without `--port`, `hansa serve` tries the port in `.hansa/web-port`, or 8765
+before its first run. If it is taken, it tries each following port until one
+binds (up to 65535). It prints the chosen port and saves it in `.hansa/web-port`;
+`hansa web` and `hansa status` then use that address. The next start tries that
+saved port first, even if 8765 is free again. The start record preserves automatic
+port selection, so `hansa up` follows the same rule. An explicit `--port N`
+stays explicit in the start record and fails if N is taken, as before.
+
 The record never includes `ANTHROPIC_*`, other key variables, values holding
 one of the desk's keys, or a Claude Code session's identity or messaging
 variables. hansa removes the session's identity before recording the start.
@@ -568,6 +576,38 @@ to have `up`, nothing starts there and hansa prints the last server command
 instead. A new desk gets on the list when its server starts once. Each desk's
 runs are kept from the other listed desks and from the list itself
 ([sandbox.md](sandbox.md#what-workers-and-verifiers-may-touch)).
+
+`hansa desks` shows this account's whole list from any folder, including inside
+a desk. It writes nothing in any desk. Each block gives the folder, whether
+its server runs (including busy or stuck), the page address without its key,
+the running server's recorded hansa version, and counts only. A server without
+a matching version record shows `unknown`; a stopped server has no current
+version. For example:
+
+```text
+desk /work/desk-one
+  server: running (up); hansa 1.2.3
+  page: http://127.0.0.1:8766/
+  tasks: 2 running, 3 waiting, 1 waiting for review
+  principal: 1 releases, 2 to-dos waiting
+
+desk /work/desk-two
+  server: not running; hansa unknown
+  page: http://127.0.0.1:8765/
+  tasks: 0 running, 1 waiting, 0 waiting for review
+  principal: 0 releases, 0 to-dos waiting
+```
+
+Running and waiting count task records in `running` and `queued` respectively,
+including verifications. Review counts `done` tasks, excluding verification
+records, as `hansa status` does. Releases count those waiting for approval;
+to-dos count open requests. A stopped desk still shows its counts and its last
+page address (or the default before it has served). Missing or unreadable desk
+folders get one line each, and the other desks are still shown. A missing or
+empty list says `No desks listed`; an unreadable list gives the same reason as
+`hansa status`. `hansa desks --json` gives the same facts in `desks` and a
+list-level `problem` string. Neither format includes task titles, notes,
+reports, to-do texts, provider keys, release codes or the page's key.
 
 ### The coordinator's session
 
