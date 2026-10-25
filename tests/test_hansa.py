@@ -15915,6 +15915,84 @@ def save():'''))
         self.assertFalse([x for x in self.sandbox_of(argv)["filesystem"]["denyRead"]
                           if x.startswith((str(f), str(other)))])
 
+    def other_desk(self, name="desk B", listed=True):
+        """Another desk in the test's folder, on the account's list (under the test's XDG_STATE_HOME) with this one
+        when `listed`."""
+        from hansa import up
+        (self.tmp / name).parent.mkdir(exist_ok=True)
+        other = init_desk(self.tmp / name, str(self.repo), "a")
+        if listed:
+            entries = json.loads(up.desks_file().read_text()) if up.desks_file().exists() else \
+                [{"desk": str(self.desk.root), "hansa": "", "at": 0}]
+            up.desks_file().parent.mkdir(parents=True, exist_ok=True)
+            write_json(up.desks_file(), entries + [{"desk": str(other.root), "hansa": "", "at": 0}])
+        return other
+
+    def test_a_run_is_kept_from_the_other_desks_on_the_accounts_list_and_from_the_list(self):
+        from hansa import run, up
+        self.assertTrue(str(up.desks_file()).startswith(str(self.tmp)))  # never the account's real list
+        seen = self.tmp / "argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SHOW_ARGV": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        b, c = self.other_desk(), self.other_desk("desk C", listed=False)
+        link = self.tmp / "b-link"
+        link.symlink_to(b.root)
+        entries = json.loads(up.desks_file().read_text())
+        entries[-1]["desk"] = str(link)  # listed through a link: the real path is hidden too
+        write_json(up.desks_file(), entries)
+        tid = self.desk.new_task("Add hello.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")  # its own worktree and tmp work
+        argv = json.loads(seen.read_text().splitlines()[-1])
+        deny, rules = self.sandbox_of(argv)["filesystem"]["denyRead"], self.denied_by(argv)
+        lane, p = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        srt = run.srt_settings(self.desk, lane, "claude", p, self.repo, str(self.tmp / "t"))["filesystem"]["denyRead"]
+        listed = str(up.desks_file())
+        for x in (str(b.root.resolve()), str(link), listed):
+            self.assertIn(x, deny)  # the worker's commands
+            self.assertIn(x, srt)  # the setup and the check
+            self.assertIn(f"Read(//{x.lstrip('/')}/**)", rules)  # its Read tool
+        stepped = os.path.normpath(f"{link}/../{b.root.name}/secrets")  # `..` steps come to the same folder
+        self.assertTrue(any(stepped == x or stepped.startswith(x + "/") for x in deny), stepped)
+        self.assertFalse([x for x in deny if x.startswith(str(c.root))])  # a desk not on the list stays as it was
+        # the coordinator's session: Read and Edit denied on the other desk's keys and state, each spelling
+        deny_co = cli.permissions(self.desk)["deny"]
+        for root in (b.root.resolve(), link):
+            for n in ("secrets", ".hansa"):
+                self.assertIn(f"Read(//{str(root).lstrip('/')}/{n}/**)", deny_co)
+                self.assertIn(f"Edit(//{str(root).lstrip('/')}/{n}/**)", deny_co)
+        self.assertFalse([r for r in deny_co if str(c.root).lstrip("/") in r])
+        # its folder gone: the runs start as before, and nothing of it is asked for
+        shutil.rmtree(b.root)
+        self.assertEqual(run.other_desks_hidden(self.desk), [x for x in run.full_paths([listed])])
+        tid = self.desk.new_task("Add hello2.txt")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+
+    def test_a_write_list_may_not_name_a_folder_in_another_listed_desk(self):
+        b = self.other_desk("others/desk B")
+        s = self.desk.settings()
+        s["lanes"]["a"]["write"] = [str(b.root / "cache")]
+        said = self.desk.save_settings(s)
+        self.assertTrue(said and "another desk on this account's list" in said[0] and str(b.root) in said[0], said)
+        s["lanes"]["a"]["write"] = [str(b.root.parent)]  # nor one that holds it
+        self.assertIn("another desk", " ".join(self.desk.save_settings(s)))
+        s["lanes"]["a"]["write"] = [str(self.tmp / "cache-a")]
+        self.assertEqual(self.desk.save_settings(s), [])
+
+    def test_status_warns_of_a_write_folder_another_listed_desk_writes_too(self):
+        b = self.other_desk()
+        shared = str(self.tmp / "hansa-cache" / "a" / "pip")
+        s = self.desk.settings()
+        s["lanes"]["a"]["write"] = [shared]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertFalse(views.status(self.desk)["shared_writes"])  # B's lanes write elsewhere
+        sb = json.loads(b.settings_path.read_text())
+        sb["lanes"]["a"]["write"] = [shared]
+        write_json(b.settings_path, sb)
+        warned = [x for x in views.status_text(views.status(self.desk)).splitlines() if x.startswith("WARNING")]
+        self.assertTrue(len(warned) == 1 and shared in warned[0] and str(b.root) in warned[0], warned)
+        self.assertIn("<desk>", warned[0])  # the convention that keeps them apart
+
     def test_the_session_hansa_coordinator_starts_keeps_its_rules_with_a_folder_recorded(self):
         self.record_folder((self.tmp / "own folder").resolve())
         show = self.tmp / "argv-claude"
@@ -16137,7 +16215,7 @@ def save():'''))
                 told = validate(s, self.desk.root)
                 self.assertTrue(len(told) == 1 and f"it would open {lib}, which holds" in told[0], told)
                 self.assertIn("nothing in it can be listed", told[0])
-                self.assertIn("~/hansa-cache/<lane>/<tool>", told[0])
+                self.assertIn("~/hansa-cache/<desk>/<lane>/<tool>", told[0])
                 self.assertNotIn("Caches and folders inside it can be listed", told[0])
 
     def test_other_names_for_the_whole_disk_open_nothing_in_either_list(self):
@@ -19592,19 +19670,19 @@ def save():'''))
                 told = self.refused_and_left_out(x, only)
                 self.assertIn("such as ~/work/cache: a user's caches", told)
                 self.assertIn("are shared with what runs outside the sandbox; give the lane a folder of its own, such "
-                              "as ~/hansa-cache/<lane>/<tool>, and point the tool there with the lane's env: "
+                              "as ~/hansa-cache/<desk>/<lane>/<tool>, and point the tool there with the lane's env: "
                               "PIP_CACHE_DIR, npm_config_cache", told)  # what can be written instead
             in_library = ("Library/Anything", "Library/LaunchAgents", "Library/Application Support/x", "Library/Caches/pip",
                           "Library/Caches/Homebrew", "Library/Caches/com.anthropic.claudefordesktop.ShipIt")
             for x in in_library:
                 told = self.refused_and_left_out(home / x, str(home / "Library") if sys.platform == "darwin" else only)
                 self.assertNotIn("Caches and folders inside it can be listed", told)  # they cannot
-                self.assertIn("~/hansa-cache/<lane>/<tool>", told)
+                self.assertIn("~/hansa-cache/<desk>/<lane>/<tool>", told)
             for system in ("linux", "darwin"):  # on either system, whichever fence says it
                 with unittest.mock.patch.object(sys, "platform", system):
                     for x in in_library:
                         told = write_problems([str(home / x)])
-                        self.assertTrue(len(told) == 1 and "~/hansa-cache/<lane>/<tool>" in told[0], (system, told))
+                        self.assertTrue(len(told) == 1 and "~/hansa-cache/<desk>/<lane>/<tool>" in told[0], (system, told))
                         self.assertNotIn("can be listed)", told[0].replace("nothing in it can be listed", ""))
             self.refused_and_left_out(home / "node_modules", "a folder node loads packages from")
             # ~/.m2 holds Maven's master password, which workers may not read: refused for that first
@@ -19641,7 +19719,7 @@ def save():'''))
             for top in ("go", "miniconda3", "anaconda3", "miniforge3", "mambaforge"):
                 for x in (home / top, home / top / "pkg" / "mod", home / top / "bin"):
                     told = self.refused_and_left_out(x, f"it would open {home / top}, ")
-                    self.assertIn("~/hansa-cache/<lane>/<tool>", told)
+                    self.assertIn("~/hansa-cache/<desk>/<lane>/<tool>", told)
             self.assertIn("Go's default GOPATH", self.refused_and_left_out(home / "work" / "lgo" / "pkg", str(home / "go")))
             self.assertIn("a conda install", write_problems([str(home / "miniconda3" / "envs")])[0])
             fine = [str(home / n) for n in ("gopher", "go-cache", "work/go", "miniconda3x", "hansa-cache/a/go")]

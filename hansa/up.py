@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from . import SESSION, SESSION_PREFIXES, account, notify, without_session
-from .desk import Desk, now, program, read_json, write_json, write_text
+from .desk import Desk, desks_file, listed_desks, now, program, read_json, write_json, write_text
 from .run import alive, proc_args, proc_cwd, proc_start, server_state
 
 DEFAULTS = {"host": "127.0.0.1", "port": 8765, "every": 3.0}
@@ -52,10 +52,6 @@ def card_copy_enabled(desk: Desk) -> bool:
 def hansa_command() -> str:
     # Keep installation links, as bin/hansa does, so switching one changes future starts.
     return str(Path(__file__).absolute().parent.parent / "bin" / "hansa")
-
-
-def desks_file() -> Path:
-    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "hansa" / "desks.json"
 
 
 def start_env(desk: Desk, env) -> dict:
@@ -887,14 +883,8 @@ def desk_up(desk: Desk) -> bool:
 
 
 def all_desks_up() -> bool:
-    entries = read_json(desks_file(), []) or []
     found, ok = False, True
-    for rec in entries:
-        if not isinstance(rec, dict) or not rec.get("desk"):
-            continue
-        root = Path(rec["desk"])
-        if not ((root / "settings.json").is_file() and (root / "tasks").is_dir()):
-            continue
+    for root, rec in listed_desks():
         if found:
             print()
         found = True

@@ -541,7 +541,9 @@ Outside any desk, with no `--desk` or `HANSA_DESK`,
 for each. Each is started by its own installation with
 `<saved hansa> --desk <folder> up`. If that installation is missing or too old
 to have `up`, nothing starts there and hansa prints the last server command
-instead. A new desk gets on the list when its server starts once.
+instead. A new desk gets on the list when its server starts once. Each desk's
+runs are kept from the other listed desks and from the list itself
+([sandbox.md](sandbox.md#what-workers-and-verifiers-may-touch)).
 
 ### The coordinator's session
 

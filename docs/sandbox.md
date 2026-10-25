@@ -107,6 +107,15 @@ pattern when it wraps a command, so a folder made afterwards stays readable to i
 Claude Code's file tools get the same as Read rules, but a temporary folder made
 after the run started is open to them.
 
+Nor does a run read the other desks on the account's list of desks (the one
+`hansa up` reads, `desks.json`; see [desk.md](desk.md)), or that list itself:
+each other listed folder that is still a desk is hidden whole, as given on the
+list, with its links resolved and, on macOS, without `/private` in front, from
+the workers' commands and Read tool, the setup and the check. A desk whose
+folder is gone, one not on the list, or one that is this desk, holds it or
+holds one of its lanes' repositories is left alone. The coordinator's session
+is denied Read and Edit on each listed desk's `secrets/` and `.hansa/` too.
+
 A write-list entry that hansa would now refuse when a run starts (one saved before that refusal
 was there, or one whose link has since been pointed elsewhere) is left out of that run, and `hansa show`
 says so ([A lane's write list and env](#a-lanes-write-list-and-env)).
@@ -282,10 +291,17 @@ cache folders. A lane writes only folders of its own. The rule, in two lines:
 - in the home folder of the account (whatever `HOME` says), only a plain
   folder: no name between the home folder and the entry starts with a dot,
   and it is not inside `~/Library` or `~/Applications`. Such as
-  `~/hansa-cache/<lane>/<tool>` or `~/work/cache`;
+  `~/hansa-cache/<desk>/<lane>/<tool>` or `~/work/cache`;
 - outside the home folder, anywhere but where programs are installed and the
   folders on the `PATH`: a tools folder such as `/srv/x/tools/xdg-cache/pnpm`,
   another volume, `/tmp`.
+
+Neither may name the desk's folder or another desk's on the account's list, or
+a folder above one. `<desk>` in `~/hansa-cache/<desk>/<lane>/<tool>` is the
+desk folder's name, so that two desks' lanes of the same name get folders of
+their own; `hansa status` warns, naming the folder and the other desk, when a
+folder on this desk's write lists is, holds or is inside one on a write list
+of another listed desk.
 
 So none of the user's caches can be listed: not `~/.cache/pip`,
 `~/Library/Caches/pip`, `~/.m2/repository`, `~/.gradle/caches`,
@@ -294,7 +310,7 @@ shared with what runs outside the sandbox (apps' updaters, corepack's node,
 what brew installs from, the user's own builds), and shells, git and the
 tools hansa runs read hidden files when they start, so a worker that wrote
 there would change what runs outside the sandbox later. Give the lane a folder
-of its own, such as `~/hansa-cache/<lane>/<tool>`, list it, and point the tool
+of its own, such as `~/hansa-cache/<desk>/<lane>/<tool>`, list it, and point the tool
 there with the lane's env. The well-known tool homes with plain names are
 refused too, with what is inside them: `~/go` (Go's default GOPATH, whose
 `pkg/mod` the user's own builds share), `~/sdk` (the Go versions Go
@@ -330,7 +346,7 @@ would open. `hansa explain lane L` marks each entry a run would leave out,
 with why. The coordinator tells the principal what it added and why.
 
 Point a tool at the lane's folder with the lane's env (`hansa lane set L env
-NAME=/Users/me/hansa-cache/L/TOOL`, and list that folder): pip
+NAME=/Users/me/hansa-cache/DESK/L/TOOL`, and list that folder): pip
 `PIP_CACHE_DIR`, npm `npm_config_cache` (env names may be in either case),
 pnpm's store `npm_config_store_dir`, yarn `YARN_CACHE_FOLDER`, cargo
 `CARGO_HOME`, go `GOMODCACHE` and `GOCACHE`, gradle `GRADLE_USER_HOME`, maven

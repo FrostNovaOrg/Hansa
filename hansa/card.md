@@ -278,9 +278,10 @@ or ask `scout` when reading is enough; say what you need back.
 - Network list: add a host only when the lane's work needs it. `localhost`: on Linux leave it off
   (each sandbox has its own loopback); on macOS it opens every service on the machine's loopback, so
   list it only where nothing there must be kept from workers. More: `hansa help network-list`.
-- Write list: only folders of the lane's own (`~/hansa-cache/<lane>/<tool>`), the tool pointed there
-  by the lane's env (`PIP_CACHE_DIR=...`); never a cache the user shares or a hidden folder
-  (`~/.cache/pip`, `~/.m2`). A tool's bin folder goes on the `PATH` inside the check or setup command.
+- Write list: only folders of the lane's own (`~/hansa-cache/<desk>/<lane>/<tool>`, `<desk>` the desk
+  folder's name), the tool pointed there by the lane's env (`PIP_CACHE_DIR=...`); never a cache the
+  user shares or a hidden folder (`~/.cache/pip`, `~/.m2`). A tool's bin folder goes on the `PATH`
+  inside the check or setup command.
   More: `hansa help write-env`, `hansa help refused-paths`.
 - Java or Maven: `hansa help java`. Lane commands on Linux: `hansa help linux-sandbox`.
 - The principal's, on the page: providers, models, keys, effort defaults, when your session compacts,
