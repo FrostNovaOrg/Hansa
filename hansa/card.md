@@ -72,7 +72,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa cancel <id>` | stop a queued or running task or verification, or a merge check (back to review) |
 | `hansa close <id>` | close a finished task or verification without merging |
 | `hansa notify [on \| off]` | the sessions hansa posts to; start or stop this one |
-| `hansa wait [id ...] [--timeout MIN]` | return when a task ends or a to-do closes |
+| `hansa wait [id ...] [--timeout MIN]` | return when a task ends; with no tasks to watch, return at once |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
 | `hansa explain [lane L [--all] \| provider P \| server \| notify]` | settings and state, and where each comes from |
 | `hansa lane` | one line per lane |

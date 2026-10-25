@@ -167,7 +167,7 @@ Code ignores the allowed commands of a folder it does not trust, and the coordin
 
 Then tell the coordinator what you want built. It sets up the lanes and how many tasks run at once
 (`hansa lane`, `hansa concurrency`) and queues the work. hansa tells the coordinator's session when a task
-ends or you answer a request, through the session's inbox (`hansa notify` shows which sessions it posts
+ends or you answer a release, through the session's inbox (`hansa notify` shows which sessions it posts
 to). If your Claude Code settings hold messages from other sessions (`crossSessionInbound`), the coordinator
 does not hear it; only you can change that.
 

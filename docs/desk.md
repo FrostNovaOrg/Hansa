@@ -840,7 +840,9 @@ says all of this.
 
 While hansa posts to a session, that session does not keep `hansa wait`
 running in the background; `hansa wait` is for a session hansa does not post
-to. Since hansa posts when a task, a verification or a merge ends and when the
+to. It waits for tasks only; open to-dos do not keep it waiting. With no tasks
+to watch, it returns at once, saying there is nothing to wait for.
+Since hansa posts when a task, a verification or a merge ends and when the
 principal answers a release, the coordinator needs no scheduled wakeups and no polling to
 find out: it ends its turn and waits. Each wakeup or poll is a turn that rereads
 the whole conversation, and costs that much even when it finds nothing to do.
@@ -867,6 +869,8 @@ fact for the principal; it does not pause dispatch. The new-item alert is unchan
 The principal answers in the conversation. The coordinator closes the item with
 `hansa ask --close N "<outcome>"`; an outcome is required. Workers and verifications
 cannot close to-dos. Releases still take the principal's yes or no on the page.
+Requests answered on the page in an older version stay closed with their answers;
+those answers are not posted to the coordinator.
 
 ### The daily clear
 

@@ -1164,23 +1164,21 @@ def cmd_resume(a):
 
 
 def cmd_wait(a):
-    """Return when a watched task stops running, a to-do is closed, or time is up.
+    """Return when a watched task stops running or time is up.
     Meant to run in the background, so the session is told when there is something to look at."""
     desk = Desk.find(a.desk)
     live = lambda t: desk.meta(t)["state"] in ("queued", "running", "merging")  # noqa: E731
     watch = sorted(set(a.ids)) or sorted(m["id"] for m in desk.tasks() if m["state"] in ("queued", "running", "merging"))
-    open_asks = {x["id"] for x in desk.asks() if not x["closed"]}
     done_already = [t for t in watch if not live(t)]
-    if not done_already and not any(map(live, watch)) and not open_asks:
-        print("nothing is queued or running and no request to the principal is open: nothing to wait for")
+    if not done_already and not any(map(live, watch)):
+        print("nothing is queued or running: nothing to wait for")
         return
     if server_state(desk)["state"] == "gone":  # as hansa status's server_up says it
         print("note: hansa serve is not running, so no task will start or finish until it is")
     end = time.time() + a.timeout * 60
     while True:
         ended = [desk.meta(t) for t in watch if not live(t)]
-        answered = [x for x in desk.asks() if x["id"] in open_asks and x["closed"]]
-        if ended or answered or time.time() >= end:
+        if ended or time.time() >= end:
             break
         time.sleep(a.every)
     for m in ended:
@@ -1191,11 +1189,8 @@ def cmd_wait(a):
                  + (mc.get("note") or f"the check failed (exit {mc.get('exit')})")
                  if m["state"] == "done" and mc and not mc.get("ok") else
                  "\n  merged after its merge check passed" if m["state"] == "merged" and mc.get("ok") else ""))
-    for x in answered:
-        print(f"request #{x['id']} closed by the coordinator: {x.get('reason', '')}" if x.get("closed_by") == "coordinator"
-              else f"request #{x['id']} answered: {x['answer'] or '(closed without a note)'}")
     still = [desk.meta(t) for t in watch if live(t)]
-    if not ended and not answered:
+    if not ended:
         print(f"no task finished in {a.timeout:g} min")
     for m in still:
         mins = int((time.time() - m["started"]) // 60) if m.get("started") else 0
@@ -3050,8 +3045,9 @@ def main(argv=None):
     card.add_argument("--card", action="store_true", default=None,
                       help="with on: turn the desk's card copy back on (default: keep the desk's choice)")
     p.epilog = see_more("inbox")
-    p = add("wait", cmd_wait, "return when a task finishes or fails, or a to-do closes; run it in the "
+    p = add("wait", cmd_wait, "return when a task finishes or fails; run it in the "
             "background when hansa does not notify the session (hansa notify)")
+    p.description += ". Open to-dos are not waited on; with no tasks to watch, return at once with nothing to wait for."
     p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")
     p.add_argument("--timeout", type=float, default=60, help="minutes (default 60)")
     p.add_argument("--every", type=float, default=5.0, help=argparse.SUPPRESS)

@@ -14776,6 +14776,40 @@ def save():'''))
             main(["--desk", str(self.desk.root), "wait"])
         self.assertIn("nothing to wait for", out.getvalue())
 
+    def test_wait_with_only_open_todos_returns_without_waiting(self):
+        self.desk.add_ask("Review access", holds=True)
+        with unittest.mock.patch("hansa.cli.time.sleep", side_effect=AssertionError("waited on a to-do")):
+            out = self.hansa_out("wait")
+        self.assertIn("nothing to wait for", out)
+        self.assertNotIn("no task finished", out)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            main(["wait", "--help"])
+        self.assertIn("nothing to wait for", " ".join(out.getvalue().split()))
+
+    def test_wait_ignores_request_answers_until_a_running_task_ends(self):
+        self.desk.add_ask("Still open")
+        self.desk.add_ask("Old page request")
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.change(tid, lambda m: {"state": "running"})
+
+        def progress(_):
+            if sleeping.call_count == 1:
+                asks = self.desk.asks()
+                asks[1].update(closed=now(), answer="Old page answer")
+                write_json(self.desk.asks_path, asks)
+            elif sleeping.call_count == 2:
+                self.desk.change(tid, lambda m: {"state": "done"})
+            else:
+                self.fail("wait did not notice the task ended")
+
+        with unittest.mock.patch("hansa.cli.time.sleep", side_effect=progress) as sleeping:
+            out = self.hansa_out("wait", "--timeout", "1")
+        self.assertEqual(sleeping.call_count, 2)
+        self.assertIn(f"{tid} done", out)
+        self.assertNotIn("request #", out)
+        self.assertEqual([a["id"] for a in views.todo_list(self.desk, state="open")["rows"]], [1])
+
     def test_wait_asks_only_whether_hansa_serve_runs(self):
         self.desk.new_task("Add hello.txt")
         out = io.StringIO()
@@ -15722,6 +15756,15 @@ def save():'''))
         self.assertEqual(row["reason"], "Principal granted access in the conversation")
         self.assertTrue(row["closed"])
         self.assertEqual(notify.items_for(self.desk, self.events("ask_closed"), {"key":"k", "session":None}), [])
+
+    def test_an_old_page_answer_stays_closed_with_its_answer_without_a_post(self):
+        old = {"id": 1, "text": "Review access", "created": 1, "closed": 2, "answer": "Access granted"}
+        write_json(self.desk.asks_path, [old])
+        self.desk.event("ask_closed", id=1, by="page")
+        self.assertEqual(views.todo_list(self.desk, state="closed")["rows"], [old])
+        self.assertEqual(views.todo_list(self.desk, state="open")["rows"], [])
+        self.assertEqual(views.status(self.desk)["asks"], [])
+        self.assertEqual(notify.items_for(self.desk, self.events("ask_closed"), {"key": "k", "session": None}), [])
 
     def test_an_open_request_naming_a_provider_that_is_ready_now_asks_whether_it_is_done(self):
         s = self.desk.settings()
