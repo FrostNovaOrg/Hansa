@@ -82,10 +82,15 @@ on its own. On the Chinese page, the desk and version items are labelled
 When releases await approval or requests are open, Status puts them directly below
 the header, before the pipeline, timeline and summary cards. Each starts with its
 number and lane/target or request's first line, followed immediately by its controls.
-The release command stays visible below the controls. Supporting details open on a
-click, so one item's details do not push the next item's controls down; commit,
-file and note lists longer than five lines have their own folded lists. Controls
-wrap in narrow windows. Recent releases and closed requests stay further down.
+The release command stays visible below the controls. Only lists longer than five
+lines, such as commits, files and a request's remaining lines, fold and open on a
+click. Release notes and warnings about a moved target, files outside the repository
+and direct commits stay visible after the controls and command, whatever their length.
+Request notes also stay visible. Open folds stay open across status refreshes until
+closed or their item stops waiting; each fold stays with its item's kind, number
+and list. Folded release lists keep their styling and scrolling. Reloading or closing
+the page discards the fold state. Controls wrap in narrow windows. Recent releases
+and closed requests stay further down.
 With nothing waiting, Status keeps its usual order.
 
 Status otherwise starts with a pipeline strip: queued tasks, running workers, running checks,

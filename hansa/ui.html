@@ -200,7 +200,7 @@ td .task-detail { min-width:200px; }
 .principal-details > summary { cursor:pointer; color:var(--link); }
 .principal-details pre { margin:7px 0; }
 .release-card { background:var(--input); }
-.release-card > .mono { padding:8px 10px; background:var(--surface); border-radius:6px; margin:7px 0; }
+.release-card > .mono, .release-card > .principal-details > .mono { padding:8px 10px; background:var(--surface); border-radius:6px; margin:7px 0; }
 .release-card > .muted { font-size:12px; margin-top:8px; }
 .event-list { max-height:400px; overflow:auto; }
 .event-row { display:grid; grid-template-columns:160px minmax(0,1fr); gap:5px 16px; padding:12px 0; border-top:1px solid var(--line); }
@@ -1215,6 +1215,19 @@ function loadTimeline() {
 
 // Keep unsent text only in this page, under the record and action it belongs to.
 const statusDrafts = new Map();
+const principalOpen = new Set();
+function keepPrincipalDetails(st) {
+  const live = new Set(st.asks.map(a => `ask:${a.id}`));
+  for (const r of st.releases || []) if (r.state === "waiting") live.add(`release:${r.id}`);
+  const item = key => key.slice(0, key.lastIndexOf(":"));
+  for (const fold of document.querySelectorAll("#tab-status details")) {
+    const key = fold.getAttribute("data-principal-fold");
+    if (!key) continue;
+    if (fold.open) principalOpen.add(key);
+    else principalOpen.delete(key);
+  }
+  for (const key of principalOpen) if (!live.has(item(key))) principalOpen.delete(key);
+}
 function statusInput(key, attrs) {
   return h("input", {...attrs, "data-status-draft":key, value:statusDrafts.get(key) || ""});
 }
@@ -1284,6 +1297,7 @@ async function loadStatus(force = false) {
   const root = $("#tab-status"), active = document.activeElement;
   const inStatus = root.contains(active);
   if (force !== true && inStatus && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return;
+  keepPrincipalDetails(st);
   const restoreFocus = keepStatusFocus(root);
   const reason = statusInput("pause", {placeholder:T.pauseReason, "aria-label":T.pauseReason});
   const t = st.last_24h;
@@ -1351,8 +1365,8 @@ function asksSection(st) {
     return h("div", {class:"request-card", "data-principal-request":true}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, first)),
       h("div", {class:"principal-actions"}, ans, h("button", {"data-status-focus":`ask:${a.id}:close`, onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
         .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close)),
-      rest.length || a.note ? h("details", {class:"principal-details"}, h("summary", {}, T.principalDetails),
-        rest.length ? h("pre", {}, rest.join("\n")) : null, a.note ? h("span", {class:"ok"}, a.note) : null) : null);
+      rest.length ? principalList(`ask:${a.id}:text`, T.principalDetails, rest, h("pre", {}, rest.join("\n"))) : null,
+      a.note ? h("span", {class:"ok"}, a.note) : null);
   }), (st.asks_closed || []).length ? h("h3", {}, T.closedRequests) : null,
     (st.asks_closed || []).map(a => h("div", {class:"request-card muted"}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, a.text)),
       h("div", {class:"field-note"}, `${T.closedByCoordinator}${a.reason} (${when(a.closed)})`))));
@@ -1367,22 +1381,21 @@ function releaseBlock(r) {
     h("div", {class:"principal-actions"}, h("button", {class:"primary", "data-status-focus":`release:${r.id}:yes`, onclick: () => answer(true)}, T.releaseYes),
       reason, h("button", {"data-status-focus":`release:${r.id}:no`, onclick: () => answer(false)}, T.releaseNo)),
     h("div", {class:"muted"}, T.releaseCommand), h("pre", {class:"mono"}, r.command),
-    h("details", {class:"principal-details"}, h("summary", {}, T.principalDetails),
     h("div", {class:"row"}, `${r.base} @ `, h("code", {}, (r.commit || "").slice(0, 10)), h("span", {class:"muted"}, when(r.asked))),
-    r.note ? [h("div", {class:"muted"}, T.releaseNote), principalList(T.releaseNote, r.note.split(/\r?\n/).map(line => h("div", {}, line)))] : null,
+    r.note ? h("div", {}, `${T.releaseNote}: ${r.note}`) : null,
     h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs),
     releaseOutside(r),
     r.moved ? h("div", {class:"bad"}, T.releaseMoved + ((ZH && r.moved_zh) || r.moved)) : null,
     r.code ? h("div", {class:"muted"}, (ZH && r.code_zh) || r.code) : null,
     h("div", {class:"muted"}, T.releaseCommits(r.count, r.since_release), " · ", T.releaseChecked(r.checked ?? r.count, (r.commits || []).length)),
-    principalList(T.releaseCommits(r.count, r.since_release), (r.commits || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`))),
+    principalList(`release:${r.id}:commits`, T.releaseCommits(r.count, r.since_release), (r.commits || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`))),
     h("div", {class:"muted"}, T.releaseFiles(r.files_count)),
-    principalList(T.releaseFiles(r.files_count), (r.files || []).map(f => named.has(f)
-      ? h("div", {class:"warn"}, h("strong", {}, f), T.releaseNamed) : h("div", {}, f)))));
+    principalList(`release:${r.id}:files`, T.releaseFiles(r.files_count), (r.files || []).map(f => named.has(f)
+      ? h("div", {class:"warn"}, h("strong", {}, f), T.releaseNamed) : h("div", {}, f))));
 }
-function principalList(label, lines) {
-  const list = h("div", {class:"mono"}, lines);
-  return lines.length > 5 ? h("details", {class:"principal-details"}, h("summary", {}, label), list) : list;
+function principalList(key, label, lines, list = h("div", {class:"mono", style:"max-height:14em;overflow:auto"}, lines)) {
+  return lines.length > 5 ? h("details", {class:"principal-details", "data-principal-fold":key, open:principalOpen.has(key)},
+    h("summary", {}, label), list) : list;
 }
 function releaseOutside(r) {
   return h("div", {class:"mono"}, (r.outside || []).map(f => h("div", {class:"warn"}, `${T.releaseOutside}: ${f.path}`,
