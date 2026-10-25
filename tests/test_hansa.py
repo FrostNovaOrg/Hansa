@@ -24156,9 +24156,12 @@ def save():'''))
         for days in (1, 7, 30, 90, None):
             with self.subTest(days=days):
                 rep = cost.report(self.desk, days)
-                self.assertEqual(len(rep["work"]), 10)
+                self.assertEqual(len(rep["work"]), 13)
                 self.assertTrue(all(value == 0 for value in rep["work"].values()))
                 self.assertEqual(rep["total"]["tokens"], 0)
+                self.assertTrue(all(b["finished"] == b["merged"] == 0 for b in rep["work_chart"]["buckets"]))
+                if days in (1, 7, 30):
+                    self.assertEqual(len(rep["work_chart"]["buckets"]), days)
 
     def test_work_history_counts_task_outcomes_not_tries_and_keeps_followups(self):
         ended = time.time() - 60
@@ -24202,6 +24205,99 @@ def save():'''))
             self.assertEqual((work["releases_asked"], work["releases_out"]), (3, 1))
             self.assertEqual((work["finished"], work["merged"], work["failed"]), (0, 0, 0))
 
+    def test_work_history_queued_or_failed_verification_with_stale_finish_is_not_completed(self):
+        ended = time.time() - 60
+        for state in ("queued", "failed"):
+            tid = self.desk.new_task("Verify again", kind="verify")
+            self.desk.update(tid, state=state, finished=ended, verdict="holds")
+        for days in (7, None):
+            work = cost.report(self.desk, days)["work"]
+            self.assertEqual([work[key] for key in ("verifications", "held", "finished", "failed")], [0, 0, 0, 0])
+
+    def test_work_history_lines_use_only_merged_tasks_saved_stats_and_followups_once(self):
+        ended = time.time() - 60
+        original = self.desk.new_task("Original work")
+        self.desk.update(original, state="done", finished=ended,
+                         stat=" 1 file changed, 900 insertions(+), 700 deletions(-)")
+        self.hansa("retry", original, "--fresh", "Follow up")
+        [followup] = [m for m in self.desk.tasks() if m["id"] != original]
+        self.desk.update(followup["id"], state="merged", finished=ended, merged=ended,
+                         stat=" 2 files changed, 12 insertions(+), 3 deletions(-)")
+        missing = self.desk.new_task("No size recorded")
+        self.desk.update(missing, state="merged", finished=ended, merged=ended)
+        old = self.desk.new_task("Merged before this period")
+        self.desk.update(old, state="merged", finished=1, merged=1, stat="1 file changed, 8 deletions(-)")
+        with unittest.mock.patch("hansa.run.git", side_effect=AssertionError("must not read git")):
+            recent = cost.report(self.desk)["work"]
+            whole = cost.report(self.desk, None)["work"]
+        self.assertEqual([recent[k] for k in ("merged", "lines_added", "lines_removed", "lines_omitted")], [2, 12, 3, 1])
+        self.assertEqual([whole[k] for k in ("merged", "lines_added", "lines_removed", "lines_omitted")], [3, 12, 11, 1])
+
+    def test_work_history_recorded_lines_handles_singular_missing_sides_and_unknown_stats(self):
+        for stat, expected in (("1 file changed, 1 insertion(+)\n", (1, 0)),
+                               ("2 files changed, 4 deletions(-)", (0, 4)),
+                               ("1 file changed", (0, 0)),  # binary or rename-only
+                               ("3 files changed, 42 insertions(+), 21 deletions(-)", (42, 21)),
+                               (None, None), ("", None), ("unreadable", None), ({}, None)):
+            with self.subTest(stat=stat):
+                self.assertEqual(cost.recorded_lines(stat), expected)
+
+    def test_work_chart_daily_bars_fill_empty_intervals_and_add_up_to_totals(self):
+        now = 1792940400  # fixed clock, independent of the test machine's calendar
+        for age in (0, 2, 6):
+            tid = self.desk.new_task("Recorded work")
+            self.desk.update(tid, state="merged", finished=now - age * 86400 - 1,
+                             merged=now - max(0, age - 1) * 86400 - 1)
+        boundary = self.desk.new_task("Exactly at the period boundary")
+        self.desk.update(boundary, state="done", finished=now - 7 * 86400)
+        for days in (1, 7, 30):
+            with self.subTest(days=days), unittest.mock.patch("hansa.cost.time.time", return_value=now):
+                rep = cost.report(self.desk, days)
+                chart = rep["work_chart"]
+                self.assertEqual(chart["interval"], "day")
+                self.assertEqual(len(chart["buckets"]), days)
+                self.assertEqual(chart["buckets"][0]["start"], now - days * 86400)
+                self.assertEqual(chart["buckets"][-1]["end"], now)
+                for key in ("finished", "merged"):
+                    self.assertEqual(sum(b[key] for b in chart["buckets"]), rep["work"][key])
+                if days == 7:
+                    self.assertEqual([b["finished"] for b in chart["buckets"]], [2, 0, 0, 0, 1, 0, 1])
+                    self.assertTrue(any(b["finished"] == b["merged"] == 0 for b in chart["buckets"]))
+
+    def test_work_chart_weeks_start_monday_in_desk_timezone_across_dst(self):
+        if not hasattr(time, "tzset"):
+            self.skipTest("needs tzset for the desk timezone")
+        old_tz = os.environ.get("TZ")
+        def restore_tz():
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+        self.addCleanup(restore_tz)
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        stamp = lambda text: time.mktime(time.strptime(text, "%Y-%m-%d %H:%M"))
+        now = stamp("2026-11-09 12:00")
+        for text in ("2026-10-25 23:59", "2026-10-26 00:00", "2026-11-02 00:00"):
+            tid = self.desk.new_task("Across local weeks")
+            self.desk.update(tid, state="merged", finished=stamp(text), merged=stamp(text))
+        for days in (90, None):
+            with self.subTest(days=days), unittest.mock.patch("hansa.cost.time.time", return_value=now):
+                rep = cost.report(self.desk, days)
+                chart = rep["work_chart"]
+                self.assertEqual(chart["interval"], "week")
+                buckets = {b["label"]: b for b in chart["buckets"]}
+                for key in ("finished", "merged"):
+                    self.assertEqual(sum(b[key] for b in buckets.values()), rep["work"][key])
+                    for label in ("2026-10-19", "2026-10-26", "2026-11-02"):
+                        self.assertEqual(buckets[label][key], 1)
+                for b in chart["buckets"][1:]:
+                    local = time.localtime(b["start"])
+                    self.assertEqual((local.tm_wday, local.tm_hour, local.tm_min), (0, 0, 0))
+                self.assertEqual(buckets["2026-10-26"]["end"] - buckets["2026-10-26"]["start"], 7 * 86400 + 3600)
+                self.assertEqual(buckets["2026-11-09"]["finished"], 0)
+
     def test_work_history_period_boundaries_and_whole_history(self):
         boundary = time.time() - 90 * 86400
         for end in (boundary - 0.01, boundary, boundary + 0.01):
@@ -24213,7 +24309,8 @@ def save():'''))
             {"id": i, "state": "done", "asked": end, "ended": end}
             for i, end in enumerate((boundary - 0.01, boundary, boundary + 0.01), 1)])
         expected = {"finished": 2, "merged": 2, "failed": 2, "verifications": 2, "held": 0, "did_not_hold": 0,
-                    "unsure": 2, "releases_asked": 2, "releases_out": 2, "worker_hours": 6}
+                    "unsure": 2, "releases_asked": 2, "releases_out": 2, "worker_hours": 6,
+                    "lines_added": 0, "lines_removed": 0, "lines_omitted": 2}
         self.assertEqual(cost.report(self.desk, since=boundary)["work"], expected)
         with unittest.mock.patch("hansa.cost.time.time", return_value=boundary + 90 * 86400):
             self.assertEqual(cost.report(self.desk, 90)["work"], expected)
@@ -24265,6 +24362,7 @@ def save():'''))
                 self.assertEqual(code, 200)
                 self.assertEqual(rep["days"], None if period == "all" else 90)
                 self.assertEqual(rep["transcripts_omitted"], period == "all")
+                self.assertEqual(rep["work_chart"]["interval"], "week")
                 self.assertEqual("rows" in rep, bool(suffix))
                 self.assertTrue(all(value == 0 for value in rep["work"].values()))
 
@@ -30018,6 +30116,22 @@ else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(as
   same(postedTo("/api/release/stop"), {id:18, reason:"Stop this run"}, "release stop payload changed");
   console.log(JSON.stringify({pause:true, resume:true, details:true, asks:true, releases:true}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "work-chart") vm.runInContext("loadCost()", ctx).then(async () => {
+  const select = ids["#cost-period"]; select.value = String(given["/api/cost"].days ?? "all"); select.on.change({target:select});
+  await new Promise(resolve => setImmediate(resolve));
+  const root = ids["#tab-cost"], charts = [];
+  walk(root, el => { if (el.className.split(" ").includes("cost-chart")) charts.push(el); });
+  const work = charts.find(el => el.className.split(" ").includes("work-chart"));
+  const bars = descendants(work, "div").filter(el => el.className.split(" ").includes("work-chart-track"));
+  const result = bars.map(el => {
+    el.focus();
+    return {label:el.attrs["aria-label"], title:el.attrs.title, tabindex:el.attrs.tabindex,
+      focused:document.activeElement === el, text:el.textContent, style:el.kids[0].attrs.style};
+  });
+  console.log(JSON.stringify({charts:charts.map(el => el.attrs["aria-label"]), text:root.textContent,
+    name:work?.attrs["aria-label"], bars:result,
+    css:page.slice(page.indexOf("<style>"), page.indexOf("</style>"))}));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "cost-chart") vm.runInContext("loadCost()", ctx).then(async () => {
   const days = given["/api/cost"].days;
   const select = ids["#cost-period"]; select.value = String(days); select.on.change({target:select});
@@ -32846,6 +32960,49 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         for period in (90, "all"):
             output = self.page_preferences(actions=[{"tab": "cost"}, {"period": period}, {"reload": True}])
             self.assertEqual(output["snapshots"][-1]["period"], str(period))
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_work_chart_and_approximate_lines_render_in_both_languages_with_focus_text(self):
+        ended = time.time() - 60
+        tid = self.desk.new_task("Work with a size")
+        self.desk.update(tid, state="merged", finished=ended, merged=ended,
+                         stat="1 file changed, 12 insertions(+), 3 deletions(-)")
+        missing = self.desk.new_task("Work without a size")
+        self.desk.update(missing, state="merged", finished=ended, merged=ended)
+        harness = self.tmp / "work-chart-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for days in (7, 90, None):
+            report = cost.report(self.desk, days)
+            for language in ("en", "zh"):
+                with self.subTest(days=days, language=language):
+                    result = subprocess.run(["node", str(harness), str(page), "work-chart", language],
+                                            input=json.dumps({"/api/cost": report}), capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    output = json.loads(result.stdout)
+                    expected = ("每日工作" if days == 7 else "每周工作") if language == "zh" else ("Daily work" if days == 7 else "Weekly work")
+                    self.assertEqual(output["charts"], ["每日折算金额" if language == "zh" else "Daily estimated value", expected])
+                    self.assertEqual(output["name"], expected)
+                    self.assertEqual(len(output["bars"]), len(report["work_chart"]["buckets"]))
+                    if days == 7:
+                        self.assertEqual(len(output["bars"]), 7)
+                    for bar, bucket in zip(output["bars"], report["work_chart"]["buckets"]):
+                        self.assertIn(bucket["range"], bar["label"])
+                        self.assertIn(("完成的任务" if language == "zh" else "Tasks finished") + f": {bucket['finished']}", bar["label"])
+                        self.assertIn(("合并的任务" if language == "zh" else "Tasks merged") + f": {bucket['merged']}", bar["label"])
+                        self.assertEqual(bar["title"], bar["label"])
+                        self.assertEqual(bar["text"], bar["label"])
+                        self.assertEqual(bar["tabindex"], "0")
+                        self.assertTrue(bar["focused"])
+                        if not bucket["finished"] and not bucket["merged"]:
+                            self.assertEqual(bar["style"], "height:0%")
+                    self.assertIn(".work-chart-track:hover .work-chart-tooltip", output["css"])
+                    self.assertIn(".work-chart-track:focus .work-chart-tooltip", output["css"])
+                    for label in (("约增加行数", "约删除行数", "未计入 1 个") if language == "zh"
+                                  else ("Approx. lines added", "Approx. lines removed", "1 merged task", "recorded change size omitted")):
+                        self.assertIn(label, output["text"])
+                    self.assertIn("≈ 12", output["text"])
+                    self.assertIn("≈ 3", output["text"])
 
     def cost_csv_rows(self, rows):
         if not shutil.which("node"):

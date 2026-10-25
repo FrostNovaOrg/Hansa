@@ -276,6 +276,15 @@ Alongside these totals it counts:
   follow-up count independently. Verifications count separately.
 - Tasks merged, from each task's `merged` time. Finishing and merging in different
   periods contributes to each period's respective count.
+- Approximate lines added and removed by those merged tasks, parsed from the
+  saved `stat` (`git diff --shortstat` at task completion) in their metadata;
+  the page never runs git to obtain these counts. Tasks without a readable size
+  record are excluded and their number is shown. An insertion-only or
+  deletion-only record contributes zero on the other side. Binary and rename-only
+  records can contribute zero lines. A replaced original contributes no lines
+  unless it was itself merged; a merged follow-up contributes its own size once.
+  These are task change sizes, not net repository growth: overlapping changes,
+  later reversions and merge conflict resolutions can differ from the sum.
 - Completed verifications, from tasks of kind `verify` with outcome `done`, by
   `finished` time. Their `verdict` counts as held (`holds` or `holds, with notes`),
   did not hold (`does not hold`) or unsure (`unsure`). A missing verdict contributes
@@ -292,17 +301,21 @@ Alongside these totals it counts:
 
 Periods are rolling windows of N × 24 hours, including the starting instant.
 All history uses the same records without a lower time limit and reads no git
-history. It retains worker and verifier token usage, value, warnings, all six
-tables, chart and CSV export, but omits coordinator and helper transcript usage
-and value: scanning all those transcripts can take too long. The page explicitly
+history. It retains worker and verifier token usage, value, warnings about that
+usage and coordinator access, all six tables, charts and CSV export, but omits
+coordinator and helper transcript usage and value: scanning all those transcripts
+can take too long. The page explicitly
 states this omission. `/api/cost?days=all` selects all history (`days: null` in
 the response); `days=90` selects 90 days. Both use the usual page key, including
-`&rows=1` for CSV data. `work` holds the new counters; `transcripts_omitted`
-identifies the all-history limitation. CSV retains its usage rows and columns;
+`&rows=1` for CSV data. `work` holds the counters, including `lines_added`,
+`lines_removed` and `lines_omitted`; `work_chart` supplies the work chart's
+`interval` and `buckets`. `transcripts_omitted` identifies the all-history
+limitation. CSV retains its usage rows and columns;
 all-history export is named `cost-all.csv`.
 
-Unpriced models and unreadable coordinator
-usage remain explicit warnings; dollar values are an estimate, not a bill. A
+Unpriced models in included usage and unreadable coordinator usage remain
+explicit warnings; all history cannot warn about unpriced models found only
+by the transcript scan it skips. Dollar values are an estimate, not a bill. A
 bar chart above the day table shows each returned day's USD value at the
 principal's prices, in date order. Each bar's accessible label and tooltip give
 the full date, amount and any unpriced token count; a warning mark identifies
@@ -313,9 +326,23 @@ readable above the table. The day table is unchanged. The chart
 uses `/api/cost`'s `by.day` date keys, `usd` and `unpriced_tokens`; it does not
 price tokens in the browser. Dates missing between the first and last returned
 day appear as empty bars with their date and no amount, using calendar arithmetic
-on the date keys alone. The chart does not extend beyond those dates: the API
-supplies no calendar boundaries or desk timezone for the period's ends.
-A period without rows shows the usage empty state. A failed range change
+on the date keys alone. The chart does not extend beyond those dates: the API's
+cost day rows supply no calendar boundaries or desk timezone for the period's ends.
+
+A separate work chart below the cost chart shows finished and merged task
+counts, using the same outcome rules and period boundaries as the totals.
+For 1, 7 and 30 days it has exactly that many rolling 24-hour bars, labeled by
+the ending date. For 90 days and all history, it groups work into calendar weeks
+starting Monday in the desk's local time, with partial first and last weeks.
+All history starts with the earliest recorded finish or merge (or today for an
+empty desk). Empty intervals retain a zero bar. The upper segment counts tasks
+finished and the lower counts tasks merged; a task can contribute to both.
+Hovering or focusing any bar shows its local start and end times and both
+counts as text; its accessible label carries the same information. The work
+chart also appears when there is no token usage. Counts are supplied by the
+API, rather than derived from usage rows or git history.
+
+A period without usage rows shows the usage empty state. A failed range change
 identifies the old report that remains visible and disables
 export until a report loads successfully. Retry requests the selected range.
 CSV export keeps the original rows and columns, uses the range selected when the

@@ -20,7 +20,9 @@ import json
 import os
 import re
 import time
+from bisect import bisect_right
 from collections import defaultdict
+from datetime import date, timedelta
 from pathlib import Path
 
 from . import account, release
@@ -340,13 +342,51 @@ def unassigned(r: dict) -> str:
     return "(coordinator)" if r["seat"] == "coordinator" or r["seat"].startswith("helper") else "(none)"
 
 
-def work_history(tasks: list, releases: list, since: float) -> dict:
+def work_buckets(tasks: list, since: float, now: float, days: int | None) -> dict:
+    """Daily rolling windows, or calendar weeks in the desk's timezone (including partial weeks)."""
+    weekly = days is None or days > 30
+    first = since if since else min([now, *(m[k] for m in tasks for k in ("finished", "merged") if m.get(k))])
+    starts = [first]
+    if weekly:
+        monday = date.fromisoformat(_day(first))
+        monday += timedelta(days=7 - monday.weekday())
+        while (stamp := time.mktime((*monday.timetuple()[:6], 0, 0, -1))) < now:
+            starts.append(stamp)
+            monday += timedelta(days=7)
+    else:
+        starts.extend(first + n * 86400 for n in range(1, days) if first + n * 86400 < now)
+    return {"interval": "week" if weekly else "day", "buckets": [
+        {"start": start, "end": end,
+         "label": str(date.fromisoformat(_day(start)) - timedelta(days=time.localtime(start).tm_wday)) if weekly else _day(end),
+         "range": " — ".join(time.strftime("%Y-%m-%d %H:%M", time.localtime(t)) for t in (start, end)),
+         "finished": 0, "merged": 0}
+        for start, end in zip(starts, [*starts[1:], now])]}
+
+
+def recorded_lines(stat) -> tuple | None:
+    """The saved --shortstat, never a fresh git diff. An empty/unrecognized record is unknown."""
+    if not isinstance(stat, str) or not re.fullmatch(
+            r"\s*\d+ files? changed(?:, \d+ insertions?\(\+\))?(?:, \d+ deletions?\(-\))?\s*", stat):
+        return None
+    return tuple(int(m[1]) if (m := re.search(r"(\d+) " + word, stat)) else 0
+                 for word in ("insertion", "deletion"))
+
+
+def work_history(tasks: list, releases: list, since: float, chart: dict | None = None) -> dict:
     """Outcomes by task, releases by request, and elapsed run time by when each ended.
     Replaced tasks retain ended_as; attempts are runs, never extra task outcomes."""
     out = dict.fromkeys(("finished", "merged", "failed", "verifications", "held", "did_not_hold", "unsure",
-                         "releases_asked", "releases_out"), 0)
+                         "releases_asked", "releases_out", "lines_added", "lines_removed", "lines_omitted"), 0)
     seconds = 0
     inside = lambda stamp: stamp is not None and stamp > 0 and stamp >= since
+    buckets = chart["buckets"] if chart else []
+    starts = [b["start"] for b in buckets]
+
+    def count(key, stamp):
+        out[key] += 1
+        if buckets:
+            buckets[max(0, bisect_right(starts, stamp) - 1)][key] += 1
+
     for m in tasks:
         state = m.get("ended_as") if m.get("state") == "replaced" else m.get("state")
         if m.get("kind") == "verify":
@@ -358,9 +398,17 @@ def work_history(tasks: list, releases: list, since: float) -> dict:
                     out[verdict] += 1
         else:
             if inside(m.get("finished")):
-                out["finished"] += state in ("done", "merged", "merging")
+                if state in ("done", "merged", "merging"):
+                    count("finished", m["finished"])
                 out["failed"] += state == "failed"
-            out["merged"] += inside(m.get("merged"))
+            if inside(m.get("merged")):
+                count("merged", m["merged"])
+                lines = recorded_lines(m.get("stat"))
+                if lines is None:
+                    out["lines_omitted"] += 1
+                else:
+                    out["lines_added"] += lines[0]
+                    out["lines_removed"] += lines[1]
         runs = [r for r in [*(m.get("attempts") or []), *(m.get("earlier_runs") or [])] if isinstance(r, dict)]
         # A queued retry still has the last run's timestamps, but its run is already on its attempt record.
         if not any(r.get("ran_from") == m.get("started") and r.get("ended") for r in runs):
@@ -378,8 +426,10 @@ def work_history(tasks: list, releases: list, since: float) -> dict:
 def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict:
     window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
               else "since the desk began" if days is None else f"last {days} day(s)")
-    since = since if since is not None else 0 if days is None else time.time() - days * 86400
+    now = time.time()
+    since = since if since is not None else 0 if days is None else now - days * 86400
     tasks = desk.tasks()
+    chart = work_buckets(tasks, since, now, days)
     # Whole-history transcripts can be arbitrarily large; metadata stays proportional to the task count.
     rows = worker_rows(desk, since, tasks=tasks) + (transcript_rows(desk, since) if days is not None else [])
     by = {}
@@ -398,7 +448,8 @@ def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict
         by[key] = {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(agg.items())}
     total_usd = sum(r["usd"] for r in rows if r["usd"] is not None)
     return {"days": days, "window": window, "rows": rows, "by": by,
-            "work": work_history(tasks, release.releases(desk), since), "transcripts_omitted": days is None,
+            "work": work_history(tasks, release.releases(desk), since, chart), "work_chart": chart,
+            "transcripts_omitted": days is None,
             "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": round(total_usd, 6),
                       "turns": sum(r.get("turns", 0) for r in rows), "runs": sum(r.get("runs", 0) for r in rows)},
             "unpriced_models": sorted({r["model"] for r in rows if r["usd"] is None}),

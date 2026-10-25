@@ -240,6 +240,11 @@ td .task-detail { min-width:200px; }
 .cost-chart-label[data-edge=first] { transform:none; text-align:left; }
 .cost-chart-label[data-edge=last] { transform:none; text-align:right; width:33%; white-space:nowrap; }
 .cost-chart-label[data-edge=only] { transform:translateX(-50%); }
+.work-chart { position:relative; }
+.work-chart-track > .cost-chart-bar { background:var(--ok); }
+.work-chart-finished { background:var(--accent); border-radius:3px 3px 0 0; }
+.work-chart-tooltip { display:none; position:absolute; z-index:2; bottom:60px; left:0; width:max-content; max-width:100%; box-sizing:border-box; padding:8px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; font-size:12px; }
+.work-chart-track:hover .work-chart-tooltip, .work-chart-track:focus .work-chart-tooltip { display:block; }
 @media (max-width:860px) {
   header { gap:12px; padding:12px 18px; }
   #state { flex-basis:100%; max-width:100%; margin-left:0; font-size:11px; }
@@ -785,6 +790,9 @@ Object.assign(T, ZH ? {
   historyHeld:"成立（含有附注）", historyNotHeld:"不成立", historyUnsure:"不确定", releasesAsked:"请求的发布", releasesOut:"成功的发布",
   workerHours:"执行与核对工时", workerHoursNote:"小时 · 含重试，按运行结束时间统计", historyEndNote:"按各自完成或合并的时间统计；核对单独计数。",
   historyOmitted:"全部历史的用量与折算金额未计入协调席及助手的会话记录，以便快速加载；已计入全部工作记录及执行席、核对席的用量。",
+  workDaily:"每日工作", workWeekly:"每周工作", workDayNote:"每栏为一个滚动的 24 小时时段。", workWeekNote:"按工作台当地时间从周一开始；首尾周可能不完整。",
+  workLegend:"上部：完成的任务 · 下部：合并的任务", linesAdded:"约增加行数", linesRemoved:"约删除行数",
+  linesNote:"来自合并任务记录的变更大小；不是合并后的净变化。", linesOmitted:n => `未计入 ${n} 个缺少可用变更大小记录的合并任务。`,
   dailyValue:"每日折算金额", chartDaysNote:"USD · 显示首末用量记录之间的日期；无记录的日期不显示金额。",
   noCost:"这段时间还没有用量", noCostNote:"模型调用产生用量后，会按席位、日期、模型、工作线、供应和任务显示明细。", seatColumn:"席位", dayColumn:"日期"
 } : {
@@ -801,6 +809,9 @@ Object.assign(T, ZH ? {
   historyHeld:"Held (including notes)", historyNotHeld:"Did not hold", historyUnsure:"Unsure", releasesAsked:"Releases asked for", releasesOut:"Releases that went out",
   workerHours:"Worker and verifier hours", workerHoursNote:"Hours · retries included, by run end time", historyEndNote:"By each completion or merge time; verifications count separately.",
   historyOmitted:"Whole-history usage and value omit coordinator and helper transcripts to load quickly; all work records and worker and verifier usage are included.",
+  workDaily:"Daily work", workWeekly:"Weekly work", workDayNote:"Each bar covers a rolling 24-hour interval.", workWeekNote:"Weeks start Monday in the desk’s local time; the first and last may be partial.",
+  workLegend:"Upper: tasks finished · Lower: tasks merged", linesAdded:"Approx. lines added", linesRemoved:"Approx. lines removed",
+  linesNote:"From merged tasks’ recorded change sizes; not the net change after merging.", linesOmitted:n => `${n} merged ${n === "1" ? "task" : "tasks"} without a usable recorded change size omitted.`,
   dailyValue:"Daily estimated value", chartDaysNote:"USD · From first to last recorded day; gaps have no amount.",
   noCost:"No usage in this period", noCostNote:"Model usage will appear by seat, day, model, lane, provider and task.", seatColumn:"Seat", dayColumn:"Date"
 });
@@ -2092,15 +2103,38 @@ function costDayChart(dayRows) {
   if (rows.some(([, row]) => row?.unpriced_tokens)) chart.append(h("p", {class:"cost-explanation warn"}, "* " + T.tokensNoPrice));
   return chart;
 }
+function workChart(data) {
+  const rows = data.buckets, weekly = data.interval === "week", title = weekly ? T.workWeekly : T.workDaily;
+  const maximum = rows.reduce((max, row) => Math.max(max, row.finished + row.merged), 1);
+  const labels = [], indices = new Set([0, 0.25, 0.5, 0.75, 1].map(f => Math.floor((rows.length - 1) * f)));
+  const mobile = new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1]);
+  return h("div", {class:"cost-chart work-chart", role:"group", "aria-label":title}, h("h3", {}, title),
+    h("p", {class:"cost-explanation"}, weekly ? T.workWeekNote : T.workDayNote),
+    h("p", {class:"cost-explanation"}, T.workLegend),
+    h("div", {class:"cost-chart-plot", style:`grid-template-columns:repeat(${rows.length},minmax(0,1fr))`}, rows.map((row, index) => {
+      const total = row.finished + row.merged;
+      const text = `${row.range} · ${T.tasksFinished}: ${fmt(row.finished)} · ${T.tasksMerged}: ${fmt(row.merged)}`;
+      if (rows.length <= 7 || indices.has(index)) {
+        const edge = rows.length === 1 ? "only" : index === 0 ? "first" : index === rows.length - 1 ? "last" : "";
+        labels.push(h("span", {class:"cost-chart-label", "data-edge":edge, "data-mobile":String(mobile.has(index)),
+          style:edge === "last" ? "right:0" : `left:${edge === "first" ? 0 : (index + 0.5) / rows.length * 100}%`}, row.label.slice(5)));
+      }
+      return h("div", {class:"cost-chart-track work-chart-track", tabindex:"0", role:"img", "aria-label":text, title:text},
+        h("div", {class:"cost-chart-bar", "aria-hidden":"true", style:`height:${total / maximum * 100}%`},
+          h("div", {class:"work-chart-finished", style:`height:${total ? row.finished / total * 100 : 0}%`})),
+        h("span", {class:"work-chart-tooltip", "aria-hidden":"true"}, text));
+    })), h("div", {class:"cost-chart-labels", "aria-hidden":"true"}, labels));
+}
 function renderCost(r) {
   const seatName = k => k.startsWith("helper:") ? `${T.seat_helper}: ${T["helper_" + k.slice(7)] || k.slice(7)}` : T["seat_" + k] || k;
   const block = key => {
     const rows = Object.entries(r.by[key] || {});
-    if (!rows.length) return key === "day" ? dashboardPanel(T.byday, "cost", 0, costDayChart(rows)) : null;
+    const charts = key === "day" ? [costDayChart(rows), r.work_chart ? workChart(r.work_chart) : null] : [];
+    if (!rows.length) return key === "day" ? dashboardPanel(T.byday, "cost", 0, ...charts) : null;
     const tries = key === "task";  // every run of a task counts: its earlier tries too
     const label = {seat:T.seatColumn, day:T.dayColumn, model:T.model, lane:T.lane, provider:T.provider, task:T.task}[key];
     const panel = dashboardPanel(T["by" + key], key === "provider" ? "providers" : key === "lane" ? "lanes" : "cost", rows.length,
-      key === "day" ? costDayChart(rows) : null,
+      ...charts,
       table([label, T.tokens, "$ " + T.listValue, T.tokensNoPrice, ...(tries ? [T.runs, T.turns] : [])],
         rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : "",
           ...(tries ? [v.runs ? fmt(v.runs) : "", v.runs ? fmt(v.turns) : ""] : [])])));
@@ -2124,6 +2158,8 @@ function renderCost(r) {
       summaryCard(T.totalTokens, fmt(r.total.tokens), T.periodDays(costDays), "status"),
       summaryCard(T.estimatedCost, "$" + r.total.usd.toFixed(2), T.usdNote, "cost"),
       summaryCard(T.unpricedTokens, fmt(unpriced), T.unpricedNote, "prices"),
+      summaryCard(T.linesAdded, "≈ " + fmt(w.lines_added || 0), T.linesNote, "check"),
+      summaryCard(T.linesRemoved, "≈ " + fmt(w.lines_removed || 0), T.linesNote, "check"),
       ...[[T.tasksFinished, w.finished], [T.tasksMerged, w.merged], [T.tasksFailed, w.failed],
         [T.historyVerifications, w.verifications], [T.historyHeld, w.held], [T.historyNotHeld, w.did_not_hold],
         [T.historyUnsure, w.unsure], [T.releasesAsked, w.releases_asked], [T.releasesOut, w.releases_out]]
@@ -2131,6 +2167,7 @@ function renderCost(r) {
       summaryCard(T.workerHours, (w.worker_hours || 0).toFixed(2), T.workerHoursNote, "status")) : null,
     r ? h("section", {class:"dashboard-panel"}, h("p", {class:"cost-explanation"}, T.costNote),
       h("p", {class:"cost-explanation"}, T.historyEndNote),
+      w.lines_omitted ? h("p", {class:"cost-explanation"}, T.linesOmitted(fmt(w.lines_omitted))) : null,
       r.transcripts_omitted ? h("p", {class:"cost-warning"}, T.historyOmitted) : null,
       r.coordinator_uncounted ? h("div", {class:"cost-warning"}, icon("error"), h("p", {}, ZH ? T.coordinatorUncounted.replaceAll("{user}", r.coordinator_user) : r.coordinator_uncounted)) : null,
       r.unpriced_models.length ? h("div", {class:"cost-warning"}, icon("prices"), h("p", {}, T.unpriced + " " + r.unpriced_models.join(", ") + " — " + T.setPrice)) : null) : null,
