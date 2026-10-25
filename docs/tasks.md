@@ -410,14 +410,28 @@ and run `hansa cost --since HH:MM --by seat` when it is done. Spend no turns on 
 
 The coordinator's own session, with its helpers, is counted only when it runs
 with the workers' Claude login (the same config folder), because only then are
-its session records where hansa reads them. It has no lane or task, so in `--by
+its session records where hansa reads them. Every session started in the desk's
+own folder counts, as `hansa coordinator` starts it there. A coordinator started
+in another folder (one `hansa up` started there, or `hansa notify on` recorded)
+counts by its Claude Code session ids, never by its folder, so another session
+in the same folder is not counted: each hansa command run in the session the
+start record names notes the id Claude Code gives the command, and the login
+folder it runs with, in `.hansa/coordinator-sessions.json`. A compaction keeps
+the id; after a `/clear` the session's next hansa command notes the new one,
+and the whole of each noted session counts, wherever its records are under the
+workers' login. Until then, and when the coordinator runs with another login,
+as another user (root on a Linux server: [On a Linux server](linux-server.md)),
+or its records cannot be read or found, `hansa cost`, `hansa cost --turns` and
+the page say it is not counted, and why.
+
+The coordinator has no lane or task, so in `--by
 lane` and `--by task` its usage is a row of its own, `(coordinator)`: in every
 view the rows add up to the total. `hansa cost --turns` shows the
 coordinator's own usage turn by turn (what started each turn, its steps, the
 conversation's length at its first step, its worth and the tools it called;
 then totals by what started them; no message text), which shows where its
-money goes. A coordinator run as root on a Linux server is not counted
-([On a Linux server](linux-server.md)).
+money goes. A turn's time runs from its first step in the window to its last;
+`hansa cost` gives the coordinator's turns and that time over the window.
 
 ## Task states
 

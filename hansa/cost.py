@@ -5,7 +5,8 @@ Two sources, never counted twice:
   each earlier try, kept on its attempt record when the task went back to the queue (or in earlier_runs, for a run
   an earlier hansa serve started and lost track of); each run counted once;
 - the coordinator and its helpers: the transcripts Claude Code writes for sessions
-  started in the desk (<config dir>/projects/<desk path>/**/*.jsonl).
+  started in the desk (<config dir>/projects/<desk path>/**/*.jsonl), and those of the coordinator's sessions
+  started in another folder, by the session ids hansa noted from its commands (note_session).
 
 Prices come from the principal's table. A Claude model with no entry, run on a
 subscription, falls back to Claude Code's own list-price figure; any other model
@@ -25,10 +26,13 @@ from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import account, release
-from .desk import Desk, read_json
+from . import account, notify, release, session_value, up
+from .desk import Desk, read_json, write_json
 
 TOKEN_FIELDS = ("in", "out", "cache_read", "cache_write")
+# in .hansa/: the Claude Code sessions the coordinator's process ran, each noted at a hansa command run in it
+SESSIONS = "coordinator-sessions.json"
+SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{7,63}")
 
 
 def price_for(model: str, prices: dict):
@@ -129,14 +133,49 @@ def coordinator_dirs(desk: Desk) -> list:
     return [(name, Path(home) / "projects" / slug(desk.root)) for home, name in homes.items()]
 
 
+def note_session(desk: Desk) -> None:
+    """Note the Claude Code session this command runs in, when its process is the coordinator's one, the one hansa
+    up started or hansa notify on recorded (coordinator-start.json): its id, as Claude Code gives it to the command,
+    and the Claude login folder it runs with. A /clear gives the same process a new id, noted at its next hansa
+    command; a compaction keeps it. Never raises."""
+    try:
+        sess, sid = notify.session_here(), session_value("CLAUDE_CODE_SESSION_ID")
+        if not sess or not SESSION_ID.fullmatch(sid) or not notify.same(up.read_coordinator(desk).get("session"), sess):
+            return
+        known = known_sessions(desk)
+        if any(x.get("id") == sid for x in known):
+            return
+        home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+        write_json(desk.state_dir / SESSIONS, [*known, {"id": sid, "home": home, "session": sess, "at": time.time()}])
+    except Exception:  # noqa: BLE001 - the command runs all the same; the next one notes it
+        pass
+
+
+def known_sessions(desk: Desk) -> list:
+    """The coordinator's sessions hansa noted (note_session), oldest first."""
+    got = read_json(desk.state_dir / SESSIONS, [])
+    return [x for x in got if isinstance(x, dict) and SESSION_ID.fullmatch(str(x.get("id", "")))] \
+        if isinstance(got, list) else []
+
+
+def session_files(proj: Path, sid: str) -> list:
+    """A session's record files under one Claude login folder's projects/, whatever folder it started in: its own,
+    and its helpers'."""
+    projects = proj.parent
+    return sorted([*projects.glob(f"*/{sid}.jsonl"), *projects.glob(f"*/{sid}/**/*.jsonl")])
+
+
 def transcript_files(desk: Desk, since: float):
-    """(provider, file, seat) for every session record file of the coordinator and its helpers
-    changed since then."""
-    for provider, proj in coordinator_dirs(desk):
-        if not proj.is_dir():
-            continue
-        for f in sorted(proj.rglob("*.jsonl")):
-            if f.stat().st_mtime >= since:
+    """(provider, file, seat) for every session record file of the coordinator and its helpers changed since then:
+    every session started in the desk, and each session of the coordinator's hansa noted, wherever it started."""
+    dirs, done = coordinator_dirs(desk), set()
+    ids = [x["id"] for x in known_sessions(desk)]
+    for provider, proj in dirs:
+        files = sorted(proj.rglob("*.jsonl")) if proj.is_dir() else []
+        files += [f for sid in ids for f in session_files(proj, sid)] if ids and proj.parent.is_dir() else []
+        for f in files:
+            if f not in done and f.stat().st_mtime >= since:
+                done.add(f)
                 yield provider, f, helper_seat(f) if "subagents" in f.parts else "coordinator"
 
 
@@ -180,30 +219,71 @@ def record_seat(d: dict, seat: str) -> str:
 
 
 def transcript_rows(desk: Desk, since: float) -> list:
-    s = desk.settings()
+    return scan(desk, since)["rows"]
+
+
+def scan(desk: Desk, since: float) -> dict:
+    """One read of the coordinator's and its helpers' records in the window: the rows hansa cost adds up, by day,
+    seat, model and provider, and the coordinator's turns as hansa cost --turns lists them (see turns)."""
+    prices = desk.settings()["prices"]
     per = defaultdict(lambda: {**{k: 0 for k in TOKEN_FIELDS}, "usd": 0.0, "unpriced": False})
-    seen = set()
+    seen, tools_seen = set(), set()
+    out, helpers, unpriced = [], defaultdict(lambda: {"steps": 0, "usd": 0.0}), set()
+    shares = {k: 0.0 for k in TOKEN_FIELDS}
     for provider, f, seat in transcript_files(desk, since):
-        for d in records(f, usage_only=True):
-            got = step(d, seen, since)
-            if not got:
-                continue
-            model, u, ts = got
-            row = per[(_day(ts), record_seat(d, seat), model, provider)]
-            for k in TOKEN_FIELDS:
-                row[k] += u[k]
-            usd = value(model, u, s["prices"])  # each call valued alone, as hansa cost --turns does
-            if usd is None:
-                row["unpriced"] = True
-            else:
-                row["usd"] += usd
+        cur = None
+        try:
+            for d in records(f):
+                s_ = record_seat(d, seat)
+                got = step(d, seen, since)
+                usd = value(got[0], got[1], prices) if got else None  # each call valued alone
+                if got:
+                    row = per[(_day(got[2]), s_, got[0], provider)]
+                    for k in TOKEN_FIELDS:
+                        row[k] += got[1][k]
+                    row["usd"] += usd or 0
+                    row["unpriced"] |= usd is None
+                    if usd is None:
+                        unpriced.add(got[0])
+                if s_ != "coordinator":
+                    if got:
+                        helpers[s_]["steps"] += 1
+                        helpers[s_]["usd"] += usd or 0
+                    continue
+                kind = _starts_turn(d)
+                if kind or (cur is None and got):
+                    cur = {"session": f.stem, "start": _ts(d.get("timestamp")), "kind": kind or "other", "steps": 0,
+                           "length": 0, "usd": 0.0, "tools": defaultdict(int), "first": 0.0, "last": 0.0}
+                    out.append(cur)
+                if cur is None or d.get("type") != "assistant":
+                    continue
+                if got:
+                    model, u, ts = got
+                    p_ = parts(model, u, prices)
+                    if cur["steps"] == 0:
+                        cur["length"], cur["first"] = u["in"] + u["cache_read"] + u["cache_write"], ts
+                    cur["steps"] += 1
+                    cur["last"] = max(cur["last"], ts)
+                    if p_ is not None:
+                        cur["usd"] += sum(p_.values())
+                        for k in TOKEN_FIELDS:
+                            shares[k] += p_[k]
+                if cur["steps"]:  # a call outside the window (or seen before) brings no tools either
+                    content = (d.get("message") or {}).get("content")
+                    for b in content if isinstance(content, list) else []:
+                        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") not in tools_seen:
+                            tools_seen.add(b.get("id"))
+                            cur["tools"][str(b.get("name", "?"))] += 1
+        except OSError:  # unreadable: coordinator_uncounted says so
+            continue
     rows = []
     for (day, seat, model, provider), u in sorted(per.items()):
         usd = None if u["unpriced"] else u["usd"]
         rows.append({"day": day, "seat": seat, "lane": "", "task": "", "provider": provider,
                      "model": model, **{k: u[k] for k in TOKEN_FIELDS}, "usd": usd,
                      "priced_by": "price table" if usd is not None else "no price"})
-    return rows
+    return {"rows": rows, "turns": sorted((t for t in out if t["steps"]), key=lambda t: t["start"]),
+            "helpers": helpers, "unpriced": unpriced, "shares": shares}
 
 
 def helper_seat(f: Path) -> str:
@@ -230,15 +310,42 @@ def _ts(text) -> float:
 
 
 def coordinator_uncounted(desk: Desk) -> str:
-    """Why the coordinator's own usage is not in the report, when it runs as another user than hansa
-    (root, on a server, while the desk is an account's): Claude Code keeps that user's session records
-    private to it. '' when it is counted."""
+    return uncounted(desk)["coordinator_uncounted"]
+
+
+def uncounted(desk: Desk) -> dict:
+    """Why the coordinator's own usage is not in the report ('' when it is counted), and what kind of why, for the
+    page's translation: it runs as another user than hansa (root, on a server, while the desk is an account's), whose
+    session records Claude Code keeps private to it ('user'); or its session started outside the desk, and hansa has
+    not yet noted it ('untied'), it runs with another Claude login than the workers' ('login'), or its records are
+    not where they should be ('missing') or cannot be read ('unreadable'). where: the folder or file it names."""
+    def why(kind, text, where=""):
+        return {"coordinator_uncounted": f"The coordinator's own usage and its helpers' are not counted: {text}"
+                if kind else "", "coordinator_uncounted_kind": kind, "coordinator_uncounted_where": where}
     who = read_json(desk.state_dir / "coordinator.json", {}) or {}
-    if not isinstance(who, dict) or who.get("uid") is None or who["uid"] == account.uid():
-        return ""
-    return (f"The coordinator's own usage and its helpers' are not counted: the coordinator runs as "
-            f"{who.get('user') or 'another user'}, and Claude Code keeps its session records private to that user, "
-            f"where hansa, running as {account.name_of(account.uid())}, cannot read them.")
+    if isinstance(who, dict) and who.get("uid") is not None and who["uid"] != account.uid():
+        return why("user", f"the coordinator runs as {who.get('user') or 'another user'}, and Claude Code keeps its "
+                           f"session records private to that user, where hansa, running as "
+                           f"{account.name_of(account.uid())}, cannot read them.")
+    rec = up.read_coordinator(desk)
+    folder, homes = rec.get("folder"), [proj.parent.parent for _, proj in coordinator_dirs(desk)]
+    if not isinstance(folder, str) or not folder or slug(Path(os.path.realpath(folder))) == slug(desk.root):
+        return why("", "")  # started in the desk: its records are the desk's folder's, counted as they are
+    mine = [x for x in known_sessions(desk) if notify.same(x.get("session"), rec.get("session"))]
+    if not mine:
+        return why("untied", f"its session started in {folder}, outside the desk, and hansa counts a session there "
+                             f"once a hansa command run in it has told hansa which session it is; none has yet.", folder)
+    home = str(mine[-1].get("home") or "")
+    if not any(os.path.realpath(home) == os.path.realpath(h) for h in homes):
+        return why("login", f"its session runs with the Claude login in {home}, not the workers' "
+                            f"({', '.join(map(str, homes))}), and hansa reads the workers' login only.", home)
+    files = [f for _, proj in coordinator_dirs(desk) if proj.parent.is_dir() for f in session_files(proj, mine[-1]["id"])]
+    if not files:
+        return why("missing", f"the records of its session {mine[-1]['id']} are not in {home}/projects.", home)
+    shut = next((f for f in files if not os.access(f, os.R_OK)), None)
+    if shut:
+        return why("unreadable", f"hansa cannot read its session's records, {shut}.", str(shut))
+    return why("", "")
 
 
 TURN_KINDS = {"human": "typed", "peer": "peer", "task-notification": "helper result"}
@@ -271,53 +378,13 @@ def turns(desk: Desk, days: int = 7, since: float | None = None) -> dict:
     window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
               else f"last {days} day(s)")
     since = since if since is not None else time.time() - days * 86400
-    prices = desk.settings()["prices"]
-    seen, tools_seen = set(), set()
-    out, helpers, unpriced = [], defaultdict(lambda: {"steps": 0, "usd": 0.0}), set()
-    shares = {k: 0.0 for k in TOKEN_FIELDS}
-    for provider, f, seat in transcript_files(desk, since):
-        cur = None
-        for d in records(f):
-            s_ = record_seat(d, seat)
-            got = step(d, seen, since)
-            if s_ != "coordinator":
-                if got:
-                    usd = value(got[0], got[1], prices)
-                    helpers[s_]["steps"] += 1
-                    helpers[s_]["usd"] += usd or 0
-                    if usd is None:
-                        unpriced.add(got[0])
-                continue
-            kind = _starts_turn(d)
-            if kind or (cur is None and got):
-                cur = {"session": f.stem, "start": _ts(d.get("timestamp")), "kind": kind or "other", "steps": 0,
-                       "length": 0, "usd": 0.0, "tools": defaultdict(int)}
-                out.append(cur)
-            if cur is None or d.get("type") != "assistant":
-                continue
-            if got:
-                model, u, _ = got
-                p_ = parts(model, u, prices)
-                if cur["steps"] == 0:
-                    cur["length"] = u["in"] + u["cache_read"] + u["cache_write"]
-                cur["steps"] += 1
-                if p_ is None:
-                    unpriced.add(model)
-                else:
-                    cur["usd"] += sum(p_.values())
-                    for k in TOKEN_FIELDS:
-                        shares[k] += p_[k]
-            if cur["steps"]:  # a call outside the window (or seen before) brings no tools either
-                content = (d.get("message") or {}).get("content")
-                for b in content if isinstance(content, list) else []:
-                    if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") not in tools_seen:
-                        tools_seen.add(b.get("id"))
-                        cur["tools"][str(b.get("name", "?"))] += 1
-    rows = sorted((t for t in out if t["steps"]), key=lambda t: t["start"])
+    got = scan(desk, since)
+    rows, helpers, unpriced, shares = got["turns"], got["helpers"], got["unpriced"], got["shares"]
     for t in rows:
         t["usd"] = round(t["usd"], 6)
         # started before the window: its steps, worth and length count from its first step inside it
         t["before_window"] = 0 < t["start"] < since
+        t["seconds"] = t.pop("last") - t.pop("first")  # the time it worked: from its first step to its last
         t["tools"] = dict(sorted(t["tools"].items(), key=lambda kv: (-kv[1], kv[0])))
     total = sum(t["usd"] for t in rows)
     by = {}
@@ -331,10 +398,11 @@ def turns(desk: Desk, days: int = 7, since: float | None = None) -> dict:
         b["share"] = b["usd"] / total if total else 0.0
     worth = sum(shares.values())
     return {"window": window, "turns": rows, "by_kind": dict(sorted(by.items(), key=lambda kv: -kv[1]["usd"])),
-            "total": {"turns": len(rows), "steps": sum(t["steps"] for t in rows), "usd": round(total, 6)},
+            "total": {"turns": len(rows), "steps": sum(t["steps"] for t in rows), "usd": round(total, 6),
+                      "seconds": sum(t["seconds"] for t in rows)},
             "token_shares": {k: (v / worth if worth else 0.0) for k, v in shares.items()},
             "helpers": {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(helpers.items())},
-            "unpriced_models": sorted(unpriced), "coordinator_uncounted": coordinator_uncounted(desk)}
+            "unpriced_models": sorted(unpriced), **uncounted(desk)}
 
 
 def unassigned(r: dict) -> str:
@@ -430,8 +498,9 @@ def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict
     since = since if since is not None else 0 if days is None else now - days * 86400
     tasks = desk.tasks()
     chart = work_buckets(tasks, since, now, days)
-    # Whole-history transcripts can be arbitrarily large; metadata stays proportional to the task count.
-    rows = worker_rows(desk, since, tasks=tasks) + (transcript_rows(desk, since) if days is not None else [])
+    # the coordinator's records too since the desk began: one read of them, about 3 s for 500 MB of a weeks-long session
+    got = scan(desk, since)
+    rows = worker_rows(desk, since, tasks=tasks) + got["rows"]
     by = {}
     for key in ("day", "seat", "lane", "task", "model", "provider"):
         agg = defaultdict(lambda: {"tokens": 0, "usd": 0.0, "unpriced_tokens": 0, "turns": 0, "runs": 0})
@@ -448,11 +517,14 @@ def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict
         by[key] = {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(agg.items())}
     total_usd = sum(r["usd"] for r in rows if r["usd"] is not None)
     return {"days": days, "window": window, "rows": rows, "by": by,
-            "work": work_history(tasks, release.releases(desk), since, chart), "work_chart": chart,
-            "transcripts_omitted": days is None,
+            "work": {**work_history(tasks, release.releases(desk), since, chart),
+                     # the coordinator's turns with a step in the window, and the time each worked, first step to last
+                     "coordinator_turns": len(got["turns"]),
+                     "coordinator_hours": sum(t["last"] - t["first"] for t in got["turns"]) / 3600},
+            "work_chart": chart,
             "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": round(total_usd, 6),
                       "turns": sum(r.get("turns", 0) for r in rows), "runs": sum(r.get("runs", 0) for r in rows)},
             "unpriced_models": sorted({r["model"] for r in rows if r["usd"] is None}),
-            "coordinator_uncounted": coordinator_uncounted(desk),
+            **uncounted(desk),
             "coordinator_user": (read_json(desk.state_dir / "coordinator.json", {}) or {}).get("user", ""),
             "note": "Dollars use the principal's price table (a Claude model without an entry uses Claude Code's list price). Subscriptions are paid by the month: this is what the tokens are worth, not a bill."}

@@ -342,24 +342,28 @@ Alongside these totals it counts:
   cannot. A run's entire duration counts in the period it ended, even if it
   started earlier. Concurrent runs add their hours; checks and release commands
   are not worker time.
+- The coordinator's turns with a step in the period (`coordinator_turns`), and
+  the time it worked in them (`coordinator_hours`): each turn from its first
+  step in the period to its last, from the coordinator's session records, as
+  `hansa cost --turns` counts them ([What work costs](tasks.md#what-work-costs)
+  says which sessions count).
 
 Periods are rolling windows of N × 24 hours, including the starting instant.
 All history uses the same records without a lower time limit and reads no git
-history. It retains worker and verifier token usage, value, warnings about that
-usage and coordinator access, all six tables, charts and CSV export, but omits
-coordinator and helper transcript usage and value: scanning all those transcripts
-can take too long. The page explicitly
-states this omission. `/api/cost?days=all` selects all history (`days: null` in
+history, the coordinator's and its helpers' session records included: hansa
+reads them once for the usage and the turns, about 3 seconds for 500 MB of
+records (a busy coordinator's month) on a laptop. `/api/cost?days=all` selects all history (`days: null` in
 the response); `days=90` selects 90 days. Both use the usual page key, including
 `&rows=1` for CSV data. `work` holds the counters, including `lines_added`,
-`lines_removed` and `lines_omitted`; `work_chart` supplies the work chart's
-`interval` and `buckets`. `transcripts_omitted` identifies the all-history
-limitation. CSV retains its usage rows and columns;
+`lines_removed`, `lines_omitted`, `coordinator_turns` and `coordinator_hours`;
+`work_chart` supplies the work chart's `interval` and `buckets`. CSV retains its usage rows and columns;
 all-history export is named `cost-all.csv`.
 
-Unpriced models in included usage and unreadable coordinator usage remain
-explicit warnings; all history cannot warn about unpriced models found only
-by the transcript scan it skips. Dollar values are an estimate, not a bill. A
+Unpriced models and a coordinator that is not counted remain explicit warnings:
+`coordinator_uncounted` says why, `coordinator_uncounted_kind` names the reason
+(`user`, `untied`, `login`, `missing` or `unreadable`) and
+`coordinator_uncounted_where` the folder or file it names, for the page's
+translation. Dollar values are an estimate, not a bill. A
 bar chart above the day table shows each returned day's USD value at the
 principal's prices, in date order. Each bar's accessible label and tooltip give
 the full date, amount and any unpriced token count; a warning mark identifies

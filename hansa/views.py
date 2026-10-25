@@ -2081,6 +2081,10 @@ def cost_text(rep: dict, by: str = "day") -> str:
         if by == "task" and v.get("runs"):  # every run of the task: its earlier tries too
             extra += f"  {v['runs']} run(s), {v.get('turns', 0):,} turn(s)"
         out.append(f"  {k or '-':<22} {v['tokens']:>14,}  ${v['usd']:.2f}{extra}")
+    w = rep.get("work") or {}
+    if w.get("coordinator_turns"):
+        out.append(f"the coordinator: {w['coordinator_turns']:,} turn(s), {w['coordinator_hours']:.2f} hour(s) of work "
+                   f"in them, each from its first step to its last (hansa cost --turns)")
     if rep["unpriced_models"]:
         out.append("no price yet for: " + ", ".join(rep["unpriced_models"]) + " (the principal sets prices on the page)")
     if rep.get("coordinator_uncounted"):
@@ -2092,7 +2096,8 @@ def cost_text(rep: dict, by: str = "day") -> str:
 def cost_turns_text(rep: dict) -> str:
     """hansa cost --turns: one line per turn of the coordinator, then totals by what started them."""
     t = rep["total"]
-    out = [f"the coordinator's turns, {rep['window']}: {t['turns']} turn(s), {t['steps']} step(s), worth ${t['usd']:.2f}"]
+    out = [f"the coordinator's turns, {rep['window']}: {t['turns']} turn(s), {t['steps']} step(s), worth ${t['usd']:.2f}, "
+           f"{t.get('seconds', 0) / 3600:.2f} hour(s) of work, each turn from its first step to its last"]
     sessions = {}  # each session once, in the order of its first turn: two sessions' turns may alternate
     for r in rep["turns"]:
         sessions.setdefault(r["session"], []).append(r)
