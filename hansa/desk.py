@@ -2354,15 +2354,19 @@ def desks_list_problem() -> str:
     return _desks_entries()[1]
 
 
-def listed_desks() -> list:
+def listed_desks(*, include_missing: bool = False) -> list:
     """The desks on the account's list, as hansa up reads it: (folder, entry) for each folder that is a desk now;
-    none while the list cannot be read (desks_list_problem, which keeps runs from starting meanwhile)."""
+    none while the list cannot be read (desks_list_problem, which keeps runs from starting meanwhile).
+    include_missing keeps missing or unreadable folders too, for the account's overview."""
     entries = _desks_entries()[0]
     out = []
     for rec in entries if isinstance(entries, list) else []:
         if not isinstance(rec, dict) or not isinstance(rec.get("desk"), str) or not rec["desk"]:
             continue
         root = Path(rec["desk"])
+        if include_missing:
+            out.append((root, rec))
+            continue
         with contextlib.suppress(OSError):
             if (root / "settings.json").is_file() and (root / "tasks").is_dir():
                 out.append((root, rec))

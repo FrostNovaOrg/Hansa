@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, gaps, installed, installed_text, memory, notify, plugin, release, up
-from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
+from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of,
@@ -832,6 +832,52 @@ def timeline(desk: Desk, *, at: float | None = None) -> dict:
     tasks, releases = desk.tasks(), release.releases(desk)
     events = timeline_events(desk.events_path, at - 86400, tasks=tasks, releases=releases, tries=trials)
     return timeline_data(lanes, tasks, events, releases, trials, at)
+
+
+def desks() -> dict:
+    """The account's desks, counts only; no status side effects or private text in the result."""
+    problem = desks_list_problem()
+    rows = []
+    for root, _ in listed_desks(include_missing=True) if not problem else []:
+        row = {"desk": str(root)}
+        rows.append(row)
+        try:
+            if not root.exists():
+                row["problem"] = "folder is gone"
+                continue
+            desk = Desk(root)
+            desk.settings_path.read_text(encoding="utf-8")
+            if not desk.tasks_dir.is_dir():
+                raise OSError
+            tasks, server = desk.tasks(), server_state(desk)
+            host, port = web_address(desk)
+            host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+            code = read_json(desk.state_dir / "serve-code", {}) or {}
+            row.update(server=server["state"], address=f"http://{'[' + host + ']' if ':' in host else host}:{port}/",
+                       version=code.get("build") if server["state"] != "gone" and code.get("pid") == server["pid"] else None,
+                       running=sum(m.get("state") == "running" for m in tasks),
+                       waiting=sum(m.get("state") == "queued" for m in tasks),
+                       review=sum(m.get("state") == "done" and m.get("kind") != "verify" for m in tasks),
+                       releases=sum(r.get("state") == "waiting" for r in release.releases(desk)),
+                       todos=sum(not a.get("closed") for a in desk.asks()))
+        except (OSError, UnicodeError):
+            row.clear()
+            row.update(desk=str(root), problem="folder cannot be read as a desk")
+    return {"desks": rows, "problem": problem}
+
+
+def desks_text(st: dict) -> str:
+    blocks = []
+    for row in st["desks"]:
+        if row.get("problem"):
+            blocks.append(f"desk {row['desk']}: {row['problem']}")
+            continue
+        server = "not running" if row["server"] == "gone" else f"running ({row['server']})"
+        blocks.append(f"desk {row['desk']}\n  server: {server}; hansa {row['version'] or 'unknown'}\n"
+                      f"  page: {row['address']}\n"
+                      f"  tasks: {row['running']} running, {row['waiting']} waiting, {row['review']} waiting for review\n"
+                      f"  principal: {row['releases']} releases, {row['todos']} to-dos waiting")
+    return st["problem"] or "\n\n".join(blocks) or "No desks listed"
 
 
 def status(desk: Desk) -> dict:

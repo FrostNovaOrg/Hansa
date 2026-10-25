@@ -92,7 +92,7 @@ TOPICS = {
 }
 # hansa help: the commands, a few to a line (a command left out of these goes on the last line)
 COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
-                  ("watching", ("status", "wait", "notify", "ask", "explain", "notes", "gaps", "cost")),
+                  ("watching", ("status", "desks", "wait", "notify", "ask", "explain", "notes", "gaps", "cost")),
                   ("lanes and releases", ("lane", "release", "changelog", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
                   ("the desk", ("init", "up", "serve", "web", "coordinator", "ping", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
@@ -451,6 +451,11 @@ def cmd_add(a):
 def cmd_status(a):
     st = views.status(Desk.find(a.desk))
     print(json.dumps(st, ensure_ascii=False, indent=1) if a.json else views.status_text(st))
+
+
+def cmd_desks(a):
+    st = views.desks()
+    print(json.dumps(st, ensure_ascii=False, indent=1) if a.json else views.desks_text(st))
 
 
 def cmd_show(a):
@@ -1444,13 +1449,20 @@ def cmd_serve(a):
     except OSError as e:
         print(f"hansa serve: the desk's card could not be brought up to date ({e.strerror or e})", file=sys.stderr,
               flush=True)
-    try:
-        port = start_web(desk, a.host, a.port).server_address[1]
-    except OSError as e:
-        if e.errno != errno.EADDRINUSE:
-            raise
-        raise SystemExit(f"hansa: port {a.port} is in use, perhaps by another desk's hansa serve; start this desk's "
-                         f"server on a free port with hansa serve --port N (hansa web then finds it)")
+    port = first_port = a.port if a.port is not None else web_port(desk)
+    port_note = ""
+    while True:
+        try:
+            port = start_web(desk, a.host, port).server_address[1]
+            break
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                raise
+            if a.port is not None or port >= 65535:
+                raise SystemExit(f"hansa: port {port} is in use, perhaps by another desk's hansa serve; start this desk's "
+                                 f"server on a free port with hansa serve --port N (hansa web then finds it)")
+            port += 1
+            port_note = f" ({first_port} was taken)"
 
     def stopped(*_):  # TERM ends it as Ctrl+C does: the alert run's folder goes with it (the thread is a daemon)
         raise KeyboardInterrupt
@@ -1462,7 +1474,8 @@ def cmd_serve(a):
     alert.start_thread(desk)  # the principal's alert command, run from here only (hansa/alert.py)
     d = Dispatcher(desk)
     desk.event("server_started", port=port)
-    print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port} (run `hansa web` for the address)", flush=True)
+    print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port}{port_note} "
+          "(run `hansa web` for the address)", flush=True)
     if dropped:
         print(f"hansa serve: {serve_session_text(dropped)}", file=sys.stderr, flush=True)
     srt = try_srt_at_start(desk)  # on this server's PATH, which runs the lanes' setups and checks
@@ -2896,6 +2909,9 @@ def main(argv=None):
     p.epilog = see_more("effort")
     p = add("status", cmd_status, "what is running, queued, waiting for review, and why")
     p.add_argument("--json", action="store_true")
+    p = add("desks", cmd_desks, "this account's listed desks: servers, page addresses without keys, and counts")
+    p.add_argument("--json", action="store_true")
+    p.epilog = see_more("bringing-up")
     p = add("show", cmd_show, "one task: its text, report, changes, refused commands, usage, next step")
     p.add_argument("id")
     g = p.add_mutually_exclusive_group()
@@ -3329,8 +3345,8 @@ def main(argv=None):
     p.epilog = see_more("bringing-up")
     p = add("serve", cmd_serve, "run the dispatcher and the web page in the foreground (what hansa up starts)")
     p.add_argument("--host", default=up.DEFAULTS["host"])
-    p.add_argument("--port", type=int, default=up.DEFAULTS["port"], help="the web page's port (default 8765); another desk's server "
-                   "on this machine needs another one")
+    p.add_argument("--port", type=int, help="the web page's port; fails if taken. Default: last served port or 8765, "
+                   "then the next free port if taken")
     p.add_argument("--every", type=float, default=up.DEFAULTS["every"], help=argparse.SUPPRESS)
     p = add("web", cmd_web, "print the web page address for the principal")
     p.description += (", then wait on its input, which holds an ssh tunnel to the page open, until that input ends "
@@ -3396,9 +3412,9 @@ def main(argv=None):
         ap.error("ask needs what the principal must do" if a.close is None else
                  "ask --close needs the outcome: hansa ask --close N \"<outcome>\"")
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
-    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up"):
+    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks"):
         _as_desk_account(a, argv)
-    if a.cmd != "init" and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
+    if a.cmd not in ("init", "desks") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
         try:
             cost.note_session(Desk.find(a.desk))
         except SystemExit:  # no desk: the command says so itself
