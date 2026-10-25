@@ -35,7 +35,7 @@ from pathlib import Path
 
 from . import account, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
-                   refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, other_desks, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, program_candidates,
+                   refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, program_candidates,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
 from .srt_output import protected
@@ -2440,8 +2440,9 @@ def no_read(desk: Desk) -> tuple:
     One that cannot be applied for any other reason (a pattern character in a name, or where a link now leads)
     stops the run: RuntimeError, saying which entry and why (no_read_stop); so does a desk or home folder whose
     path has a pattern character (desk_paths_problem), as the rules for the desk's folders and the logins would
-    close other folders."""
-    moved = desk_paths_problem(desk, run_homes())
+    close other folders; and so does an account's list of desks that is there but cannot be read
+    (desks_list_problem), as the other desks on it could not be hidden from the run."""
+    moved = desk_paths_problem(desk, run_homes()) or desks_list_problem()
     if moved:  # the deny rules for the desk's own folders and the logins would close other folders
         raise RuntimeError(f"hansa starts no run (worker, verifier, setup or check): {moved}")
     good, said, stops = no_read_parts(desk.settings(), desk.root)
@@ -6162,7 +6163,7 @@ class Dispatcher:
         memory_low = False
         with serve_step():
             memory_low = self.memory(s)
-        low = bool(low or memory_low)
+        low = bool(low or memory_low or desks_list_problem())  # an unreadable list of desks holds new runs too
         with serve_step():
             self.record(self.tasks())
         for tid, proc in list(self.procs.items()):
@@ -6565,7 +6566,7 @@ def waiting_looks(desk: Desk, s: dict, tasks: list | None = None, server: dict |
     return {"tasks": desk.tasks() if tasks is None else tasks, "paused": desk.paused(),
             "disk": disk.short_text(desk, low) if low else memory.short_text(desk) if resource else "",
             "resource": resource, "server": server, "held": sandbox_held(desk),
-            "not_looking": not_looking(desk, server),
+            "not_looking": not_looking(desk, server), "desks": desks_list_problem(),
             "problems": {p: provider_problem(desk, s, p) for ln in s["lanes"].values() for p in ln["providers"]},
             "provider_state": desk.provider_state()}
 
@@ -6583,6 +6584,8 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
 
     if lk["paused"]:
         return result("paused", "dispatch is paused")
+    if lk.get("desks"):
+        return result("desks_list", lk["desks"])
     if lk["disk"]:
         resource = lk["resource"]
         return result(resource["code"], lk["disk"], **resource["values"])

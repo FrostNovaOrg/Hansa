@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from . import SESSION, SESSION_PREFIXES, account, notify, without_session
-from .desk import Desk, desks_file, listed_desks, now, program, read_json, write_json, write_text
+from .desk import Desk, desks_file, desks_list_problem, listed_desks, now, program, read_json, write_json, write_text
 from .run import alive, proc_args, proc_cwd, proc_start, server_state
 
 DEFAULTS = {"host": "127.0.0.1", "port": 8765, "every": 3.0}
@@ -910,6 +910,9 @@ def all_desks_up() -> bool:
             print(desk.redact(f"Could not run its hansa: {e}"))
             print("Last server command: " + shlex.join(serve_command(desk, last)))
             ok = False
+    if not found and desks_list_problem():
+        print(desks_list_problem())
+        return False
     if not found:
         print("No desks on this account's list. A desk gets on it when its server starts once (hansa serve).")
     return ok
