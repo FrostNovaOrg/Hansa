@@ -3,8 +3,8 @@
 Every interactive Claude Code session listens on a local Unix socket, its inbox: one line of JSON posted
 there arrives in the session as a message from another session. A follower is a small background process
 per session and desk. It reads the desk's event log from where it left off, picks what the coordinator
-waits for (a task ended, a verification ended, a queued merge check ended, the principal
-answered a request, a provider an open request names became ready, the principal answered a release, a release
+waits for (a task ended, a verification ended, a queued merge check ended,
+a provider an open request names became ready, the principal answered a release, a release
 ended or became void, the server stopped, free space went under the floor or came back over it), and posts it to
 that session's inbox. It ends when the session's process does.
 
@@ -258,13 +258,6 @@ def _item(desk: Desk, e: dict):
             if memory:
                 line += " · " + " · ".join(memory)
         return key, line, m.get("session"), False, m.get("cancel_by") if m.get("state") == "cancelled" else None
-    # The coordinator knows of a request it closed itself (hansa ask --close)
-    if kind == "ask_closed" and e.get("by") != "hansa" and not e.get("coordinator"):
-        x = next((a for a in desk.asks() if a.get("id") == e.get("id")), None)
-        if not x:
-            return None
-        return (("ask", x["id"]), f"request #{x['id']} answered: {x.get('answer') or '(closed without a note)'}"
-                                  f" (you asked: {str(x.get('text', ''))[:120]})", x.get("session"), False, None)
     if kind == "ask_ready":  # a provider open requests name became ready since they were made (views.ready_news)
         named = [a for a in desk.asks() if a.get("id") in (e.get("ids") or []) and not a.get("closed")]
         if not named:
