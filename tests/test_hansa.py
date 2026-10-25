@@ -30142,6 +30142,28 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       check(!run("settingsDirty()"), "provider key order stayed unsaved");
       change(field, "38"); check(run('settingsDirty() && groupDirty("providers")'), "different value was missed");
       change(field, "37"); check(!run("settingsDirty()"), "changed-back value stayed unsaved");
+    } else if (ask === "settings-fix-key-use" || ask === "settings-fix-key-transport") {
+      const zh = process.argv[4] === "zh";
+      run('showSettingsGroup("providers")');
+      let card = key();
+      while (card && card.className !== "lane") card = card.parentElement;
+      check(card, "provider key controls missing");
+      if (ask.endsWith("use")) {
+        const parts = zh ? ["保存在本机", "不回显已保存的内容", "系统账号", "工作者或适配器", "发给上方的供应接口地址"]
+          : ["Saved on this machine", "does not show the saved value", "OS account running hansa", "worker or adapter", "send it to the provider endpoint above"];
+        for (const part of parts) check(visibleText(part, card), "key use guidance missing: " + part);
+        check(keyPosts.length === 0 && !key().value, "guidance requires entering or saving a key");
+      } else {
+        const label = find(el => el.tag === "label" && el.textContent === run("T.endpoint"), card);
+        for (const url of ["http://example.org", "https://example.org", "http://127.0.0.1:8443"]) {
+          change(ids["#" + label.attrs.for], url);
+          const warning = find(el => el.className === "warn" && el.textContent.includes("HTTP"), card);
+          const parts = zh ? ["未加密", "远程接口请使用 HTTPS", "可信的本机适配器"]
+            : ["without encryption", "Use HTTPS for remote endpoints", "trusted local adapters"];
+          for (const part of parts) check(warning && visibleText(part, warning), "transport guidance missing: " + part);
+        }
+        check(keyPosts.length === 0 && settingsPostCount === 0, "transport guidance requires saving first");
+      }
     } else if (ask === "settings-fix-labels") {
       const zh = process.argv[4] === "zh";
       const labels = run('SETTINGS_GROUPS.map(([,label]) => label)');
@@ -32001,6 +32023,12 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def test_labels_use_the_desks_groups_and_describe_model_key_and_price_behavior(self):
         self.run_settings_fix_scenario("labels")
+
+    def test_provider_key_use_guidance_is_visible_before_entry(self):
+        self.run_settings_fix_scenario("key-use")
+
+    def test_provider_transport_guidance_is_visible_before_saving(self):
+        self.run_settings_fix_scenario("key-transport")
 
     def test_required_warnings_and_lane_permissions_stay_visible(self):
         self.run_settings_fix_scenario("visible")

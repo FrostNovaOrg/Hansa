@@ -351,6 +351,9 @@ input stays in memory across page and group switches, and across a settings save
 it is never included in the settings request or put in browser storage. A
 confirmed discard clears those inputs too. Keys already saved are unaffected.
 The eye button shows or hides the current key input without saving or changing it.
+Visible notes beside the input explain [storage and use](#where-a-desks-files-are)
+before saving. HTTP sends keys without encryption: use HTTPS for remote endpoints
+and reserve HTTP for trusted local adapters. The page warns rather than refusing HTTP.
 With no draft, returning to Settings refreshes it from the desk. If the principal starts
 editing before that reply arrives, the reply leaves their new draft alone.
 
@@ -592,8 +595,10 @@ The account's desk list lives outside it, as described [above](#starting-the-ser
 A write that fails leaves the previous file, with its permissions, and no temporary file.
 The event log is only appended to. Readers skip a damaged line, and the next event starts
 on a line of its own. Keys live
-in `secrets/` (mode 600) and are never shown or sent anywhere but to the
-provider's endpoint, as that worker's environment. hansa replaces a key with
+in `secrets/` (mode 600); the OS account running hansa can read them. The worker
+or adapter receives the selected key in its environment for requests to the
+configured provider endpoint; a local adapter controls how it uses that key.
+Saved values are not returned to the page. hansa replaces a key with
 `[key of <provider>]` wherever it would otherwise show, and refuses to merge a
 change that holds one. The coordinator's permission rules are hansa's: they are
 in the desk's `.claude/settings.json` and come up to date whenever the
