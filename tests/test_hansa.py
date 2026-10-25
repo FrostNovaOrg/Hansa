@@ -30387,6 +30387,7 @@ class El {
   getAttribute(k) { return this.attrs[k] ?? null; }
   removeAttribute(k) { delete this.attrs[k]; if (k === "disabled" || k === "hidden") this[k] = false; }
   scrollIntoView() { this.scrolled = true; }
+  querySelector(tag) { return descendants(this, tag)[0] || null; }
   focus() { document.activeElement = this; }
   click() {
     if (this.tag === "a") downloads.push({href:this.attrs.href, name:this.attrs.download});
@@ -30440,6 +30441,15 @@ const fetch = async (path, options) => {
   }
   if (options && options.method === "POST" && path === "/api/key") {
     keyPosts.push(JSON.parse(options.body)); return {status:200, json:async () => keyPostReply};
+  }
+  if (options && options.method === "POST" && path === "/api/provider/top-up") {
+    const r = given[path] || {ok:true}, name = JSON.parse(options.body).provider;
+    if (r.ok) {
+      const provider = given["/api/status"].providers.find(p => p.name === name);
+      provider.credit_since = 0; provider.problem = "";
+      if (given["/api/settings"]) delete given["/api/settings"].provider_credit[name];
+    }
+    return {status:200, json:async () => r};
   }
   if (options && options.method === "POST" && ["/api/pause", "/api/resume", "/api/release/answer", "/api/release/stop"].includes(path)) {
     const body = JSON.parse(options.body);
@@ -31112,6 +31122,36 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     }
   }
   console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "principal-credit" || ask === "status-sections") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const tree = el => ({tag:el.tag, attrs:el.attrs, className:el.className,
+    text:el.textContent, kids:el.kids.filter(k => k instanceof El).map(tree)});
+  await run("loadStatus()");
+  if (ask === "status-sections") {
+    const root = ids["#tab-status"], panels = descendants(root, "section");
+    const links = descendants(root.kids[0], "a").map(link => {
+      const panel = ids[link.attrs.href]; link.click();
+      return {text:link.textContent, heading:panel?.querySelector("h2")?.textContent,
+        target:panel?.id, scrolled:!!panel?.scrolled, inside:root.contains(panel)};
+    });
+    console.log(JSON.stringify({first:root.kids[0].id, links, panels:panels.map(p => p.id),
+      css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))}));
+    return;
+  }
+  const snapshot = () => ({root:tree(ids["#tab-status"]), title:document.title, state:ids["#state"].textContent,
+    pipeline:descendants(ids["#status-picture"], "button").find(b => b.attrs["data-pipeline-step"] === "principal").attrs["data-count"]});
+  const before = snapshot();
+  const topButtons = () => descendants(ids["#status-principal"], "button").filter(b => b.textContent === run("T.toppedUp"));
+  // First exercise the initial Status page, before settings have ever loaded.
+  if (given.clickTopUp) await topButtons()[0].click();
+  const after = snapshot();
+  await run("loadSettings()");
+  const settingsButtons = descendants(ids["#tab-settings"], "button").filter(b => b.textContent === run("T.toppedUp"));
+  const settingsCount = settingsButtons.length;
+  if (given.clickSettingsTopUp) await settingsButtons[0].click();
+  console.log(JSON.stringify({before, after, final:snapshot(), settingsCount, posts:apiPosts,
+    settings:run("S"), requests:apiRequests.filter(r => r.path === "/api/provider/top-up")}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "principal-layout") vm.runInContext("loadStatus()", ctx).then(() => {
   const tree = el => ({tag:el.tag, attrs:el.attrs, className:el.className,
@@ -32554,7 +32594,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         st = self.picture_status()
         st["lanes"] += [{**st["lanes"][0], "name": "b", "providers": []}]
         for language, [page] in self.picture_pages(st):
-            self.assertEqual(page["first"], "status-picture")
+            self.assertEqual(page["first"], "status-sections")
             self.assertEqual([r["lane"] for r in page["rows"]], ["a", "b"])
             row = page["rows"][0]
             self.assertIn("dimmed", row["tone"])
@@ -33523,7 +33563,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), {"pause": True, "resume": True, "details": True, "asks": True, "releases": True})
 
-    def principal_layout_page(self, releases=(), asks=(), scenario="principal-layout"):
+    def principal_layout_page(self, releases=(), asks=(), scenario="principal-layout", providers=None, options=None):
         if not shutil.which("node"):
             self.skipTest("needs node to run the page's script")
         status = views.status(self.desk)
@@ -33535,12 +33575,20 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                    "files_count": 6, "files": [f"file-{i}.txt" for i in range(6)]}
         status.update(releases=[{**waiting, **r} for r in releases], asks=list(asks),
                       asks_closed=[{"id": 9, "text": "Closed request", "reason": "done", "closed": 1}])
+        if providers is not None:
+            status["providers"] = [{**status["providers"][0], **p} for p in providers]
+        public = public_settings(self.desk)
+        public["provider_credit"] = {p["name"]: f'credit since {p["credit_since"]}'
+                                     for p in status["providers"] if p.get("credit_since")}
+        for p in status["providers"]:
+            public["settings"]["providers"].setdefault(p["name"], public["settings"]["providers"]["claude"].copy())
+        replies = {"/api/status": status, "/api/events": [], "/api/settings": public, **(options or {})}
         harness = self.tmp / "principal-layout.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
         for language in ("en", "zh"):
             result = subprocess.run(["node", str(harness), str(page), scenario, language],
-                                    input=json.dumps({"/api/status": status, "/api/events": []}),
+                                    input=json.dumps(replies),
                                     capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             yield json.loads(result.stdout)
@@ -33551,11 +33599,97 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         for child in node["kids"]:
             yield from DeskTest.page_nodes(child)
 
+    def test_principal_credit_rest_waiting_item(self):
+        providers = [{"name": "claude", "credit_since": 1700000000},
+                     {"name": "usage", "credit_since": 0, "problem": "usage limit rest"}]
+        for page in self.principal_layout_page(releases=[{}], asks=[{"id": 7, "text": "Review account"}],
+                                              providers=providers, scenario="principal-credit"):
+            before = page["before"]
+            self.assertTrue(before["title"].startswith("(3) "))
+            self.assertEqual(before["pipeline"], "3")
+            principal = before["root"]["kids"][1]
+            self.assertEqual(principal["attrs"]["id"], "status-principal")
+            [card] = [n for n in self.page_nodes(principal) if "data-principal-provider" in n["attrs"]]
+            self.assertEqual(card["attrs"]["data-principal-provider"], "claude")
+            self.assertEqual(card["kids"][0]["className"], "request-body")
+            self.assertIn("claude", card["kids"][0]["text"])
+            self.assertIn("2023", card["kids"][0]["text"])
+            self.assertTrue("since" in card["kids"][0]["text"] or "自" in card["kids"][0]["text"])
+            self.assertEqual(card["kids"][1]["className"], "principal-actions")
+            self.assertEqual(card["kids"][1]["kids"][0]["tag"], "button")
+            self.assertIn(card["kids"][1]["text"], ("Topped up", "已充值"))
+            self.assertNotIn("usage", principal["text"])
+            self.assertEqual(page["settingsCount"], 1)
+            self.assertEqual(page["posts"], [])
+
+    def test_principal_usage_rest_not_waiting(self):
+        for problem in ("", "usage limit rest"):
+            for page in self.principal_layout_page(providers=[{"credit_since": 0, "problem": problem}],
+                                                  scenario="principal-credit"):
+                self.assertFalse(page["before"]["title"].startswith("("))
+                self.assertEqual(page["before"]["pipeline"], "0")
+                self.assertEqual(page["before"]["root"]["kids"][1]["attrs"]["id"], "status-picture")
+                self.assertFalse(any("data-principal-provider" in n["attrs"]
+                                     for n in self.page_nodes(page["before"]["root"])))
+                self.assertEqual(page["settingsCount"], 0)
+
+    def test_principal_top_up_matches_settings_request(self):
+        for button in ("clickTopUp", "clickSettingsTopUp"):
+            for page in self.principal_layout_page(releases=[{}], asks=[{"id": 7, "text": "Review account"}],
+                    providers=[{"credit_since": 1700000000}], scenario="principal-credit", options={button: True}):
+                self.assertEqual(page["posts"], [{"path": "/api/provider/top-up", "body": {"provider": "claude"}}])
+                [request] = page["requests"]
+                self.assertEqual(request["headers"], {"Authorization": "Bearer ", "Content-Type": "application/json", "X-Hansa": "1"})
+                self.assertEqual((request["credentials"], request["mode"]), ("omit", "same-origin"))
+                self.assertTrue(page["final"]["title"].startswith("(2) "))
+                self.assertEqual(page["final"]["pipeline"], "2")
+                before, after = (p["root"]["kids"][1] for p in (page["before"], page["final"]))
+                self.assertEqual(after["attrs"]["id"], "status-principal")
+                self.assertEqual(before["kids"][:2], after["kids"])
+                self.assertFalse(any("data-principal-provider" in n["attrs"] for n in self.page_nodes(after)))
+                self.assertEqual(page["settingsCount"], 0 if button == "clickTopUp" else 1)
+                if button == "clickTopUp":
+                    self.assertEqual(page["after"]["title"], page["final"]["title"])
+
+    def test_principal_refused_top_up_stays_waiting(self):
+        for page in self.principal_layout_page(providers=[{"credit_since": 1700000000}], scenario="principal-credit",
+                options={"clickTopUp": True, "/api/provider/top-up": {"ok": False, "problems": ["example top-up refusal"]}}):
+            self.assertEqual(page["after"]["root"], page["before"]["root"])
+            self.assertEqual(page["after"]["title"], page["before"]["title"])
+            self.assertEqual(page["after"]["pipeline"], "1")
+            self.assertIn("example top-up refusal", page["after"]["state"])
+            self.assertEqual(page["settingsCount"], 1)
+
+    def test_principal_last_top_up_clears_waiting_count(self):
+        for page in self.principal_layout_page(providers=[{"credit_since": 1700000000}],
+                                              scenario="principal-credit", options={"clickTopUp": True}):
+            self.assertTrue(page["before"]["title"].startswith("(1) "))
+            self.assertFalse(page["after"]["title"].startswith("("))
+            self.assertEqual(page["after"]["pipeline"], "0")
+            self.assertEqual(page["after"]["root"]["kids"][1]["attrs"]["id"], "status-picture")
+            self.assertEqual(page["settingsCount"], 0)
+
+    def test_status_section_links_scroll_and_wrap(self):
+        for releases, asks, providers in (([], [], []), ([{}, {"id": 18, "state": "done", "what": "done"}],
+                [{"id": 7, "text": "Review account"}], [{"credit_since": 1700000000}])):
+            for page in self.principal_layout_page(releases=releases, asks=asks, providers=providers, scenario="status-sections"):
+                self.assertEqual(page["first"], "status-sections")
+                self.assertEqual([link["target"] for link in page["links"]], page["panels"])
+                self.assertEqual(len(set(page["panels"])), len(page["panels"]))
+                self.assertTrue(page["links"])
+                for link in page["links"]:
+                    self.assertEqual(link["text"], link["heading"])
+                    self.assertTrue(link["scrolled"] and link["inside"])
+                # This DOM harness has no layout engine; check wrapping and sticky-header clearance in CSS.
+                self.assertRegex(page["css"], r"\.section-links\s*\{[^}]*flex-wrap:wrap")
+                self.assertRegex(page["css"], r"#tab-status section[^}]*scroll-margin-top:calc\(var\(--header-height\)")
+
     def assert_principal_layout(self, page, count):
         root = page["root"]
-        principal = root["kids"][0]
+        self.assertEqual(root["kids"][0]["attrs"].get("id"), "status-sections")
+        principal = root["kids"][1]
         self.assertEqual(principal["attrs"].get("id"), "status-principal")
-        self.assertEqual(root["kids"][1]["attrs"].get("id"), "status-picture")
+        self.assertEqual(root["kids"][2]["attrs"].get("id"), "status-picture")
         cards = [n for n in self.page_nodes(principal) if "data-principal-request" in n["attrs"]]
         self.assertEqual(len(cards), count)
         for card in cards:
@@ -33606,7 +33740,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertTrue("Work goes on" in second["text"] or "工作继续" in second["text"])
             markup = next(n for n in self.page_nodes(first) if n["tag"] == "pre" and n["text"] == "<i>Only you</i>")
             self.assertEqual(markup["kids"], [])
-            self.assertNotIn("#18", page["root"]["kids"][0]["text"])
+            self.assertNotIn("#18", page["root"]["kids"][1]["text"])
             self.assertIn("#18", page["root"]["text"])
             # The harness has no layout engine; check the rules applied to these rendered controls.
             self.assertRegex(page["css"], r"\.principal-actions\s*\{[^}]*flex-wrap:wrap")
@@ -33615,7 +33749,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def test_principal_nothing_waiting_preserves_existing_page_order(self):
         for page in self.principal_layout_page(releases=[{"state": "done", "what": "done"}]):
-            children = page["root"]["kids"]
+            self.assertEqual(page["root"]["kids"][0]["attrs"].get("id"), "status-sections")
+            children = page["root"]["kids"][1:]
             self.assertEqual(children[0]["attrs"].get("id"), "status-picture")
             self.assertEqual(children[1]["attrs"].get("id"), "status-timeline")
             self.assertEqual(children[2]["className"], "page-head")

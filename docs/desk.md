@@ -52,8 +52,9 @@ continue to use the default of 60. An empty POST body still means `{}`.
 
 The browser tab and the caption beside Hansa name the desk by its parent folder
 and its own folder, such as `work/desk`. The tab title is `Hansa · work/desk`,
-prefixed with the number of releases waiting for approval plus open to-dos
-when that count is nonzero. It updates with each status refresh.
+prefixed with the number of releases waiting for approval, open to-dos and
+providers resting until a top-up is confirmed when that count is nonzero.
+It updates with each status refresh.
 
 All tasks lists every work task, newest queued first, 50 per page through to the
 oldest. Each line shows its number, title, lane, current state, queued time,
@@ -115,11 +116,19 @@ that needs attention, such as paused dispatch or a stopped server, stands out
 on its own. On the Chinese page, the desk and version items are labelled
 `工作台` and `hansa 版本`; the English current-time item uses `now`, as `hansa status` does.
 
-When releases await approval or to-dos are open, Status puts them directly below
-the header, before the pipeline, timeline and summary cards. Each to-do shows its
-number, what the principal must do, why only they can do it (if given), whether
-work waits, and when it was recorded. To-dos are read-only: the principal answers
-in the conversation and the coordinator records the outcome and closes them.
+At the top of Status, links to each section scroll to it, with labels in the
+selected language. The links wrap in narrow windows.
+
+When releases await approval, to-dos are open or providers need a credit top-up,
+Status puts them below those links, before the pipeline, timeline and summary
+cards. Each to-do shows its number, what the principal must do, why only they
+can do it (if given), whether work waits, and when it was recorded. To-dos are
+read-only: the principal answers in the conversation and the coordinator records
+the outcome and closes them.
+Each provider waiting for credit shows its name and when the rest began, with
+the same **Topped up** button as Settings, Providers directly underneath.
+Confirming a top-up removes that waiting item and updates the count. Usage-limit
+rests end by themselves and do not appear among the principal's waiting items.
 
 Release controls remain beside their number and lane/target, with the command
 below. Only lists longer than five lines, such as commits, files and a to-do's
