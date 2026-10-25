@@ -898,8 +898,8 @@ const section = (title, ...kids) => h("section", {}, h("h2", {}, title), ...kids
 const table = (head, rows) => h("div", {class:"scroll"}, h("table", {}, h("tr", {}, head.map(x => h("th", {}, x))),
   rows.map(r => h("tr", {}, r.map(c => h("td", {}, c))))));
 const statusPill = (text, tone = "", symbol = "check") => h("span", {class:"status-pill " + tone}, icon(tone === "warn" ? "error" : symbol), text);
-const pageHeading = (tab, intro, aside) => h("div", {class:"page-head"},
-  h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T[tab]), h("h1", {}, T[tab]), h("p", {}, intro)), aside);
+const pageHeading = (title, intro, aside) => h("div", {class:"page-head"},
+  h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", title), h("h1", {}, title), h("p", {}, intro)), aside);
 const summaryCard = (label, value, note, symbol) => h("div", {class:"metric-card"},
   h("span", {class:"metric-label"}, icon(symbol), label), h("strong", {class:"metric-value"}, value), note ? h("span", {class:"metric-note"}, note) : null);
 const dashboardPanel = (title, symbol, count, ...kids) => h("section", {class:"dashboard-panel"},
@@ -1352,7 +1352,7 @@ async function loadStatus(force = false) {
     principal,
     statusPicture,
     timelineSection(),
-    pageHeading("status", T.statusIntro, statusPill(T.autoUpdates, "", "reload")),
+    pageHeading(T.status, T.statusIntro, statusPill(T.autoUpdates, "", "reload")),
     h("div", {class:"metric-caption"}, T.last24h),
     h("div", {class:"metric-grid", "aria-label":T.last24h},
       summaryCard(T.finished, fmt(t.finished), "", "check"), summaryCard(T.merged, fmt(t.merged), "", "releases"),
@@ -2062,7 +2062,7 @@ async function loadNotes() {
         note.truncated ? h("p", {class:"warn"}, T.noteCut) : null, h("pre", {}, note.text)]));
     } catch (e) { if (selection === notesEpoch) detail.replaceChildren(h("p", {class:"bad"}, T.notesFailed)); }
   };
-  host.replaceChildren(pageHeading("notes", T.notesIntro), h("label", {class:"tick"},
+  host.replaceChildren(pageHeading(T.notes, T.notesIntro), h("label", {class:"tick"},
     h("input", {type:"checkbox", checked:notesArchived, onchange:e => { notesArchived = e.target.checked; return loadNotes(); }}), T.showArchived), detail);
   try {
     const files = await api("/api/notes?archived=" + (notesArchived ? "1" : "0"));
@@ -2090,7 +2090,7 @@ async function loadTasks() {
     const filter = () => { tasksPage = 1; return loadTasks(); };
     for (const key of ["state", "lane", "days"]) tasksControls[key].addEventListener("change", filter);
     tasksResults = h("div", {"aria-live":"polite"});
-    host.replaceChildren(pageHeading("tasks", T.tasksIntro),
+    host.replaceChildren(pageHeading(T.tasks, T.tasksIntro),
       h("form", {class:"cost-toolbar", onsubmit:e => { e.preventDefault(); return filter(); }},
         Object.entries(tasksControls).map(([key, control]) => h("label", {},
           {state:T.taskState, lane:T.lane, words:T.taskTitle, days:T.queuedAt}[key], " ", control)),
@@ -2262,7 +2262,7 @@ function renderCost(r) {
   const w = r?.work || {};
   const unpriced = r ? Object.values(r.by.model || {}).reduce((sum, value) => sum + (value.unpriced_tokens || 0), 0) : 0;
   $("#tab-cost").replaceChildren(...shown([
-    pageHeading("cost", T.costIntro),
+    pageHeading(T.cost, T.costIntro),
     h("section", {class:"dashboard-panel"}, h("div", {class:"cost-toolbar"},
       h("div", {class:"period-control"}, h("label", {for:"cost-period"}, T.period), costSelect), costExportButton), costFeedback),
     r ? h("div", {class:"metric-grid cost-metrics", "aria-label":T.total},
