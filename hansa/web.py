@@ -167,6 +167,15 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 return self._send(200, views.status(desk))
             if url.path == "/api/timeline":
                 return self._send(200, views.timeline(desk))
+            if url.path == "/api/todos":
+                try:
+                    page = int(q.get("page", ["1"])[0])
+                except ValueError:
+                    return self._bad_request("invalid_query", "page", "page must be a whole number")
+                state = q.get("state", [""])[0]
+                if state not in ("", "open", "closed"):
+                    return self._bad_request("invalid_query", "state", "state must be open or closed")
+                return self._send(200, views.todo_list(desk, page=page, state=state))
             if url.path == "/api/tasks":
                 try:
                     page = int(q.get("page", ["1"])[0])
@@ -240,9 +249,6 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                                                                 by="page"))
                 if path == "/api/alert/test":  # the principal's test of the alert command; no command sends one
                     return self._send(200, alert.test(desk))
-                if path == "/api/ask/close":
-                    refused = desk.close_ask(int(body["id"]), body.get("answer", ""), by="page")
-                    return self._send(200, {"ok": False, "problems": [refused]} if refused else {"ok": True})
                 return self._send(404, {"error": "not found"})
             except SettingsError as e:
                 return self._settings_unavailable(e)

@@ -3041,44 +3041,29 @@ class Desk:
         from .views import ready_news
         ready_news(self)
 
-    def add_ask(self, text: str, by: str = "", session: dict | None = None) -> int:
-        """session: the Claude Code session that asked, which hears the answer (hansa/notify.py). It records the
-        providers ready then; any other name (one not set up yet too) was not, and a request naming it may be done
-        once it is (views.ask_note)."""
+    def add_ask(self, text: str, by: str = "", session: dict | None = None,
+                why: str = "", holds: bool = False) -> int:
+        """session: the Claude Code session that asked, which hears provider readiness news (hansa/notify.py).
+        It records the providers ready then; any other name (one not set up yet too) was not, and a to-do
+        naming it may be done once it is (views.ask_note)."""
         from .views import ready_now
         ready_then = ready_now(self)
         with self.lock():
             asks = self.asks()
             n = max((a["id"] for a in asks), default=0) + 1
             asks.append({"id": n, "text": self.redact(text.strip()), "by": by, "created": now(), "closed": None,
-                         "answer": "", "ready_then": ready_then, **({"session": session} if session else {})})
+                         "answer": "", "why": self.redact(why.strip()), "holds": holds, "ready_then": ready_then,
+                         **({"session": session} if session else {})})
             write_json(self.asks_path, asks)
         self.event("ask", id=n, by=by)
         return n
 
-    def close_ask(self, n: int, answer: str = "", by: str = "") -> str:
-        """Answers an open request; one no longer open (closed meanwhile by the coordinator, say, while the page
-        still showed it) is left as it was: what was refused is returned, "" when it was answered."""
-        with self.lock():
-            asks = self.asks()
-            a = next((a for a in asks if a.get("id") == n), None)
-            if not a:
-                return f"there is no request #{n}; nothing was answered"
-            if a.get("closed"):
-                return (f"request #{n} was already closed"
-                        + (f" by the coordinator ({a['reason']})" if a.get("closed_by") == "coordinator" else "")
-                        + "; your answer was not taken")
-            a["closed"], a["answer"] = now(), self.redact(answer.strip())
-            write_json(self.asks_path, asks)
-        self.event("ask_closed", id=n, by=by)
-        return ""
-
     def close_ask_as_coordinator(self, n: int, reason: str, by: str = "") -> None:
-        """The coordinator closes an open request of this desk itself (hansa ask --close), saying why; the page
-        shows it as closed by the coordinator, and nobody is posted: the coordinator knows."""
+        """Record the outcome of a to-do (hansa ask --close); the principal answers in conversation.
+        Nobody is posted: the coordinator knows."""
         reason = self.redact(reason.strip())
         if not reason:
-            raise SystemExit("hansa: say why the request is closed: hansa ask --close N \"why\"")
+            raise SystemExit("hansa: give the outcome: hansa ask --close N \"<outcome>\"")
         with self.lock():
             asks = self.asks()
             a = next((a for a in asks if a.get("id") == n), None)

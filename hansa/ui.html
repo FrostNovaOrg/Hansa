@@ -374,6 +374,7 @@ td .task-detail { min-width:200px; }
   <div id="tab-settings" hidden></div>
   <div id="tab-cost" hidden></div>
   <div id="tab-tasks" hidden></div>
+  <div id="tab-todos" hidden></div>
   <div id="tab-gaps" hidden></div>
   <div id="tab-notes" hidden></div>
 </main>
@@ -400,7 +401,7 @@ if (tokenAddress) {
 } else {
   try { pageToken = sessionStorage.getItem("hansa.token") || ""; } catch (_) {}
 }
-const TABS = ["status", "tasks", "gaps", "notes", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
+const TABS = ["status", "tasks", "todos", "gaps", "notes", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
 const language = keptChoice("localStorage", "hansa.language", ["zh-CN", "en"],
   (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en");
 const ZH = language === "zh-CN";
@@ -441,7 +442,8 @@ const T = ZH ? {
   taskSteps:"任务步骤", taskQueued:"排队", taskRun:n => `运行 ${n}`, taskLaneCheck:"工作线验收", taskVerification:"核对", taskMergeCheck:"合并验收", taskMerged:"已合并",
   taskRunning:"进行中", taskCompleted:"已完成", taskFailed:"失败", taskCancelled:"已取消", taskWait:"等待", taskFirstResult:"首次结果",
   taskMinutes:n => `${n} 分钟`, taskSeconds:n => `${n} 秒`, taskExit:n => `退出码 ${n}`, taskVerifies:"核对任务", taskReplaces:"接替任务", taskVerificationUnavailable:"核对记录不可用",
-  asks:"智能体提的请求", principalDetails:"详情", answer:"回复（可不填）", close:"处理完", closedByCoordinator:"已由协调者关闭：",
+  asks:"待办事项", todos:"待办事项", todosIntro:"仅展示。请在对话中回复，由协调者记录结果并关闭；所有事项永久保留。",
+  todoWhat:"待办内容", todoWork:"工作", todoLoading:"正在加载待办事项…", todoPage:(p, n, total) => `第 ${p} / ${n} 页 · 共 ${total} 件待办事项`, todoWhy:"为何只有您能做", todoHolds:"工作等待此事", todoContinues:"工作继续", todoSince:"提出时间", todoOutcome:"结果", todoClosed:"关闭时间", todoOpen:"未完成", todoDone:"已关闭", principalDetails:"详情",
   providers:"模型供应", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
   effortDefault:"默认", endpoint:"接口地址", loginDir:"登录目录（空＝默认）", key:"密钥", keySet:"已填", keyMissing:"未填",
   saveKey:"保存密钥", clearKey:"清除密钥", keyHint:"在这里输入密钥", check:"Ping", checking:"Ping 中…",
@@ -601,7 +603,8 @@ const T = ZH ? {
   taskSteps:"Task steps", taskQueued:"Queued", taskRun:n => `Run ${n}`, taskLaneCheck:"Lane check", taskVerification:"Verification", taskMergeCheck:"Merge check", taskMerged:"Merged",
   taskRunning:"running", taskCompleted:"completed", taskFailed:"failed", taskCancelled:"cancelled", taskWait:"Wait", taskFirstResult:"First result",
   taskMinutes:n => `${n} min`, taskSeconds:n => `${n} s`, taskExit:n => `exit ${n}`, taskVerifies:"Verifies", taskReplaces:"Replaces", taskVerificationUnavailable:"Verification record unavailable",
-  asks:"Requests from agents", principalDetails:"Details", answer:"answer (optional)", close:"Done", closedByCoordinator:"closed by the coordinator: ",
+  asks:"To-dos", todos:"To-dos", todosIntro:"Read-only. Answer in the conversation; the coordinator records the outcome and closes each item. Every item is kept.",
+  todoWhat:"What", todoWork:"Work", todoLoading:"Loading to-dos…", todoPage:(p, n, total) => `Page ${p} of ${n} · ${total} to-dos`, todoWhy:"Why only you", todoHolds:"Work waits", todoContinues:"Work goes on", todoSince:"Since", todoOutcome:"Outcome", todoClosed:"Closed at", todoOpen:"Open", todoDone:"Closed", principalDetails:"Details",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
   effortDefault:"default", endpoint:"Endpoint", loginDir:"Login directory (blank = default)", key:"Key", keySet:"set", keyMissing:"missing",
   saveKey:"Save key", clearKey:"Clear key", keyHint:"Enter a key here", check:"Ping", checking:"pinging…",
@@ -795,7 +798,7 @@ Object.assign(T, ZH ? {
   noActiveTasks:"当前没有进行中的任务", noActiveTasksNote:"任务开始、排队或等待审核时，会显示在这里。", taskFlow:"任务进展",
   noLanes:"还没有工作线", noLanesNote:"由协调席添加工作线后，这里会显示它的状态。",
   noProviders:"还没有模型供应", noProvidersNote:"在设置中加一家供应后，这里会显示连接状态。",
-  noEvents:"还没有活动记录", noEventsNote:"任务与工作台的最新变化会显示在这里。", closedRequests:"已处理的请求",
+  noEvents:"还没有活动记录", noEventsNote:"任务与工作台的最新变化会显示在这里。",
   period:"统计范围", periodDays:n => n === "all" ? "从工作台开始至今" : `最近 ${n} 天`, estimatedCost:"折算金额", totalTokens:"Token 用量", unpricedTokens:"没有价目的 token",
   unpricedNote:"未计入折算金额", usdNote:"USD · 按设置中的价目折算", costLoading:"正在加载用量…", costReady:"按所选时间范围统计。",
   costLoadFailed:"用量加载失败，请重试。", costRetained:n => `仍显示「${T.periodDays(n)}」的上次结果。`, retry:"重试", exporting:"正在导出…", exported:"CSV 已导出。", exportFailed:"导出失败，请重试。",
@@ -814,7 +817,7 @@ Object.assign(T, ZH ? {
   noActiveTasks:"No tasks in progress", noActiveTasksNote:"Running, queued and review tasks will appear here.", taskFlow:"Task progress",
   noLanes:"No lanes yet", noLanesNote:"Lanes appear here after the coordinator adds them.",
   noProviders:"No providers yet", noProvidersNote:"Add a provider in Settings to see its connection status here.",
-  noEvents:"No activity yet", noEventsNote:"New task and desk events will appear here.", closedRequests:"Closed requests",
+  noEvents:"No activity yet", noEventsNote:"New task and desk events will appear here.",
   period:"Time range", periodDays:n => n === "all" ? "Since the desk began" : `Last ${n} days`, estimatedCost:"Estimated value", totalTokens:"Token usage", unpricedTokens:"Unpriced tokens",
   unpricedNote:"Excluded from the estimated value", usdNote:"USD · using the Settings price table", costLoading:"Loading usage…", costReady:"Totals for the selected period.",
   costLoadFailed:"Could not load usage. Try again.", costRetained:n => `Still showing the previous report: ${T.periodDays(n)}.`, retry:"Retry", exporting:"Exporting…", exported:"CSV exported.", exportFailed:"Could not export. Try again.",
@@ -902,7 +905,7 @@ function icon(name) {
   };
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   for (const [key, value] of Object.entries({class:"icon", viewBox:"0 0 24 24", fill:"none", stroke:"currentColor", "stroke-width":"1.7", "stroke-linecap":"round", "stroke-linejoin":"round", "aria-hidden":"true", focusable:"false"})) svg.setAttribute(key, value);
-  for (const d of paths[name] || paths.settings) {
+  for (const d of paths[name === "todos" ? "tasks" : name] || paths.settings) {
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", d); svg.append(path);
   }
   return svg;
@@ -944,7 +947,7 @@ function show(tab) {
     b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
   }
   for (const t of TABS) $("#tab-" + t).hidden = t !== tab;
-  return ({status:loadStatus, tasks:loadTasks, gaps:loadGaps, notes:loadNotes, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
+  return ({status:loadStatus, tasks:loadTasks, todos:loadTodos, gaps:loadGaps, notes:loadNotes, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
 }
 function err(e) { $("#state").textContent = String(e.message || e); $("#state").className = "bad"; }
 
@@ -1287,7 +1290,7 @@ function statusInput(key, attrs) {
   return h("input", {...attrs, "data-status-draft":key, value:statusDrafts.get(key) || ""});
 }
 function keepStatusDrafts(st) {
-  const live = new Set(st.asks.map(a => `ask:${a.id}`));
+  const live = new Set();
   if (!st.paused) live.add("pause");
   for (const r of st.releases || []) {
     if (r.state === "waiting") live.add(`release:${r.id}`);
@@ -1359,7 +1362,7 @@ async function loadStatus(force = false) {
   const pendingReleases = (st.releases || []).filter(r => r.state === "waiting");
   const principal = waiting ? h("div", {id:"status-principal"},
     pendingReleases.length ? dashboardPanel(T.releaseWaiting, "releases", pendingReleases.length, pendingReleases.map(releaseBlock)) : null,
-    asksSection({...st, asks_closed:[]})) : null;
+    asksSection(st)) : null;
   statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));
   $("#tab-status").replaceChildren(...shown([
     principal,
@@ -1378,7 +1381,7 @@ async function loadStatus(force = false) {
       st.paused ? h("button", {class:"primary", "data-status-focus":"resume", onclick: () => api("/api/resume", {}).then(() => loadStatus(true)).catch(err)}, T.resume)
                 : [reason, h("button", {"data-status-focus":"pause", onclick: () => api("/api/pause", {reason:reason.value}).then(() => loadStatus(true)).catch(err)}, T.pause)])),
     h("div", waiting ? {} : {id:"status-principal"},
-      releasesSection((st.releases || []).filter(r => r.state !== "waiting")), asksSection({...st, asks:[]})),
+      releasesSection((st.releases || []).filter(r => r.state !== "waiting"))),
     !st.running.length && !st.queued.length && !st.review.length && !(st.merging || []).length ? dashboardPanel(T.taskFlow, "status", 0,
       emptyState(T.noActiveTasks, T.noActiveTasksNote, "check")) : null,
     h("div", {id:"status-queued"}, st.queued.length ? dashboardPanel(T.queued, "pending", st.queued.length, table([T.task, T.lane, T.titleCol, T.waiting],
@@ -1413,18 +1416,15 @@ async function loadStatus(force = false) {
   if (current === "status") loadTimeline();
 }
 function asksSection(st) {
-  if (!st.asks.length && !(st.asks_closed || []).length) return null;
+  if (!st.asks.length) return null;
   return dashboardPanel(T.asks, "alerts", st.asks.length, st.asks.map(a => {
-    const ans = statusInput(`ask:${a.id}`, {placeholder:T.answer, "aria-label":`#${a.id} · ${T.answer}`});
     const [first, ...rest] = (a.text || "").split(/\r?\n/);
     return h("div", {class:"request-card", "data-principal-request":true}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, first)),
-      h("div", {class:"principal-actions"}, ans, h("button", {"data-status-focus":`ask:${a.id}:close`, onclick: () => api("/api/ask/close", {id:a.id, answer:ans.value})
-        .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.close)),
+      h("div", {class:"field-note"}, `${a.holds ? T.todoHolds : T.todoContinues} · ${T.todoSince}: ${when(a.created)}`),
       rest.length ? principalList(`ask:${a.id}:text`, T.principalDetails, rest, h("pre", {}, rest.join("\n"))) : null,
+      a.why ? h("div", {}, T.todoWhy + ": ", h("pre", {}, a.why)) : null,
       a.note ? h("span", {class:"ok"}, a.note) : null);
-  }), (st.asks_closed || []).length ? h("h3", {}, T.closedRequests) : null,
-    (st.asks_closed || []).map(a => h("div", {class:"request-card muted"}, h("div", {class:"request-body"}, h("strong", {}, "#" + a.id), h("span", {}, a.text)),
-      h("div", {class:"field-note"}, `${T.closedByCoordinator}${a.reason} (${when(a.closed)})`))));
+  }));
 }
 function releaseBlock(r) {
   const reason = statusInput(`release:${r.id}`, {placeholder:T.releaseReason});
@@ -2108,6 +2108,34 @@ async function loadGaps() {
     })) : h("p", {}, T.noGaps));
   } catch (e) {
     if (epoch === gapsEpoch) results.replaceChildren(h("p", {class:"bad"}, T.gapsFailed), h("button", {onclick:loadGaps}, T.retry));
+  }
+}
+
+/* ---------- to-dos ---------- */
+let todosPage = 1, todosState = "", todosEpoch = 0;
+async function loadTodos() {
+  const host = $("#tab-todos"), epoch = ++todosEpoch;
+  const filter = h("select", {"aria-label":T.taskState, onchange:e => {
+    todosState = e.target.value; todosPage = 1; return loadTodos();
+  }}, [["", T.anyState], ["open", T.todoOpen], ["closed", T.todoDone]].map(([value, label]) =>
+    h("option", {value, selected:value === todosState}, label)));
+  const results = h("div", {"aria-live":"polite"}, T.todoLoading);
+  host.replaceChildren(pageHeading(T.todos, T.todosIntro), filter, results);
+  try {
+    const r = await api(`/api/todos?page=${todosPage}&state=${todosState}`);
+    if (epoch !== todosEpoch) return;
+    todosPage = r.page;
+    const turn = page => { todosPage = page; return loadTodos(); };
+    results.replaceChildren(h("p", {}, T.todoPage(r.page, r.pages, r.total)),
+      table(["#", T.todoWhat, T.todoWhy, T.todoWork, T.todoSince, T.taskState, T.todoOutcome, T.todoClosed],
+        r.rows.map(a => [a.id, h("pre", {}, a.text), h("pre", {}, a.why || "—"),
+          a.holds ? T.todoHolds : T.todoContinues, when(a.created), a.closed ? T.todoDone : T.todoOpen,
+          h("pre", {}, a.reason || a.answer || "—"), when(a.closed)])),
+      h("div", {class:"cost-toolbar"},
+        h("button", {disabled:r.page <= 1, onclick:() => turn(r.page - 1)}, T.newerPage),
+        h("button", {disabled:r.page >= r.pages, onclick:() => turn(r.page + 1)}, T.olderPage)));
+  } catch (e) {
+    if (epoch === todosEpoch) results.replaceChildren(h("p", {class:"bad"}, String(e.message || e)), h("button", {onclick:loadTodos}, T.retry));
   }
 }
 

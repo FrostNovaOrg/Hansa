@@ -11506,7 +11506,7 @@ def save():'''))
         self.assertNotIn(key, self.desk.asks_path.read_text())
         later = "sk-saved-later-0222"
         tid2 = self.desk.new_task(f"Mention {later} in the notes")
-        self.desk.close_ask(n, f"use {later} instead")
+        self.desk.close_ask_as_coordinator(n, f"use {later} instead")
         self.desk.write_key("mimo", later)  # saved after it was written down
         self.assertNotIn(later, (self.desk.tasks_dir / tid2 / "task.md").read_text())
         self.assertNotIn(later, self.desk.asks_path.read_text())
@@ -15641,33 +15641,87 @@ def save():'''))
         notify.handle(self.desk, {"op": "feed", "me": me, "pos": 0, "done": 0})  # its next write drops it
         self.assertNotIn("clear", json.loads((notify.register_dir(self.desk) / f"{key}.json").read_text()))
 
-    def test_a_request_answered_on_the_page_reaches_the_session_that_asked_with_the_answer(self):
-        skip_unless_ports(self)
-        (a, sa), (b, sb) = self.session(), self.session()
-        for p, sock in ((a, sa), (b, sb)):
-            with self.in_session(p, sock):
-                self.hansa_out("notify", "on")
-        with self.in_session(a, sa):
-            self.hansa_out("ask", "May the docs lane use the npm registry?")
-        self.assertEqual(self.desk.asks()[0]["session"]["pid"], a.pid)
-        self.desk.write_key("mimo", "sk-mimo-12345678")
-        httpd = start_web(self.desk, "127.0.0.1", 0)
-        try:
-            req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/api/ask/close",
-                                         method="POST", headers={"X-Hansa": "1",
-                                                                "Authorization": "Bearer " + self.desk.web_token()},
-                                         data=json.dumps({"id": 1, "answer": "Yes; its key is sk-mimo-12345678"}).encode())
-            with urllib.request.urlopen(req) as r:
-                self.assertTrue(json.load(r)["ok"])
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-        heard = self.soon(lambda: self.posts(sa))
-        self.assertIn("- request #1 answered: Yes; its key is [key of mimo] (you asked: May the docs lane use the npm "
-                      "registry?)", heard[0])
-        self.assertNotIn("sk-mimo-12345678", heard[0])
-        time.sleep(1)
-        self.assertEqual(self.posts(sb), [])
+    def test_ask_records_why_holds_defaults_and_the_same_alert(self):
+        from hansa import alert
+        self.desk.write_key("mimo", "sk-todo-test-12345678")
+        s = self.desk.settings()
+        s["alert"] = {"command": "true"}
+        self.assertEqual(self.desk.save_settings(s, by="page"), [])
+        self.hansa_out("ask", "Review <b>x</b>", "--why", "Only you have sk-todo-test-12345678", "--holds")
+        self.hansa_out("ask", "Pick a name")
+        first, second = views.status(self.desk)["asks"]
+        self.assertEqual((first["text"], first["why"], first["holds"]),
+                         ("Review <b>x</b>", "Only you have [key of mimo]", True))
+        self.assertEqual((second["why"], second["holds"]), ("", False))
+        self.assertTrue(first["created"])
+        self.assertEqual([a["text"] for a in alert.queued(self.desk)],
+                         ["request #1 waits for you on the page: Review <b>x</b>",
+                          "request #2 waits for you on the page: Pick a name"])
+
+    def test_todos_keep_300_closed_items_and_page_filter_to_the_oldest(self):
+        from hansa import disk
+        history = [{"id": n, "text": f"To-do {n}", "created": n, "closed": n + 1,
+                    "answer": "Old page answer"} for n in range(1, 301)]
+        write_json(self.desk.asks_path, history)
+        self.hansa_out("ask", "New item")
+        self.assertEqual(views.todo_list(self.desk, state="open")["total"], 1)
+        self.hansa_out("ask", "--close", "301", "Principal finished it")
+        before = self.desk.asks_path.read_bytes()
+        disk.trim(self.desk)
+        self.assertEqual(self.desk.asks_path.read_bytes(), before)
+        self.assertEqual(len(self.desk.asks()), 301)
+        ids = []
+        for page in range(1, 8):
+            rep = views.todo_list(self.desk, page=page, state="closed")
+            self.assertEqual((rep["page"], rep["pages"], rep["total"]), (page, 7, 301))
+            self.assertEqual(len(rep["rows"]), 50 if page < 7 else 1)
+            ids.extend(a["id"] for a in rep["rows"])
+        self.assertEqual(ids, list(range(301, 0, -1)))
+        self.assertEqual(views.todo_list(self.desk, page=999)["page"], 7)
+        self.assertEqual(views.todo_list(self.desk, page=-1)["page"], 1)
+        self.assertEqual(views.todo_list(self.desk, state="open"),
+                         {"rows": [], "page": 1, "pages": 1, "total": 0})
+        self.assertEqual(views.todo_list(self.desk, page=7)["rows"][0]["answer"], "Old page answer")
+
+    def test_todos_api_auth_filters_and_invalid_queries(self):
+        self.desk.add_ask("Review")
+        self.desk.add_ask("Done")
+        self.hansa_out("ask", "--close", "2", "Principal completed it")
+        headers = {"Authorization": "Bearer " + self.desk.web_token()}
+        for state in ("", "open", "closed"):
+            path = "/api/todos?page=1&state=" + state
+            self.assertEqual(self.web_request(path)[0], 403)
+            code, body, _ = self.web_request(path, headers=headers)
+            self.assertEqual((code, body), (200, views.todo_list(self.desk, state=state)))
+        for query in ("page=x", "page=1.5", "state=done"):
+            self.assertEqual(self.web_request("/api/todos?" + query, headers=headers)[0], 400)
+
+    def test_todos_page_read_only_translated_plain_text_and_paginated(self):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        harness = self.tmp / "todos-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        rows = [{"id": n, "text": "<b>x</b>", "why": "<i>only you</i>", "holds": True,
+                 "created": 1700000000, "closed": 1700000010, "reason": "<em>done</em>"}
+                for n in range(51, 1, -1)]
+        for language in ("en", "zh"):
+            replies = {"/api/todos": {"rows": rows, "page": 1, "pages": 2, "total": 51}}
+            result = subprocess.run(["node", str(harness), str(page), "todos", language],
+                                    input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"ok": True})
+
+    def test_old_requests_are_open_todos_and_coordinator_records_the_outcome(self):
+        write_json(self.desk.asks_path, [{"id": 3, "text": "Review access", "created": 1,
+                                         "closed": None, "answer": ""}])
+        self.assertEqual([a["id"] for a in views.status(self.desk)["asks"]], [3])
+        self.hansa_out("ask", "--close", "3", "Principal granted access in the conversation")
+        self.assertEqual(views.status(self.desk)["asks"], [])
+        [row] = views.todo_list(self.desk)["rows"]
+        self.assertEqual(row["reason"], "Principal granted access in the conversation")
+        self.assertTrue(row["closed"])
+        self.assertEqual(notify.items_for(self.desk, self.events("ask_closed"), {"key":"k", "session":None}), [])
 
     def test_an_open_request_naming_a_provider_that_is_ready_now_asks_whether_it_is_done(self):
         s = self.desk.settings()
@@ -15685,9 +15739,9 @@ def save():'''))
         self.assertEqual([a["closed"] for a in self.desk.asks()], [None, None])  # hansa closes nothing itself
         heard = notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None})
         self.assertEqual([x["line"] for x in heard], ["mimo is ready now: done? Still open: request #1 (Please fill in "
-                                                      "mimo's key) (the principal closes a request on the page; if it is done, "
-                                                      "close it: hansa ask --close N \"why\")"])
-        self.desk.close_ask(1)
+                                                      "mimo's key) (the principal answers in the conversation; "
+                                                      "record the outcome: hansa ask --close N \"<outcome>\")"])
+        self.desk.close_ask_as_coordinator(1, "principal completed it")
         self.assertEqual(notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None}), [])
 
     def test_the_ready_now_line_comes_once_and_again_only_after_the_provider_stopped_being_ready(self):
@@ -15706,7 +15760,7 @@ def save():'''))
         self.desk.write_key("mimo", "sk-mimo-12345678")
         self.desk.write_key("mimo", "sk-mimo-87654321")
         self.assertEqual([e["ids"] for e in self.events("ask_ready")], [[1], [1]])
-        self.desk.close_ask(1)
+        self.desk.close_ask_as_coordinator(1, "principal completed it")
         self.desk.write_key("mimo", "")
         self.desk.write_key("mimo", "sk-mimo-12345678")  # a closed request is not told
         self.assertEqual(len(self.events("ask_ready")), 2)
@@ -15773,7 +15827,7 @@ def save():'''))
         st = views.status(self.desk)
         self.assertEqual([x["id"] for x in st["asks"]], [2])  # status stops listing it
         self.assertNotIn("#1:", views.status_text(st))
-        self.assertEqual([(x["id"], x["reason"]) for x in st["asks_closed"]],
+        self.assertEqual([(x["id"], x["reason"]) for x in views.todo_list(self.desk, state="closed")["rows"]],
                          [(1, "The principal filled it in: [key of mimo]")])  # the page shows it, with the reason
         closed = self.events("ask_closed")
         self.assertEqual([(e["id"], e["by"], e["coordinator"]) for e in closed], [(1, "coordinator", True)])
@@ -15783,16 +15837,24 @@ def save():'''))
         with self.assertRaises(SystemExit) as e:
             self.hansa_out("ask", "--close", "1", "again")
         self.assertIn("request #1 is already closed by the coordinator", str(e.exception.code))
-        self.desk.close_ask(2, "yes", by="page")  # closed on the page: refused as already closed too
+        asks = self.desk.asks()  # a page answer from an older version remains on record
+        asks[1].update(closed=time.time(), answer="yes")
+        write_json(self.desk.asks_path, asks)
         with self.assertRaises(SystemExit) as e:
             self.hansa_out("ask", "--close", "2", "done")
         self.assertIn("request #2 is already closed: yes", str(e.exception.code))
-        self.assertEqual(len(self.events("ask_closed")), 2)
+        self.assertEqual(len(self.events("ask_closed")), 1)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             main(["ask", "--help"])
-        self.assertIn('the coordinator closes it: hansa ask --close N "why"; the reason is required',
+        self.assertIn('the coordinator closes the to-do: hansa ask --close N "<outcome>". The outcome is required',
                       " ".join(out.getvalue().split()))
+        help_text = " ".join(out.getvalue().split())
+        for text in ("--why", "--holds", "answers in the conversation", "Workers and verifications cannot close to-dos"):
+            self.assertIn(text, help_text)
+        for source in (self.hansa_out("help", "inbox"), self.hansa_out("help", "card")):
+            self.assertIn("principal answers in", " ".join(source.split()))
+            self.assertIn("--holds", source)
 
     def test_a_request_made_while_its_provider_was_ready_gets_no_note(self):
         self.assertIn("claude", views.ready_now(self.desk))
@@ -30191,7 +30253,7 @@ const fetch = async (path, options) => {
   if (options && options.method === "POST" && path === "/api/key") {
     keyPosts.push(JSON.parse(options.body)); return {status:200, json:async () => keyPostReply};
   }
-  if (options && options.method === "POST" && ["/api/pause", "/api/resume", "/api/ask/close", "/api/release/answer", "/api/release/stop"].includes(path)) {
+  if (options && options.method === "POST" && ["/api/pause", "/api/resume", "/api/release/answer", "/api/release/stop"].includes(path)) {
     const body = JSON.parse(options.body);
     if (path === "/api/pause") given["/api/status"].paused = body.reason || "from page";
     if (path === "/api/resume") given["/api/status"].paused = "";
@@ -30223,7 +30285,7 @@ function openPage(search = "") {
   for (const key of Object.keys(ids)) delete ids[key];
   document.documentElement = new El("html"); document.activeElement = null; document.title = "Hansa";
   for (const key of Object.keys(windowEvents)) delete windowEvents[key];
-  for (const tab of ["status", "tasks", "gaps", "notes", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
+  for (const tab of ["status", "tasks", "todos", "gaps", "notes", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
   const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
   location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
   URLSearchParams, setInterval(f) { (windowEvents.interval ||= []).push(f); }, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
@@ -30361,7 +30423,7 @@ else if (ask === "preferences") (async () => {
   const flush = () => new Promise(resolve => setImmediate(resolve));
   const run = code => vm.runInContext(code, ctx);
   const snapshot = () => {
-    const tab = ["status", "tasks", "gaps", "notes", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
+    const tab = ["status", "tasks", "todos", "gaps", "notes", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
     const selected = document.querySelectorAll("#tabs button").find(el => el.attrs["aria-current"] === "page");
     if (selected?.dataset.tab !== tab) throw new Error("tab selection and visibility disagree");
     const group = run("settingsGroup");
@@ -30539,6 +30601,44 @@ else if (ask === "gaps") (async () => {
   check(apiPosts.length === 0 && !descendants(root, "input").length && !descendants(root, "textarea").length, "gaps editable on page");
   console.log(JSON.stringify({ok:true}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "todos") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  await run('show("todos")');
+  const root = ids["#tab-todos"], report = given["/api/todos"];
+  const rows = () => descendants(root, "tr");
+  check(descendants(root, "h1")[0].textContent === (process.argv[4] === "zh" ? "待办事项" : "To-dos"), "to-do title untranslated");
+  check(root.textContent.includes(run("T.todosIntro")), "conversation instructions missing");
+  check(rows().length === 51, "not 50 items on first page");
+  const cells = rows()[1].kids;
+  for (const [col, text] of [[1,"<b>x</b>"], [2,"<i>only you</i>"], [6,"<em>done</em>"]])
+    check(cells[col].textContent === text && cells[col].kids[0].kids[0] instanceof Text, "markup interpreted");
+  check(cells[3].textContent === run("T.todoHolds") && cells[5].textContent === run("T.todoDone"), "state or holds untranslated");
+  check(cells[4].textContent && cells[7].textContent, "timestamps missing");
+  check(JSON.stringify(rows()[0].kids.map(el => el.textContent)) === JSON.stringify(run('["#",T.todoWhat,T.todoWhy,T.todoWork,T.todoSince,T.taskState,T.todoOutcome,T.todoClosed]')), "headers untranslated");
+  const button = key => descendants(root, "button").find(el => el.textContent === run("T." + key));
+  check(button("newerPage").disabled && !button("olderPage").disabled, "first page buttons wrong");
+  report.rows = [{id:1, text:"Old", answer:"Legacy answer", created:1, closed:2}]; report.page = 2;
+  await button("olderPage").click();
+  check(apiGets.at(-1).includes("page=2") && rows().length === 2, "next page missing");
+  check(rows()[1].kids[2].textContent === "—" && rows()[1].kids[3].textContent === run("T.todoContinues") &&
+    rows()[1].kids[6].textContent === "Legacy answer", "legacy fields missing");
+  check(button("olderPage").disabled && !button("newerPage").disabled, "last page buttons wrong");
+  report.page = 1;
+  await button("newerPage").click();
+  for (const state of ["open", "closed", ""]) {
+    const filter = descendants(root, "select")[0]; filter.value = state;
+    await filter.on.change({target:filter});
+    const query = new URLSearchParams(apiGets.at(-1).split("?")[1]);
+    check(query.get("page") === "1" && query.get("state") === state, "filter did not reset page");
+  }
+  check(descendants(root, "option").map(el => el.textContent).join() === run('[T.anyState,T.todoOpen,T.todoDone].join()'), "filters untranslated");
+  check(apiPosts.length === 0 && !descendants(root, "input").length && !descendants(root, "textarea").length, "to-dos writable");
+  report.rows = []; report.total = 0; report.pages = 1;
+  await run("loadTodos()");
+  check(rows().length === 1 && button("newerPage").disabled && button("olderPage").disabled, "empty page broken");
+  console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "all-tasks") (async () => {
   const run = code => vm.runInContext(code, ctx);
   const check = (ok, why) => { if (!ok) throw new Error(why); };
@@ -30662,7 +30762,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
   const find = predicate => { let found; walk(root, el => { if (!found && predicate(el)) found = el; }); return found; };
   const input = label => find(el => el.tag === "input" && el.attrs.placeholder === run("T." + label));
   const button = label => find(el => el.tag === "button" && el.textContent === run("T." + label));
-  const labels = ["pauseReason", "answer", "releaseReason", "releaseStopReason"];
+  const labels = ["pauseReason", "releaseReason", "releaseStopReason"];
   const draft = label => "Unsent " + label;
   await run("loadStatus()");
   if (ask === "status-drafts") {
@@ -30672,9 +30772,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     st.releases.unshift({...st.releases[0], id:19});
     st.releases[1].commit = "b".repeat(40); st.releases[1].command = "publish revised";
     await run("loadStatus()");
-    const answers = descendants(root, "input").filter(el => el.attrs.placeholder === run("T.answer"));
     const reasons = descendants(root, "input").filter(el => el.attrs.placeholder === run("T.releaseReason"));
-    check(answers[0].value === "" && answers[1].value === draft("answer"), "answer draft moved to another request or vanished");
     check(reasons[0].value === "" && reasons[1].value === draft("releaseReason"), "release draft moved to another release or vanished");
     for (const label of ["pauseReason", "releaseStopReason"]) check(input(label).value === draft(label), label + " draft vanished");
     // A redraw must use the refreshed release's command and commit, with its own retained reason.
@@ -30686,11 +30784,10 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
   } else if (ask.startsWith("status-action-")) {
     const action = ask.slice("status-action-".length);
     const [label, field, path, payload] = {
-      close:["close", "answer", "/api/ask/close", {id:7, answer:draft("answer")}],
       yes:["releaseYes", "releaseReason", "/api/release/answer", {id:17, yes:true, reason:draft("releaseReason"), commit:st.releases[0].commit, command:st.releases[0].command}],
       no:["releaseNo", "releaseReason", "/api/release/answer", {id:17, yes:false, reason:draft("releaseReason"), commit:st.releases[0].commit, command:st.releases[0].command}],
       stop:["releaseStop", "releaseStopReason", "/api/release/stop", {id:18, reason:draft("releaseStopReason")}],
-      ping:["check", "answer", "/api/check", {provider:"example-provider"}]
+      ping:["check", "pauseReason", "/api/check", {provider:"example-provider"}]
     }[action];
     const fieldBefore = input(field), controlBefore = button(label);
     fieldBefore.value = draft(field); fieldBefore.focus();
@@ -30711,7 +30808,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
   } else if (ask === "status-button-refresh") {
     for (const label of labels) input(label).value = draft(label);
     // Same labels on different records must not attract focus when their order changes.
-    button("close").focus();
+    button("releaseYes").focus();
     st.asks.unshift({id:8, text:"New request before the focused request"});
     st.releases.unshift({...st.releases[0], id:19});
     st.queued.unshift({id:"t0043", lane:"a", title:"New queued task", waiting:"paused"});
@@ -30721,8 +30818,8 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     windowEvents.interval[0](); await flush();
     check(root.textContent.includes("New queued task") && root.textContent.includes("new-background-lane") &&
       root.textContent.includes("new-background-event"), "focused button blocked lane, task or event updates");
-    const closes = descendants(root, "button").filter(el => el.textContent === run("T.close"));
-    check(document.activeElement === closes[1] && document.activeElement !== previous, "focus moved to another request after reorder");
+    const approvals = descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"));
+    check(document.activeElement === approvals[1] && document.activeElement !== previous, "focus moved to another release after reorder");
     for (const label of ["releaseYes", "releaseNo", "releaseStop", "check", "pause"]) {
       button(label).focus();
       windowEvents.interval[0](); await flush();
@@ -30741,12 +30838,12 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     run(timeline);
     check(document.activeElement === find(el => el.attrs["data-timeline-kind"] === "release"), "timeline data refresh lost segment focus");
     // A vanished action must not move focus to the same action on a different record.
-    descendants(root, "button").filter(el => el.textContent === run("T.close"))[1].focus();
-    st.asks = st.asks.filter(a => a.id !== 7);
+    descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"))[1].focus();
+    st.releases = st.releases.filter(r => r.id !== 17);
     windowEvents.interval[0](); await flush();
-    check(document.activeElement === document.body, "removed request transferred focus to another record");
+    check(document.activeElement === document.body, "removed release transferred focus to another record");
   } else if (ask === "status-focus") {
-    const answer = input("answer"); answer.value = draft("answer");
+    const answer = input("releaseReason"); answer.value = draft("releaseReason");
     const task = find(el => el.tag === "button" && el.textContent === "t0042");
     await task.click(); await flush();
     const detail = ids["#" + task.attrs["aria-controls"]];
@@ -30759,7 +30856,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
       for (let cycle = 0; cycle < 2; cycle++) { windowEvents.interval[0](); await flush(); }
       check(document.activeElement === control && root.contains(control), "polling replaced a focused field");
       check(ids["#state"].textContent.includes("focused-build"), "focused interaction blocked header updates");
-      check(input("answer") === answer && answer.value === draft("answer"), "polling lost draft or input identity");
+      check(input("releaseReason") === answer && answer.value === draft("releaseReason"), "polling lost draft or input identity");
       check(!root.textContent.includes(st.queued[0].title), "polling redrew lists while editing");
       check(!detail.hidden, "polling collapsed task details");
     }
@@ -30770,15 +30867,15 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
       check(document.activeElement === refreshedTask, "polling lost task button focus");
       check(refreshedTask.attrs["aria-expanded"] === "true" &&
         ids["#" + refreshedTask.attrs["aria-controls"]].textContent.includes("Task detail from API"), "polling lost expanded task details");
-      check(input("answer").value === draft("answer"), "polling lost answer draft after button focus");
+      check(input("releaseReason").value === draft("releaseReason"), "polling lost release reason after button focus");
     }
     document.activeElement = document.body;
     let finish;
     statusGetGate = new Promise(resolve => { finish = resolve; });
     windowEvents.interval[0](); await flush();
-    button("close").focus(); const focused = document.activeElement;
+    button("releaseYes").focus(); const focused = document.activeElement;
     finish(); await flush(); statusGetGate = null;
-    check(document.activeElement === button("close") && document.activeElement !== focused,
+    check(document.activeElement === button("releaseYes") && document.activeElement !== focused,
       "in-flight refresh did not redraw and restore the newly focused button");
     // Explicit actions must still refresh their changed state even with a focused button.
     button("pause").focus(); await button("pause").click();
@@ -30787,13 +30884,13 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     check(document.activeElement === button("resume"), "resume control lost focus");
     document.activeElement = document.body;
     windowEvents.interval[0](); await flush();
-    check(input("answer").value === draft("answer"), "draft vanished after focus left Status");
+    check(input("releaseReason").value === draft("releaseReason"), "draft vanished after focus left Status");
   } else if (ask === "status-draft-cleanup") {
     for (const label of labels) input(label).value = draft(label);
     // Failed fetches do not discard drafts. An unchanged record also retains a submitted draft.
     statusGetError = "temporary status failure";
     await run("loadStatus()").catch(() => {}); statusGetError = null;
-    await button("close").click();
+    await button("releaseYes").click();
     for (const label of labels) check(input(label).value === draft(label), "failed or unchanged refresh lost " + label);
     st.releases[1].stop_asked = true;
     await run("loadStatus()");
@@ -30894,10 +30991,9 @@ else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(as
     "status refresh lost the expanded task");
   await task.click();
   check(!run('detailOpen.has("t0042")') && task.attrs["aria-expanded"] === "false", "task detail did not collapse");
-  const answer = input(run("T.answer"));
-  check(answer && button(run("T.close")), "ask answer controls missing");
-  answer.value = "Ready, continue"; await button(run("T.close")).click();
-  same(postedTo("/api/ask/close"), {id:7, answer:"Ready, continue"}, "ask close payload changed");
+  const request = descendants(ids["#tab-status"], "div").find(el => el.className === "request-card");
+  check(request && !descendants(request, "input").length && !descendants(request, "button").length, "to-do has answer controls");
+  check(apiPosts.every(p => !p.path.includes("/ask")), "page wrote a to-do");
   const releasePayload = {id:17, yes:true, reason:"Reviewed the exact commit", commit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", command:"git push origin alpha"};
   input(run("T.releaseReason")).value = releasePayload.reason; await button(run("T.releaseYes")).click();
   same(postedTo("/api/release/answer"), releasePayload, "release approval lost its original commit or command");
@@ -33278,14 +33374,17 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(len(cards), count)
         for card in cards:
             self.assertEqual(card["kids"][0]["className"], "request-body")
-            self.assertEqual(card["kids"][1]["className"], "principal-actions")
-            self.assertTrue(any(n["tag"] == "button" for n in self.page_nodes(card["kids"][1])))
+            if "release-card" in card["className"]:
+                self.assertEqual(card["kids"][1]["className"], "principal-actions")
+                self.assertTrue(any(n["tag"] == "button" for n in self.page_nodes(card["kids"][1])))
+            else:
+                self.assertFalse(any(n["tag"] in ("button", "input", "textarea") for n in self.page_nodes(card)))
             # Only long lists have disclosures, initially closed.
             for detail in (n for n in self.page_nodes(card) if n["tag"] == "details"):
                 self.assertNotIn("open", detail["attrs"])
                 self.assertEqual(detail["kids"][0]["tag"], "summary")
         self.assertNotIn("Closed request", principal["text"])
-        self.assertIn("Closed request", root["text"])
+        self.assertNotIn("Closed request", root["text"])
         return cards
 
     def test_principal_waiting_release_controls_precede_folded_details(self):
@@ -33304,8 +33403,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertFalse(any("Changelog line 7" in n["text"] for n in folds))
 
     def test_principal_release_and_two_requests_come_before_other_sections(self):
-        asks = [{"id": 7, "text": "Review account\n" + "\n".join(f"Request detail {i}" for i in range(20)),
-                 "note": "Ready now"}, {"id": 8, "text": "Review access\nSecond request detail"}]
+        asks = [{"id": 7, "text": "Review <b>x</b>\n" + "\n".join(f"Request detail {i}" for i in range(20)),
+                 "note": "Ready now", "why": "<i>Only you</i>", "holds": True, "created": 1700000000}, {"id": 8, "text": "Review access\nSecond request detail"}]
         for page in self.principal_layout_page(releases=[{}, {"id": 18, "state": "done", "what": "done"}], asks=asks):
             cards = self.assert_principal_layout(page, 3)
             self.assertEqual([c["kids"][0]["kids"][0]["text"] for c in cards], ["#17", "#7", "#8"])
@@ -33313,6 +33412,14 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual(card["kids"][0]["text"], f'#{ask["id"]}' + ask["text"].splitlines()[0])
                 self.assertEqual(card["kids"][2]["tag"], "details" if len(ask["text"].splitlines()) > 6 else "pre")
                 self.assertIn(ask["text"].splitlines()[1], card["kids"][2]["text"])
+            first, second = cards[1:]
+            self.assertIn("<i>Only you</i>", first["text"])
+            metadata = first["kids"][1]["text"]
+            self.assertIn("2023", metadata)
+            self.assertTrue("Work waits" in metadata or "工作等待此事" in metadata)
+            self.assertTrue("Work goes on" in second["text"] or "工作继续" in second["text"])
+            markup = next(n for n in self.page_nodes(first) if n["tag"] == "pre" and n["text"] == "<i>Only you</i>")
+            self.assertEqual(markup["kids"], [])
             self.assertNotIn("#18", page["root"]["kids"][0]["text"])
             self.assertIn("#18", page["root"]["text"])
             # The harness has no layout engine; check the rules applied to these rendered controls.
@@ -33332,7 +33439,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertEqual(children[6]["attrs"].get("id"), "status-principal")
             self.assertFalse(any("data-principal-request" in n["attrs"] for n in self.page_nodes(page["root"])))
             self.assertIn("#17", children[6]["text"])
-            self.assertIn("Closed request", children[6]["text"])
+            self.assertNotIn("Closed request", children[6]["text"])
 
     def test_principal_requests_without_a_release_still_come_first(self):
         for page in self.principal_layout_page(asks=[{"id": 7, "text": "Review account"}]):
@@ -33413,7 +33520,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), {"ok": True})
 
-    def test_status_refresh_keeps_drafts_with_their_request_and_release(self):
+    def test_status_refresh_keeps_drafts_with_their_release(self):
         self.status_refresh_page("status-drafts")
 
     def test_status_refresh_preserves_focused_controls_and_task_details(self):
@@ -33421,9 +33528,6 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def test_status_refresh_updates_lists_and_restores_the_same_focused_button(self):
         self.status_refresh_page("status-button-refresh")
-
-    def test_status_close_refreshes_immediately_then_keeps_background_updates(self):
-        self.status_refresh_page("status-action-close")
 
     def test_status_release_yes_refreshes_immediately_then_keeps_background_updates(self):
         self.status_refresh_page("status-action-yes")
@@ -36438,19 +36542,18 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertIn(f"Claude Code said: {why}", views.show_text(self.desk, tid, full=True))
         self.assertNotIn("(the end of the reason)", views.show_text(self.desk, tid))
 
-    def test_the_page_cannot_answer_a_request_that_was_closed_meanwhile(self):
-        self.desk.add_ask("May the docs lane use the npm registry?")
-        self.desk.close_ask_as_coordinator(1, "done without it")
-        # a page that had not refreshed yet still shows it open
-        said = self.page_post("/api/ask/close", {"id": 1, "answer": "Yes"})
-        self.assertFalse(said["ok"])
-        self.assertEqual(said["problems"], ["request #1 was already closed by the coordinator (done without it); "
-                                            "your answer was not taken"])
-        a = self.desk.asks()[0]
-        self.assertEqual((a["closed_by"], a["reason"], a["answer"]), ("coordinator", "done without it", ""))
-        self.assertEqual(len(self.events("ask_closed")), 1)
-        self.assertEqual(self.desk.close_ask(1, "again"), "request #1 was already closed by the coordinator "
-                                                            "(done without it); your answer was not taken")
+    def test_page_refuses_all_todo_writes_open_or_closed(self):
+        self.desk.add_ask("Review <b>x</b>", why="Only the principal has access", holds=True)
+        headers = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        for closed in (False, True):
+            if closed:
+                self.hansa_out("ask", "--close", "1", "Access granted")
+            before = self.desk.asks_path.read_bytes(), self.desk.events_path.read_bytes()
+            for path in ("/api/ask/close", "/api/ask/answer", "/api/ask", "/api/todos", "/api/todos/close"):
+                code, _, _ = self.web_request(path, method="POST", headers=headers,
+                    data=json.dumps({"id": 1, "text": "new", "answer": "Yes", "outcome": "Done"}).encode())
+                self.assertEqual(code, 404)
+                self.assertEqual((self.desk.asks_path.read_bytes(), self.desk.events_path.read_bytes()), before)
 
     def test_a_merge_check_of_only_spaces_written_by_hand_is_unset(self):
         from hansa import run

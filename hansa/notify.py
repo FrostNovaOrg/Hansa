@@ -273,7 +273,7 @@ def _item(desk: Desk, e: dict):
         return (("ready", e.get("provider")),
                 f"{e.get('provider')} is ready now: done? Still open: "
                 + "; ".join(f"request #{a['id']} ({str(a.get('text', ''))[:120]})" for a in named)
-                + " (the principal closes a request on the page; if it is done, close it: hansa ask --close N \"why\")",
+                + " (the principal answers in the conversation; record the outcome: hansa ask --close N \"<outcome>\")",
                 sessions[0] if all(same(x, sessions[0]) for x in sessions) else None, False, None)
     if kind in ("release_answered", "release_ended", "release_void", "release_forbidden",
                 "release_stopped") and not e.get("quiet"):

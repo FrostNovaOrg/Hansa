@@ -52,7 +52,7 @@ continue to use the default of 60. An empty POST body still means `{}`.
 
 The browser tab and the caption beside Hansa name the desk by its parent folder
 and its own folder, such as `work/desk`. The tab title is `Hansa · work/desk`,
-prefixed with the number of releases waiting for approval plus open requests
+prefixed with the number of releases waiting for approval plus open to-dos
 when that count is nonzero. It updates with each status refresh.
 
 All tasks lists every work task, newest queued first, 50 per page through to the
@@ -96,9 +96,9 @@ textarea or select has focus, background refreshes update the header but leave
 the tab's fields in place. With focus on a button or link, the lists keep
 updating and focus returns to the same action on the same record, if it is
 still available. Expanded task details stay open. Submitting an action refreshes
-the tab immediately. Unsent request answers, release approval or stop reasons,
+the tab immediately. Unsent release approval or stop reasons,
 and the pause reason survive these redraws in this page's memory. Each draft
-stays with its request or release and action, and is dropped when that action
+stays with its release and action, and is dropped when that action
 is no longer available. Reloading or
 closing the page discards the drafts.
 
@@ -115,19 +115,28 @@ that needs attention, such as paused dispatch or a stopped server, stands out
 on its own. On the Chinese page, the desk and version items are labelled
 `工作台` and `hansa 版本`; the English current-time item uses `now`, as `hansa status` does.
 
-When releases await approval or requests are open, Status puts them directly below
-the header, before the pipeline, timeline and summary cards. Each starts with its
-number and lane/target or request's first line, followed immediately by its controls.
-The release command stays visible below the controls. Only lists longer than five
-lines, such as commits, files and a request's remaining lines, fold and open on a
-click. Release notes and warnings about a moved target, files outside the repository
-and direct commits stay visible after the controls and command, whatever their length.
-Request notes also stay visible. Open folds stay open across status refreshes until
-closed or their item stops waiting; each fold stays with its item's kind, number
-and list. Folded release lists keep their styling and scrolling. Reloading or closing
-the page discards the fold state. Controls wrap in narrow windows. Recent releases
-and closed requests stay further down.
-With nothing waiting, Status keeps its usual order.
+When releases await approval or to-dos are open, Status puts them directly below
+the header, before the pipeline, timeline and summary cards. Each to-do shows its
+number, what the principal must do, why only they can do it (if given), whether
+work waits, and when it was recorded. To-dos are read-only: the principal answers
+in the conversation and the coordinator records the outcome and closes them.
+
+Release controls remain beside their number and lane/target, with the command
+below. Only lists longer than five lines, such as commits, files and a to-do's
+remaining lines, fold and open on a click. Notes and warnings stay visible.
+Open folds stay open across status refreshes until closed or their item stops
+waiting. Folded release lists keep their styling and scrolling. Reloading or
+closing the page discards the fold state. Controls wrap in narrow windows.
+Recent releases stay further down. With nothing waiting, Status keeps its usual order.
+
+The To-dos section lists every item, open and closed, newest first, 50 per page,
+with an all/open/closed filter. It includes the outcome and closure time. Nothing
+is trimmed. Requests recorded by older versions appear here too, and open ones
+can be closed with the same command. Old page answers remain visible as outcomes.
+The page has no endpoint for recording, answering or closing to-dos;
+`GET /api/todos?page=1&state=open` reads them with the usual bearer key.
+Omit `state` for all items or use `closed`; page numbers are clamped to the
+available pages. Text, reasons and outcomes display as plain text.
 
 Status otherwise starts with a pipeline strip: queued tasks, running workers, running checks,
 awaiting review, running verifications and merge checks. Queued counts the queued
@@ -136,7 +145,7 @@ verifications. Awaiting review counts review tasks with no verification running
 (including those whose verification is queued); running verifications counts their
 running verifier tasks, including a verifier's check. Each task appears in one box.
 Merge checks include those queued. A separate box counts waiting releases
-plus open requests. Clicking a box scrolls to its list (running stages use the lane
+plus open to-dos. Clicking a box scrolls to its list (running stages use the lane
 tracks). Zero counts are dimmed.
 
 Below the strip, lane tracks replace the Lanes and Running tables, with running
@@ -235,10 +244,9 @@ causes a search through the desk's entire history. Existing status responses
 and command output do not include timeline data.
 
 Status also shows the last 24 hours in summary cards, keeps dispatch controls separate
-from task lists, and puts pending release decisions and requests first. Empty
+from task lists, and puts pending release decisions and to-dos first. Empty
 states explain where new activity will appear. Task details remain open across
-refreshes. Release approvals, refusals, stops and request replies use the same
-actions as before.
+refreshes. Release approvals, refusals and stops keep their existing controls.
 
 Dates and times follow the page's selected Chinese or English language, including
 the lane's estimated start time. In a task box's steps row, times show hours and
@@ -390,11 +398,11 @@ spreadsheet; actual numeric values stay numeric. Both pages share the settings
 page's native CSS and JavaScript controls and reduced-motion support.
 
 The page keeps navigation for the current browser tab in `sessionStorage`:
-`hansa.tab` is written whenever Status, All tasks, Notes, Settings or Work and cost is shown (including
+`hansa.tab` is written whenever Status, All tasks, To-dos, Gaps, Notes, Settings or Work and cost is shown (including
 startup), `hansa.settingsSection` whenever a Settings section is shown, and
 `hansa.costPeriod` when the Work and cost range changes. Reloading restores those choices;
 a fresh browser tab starts on Status. An address containing `?t=` (or `&t=`)
-always opens Status, where releases and requests wait for the principal.
+always opens Status, where releases and to-dos wait for the principal.
 Unknown saved choices fall back to Status, Providers and 7 days.
 Scroll position and expanded Status details are not stored.
 
@@ -801,13 +809,12 @@ hansa posts to the coordinator's Claude Code session through the session's
 inbox (a local socket every interactive session listens on) when something
 needs the coordinator: a task ended (after hansa's own check), failed, was
 cancelled, stopped at its ceiling or could not start; a verification's verdict;
-a merge check ended; the principal answered or closed a
-request (with the answer); the principal answered a release; a release ended
+a merge check ended; the principal answered a release; a release ended
 (done, or failed with its exit code and last lines) or became void; a provider
 an open request names became ready when it was not as the request was made
 (once, looked at on a key or settings save, a `hansa ping`, or its rest after a usage
 limit running out; the request may be done: if it is, the coordinator closes it
-with `hansa ask --close N "<why>"`); `hansa serve` stopped, or, still running,
+with `hansa ask --close N "<outcome>"`); `hansa serve` stopped, or, still running,
 finished no round for 5 minutes (busy or stuck), and then that it runs again;
 srt not running; free space went under the floor (`hansa disk-floor`), and then
 that it is back over it. A server busy for less than that is not news, and
@@ -834,7 +841,7 @@ says all of this.
 While hansa posts to a session, that session does not keep `hansa wait`
 running in the background; `hansa wait` is for a session hansa does not post
 to. Since hansa posts when a task, a verification or a merge ends and when the
-principal answers, the coordinator needs no scheduled wakeups and no polling to
+principal answers a release, the coordinator needs no scheduled wakeups and no polling to
 find out: it ends its turn and waits. Each wakeup or poll is a turn that rereads
 the whole conversation, and costs that much even when it finds nothing to do.
 
@@ -850,6 +857,16 @@ The minutes before each are the principal's, on the page, and `hansa status` sho
 such as `the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`. For the last two a
 session's follower runs `claude agents --json` only while something posted to it could still go unanswered, and at
 most once a minute counting every run, its lookup of the session's name included (one run gives both).
+
+### The principal's to-dos
+
+The coordinator records what only the principal can do with
+`hansa ask "<what>" [--why "<why only the principal can do it>"] [--holds]`.
+`--holds` says work waits on this item; without it, work goes on. It records that
+fact for the principal; it does not pause dispatch. The new-item alert is unchanged.
+The principal answers in the conversation. The coordinator closes the item with
+`hansa ask --close N "<outcome>"`; an outcome is required. Workers and verifications
+cannot close to-dos. Releases still take the principal's yes or no on the page.
 
 ### The daily clear
 

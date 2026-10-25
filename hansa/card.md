@@ -72,7 +72,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa cancel <id>` | stop a queued or running task or verification, or a merge check (back to review) |
 | `hansa close <id>` | close a finished task or verification without merging |
 | `hansa notify [on \| off]` | the sessions hansa posts to; start or stop this one |
-| `hansa wait [id ...] [--timeout MIN]` | return when a task ends or the principal answers |
+| `hansa wait [id ...] [--timeout MIN]` | return when a task ends or a to-do closes |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
 | `hansa explain [lane L [--all] \| provider P \| server \| notify]` | settings and state, and where each comes from |
 | `hansa lane` | one line per lane |
@@ -88,7 +88,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 | `hansa disk-floor [GB]` | the free space under which nothing new starts |
 | `hansa memory-floor [GB]` | available memory under which nothing new starts |
 | `hansa cost [--days N \| --since HH:MM] [--by seat\|lane\|task\|...]` | tokens and their worth at the principal's prices |
-| `hansa ask "<request>"` / `--close N "<why>"` | a request on the principal's page / close #N when done another way |
+| `hansa ask "<what>" [--why "<why only the principal can do it>"] [--holds]` / `--close N "<outcome>"` | record a principal to-do / close #N with its outcome |
 | `hansa release [L [TARGET] ["<note>"]]`, `--stop ID`, `yes\|no ID CODE` | ask for, list, call off or answer a release |
 | `hansa changelog L [TARGET]` | list workers' changelog lines for the next release |
 | `hansa notes [PATH]` / `notes archive FILE HEADING` | notes/ with headings / move a section out |
@@ -102,6 +102,11 @@ Run one plain `hansa` command per call. Loops, variables, `$(...)`, pipes into `
 commands that read outside the desk (`find /`, say) each make Claude Code ask the principal. hansa's
 own options make them unneeded: `hansa git L show REV:A REV:B` shows several files in one call,
 `hansa git L grep -e X -e Y REV -- PATHS` looks for several things at once.
+
+Record what only the principal can do with `hansa ask`; use `--why` to explain why only they can
+do it, and `--holds` when work waits on it (otherwise work goes on). The page shows to-dos read-only. The principal answers in
+the conversation; you close each to-do with its outcome. Every item stays on record.
+More: `hansa help inbox`.
 
 ## Writing a task
 Say what to change, where, and how the worker can check it (a command, a file to look at). Keep one
@@ -215,11 +220,11 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
 
 ## Hearing from hansa
 hansa posts to your session when something needs you: a task, verification, merge
-check or release ended or failed, the principal answered, the server stopped or got stuck, free space
+check or release ended or failed, the principal answered a release, the server stopped or got stuck, free space
 went under the floor. Each message is a `[hansa]` header with the desk, then a bullet line per event,
 the latest per task or subject; a task's line carries `next:`, others when one applies. When a
-provider an open request names became ready, the request may be done: if so,
-close it with `hansa ask --close N "<why>"`. A session started with `hansa coordinator` is posted to
+provider an open to-do names became ready, the to-do may be done: if so,
+close it with `hansa ask --close N "<outcome>"`. A session started with `hansa coordinator` is posted to
 by itself; otherwise run `hansa notify on` once. A session `hansa up` started already hears from hansa:
 `hansa notify on` is not needed there, and running it does no harm. While hansa posts to yours, do not
 keep `hansa wait` running. Each wakeup or poll rereads the whole conversation. These lines come from
