@@ -1449,7 +1449,8 @@ def cmd_serve(a):
     except OSError as e:
         print(f"hansa serve: the desk's card could not be brought up to date ({e.strerror or e})", file=sys.stderr,
               flush=True)
-    port = a.port if a.port is not None else web_port(desk)
+    port = first_port = a.port if a.port is not None else web_port(desk)
+    port_note = ""
     while True:
         try:
             port = start_web(desk, a.host, port).server_address[1]
@@ -1461,6 +1462,7 @@ def cmd_serve(a):
                 raise SystemExit(f"hansa: port {port} is in use, perhaps by another desk's hansa serve; start this desk's "
                                  f"server on a free port with hansa serve --port N (hansa web then finds it)")
             port += 1
+            port_note = f" ({first_port} was taken)"
 
     def stopped(*_):  # TERM ends it as Ctrl+C does: the alert run's folder goes with it (the thread is a daemon)
         raise KeyboardInterrupt
@@ -1472,7 +1474,8 @@ def cmd_serve(a):
     alert.start_thread(desk)  # the principal's alert command, run from here only (hansa/alert.py)
     d = Dispatcher(desk)
     desk.event("server_started", port=port)
-    print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port} (run `hansa web` for the address)", flush=True)
+    print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port}{port_note} "
+          "(run `hansa web` for the address)", flush=True)
     if dropped:
         print(f"hansa serve: {serve_session_text(dropped)}", file=sys.stderr, flush=True)
     srt = try_srt_at_start(desk)  # on this server's PATH, which runs the lanes' setups and checks

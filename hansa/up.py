@@ -102,6 +102,7 @@ def record_tmux() -> dict:
 def record_start(desk: Desk, options) -> None:
     """Called after serve removes session identity, while it holds serve.lock."""
     rec = {"hansa": hansa_command(), "options": {k: getattr(options, k) for k in DEFAULTS},
+           "port_explicit": options.port is not None,
            "env": start_env(desk, os.environ), "tmux": record_tmux(), "at": now()}
     write_json(desk.state_dir / "serve-start.json", rec)
     listed = desks_file()
@@ -121,6 +122,8 @@ def record_start(desk: Desk, options) -> None:
 
 def serve_command(desk: Desk, rec: dict) -> list:
     opts = {**DEFAULTS, "port": None, **rec.get("options", {})}
+    if "port_explicit" not in rec and opts["port"] == DEFAULTS["port"]:
+        opts["port"] = None  # older records saved 8765 even when no --port was given
     return [rec.get("hansa") or hansa_command(), "--desk", str(desk.root), "serve",
             *[str(x) for k in DEFAULTS if opts[k] is not None for x in ("--" + k, opts[k])]]
 

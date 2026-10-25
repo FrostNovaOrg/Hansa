@@ -517,7 +517,8 @@ one, is left running and its pid is shown. It does not arrange startup at boot,
 or stop or restart a running server or session.
 
 Each `hansa serve` start saves `.hansa/serve-start.json`: the absolute path of
-its installation's `bin/hansa`, `--host`, `--port`, `--every`, and the variables
+its installation's `bin/hansa`, `--host`, `--every`, whether `--port` was given
+(and its value if so), and the variables
 that were set: `PATH`, `LANG`, every `LC_*` (including `LC_ALL`), `HANSA_CLAUDE`,
 `HANSA_TMUX`, `CLAUDE_CONFIG_DIR`, `TMPDIR`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`
 and `TMUX_TMPDIR`. In tmux it also saves the server and session. A socket in
@@ -530,11 +531,15 @@ makes future starts use the new installation.
 
 Without `--port`, `hansa serve` tries the port in `.hansa/web-port`, or 8765
 before its first run. If it is taken, it tries each following port until one
-binds (up to 65535). It prints the chosen port and saves it in `.hansa/web-port`;
+binds (up to 65535). It prints the chosen port, says which port was taken when
+it moves, and saves the chosen port in `.hansa/web-port`;
 `hansa web` and `hansa status` then use that address. The next start tries that
 saved port first, even if 8765 is free again. The start record preserves automatic
 port selection, so `hansa up` follows the same rule. An explicit `--port N`
 stays explicit in the start record and fails if N is taken, as before.
+Older records did not distinguish an explicit 8765 from the default: `hansa up`
+treats an unmarked record's 8765 as automatic, keeping other recorded ports
+explicit. New records distinguish both, including an explicit `--port 8765`.
 
 The record never includes `ANTHROPIC_*`, other key variables, values holding
 one of the desk's keys, or a Claude Code session's identity or messaging

@@ -2202,6 +2202,58 @@ class UpTest(unittest.TestCase):
         self.assertEqual(self.fake_serve(bind)[1], [8767, 8768])
         self.assertEqual(cli.web_port(self.desk), 8768)
 
+    def test_up_replays_legacy_default_port_automatically(self):
+        from hansa import up
+        rec = self.record(options={**vars(self.options), "port": 8765})
+        command = up.serve_command(self.desk, rec)
+        self.assertNotIn("--port", command)
+
+        def bind(desk, host, port):
+            if port == 8765:
+                raise OSError(errno.EADDRINUSE, "taken")
+            return types.SimpleNamespace(server_address=(host, port))
+
+        said, tried = self.fake_serve(bind, *command[4:])
+        self.assertEqual(tried, [8765, 8766])
+        self.assertEqual(cli.web_port(self.desk), 8766)
+        self.assertIn(":8766", said)
+        # An older record's nondefault port still represents an explicit choice.
+        rec["options"]["port"] = 9123
+        command = up.serve_command(self.desk, rec)
+        self.assertEqual(command[command.index("--port") + 1], "9123")
+
+    def test_up_preserves_new_explicit_default_port_conflicts(self):
+        from hansa import up
+        bind = unittest.mock.Mock(side_effect=OSError(errno.EADDRINUSE, "taken"))
+        with self.assertRaisesRegex(SystemExit, "port 8765 is in use"):
+            self.fake_serve(bind, "--port", "8765")
+        rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
+        command = up.serve_command(self.desk, rec)
+        self.assertEqual(command[command.index("--port") + 1], "8765")
+        bind.reset_mock()
+        with self.assertRaisesRegex(SystemExit, "port 8765 is in use"):
+            self.fake_serve(bind, *command[4:])
+        bind.assert_called_once()
+        self.assertEqual(bind.call_args.args[1:], ("127.0.0.1", 8765))
+
+    def test_serve_says_when_it_moves_from_the_default_or_saved_port(self):
+        for first in (8765, 9123):
+            with self.subTest(first=first):
+                if first != 8765:
+                    (self.desk.state_dir / "web-port").write_text(str(first))
+
+                def bind(desk, host, port):
+                    if port == first:
+                        raise OSError(errno.EADDRINUSE, "taken")
+                    return types.SimpleNamespace(server_address=(host, port))
+
+                said, tried = self.fake_serve(bind)
+                self.assertEqual(tried, [first, first + 1])
+                self.assertIn(f"web page on 127.0.0.1:{first + 1} ({first} was taken)", said)
+                said, tried = self.fake_serve(bind)
+                self.assertEqual(tried, [first + 1])
+                self.assertNotIn("was taken", said)
+
     def test_serve_explicit_port_conflict_still_fails_without_trying_another(self):
         attempted = []
 
