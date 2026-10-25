@@ -1080,6 +1080,19 @@ class FailedWriteTest(unittest.TestCase):
                 self.assertEqual([e["event"] for e in events[:-1]],
                                  ["old", "whole but no newline"] if tail.startswith(b'{') else ["old"])
 
+    def test_json_records_round_trip_filesystem_bytes_as_utf8(self):
+        from hansa.desk import json_text, read_json
+        name = os.fsdecode(b"publish-\x80\xff.sh")
+        data = {name: {"words": [name, "中文 é 🙂", r"\udc80\udcff", 'quote" slash\\\n']}}
+        path = self.root / "record.json"
+        text = json_text(data)
+        self.assertEqual(json.loads(text.encode("utf-8")), data)
+        write_json(path, data)
+        self.assertEqual(read_json(path), data)
+        self.assertEqual(path.read_text(encoding="utf-8"), text)
+        self.assertIn("中文 é 🙂", text)
+        self.assertIn(r"\udc80\udcff", text)
+
     def test_shell_completion_writers_matrix(self):
         import resource
         from hansa import release, run
@@ -27220,6 +27233,20 @@ def save():'''))
                 with self.subTest(word=word):
                     self.with_release(f"sh {word}")
                     self.assertIn("publish.sh", self.refused("release", "a"))
+
+    def test_release_command_settings_keep_filesystem_bytes(self):
+        from hansa import release
+        # Exercise settings even on filesystems that require UTF-8 filenames.
+        name = os.fsdecode(b"publish-\xff.sh")
+        for command in (f"sh {shlex.quote(name)}", f"sh {shlex.quote('./' + name)}",
+                        f'sh "{name}"', f"awk -f{shlex.quote(name)}", f"<{shlex.quote(name)} sh"):
+            with self.subTest(command=command):
+                self.with_release(command)
+                saved = self.desk.settings_path.read_text(encoding="utf-8")
+                self.assertEqual(json.loads(saved)["lanes"]["a"]["targets"]["default"]["command"], command)
+                self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["default"]["command"], command)
+                request = release.ask(self.desk, "a")
+                self.assertEqual(release.get(self.desk, request["id"])["command"], command)
 
     def test_release_repository_input_words_keep_literal_characters(self):
         from hansa import release
