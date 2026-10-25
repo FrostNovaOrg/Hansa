@@ -3309,9 +3309,10 @@ def main(argv=None):
     p = add("cost", cmd_cost, "tokens and what they are worth")
     p.description = ("Tokens and what they are worth: the workers' runs, and the coordinator's own session with its "
                      "helpers. The coordinator is counted only when it runs with the workers' Claude login (the same "
-                     "config folder), because only then are its session records where hansa reads them. It has no "
-                     "lane or task, so in --by lane and --by task its usage is a row of its own, (coordinator): in "
-                     "every view the rows add up to the total.")
+                     "config folder), because only then are its session records where hansa reads them; a session "
+                     "started outside the desk counts once a hansa command run in it has told hansa its id. When it "
+                     "is not counted, hansa cost says why. It has no lane or task, so in --by lane and --by task its "
+                     "usage is a row of its own, (coordinator): in every view the rows add up to the total.")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--since", help="HH:MM (today's, or yesterday's when still ahead), or YYYY-MM-DD "
                    "HH:MM: count from then instead of --days")
@@ -3401,6 +3402,11 @@ def main(argv=None):
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
     if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up"):
         _as_desk_account(a, argv)
+    if a.cmd != "init" and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
+        try:
+            cost.note_session(Desk.find(a.desk))
+        except SystemExit:  # no desk: the command says so itself
+            pass
     try:
         a.fn(a)
     except SettingsError as e:

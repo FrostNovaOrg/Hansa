@@ -24572,7 +24572,7 @@ def save():'''))
         for days in (1, 7, 30, 90, None):
             with self.subTest(days=days):
                 rep = cost.report(self.desk, days)
-                self.assertEqual(len(rep["work"]), 13)
+                self.assertEqual(len(rep["work"]), 15)
                 self.assertTrue(all(value == 0 for value in rep["work"].values()))
                 self.assertEqual(rep["total"]["tokens"], 0)
                 self.assertTrue(all(b["finished"] == b["merged"] == 0 for b in rep["work_chart"]["buckets"]))
@@ -24726,7 +24726,8 @@ def save():'''))
             for i, end in enumerate((boundary - 0.01, boundary, boundary + 0.01), 1)])
         expected = {"finished": 2, "merged": 2, "failed": 2, "verifications": 2, "held": 0, "did_not_hold": 0,
                     "unsure": 2, "releases_asked": 2, "releases_out": 2, "worker_hours": 6,
-                    "lines_added": 0, "lines_removed": 0, "lines_omitted": 2}
+                    "lines_added": 0, "lines_removed": 0, "lines_omitted": 2, "coordinator_turns": 0,
+                    "coordinator_hours": 0}
         self.assertEqual(cost.report(self.desk, since=boundary)["work"], expected)
         with unittest.mock.patch("hansa.cost.time.time", return_value=boundary + 90 * 86400):
             self.assertEqual(cost.report(self.desk, 90)["work"], expected)
@@ -24753,14 +24754,13 @@ def save():'''))
         self.assertAlmostEqual(work["worker_hours"], 4.1 + 1 / 3600)
         self.assertAlmostEqual(cost.report(self.desk, None)["work"]["worker_hours"], 5.1 + 1 / 3600)
 
-    def test_work_history_all_omits_transcripts_but_keeps_usage_and_export_rows(self):
+    def test_work_history_all_keeps_usage_and_export_rows(self):
         tid = self.desk.new_task("Old work")
         self.desk.update(tid, state="done", started=1, finished=3601, provider="claude",
                          usage={"unpriced-engine": {"in": 10, "out": 5}})
-        with unittest.mock.patch("hansa.cost.transcript_rows", side_effect=AssertionError("must not scan transcripts")), \
-                unittest.mock.patch("hansa.run.git", side_effect=AssertionError("must not read git history")):
+        with unittest.mock.patch("hansa.run.git", side_effect=AssertionError("must not read git history")):
             rep = cost.report(self.desk, None)
-        self.assertTrue(rep["transcripts_omitted"])
+        self.assertNotIn("transcripts_omitted", rep)  # the coordinator's records are read since the desk began too
         self.assertEqual((rep["work"]["finished"], rep["work"]["worker_hours"]), (1, 1))
         self.assertEqual(rep["total"]["tokens"], 15)
         self.assertEqual(rep["unpriced_models"], ["unpriced-engine"])
@@ -24777,7 +24777,6 @@ def save():'''))
                 code, rep, _ = self.web_request(path, headers=headers)
                 self.assertEqual(code, 200)
                 self.assertEqual(rep["days"], None if period == "all" else 90)
-                self.assertEqual(rep["transcripts_omitted"], period == "all")
                 self.assertEqual(rep["work_chart"]["interval"], "week")
                 self.assertEqual("rows" in rep, bool(suffix))
                 self.assertTrue(all(value == 0 for value in rep["work"].values()))
@@ -24952,6 +24951,112 @@ def save():'''))
                 "message": {"id": mid, "model": "claude-x", "usage": {"input_tokens": 10, "output_tokens": 2}}}) + "\n")
         rows = cost.transcript_rows(self.desk, 0)  # the coordinator ran on claude, then on mimo
         self.assertEqual(sorted((r["provider"], r["in"]) for r in rows), [("claude", 10), ("mimo", 10)])
+
+    def coordinator_outside(self, folder=None):
+        """A coordinator's session hansa up started in the folder holding the desk (a notify record), this process
+        standing in for it; the workers' Claude login in a folder of the test's. (login folder, session folder)"""
+        conf = self.tmp / "conf"
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(conf)
+        self.desk.save_settings(s)
+        folder = folder or self.desk.root.parent
+        write_json(self.desk.state_dir / hansa.up.COORDINATOR_START, {
+            "kind": "notify", "folder": str(folder), "argv": ["claude"],
+            "session": {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}})
+        return conf, conf / "projects" / cost.slug(folder)
+
+    def transcript(self, path, t0, turns):
+        """A session's record file: each turn (its start's minute, origin kind, [(second, message id, tokens in)])."""
+        lines = []
+        for minute, kind, calls in turns:
+            at = lambda sec: time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t0 + minute * 60 + sec))
+            lines.append({"type": "user", "timestamp": at(0), "origin": {"kind": kind},
+                          "message": {"role": "user", "content": "go"}})
+            for sec, mid, tokens in calls:
+                lines.append({"type": "assistant", "timestamp": at(sec), "message": {
+                    "id": mid, "model": "claude-opus-5", "content": [{"type": "text", "text": "ok"}],
+                    "usage": {"input_tokens": tokens, "output_tokens": 0}}})
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(x) + "\n" for x in lines))
+
+    def hansa_in_session(self, sid, *words, pid=None, login=None):
+        """A hansa command run in a Claude Code session: its process, and the id Claude Code gives the command."""
+        out = io.StringIO()
+        with unittest.mock.patch.dict(hansa.SESSION, {"CLAUDE_PID": str(pid or os.getpid()),
+                                                      "CLAUDE_CODE_SESSION_ID": sid}), \
+                unittest.mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(login or self.tmp / "conf")}), \
+                contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), *words])
+        return out.getvalue()
+
+    def test_cost_counts_the_coordinator_started_outside_the_desk_by_its_sessions_not_the_folders_others(self):
+        conf, proj = self.coordinator_outside()
+        t0 = time.time() - 3 * 3600
+        self.transcript(proj / "sid-coord-1.jsonl", t0, [(0, "human", [(10, "c1", 100), (70, "c2", 200)])])
+        self.transcript(proj / "sid-coord-1" / "subagents" / "agent-1.jsonl", t0, [(1, "human", [(5, "h1", 7)])])
+        (proj / "sid-coord-1" / "subagents" / "agent-1.meta.json").write_text(json.dumps({"agentType": "scout"}))
+        # the same session after a /clear: the same process, a new id and file
+        self.transcript(proj / "sid-coord-2.jsonl", t0, [(10, "peer", [(0, "c3", 1000), (60, "c4", 2000), (300, "c5", 3000)])])
+        # another session in the same folder, not the coordinator: never counted
+        self.transcript(proj / "sid-other-1.jsonl", t0, [(5, "human", [(1, "o1", 50000)])])
+        rep = cost.report(self.desk, 1)
+        self.assertNotIn("coordinator", rep["by"]["seat"])  # hansa does not know its session yet, and says so
+        self.assertEqual(rep["coordinator_uncounted_kind"], "untied")
+        self.assertIn(str(self.desk.root.parent), rep["coordinator_uncounted"])
+        self.assertIn("not counted", self.hansa_in_session("sid-other-1", "cost", "--days", "1", pid=os.getppid()))
+        self.assertEqual(cost.known_sessions(self.desk), [])  # another process's command notes nothing
+        text = self.hansa_in_session("sid-coord-1", "cost", "--days", "1", "--by", "seat")
+        self.assertRegex(text, r"\n  coordinator +300 ")
+        self.assertIn("helper:scout", text)
+        self.assertNotIn("not counted", text)
+        self.assertIn(" 2 step(s)", self.hansa_in_session("sid-coord-2", "cost", "--turns", "--days", "1"))
+        self.assertEqual([x["id"] for x in cost.known_sessions(self.desk)], ["sid-coord-1", "sid-coord-2"])
+        for days in (1, None):  # since the desk began too
+            rep = cost.report(self.desk, days)
+            self.assertEqual((rep["by"]["seat"]["coordinator"]["tokens"], rep["by"]["seat"]["helper:scout"]["tokens"]),
+                             (6300, 7), days)
+            self.assertEqual(rep["coordinator_uncounted"], "")
+            self.assertEqual(rep["work"]["coordinator_turns"], 2)  # one turn each side of the clear
+            self.assertAlmostEqual(rep["work"]["coordinator_hours"], (60 + 300) / 3600)
+        turns = cost.turns(self.desk, 1)
+        self.assertEqual([(t["session"], t["steps"], t["seconds"]) for t in turns["turns"]],
+                         [("sid-coord-1", 2, 60), ("sid-coord-2", 3, 300)])
+        self.assertEqual(turns["total"]["seconds"], 360)
+        self.assertIn("2 turn(s), 0.10 hour(s) of work", views.cost_text(cost.report(self.desk, 1), "seat"))
+        # a window that starts inside the second turn: its steps and time from there
+        later = cost.report(self.desk, since=t0 + 10 * 60 + 30)["work"]
+        self.assertEqual((later["coordinator_turns"], later["coordinator_hours"] * 3600), (1, 240))
+
+    def test_cost_counts_a_coordinator_started_in_the_desk_as_before(self):
+        conf, proj = self.coordinator_outside(self.desk.root)
+        t0 = time.time() - 3600
+        self.transcript(proj / "any-session.jsonl", t0, [(0, "human", [(1, "d1", 40)])])
+        rep = cost.report(self.desk, 1)
+        self.assertEqual((rep["by"]["seat"]["coordinator"]["tokens"], rep["coordinator_uncounted"]), (40, ""))
+
+    def test_cost_says_why_the_coordinator_on_another_login_or_with_unreadable_records_is_not_counted(self):
+        conf, proj = self.coordinator_outside()
+        other = self.tmp / "other-login"
+        t0 = time.time() - 3600
+        self.transcript(other / "projects" / cost.slug(self.desk.root.parent) / "sid-elsewhere.jsonl", t0,
+                        [(0, "human", [(1, "e1", 40)])])
+        text = self.hansa_in_session("sid-elsewhere", "cost", "--days", "1", "--by", "seat", login=other)
+        self.assertIn("not counted", text)
+        self.assertIn(f"Claude login in {other}", text)
+        rep = cost.report(self.desk, 1)
+        self.assertEqual((rep["coordinator_uncounted_kind"], rep["coordinator_uncounted_where"]), ("login", str(other)))
+        self.assertNotIn("coordinator", rep["by"]["seat"])
+        self.hansa_in_session("sid-gone-1", "status")  # its records are not under the workers' login
+        self.assertEqual(cost.report(self.desk, 1)["coordinator_uncounted_kind"], "missing")
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file its mode closes")
+        self.transcript(proj / "sid-shut-1.jsonl", t0, [(0, "human", [(1, "s1", 40)])])
+        (proj / "sid-shut-1.jsonl").chmod(0)
+        self.addCleanup((proj / "sid-shut-1.jsonl").chmod, 0o600)
+        text = self.hansa_in_session("sid-shut-1", "cost", "--days", "1")
+        self.assertIn("cannot read", text)
+        self.assertIn("sid-shut-1.jsonl", text)
+        self.assertEqual(cost.report(self.desk, None)["coordinator_uncounted_kind"], "unreadable")
 
     def test_settings_saved_from_a_stale_page_are_refused(self):
         first, second = public_settings(self.desk), public_settings(self.desk)  # two tabs, opened together
@@ -31047,14 +31152,12 @@ else if (ask === "cost-history") (async () => {
   await run("loadCost()");
   const zh = process.argv[4] === "zh";
   check(descendants(root, "h1")[0]?.textContent === (zh ? "工作与成本" : "Work and cost"), "history title missing");
-  const labels = zh ? ["完成的任务", "合并的任务", "失败的任务", "核对次数", "成立（含有附注）", "不成立", "不确定", "请求的发布", "成功的发布", "执行与核对工时"]
-    : ["Tasks finished", "Tasks merged", "Tasks failed", "Verifications", "Held (including notes)", "Did not hold", "Unsure", "Releases asked for", "Releases that went out", "Worker and verifier hours"];
-  const values = ["11", "7", "3", "4", "2", "1", "1", "3", "1", "12.50"];
+  const labels = zh ? ["完成的任务", "合并的任务", "失败的任务", "核对次数", "成立（含有附注）", "不成立", "不确定", "请求的发布", "成功的发布", "执行与核对工时", "协调席的轮数", "协调席工时"]
+    : ["Tasks finished", "Tasks merged", "Tasks failed", "Verifications", "Held (including notes)", "Did not hold", "Unsure", "Releases asked for", "Releases that went out", "Worker and verifier hours", "Coordinator turns", "Coordinator hours"];
+  const values = ["11", "7", "3", "4", "2", "1", "1", "3", "1", "12.50", "42", "3.25"];
   const cards = descendants(root, "div").filter(el => el.className === "metric-card");
   labels.forEach((label, index) => check(cards.some(el => el.kids[0]?.textContent === label && el.kids[1]?.textContent === values[index]), "history metric missing: " + label));
-  check(!root.textContent.includes(run("T.historyOmitted")), "bounded report claims to omit transcripts");
   for (const days of [90, "all"]) {
-    given["/api/cost"].transcripts_omitted = days === "all";
     const select = ids["#cost-period"];
     check(descendants(select, "option").some(el => el.value === String(days)), "history period missing");
     select.value = String(days); await select.on.change({target:select});
@@ -31062,7 +31165,7 @@ else if (ask === "cost-history") (async () => {
     check(apiGets.at(-1) === "/api/cost?days=" + days, "history period request incorrect");
   }
   check(root.textContent.includes(zh ? "从工作台开始至今" : "Since the desk began"), "whole-history label untranslated");
-  check(root.textContent.includes(zh ? "未计入协调席及助手" : "omit coordinator and helper"), "transcript omission not explained");
+  check(!root.textContent.includes(zh ? "未计入协调席" : "omit coordinator"), "whole history claims to omit the coordinator");
   await run("exportCsv()");
   check(apiGets.at(-1) === "/api/cost?days=all&rows=1" && downloads.at(-1).name === "cost-all.csv", "whole-history export missing");
   console.log(JSON.stringify({ok:true}));
@@ -33875,10 +33978,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                  [columns, ["" if row[column] is None else str(row[column]) for column in columns]])
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
-    def test_work_history_page_translates_counts_periods_omissions_and_exports(self):
+    def test_work_history_page_translates_counts_periods_and_exports(self):
         report = {"total": {"tokens": 10, "usd": 1}, "by": {}, "rows": [], "unpriced_models": [],
                   "work": {"finished": 11, "merged": 7, "failed": 3, "verifications": 4, "held": 2,
-                           "did_not_hold": 1, "unsure": 1, "releases_asked": 3, "releases_out": 1, "worker_hours": 12.5}}
+                           "did_not_hold": 1, "unsure": 1, "releases_asked": 3, "releases_out": 1, "worker_hours": 12.5,
+                           "coordinator_turns": 42, "coordinator_hours": 3.25}}
         harness = self.tmp / "work-history-page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"

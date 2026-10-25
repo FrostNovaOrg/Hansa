@@ -499,6 +499,10 @@ const T = ZH ? {
   total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
   costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。一件活重新排队再试时，每次尝试的 token 都算在里面。",
   coordinatorUncounted:"这里没有算协调席和它的子代理的用量：协调席以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
+  coordinatorUncountedWhy:{untied:"这里没有算协调席和它的子代理的用量：协调席的会话在工作台之外的 {where} 启动，要等它在会话里跑一条 hansa 命令、让 hansa 知道是哪个会话之后才算，目前还没有。",
+    login:"这里没有算协调席和它的子代理的用量：协调席的会话用的是 {where} 里的 Claude 登录，不是执行层的，hansa 只读执行层的登录。",
+    missing:"这里没有算协调席和它的子代理的用量：在 {where} 里找不到它的会话记录。",
+    unreadable:"这里没有算协调席和它的子代理的用量：hansa 读不了它的会话记录 {where}。"},
   runs:"运行次数（每次尝试都算）", turns:"轮数",
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按工作线", bymodel:"按模型", bytask:"按任务", byprovider:"按供应",
   seat_coordinator:"协调席", seat_helper:"协调席的子代理", seat_worker:"执行层", seat_verify:"核对活", helper_reviewer:"复核", helper_scout:"侦察", helper_operator:"操作",
@@ -805,7 +809,7 @@ Object.assign(T, ZH ? {
   tasksFinished:"完成的任务", tasksMerged:"合并的任务", tasksFailed:"失败的任务", historyVerifications:"核对次数",
   historyHeld:"成立（含有附注）", historyNotHeld:"不成立", historyUnsure:"不确定", releasesAsked:"请求的发布", releasesOut:"成功的发布",
   workerHours:"执行与核对工时", workerHoursNote:"小时 · 含重试，按运行结束时间统计", historyEndNote:"按各自完成或合并的时间统计；核对单独计数。",
-  historyOmitted:"全部历史的用量与折算金额未计入协调席及助手的会话记录，以便快速加载；已计入全部工作记录及执行席、核对席的用量。",
+  coordinatorTurns:"协调席的轮数", coordinatorTurnsNote:"这段时间里有步骤的轮", coordinatorHours:"协调席工时", coordinatorHoursNote:"小时 · 每轮从第一步到最后一步",
   workDaily:"每日工作", workWeekly:"每周工作", workDayNote:"每栏为一个滚动的 24 小时时段。", workWeekNote:"按工作台当地时间从周一开始；首尾周可能不完整。",
   workLegend:"上部：完成的任务 · 下部：合并的任务", linesAdded:"约增加行数", linesRemoved:"约删除行数",
   linesNote:"来自合并任务记录的变更大小；不是合并后的净变化。", linesOmitted:n => `未计入 ${n} 个缺少可用变更大小记录的合并任务。`,
@@ -824,7 +828,7 @@ Object.assign(T, ZH ? {
   tasksFinished:"Tasks finished", tasksMerged:"Tasks merged", tasksFailed:"Tasks failed", historyVerifications:"Verifications",
   historyHeld:"Held (including notes)", historyNotHeld:"Did not hold", historyUnsure:"Unsure", releasesAsked:"Releases asked for", releasesOut:"Releases that went out",
   workerHours:"Worker and verifier hours", workerHoursNote:"Hours · retries included, by run end time", historyEndNote:"By each completion or merge time; verifications count separately.",
-  historyOmitted:"Whole-history usage and value omit coordinator and helper transcripts to load quickly; all work records and worker and verifier usage are included.",
+  coordinatorTurns:"Coordinator turns", coordinatorTurnsNote:"Turns with a step in the period", coordinatorHours:"Coordinator hours", coordinatorHoursNote:"Hours · each turn from its first step to its last",
   workDaily:"Daily work", workWeekly:"Weekly work", workDayNote:"Each bar covers a rolling 24-hour interval.", workWeekNote:"Weeks start Monday in the desk’s local time; the first and last may be partial.",
   workLegend:"Upper: tasks finished · Lower: tasks merged", linesAdded:"Approx. lines added", linesRemoved:"Approx. lines removed",
   linesNote:"From merged tasks’ recorded change sizes; not the net change after merging.", linesOmitted:n => `${n} merged ${n === "1" ? "task" : "tasks"} without a usable recorded change size omitted.`,
@@ -2339,12 +2343,15 @@ function renderCost(r) {
         [T.historyVerifications, w.verifications], [T.historyHeld, w.held], [T.historyNotHeld, w.did_not_hold],
         [T.historyUnsure, w.unsure], [T.releasesAsked, w.releases_asked], [T.releasesOut, w.releases_out]]
         .map(([label, value]) => summaryCard(label, fmt(value || 0), "", "check")),
-      summaryCard(T.workerHours, (w.worker_hours || 0).toFixed(2), T.workerHoursNote, "status")) : null,
+      summaryCard(T.workerHours, (w.worker_hours || 0).toFixed(2), T.workerHoursNote, "status"),
+      summaryCard(T.coordinatorTurns, fmt(w.coordinator_turns || 0), T.coordinatorTurnsNote, "status"),
+      summaryCard(T.coordinatorHours, (w.coordinator_hours || 0).toFixed(2), T.coordinatorHoursNote, "status")) : null,
     r ? h("section", {class:"dashboard-panel"}, h("p", {class:"cost-explanation"}, T.costNote),
       h("p", {class:"cost-explanation"}, T.historyEndNote),
       w.lines_omitted ? h("p", {class:"cost-explanation"}, T.linesOmitted(fmt(w.lines_omitted))) : null,
-      r.transcripts_omitted ? h("p", {class:"cost-warning"}, T.historyOmitted) : null,
-      r.coordinator_uncounted ? h("div", {class:"cost-warning"}, icon("error"), h("p", {}, ZH ? T.coordinatorUncounted.replaceAll("{user}", r.coordinator_user) : r.coordinator_uncounted)) : null,
+      r.coordinator_uncounted ? h("div", {class:"cost-warning"}, icon("error"), h("p", {}, !ZH ? r.coordinator_uncounted
+        : T.coordinatorUncountedWhy[r.coordinator_uncounted_kind]?.replaceAll("{where}", r.coordinator_uncounted_where || "")
+          ?? T.coordinatorUncounted.replaceAll("{user}", r.coordinator_user))) : null,
       r.unpriced_models.length ? h("div", {class:"cost-warning"}, icon("prices"), h("p", {}, T.unpriced + " " + r.unpriced_models.join(", ") + " — " + T.setPrice)) : null) : null,
     r ? sections.length ? h("div", {class:"cost-breakdowns"}, sections) : dashboardPanel(T.cost, "cost", 0, emptyState(T.noCost, T.noCostNote, "cost"))
       : dashboardPanel(T.cost, "cost", null, costPlaceholder)
