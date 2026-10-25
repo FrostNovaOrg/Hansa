@@ -33669,6 +33669,16 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertEqual(page["after"]["root"]["kids"][1]["attrs"]["id"], "status-picture")
             self.assertEqual(page["settingsCount"], 0)
 
+    def test_status_top_up_heading_and_link_distinct_from_providers(self):
+        pages = self.principal_layout_page(providers=[{"credit_since": 1700000000}],
+                                           scenario="status-sections")
+        for page, heading, providers in zip(pages,
+                ("Top-ups to confirm", "等你确认充值"), ("Providers", "模型供应")):
+            with self.subTest(heading=heading):
+                self.assertEqual(page["links"][0]["heading"], heading)
+                self.assertEqual(page["links"][0]["text"], heading)
+                self.assertEqual(sum(link["text"] == providers for link in page["links"]), 1)
+
     def test_status_section_links_scroll_and_wrap(self):
         for releases, asks, providers in (([], [], []), ([{}, {"id": 18, "state": "done", "what": "done"}],
                 [{"id": 7, "text": "Review account"}], [{"credit_since": 1700000000}])):

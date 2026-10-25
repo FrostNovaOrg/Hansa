@@ -125,8 +125,10 @@ cards. Each to-do shows its number, what the principal must do, why only they
 can do it (if given), whether work waits, and when it was recorded. To-dos are
 read-only: the principal answers in the conversation and the coordinator records
 the outcome and closes them.
-Each provider waiting for credit shows its name and when the rest began, with
-the same **Topped up** button as Settings, Providers directly underneath.
+The credit group and its section link are labelled **Top-ups to confirm**
+(**等你确认充值** in Chinese). Each provider waiting for credit shows its name
+and when the rest began, with the same **Topped up** button as Settings, Providers
+directly underneath.
 Confirming a top-up removes that waiting item and updates the count. Usage-limit
 rests end by themselves and do not appear among the principal's waiting items.
 
