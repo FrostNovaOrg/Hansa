@@ -42,6 +42,7 @@ A stopped release went out for no `--after`: like a failed one, it lets no other
 from __future__ import annotations
 
 import contextlib
+import glob
 import hashlib
 import hmac
 import json
@@ -717,6 +718,90 @@ def _has_commit(repo, sha: str) -> bool:
 
 
 # -- asking ------------------------------------------------------------------------------------------------------
+def repository_input(command: str, repository, commit: str, fixed: bool = False, directory=None) -> tuple:
+    """Check recognized repository inputs. Fixed relative inputs are checked in their actual checkout."""
+    root = Path(repository).resolve()
+    cwd = Path(directory).resolve() if directory else root
+    entries = {}
+
+    def load(repository, revision):
+        result = subprocess.run(["git", "ls-tree", "-r", "-z", revision], cwd=repository, capture_output=True,
+                                stdin=subprocess.DEVNULL)
+        if result.returncode:
+            raise RuntimeError("cannot read release input tree")
+        for row in filter(None, os.fsdecode(result.stdout).split("\0")):
+            info, name = row.split("\t", 1)
+            _, kind, oid = info.split()
+            path = repository / name
+            if kind == "blob":
+                entries[path] = repository, revision, name
+            else:  # An initialized submodule's files are bound by its recorded commit.
+                try:
+                    if not git("rev-parse", "--show-prefix", cwd=path):
+                        load(path, oid)
+                except (OSError, RuntimeError):
+                    pass
+    load(root, commit)
+    if fixed and directory and root in cwd.parents:
+        load(cwd, commit)
+
+    def dependencies(candidate):
+        candidate = cwd / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_file() or root not in resolved.parents:
+                return []
+        except (OSError, RuntimeError, ValueError):
+            return []
+        cursor, parts, links = Path(candidate.anchor), list(candidate.parts[1:]), []
+        while parts:
+            part = parts.pop(0)
+            if part == "..":
+                cursor = cursor.parent
+                continue
+            path = cursor / part
+            if path.is_symlink():
+                links.append(path)
+                target = Path(os.readlink(path))
+                parts = list(target.parts) + parts
+                if target.is_absolute():
+                    cursor = Path(parts.pop(0))
+            else:
+                cursor = path
+        return links + [resolved]
+
+    def change_directory(path, physical):
+        candidate = cwd / (path if physical else os.path.normpath(path))
+        if candidate.is_dir() and os.access(candidate, os.X_OK):
+            return candidate.resolve() if physical else Path(os.path.normpath(path))
+        return None
+
+    for word, pattern in outside._input_paths(command, directory_change=(
+            (lambda path, physical: path) if fixed and directory is None else change_directory)):
+        if fixed and directory is None and not word.is_absolute():
+            continue
+        matches = glob.glob(str(Path(glob.escape(str(cwd))) / pattern))
+        for candidate in matches or [word]:
+            for path in dependencies(candidate):
+                if root not in path.parents:
+                    continue
+                relative = path.relative_to(root).as_posix()
+                try:
+                    if path in entries:
+                        if fixed:
+                            source, revision, name = entries[path]
+                            git("diff", "--quiet", "--no-ext-diff", "--no-textconv", revision, "--",
+                                f":(literal){name}", cwd=source)
+                        continue
+                except (RuntimeError, OSError):
+                    pass
+                return (f"repository file {relative} must match a file in release commit {commit[:10]}; "
+                        "commit it or use a path from that commit before asking again",
+                        f"仓库文件 {relative} 必须对应发布提交 {commit[:10]} 中的文件；"
+                        "请先提交，或使用该提交中的路径，再重新请求")
+    return "", ""
+
+
 def scan_key(repo, since: str, commit: str, words: list, command: str, mailboxes: bool = False,
              mailbox_allow=(), exceptions=()) -> str:
     """What a forbidden-word scan depends on, in one string: the commit, the starting point (the target's last
@@ -848,6 +933,12 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
             f'The principal requires their yes for direct commits; ask with hansa release {lane} {a["target"]} '
             '--direct "<why>". Nothing was asked'))
     target, command, prev, since = a["target"], a["command"], a["prev"], a["since"]
+    try:
+        why, _ = repository_input(command, a["repo"], a["commit"], a["fixed"])
+    except (RuntimeError, OSError) as e:
+        raise SystemExit(f"hansa: the release inputs cannot be read ({desk.redact(str(e))}). Nothing was asked")
+    if why:
+        raise SystemExit(desk.redact(f"hansa: {why}. Nothing was asked"))
     rs = releases(desk)
     listed = lane_listed(s, lane, target) and not held
     r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "target": target,
@@ -915,6 +1006,9 @@ def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
                 f"仓库外的文件 {path} 在请求发布之后变了")
     try:
         tip = git("rev-parse", "--verify", f"refs/heads/{r['base']}^{{commit}}", cwd=r["repo"])
+        why = repository_input(r.get("command") or "", ln["repo"], r["commit"], bool(r.get("fixed")))
+        if why[0]:
+            return why
     except (RuntimeError, OSError) as e:
         return (desk.redact(f"{r['base']} cannot be read in {r['repo']} ({e})")[:400],
                 desk.redact(f"{r['base']} 在 {r['repo']} 里读不出来（{e}）")[:400])
@@ -1374,6 +1468,11 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
         git("worktree", "add", "--detach", str(path), r["commit"], cwd=r["repo"])
         if (get(desk, rid) or {}).get("stop_asked"):  # stopped meanwhile: its command never runs
             finish(desk, rid, ran=False)
+            return None
+        why, why_zh = repository_input(r["command"], r["repo"], r["commit"], True, directory=path)
+        if why:
+            void(desk, rid, why, ("starting",), why_zh)
+            drop_checkout(desk, rid, r["repo"])
             return None
         proc = _launch(desk, r, token, path)
     desk.event("release_started", id=rid, lane=r["lane"], target=target, commit=r["commit"])
