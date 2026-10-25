@@ -160,9 +160,10 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0]})
             if url.path == "/api/cost":
                 try:
-                    days = max(1, min(90, int(q.get("days", ["7"])[0])))
+                    period = q.get("days", ["7"])[0]
+                    days = None if period == "all" else max(1, min(90, int(period)))
                 except ValueError:
-                    return self._bad_request("invalid_query", "days", "days must be a whole number")
+                    return self._bad_request("invalid_query", "days", "days must be a whole number or all")
                 rep = cost.report(desk, days)
                 if q.get("rows", ["0"])[0] != "1":
                     rep.pop("rows")
