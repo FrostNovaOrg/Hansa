@@ -24039,6 +24039,102 @@ def save():'''))
         self.assertTrue(any("unknown field" in p for p in probs))
         self.assertTrue(any("set from the provider" in p for p in probs))
 
+    def test_settings_require_a_readable_json_object_before_saving(self):
+        saved = self.desk.settings()
+        tid = self.desk.new_task("Keep this task", lane="a")
+        meta = self.desk.meta(tid)
+        for data in (b'{"lanes":', b'{bad}', b'\xff', b'[]', b'null'):
+            with self.subTest(data=data):
+                self.desk.settings_path.write_bytes(data)
+                with self.assertRaisesRegex(ValueError, "settings.json.*restore"):
+                    self.desk.settings()
+                self.assertTrue(self.desk.save_settings(saved, by="page"))
+                self.assertEqual(self.desk.settings_path.read_bytes(), data)
+        write_json(self.desk.settings_path, saved)
+        self.assertEqual(self.desk.settings(), saved)
+        self.assertEqual(self.desk.meta(tid), meta)
+        self.assertIn(meta["lane"], self.desk.settings()["lanes"])
+        self.assertEqual(Desk(self.tmp / "not-yet-created").settings()["lanes"], {})
+
+    def test_unreadable_settings_give_clean_command_and_save_refusals(self):
+        saved, read = self.desk.settings(), Path.read_text
+        for error in (PermissionError(errno.EACCES, "closed"), OSError(errno.EIO, "unavailable")):
+            def read_text(path, *args, **kwargs):
+                if path == self.desk.settings_path:
+                    raise error
+                return read(path, *args, **kwargs)
+            with self.subTest(error=error.errno), unittest.mock.patch.object(Path, "read_text", read_text):
+                self.assertTrue(self.desk.save_settings(saved))
+                with self.assertRaisesRegex(SystemExit, "settings.json.*restore"):
+                    self.hansa("concurrency", "2")
+        self.assertEqual(self.desk.settings(), saved)
+
+    def test_web_refuses_unavailable_settings_without_writing_them(self):
+        saved = self.desk.settings()
+        headers = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        for data in (b'{"lanes":', b'\xff'):
+            self.desk.settings_path.write_bytes(data)
+            for path, method in (("/api/settings", "GET"), ("/api/status", "GET"),
+                                 ("/api/cost", "GET"), ("/api/settings", "POST")):
+                with self.subTest(data=data, path=path, method=method):
+                    code, body, _ = self.web_request(path, method=method, headers=headers,
+                                                   data=json.dumps({"settings": saved}).encode())
+                    self.assertEqual((code, body.get("code")), (503, "settings_unavailable"))
+                    self.assertIn("restore", " ".join(body["problems"]))
+                    self.assertNotIn("settings", body)
+                    self.assertEqual(self.desk.settings_path.read_bytes(), data)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_shows_settings_recovery_instructions(self):
+        problem = "Stop the server and restore settings.json from your own backup."
+        replies = {"/api/status": views.status(self.desk), "/api/events": [],
+                   "/api/settings": {"ok": False, "code": "settings_unavailable", "problems": [problem]}}
+        harness = self.tmp / "settings-unavailable.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        result = subprocess.run(["node", str(harness), str(page), "settings-unavailable"],
+                                input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(problem, json.loads(result.stdout))
+
+    def test_prices_require_finite_numbers_in_every_field(self):
+        from hansa.desk import PRICE_FIELDS
+        saved = self.desk.settings_path.read_bytes()
+        for field in PRICE_FIELDS:
+            for value in (float("nan"), float("inf"), -float("inf"), 10 ** 400, -1, True, "1"):
+                with self.subTest(field=field, value=str(value)):
+                    s = self.desk.settings()
+                    s["prices"]["example/model"] = {"in": 0, "out": 0.25, field: value}
+                    self.assertTrue(any("finite" in p and field in p for p in validate(s)))
+                    self.assertTrue(self.desk.save_settings(s))
+                    self.assertEqual(self.desk.settings_path.read_bytes(), saved)
+
+    def test_page_refuses_nonfinite_prices_and_keeps_zero_and_decimals(self):
+        saved, data = self.desk.settings(), self.desk.settings_path.read_bytes()
+        headers = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        for token in ("NaN", "Infinity", "-Infinity", "1e309"):
+            body = json.dumps({"settings": saved}).replace('"in": 1', '"in": ' + token, 1).encode()
+            code, reply, _ = self.web_request("/api/settings", method="POST", headers=headers, data=body)
+            self.assertEqual(code, 200)
+            self.assertFalse(reply["ok"], token)
+            self.assertIn("finite", " ".join(reply["problems"]))
+            self.assertEqual(self.desk.settings_path.read_bytes(), data)
+        saved["prices"]["example/model"] = {"in": 0, "out": 0.25, "cache_read": 0.125}
+        self.assertEqual(self.desk.save_settings(saved), [])
+        self.assertEqual(self.desk.settings()["prices"], saved["prices"])
+        json.dumps(public_settings(self.desk), allow_nan=False)
+
+    def test_saved_prices_must_be_finite_before_they_are_used(self):
+        from hansa.desk import PRICE_FIELDS
+        saved = self.desk.settings()
+        for field in PRICE_FIELDS:
+            for token in ("NaN", "Infinity", "1e309"):
+                with self.subTest(field=field, token=token):
+                    s = {**saved, "prices": {"example/model": {"in": 0, "out": 0.25, field: "PRICE"}}}
+                    self.desk.settings_path.write_text(json.dumps(s).replace('"PRICE"', token))
+                    with self.assertRaisesRegex(ValueError, "finite"):
+                        self.desk.settings()
+
     def test_key_that_does_not_look_like_a_key_is_refused(self):
         for bad in ("MIMO_API_KEY=abc", "sk-abc def", '"sk-abc"', "sk-ab***yz", "Bearer sk-abc"):
             with self.assertRaises(ValueError):
@@ -29285,6 +29381,7 @@ const fetch = async (path, options) => {
   if (path === "/api/settings") { settingsGetCount++; if (settingsGetError) throw new Error(settingsGetError); }
   if (path === statusFailPath && statusGetError) throw new Error(statusGetError);
   const r = reply(path); if (r === null) return new Promise(() => {});
+  if (r?.code === "settings_unavailable") return {status:503, json:async () => r};
   const snapshot = JSON.parse(JSON.stringify(r));
   if (path === "/api/status" && statusGetGate) await statusGetGate;
   if (path === "/api/settings" && settingsGetGate) await settingsGetGate;
@@ -29345,6 +29442,15 @@ if (ask === "timeline") (async () => {
   await run("loadStatus()"); await run("loadTimeline()");
   await run("loadStatus()"); await run("loadTimeline()");
   const root = ids["#status-timeline"], segments = [];
+  // Refreshing the timeline starts separate reads for its expanded task details.
+  const waitForDetails = async () => {
+    const deadline = Date.now() + 10000;
+    while (descendants(root, "div").some(el => el.className === "mono task-detail" &&
+      !el.hidden && !descendants(el, "pre").length)) {
+      if (Date.now() >= deadline) throw new Error("Timeline task details did not finish loading");
+      await new Promise(resolve => setImmediate(resolve));
+    }
+  };
   walk(root, el => { if (el.attrs["data-timeline-kind"]) segments.push(el); });
   const inspector = descendants(root, "div").find(el => el.className === "timeline-inspector");
   const interactions = [];
@@ -29352,7 +29458,7 @@ if (ask === "timeline") (async () => {
     inspector.replaceChildren(); segment.on.pointerenter();
     const hover = inspector.textContent;
     inspector.replaceChildren(); await segment.click();
-    await new Promise(resolve => setImmediate(resolve));
+    await waitForDetails();
     const detail = ids["#" + segment.attrs["aria-controls"]];
     interactions.push({hover, tap:inspector.textContent, opened:detail ? !detail.hidden : false,
       detail:detail?.textContent});
@@ -29361,6 +29467,7 @@ if (ask === "timeline") (async () => {
   await run("timelineFetchedAt = Date.now() - 61000; loadTimeline()");
   const refreshGets = apiGets.filter(p => p === "/api/timeline").length;
   await run("current = 'settings'; show('status')"); await run("loadTimeline()");
+  await waitForDetails();
   console.log(JSON.stringify({text:root.textContent, gets, refreshGets, reopenGets:apiGets.filter(p => p === "/api/timeline").length,
     rows:descendants(root, "div").filter(el => el.attrs["data-timeline-lane"]).map(el => el.attrs["data-timeline-lane"]),
     segments:segments.map((el, i) => ({kind:el.attrs["data-timeline-kind"], tone:el.className, label:el.attrs.title,
@@ -29868,6 +29975,9 @@ else if (ask === "nulls") vm.runInContext("Promise.all([loadStatus(), loadSettin
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "release-hits" || ask === "status") vm.runInContext("loadStatus()", ctx).then(() => {
   console.log(JSON.stringify(ids["#tab-status"].textContent));
+}, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "settings-unavailable") vm.runInContext('show("settings")', ctx).then(() => {
+  console.log(JSON.stringify(ids["#state"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {
   if (ask === "credit") {
@@ -30888,6 +30998,20 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                 ".timeline-track { position:relative; min-width:0;", ".timeline-legend { display:flex; flex-wrap:wrap;",
                                 '.timeline-hour:not([data-mobile="true"]) { font-size:0; }'):
                         self.assertIn(css, page["css"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_status_timeline_task_details_survive_delayed_replies(self):
+        harness = self.PAGE_HARNESS.replace(
+            'return {status: 200, json: async () => JSON.parse(JSON.stringify(snapshot))};',
+            '''return {status: 200, json: async () => {
+              if (path.startsWith("/api/task")) {
+                for (let turn = 0; turn < 3; turn++) await new Promise(resolve => setImmediate(resolve));
+              }
+              return JSON.parse(JSON.stringify(snapshot));
+            }};''')
+        self.assertNotEqual(harness, self.PAGE_HARNESS)
+        with unittest.mock.patch.object(self, "PAGE_HARNESS", harness):
+            self.test_status_timeline_kinds_and_empty_window_in_both_languages()
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_status_timeline_hour_titles_follow_page_language(self):

@@ -26,6 +26,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import secrets as _secrets
@@ -471,6 +472,14 @@ def _is_int(v, lo: int, hi: int) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
 
 
+def _finite_number(v) -> bool:
+    """A number that can be used in floating-point price calculations."""
+    try:
+        return math.isfinite(v)
+    except OverflowError:
+        return False
+
+
 def mailbox_settings(s: dict) -> str:
     """Read the old spelling, returning its effective key for validation; save only the new spelling."""
     key = ("release_test_mailboxes" if "release_test_mailboxes" in s and "release_mailboxes" not in s
@@ -858,8 +867,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             for k, v in pr.items():
                 if k not in PRICE_FIELDS:
                     p.append(f"price {model}: unknown field {k}")
-                elif not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
-                    p.append(f"price {model}: {k} must be a number, 0 or more")
+                elif not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0 or not _finite_number(v):
+                    p.append(f"price {model}: {k} must be a finite number, 0 or more; use a smaller price if too large")
     return p
 
 
@@ -2465,6 +2474,10 @@ class KeyScrubError(ValueError):
     """The key was saved, but some published files still hold it."""
 
 
+class SettingsError(ValueError):
+    """Settings cannot be read; commands and the page must refuse until they are restored."""
+
+
 class Desk:
     def __init__(self, root) -> None:
         self.root = Path(root).resolve()
@@ -2508,12 +2521,31 @@ class Desk:
         raise SystemExit("hansa: no desk here. Run inside a desk, pass --desk DIR, or set HANSA_DESK.")
 
     # -- settings ---------------------------------------------------------
+    def _saved_settings(self) -> dict:
+        """Read a settings object, preserving the file whenever it needs attention."""
+        try:
+            loaded = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise ValueError
+            prices = loaded.get("prices")
+            for pr in (prices.values() if isinstance(prices, dict) else ()):
+                if isinstance(pr, dict) and any(k in PRICE_FIELDS and isinstance(v, (int, float))
+                                               and not _finite_number(v) for k, v in pr.items()):
+                    raise ValueError
+            return loaded
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError):
+            raise SettingsError(f"cannot read {self.settings_path} as a UTF-8 JSON object with finite prices; "
+                                "stop hansa serve, keep a copy of the file, then restore a known-good settings.json "
+                                "or repair it and its read permissions (hansa help desk-files); reload the page and "
+                                "restart hansa serve") from None
+
     def settings(self) -> dict:
         s = default_settings()
-        loaded = read_json(self.settings_path, {})
-        if isinstance(loaded, dict):
-            mailbox_settings(loaded)
-            s.update(loaded)
+        loaded = self._saved_settings()
+        mailbox_settings(loaded)
+        s.update(loaded)
         s = current_settings(s)
         migrate_releases(s)
         for ln in (s["lanes"].values() if isinstance(s.get("lanes"), dict) else []):
@@ -2536,7 +2568,10 @@ class Desk:
             if rev is not None and rev != self.settings_rev():
                 return ["the settings changed since this page loaded them (another tab or a command); "
                         "press Reload, then make the change again"]
-            old = self.settings()
+            try:
+                old = self.settings()
+            except SettingsError as e:
+                return [str(e)]
             mailbox_key = ""
             if isinstance(new, dict):
                 new = current_settings(new)
@@ -2547,7 +2582,7 @@ class Desk:
                                 and isinstance(x["entry"], str) and not x["entry"].strip() and x["lanes"] == [])]
                 # A page or command loaded the normalized spelling of an invalid value still in the file.
                 if not isinstance(new.get("release_mailboxes", False), bool):
-                    saved = read_json(self.settings_path, {})
+                    saved = self._saved_settings()
                     if (isinstance(saved, dict) and "release_mailboxes" not in saved and "release_test_mailboxes" in saved
                             and type(new["release_mailboxes"]) is type(saved["release_test_mailboxes"])
                             and new["release_mailboxes"] == saved.get("release_test_mailboxes")):
@@ -2636,8 +2671,7 @@ class Desk:
                     hidden[entry] = {"by": by, "at": now()}
                     added.append(entry)
             if added:  # not save_settings: every other setting stays as the disk has it, and the record is hansa's
-                saved = read_json(self.settings_path, {})
-                saved = saved if isinstance(saved, dict) else {}
+                saved = self._saved_settings()
                 mailbox_settings(saved)
                 write_json(self.settings_path, {**saved,
                                                 "workers_may_not_read": listed, HIDDEN_BY: hidden})
@@ -3016,7 +3050,7 @@ def public_settings(desk: Desk) -> dict:
     s = copy.deepcopy(desk.settings())
     mailbox_key = ""
     if not isinstance(s.get("release_mailboxes", False), bool):
-        saved = read_json(desk.settings_path, {})
+        saved = desk._saved_settings()
         if isinstance(saved, dict):
             mailbox_key = mailbox_settings(saved)
     keys = {name: desk.has_key(name) for name, p in s["providers"].items() if p.get("kind") == "compatible"}

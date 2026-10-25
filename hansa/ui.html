@@ -864,7 +864,9 @@ async function api(path, body) {
   }
   const r = await fetch(path, opt);
   if (r.status === 403) throw new Error(T.forbidden);
-  return r.json();
+  const reply = await r.json();
+  if (reply?.code === "settings_unavailable") throw new Error((reply.problems || []).join("; "));
+  return reply;
 }
 
 /* ---------- tabs ---------- */
