@@ -84,92 +84,9 @@ hansa also keeps running: its server dispatches work, runs checks and merges aro
 
 ## Quick start
 
-Working as root on a Linux server? Read [On a Linux server](docs/linux-server.md) before you start: Claude
-Code's sandbox cannot start as root, so there the desk, the lanes' repositories and hansa's own checkout
-belong to, or are readable by, an ordinary account, and the steps below change accordingly.
-
-### 1. What you need
-
-- **macOS or Linux** with Python 3.9 or newer, git and [Claude Code](https://code.claude.com/docs/en/overview).
-- **Claude Code's sandbox**, which every worker runs in; a worker does not start without it. It is built
-  into macOS; on Linux it needs `bubblewrap` and `socat`, and on Ubuntu 24.04 and later the system's
-  AppArmor rules can stop it (see Claude Code's [sandboxing documentation](https://code.claude.com/docs/en/sandboxing#set-up-linux-and-wsl2)).
-- **`srt`**, [Anthropic's sandbox runtime](https://github.com/anthropics/sandbox-runtime), for any lane with
-  a setup or check command: hansa runs those in the lane's sandbox with it.
-  `npm install -g @anthropic-ai/sandbox-runtime@0.0.79`; srt needs Node 22.12.0 or newer on the `PATH` of
-  `hansa serve`. Without it, a lane's setup fails each task before its worker starts, and its check reads
-  "could not run" without judging the task; `hansa status` says so.
-
-### 2. Get hansa
-
-```sh
-git clone https://github.com/FrostNovaOrg/Hansa.git ~/hansa
-export PATH="$HOME/hansa/bin:$PATH"     # add this line to your shell's profile too
-hansa --version
-```
-
-Put the `bin` folder itself on your `PATH`, not a link to `bin/hansa` in another folder: the script finds
-hansa's code from the path it was started by, without following links, so through a link it fails with
-`No module named hansa`.
-
-### 3. Make a desk and keep the server running
-
-```sh
-hansa init ~/desk --repo ~/code/myproject   # the first lane, "a", on the checkout's current branch
-cd ~/desk && hansa up                     # starts the server, then the coordinator (step 5); tmux when installed
-```
-
-The repository needs a first commit: `hansa init` and `hansa lane add` refuse one without. hansa also
-refuses a desk, home folder, repository or worktree whose path holds one of `[ ] * ? \`, and a desk or
-repository whose path holds a `)` followed later by a space or a comma: its rules for the sandbox would
-read them as patterns or split them ([Paths hansa refuses](docs/sandbox.md#paths-hansa-refuses)).
-A desk has one `hansa serve`. It automatically chooses a free page port and remembers it for the next start;
-that desk's `hansa web` finds it. Use `hansa serve --port N` to require a particular port.
-
-### 4. Open the page and add providers
-
-```sh
-cd ~/desk && hansa web     # prints the page's address, with a token; keep this terminal open
-```
-
-Run `hansa web` and `hansa serve` from a terminal of your own, not from a Claude Code session: `hansa web`
-refuses there, as the token would land in the session's context, and `hansa serve` drops the session's
-identity from its environment and says so ([details](docs/who-changes-what.md#a-claude-code-sessions-identity-and-the-pages-token)).
-
-From your own computer, open the page of a desk on another machine through an SSH tunnel (for a desk on
-another port, tunnel that port instead):
-
-```sh
-ssh -L 8765:127.0.0.1:8765 HOST /path/to/hansa/bin/hansa --desk /path/to/desk web
-```
-
-`hansa status` and `hansa explain server` say the address and port the page is served on, and whether
-`hansa serve` serves it now. On the page, under Settings, add providers (a Claude Code login, or any endpoint that speaks the
-Anthropic API, with its key), their models and effort defaults, and the prices hansa counts tokens at. A new
-desk starts with one provider, `claude`: the Claude Code login of the account hansa runs as.
-`hansa ping [PROVIDER]` sends one tiny request through a provider (all when omitted) to see that it answers.
-Run from a shell, it uses the `claude` program the recorded `hansa serve` start used, not whichever one that
-shell would find, and says so when the two differ. The page follows the browser's language: English, or Chinese.
-
-### 5. Start the coordinator
-
-`hansa up` starts the coordinator's session too, in tmux, and prints how to attach to it; after a restart it
-starts the session again as it last started, continuing its conversation. `hansa coordinator` stays the way
-to run it in the current terminal instead (one or the other: both would be two coordinators):
-
-```sh
-# Attach with the command hansa up printed, or run it in this terminal:
-cd ~/desk && hansa coordinator
-```
-
-The first time Claude Code opens in a new desk, it asks whether you trust the folder: choose yes. Claude
-Code ignores the allowed commands of a folder it does not trust, and the coordinator could not run `hansa`.
-
-Then tell the coordinator what you want built. It sets up the lanes and how many tasks run at once
-(`hansa lane`, `hansa concurrency`) and queues the work. hansa tells the coordinator's session when a task
-ends or you answer a release, through the session's inbox (`hansa notify` shows which sessions it posts
-to). If your Claude Code settings hold messages from other sessions (`crossSessionInbound`), the coordinator
-does not hear it; only you can change that.
+Clone the current alpha with `git clone --branch alpha https://github.com/FrostNovaOrg/Hansa.git ~/hansa`,
+then follow [Getting started](docs/getting-started.md) for tools, login, desk setup, the page,
+SSH access and your first finished task.
 
 ## Everyday commands
 
@@ -320,6 +237,7 @@ fix that.
 | Document | What is in it |
 |---|---|
 | [`hansa/card.md`](hansa/card.md) | What the coordinator needs on every turn: how work moves, every command, what it may change; `hansa help <topic>` prints the rest from `docs/`. `hansa help card` prints it, and each desk holds a copy as `CLAUDE.md`. |
+| [Getting started](docs/getting-started.md) | Install, log in, create a desk, reach its page locally or over SSH, and finish the first task |
 | [How a desk is run](docs/principles.md) | The rules hansa is built around, what enforces them and what each guards against |
 | [Who changes what](docs/who-changes-what.md) | What the principal sets on the page and the coordinator with `hansa`: lanes, commit messages and identity, what stays closed to the coordinator |
 | [Workers and the sandbox](docs/sandbox.md) | What workers and verifiers may touch; git's folders; the sandbox probe; write lists and env; the allow list and its web tools; paths hansa refuses; what hansa stops when a run ends |
