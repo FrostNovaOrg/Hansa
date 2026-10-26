@@ -410,7 +410,7 @@ page sets it: no `hansa` command sets, changes or clears it, and `hansa lane
 set` has nothing like it. `hansa serve` runs it when a release starts waiting
 for the principal's yes (also when a ticked target's tick no longer holds and
 its release goes back to waiting), when a release ends (done, failed, void or
-forbidden), when the coordinator stops a release, when a request to the principal is filed (`hansa ask`), when a
+forbidden), when the coordinator stops a release, when a to-do for the principal is recorded (`hansa ask`), when a
 lane's runs cannot start because their sandbox cannot (once for each lane and reason), when free space goes under the
 floor and `hansa serve` starts nothing new (once each time: see [free space](desk.md#free-space)), when
 its own rounds have stopped for 15 minutes, and when what hansa posts to the coordinator's session cannot reach it
@@ -427,7 +427,10 @@ characters; a release's text names its lane and target. Alerts name the desk by
 the last two folders of its path, as the page title does: `[hansa] desk shop/desk: ...`
 for `/work/shop/desk`, or `[hansa] desk desk: ...` for `/desk`. Spaces and
 non-ASCII letters stay as they are. Desks with the same last two folders have
-the same alert name.
+the same alert name. A new to-do reads `to-do #N for you: <text>`; the principal
+answers in the conversation. When the gathered alerts go out, to-dos already
+closed are left out. If nothing remains, no alert command runs. Closing a to-do
+after its alert went out sends nothing more.
 For a release refused by the word scan, the alert gives only counts of hits
 and lines that could not be checked against patterns; the entries, lines and
 reasons stay in the page's release list and `hansa release`, so refused
