@@ -3,7 +3,7 @@
 The principal sets one command line on the page (settings `alert`, which only the page saves: desk.PRINCIPAL_ONLY);
 the page records that it saved it, and when. hansa runs it when a release starts waiting for the principal's yes,
 when a release ends (done, failed, void or forbidden), when the coordinator stops one (release_stopped; the principal's
-own Stop on the page sends none), when a request to the principal is filed (hansa ask), when a lane's runs cannot
+own Stop on the page sends none), when a to-do for the principal is recorded (hansa ask), when a lane's runs cannot
 start because a provider ran out of credit (once per rest: run.rest_provider), when a lane's runs cannot
 start because their sandbox cannot (once for each lane and reason: run.hold), when free space goes under the floor
 and hansa serve starts nothing new (once each time: disk.look),
@@ -27,7 +27,8 @@ as the desk's account, outside the sandbox, in a folder of its own under the des
 with hansa's own environment (not a lane's env),
 the kinds in HANSA_ALERT_KIND (comma-separated when several go out together) and the text on standard input (UTF-8,
 keys removed, cut at MOST_TEXT characters), stopped after TIMEOUT seconds. Alerts that come within GATHER seconds
-of each other go out in one run (none waits more than MOST_WAIT); one run at a time (.hansa/alert.lock), and at
+of each other go out in one run (none waits more than MOST_WAIT); to-dos closed before that run are left out.
+One run at a time (.hansa/alert.lock), and at
 most MOST_RUNS in an hour: beyond that, what comes waits and goes out in one run when the hour frees a run, with a
 line saying how many were held back. An entry of the queue that cannot be read is dropped, and recorded once
 (event alert_dropped); the others go. The command's own exit ends its run, even when it leaves a child behind;
@@ -147,10 +148,11 @@ def _clean(desk: Desk) -> list:
     return good
 
 
-def add(desk: Desk, kind: str, text: str, code: str = "", release=None) -> bool:
+def add(desk: Desk, kind: str, text: str, code: str = "", release=None, ask=None) -> bool:
     """Queue an alert for the next run; False (nothing queued) when no alert command is set. code: the one-time
     code of release `release` the text holds (it replaces one queued before for that release, now void); the entry
-    goes once it is sent, and none of what the command prints for it is kept."""
+    goes once it is sent, and none of what the command prints for it is kept. ask: the to-do's ID, so a closed
+    to-do can be left out when the gathered alerts go out."""
     if not command(desk.settings()):
         return False
     with desk.lock():
@@ -158,7 +160,7 @@ def add(desk: Desk, kind: str, text: str, code: str = "", release=None) -> bool:
         if code:
             q = [x for x in q if not (x.get("code") and x.get("release") == release)]
         q.append({"kind": kind, "text": desk.redact(text), "at": time.time(),
-                  **({"code": code, "release": release} if code else {})})
+                  **({"code": code, "release": release} if code else {}), **({"ask": ask} if ask is not None else {})})
         desk.state_dir.mkdir(exist_ok=True)
         write_json(queue_file(desk), q)
     return True
@@ -207,7 +209,7 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
         add(desk, "release_stopped", _release_text(desk, fields.get("id"), False))
     elif kind == "ask":
         a = next((x for x in desk.asks() if x.get("id") == fields.get("id")), {})
-        add(desk, "ask", f"request #{fields.get('id')} waits for you on the page: {a.get('text', '')}")
+        add(desk, "ask", f"to-do #{fields.get('id')} for you: {a.get('text', '')}", ask=fields.get("id"))
     elif kind == "provider_credit":
         add(desk, "credit", fields["text"])
     elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason (run.hold)
@@ -352,7 +354,8 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
                 desk.event("alert_held", alerts=len(good), most_runs=MOST_RUNS)
             return None
         with desk.lock():
-            q = _clean(desk)
+            closed = {a["id"] for a in desk.asks() if a.get("closed")}
+            q = [x for x in _clean(desk) if x["kind"] != "ask" or x.get("ask") not in closed]
             write_json(queue_file(desk), [])
         cmd = command(desk.settings())
         codes = [x for x in q if isinstance(x.get("code"), str) and x["code"]]

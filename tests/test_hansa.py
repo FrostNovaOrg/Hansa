@@ -16026,8 +16026,8 @@ def save():'''))
         self.assertEqual((second["why"], second["holds"]), ("", False))
         self.assertTrue(first["created"])
         self.assertEqual([a["text"] for a in alert.queued(self.desk)],
-                         ["request #1 waits for you on the page: Review <b>x</b>",
-                          "request #2 waits for you on the page: Pick a name"])
+                         ["to-do #1 for you: Review <b>x</b>",
+                          "to-do #2 for you: Pick a name"])
 
     def test_todos_keep_300_closed_items_and_page_filter_to_the_oldest(self):
         from hansa import disk
@@ -36213,7 +36213,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(alert.send_due(self.desk, gather=0)["ok"], True)
         [a] = self.alerted(out)
         self.assertEqual(a["kind"], "ask")
-        self.assertIn(f"request #{n} waits for you on the page: Please renew the deploy login", a["text"])
+        self.assertIn(f"to-do #{n} for you: Please renew the deploy login", a["text"])
         self.assertEqual((a["task"], a["mine"]), (None, "yes"))
         self.assertNotEqual(a["cwd"], str(self.desk.root))  # a folder of its own
         os.environ.pop("HANSA_TASK")
@@ -36299,6 +36299,83 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                         self.assertEqual(add.call_args.args[:2], (self.desk, "server_stuck"))
                         self.assertIn(f"no round for {minutes} minutes", add.call_args.args[2])
 
+    def test_an_open_todo_alert_names_the_todo_after_gathering(self):
+        from hansa import alert
+        out = self.alert_fake()
+        n = self.desk.add_ask("Please renew the login")
+        [item] = alert.queued(self.desk)
+        with unittest.mock.patch.object(alert.time, "time", return_value=item["at"] + alert.GATHER + 1):
+            self.assertTrue(alert.send_due(self.desk)["ok"])
+        [sent] = self.alerted(out)
+        self.assertEqual(sent["kind"], "ask")
+        self.assertEqual(sent["text"].split(": ", 1)[1], f"to-do #{n} for you: Please renew the login")
+        self.assertEqual(len(sent["text"].splitlines()), 1)
+
+    def test_todos_closed_while_alerts_gather_send_nothing(self):
+        from hansa import alert
+        out = self.alert_fake()
+        for count in (1, 3):
+            with self.subTest(count=count):
+                ids = [self.desk.add_ask(f"Already handled {i}") for i in range(count)]
+                at = max(x["at"] for x in alert.queued(self.desk))
+                with unittest.mock.patch.object(alert.time, "time", return_value=at + alert.GATHER - 1):
+                    self.assertIsNone(alert.send_due(self.desk))
+                    for n in ids:
+                        self.desk.close_ask_as_coordinator(n, "Done in the conversation")
+                with unittest.mock.patch.object(alert.time, "time", return_value=at + alert.GATHER + 1):
+                    self.assertIsNone(alert.send_due(self.desk))
+                self.assertEqual(alert.queued(self.desk), [])
+                self.assertEqual(self.alerted(out), [])
+                self.assertEqual(self.events("alert_sent"), [])
+                self.assertFalse(alert.last_file(self.desk).exists())
+
+    def test_a_gathered_todo_batch_sends_only_the_open_todos(self):
+        from hansa import alert
+        out = self.alert_fake()
+        ids = [self.desk.add_ask(text) for text in ("Handled first", "Still needed", "Handled last", "Also needed")]
+        self.desk.close_ask_as_coordinator(ids[0], "Done")
+        self.desk.close_ask_as_coordinator(ids[2], "Done")
+        at = max(x["at"] for x in alert.queued(self.desk))
+        with unittest.mock.patch.object(alert.time, "time", return_value=at + alert.GATHER + 1):
+            self.assertTrue(alert.send_due(self.desk)["ok"])
+        [sent] = self.alerted(out)
+        self.assertEqual(sent["kind"], "ask")
+        self.assertIn("2 alerts", sent["text"])
+        self.assertEqual(sent["text"].splitlines()[1:],
+                         [f"- to-do #{ids[1]} for you: Still needed", f"- to-do #{ids[3]} for you: Also needed"])
+        self.assertEqual(self.events("alert_sent")[-1]["alerts"], 2)
+        self.assertEqual(alert.queued(self.desk), [])
+
+    def test_closing_a_todo_after_its_alert_sends_no_more(self):
+        from hansa import alert
+        out = self.alert_fake()
+        n = self.desk.add_ask("Please renew the login")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.desk.close_ask_as_coordinator(n, "Renewed")
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(len(self.alerted(out)), 1)
+
+    def test_omitting_a_closed_todo_preserves_release_codes_and_other_alerts(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        n = self.desk.add_ask("Already handled")
+        self.hansa("lane", "target", "a", "default", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        alert.add(self.desk, "disk", "free space warning")
+        self.desk.close_ask_as_coordinator(n, "Done")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        [sent] = self.alerted(out)
+        self.assertEqual(sent["kind"], "release_waiting,disk")
+        self.assertIn("2 alerts", sent["text"])
+        self.assertIn(f"#1 code {code}", sent["text"])
+        self.assertIn(f"release #1 (lane a, target default) · code {code}:", sent["text"])
+        self.assertIn("\n- free space warning", sent["text"])
+        self.assertNotIn("Already handled", sent["text"])
+        self.assertTrue(release.page_rows(self.desk, self.desk.settings())[0]["code_sent"])
+        self.assertEqual(alert.queued(self.desk), [])
+
     def test_alerts_that_come_close_together_go_out_in_one_run_one_run_at_a_time(self):
         from hansa import alert
         out = self.alert_fake()
@@ -36317,7 +36394,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         [a] = self.alerted(out)
         self.assertEqual(a["kind"], "ask")
         self.assertIn("2 alerts", a["text"])
-        self.assertIn("- request #1 waits for you on the page: first\n- request #2 waits for you on the page: second",
+        self.assertIn("- to-do #1 for you: first\n- to-do #2 for you: second",
                       a["text"])
         self.assertEqual(alert.queued(self.desk), [])
         # alerts that keep coming go out once the first has waited long enough
@@ -36395,7 +36472,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         alert.queue_file(self.desk).write_bytes(raw)
         self.desk.add_ask("third")
         self.assertEqual(len(self.events("alert_dropped")), 2)
-        self.assertEqual([x["text"] for x in alert.queued(self.desk)][-1], "request #1 waits for you on the page: third")
+        self.assertEqual([x["text"] for x in alert.queued(self.desk)][-1], "to-do #1 for you: third")
         self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
         self.assertIn("caf", self.alerted(out)[-1]["text"])
         self.assertIn("third", self.alerted(out)[-1]["text"])
@@ -36457,7 +36534,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
         a = self.alerted(out)[-1]
         self.assertIn("(3 held back by the limit of 20 runs an hour)", a["text"])
-        self.assertIn("- request #2 waits for you on the page: two", a["text"])
+        self.assertIn("- to-do #2 for you: two", a["text"])
         self.assertIn("four", a["text"])
         self.assertEqual(alert.queued(self.desk), [])
         self.desk.add_ask("five")
@@ -36583,7 +36660,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertIn("held back by the limit of 20 runs an hour)", first)
         lines = text.splitlines()[1:]  # those holding a code come first
         self.assertEqual([" · code " in x for x in lines], [True, True] + [False] * (len(lines) - 2))
-        self.assertIn("- request #", text)
+        self.assertIn("- to-do #", text)
 
     def test_a_release_code_appears_nowhere_else_hansa_writes(self):
         from hansa import alert, release, web
