@@ -41,8 +41,9 @@ def price_for(model: str, prices: dict):
         return None
     i = pr["in"]
     cw = pr.get("cache_write", i * 1.25)
+    cw1h = i * 2 if model.startswith("claude-") or "cache_write" not in pr else cw
     return {"in": i, "out": pr["out"], "cache_read": pr.get("cache_read", i * 0.1),
-            "cache_write": cw, "cache_write_1h": pr.get("cache_write_1h", cw if "cache_write" in pr else i * 2)}
+            "cache_write": cw, "cache_write_1h": pr.get("cache_write_1h", cw1h)}
 
 
 def parts(model: str, u: dict, prices: dict):

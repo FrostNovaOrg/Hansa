@@ -469,6 +469,14 @@ Prices must be finite numbers, zero or more; zero and decimals are accepted.
 NaN, infinity and numbers too large for floating-point calculations are refused;
 use a smaller price. A saved file containing such prices also requires repair
 before hansa uses it, following [the recovery steps](#reading-and-restoring-settings).
+
+Missing cache-read and five-minute cache-write prices default to 0.1 and 1.25
+times the input price. For models whose names start with `claude-`, a missing
+`cache_write_1h` is twice the input price, even when `cache_write` is set.
+For other models it uses `cache_write` when given, otherwise twice the input
+price. An explicit `cache_write_1h` always wins. Usage without a five-minute /
+one-hour split is counted as one-hour writes.
+
 After saving, it describes the timing for each kind of setting changed:
 prices apply immediately on the next report read, recalculating past usage too;
 provider settings apply to new worker/verifier runs and the next coordinator start;
