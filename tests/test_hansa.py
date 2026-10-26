@@ -25351,6 +25351,38 @@ def save():'''))
                 self.assertEqual("rows" in rep, bool(suffix))
                 self.assertTrue(all(value == 0 for value in rep["work"].values()))
 
+    def test_cache_price_defaults_and_explicit_one_hour_prices(self):
+        for model, entry, write5m, write1h in (
+                ("claude-opus-5-5", {"in": 4, "out": 20, "cache_read": 0.2, "cache_write": 5}, 5, 8),
+                ("claude-opus-5-5", {"in": 4, "out": 20, "cache_write": 5, "cache_write_1h": 9}, 5, 9),
+                ("claude-opus-5-5", {"in": 4, "out": 20, "cache_write_1h": 0}, 5, 0),
+                ("claude-opus-5-5", {"in": 4, "out": 20}, 5, 8),
+                ("other-model", {"in": 4, "out": 20, "cache_write": 3}, 3, 3),
+                ("other-model", {"in": 4, "out": 20}, 5, 8)):
+            with self.subTest(model=model, entry=entry):
+                for name in (model, model + "-20261001"):
+                    pr = cost.price_for(name, {model: entry})
+                    self.assertEqual(pr["cache_write"], write5m)
+                    self.assertEqual(pr["cache_write_1h"], write1h)
+                    self.assertEqual(pr["cache_read"], entry.get("cache_read", 0.4))
+
+    def test_cost_split_cache_writes_use_each_durations_price(self):
+        prices = {"claude-opus-5-5": {"in": 4, "out": 20, "cache_read": 0.2, "cache_write": 5}}
+        usage = {"in": 1000000, "out": 1000000, "cache_read": 1000000,
+                 "cache_write": 3000000, "cache_write_5m": 1000000, "cache_write_1h": 2000000}
+        self.assertEqual(cost.parts("claude-opus-5-5", usage, prices),
+                         {"in": 4, "out": 20, "cache_read": 0.2, "cache_write": 21})
+        self.assertAlmostEqual(cost.value("claude-opus-5-5", usage, prices), 45.2)
+
+    def test_cost_unsplit_cache_writes_keep_using_one_hour_price(self):
+        for model, entry, expected in (
+                ("claude-opus-5-5", {"in": 4, "out": 20, "cache_write": 5}, 8),
+                ("claude-opus-5-5", {"in": 4, "out": 20, "cache_write_1h": 9}, 9),
+                ("claude-opus-5-5", {"in": 4, "out": 20}, 8),
+                ("other-model", {"in": 4, "out": 20, "cache_write": 3}, 3)):
+            with self.subTest(model=model, entry=entry):
+                self.assertEqual(cost.value(model, {"cache_write": 1000000}, {model: entry}), expected)
+
     def test_cost_counts_workers_and_coordinator_once(self):
         tid = self.desk.new_task("Add hello.txt")
         self.settle(Dispatcher(self.desk), tid)
