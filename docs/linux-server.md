@@ -1,8 +1,10 @@
 # On a Linux server
 
-The [README](../README.md#quick-start) covers the usual setup, where the desk belongs to the user who runs
-hansa. Here: a Linux server where the principal works as root, what a lane's commands meet in Linux's sandbox,
-and what the kernel stops first when memory runs out.
+[Getting started](getting-started.md) covers installation, login, the first task
+and [SSH access](getting-started.md#work-over-ssh), where the desk belongs to the
+user who runs hansa. Here: a Linux server where the principal works as root,
+what a lane's commands meet in Linux's sandbox, and what the kernel stops first
+when memory runs out.
 
 ## The coordinator as root, the desk as an ordinary account
 
@@ -21,7 +23,8 @@ folder it cannot read or enter (`No module named hansa`).
 Install Claude Code where the account can run it (not only under root's home),
 and log each subscription provider in as the account: `runuser -u hansa -- claude`
 (with `env CLAUDE_CONFIG_DIR=...` before `claude` when the provider has a
-config_dir). Then run `hansa serve` in the desk; started from root, it and every
+config_dir). Follow the guide for [page setup](getting-started.md#open-the-principals-page).
+In this root/account arrangement, run `hansa serve` in the desk: started from root, it and every
 other `hansa` command but `coordinator`, `init`, `notify`, `notify-follow` and `up`
 switch to the account by themselves (that needs `runuser`, from util-linux). Run `hansa coordinator` as root: it stays root, uses root's own
 Claude Code login and folder (the first time, log in inside the session), and

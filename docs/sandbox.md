@@ -7,6 +7,10 @@ short version.
 
 ## Tools and upgrades
 
+For installation, Linux prerequisites and the first lane sandbox check, follow
+[Getting started](getting-started.md#install-the-tools). This section records
+the tool baseline and the checks for maintainers upgrading it.
+
 The Python program uses the standard library. The tools it starts have their own
 requirements; install them outside a worker's worktree and denied folders.
 The CI baseline is explicit, so a fresh run selects the same direct tool releases:

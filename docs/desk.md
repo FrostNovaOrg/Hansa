@@ -8,8 +8,10 @@ give the usual "no desk here" refusal.
 
 ## Creating a desk and lanes
 
-With `hansa init DIR --repo PATH` or `hansa lane add L --repo PATH`, the
-checkout must already have a commit. An explicit `--base` must resolve to a
+For the initial checkout, first commit, `hansa init` and startup, follow
+[Getting started](getting-started.md#create-and-start-the-desk).
+An explicit `--base` with `hansa init DIR --repo PATH` or
+`hansa lane add L --repo PATH` must resolve to a
 commit in that checkout; this also applies to `hansa lane add L --like OTHER
 --base BRANCH`. A missing base or a reference to a tree or file is refused
 before desk files, lane settings or standing instructions are written, so a
@@ -25,7 +27,10 @@ their original spelling.
 
 ## Status, work and cost on the web page
 
-Open the address `hansa web` prints in a terminal of your own. The page keeps
+For opening the page and setting providers, models and prices, follow
+[Getting started](getting-started.md#open-the-principals-page); for a remote
+desk, use its [SSH tunnel instructions](getting-started.md#work-over-ssh).
+The page keeps
 its token in `sessionStorage`, scoped to the browser tab and origin (scheme,
 host and port), and removes it from the address before requesting desk data.
 Reloading in that tab keeps access; another desk or forwarded port has its own
@@ -537,6 +542,10 @@ merge or release check, and alert settings at the next alert check.
 The visible not-read warning says that while the list holds an entry containing
 `()[]{}*?\`, hansa starts no worker, verifier or coordinator until it is changed here.
 
+`hansa ping [PROVIDER]` sends a tiny request through one provider, or all when
+omitted. From a shell it uses the `claude` program the recorded `hansa serve`
+start used, and says when that differs from the one the shell would find.
+
 The directory marks groups with unsaved edits. The save bar distinguishes edits,
 an operation in progress, success and failure; a failed save says that the draft
 is still present. Known validation errors link to the relevant field or group,
@@ -574,6 +583,10 @@ With no draft, returning to Settings refreshes it from the desk. If the principa
 editing before that reply arrives, the reply leaves their new draft alone.
 
 ## Starting the server and the coordinator again
+
+For first startup and the alternative without tmux, follow
+[Getting started](getting-started.md#create-and-start-the-desk). This section
+describes saved starts, port selection and restoring sessions.
 
 Run `hansa up` in a desk, or name it with `hansa --desk DIR up` or `HANSA_DESK`.
 If the named folder is not a desk, hansa refuses it and starts nothing; it does
