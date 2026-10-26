@@ -17657,7 +17657,7 @@ def save():'''))
         from hansa import web
         harness = self.tmp / "page.js"
         script = self.PAGE_HARNESS.replace("console.log(JSON.stringify(nulls));",
-                                           "console.log(JSON.stringify({nulls, text: ids['#state'].textContent, "
+                                           "console.log(JSON.stringify({nulls, text: ids['#state-list'].textContent, "
                                            "warn: ids['#state'].className, settings: ids['#tab-settings'].textContent}));")
         for version, says, zh, warn in (
                 ("2.1.296", self.MOD_LOADED, "hansa 加载了协调席的 mod；命令行里的 --autocompact 选项：--autocompact 550000",
@@ -17867,7 +17867,7 @@ def save():'''))
         at = lambda d, h, m=0: time.mktime((2026, 9, d, h, m, 0, 0, 0, -1))  # noqa: E731
         harness = self.tmp / "page.js"
         script = self.PAGE_HARNESS.replace("console.log(JSON.stringify(nulls));",
-                                           "console.log(JSON.stringify({nulls, text: ids['#state'].textContent, "
+                                           "console.log(JSON.stringify({nulls, text: ids['#state-list'].textContent, "
                                            "warn: ids['#state'].className}));")
 
         def none():
@@ -31133,7 +31133,8 @@ const [page, given, ask] = [fs.readFileSync(process.argv[2], "utf8"), JSON.parse
 const script = page.slice(page.indexOf("<script>") + 8, page.lastIndexOf("</script>"));
 class El {
   constructor(tag) { this.tag = tag; this.kids = []; this.attrs = {}; this.className = ""; this.hidden = false;
-    this.value = ""; this.checked = false; this.disabled = false; this.on = {}; this.classList = {toggle: () => {}}; this.dataset = {}; }
+    this.value = ""; this.checked = false; this.disabled = false; this.on = {}; this.classList = {toggle: () => {}}; this.dataset = {};
+    this.style = {setProperty(k, v) { this[k] = v; }}; this.clientWidth = 300; this.scrollWidth = 0; }
   get tagName() { return this.tag.toUpperCase(); }
   get id() { return this.attrs.id || ""; } set id(value) { this.setAttribute("id", value); }
   get type() { return this.attrs.type || ""; } set type(value) { this.setAttribute("type", value); }
@@ -31141,17 +31142,29 @@ class El {
   set open(value) { if (value) this.setAttribute("open", ""); else this.removeAttribute("open"); }
   set textContent(x) { this.kids = [String(x)]; } get textContent() { return this.kids.map(k => k.textContent ?? k).join(""); }
   setAttribute(k, v) { this.attrs[k] = String(v); if (k.startsWith("data-")) this.dataset[k.slice(5)] = String(v);
+    if (k === "class") this.className = String(v);
     if (k === "id") ids["#" + v] = this;
     if (k === "disabled" || k === "hidden") this[k] = true; }
   getAttribute(k) { return this.attrs[k] ?? null; }
   removeAttribute(k) { delete this.attrs[k]; if (k === "disabled" || k === "hidden") this[k] = false; }
   scrollIntoView() { this.scrolled = true; }
   querySelector(tag) { return descendants(this, tag)[0] || null; }
+  closest(selectors) {
+    for (let el = this; el; el = el.parentElement) {
+      if (selectors.split(",").some(s => { s = s.trim();
+        return s.startsWith(".") ? el.className.split(/\s+/).includes(s.slice(1)) : el.tag === s; })) return el;
+    }
+    return null;
+  }
   focus() { document.activeElement = this; }
   click() {
     if (this.tag === "a") downloads.push({href:this.attrs.href, name:this.attrs.download});
     if (this.tag === "summary" && this.parentElement?.tag === "details") this.parentElement.open = !this.parentElement.open;
-    return this.on.click?.({target:this, preventDefault() {}});
+    const event = {target:this, preventDefault() {}};
+    const result = this.on.click?.(event);
+    for (let parent = this.parentElement; parent; parent = parent.parentElement) parent.on.click?.(event);
+    for (const handler of windowEvents.click || []) handler(event);
+    return result;
   }
   remove() { if (this.parentElement) this.parentElement.kids = this.parentElement.kids.filter(k => k !== this); }
   addEventListener(k, f) { const previous = this.on[k]; this.on[k] = previous ? e => { previous(e); return f(e); } : f; }
@@ -31238,14 +31251,43 @@ const storage = (values = {}, mode) => ({values:{...values}, writes:[],
     this.values[key] = String(value); this.writes.push([key, String(value)]); }});
 let session = storage(preferences.session, preferences.sessionMode), local = storage(preferences.local, preferences.localMode);
 let reloads = 0, historyReplacements = [], unloadWarnings = [];
+let timerNow = 0, timerId = 0, timers = new Map();
+const motionQuery = {matches:!!given.reducedMotion};
+const later = (f, delay, repeat = false) => {
+  const id = ++timerId; timers.set(id, {f, at:timerNow + delay, delay, repeat}); return id;
+};
+async function advance(milliseconds) {
+  const end = timerNow + milliseconds;
+  for (;;) {
+    const entry = [...timers].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+    if (!entry) break;
+    const [id, timer] = entry; timerNow = timer.at;
+    if (timer.repeat) timer.at += timer.delay; else timers.delete(id);
+    timer.f(); await new Promise(resolve => setImmediate(resolve));
+  }
+  timerNow = end;
+}
 function openPage(search = "") {
   for (const key of Object.keys(ids)) delete ids[key];
+  timers.clear(); timerNow = 0;
   document.documentElement = new El("html"); document.activeElement = null; document.title = "Hansa";
+  document.body = new El("body");
+  // Build the actual static header, so its buttons, nesting and initial ARIA are exercised too.
+  const header = new El("header"), stack = [header]; ids.header = header; document.body.append(header);
+  for (const tag of page.split("<header>")[1].split("</header>")[0].matchAll(/<(\/?)([\w-]+)([^>]*)>/g)) {
+    if (tag[1]) { stack.pop(); continue; }
+    const el = new El(tag[2]);
+    for (const attr of tag[3].matchAll(/([\w-]+)(?:="([^"]*)")?/g)) el.setAttribute(attr[1], attr[2] ?? "");
+    stack.at(-1).append(el); stack.push(el);
+  }
   for (const key of Object.keys(windowEvents)) delete windowEvents[key];
   for (const tab of ["status", "tasks", "todos", "gaps", "notes", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
   const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
   location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
-  URLSearchParams, setInterval(f) { (windowEvents.interval ||= []).push(f); }, window: {scrollTo() {}, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
+  URLSearchParams, performance:{now:() => timerNow},
+  setTimeout:later, clearTimeout:id => timers.delete(id),
+  setInterval(f, delay) { (windowEvents.interval ||= []).push(f); return later(f, delay, true); },
+  window: {scrollTo() {}, matchMedia:() => motionQuery, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
     confirm(message) { confirmations.push(message); return confirmReply; }}, console,
   URL: class extends URL {
     static createObjectURL(blob) { blobs.push(blob); return "blob:page-test-" + blobs.length; }
@@ -31280,7 +31322,53 @@ function openPage(search = "") {
 let ctx = openPage(preferences.search);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 const stateBeforeCost = document.querySelector("#state").textContent;
-if (ask === "timeline") (async () => {
+if (ask === "header") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  await run("loadStatus()");
+  const text = ids["#state-text"], viewport = ids["#state-window"], caption = ids["#title"].kids[1].kids[1];
+  const snapshot = () => ({text:text.textContent, tone:text.className, transform:text.style.transform,
+    dot:ids["#state"].className, parts:descendants(ids["#state-list"], "li").map(el =>
+      ({text:el.textContent, tone:el.className, warning:!!descendants(el, "svg").length})),
+    statusOpen:!ids["#state-list"].hidden, languageOpen:!ids["#language-menu"].hidden,
+    statusExpanded:ids["#state-toggle"].attrs["aria-expanded"], languageExpanded:ids["#language"].attrs["aria-expanded"],
+    choices:descendants(ids["#language-menu"], "button").map(el =>
+      ({text:el.textContent, lang:el.attrs.lang, current:el.attrs["aria-current"] === "true", marked:!!descendants(el, "svg").length})),
+    focus:document.activeElement?.id || document.activeElement?.tag, caption:caption.textContent, hover:caption.attrs.title,
+    brand:ids["#title"].kids[1].kids[0].textContent, labelClass:caption.parentElement.className,
+    buttons:["#state-toggle", "#language"].map(id => ({tag:ids[id].tag, ...ids[id].attrs})),
+    reloads, localWrites:local.writes.slice(), gets:apiGets.filter(path => path === "/api/status").length});
+  const snapshots = [snapshot()];
+  for (const action of given.headerActions || []) {
+    if (action.widths) [viewport.clientWidth, text.scrollWidth] = action.widths;
+    if (action.motion !== undefined) motionQuery.matches = action.motion;
+    if (action.update) Object.assign(given["/api/status"], action.update);
+    if (action.error !== undefined) statusGetError = action.error;
+    if (action.refresh) await run("loadStatus()").catch(e => { if (!statusGetError) throw e; });
+    if (action.advance !== undefined) await advance(action.advance);
+    if (action.focus) ids[action.focus].focus();
+    if (action.click) {
+      const target = action.click === "outside" ? document.body : action.click.endsWith(":icon")
+        ? ids[action.click.slice(0, -5)].kids[0].kids[0] : ids[action.click];
+      await target.click();
+    }
+    if (action.choose) await descendants(ids["#language-menu"], "button").find(el => el.attrs.lang === action.choose).click();
+    if (action.key) {
+      const event = {key:action.key, target:document.activeElement, prevented:false, preventDefault() { this.prevented = true; }};
+      for (const f of windowEvents.keydown || []) f(event);
+      if (action.key === "Tab" && !event.prevented) {
+        const order = [];
+        const visit = el => { if (el.hidden) return;
+          if (el.tag === "button" && !el.disabled && el.attrs.tabindex !== "-1") order.push(el);
+          for (const child of el.kids) if (child instanceof El) visit(child);
+        };
+        visit(document.body); order[(order.indexOf(document.activeElement) + 1) % order.length].focus();
+      }
+    }
+    snapshots.push(snapshot());
+  }
+  console.log(JSON.stringify({snapshots, css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "timeline") (async () => {
   const run = code => vm.runInContext(code, ctx);
   await run("loadStatus()"); await run("loadTimeline()");
   await run("loadStatus()"); await run("loadTimeline()");
@@ -31348,8 +31436,8 @@ else if (ask.startsWith("status-picture")) (async () => {
       await box.click(); clicks.push(!!ids["#" + box.attrs["aria-controls"]]?.scrolled);
     }
     return {rows, lists, laneCount:descendants(ids["#status-lanes"], "span").find(el => el.className === "count-badge")?.textContent,
-      text:root.textContent, state:ids["#state"].textContent,
-      warnings:descendants(ids["#state"], "span").filter(el => el.className === "warn").map(el => el.textContent),
+      text:root.textContent, state:ids["#state-list"].textContent,
+      warnings:descendants(ids["#state-list"], "li").filter(el => el.className === "warn").map(el => el.textContent),
       events:descendants(root, "div").filter(el => el.className === "event-row").map(el => ({text:el.textContent,
         time:descendants(el, "span").find(n => n.className === "event-time")?.textContent,
         links:descendants(el, "button").filter(n => n.className === "link").map(n => n.textContent)})),
@@ -31387,7 +31475,7 @@ else if (ask === "preferences") (async () => {
     if (tab === "settings" && (!ids["#settings-" + group] || ids["#settings-" + group].hidden)) throw new Error("settings section not shown");
     const period = tab === "cost" ? descendants(ids["#cost-period"], "option").find(el => "selected" in el.attrs)?.value : null;
     return {tab, group, period, language:run('ZH ? "zh-CN" : "en"'), lang:document.documentElement.attrs.lang,
-      title:document.title, caption:ids["#title"].kids.at(-1).textContent, state:ids["#state"].textContent,
+      title:document.title, caption:ids["#title"].kids.at(-1).kids.at(-1).textContent, state:ids["#state-list"].textContent,
       cool:run("S && S.cool_minutes"), session:{...session.values}, local:{...local.values}};
   };
   await flush();
@@ -31406,11 +31494,11 @@ else if (ask === "preferences") (async () => {
       input.value = String(action.draft); input.on.input({target:input});
     }
     if (action.language) {
-      const select = ids["#language"];
-      if (!select?.on.change) throw new Error("language control missing");
-      const labels = descendants(select, "option").map(el => [el.value, el.textContent, el.attrs.lang]);
-      if (JSON.stringify(labels) !== JSON.stringify([["zh-CN", "中文", "zh-CN"], ["en", "English", "en"]])) throw new Error("language names missing");
-      select.value = action.language; select.on.change({target:select});
+      await ids["#language"].click();
+      const choices = descendants(ids["#language-menu"], "button");
+      const labels = choices.map(el => [el.textContent, el.attrs.lang]);
+      if (JSON.stringify(labels) !== JSON.stringify([["中文", "zh-CN"], ["English", "en"]])) throw new Error("language names missing");
+      await choices.find(el => el.attrs.lang === action.language).click();
       if (!reloads) throw new Error("language choice did not reload");
       const event = {prevented:false, returnValue:null, preventDefault() { this.prevented = true; }};
       for (const handler of windowEvents.beforeunload || []) handler(event);
@@ -31425,8 +31513,8 @@ else if (ask === "preferences") (async () => {
     posts:apiPosts, requests:apiRequests}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (["desk-name", "desk-count", "status-parts", "notify-status"].includes(ask)) vm.runInContext("loadStatus()", ctx).then(async () => {
-  const snapshot = () => ({title:document.title, caption:ids["#title"].kids.at(-1).textContent,
-    text:ids["#state"].textContent, parts:ids["#state"].kids.filter(el => el instanceof El)
+  const snapshot = () => ({title:document.title, caption:ids["#title"].kids.at(-1).kids.at(-1).textContent,
+    text:ids["#state-list"].textContent, parts:descendants(ids["#state-list"], "li")
       .map(el => ({text:el.textContent, tone:el.className}))});
   const snapshots = [snapshot()];
   if (ask === "desk-count") {
@@ -31614,11 +31702,12 @@ else if (ask === "all-tasks") (async () => {
   const stateOptions = descendants(ids["#tasks-state"], "option");
   for (const state of report.states) check(stateOptions.some(el => el.value === state && el.textContent === run(`T.taskStates[${JSON.stringify(state)}]`)), "state option untranslated");
   // Click the line itself, then check that it fetched and opened the existing details and steps.
-  rows()[1].on.click({target:{closest:() => null}}); await flush();
+  await rows()[1].kids[1].click(); await flush();
   const box = descendants(rows()[1], "div").find(el => el.className === "mono task-detail");
   check(box && !box.hidden && descendants(box, "ol").length === 1, "existing task steps not opened");
   const pre = descendants(box, "pre")[0];
   check(pre?.textContent === "Report: <b>plain</b>" && pre.kids[0] instanceof Text, "report is not plain text");
+  await pre.click(); check(!box.hidden, "click inside task details closed them");
   const pageButton = key => descendants(root, "button").find(el => el.textContent === run("T." + key));
   check(pageButton("newerPage").disabled && !pageButton("olderPage").disabled, "first-page controls incorrect");
   report.rows = [{id:"t0001"}]; report.page = 2;
@@ -31812,7 +31901,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
       st.queued[0].title = "Update held while editing";
       for (let cycle = 0; cycle < 2; cycle++) { windowEvents.interval[0](); await flush(); }
       check(document.activeElement === control && root.contains(control), "polling replaced a focused field");
-      check(ids["#state"].textContent.includes("focused-build"), "focused interaction blocked header updates");
+      check(ids["#state-list"].textContent.includes("focused-build"), "focused interaction blocked header updates");
       check(input("releaseReason") === answer && answer.value === draft("releaseReason"), "polling lost draft or input identity");
       check(!root.textContent.includes(st.queued[0].title), "polling redrew lists while editing");
       check(!detail.hidden, "polling collapsed task details");
@@ -34064,6 +34153,196 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
+
+    def interactive_header(self, language, actions=(), reduced_motion=False, **status):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        st = self.picture_status()
+        st.update(desk="/home/shop/desk", paused="", server={"state": "up"}, mod=None, mod_line="", clear_line="",
+                  srt_missing="", serve_code="", alert_failed="", disk=None, memory=None,
+                  no_read_stop="", no_read_left_out=[], unreached=[])
+        st.update(status)
+        harness = self.tmp / "interactive-header.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        replies = {"/api/status": st, "/api/events": [], "headerActions": actions, "reducedMotion": reduced_motion,
+                   "pagePreferences": {}, "pageClock": {"now": "2026-10-26T08:00:00Z", "browserLanguage": language}}
+        result = subprocess.run(["node", str(harness), str(page), "header", language], input=json.dumps(replies),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def header_offset(self, snapshot):
+        return float(re.search(r"translateX\(-([\d.]+)px\)", snapshot["transform"] or "translateX(-0px)")[1])
+
+    def test_header_rotates_warnings_first_in_order_and_loops_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                pages = self.interactive_header(language, [{"advance": 3999}, {"advance": 1}] +
+                    [{"advance": 4000}] * 6, paused="review queue", server_up=False,
+                    server={"state": "gone"}, srt_missing="sandbox unavailable")["snapshots"]
+                parts = pages[0]["parts"]
+                self.assertEqual([p["tone"] for p in parts], ["warn"] * 3 + ["muted"] * 4)
+                self.assertIn("review queue", parts[0]["text"])
+                self.assertIn("not running" if language == "en" else "没在运行", parts[1]["text"])
+                self.assertEqual(parts[2]["text"], "sandbox unavailable")
+                self.assertIn("/home/shop/desk", parts[3]["text"])
+                self.assertEqual(pages[1]["text"], pages[0]["text"])
+                self.assertEqual([p["text"] for p in [pages[0], *pages[2:-1]]], [p["text"] for p in parts])
+                self.assertEqual(pages[-1]["text"], pages[0]["text"])
+                self.assertTrue(all(p["dot"] == "warn" for p in pages))
+                self.assertEqual([p["warning"] for p in parts], [True] * 3 + [False] * 4)
+
+    def test_header_long_part_reads_once_with_rests_before_rotating_in_both_languages(self):
+        actions = [{"widths": [100, 400]}, {"advance": 800}, {"advance": 1000}, {"advance": 1000},
+                   {"advance": 4000}, {"advance": 760}, {"advance": 40}]
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                pages = self.interactive_header(language, actions, paused="Read shop/desk " * 20)["snapshots"]
+                self.assertEqual([self.header_offset(p) for p in pages[1:]], [0, 0, 50, 100, 300, 300, 0])
+                self.assertTrue(all(p["text"] == pages[0]["text"] for p in pages[:-1]))
+                self.assertIn("/home/shop/desk", pages[-1]["text"])
+
+    def test_header_single_error_stays_and_repeats_long_text_in_both_languages(self):
+        for language in ("en", "zh"):
+            for long in (False, True):
+                with self.subTest(language=language, long=long):
+                    message = "Cannot read shop/desk " * (20 if long else 1)
+                    actions = [{"error": message, "refresh": True, "widths": [100, 400 if long else 80]},
+                               {"advance": 800}, {"advance": 1000}, {"advance": 5000},
+                               {"advance": 800}, {"advance": 1800}]
+                    pages = self.interactive_header(language, actions)["snapshots"][1:]
+                    self.assertTrue(all(p["text"] == message and p["dot"] == "bad" for p in pages))
+                    self.assertTrue(all(p["parts"] == [{"text": message, "tone": "bad", "warning": True}] for p in pages))
+                    self.assertEqual([self.header_offset(p) for p in pages], [0, 0, 50, 300, 0, 50] if long else [0] * 6)
+
+    def test_header_refresh_preserves_current_text_rotation_and_motion_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language, case="rotation"):
+                pages = self.interactive_header(language, [
+                    {"advance": 4000}, {"update": {"srt_missing": "new sandbox note", "paused": ""}, "advance": 1000},
+                    {"advance": 2999}, {"advance": 1}], paused="review queue", srt_missing="old sandbox note")["snapshots"]
+                self.assertEqual([p["text"] for p in pages[1:4]], ["old sandbox note", "new sandbox note", "new sandbox note"])
+                self.assertGreater(pages[2]["gets"], pages[1]["gets"])  # the real 5 s polling callback ran
+                self.assertIn("/home/shop/desk", pages[-1]["text"])
+            with self.subTest(language=language, case="removed"):
+                pages = self.interactive_header(language, [{"advance": 4000},
+                    {"update": {"srt_missing": ""}, "refresh": True}], paused="review queue", srt_missing="sandbox note")["snapshots"]
+                self.assertEqual(pages[1]["text"], "sandbox note")
+                self.assertIn("/home/shop/desk", pages[2]["text"])
+            with self.subTest(language=language, case="motion"):
+                pages = self.interactive_header(language, [{"widths": [100, 400]},
+                    {"update": {"paused": "new long shop/desk note " * 20}, "advance": 5000}, {"advance": 1800},
+                    {"refresh": True}, {"advance": 800}], paused="old long shop/desk note " * 20)["snapshots"]
+                self.assertIn("new long", pages[2]["text"])
+                self.assertEqual([self.header_offset(p) for p in pages[2:]], [210, 300, 300, 0])
+                self.assertIn("/home/shop/desk", pages[-1]["text"])
+            with self.subTest(language=language, case="warning cleared"):
+                pages = self.interactive_header(language, [{"advance": 1000},
+                    {"update": {"paused": ""}, "refresh": True}, {"advance": 3000}], paused="review queue")["snapshots"]
+                self.assertIn("dispatch" if language == "en" else "派活", pages[2]["text"])
+                self.assertEqual(pages[2]["dot"], "muted")
+                self.assertIn("running" if language == "en" else "运行", pages[-1]["text"])
+            with self.subTest(language=language, case="repeated notes"):
+                pages = self.interactive_header(language, [{"advance": 4000}, {"widths": [100, 400],
+                    "update": {"memory": {"unknown": ["memory note", "new memory note"]}}, "advance": 1000},
+                    {"advance": 1000}], memory={"unknown": ["memory note", "memory note"]})["snapshots"]
+                self.assertEqual(pages[1]["text"], "memory note")
+                self.assertEqual(pages[2]["text"], "new memory note")
+                self.assertEqual([self.header_offset(p) for p in pages[2:]], [10, 60])
+
+    def test_header_menus_refresh_switch_dismiss_and_return_focus_in_both_languages(self):
+        actions = [{"key": "Tab"}] * 9 + [
+            {"click": "#state-toggle:icon"}, {"update": {"paused": "review shop/desk", "build": "new-build"}, "advance": 5000},
+            {"click": "#state-list"}, {"click": "#language"}, {"click": "#language"},
+            {"click": "#language"}, {"click": "outside"},
+            {"click": "#state-toggle"}, {"focus": "#language", "key": "Escape"},
+            {"click": "#language"}, {"focus": "#state-toggle", "key": "Escape"},
+            {"click": "#state-toggle"}, {"click": "outside"},
+            {"click": "#language"}]
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                chosen = "zh-CN" if language == "en" else "en"
+                pages = self.interactive_header(language, actions + [{"choose": chosen}])["snapshots"]
+                self.assertEqual([p["focus"] for p in pages[8:10]], ["state-toggle", "language"])
+                for button, name in zip(pages[0]["buttons"], ["全部状态" if language == "zh" else "All status details",
+                                                            "语言" if language == "zh" else "Language"]):
+                    self.assertEqual(button["tag"], "button")
+                    self.assertEqual(button["aria-label"], name)
+                    self.assertNotEqual(button.get("tabindex"), "-1")
+                expected = [(True, False)] * 3 + [(False, True), (False, False), (False, True), (False, False),
+                            (True, False), (False, False), (False, True), (False, False), (True, False),
+                            (False, False), (False, True), (False, False)]
+                self.assertEqual([(p["statusOpen"], p["languageOpen"]) for p in pages[10:]], expected)
+                for p in pages:
+                    self.assertEqual(p["statusExpanded"], str(p["statusOpen"]).lower())
+                    self.assertEqual(p["languageExpanded"], str(p["languageOpen"]).lower())
+                self.assertTrue(any("new-build" in p["text"] for p in pages[11]["parts"]))
+                self.assertTrue(any("review shop/desk" in p["text"] and p["warning"] for p in pages[11]["parts"]))
+                self.assertEqual(pages[18]["focus"], "state-toggle")
+                self.assertEqual(pages[20]["focus"], "language")
+                choices = pages[0]["choices"]
+                self.assertEqual([p["text"] for p in choices], ["中文", "English"])
+                self.assertEqual([p["lang"] for p in choices if p["current"] and p["marked"]],
+                                 ["zh-CN" if language == "zh" else "en"])
+                self.assertEqual(pages[-1]["reloads"], 1)
+                self.assertEqual(pages[-1]["localWrites"], [["hansa.language", chosen]])
+                pages = self.interactive_header(language, [{"click": "#language:icon"},
+                    {"click": "#state-toggle"}, {"key": "Escape"}])["snapshots"]
+                self.assertEqual([(p["statusOpen"], p["languageOpen"]) for p in pages],
+                                 [(False, False), (False, True), (True, False), (False, False)])
+                self.assertEqual(pages[-1]["focus"], "state-toggle")
+
+    def test_header_reduced_motion_cuts_long_parts_but_keeps_rotation_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                output = self.interactive_header(language, [{"widths": [100, 400], "advance": 1800},
+                    {"advance": 2200}, {"click": "#state-toggle"}], reduced_motion=True,
+                    paused="Read shop/desk " * 20, srt_missing="next warning")
+                pages = output["snapshots"]
+                self.assertTrue(all(self.header_offset(p) == 0 for p in pages))
+                self.assertEqual(pages[1]["text"], pages[0]["text"])
+                self.assertEqual(pages[2]["text"], "next warning")
+                self.assertEqual(pages[3]["parts"][0]["text"], pages[0]["text"])
+                reduced_css = output["css"].split("@media (prefers-reduced-motion:reduce)")[1]
+                self.assertIn("#state-window { text-overflow:ellipsis; }", reduced_css)
+                self.assertIn("#state-text { display:inline; transform:none !important; }", reduced_css)
+                pages = self.interactive_header(language, [{"widths": [100, 400], "advance": 1800},
+                    {"motion": True, "advance": 40}], paused="Read shop/desk " * 20)["snapshots"]
+                self.assertEqual([self.header_offset(p) for p in pages[1:]], [50, 0])
+                message = "Cannot read shop/desk " * 20
+                pages = self.interactive_header(language, [{"error": message, "refresh": True,
+                    "widths": [100, 400]}, {"advance": 12000}], reduced_motion=True)["snapshots"][1:]
+                self.assertTrue(all(p["text"] == message and self.header_offset(p) == 0 for p in pages))
+
+    def test_header_caption_and_phone_layout_keep_content_inside_header_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                output = self.interactive_header(language, [{"widths": [100, 400], "advance": 1800},
+                    {"widths": [500, 400], "advance": 40}], desk="/home/shop/" + "long desk <&> " * 20)
+                pages, css = output["snapshots"], output["css"]
+                self.assertEqual(pages[0]["brand"], "Hansa")
+                self.assertEqual(pages[0]["labelClass"], "brand-label")
+                self.assertEqual(pages[0]["caption"], "shop/" + "long desk <&> " * 20)
+                self.assertEqual(pages[0]["hover"], pages[0]["caption"])
+                self.assertEqual([self.header_offset(p) for p in pages[1:]], [50, 0])
+                # The harness sets widths but has no layout engine. Check the CSS constraints too.
+                for selector, properties in {
+                    ".brand-label": ["flex-direction:column", "min-width:0"],
+                    ".brand-caption": ["overflow:hidden", "text-overflow:ellipsis"],
+                    "#state": ["height:30px", "min-width:0"],
+                    "#state-window": ["overflow:hidden", "white-space:nowrap", "min-width:0"],
+                    "#tabs": ["max-width:100%", "overflow-x:auto"],
+                    ".header-menu": ["position:absolute", "top:100%", "max-width:calc(100% - 24px)"],
+                    "#state-list li": ["white-space:normal"],
+                }.items():
+                    rule = re.search(re.escape(selector) + r"\s*\{([^}]+)\}", css)[1]
+                    for prop in properties:
+                        self.assertIn(prop, rule)
+                self.assertNotRegex(css, r"\.brand-caption\s*\{[^}]*display:none")
+                phone = css.split("@media (max-width:860px)")[1].split("@media (max-width:640px)")[0]
+                self.assertIn("grid-template-columns:minmax(0,1fr) auto", phone)
+                self.assertRegex(phone, r"#state\s*\{[^}]*grid-column:1 / -1;[^}]*grid-row:3;")
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_page_title_and_caption_name_the_desk_and_its_parent(self):

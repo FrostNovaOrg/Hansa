@@ -110,10 +110,22 @@ current blocking problem. A failed last check has a warning; a current problem
 and time remain visible. These labels do not change which providers can be
 scheduled; an unchecked provider can still be tried.
 
-The header summary presents its facts as separate items: desk, dispatch, server,
-version, install time and current time, followed by any status notes. Each item
-that needs attention, such as paused dispatch or a stopped server, stands out
-on its own. On the Chinese page, the desk and version items are labelled
+The header shows the desk's last two path folders, such as `shop/desk`, under
+Hansa at every width. Long names are cut with an ellipsis; hovering shows the
+whole name. The summary stays one line high, on its own row in narrow windows.
+It cycles through desk, dispatch, server, version, install time, current time
+and status notes, showing warnings first and keeping each group's order.
+Short items change about every four seconds. A long item rests briefly, moves
+from its start to its end at reading pace, and rests again before the next item;
+a lone item repeats that movement. With reduced motion, long items are cut with
+an ellipsis instead, while items still change. Refreshes keep the current item
+and its progress, updating its text; a removed item gives way to the next.
+The dot keeps the summary's overall status colour. The list button at the end
+opens all items in full, with warnings marked, over the page below the header.
+It stays open and updates on refresh. The button again, a click elsewhere, or
+Escape closes it. Both header buttons are reachable with Tab; Escape returns
+focus to the button that opened the list or menu. On the Chinese page, the desk
+and version items are labelled
 `工作台` and `hansa 版本`; the English current-time item uses `now`, as `hansa status` does.
 
 At the top of Status, links to each section scroll to it, with labels in the
@@ -427,8 +439,10 @@ always opens Status, where releases and to-dos wait for the principal.
 Unknown saved choices fall back to Status, Providers and 7 days.
 Scroll position and expanded Status details are not stored.
 
-The small language selector at the end of the header, after the status summary,
-offers `中文` and `English`. Choosing writes `hansa.language` in `localStorage`
+The globe button at the end of the header opens a small menu offering `中文`
+and `English`, with the current language marked. Clicking elsewhere or pressing
+Escape closes it. Opening either header menu closes the other.
+Choosing writes `hansa.language` in `localStorage`
 (`zh-CN` or `en`) and reloads, keeping navigation. Unsaved Settings text triggers
 the browser's usual warning before leaving; accepting the reload discards it.
 If the viewer stays, the language choice applies on the next load.

@@ -11,20 +11,27 @@
 body { margin:0; font:14px/1.6 system-ui,-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif; background:var(--bg); color:var(--fg); }
 /* Long commands and paths stay inside the page. */
 body, td, label, code, .mono { overflow-wrap:anywhere; }
-header { display:flex; gap:20px; align-items:center; flex-wrap:wrap; padding:12px 24px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:5; }
-#title { display:flex; align-items:center; gap:9px; font-size:15px; letter-spacing:-.3px; white-space:nowrap; }
-.brand-mark { display:grid; place-items:center; width:27px; height:27px; border-radius:8px; background:var(--fg); color:var(--card); font-size:15px; font-weight:700; }
-.brand-caption { color:var(--muted); font-size:12px; font-weight:400; padding-left:9px; border-left:1px solid var(--line); }
+header { display:grid; grid-template-columns:minmax(90px,160px) minmax(0,max-content) minmax(100px,1fr) auto; gap:20px; align-items:center; padding:12px 24px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:5; }
+#title { display:flex; align-items:center; gap:9px; min-width:0; font-size:15px; letter-spacing:-.3px; white-space:nowrap; }
+.brand-mark { display:grid; place-items:center; flex:none; width:27px; height:27px; border-radius:8px; background:var(--fg); color:var(--card); font-size:15px; font-weight:700; }
+.brand-label { display:flex; flex-direction:column; min-width:0; line-height:1.3; }
+.brand-caption { color:var(--muted); font-size:12px; font-weight:400; overflow:hidden; text-overflow:ellipsis; }
 nav { display:flex; gap:4px; }
 .section-links { flex-wrap:wrap; gap:8px 16px; margin-bottom:20px; }
 .section-links a { color:var(--link); }
-#tabs { padding:3px; background:var(--surface); border:1px solid var(--line); border-radius:9px; }
+#tabs { min-width:0; max-width:100%; overflow-x:auto; padding:3px; background:var(--surface); border:1px solid var(--line); border-radius:9px; }
+#tabs button { flex:none; white-space:nowrap; }
 nav button { display:flex; gap:7px; align-items:center; border:1px solid transparent; background:none; padding:6px 11px; border-radius:6px; color:var(--muted); }
 nav button.on { background:var(--card); border-color:var(--line); color:var(--fg); font-weight:600; box-shadow:var(--shadow); }
-#state { display:inline-flex; align-items:baseline; flex-wrap:wrap; gap:7px; margin-left:auto; font-size:12px; min-width:0; max-width:52%; }
-#language { width:auto; min-height:30px; padding:4px 7px; font-size:12px; }
-#state > span { min-width:0; }
-#state > span + span::before { content:"·"; color:var(--muted); margin-right:7px; }
+#state { display:flex; align-items:center; gap:7px; min-width:0; height:30px; font-size:12px; }
+#state-window { flex:1; min-width:0; overflow:hidden; white-space:nowrap; }
+#state-text { display:inline-block; white-space:nowrap; }
+#state-toggle, #language { flex:none; width:30px; min-height:30px; padding:4px; }
+.header-menu { position:absolute; top:100%; right:12px; z-index:6; margin:6px 0 0; padding:10px; border:1px solid var(--line); border-radius:9px; background:var(--card); box-shadow:var(--shadow); max-width:calc(100% - 24px); max-height:70vh; overflow:auto; }
+#state-list { width:620px; list-style:none; }
+#state-list li { display:flex; align-items:baseline; gap:7px; padding:5px; white-space:normal; }
+#language-menu button { display:flex; width:100%; justify-content:flex-start; border:0; }
+#language-menu [aria-current=true] { color:var(--link); background:var(--tint); }
 #state::before { content:""; width:6px; height:6px; flex:none; border-radius:50%; background:var(--ok); }
 #state.warn::before { background:var(--warn); } #state.bad::before { background:var(--bad); }
 main { max-width:1240px; margin:0 auto; padding:30px 28px; }
@@ -248,9 +255,10 @@ td .task-detail { min-width:200px; }
 .work-chart-tooltip { display:none; position:absolute; z-index:2; bottom:60px; left:0; width:max-content; max-width:100%; box-sizing:border-box; padding:8px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; font-size:12px; }
 .work-chart-track:hover .work-chart-tooltip, .work-chart-track:focus .work-chart-tooltip { display:block; }
 @media (max-width:860px) {
-  header { gap:12px; padding:12px 18px; }
-  #state { flex-basis:100%; max-width:100%; margin-left:0; font-size:11px; }
-  .brand-caption { display:none; }
+  header { grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:12px 18px; }
+  #tabs { grid-column:1 / -1; grid-row:2; }
+  #state { grid-column:1 / -1; grid-row:3; font-size:11px; }
+  #language { grid-column:2; grid-row:1; }
   main { padding:24px 18px; }
   .settings-layout { grid-template-columns:minmax(0,1fr); gap:20px; }
   .settings-nav { flex-direction:row; overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:thin; scrollbar-color:var(--control-line) transparent; top:calc(var(--header-height) + 6px); z-index:3; box-shadow:var(--shadow); border-radius:10px; }
@@ -267,7 +275,7 @@ td .task-detail { min-width:200px; }
 @media (max-width:640px) {
   header { padding:10px 12px; gap:10px; }
   #title { font-size:14px; } .brand-mark { width:25px; height:25px; }
-  #tabs { margin-left:auto; } #tabs button { padding:6px 9px; }
+  #tabs button { padding:6px 9px; }
   #tabs .icon { display:none; }
   .settings-head { gap:10px; } .settings-head h1 { font-size:25px; }
   .settings-head p { font-size:12px; }
@@ -361,6 +369,8 @@ td .task-detail { min-width:200px; }
 }
 @media (prefers-reduced-motion:reduce) {
   *, *::before, *::after { transition:none !important; animation:none !important; scroll-behavior:auto !important; }
+  #state-window { text-overflow:ellipsis; }
+  #state-text { display:inline; transform:none !important; }
 }
 </style>
 </head>
@@ -368,8 +378,10 @@ td .task-detail { min-width:200px; }
 <header>
   <strong id="title"></strong>
   <nav id="tabs"></nav>
-  <span id="state" class="muted"></span>
-  <select id="language" aria-label="中文 / English"></select>
+  <span id="state" class="muted"><span id="state-window"><span id="state-text"></span></span><button id="state-toggle" type="button" aria-controls="state-list" aria-expanded="false"></button></span>
+  <button id="language" type="button" aria-controls="language-menu" aria-expanded="false"></button>
+  <ul id="state-list" class="header-menu" hidden></ul>
+  <div id="language-menu" class="header-menu" hidden></div>
 </header>
 <main>
   <div id="tab-status"></div>
@@ -898,6 +910,7 @@ function icon(name) {
   const paths = {
     status:["M3 12h4l3-8 4 16 3-8h4"], settings:["M4 7h16M4 17h16M8 4v6m8 4v6"], cost:["M5 20v-7m7 7V4m7 16V9"],
     tasks:["M8 6h12M8 12h12M8 18h12M3 6h1M3 12h1M3 18h1"],
+    globe:["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18"],
     notes:["M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7"],
     gaps:["M12 3l9 5v8l-9 5-9-5V8zM12 7v6m0 3h.01"],
     providers:["M8 8V4h8v4M6 8h12v8H6zM9 20h6m-3-4v4"],
@@ -956,7 +969,63 @@ function show(tab) {
   for (const t of TABS) $("#tab-" + t).hidden = t !== tab;
   return ({status:loadStatus, tasks:loadTasks, todos:loadTodos, gaps:loadGaps, notes:loadNotes, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
 }
-function err(e) { $("#state").textContent = String(e.message || e); $("#state").className = "bad"; }
+function err(e) { setStatusParts([{key:"error", text:String(e.message || e), tone:"bad"}]); }
+
+/* The summary keeps its place across polls, including time spent reading a long part. */
+let statusParts = [], statusKey = null, statusStarted = 0, statusTimer;
+const statusMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+function showStatusPart() {
+  const part = statusParts.find(p => p.key === statusKey), text = $("#state-text");
+  text.textContent = part ? part.text : "";
+  text.className = part ? part.tone : "";
+  text.style.transform = "";
+}
+function statusFrame() {
+  clearTimeout(statusTimer);
+  if (!statusParts.length) return;
+  const text = $("#state-text"), elapsed = performance.now() - statusStarted;
+  const distance = statusMotion.matches ? 0 : Math.max(0, text.scrollWidth - $("#state-window").clientWidth);
+  // 800 ms at either end, then 50 px/s; short parts get four seconds altogether.
+  if (elapsed >= Math.max(4000, 1600 + distance * 20)) {
+    statusKey = statusParts[(statusParts.findIndex(p => p.key === statusKey) + 1) % statusParts.length].key;
+    statusStarted = performance.now(); showStatusPart();
+  } else text.style.transform = `translateX(-${Math.min(distance, Math.max(0, (elapsed - 800) / 20))}px)`;
+  statusTimer = setTimeout(statusFrame, 40);
+}
+function setStatusParts(parts) {
+  const ordered = [...parts.filter(p => p.tone !== "muted"), ...parts.filter(p => p.tone === "muted")];
+  if (!ordered.some(p => p.key === statusKey)) {
+    const index = statusParts.findIndex(p => p.key === statusKey);
+    const next = [...statusParts.slice(index + 1), ...statusParts.slice(0, index)]
+      .find(p => ordered.some(n => n.key === p.key));
+    statusKey = (next || ordered[0])?.key; statusStarted = performance.now();
+  }
+  statusParts = ordered;
+  $("#state").className = parts.some(p => p.tone === "bad") ? "bad" : parts.some(p => p.tone === "warn") ? "warn" : "muted";
+  $("#state-list").replaceChildren(...ordered.map(p => h("li", {class:p.tone},
+    p.tone !== "muted" ? icon("error") : null, p.text)));
+  showStatusPart(); statusFrame();
+}
+let headerMenu = null;
+function closeHeaderMenu(restore = false) {
+  if (!headerMenu) return;
+  const {button, panel} = headerMenu; headerMenu = null;
+  panel.hidden = true; button.setAttribute("aria-expanded", "false");
+  if (restore) button.focus();
+}
+function headerMenuButton(button, panel, name, symbol) {
+  button.setAttribute("aria-label", name); button.replaceChildren(icon(symbol));
+  button.addEventListener("click", () => {
+    const opening = headerMenu?.button !== button; closeHeaderMenu();
+    if (opening) { headerMenu = {button, panel}; panel.hidden = false; button.setAttribute("aria-expanded", "true"); }
+  });
+}
+window.addEventListener("click", e => {
+  if (headerMenu && !headerMenu.button.contains(e.target) && !headerMenu.panel.contains(e.target)) closeHeaderMenu();
+});
+window.addEventListener("keydown", e => {
+  if (e.key === "Escape" && headerMenu) { e.preventDefault(); closeHeaderMenu(true); }
+});
 
 /* ---------- status ---------- */
 const detailOpen = new Set();
@@ -1333,31 +1402,30 @@ async function loadStatus(force = false) {
   const name = st.desk.split("/").filter(Boolean).slice(-2).join("/") || "/";
   const waiting = principalCount(st);
   document.title = (waiting ? `(${waiting}) ` : "") + "Hansa · " + name;
-  deskCaption.textContent = name;
+  deskCaption.textContent = name; deskCaption.setAttribute("title", name);
   const pad = n => String(n).padStart(2, "0"), now = new Date(), installed = new Date(st.installed * 1000);
   const clock = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  const parts = [], part = (text, warn = false) => { if (text) parts.push(h("span", {class:warn ? "warn" : "muted"}, text)); };
-  part(T.desk + " " + st.desk);
-  part(st.paused ? T.paused + ": " + st.paused : T.dispatchLimit(st.concurrency), !!st.paused);
-  part(st.server && st.server.state === "stuck" ? T.serverStuck(st.server.pid, Math.floor(st.server.quiet / 60))
+  const parts = [], part = (key, text, warn = false) => { if (text) parts.push({key, text, tone:warn ? "warn" : "muted"}); };
+  part("desk", T.desk + " " + st.desk);
+  part("dispatch", st.paused ? T.paused + ": " + st.paused : T.dispatchLimit(st.concurrency), !!st.paused);
+  part("server", st.server && st.server.state === "stuck" ? T.serverStuck(st.server.pid, Math.floor(st.server.quiet / 60))
     : st.server_up ? T.serverUp : T.serverDown, !st.server_up || (st.server && st.server.state === "stuck"));
-  part(T.version + " " + st.build);
-  part(T.installed + " " + (st.installed ? `${installed.getFullYear()}-${pad(installed.getMonth() + 1)}-${pad(installed.getDate())} ${clock(installed)}` : "?"));
-  part(T.summaryNow + " " + clock(now));
-  part(st.serve_code ? T.serveCodeWarning + ": " + st.serve_code : "", true);
-  part(st.srt_missing, true);
-  part(st.alert_failed ? T.alertFailedWarning + ": " + st.alert_failed : "", true);
-  part(st.disk && st.disk.low_text ? (ZH ? T.diskLow + "：" : "") + st.disk.low_text : "", true);
-  for (const x of st.disk && st.disk.unknown || []) part(x, true);
-  part(st.memory && st.memory.low_text || "", true);
-  for (const x of st.memory && st.memory.unknown || []) part(x, true);
-  part(st.no_read_stop ? T.noReadStop + ": " + st.no_read_stop : "", true);
-  for (const x of st.no_read_left_out || []) part(T.workersMayNotReadSkipped + ": " + x, true);
-  for (const x of st.unreached || []) part(T.unreachedWarning + ": " + x, true);
-  part(modLine(st.mod, st.mod_line), st.mod && st.mod.kind !== "notify" && st.mod.loaded !== true);
-  part(clearLine(st.mod, st.clear_line), st.mod && st.mod.clear && st.mod.clear.warn);
-  $("#state").replaceChildren(...parts);
-  $("#state").className = parts.some(p => p.className === "warn") ? "warn" : "muted";
+  part("version", T.version + " " + st.build);
+  part("installed", T.installed + " " + (st.installed ? `${installed.getFullYear()}-${pad(installed.getMonth() + 1)}-${pad(installed.getDate())} ${clock(installed)}` : "?"));
+  part("now", T.summaryNow + " " + clock(now));
+  part("serveCode", st.serve_code ? T.serveCodeWarning + ": " + st.serve_code : "", true);
+  part("srt", st.srt_missing, true);
+  part("alert", st.alert_failed ? T.alertFailedWarning + ": " + st.alert_failed : "", true);
+  part("disk", st.disk && st.disk.low_text ? (ZH ? T.diskLow + "：" : "") + st.disk.low_text : "", true);
+  for (const [i, x] of (st.disk && st.disk.unknown || []).entries()) part("disk:" + i, x, true);
+  part("memory", st.memory && st.memory.low_text || "", true);
+  for (const [i, x] of (st.memory && st.memory.unknown || []).entries()) part("memory:" + i, x, true);
+  part("noRead", st.no_read_stop ? T.noReadStop + ": " + st.no_read_stop : "", true);
+  for (const [i, x] of (st.no_read_left_out || []).entries()) part("leftOut:" + i, T.workersMayNotReadSkipped + ": " + x, true);
+  for (const [i, x] of (st.unreached || []).entries()) part("unreached:" + i, T.unreachedWarning + ": " + x, true);
+  part("mod", modLine(st.mod, st.mod_line), st.mod && st.mod.kind !== "notify" && st.mod.loaded !== true);
+  part("clear", clearLine(st.mod, st.clear_line), st.mod && st.mod.clear && st.mod.clear.warn);
+  setStatusParts(parts);
   keepStatusDrafts(st);
   // Check after the fetch: focus may have entered while the request was in flight.
   // Leave fields and their selection in place while editing; redraw lists for other controls.
@@ -2407,18 +2475,19 @@ async function exportCsv() {
 
 /* ---------- start ---------- */
 const deskCaption = h("span", {class:"brand-caption"});
-$("#title").replaceChildren(h("span", {class:"brand-mark", "aria-hidden":"true"}, "H"), h("span", {}, "Hansa"), deskCaption);
+$("#title").replaceChildren(h("span", {class:"brand-mark", "aria-hidden":"true"}, "H"),
+  h("span", {class:"brand-label"}, h("span", {}, "Hansa"), deskCaption));
 $("#tabs").setAttribute("aria-label", T.primaryNav);
 for (const tab of TABS) {
   mainTabLabels[tab] = h("span", {}, T[tab]);
   $("#tabs").append(...shown([h("button", {"data-tab":tab, onclick: () => show(tab)}, icon(tab), mainTabLabels[tab])]));
 }
-$("#language").append(...[ ["zh-CN", "中文"], ["en", "English"] ].map(([value, label]) =>
-  h("option", {value, lang:value, selected:value === language}, label)));
-$("#language").addEventListener("change", e => {
-  keepChoice("localStorage", "hansa.language", e.target.value);
-  location.reload();
-});
+headerMenuButton($("#state-toggle"), $("#state-list"), ZH ? "全部状态" : "All status details", "tasks");
+headerMenuButton($("#language"), $("#language-menu"), ZH ? "语言" : "Language", "globe");
+$("#language-menu").append(...[ ["zh-CN", "中文"], ["en", "English"] ].map(([value, label]) =>
+  h("button", {type:"button", lang:value, "aria-current":value === language ? "true" : null, onclick:() => {
+    closeHeaderMenu(true); keepChoice("localStorage", "hansa.language", value); location.reload();
+  }}, value === language ? icon("check") : null, label)));
 if (typeof ResizeObserver !== "undefined") {
   const header = document.querySelector("header");
   new ResizeObserver(() => document.documentElement.style.setProperty("--header-height", header.getBoundingClientRect().height + "px")).observe(header);
