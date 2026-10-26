@@ -202,6 +202,11 @@ setting and tick. A failed run reaches the coordinator as a failed check, naming
 merges since its last passing run: make a task to fix what failed, and the target runs again after
 its merge. Only failure alerts the principal.
 
+While a batch waits, `hansa status` and the page show its lane, target, current base commit and
+scheduled start (MINUTES after the last merge). Another merge moves that time and commit; a paused
+desk says it waits for resume. Once the release is asked, its ordinary release row takes over.
+No new merges since the last run means no waiting line.
+
 ## Forbidden words before a release
 
 A release, and the steps before it, look for the words the principal keeps

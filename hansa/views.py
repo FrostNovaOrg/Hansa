@@ -996,6 +996,7 @@ def status(desk: Desk) -> dict:
         "asks": [{**a, "note": ask_note(a, ready)} for a in desk.asks() if not a.get("closed")],
         # the open releases (hansa release) and the latest that ended: the page asks the principal about each waiting one
         "releases": release.page_rows(desk, s, tasks),
+        "after_merge_waiting": release.after_merge_rows(desk, s, tasks),
         "last_24h": {"finished": sum((m.get("finished") or 0) >= day for m in tasks),
                      "merged": sum(m["state"] == "merged" and (m.get("merged") or 0) >= day for m in tasks),
                      "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
@@ -1103,8 +1104,9 @@ def status_text(st: dict) -> str:
         out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {rest:<{wr}}  {p['problem'] or 'ready'}")
     shown_releases = [r for r in st.get("releases") or [] if r["state"] in release.OPEN
                       or any(h.get("kind") == "pattern_limit" for h in r.get("hits") or [])]
-    if shown_releases:
+    if shown_releases or st.get("after_merge_waiting"):
         out.append("releases (hansa release):")
+        out += [f"  {r['what']}" for r in st.get("after_merge_waiting") or []]
         out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in shown_releases]
         if any(r["state"] == "waiting" for r in st["releases"]):
             out.append("  the principal answers on the page, or says the one-time code of their alert in the "

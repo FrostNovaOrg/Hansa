@@ -29905,6 +29905,129 @@ def save():'''))
                 finally:
                     c.doCleanups()
 
+    def recorded_after_merge(self, at, name="work.txt", lane="a"):
+        """A landing already recorded by hansa, with a real base commit for release/status reads."""
+        commit = self.commit_in_repo(name, name + "\n")
+        tid = self.desk.new_task("Add " + name, lane=lane)
+        self.desk.update(tid, state="merged", merged=at, merge_commit=commit,
+                         merge_repo=str(self.repo), merge_base="main")
+        return commit
+
+    def test_after_merge_waiting_status_tracks_merges_and_the_release_taking_over(self):
+        from hansa import release
+        at = time.time() - 300
+        clock = [at + 300]
+        with unittest.mock.patch.object(release, "now", side_effect=lambda: clock[0]):
+            self.assertEqual(views.status(self.desk)["after_merge_waiting"], [])
+            self.hansa("lane", "target", "a", "linux", "echo checked", "--after-merge", "20")
+            self.tick_targets("linux")
+            self.assertEqual(views.status(self.desk)["after_merge_waiting"], [])
+            first = self.recorded_after_merge(at)
+            st = views.status(self.desk)
+            [row] = st["after_merge_waiting"]
+            self.assertEqual((row["lane"], row["target"], row["commit"], row["starts_at"]),
+                             ("a", "linux", first, at + 1200))
+            for word in ("linux on lane a", first[:10], "starts at " + release.when(at + 1200),
+                         "20 minutes after the last merge"):
+                self.assertIn(word, self.hansa("status"))
+            self.assertEqual(release.releases(self.desk), [])
+            self.assertIsNone(release._after_merge_ready(self.desk.settings(), "a", "linux", self.desk.tasks(), []))
+
+            second = self.recorded_after_merge(at + 300, "next.txt")
+            [row] = views.status(self.desk)["after_merge_waiting"]
+            self.assertEqual((row["commit"], row["starts_at"]), (second, at + 1500))
+            # Even a direct commit on the base is what the ordinary ask will run.
+            direct = self.commit_in_repo("direct.txt", "correction\n")
+            self.assertEqual(views.status(self.desk)["after_merge_waiting"][0]["commit"], direct)
+            self.hansa("pause", "reviewing")
+            self.assertIn("waits until the desk is resumed", self.hansa("status"))
+            self.assertIn("reviewing", views.status(self.desk)["after_merge_waiting"][0]["what_zh"])
+
+            clock[0] = at + 1499
+            d = Dispatcher(self.desk)
+            d.tick()
+            self.assertEqual(release.releases(self.desk), [])
+            clock[0] += 1
+            d.tick()
+            self.assertEqual(views.status(self.desk)["after_merge_waiting"], [])
+            [row] = views.status(self.desk)["releases"]
+            self.assertEqual((row["state"], row["commit"]), ("approved", direct))
+            self.assertIn("waits until the desk is resumed", row["what"])
+            self.hansa("resume")
+            self.assertEqual(self.settle_release(d, row["id"])["state"], "done")
+            self.assertEqual(views.status(self.desk)["after_merge_waiting"], [])
+
+    def test_after_merge_waiting_uses_the_schedulers_batch_rules(self):
+        from hansa import release
+        at = time.time() - 300
+        self.hansa("lane", "target", "a", "linux", "true", "--after-merge", "20")
+        self.recorded_after_merge(at)
+        s, tasks = self.desk.settings(), self.desk.tasks()
+        run = {"lane": "a", "target": "linux", "repo": str(self.repo.resolve()), "base": "main", "asked": at + 1}
+        for state in (*release.OPEN, "done", "failed", "refused", "void", "stopped", "forbidden"):
+            for automatic in (False, True):
+                with self.subTest(state=state, automatic=automatic):
+                    r = {**run, "state": state, **({"after_merge": {"through": at}} if automatic else {})}
+                    with unittest.mock.patch.object(release, "releases", return_value=[r]):
+                        rows = release.after_merge_rows(self.desk, s, tasks)
+                    consumed = automatic or state in (*release.OPEN, "done", "failed")
+                    self.assertEqual(len(rows), 0 if consumed else 1)
+        for delay, after in ((0, None), (True, None), ("20", None), (1441, None), (20, "parent")):
+            with self.subTest(delay=delay, after=after):
+                target = s["lanes"]["a"]["targets"]["linux"]
+                target.update(after_merge_min=delay, after=after)
+                self.assertEqual(release.after_merge_rows(self.desk, s, tasks), [])
+        s = self.desk.settings()
+        self.assertEqual(release.after_merge_rows(self.desk, s, [*tasks, {"state": "merging", "lane": "a"}]), [])
+        self.assertEqual(release.after_merge_rows(self.desk, s, [{**tasks[0], "merge_base": "other"}]), [])
+        with unittest.mock.patch.object(release, "git", side_effect=RuntimeError("unreadable base")):
+            self.assertEqual(release.after_merge_rows(self.desk, s, tasks), [])
+        # An idle target must not inspect git or outside files just to build status.
+        with unittest.mock.patch.object(release, "git", side_effect=AssertionError("idle git")):
+            self.assertEqual(release.after_merge_rows(self.desk, s, []), [])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_after_merge_waiting_page_in_both_languages(self):
+        from hansa import release
+        at = time.time() - 300
+        self.hansa("lane", "target", "a", "linux", "true", "--after-merge", "20")
+        self.tick_targets("linux")
+        harness = self.tmp / "after-merge-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+
+        def page_rows(commit=None, start=None, paused=False):
+            status = views.status(self.desk)
+            for language in ("en", "zh"):
+                with self.subTest(language=language, commit=commit, paused=paused):
+                    result = subprocess.run(["node", str(harness), str(Path(cli.__file__).with_name("ui.html")),
+                                             "status", language], input=json.dumps({"/api/status": status}),
+                                            capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    text = json.loads(result.stdout)
+                    marker = "minutes after the last merge" if language == "en" else "即上次合并后"
+                    self.assertEqual(text.count(marker), 1 if commit else 0)
+                    if commit:
+                        for word in ("linux", "lane a" if language == "en" else "工作线 a", commit[:10],
+                                     release.when(start), "20 minutes" if language == "en" else "20 分钟"):
+                            self.assertIn(word, text)
+                        self.assertEqual("waits until the desk is resumed" in text if language == "en" else
+                                         "等桌面恢复" in text, paused)
+                    else:
+                        for row in status["releases"]:
+                            self.assertIn(row["what" if language == "en" else "what_zh"], text)
+
+        page_rows()
+        first = self.recorded_after_merge(at)
+        page_rows(first, at + 1200)
+        second = self.recorded_after_merge(at + 300, "next.txt")
+        page_rows(second, at + 1500)
+        self.hansa("pause", "reviewing")
+        page_rows(second, at + 1500, paused=True)
+        with unittest.mock.patch.object(release, "now", return_value=at + 1500):
+            release.ask(self.desk, "a", target="linux", after_merge=True)
+        page_rows()
+        self.assertEqual(release.releases(self.desk)[0]["state"], "approved")
+
     def test_after_merge_release_cases(self):
         from hansa import alert, release
         from hansa.desk import validate

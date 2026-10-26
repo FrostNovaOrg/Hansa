@@ -1397,7 +1397,7 @@ async function loadStatus(force = false) {
       st.paused ? h("button", {class:"primary", "data-status-focus":"resume", onclick: () => api("/api/resume", {}).then(() => loadStatus(true)).catch(err)}, T.resume)
                 : [reason, h("button", {"data-status-focus":"pause", onclick: () => api("/api/pause", {reason:reason.value}).then(() => loadStatus(true)).catch(err)}, T.pause)])),
     h("div", waiting ? {} : {id:"status-principal"},
-      releasesSection((st.releases || []).filter(r => r.state !== "waiting"))),
+      releasesSection((st.releases || []).filter(r => r.state !== "waiting"), st.after_merge_waiting || [])),
     !st.running.length && !st.queued.length && !st.review.length && !(st.merging || []).length ? dashboardPanel(T.taskFlow, "status", 0,
       emptyState(T.noActiveTasks, T.noActiveTasksNote, "check")) : null,
     h("div", {id:"status-queued"}, st.queued.length ? dashboardPanel(T.queued, "pending", st.queued.length, table([T.task, T.lane, T.titleCol, T.waiting],
@@ -1506,10 +1506,12 @@ function releaseHits(hits) {
         limit ? `; ${patternLimitReason(x)}` : null))) : null;
   });
 }
-function releasesSection(rel) {
+function releasesSection(rel, scheduled = []) {
   const waiting = rel.filter(r => r.state === "waiting"), others = rel.filter(r => r.state !== "waiting");
-  if (!rel.length) return null;
-  return dashboardPanel(T.releases, "releases", rel.length, waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
+  if (!rel.length && !scheduled.length) return null;
+  return dashboardPanel(T.releases, "releases", rel.length + scheduled.length,
+    scheduled.map(r => h("div", {class:"muted"}, (ZH && r.what_zh) || r.what)),
+    waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
     others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
       "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs), releaseOutside(r)),
       h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
