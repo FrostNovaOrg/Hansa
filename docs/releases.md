@@ -176,7 +176,7 @@ is history from before hansa and is not direct. With no hansa merge in that rang
 outgoing commit is listed as direct: hansa cannot tell what came before it. With a remote-tracking
 branch, no such cutoff applies, even when the last release's commit is gone. Commits on
 remote-tracking branches or in the target's last release are not looked at, nor are working files
-or uncommitted changes; tasks are read for this at the ask only, never in an idle round. Only the
+or uncommitted changes; the ask and waiting line use recorded task landings to identify direct commits. Only the
 principal saves `release_direct` on the page: `record` (default) lists these commits and keeps ticked
 targets going out without asking; `hold` (also used for an unknown setting value) refuses a release
 with them unless asked with `--direct "<why>"`, then records the reason and waits for the principal's
@@ -201,6 +201,14 @@ the 10 newest and the count of all. `hansa lane target L` and `hansa explain lan
 setting and tick. A failed run reaches the coordinator as a failed check, naming the target and
 merges since its last passing run: make a task to fix what failed, and the target runs again after
 its merge. Only failure alerts the principal.
+
+While a batch waits, `hansa status` and the page show its lane, target, current base commit and
+scheduled start (MINUTES after the last merge). Another merge moves that time and commit. A missing
+or invalidated tick says it waits for the principal's tick; outgoing direct commits under
+`release_direct: hold` say it is held for the principal's yes. Once the start time arrives, an
+unasked batch says it starts when the server next looks. A paused desk says it waits for resume.
+Once the release is asked, its ordinary release row takes over.
+No new merges since the last run means no waiting line.
 
 ## Forbidden words before a release
 

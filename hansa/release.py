@@ -407,7 +407,7 @@ def outgoing(repo, since: str, commit: str) -> tuple:
 
 
 def hansa_merges(desk: Desk, s: dict, a: dict, tasks=None) -> set:
-    """Read tasks only while asking: landings in this repository and base, from every lane."""
+    """Landings in this repository and base, from every lane; status supplies its task snapshot."""
     found = set()
     for m in desk.tasks() if tasks is None else tasks:
         if not m.get("merge_commit"):
@@ -1594,10 +1594,11 @@ def merges_text(merges: list, count: int | None = None) -> str:
     return names + (f"; and {count - len(merges)} more" if count is not None and count > len(merges) else "")
 
 
-def _after_merge_ready(s: dict, lane: str, target: str, tasks: list, rs: list) -> dict | None:
+def _after_merge_ready(s: dict, lane: str, target: str, tasks: list, rs: list, *, settled: bool = True) -> dict | None:
     """Use the round's records first: only settled, unconsumed landings merit looking at a tick or at git.
     Automatic requests consume their batch however they end; completed manual runs cover earlier landings.
-    The boundary is at the ask, not the end: a merge during a fixed run remains for the next run."""
+    The boundary is at the ask, not the end: a merge during a fixed run remains for the next run.
+    settled=False also reads batches still waiting out their quiet time, for status."""
     ln = s["lanes"].get(lane) or {}
     t = lane_targets(ln).get(target) or {}
     delay = t.get("after_merge_min")
@@ -1628,11 +1629,54 @@ def _after_merge_ready(s: dict, lane: str, target: str, tasks: list, rs: list) -
             merges.append({k: m.get(k) for k in ("id", "title", "merged", "merge_commit")})
     merges.sort(key=lambda m: (m["merged"], m["id"]))
     fresh = [m for m in merges if m["merged"] > through]
-    if not fresh or now() - fresh[-1]["merged"] < 60 * delay:
+    if not fresh or (settled and now() - fresh[-1]["merged"] < 60 * delay):
         return None
     since_pass = [m for m in merges if m["merged"] > pass_through]
     return {"through": fresh[-1]["merged"], "merges": fresh[-MOST_MERGES:], "merges_count": len(fresh),
             "since_pass": since_pass[-MOST_MERGES:], "since_pass_count": len(since_pass)}
+
+
+def after_merge_rows(desk: Desk, s: dict, tasks: list) -> list:
+    """Unasked batches, read by the same rules as the scheduler, including their quiet time."""
+    rs, out = releases(desk), []
+    for lane, ln in s["lanes"].items():
+        for target, t in lane_targets(ln).items():
+            batch = _after_merge_ready(s, lane, target, tasks, rs, settled=False)
+            if not batch:
+                continue
+            listed = lane_listed(s, lane, target)
+            held = False
+            try:
+                commit = git("rev-parse", "--verify", f"refs/heads/{ln.get('base') or 'main'}^{{commit}}", cwd=ln["repo"])
+                if listed and s.get("release_direct", "record") != "record":
+                    a = _askable(desk, s, lane, target)
+                    commit = a["commit"]
+                    commits, _ = outgoing(a["repo"], a["since"], commit)
+                    held = bool(direct_commits(a["repo"], a["since"], commit, commits,
+                                               hansa_merges(desk, s, a, tasks)))
+            except (RuntimeError, OSError, SystemExit):
+                continue  # no release can be asked from an unreadable base or outgoing range
+            delay = t["after_merge_min"]
+            at = batch["through"] + 60 * delay
+            if not listed:
+                en, zh = "waits for the principal's tick", "等待负责人勾选"
+                if any(listed_key(e) == (lane, target) for e in s.get("releases_without_asking") or []):
+                    en += "; the previous tick no longer counts"
+                    zh += "；原来的勾选已失效"
+            elif held:
+                en, zh = "held: direct commits need the principal's yes", "已暂缓：直接提交需要负责人同意"
+            elif now() >= at:
+                en, zh = "starts when the server next looks", "服务器下次检查时开始"
+            else:
+                en = f"starts at {when(at)}, {delay} minute{'s' if delay != 1 else ''} after the last merge"
+                zh = f"于 {when(at)} 开始，即上次合并后 {delay} 分钟"
+            en = f"{target} on lane {lane} at {commit[:10]} {en}"
+            zh = f"工作线 {lane} 的目标 {target} 在提交 {commit[:10]} 上{zh}"
+            if desk.paused():
+                en += "; " + waits_text(desk, s, {"without_asking": True})
+                zh += "；" + waits_text(desk, s, {"without_asking": True}, zh=True)
+            out.append({"lane": lane, "target": target, "commit": commit, "starts_at": at, "what": en, "what_zh": zh})
+    return out
 
 
 def _after_merges(desk: Desk, s: dict, tasks, rs) -> None:
