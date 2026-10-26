@@ -341,6 +341,7 @@ loads nothing.
 ## More: hansa help TOPIC
 | Topic | What it holds |
 |---|---|
+| `principles` | how a desk is run: rules, enforcement and what they guard against |
 | `workers-sandbox` | what workers may read, write and reach |
 | `git-folders` | git's folders: what runs may write, hansa's checks |
 | `sandbox-probe` | the sandbox probe before a run |

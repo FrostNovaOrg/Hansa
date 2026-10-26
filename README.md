@@ -320,6 +320,7 @@ fix that.
 | Document | What is in it |
 |---|---|
 | [`hansa/card.md`](hansa/card.md) | What the coordinator needs on every turn: how work moves, every command, what it may change; `hansa help <topic>` prints the rest from `docs/`. `hansa help card` prints it, and each desk holds a copy as `CLAUDE.md`. |
+| [How a desk is run](docs/principles.md) | The rules hansa is built around, what enforces them and what each guards against |
 | [Who changes what](docs/who-changes-what.md) | What the principal sets on the page and the coordinator with `hansa`: lanes, commit messages and identity, what stays closed to the coordinator |
 | [Workers and the sandbox](docs/sandbox.md) | What workers and verifiers may touch; git's folders; the sandbox probe; write lists and env; the allow list and its web tools; paths hansa refuses; what hansa stops when a run ends |
 | [How a task runs](docs/tasks.md) | Time limits and resumes, retries after a dropped connection, providers' usage limits |

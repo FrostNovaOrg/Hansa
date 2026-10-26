@@ -35,6 +35,7 @@ DOCS = Path(__file__).resolve().parent.parent / "docs"  # where hansa help TOPIC
 # hansa help TOPIC: the topic's file under docs/, its heading (None: the whole file), and what it holds. No name
 # equals a command, a lane subcommand or an explain target, a plural of one or a prefix of one (a test holds it)
 TOPICS = {
+    "principles": ("principles.md", None, "how a desk is run: its rules, what enforces them and what they guard against"),
     "workers-sandbox": ("sandbox.md", "What workers and verifiers may touch",
                         "what workers and verifiers may read, write and reach"),
     "git-folders": ("sandbox.md", "Git's folders", "what each run may write in git's folders, and what hansa checks "
@@ -2790,7 +2791,6 @@ def index_text(commands: list, lane_commands: list) -> str:
         "Commands:",
         *(f"  {label}: {', '.join(shown.get(x, x) for x in g if x in commands)}"
           for (label, _), g in zip(COMMAND_GROUPS, grouped)),
-        "",
         topics_text()])
 
 
