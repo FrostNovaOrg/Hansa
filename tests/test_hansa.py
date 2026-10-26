@@ -29957,6 +29957,59 @@ def save():'''))
             self.assertEqual(self.settle_release(d, row["id"])["state"], "done")
             self.assertEqual(views.status(self.desk)["after_merge_waiting"], [])
 
+    def test_after_merge_waiting_needs_the_principals_tick(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "linux", "true", "--after-merge", "1")
+        commit = self.recorded_after_merge(time.time() - 120)
+        self.assertIn("waits for the principal's tick", self.hansa("status"))
+        self.assertNotIn("starts at", self.hansa("status"))
+        Dispatcher(self.desk).tick()
+        self.assertEqual(release.releases(self.desk), [])
+        self.assertEqual(views.status(self.desk)["after_merge_waiting"][0]["commit"], commit)
+
+    def test_after_merge_waiting_tick_no_longer_counts(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "linux", "true", "--after-merge", "1")
+        self.tick_targets("linux")
+        self.recorded_after_merge(time.time() - 120)
+        self.hansa("lane", "target", "a", "linux", "echo changed")
+        for word in ("waits for the principal's tick", "tick no longer counts"):
+            self.assertIn(word, self.hansa("status"))
+        self.assertNotIn("starts at", self.hansa("status"))
+        Dispatcher(self.desk).tick()
+        self.assertEqual(release.releases(self.desk), [])
+
+    def test_after_merge_waiting_direct_hold(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "linux", "true", "--after-merge", "1")
+        self.tick_targets("linux")
+        self.recorded_after_merge(time.time() - 120)
+        self.assertTrue(self.page_save(lambda s: s.update(release_direct="hold"))["ok"])
+        self.assertNotIn("held", self.hansa("status"))  # no direct commits
+        direct = self.commit_in_repo("direct.txt", "direct\n")
+        for word in (direct[:10], "held", "direct commits", "principal's yes"):
+            self.assertIn(word, self.hansa("status"))
+        self.assertNotIn("starts at", self.hansa("status"))
+        Dispatcher(self.desk).tick()
+        self.assertEqual(release.releases(self.desk), [])
+        self.assertTrue(self.page_save(lambda s: s.update(release_direct="record"))["ok"])
+        self.assertIn("starts when the server next looks", self.hansa("status"))
+
+    def test_after_merge_waiting_due_time_and_one_minute(self):
+        from hansa import release
+        at = time.time()
+        self.hansa("lane", "target", "a", "linux", "true", "--after-merge", "1")
+        self.tick_targets("linux")
+        self.recorded_after_merge(at)
+        with unittest.mock.patch.object(release, "now", return_value=at + 59):
+            self.assertIn("starts at " + release.when(at + 60), self.hansa("status"))
+            self.assertIn("1 minute after the last merge", self.hansa("status"))
+        for elapsed in (60, 120):
+            with self.subTest(elapsed=elapsed), unittest.mock.patch.object(release, "now", return_value=at + elapsed):
+                self.assertIn("starts when the server next looks", self.hansa("status"))
+                self.assertNotIn("starts at", self.hansa("status"))
+                self.assertEqual(release.releases(self.desk), [])
+
     def test_after_merge_waiting_uses_the_schedulers_batch_rules(self):
         from hansa import release
         at = time.time() - 300
@@ -29995,7 +30048,7 @@ def save():'''))
         harness = self.tmp / "after-merge-page.js"
         harness.write_text(self.PAGE_HARNESS)
 
-        def page_rows(commit=None, start=None, paused=False):
+        def page_rows(commit=None, start=None, paused=False, reason=None):
             status = views.status(self.desk)
             for language in ("en", "zh"):
                 with self.subTest(language=language, commit=commit, paused=paused):
@@ -30004,6 +30057,13 @@ def save():'''))
                                             capture_output=True, text=True, timeout=60)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     text = json.loads(result.stdout)
+                    if reason:
+                        self.assertEqual(text.count(reason[0 if language == "en" else 1]), 1)
+                        self.assertIn(commit[:10], text)
+                        self.assertIn("linux", text)
+                        self.assertIn("lane a" if language == "en" else "工作线 a", text)
+                        self.assertNotIn("starts at" if language == "en" else "上于", text)
+                        continue
                     marker = "minutes after the last merge" if language == "en" else "即上次合并后"
                     self.assertEqual(text.count(marker), 1 if commit else 0)
                     if commit:
@@ -30021,8 +30081,20 @@ def save():'''))
         page_rows(first, at + 1200)
         second = self.recorded_after_merge(at + 300, "next.txt")
         page_rows(second, at + 1500)
+        self.tick_targets()
+        page_rows(second, reason=("waits for the principal's tick", "等待负责人勾选"))
+        self.tick_targets("linux")
+        self.hansa("lane", "target", "a", "linux", "echo changed")
+        page_rows(second, reason=("tick no longer counts", "原来的勾选已失效"))
+        self.tick_targets("linux")
+        self.assertTrue(self.page_save(lambda s: s.update(release_direct="hold"))["ok"])
+        direct = self.commit_in_repo("direct.txt", "direct\n")
+        page_rows(direct, reason=("held: direct commits need the principal's yes", "已暂缓：直接提交需要负责人同意"))
+        self.assertTrue(self.page_save(lambda s: s.update(release_direct="record"))["ok"])
+        with unittest.mock.patch.object(release, "now", return_value=at + 1500):
+            page_rows(direct, reason=("starts when the server next looks", "服务器下次检查时开始"))
         self.hansa("pause", "reviewing")
-        page_rows(second, at + 1500, paused=True)
+        page_rows(direct, at + 1500, paused=True)
         with unittest.mock.patch.object(release, "now", return_value=at + 1500):
             release.ask(self.desk, "a", target="linux", after_merge=True)
         page_rows()
