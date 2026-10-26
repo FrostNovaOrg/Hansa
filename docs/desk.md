@@ -97,11 +97,10 @@ textarea or select has focus, background refreshes update the header but leave
 the tab's fields in place. With focus on a button or link, the lists keep
 updating and focus returns to the same action on the same record, if it is
 still available. Expanded task details stay open. Submitting an action refreshes
-the tab immediately. Unsent release approval or stop reasons,
-and the pause reason survive these redraws in this page's memory. Each draft
-stays with its release and action, and is dropped when that action
-is no longer available. Reloading or
-closing the page discards the drafts.
+the tab immediately. Unsent release approval or stop reasons survive these
+redraws in this page's memory. Each draft stays with its release and action,
+and is dropped when that action is no longer available. Reloading or closing
+the page discards the drafts.
 
 In the provider table, a provider without a recorded Ping says “not checked yet”
 in a neutral colour. Green “ready” requires a successful recorded check and no
@@ -128,16 +127,13 @@ focus to the button that opened the list or menu. On the Chinese page, the desk
 and version items are labelled
 `工作台` and `hansa 版本`; the English current-time item uses `now`, as `hansa status` does.
 
-At the top of Status, links to each section scroll to it, with labels in the
-selected language. The links wrap in narrow windows.
-
 When releases await approval, to-dos are open or providers need a credit top-up,
-Status puts them below those links, before the pipeline, timeline and summary
-cards. Each to-do shows its number, what the principal must do, why only they
-can do it (if given), whether work waits, and when it was recorded. To-dos are
+Status puts them first, before the pipeline and summary cards. Each to-do shows
+its number, what the principal must do, why only they can do it (if given),
+whether work waits, and when it was recorded. To-dos are
 read-only: the principal answers in the conversation and the coordinator records
 the outcome and closes them.
-The credit group and its section link are labelled **Top-ups to confirm**
+The credit group is labelled **Top-ups to confirm**
 (**等你确认充值** in Chinese). Each provider waiting for credit shows its name
 and when the rest began, with the same **Topped up** button as Settings, Providers
 directly underneath.
@@ -202,7 +198,9 @@ wrap between words, the principal box follows below the stages, and tracks fit
 the page without horizontal scrolling.
 The picture has no animation and uses the page's English and Chinese dictionaries.
 
-The Status tab also shows a rolling 24-hour timeline, one row per current lane
+Work and cost shows a rolling 24-hour timeline below the totals and their
+explanation, above the breakdown tables. Its window stays at 24 hours for every
+selected cost period. It has one row per current lane
 (including empty lanes), with hourly marks from 24 hours ago to now. Removed
 lanes are omitted. Workers, lane checks, verifications, merge checks, lane tries
 and releases each have a palette colour; failures are red. Running work extends
@@ -214,8 +212,9 @@ Concurrent pieces stack within their lane's row so each remains selectable.
 Checks that could not run say so. The legend and details use the page language.
 The axis fits the page on phones, with fewer hour labels but all hourly marks;
 labels have an opaque background so adjacent grid lines do not cross their text.
-History loads when Status opens and at most once a minute during its regular
-five-second updates; it does not hold up the rest of Status.
+History loads when Work and cost opens, at most once a minute, independently of
+the cost report. Read failures appear in the timeline section, keeping the last
+successful timeline when available.
 
 `GET /api/timeline` uses the same bearer authorization as the other page endpoints
 and only reads records. Its top-level `start` and `end` are Unix seconds bounding
@@ -266,8 +265,9 @@ remembered boundaries. Thus neither a server restart nor a new unmatched end
 causes a search through the desk's entire history. Existing status responses
 and command output do not include timeline data.
 
-Status also shows the last 24 hours in summary cards, keeps dispatch controls separate
-from task lists, and puts pending release decisions and to-dos first. Empty
+Status also shows the last 24 hours in summary cards and puts pending release
+decisions and to-dos first. Its Auto updates mark carries the note about
+five-second updates and keeping controls in place while editing. Empty
 states explain where new activity will appear. Task details remain open across
 refreshes. Release approvals, refusals and stops keep their existing controls.
 
@@ -479,11 +479,18 @@ validation cover the whole file even when its preview is cut.
 
 ## Settings on the web page
 
-Settings are grouped into Providers, Coordinator, Lanes (read only), What workers
+Settings are grouped into Providers, Coordinator, Lanes, What workers
 may not read, Releases, Alerts and Prices. Select a group in the directory; full
 explanations and other read-only lane fields expand in place. Network, write and
 allowed-command rules remain visible, as do the warnings needed before saving.
 Providers includes the rest minutes that apply to every provider.
+Lanes starts with Dispatch control, above the read-only concurrency and disk floor.
+It shows whether dispatch is on or paused, including the pause reason. Pause sends
+the optional reason immediately; Resume also takes effect immediately. These
+buttons work separately from Save settings and preserve all unsaved settings.
+The dispatch state loads when Settings opens and after either action. A failed
+press shows its error and keeps the displayed state and reason box. The header
+still reports when the desk is paused.
 The save bar applies to all editable settings groups.
 Prices must be finite numbers, zero or more; zero and decimals are accepted.
 NaN, infinity and numbers too large for floating-point calculations are refused;

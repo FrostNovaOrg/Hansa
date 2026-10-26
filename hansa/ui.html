@@ -17,8 +17,6 @@ header { display:grid; grid-template-columns:minmax(90px,160px) minmax(0,max-con
 .brand-label { display:flex; flex-direction:column; min-width:0; line-height:1.3; }
 .brand-caption { color:var(--muted); font-size:12px; font-weight:400; overflow:hidden; text-overflow:ellipsis; }
 nav { display:flex; gap:4px; }
-.section-links { flex-wrap:wrap; gap:8px 16px; margin-bottom:20px; }
-.section-links a { color:var(--link); }
 #tabs { min-width:0; max-width:100%; overflow-x:auto; padding:3px; background:var(--surface); border:1px solid var(--line); border-radius:9px; }
 #tabs button { flex:none; white-space:nowrap; }
 nav button { display:flex; gap:7px; align-items:center; border:1px solid transparent; background:none; padding:6px 11px; border-radius:6px; color:var(--muted); }
@@ -90,7 +88,6 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .settings-nav button.on { background:var(--tint); color:var(--fg); border-color:transparent; font-weight:600; box-shadow:none; }
 .settings-nav button.on::before { content:""; position:absolute; left:-5px; top:12px; bottom:12px; width:2px; border-radius:2px; background:var(--link); }
 .settings-nav button[data-dirty=true]::after { content:""; width:5px; height:5px; border-radius:50%; background:var(--warn); margin-left:auto; flex:none; }
-.settings-nav small { margin-left:auto; font-size:10px; font-weight:400; }
 .settings-content, .settings-form { min-width:0; }
 .settings-form { border:0; padding:0; margin:0; }
 .group-head { display:flex; gap:12px; align-items:flex-start; margin:0 0 20px; }
@@ -960,7 +957,6 @@ async function api(path, body) {
 /* ---------- tabs ---------- */
 let current = "status";
 function show(tab) {
-  if (tab === "status") timelineFetchedAt = 0;
   current = tab;
   keepChoice("sessionStorage", "hansa.tab", tab);
   for (const b of document.querySelectorAll("#tabs button")) {
@@ -1369,7 +1365,6 @@ function statusInput(key, attrs) {
 }
 function keepStatusDrafts(st) {
   const live = new Set();
-  if (!st.paused) live.add("pause");
   for (const r of st.releases || []) {
     if (r.state === "waiting") live.add(`release:${r.id}`);
     if (["approved", "starting", "running"].includes(r.state) && !r.stop_asked) live.add(`stop:${r.id}`);
@@ -1384,7 +1379,8 @@ function keepStatusFocus(root) {
   const active = document.activeElement;
   if (!root.contains(active)) return () => {};
   const key = active.getAttribute("data-status-focus");
-  const matchingControls = () => [...document.querySelectorAll("#tab-status button"), ...document.querySelectorAll("#tab-status a")]
+  const tab = root === timelinePanel ? "#tab-cost" : "#tab-status";
+  const matchingControls = () => [...document.querySelectorAll(tab + " button"), ...document.querySelectorAll(tab + " a")]
     .filter(el => root.contains(el) && el.getAttribute("data-status-focus") === key);
   const index = key ? matchingControls().indexOf(active) : -1;
   return () => {
@@ -1434,7 +1430,6 @@ async function loadStatus(force = false) {
   if (force !== true && inStatus && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return;
   keepPrincipalDetails(st);
   const restoreFocus = keepStatusFocus(root);
-  const reason = statusInput("pause", {placeholder:T.pauseReason, "aria-label":T.pauseReason});
   const t = st.last_24h;
   const pendingReleases = (st.releases || []).filter(r => r.state === "waiting");
   const principal = waiting ? h("div", {id:"status-principal"},
@@ -1446,24 +1441,14 @@ async function loadStatus(force = false) {
         h("div", {class:"principal-actions"}, h("button", {"data-status-focus":`top-up:${p.name}`,
           onclick:() => topUpProvider(p.name)}, T.toppedUp))))) : null) : null;
   statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));
-  const links = h("nav", {id:"status-sections", class:"section-links", "aria-label":T.status});
   $("#tab-status").replaceChildren(...shown([
-    links,
     principal,
     statusPicture,
-    timelineSection(),
-    pageHeading(T.status, T.statusIntro, statusPill(T.autoUpdates, "", "reload")),
+    pageHeading(T.status, T.statusIntro, h("div", {}, statusPill(T.autoUpdates, "", "reload"), h("p", {class:"field-note"}, T.refreshNote))),
     h("div", {class:"metric-caption"}, T.last24h),
     h("div", {class:"metric-grid", "aria-label":T.last24h},
       summaryCard(T.finished, fmt(t.finished), "", "check"), summaryCard(T.merged, fmt(t.merged), "", "releases"),
       summaryCard(T.tokens, fmt(t.worker_tokens), T.last24h, "status"), summaryCard(T.estimatedCost, money(t.worker_usd), T.listValue, "cost")),
-    h("section", {class:"dashboard-panel runtime-toolbar"},
-      h("div", {class:"runtime-summary"}, h("h2", {}, T.dispatchControl),
-        statusPill(st.paused ? T.paused : T.dispatchOn, st.paused ? "warn" : "ok", st.paused ? "pending" : "check"),
-        st.paused ? h("p", {}, st.paused) : null, h("p", {}, T.refreshNote)),
-      h("div", {class:"runtime-actions"},
-      st.paused ? h("button", {class:"primary", "data-status-focus":"resume", onclick: () => api("/api/resume", {}).then(() => loadStatus(true)).catch(err)}, T.resume)
-                : [reason, h("button", {"data-status-focus":"pause", onclick: () => api("/api/pause", {reason:reason.value}).then(() => loadStatus(true)).catch(err)}, T.pause)])),
     h("div", waiting ? {} : {id:"status-principal"},
       releasesSection((st.releases || []).filter(r => r.state !== "waiting"), st.after_merge_waiting || [])),
     !st.running.length && !st.queued.length && !st.review.length && !(st.merging || []).length ? dashboardPanel(T.taskFlow, "status", 0,
@@ -1496,14 +1481,7 @@ async function loadStatus(force = false) {
       ? h("div", {class:"bad", role:"alert"}, String(events.reason.message || events.reason))
       : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(eventRow)) : emptyState(T.noEvents, T.noEventsNote, "status"))
   ]));
-  document.querySelectorAll("#tab-status section").forEach((panel, i) => {
-    if (!panel.id) panel.id = `status-section-${i}`;
-    const heading = panel.querySelector("h2");
-    if (heading) links.append(h("a", {href:"#" + panel.id, "data-status-focus":`section:${panel.id}`,
-      onclick:e => { e.preventDefault(); panel.scrollIntoView({block:"start"}); }}, heading.textContent));
-  });
   restoreFocus();
-  if (current === "status") loadTimeline();
 }
 function asksSection(st) {
   if (!st.asks.length) return null;
@@ -1685,10 +1663,30 @@ function refreshSettingsState() {
   if (mainTabLabels.settings) mainTabLabels.settings.textContent = T.settings + (dirty ? " •" : "");
   updateFieldErrors();
 }
+let dispatchPanel = null;
+function dispatchSection() {
+  if (!dispatchPanel) dispatchPanel = h("section", {id:"settings-dispatch", class:"runtime-toolbar"}, h("h2", {}, T.dispatchControl));
+  return dispatchPanel;
+}
+async function loadDispatch() {
+  const st = await api("/api/status"), reason = h("input", {placeholder:T.pauseReason, "aria-label":T.pauseReason});
+  const act = path => api(path, path === "/api/pause" ? {reason:reason.value} : {}).then(r => {
+    if (r.ok === false) throw new Error((r.problems || [r.error || T.problems]).join("; "));
+    return loadDispatch().then(() => loadStatus(true));
+  }).catch(err);
+  dispatchSection().replaceChildren(
+    h("div", {class:"runtime-summary"}, h("h2", {}, T.dispatchControl),
+      statusPill(st.paused ? T.paused : T.dispatchOn, st.paused ? "warn" : "ok", st.paused ? "pending" : "check"),
+      st.paused ? h("p", {}, st.paused) : null),
+    h("div", {class:"runtime-actions"}, st.paused
+      ? h("button", {class:"primary", onclick:() => act("/api/resume")}, T.resume)
+      : [reason, h("button", {onclick:() => act("/api/pause")}, T.pause)]));
+}
 function ensureSettings() {
-  if (S && (settingsDirty() || settingsSaving || newProviderName || newPriceName)) return Promise.resolve();
+  const dispatch = loadDispatch();
+  if (S && (settingsDirty() || settingsSaving || newProviderName || newPriceName)) return dispatch;
   if (!settingsLoading) settingsLoading = loadSettings(undefined, false, !!S).finally(() => { settingsLoading = null; });
-  return settingsLoading;
+  return Promise.all([settingsLoading, dispatch]);
 }
 function showSettingsGroup(key) {
   if (!settingsPanels[key]) return;
@@ -2071,6 +2069,7 @@ function renderSettings(problems = settingsProblems) {
         field(T.compactWorking, bind(S.coordinator_compact, "working_at", "number"))),
         h("p", {class:"field-note"}, T.compactHint), help(T.compactNote))],
     lanes: [
+      dispatchSection(),
       section(T.general, h("p", {class:"field-note"}, T.runtimeReadOnly), fields(
         field(T.concurrency, h("div", {class:"readonly-value"}, S.concurrency), "", T.concurrencyNote),
         field(T.diskFloor, h("div", {class:"readonly-value"}, S.disk_floor ? `${S.disk_floor} GB` : T.diskFloorOff),
@@ -2125,8 +2124,7 @@ function renderSettings(problems = settingsProblems) {
   settingsPanels = {}; settingsNavButtons = {};
   const nav = h("nav", {class:"settings-nav", "aria-label":T.settingsNav}, SETTINGS_GROUPS.map(([key, label], i) => {
     const button = h("button", {"aria-controls":"settings-" + key, onclick:() => showSettingsGroup(key)},
-      icon(key), h("span", {}, label),
-      key === "lanes" ? h("small", {}, T.readOnly) : null);
+      icon(key), h("span", {}, label));
     settingsNavButtons[key] = button; return button;
   }));
   settingsForm = h("fieldset", {class:"settings-form", "aria-label":T.settings}, SETTINGS_GROUPS.map(([key, label, description]) => {
@@ -2310,6 +2308,7 @@ function costFeedbackState(tone, text, retry = false) {
   costRetryButton.hidden = !retry;
 }
 async function loadCost() {
+  loadTimeline();
   const epoch = ++costEpoch, days = costDays, host = $("#tab-cost");
   costLoading = true; host.setAttribute("aria-busy", "true");
   if (!costFeedback) renderCost(null);
@@ -2441,6 +2440,7 @@ function renderCost(r) {
         : T.coordinatorUncountedWhy[r.coordinator_uncounted_kind]?.replaceAll("{where}", r.coordinator_uncounted_where || "")
           ?? T.coordinatorUncounted.replaceAll("{user}", r.coordinator_user))) : null,
       r.unpriced_models.length ? h("div", {class:"cost-warning"}, icon("prices"), h("p", {}, T.unpriced + " " + r.unpriced_models.join(", ") + " — " + T.setPrice)) : null) : null,
+    timelineSection(),
     r ? sections.length ? h("div", {class:"cost-breakdowns"}, sections) : dashboardPanel(T.cost, "cost", 0, emptyState(T.noCost, T.noCostNote, "cost"))
       : dashboardPanel(T.cost, "cost", null, costPlaceholder)
   ]));

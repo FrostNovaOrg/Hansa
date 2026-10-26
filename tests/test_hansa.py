@@ -31199,7 +31199,7 @@ let costGetGate = null, costRowsError = null, costRowsGate = null;
 let statusGetError = ask === "status-picture-initial-error" ? "status connection lost" : null;
 let statusFailPath = "/api/status";
 let statusGetGate = null;
-let confirmReply = true;
+let confirmReply = true, dispatchPostError = null, dispatchPostReply = null;
 const fetch = async (path, options) => {
   apiRequests.push({path, headers:{...options?.headers}, credentials:options?.credentials, mode:options?.mode});
   if (options && options.method === "POST") apiPosts.push({path, body:JSON.parse(options.body)});
@@ -31225,6 +31225,10 @@ const fetch = async (path, options) => {
   }
   if (options && options.method === "POST" && ["/api/pause", "/api/resume", "/api/release/answer", "/api/release/stop"].includes(path)) {
     const body = JSON.parse(options.body);
+    if (["/api/pause", "/api/resume"].includes(path)) {
+      if (dispatchPostError) throw new Error(dispatchPostError);
+      if (dispatchPostReply) return {status:200, json:async () => dispatchPostReply};
+    }
     if (path === "/api/pause") given["/api/status"].paused = body.reason || "from page";
     if (path === "/api/resume") given["/api/status"].paused = "";
     return {status:200, json:async () => ({ok:true})};
@@ -31370,8 +31374,19 @@ if (ask === "header") (async () => {
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "timeline") (async () => {
   const run = code => vm.runInContext(code, ctx);
-  await run("loadStatus()"); await run("loadTimeline()");
-  await run("loadStatus()"); await run("loadTimeline()");
+  await run("loadStatus()");
+  const statusGets = apiGets.filter(p => p === "/api/timeline").length;
+  given["/api/cost"] ||= {total:{tokens:0, usd:0}, by:{day:{}, model:{}}, unpriced_models:[]};
+  await run("show('cost')"); await run("loadTimeline()");
+  const periods = [];
+  for (const days of [1, 7, 30, 90, "all"]) {
+    await run(`costDays = ${JSON.stringify(days)}; loadCost()`);
+    const cost = ids["#tab-cost"], timeline = ids["#status-timeline"];
+    periods.push({days, position:cost.kids.indexOf(timeline), before:cost.kids.indexOf(timeline) >
+      cost.kids.findIndex(el => el.className === "metric-grid cost-metrics"),
+      after:cost.kids.indexOf(timeline) < cost.kids.findIndex(el => el.className === "cost-breakdowns"),
+      window:run("timelineReport.end - timelineReport.start")});
+  }
   const root = ids["#status-timeline"], segments = [];
   // Refreshing the timeline starts separate reads for its expanded task details.
   const waitForDetails = async () => {
@@ -31397,9 +31412,19 @@ else if (ask === "timeline") (async () => {
   const gets = [...apiGets];
   await run("timelineFetchedAt = Date.now() - 61000; loadTimeline()");
   const refreshGets = apiGets.filter(p => p === "/api/timeline").length;
-  await run("current = 'settings'; show('status')"); await run("loadTimeline()");
+  await run("show('status')");
+  const statusReturnGets = apiGets.filter(p => p === "/api/timeline").length;
+  await run("show('cost')"); await run("loadTimeline()");
+  const reopenGets = apiGets.filter(p => p === "/api/timeline").length;
+  await run("timelineFetchedAt = Date.now() - 61000; show('cost')"); await run("loadTimeline()");
   await waitForDetails();
-  console.log(JSON.stringify({text:root.textContent, gets, refreshGets, reopenGets:apiGets.filter(p => p === "/api/timeline").length,
+  // The moved panel still restores focus when its data refreshes.
+  const focusButton = descendants(root, "button").find(el => el.attrs["data-timeline-kind"]);
+  if (focusButton) focusButton.focus();
+  await run("renderTimeline(timelineReport)"); await waitForDetails();
+  const focused = !focusButton || document.activeElement?.attrs["data-status-focus"] === focusButton.attrs["data-status-focus"];
+  console.log(JSON.stringify({text:root.textContent, gets, refreshGets, statusGets, statusReturnGets, periods, focused,
+    reopenGets, staleReopenGets:apiGets.filter(p => p === "/api/timeline").length,
     rows:descendants(root, "div").filter(el => el.attrs["data-timeline-lane"]).map(el => el.attrs["data-timeline-lane"]),
     segments:segments.map((el, i) => ({kind:el.attrs["data-timeline-kind"], tone:el.className, label:el.attrs.title,
       text:el.textContent, aria:el.attrs["aria-label"], style:el.attrs.style, ...interactions[i]})),
@@ -31808,7 +31833,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
   const find = predicate => { let found; walk(root, el => { if (!found && predicate(el)) found = el; }); return found; };
   const input = label => find(el => el.tag === "input" && el.attrs.placeholder === run("T." + label));
   const button = label => find(el => el.tag === "button" && el.textContent === run("T." + label));
-  const labels = ["pauseReason", "releaseReason", "releaseStopReason"];
+  const labels = ["releaseReason", "releaseStopReason"];
   const draft = label => "Unsent " + label;
   await run("loadStatus()");
   if (ask === "status-drafts") {
@@ -31820,7 +31845,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     await run("loadStatus()");
     const reasons = descendants(root, "input").filter(el => el.attrs.placeholder === run("T.releaseReason"));
     check(reasons[0].value === "" && reasons[1].value === draft("releaseReason"), "release draft moved to another release or vanished");
-    for (const label of ["pauseReason", "releaseStopReason"]) check(input(label).value === draft(label), label + " draft vanished");
+    for (const label of ["releaseStopReason"]) check(input(label).value === draft(label), label + " draft vanished");
     // A redraw must use the refreshed release's command and commit, with its own retained reason.
     const approvals = descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"));
     await approvals[1].click();
@@ -31833,7 +31858,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
       yes:["releaseYes", "releaseReason", "/api/release/answer", {id:17, yes:true, reason:draft("releaseReason"), commit:st.releases[0].commit, command:st.releases[0].command}],
       no:["releaseNo", "releaseReason", "/api/release/answer", {id:17, yes:false, reason:draft("releaseReason"), commit:st.releases[0].commit, command:st.releases[0].command}],
       stop:["releaseStop", "releaseStopReason", "/api/release/stop", {id:18, reason:draft("releaseStopReason")}],
-      ping:["check", "pauseReason", "/api/check", {provider:"example-provider"}]
+      ping:["check", "releaseReason", "/api/check", {provider:"example-provider"}]
     }[action];
     const fieldBefore = input(field), controlBefore = button(label);
     fieldBefore.value = draft(field); fieldBefore.focus();
@@ -31866,7 +31891,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
       root.textContent.includes("new-background-event"), "focused button blocked lane, task or event updates");
     const approvals = descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"));
     check(document.activeElement === approvals[1] && document.activeElement !== previous, "focus moved to another release after reorder");
-    for (const label of ["releaseYes", "releaseNo", "releaseStop", "check", "pause"]) {
+    for (const label of ["releaseYes", "releaseNo", "releaseStop", "check"]) {
       button(label).focus();
       windowEvents.interval[0](); await flush();
       check(document.activeElement === button(label), "focus not restored for " + label);
@@ -31874,15 +31899,6 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     const pipelineButton = () => find(el => el.attrs["data-pipeline-step"] === "queued");
     pipelineButton().focus(); windowEvents.interval[0](); await flush();
     check(document.activeElement === pipelineButton(), "pipeline control lost focus");
-    // The timeline panel is reused, but removing it during the tab redraw still blurs its buttons.
-    const timeline = 'renderTimeline({start:1, end:3601, lanes:[{lane:"a", segments:[{kind:"release", result:"done", tasks:[], release:{id:17, target:"push"}, start:1, end:3601, started:1, minutes:60}]}]})';
-    run(timeline);
-    const timelineButton = find(el => el.attrs["data-timeline-kind"] === "release");
-    timelineButton.focus(); windowEvents.interval[0](); await flush();
-    check(document.activeElement === timelineButton, "retained timeline control lost focus");
-    // Its separate, less frequent data refresh also keeps focus on the same segment.
-    run(timeline);
-    check(document.activeElement === find(el => el.attrs["data-timeline-kind"] === "release"), "timeline data refresh lost segment focus");
     // A vanished action must not move focus to the same action on a different record.
     descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"))[1].focus();
     st.releases = st.releases.filter(r => r.id !== 17);
@@ -31923,11 +31939,6 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     finish(); await flush(); statusGetGate = null;
     check(document.activeElement === button("releaseYes") && document.activeElement !== focused,
       "in-flight refresh did not redraw and restore the newly focused button");
-    // Explicit actions must still refresh their changed state even with a focused button.
-    button("pause").focus(); await button("pause").click();
-    check(button("resume"), "focused pause action did not refresh dispatch controls");
-    button("resume").focus(); windowEvents.interval[0](); await flush();
-    check(document.activeElement === button("resume"), "resume control lost focus");
     document.activeElement = document.body;
     windowEvents.interval[0](); await flush();
     check(input("releaseReason").value === draft("releaseReason"), "draft vanished after focus left Status");
@@ -31971,19 +31982,80 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
   }
   console.log(JSON.stringify({ok:true}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "cost-timeline-errors") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  statusFailPath = "/api/timeline"; statusGetError = "example timeline unavailable";
+  await run("show('cost')"); await run("loadTimeline()");
+  const root = ids["#status-timeline"], initial = root.textContent;
+  const inside = ids["#tab-cost"].contains(root);
+  statusGetError = null;
+  await run("timelineFetchedAt = Date.now() - 61000; loadTimeline()");
+  const recovered = root.textContent;
+  statusGetError = "example timeline unavailable";
+  await run("timelineFetchedAt = Date.now() - 61000; loadTimeline()");
+  console.log(JSON.stringify({initial, recovered, retained:root.textContent, inside,
+    alerts:descendants(root, "p").filter(el => el.attrs.role === "alert").length,
+    state:ids["#state-list"].textContent}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask.startsWith("settings-dispatch-")) (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  await run("show('settings');"); run("showSettingsGroup('lanes')");
+  const root = ids["#settings-dispatch"], panel = ids["#settings-lanes"];
+  const snapshot = () => ({text:root.textContent, buttons:descendants(root, "button").map(el => el.textContent),
+    reasons:descendants(root, "input").map(el => el.attrs["aria-label"]),
+    headings:descendants(panel, "h2").map(el => el.textContent), hidden:panel.hidden,
+    nav:run("settingsNavButtons.lanes.textContent")});
+  const initial = snapshot();
+  if (ask === "settings-dispatch-state") { console.log(JSON.stringify(initial)); return; }
+  const setting = descendants(ids["#settings-providers"], "input").find(el => el.type === "number");
+  setting.value = "38"; setting.on.input({target:setting});
+  run('KEY_DRAFTS.claude = "typed-key"; newProviderName = "draft-provider"; newPriceName = "draft-price"; refreshSettingsState()');
+  const draft = run("JSON.stringify([S, KEY_DRAFTS, newProviderName, newPriceName, settingsBaseline])");
+  const form = run("settingsForm"), gets = settingsGetCount;
+  const keepDraft = () => check(run("settingsDirty()") && setting.value === "38" &&
+    form === run("settingsForm") && form.contains(setting) && settingsGetCount === gets &&
+    settingsPostCount === 0 && run("settingsBadge.textContent") === run("T.unsaved") &&
+    run("JSON.stringify([S, KEY_DRAFTS, newProviderName, newPriceName, settingsBaseline])") === draft,
+    "dispatch action replaced or saved the settings draft");
+  const failed = [];
+  for (const action of ["pause", "resume"]) {
+    const button = () => descendants(root, "button").find(el => el.textContent === run("T." + action));
+    const reason = descendants(root, "input")[0];
+    if (reason) reason.value = "Review queue <&>";
+    for (const mode of ["transport", "refused"]) {
+      const before = root.textContent;
+      if (mode === "transport") dispatchPostError = "example dispatch failed";
+      else dispatchPostReply = {ok:false, problems:["example dispatch failed"]};
+      await button().click();
+      check(root.textContent === before && button(), "failed dispatch action changed the displayed state");
+      check(ids["#state-list"].textContent.includes("example dispatch failed"), "dispatch failure was not shown");
+      if (reason) check(reason.value === "Review queue <&>", "failed pause lost the reason");
+      keepDraft(); failed.push(action + ":" + mode);
+      dispatchPostError = dispatchPostReply = null;
+    }
+    await button().click(); keepDraft();
+    check(root.textContent.includes(run(action === "pause" ? "T.paused" : "T.dispatchOn")), "dispatch state did not refresh");
+    if (action === "pause") check(root.textContent.includes("Review queue <&>") &&
+      ids["#state-list"].textContent.includes("Review queue <&>"), "paused reason missing from settings or header");
+  }
+  check(!ids["#state-list"].textContent.includes("Review queue <&>"), "header still says paused after resume");
+  given["/api/status"].paused = "Paused elsewhere";
+  await run("show('status')"); await run("show('settings')"); keepDraft();
+  check(root.textContent.includes("Paused elsewhere"), "returning to dirty Settings did not refresh dispatch state");
+  console.log(JSON.stringify({initial, failed, posts:apiPosts, draft:true, reopened:snapshot()}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "principal-credit" || ask === "status-sections") (async () => {
   const run = code => vm.runInContext(code, ctx);
   const tree = el => ({tag:el.tag, attrs:el.attrs, className:el.className,
     text:el.textContent, kids:el.kids.filter(k => k instanceof El).map(tree)});
   await run("loadStatus()");
   if (ask === "status-sections") {
-    const root = ids["#tab-status"], panels = descendants(root, "section");
-    const links = descendants(root.kids[0], "a").map(link => {
-      const panel = ids[link.attrs.href]; link.click();
-      return {text:link.textContent, heading:panel?.querySelector("h2")?.textContent,
-        target:panel?.id, scrolled:!!panel?.scrolled, inside:root.contains(panel)};
-    });
-    console.log(JSON.stringify({first:root.kids[0].id, links, panels:panels.map(p => p.id),
+    const root = ids["#tab-status"];
+    console.log(JSON.stringify({first:root.kids[0].id, navs:descendants(root, "nav").length,
+      headings:descendants(root, "h2").map(el => el.textContent), text:root.textContent,
+      noteBesideMark:descendants(root, "div").some(el => el.kids.some(k => k.textContent === run("T.autoUpdates")) &&
+        el.kids.some(k => k.textContent === run("T.refreshNote"))),
       css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))}));
     return;
   }
@@ -32048,14 +32120,6 @@ else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(as
   const input = label => find(el => el.tag === "input" && el.attrs.placeholder === label);
   const postedTo = path => apiPosts.filter(post => post.path === path).at(-1)?.body;
   const same = (actual, expected, why) => check(JSON.stringify(actual) === JSON.stringify(expected), why);
-  const reason = input(run("T.pauseReason"));
-  check(reason && button(run("T.pause")), "pause controls missing");
-  reason.value = "Review UI, keep the queue"; await button(run("T.pause")).click();
-  same(postedTo("/api/pause"), {reason:"Review UI, keep the queue"}, "pause payload changed");
-  check(button(run("T.resume")), "pause did not expose resume");
-  await button(run("T.resume")).click();
-  same(postedTo("/api/resume"), {}, "resume payload changed");
-  check(button(run("T.pause")), "resume did not restore pause controls");
   let task = button("t0042");
   check(task, "queued task link missing"); await task.click(); await flush();
   check(run('detailOpen.has("t0042")') && task.attrs["aria-expanded"] === "true" &&
@@ -32077,7 +32141,7 @@ else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(as
   same(postedTo("/api/release/answer"), {...releasePayload, yes:false, reason:"Wait for review"}, "release refusal payload changed");
   input(run("T.releaseStopReason")).value = "Stop this run"; await button(run("T.releaseStop")).click();
   same(postedTo("/api/release/stop"), {id:18, reason:"Stop this run"}, "release stop payload changed");
-  console.log(JSON.stringify({pause:true, resume:true, details:true, asks:true, releases:true}));
+  console.log(JSON.stringify({details:true, asks:true, releases:true}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "work-chart") vm.runInContext("loadCost()", ctx).then(async () => {
   const select = ids["#cost-period"]; select.value = String(given["/api/cost"].days ?? "all"); select.on.change({target:select});
@@ -32469,7 +32533,6 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       for (const value of ["docs.example.net", "/example/extra-write", "WebFetch(domain:docs.example.net)"])
         check(visibleText(value, lane), "lane permission hidden: " + value);
       check(visibleText(run("T.readOnly"), lane), "lane read-only mark hidden");
-      check(!/\.settings-nav small\s*\{[^}]*display\s*:\s*none/.test(page), "read-only navigation mark hidden on narrow screens");
       check(find(el => el.tag === "details" && el.textContent.includes(run("T.workersMayNotRead"))), "full explanations no longer folded");
     } else if (ask === "settings-fix-problems") {
       for (const [problem, group] of [
@@ -33231,8 +33294,62 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(data["lanes"][0]["segments"][0]["kind"], "try")
         self.assertLess(sum(f.count for f in opened), 131072)
 
+    def relocated_panels_page(self, scenario, language, paused=""):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        from hansa import web
+        harness = self.tmp / "relocated-panels.js"
+        harness.write_text(self.PAGE_HARNESS)
+        status = self.picture_status()
+        status["paused"] = paused
+        replies = {"/api/status": status, "/api/settings": public_settings(self.desk), "/api/events": [],
+                   "/api/cost": {"total": {"tokens": 0, "usd": 0}, "by": {"day": {}, "model": {}}, "unpriced_models": []},
+                   "/api/timeline": {"start": 1, "end": 86401, "lanes": []}}
+        result = subprocess.run(["node", str(harness), str(web.UI), scenario, language],
+                                input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_settings_dispatch_initial_state_in_both_languages(self):
+        for language in ("en", "zh"):
+            for paused in ("", "Review queue <&>"):
+                with self.subTest(language=language, paused=paused):
+                    page = self.relocated_panels_page("settings-dispatch-state", language, paused)
+                    self.assertEqual(page["headings"][:3], ["Lanes", "Dispatch control", "General"] if language == "en"
+                                     else ["工作线", "派活控制", "总体"])
+                    self.assertFalse(page["hidden"])
+                    self.assertEqual(page["nav"], page["headings"][0])
+                    self.assertIn(("paused" if paused else "dispatching") if language == "en" else ("已暂停" if paused else "正在派活"), page["text"])
+                    self.assertEqual(page["buttons"], [("Resume" if paused else "Pause") if language == "en" else ("恢复派活" if paused else "暂停派活")])
+                    self.assertEqual(page["reasons"], [] if paused else ["reason (optional)" if language == "en" else "暂停原因（可不填）"])
+                    if paused:
+                        self.assertIn(paused, page["text"])
+
+    def test_settings_dispatch_actions_preserve_unsaved_settings_and_failed_state(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                page = self.relocated_panels_page("settings-dispatch-actions", language)
+                self.assertTrue(page["draft"])
+                self.assertEqual(page["failed"], ["pause:transport", "pause:refused", "resume:transport", "resume:refused"])
+                self.assertEqual(page["posts"], [{"path": path, "body": body} for path, body in
+                    [("/api/pause", {"reason": "Review queue <&>"})] * 3 + [("/api/resume", {})] * 3])
+                self.assertIn("Paused elsewhere", page["reopened"]["text"])
+
+    def test_cost_timeline_errors_stay_in_section_and_recover_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                page = self.relocated_panels_page("cost-timeline-errors", language)
+                self.assertTrue(page["inside"])
+                self.assertIn("example timeline unavailable", page["initial"])
+                self.assertNotIn("example timeline unavailable", page["recovered"])
+                self.assertIn("No work" if language == "en" else "没有工作", page["recovered"])
+                self.assertIn(page["recovered"], page["retained"])
+                self.assertIn("example timeline unavailable", page["retained"])
+                self.assertEqual(page["alerts"], 1)
+                self.assertNotIn("example timeline unavailable", page["state"])
+
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
-    def test_status_timeline_kinds_and_empty_window_in_both_languages(self):
+    def test_cost_timeline_kinds_and_empty_window_in_both_languages(self):
         from hansa import web
         at, tasks, events, releases = self.timeline_fixture()
         # A wire fixture independent of the view: this test also runs before the view exists.
@@ -33260,7 +33377,14 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertEqual([s["kind"] for s in page["segments"]], [] if empty else kinds)
                     self.assertEqual(page["gets"].count("/api/timeline"), 1)
                     self.assertEqual(page["refreshGets"], 2)
-                    self.assertEqual(page["reopenGets"], 3)
+                    self.assertEqual(page["statusGets"], 0)
+                    self.assertEqual(page["statusReturnGets"], 2)
+                    self.assertEqual(page["reopenGets"], 2)
+                    self.assertEqual(page["staleReopenGets"], 3)
+                    self.assertTrue(page["focused"])
+                    self.assertTrue(all(period["before"] and period["after"] for period in page["periods"]))
+                    self.assertTrue(all(period["window"] == 86400 for period in page["periods"]))
+                    self.assertEqual([p for p in page["gets"] if p.startswith("/api/timeline")], ["/api/timeline"])
                     self.assertEqual(len(page["marks"]), 24)
                     self.assertTrue(all(label.endswith(":00") for label in page["marks"]))
                     self.assertIn("24", page["text"])
@@ -33295,7 +33419,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                         self.assertIn(css, page["css"])
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
-    def test_status_timeline_task_details_survive_delayed_replies(self):
+    def test_cost_timeline_task_details_survive_delayed_replies(self):
         harness = self.PAGE_HARNESS.replace(
             'return {status: 200, json: async () => JSON.parse(JSON.stringify(snapshot))};',
             '''return {status: 200, json: async () => {
@@ -33306,10 +33430,10 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             }};''')
         self.assertNotEqual(harness, self.PAGE_HARNESS)
         with unittest.mock.patch.object(self, "PAGE_HARNESS", harness):
-            self.test_status_timeline_kinds_and_empty_window_in_both_languages()
+            self.test_cost_timeline_kinds_and_empty_window_in_both_languages()
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
-    def test_status_timeline_hour_titles_follow_page_language(self):
+    def test_cost_timeline_hour_titles_follow_page_language(self):
         from hansa import web
         harness = self.tmp / "timeline-hour-language.js"
         harness.write_text(self.PAGE_HARNESS)
@@ -33327,7 +33451,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual([mark["title"] for mark in shown["hourMarks"]], [title])
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
-    def test_status_timeline_last_hour_label_stays_inside_in_both_languages(self):
+    def test_cost_timeline_last_hour_label_stays_inside_in_both_languages(self):
         from datetime import datetime, timezone
         from hansa import web
         at = datetime(2026, 10, 23, 22, 8, tzinfo=timezone.utc).timestamp()
@@ -33457,7 +33581,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         st = self.picture_status()
         st["lanes"] += [{**st["lanes"][0], "name": "b", "providers": []}]
         for language, [page] in self.picture_pages(st):
-            self.assertEqual(page["first"], "status-sections")
+            self.assertEqual(page["first"], "status-picture")
             self.assertEqual([r["lane"] for r in page["rows"]], ["a", "b"])
             row = page["rows"][0]
             self.assertIn("dimmed", row["tone"])
@@ -34614,7 +34738,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 result = subprocess.run(["node", str(harness), str(page), "status-controls", language],
                                         input=json.dumps(replies), capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(json.loads(result.stdout), {"pause": True, "resume": True, "details": True, "asks": True, "releases": True})
+                self.assertEqual(json.loads(result.stdout), {"details": True, "asks": True, "releases": True})
 
     def principal_layout_page(self, releases=(), asks=(), scenario="principal-layout", providers=None, options=None):
         if not shutil.which("node"):
@@ -34660,7 +34784,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             before = page["before"]
             self.assertTrue(before["title"].startswith("(3) "))
             self.assertEqual(before["pipeline"], "3")
-            principal = before["root"]["kids"][1]
+            principal = before["root"]["kids"][0]
             self.assertEqual(principal["attrs"]["id"], "status-principal")
             [card] = [n for n in self.page_nodes(principal) if "data-principal-provider" in n["attrs"]]
             self.assertEqual(card["attrs"]["data-principal-provider"], "claude")
@@ -34681,7 +34805,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                                   scenario="principal-credit"):
                 self.assertFalse(page["before"]["title"].startswith("("))
                 self.assertEqual(page["before"]["pipeline"], "0")
-                self.assertEqual(page["before"]["root"]["kids"][1]["attrs"]["id"], "status-picture")
+                self.assertEqual(page["before"]["root"]["kids"][0]["attrs"]["id"], "status-picture")
                 self.assertFalse(any("data-principal-provider" in n["attrs"]
                                      for n in self.page_nodes(page["before"]["root"])))
                 self.assertEqual(page["settingsCount"], 0)
@@ -34696,7 +34820,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual((request["credentials"], request["mode"]), ("omit", "same-origin"))
                 self.assertTrue(page["final"]["title"].startswith("(2) "))
                 self.assertEqual(page["final"]["pipeline"], "2")
-                before, after = (p["root"]["kids"][1] for p in (page["before"], page["final"]))
+                before, after = (p["root"]["kids"][0] for p in (page["before"], page["final"]))
                 self.assertEqual(after["attrs"]["id"], "status-principal")
                 self.assertEqual(before["kids"][:2], after["kids"])
                 self.assertFalse(any("data-principal-provider" in n["attrs"] for n in self.page_nodes(after)))
@@ -34719,40 +34843,35 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertTrue(page["before"]["title"].startswith("(1) "))
             self.assertFalse(page["after"]["title"].startswith("("))
             self.assertEqual(page["after"]["pipeline"], "0")
-            self.assertEqual(page["after"]["root"]["kids"][1]["attrs"]["id"], "status-picture")
+            self.assertEqual(page["after"]["root"]["kids"][0]["attrs"]["id"], "status-picture")
             self.assertEqual(page["settingsCount"], 0)
 
-    def test_status_top_up_heading_and_link_distinct_from_providers(self):
+    def test_status_top_up_heading_distinct_from_providers(self):
         pages = self.principal_layout_page(providers=[{"credit_since": 1700000000}],
                                            scenario="status-sections")
         for page, heading, providers in zip(pages,
                 ("Top-ups to confirm", "等你确认充值"), ("Providers", "模型供应")):
             with self.subTest(heading=heading):
-                self.assertEqual(page["links"][0]["heading"], heading)
-                self.assertEqual(page["links"][0]["text"], heading)
-                self.assertEqual(sum(link["text"] == providers for link in page["links"]), 1)
+                self.assertEqual(page["headings"][0], heading)
+                self.assertEqual(page["headings"].count(providers), 1)
 
-    def test_status_section_links_scroll_and_wrap(self):
+    def test_status_omits_section_links_timeline_and_dispatch_in_both_languages(self):
         for releases, asks, providers in (([], [], []), ([{}, {"id": 18, "state": "done", "what": "done"}],
                 [{"id": 7, "text": "Review account"}], [{"credit_since": 1700000000}])):
-            for page in self.principal_layout_page(releases=releases, asks=asks, providers=providers, scenario="status-sections"):
-                self.assertEqual(page["first"], "status-sections")
-                self.assertEqual([link["target"] for link in page["links"]], page["panels"])
-                self.assertEqual(len(set(page["panels"])), len(page["panels"]))
-                self.assertTrue(page["links"])
-                for link in page["links"]:
-                    self.assertEqual(link["text"], link["heading"])
-                    self.assertTrue(link["scrolled"] and link["inside"])
-                # This DOM harness has no layout engine; check wrapping and sticky-header clearance in CSS.
-                self.assertRegex(page["css"], r"\.section-links\s*\{[^}]*flex-wrap:wrap")
-                self.assertRegex(page["css"], r"#tab-status section[^}]*scroll-margin-top:calc\(var\(--header-height\)")
+            pages = self.principal_layout_page(releases=releases, asks=asks, providers=providers, scenario="status-sections")
+            for language, page in zip(("en", "zh"), pages):
+                self.assertEqual(page["first"], "status-principal" if asks else "status-picture")
+                self.assertEqual(page["navs"], 0)
+                self.assertNotIn("section-links", page["css"])
+                self.assertNotIn("Lanes over the last 24 hours" if language == "en" else "工作线最近 24 小时", page["text"])
+                self.assertNotIn("Dispatch control" if language == "en" else "派活控制", page["text"])
+                self.assertTrue(page["noteBesideMark"])
 
     def assert_principal_layout(self, page, count):
         root = page["root"]
-        self.assertEqual(root["kids"][0]["attrs"].get("id"), "status-sections")
-        principal = root["kids"][1]
+        principal = root["kids"][0]
         self.assertEqual(principal["attrs"].get("id"), "status-principal")
-        self.assertEqual(root["kids"][2]["attrs"].get("id"), "status-picture")
+        self.assertEqual(root["kids"][1]["attrs"].get("id"), "status-picture")
         cards = [n for n in self.page_nodes(principal) if "data-principal-request" in n["attrs"]]
         self.assertEqual(len(cards), count)
         for card in cards:
@@ -34803,7 +34922,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertTrue("Work goes on" in second["text"] or "工作继续" in second["text"])
             markup = next(n for n in self.page_nodes(first) if n["tag"] == "pre" and n["text"] == "<i>Only you</i>")
             self.assertEqual(markup["kids"], [])
-            self.assertNotIn("#18", page["root"]["kids"][1]["text"])
+            self.assertNotIn("#18", page["root"]["kids"][0]["text"])
             self.assertIn("#18", page["root"]["text"])
             # The harness has no layout engine; check the rules applied to these rendered controls.
             self.assertRegex(page["css"], r"\.principal-actions\s*\{[^}]*flex-wrap:wrap")
@@ -34812,18 +34931,15 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     def test_principal_nothing_waiting_preserves_existing_page_order(self):
         for page in self.principal_layout_page(releases=[{"state": "done", "what": "done"}]):
-            self.assertEqual(page["root"]["kids"][0]["attrs"].get("id"), "status-sections")
-            children = page["root"]["kids"][1:]
+            children = page["root"]["kids"]
             self.assertEqual(children[0]["attrs"].get("id"), "status-picture")
-            self.assertEqual(children[1]["attrs"].get("id"), "status-timeline")
-            self.assertEqual(children[2]["className"], "page-head")
-            self.assertEqual(children[3]["className"], "metric-caption")
-            self.assertEqual(children[4]["className"], "metric-grid")
-            self.assertIn("runtime-toolbar", children[5]["className"])
-            self.assertEqual(children[6]["attrs"].get("id"), "status-principal")
+            self.assertEqual(children[1]["className"], "page-head")
+            self.assertEqual(children[2]["className"], "metric-caption")
+            self.assertEqual(children[3]["className"], "metric-grid")
+            self.assertEqual(children[4]["attrs"].get("id"), "status-principal")
             self.assertFalse(any("data-principal-request" in n["attrs"] for n in self.page_nodes(page["root"])))
-            self.assertIn("#17", children[6]["text"])
-            self.assertNotIn("Closed request", children[6]["text"])
+            self.assertIn("#17", children[4]["text"])
+            self.assertNotIn("Closed request", children[4]["text"])
 
     def test_principal_requests_without_a_release_still_come_first(self):
         for page in self.principal_layout_page(asks=[{"id": 7, "text": "Review account"}]):
