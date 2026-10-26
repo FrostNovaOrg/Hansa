@@ -322,6 +322,11 @@ matches what that list recorded.
 
 Work and cost offers the last 1, 7, 30 or 90 days and **Since the desk began**,
 with token usage, estimated value and unpriced tokens above the six category tables.
+Money on the Status and Work and cost pages uses `US$` before every amount,
+including table cells, chart labels and tooltips (for example, `US$305.31`).
+Currency headings and notes say **USD** in English and **美元** in Chinese.
+The price form keeps its USD-per-million-token units; downloaded CSV data and
+values sent to the server are unchanged.
 Alongside these totals it counts:
 
 - Tasks finished and failed, once per task, from `tasks/<id>/meta.json`'s

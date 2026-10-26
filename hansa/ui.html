@@ -656,7 +656,7 @@ const T = ZH ? {
   savedAlerts:"Alert settings apply at the next alert check.",
   last24h:"Last 24 h", finished:"finished", merged:"merged", tokens:"tokens", listValue:"priced",
   total:"Total", unpriced:"No price yet for:", setPrice:"Add them under Settings > Prices.",
-  costNote:"Dollars use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill. A task queued again for another try counts every try's tokens.",
+  costNote:"USD amounts use the price table in Settings (a Claude model without an entry uses Claude's list price). Subscriptions are paid monthly: this is what the tokens are worth, for comparing and spotting waste, not a bill. A task queued again for another try counts every try's tokens.",
   runs:"Runs (every try)", turns:"Turns",
   export:"Export CSV", byday:"By day", byseat:"By seat", bylane:"By lane", bymodel:"By model", bytask:"By task", byprovider:"By provider",
   seat_coordinator:"coordinator", seat_helper:"coordinator's helpers", seat_worker:"workers", seat_verify:"verifications", helper_reviewer:"reviewer", helper_scout:"scout", helper_operator:"operator",
@@ -806,7 +806,7 @@ Object.assign(T, ZH ? {
   noProviders:"还没有模型供应", noProvidersNote:"在设置中加一家供应后，这里会显示连接状态。",
   noEvents:"还没有活动记录", noEventsNote:"任务与工作台的最新变化会显示在这里。",
   period:"统计范围", periodDays:n => n === "all" ? "从工作台开始至今" : `最近 ${n} 天`, estimatedCost:"折算金额", totalTokens:"Token 用量", unpricedTokens:"没有价目的 token",
-  unpricedNote:"未计入折算金额", usdNote:"USD · 按设置中的价目折算", costLoading:"正在加载用量…", costReady:"按所选时间范围统计。",
+  unpricedNote:"未计入折算金额", currency:"美元", usdNote:"美元 · 按设置中的价目折算", costLoading:"正在加载用量…", costReady:"按所选时间范围统计。",
   costLoadFailed:"用量加载失败，请重试。", costRetained:n => `仍显示「${T.periodDays(n)}」的上次结果。`, retry:"重试", exporting:"正在导出…", exported:"CSV 已导出。", exportFailed:"导出失败，请重试。",
   tasksFinished:"完成的任务", tasksMerged:"合并的任务", tasksFailed:"失败的任务", historyVerifications:"核对次数",
   historyHeld:"成立（含有附注）", historyNotHeld:"不成立", historyUnsure:"不确定", releasesAsked:"请求的发布", releasesOut:"成功的发布",
@@ -815,7 +815,7 @@ Object.assign(T, ZH ? {
   workDaily:"每日工作", workWeekly:"每周工作", workDayNote:"每栏为一个滚动的 24 小时时段。", workWeekNote:"按工作台当地时间从周一开始；首尾周可能不完整。",
   workLegend:"上部：完成的任务 · 下部：合并的任务", linesAdded:"约增加行数", linesRemoved:"约删除行数",
   linesNote:"来自合并任务记录的变更大小；不是合并后的净变化。", linesOmitted:n => `未计入 ${n} 个缺少可用变更大小记录的合并任务。`,
-  dailyValue:"每日折算金额", chartDaysNote:"USD · 显示首末用量记录之间的日期；无记录的日期不显示金额。",
+  dailyValue:"每日折算金额", chartDaysNote:"美元 · 显示首末用量记录之间的日期；无记录的日期不显示金额。",
   noCost:"这段时间还没有用量", noCostNote:"模型调用产生用量后，会按席位、日期、模型、工作线、供应和任务显示明细。", seatColumn:"席位", dayColumn:"日期"
 } : {
   statusIntro:"Follow tasks, lanes and the decisions that need your attention.", costIntro:"Explore the desk’s work, token usage and estimated value by period.",
@@ -825,7 +825,7 @@ Object.assign(T, ZH ? {
   noProviders:"No providers yet", noProvidersNote:"Add a provider in Settings to see its connection status here.",
   noEvents:"No activity yet", noEventsNote:"New task and desk events will appear here.",
   period:"Time range", periodDays:n => n === "all" ? "Since the desk began" : `Last ${n} days`, estimatedCost:"Estimated value", totalTokens:"Token usage", unpricedTokens:"Unpriced tokens",
-  unpricedNote:"Excluded from the estimated value", usdNote:"USD · using the Settings price table", costLoading:"Loading usage…", costReady:"Totals for the selected period.",
+  unpricedNote:"Excluded from the estimated value", currency:"USD", usdNote:"USD · using the Settings price table", costLoading:"Loading usage…", costReady:"Totals for the selected period.",
   costLoadFailed:"Could not load usage. Try again.", costRetained:n => `Still showing the previous report: ${T.periodDays(n)}.`, retry:"Retry", exporting:"Exporting…", exported:"CSV exported.", exportFailed:"Could not export. Try again.",
   tasksFinished:"Tasks finished", tasksMerged:"Tasks merged", tasksFailed:"Tasks failed", historyVerifications:"Verifications",
   historyHeld:"Held (including notes)", historyNotHeld:"Did not hold", historyUnsure:"Unsure", releasesAsked:"Releases asked for", releasesOut:"Releases that went out",
@@ -928,6 +928,7 @@ const dashboardPanel = (title, symbol, count, ...kids) => h("section", {class:"d
   h("div", {class:"section-head"}, h("h2", {}, icon(symbol), title), count == null ? null : h("span", {class:"count-badge"}, count)), ...kids);
 const emptyState = (title, note, symbol) => h("div", {class:"empty-state"}, icon(symbol), h("strong", {}, title), h("p", {}, note));
 const fmt = n => (n || 0).toLocaleString();
+const money = n => "US$" + n.toFixed(2);
 const when = ts => ts ? new Date(ts * 1000).toLocaleString(language) : "";
 async function api(path, body) {
   const opt = {credentials:"omit", mode:"same-origin", headers:{Authorization:"Bearer " + pageToken}};
@@ -1387,7 +1388,7 @@ async function loadStatus(force = false) {
     h("div", {class:"metric-caption"}, T.last24h),
     h("div", {class:"metric-grid", "aria-label":T.last24h},
       summaryCard(T.finished, fmt(t.finished), "", "check"), summaryCard(T.merged, fmt(t.merged), "", "releases"),
-      summaryCard(T.tokens, fmt(t.worker_tokens), T.last24h, "status"), summaryCard(T.estimatedCost, "$" + t.worker_usd.toFixed(2), T.listValue, "cost")),
+      summaryCard(T.tokens, fmt(t.worker_tokens), T.last24h, "status"), summaryCard(T.estimatedCost, money(t.worker_usd), T.listValue, "cost")),
     h("section", {class:"dashboard-panel runtime-toolbar"},
       h("div", {class:"runtime-summary"}, h("h2", {}, T.dispatchControl),
         statusPill(st.paused ? T.paused : T.dispatchOn, st.paused ? "warn" : "ok", st.paused ? "pending" : "check"),
@@ -2284,7 +2285,7 @@ function costDayChart(dayRows) {
   const labels = [];
   chart.append(h("p", {class:"cost-explanation"}, T.chartDaysNote),
     h("div", {class:"cost-chart-plot", style:`grid-template-columns:repeat(${rows.length},minmax(0,1fr))`}, rows.map(([day, row], index) => {
-      const amount = row ? "$" + row.usd.toFixed(2) : "", unpriced = row?.unpriced_tokens;
+      const amount = row ? money(row.usd) : "", unpriced = row?.unpriced_tokens;
       const label = day + (row ? ` · ${amount}` : "") + (unpriced ? ` · ${T.tokensNoPrice}: ${fmt(unpriced)}` : "");
       const mobile = mobileIndices.has(index);
       if (rows.length <= 7 || labelIndices.has(index)) {
@@ -2331,8 +2332,8 @@ function renderCost(r) {
     const label = {seat:T.seatColumn, day:T.dayColumn, model:T.model, lane:T.lane, provider:T.provider, task:T.task}[key];
     const panel = dashboardPanel(T["by" + key], key === "provider" ? "providers" : key === "lane" ? "lanes" : "cost", rows.length,
       ...charts,
-      table([label, T.tokens, "$ " + T.listValue, T.tokensNoPrice, ...(tries ? [T.runs, T.turns] : [])],
-        rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), v.usd.toFixed(2), v.unpriced_tokens ? fmt(v.unpriced_tokens) : "",
+      table([label, T.tokens, T.currency + " · " + T.listValue, T.tokensNoPrice, ...(tries ? [T.runs, T.turns] : [])],
+        rows.map(([k, v]) => [key === "seat" ? seatName(k) : (k || "-"), fmt(v.tokens), money(v.usd), v.unpriced_tokens ? fmt(v.unpriced_tokens) : "",
           ...(tries ? [v.runs ? fmt(v.runs) : "", v.runs ? fmt(v.turns) : ""] : [])])));
     if (["provider", "task"].includes(key)) panel.className += " cost-wide";
     return panel;
@@ -2352,7 +2353,7 @@ function renderCost(r) {
       h("div", {class:"period-control"}, h("label", {for:"cost-period"}, T.period), costSelect), costExportButton), costFeedback),
     r ? h("div", {class:"metric-grid cost-metrics", "aria-label":T.total},
       summaryCard(T.totalTokens, fmt(r.total.tokens), T.periodDays(costDays), "status"),
-      summaryCard(T.estimatedCost, "$" + r.total.usd.toFixed(2), T.usdNote, "cost"),
+      summaryCard(T.estimatedCost, money(r.total.usd), T.usdNote, "cost"),
       summaryCard(T.unpricedTokens, fmt(unpriced), T.unpricedNote, "prices"),
       summaryCard(T.linesAdded, "≈ " + fmt(w.lines_added || 0), T.linesNote, "check"),
       summaryCard(T.linesRemoved, "≈ " + fmt(w.lines_removed || 0), T.linesNote, "check"),

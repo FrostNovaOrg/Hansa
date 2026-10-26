@@ -31734,6 +31734,21 @@ else if (ask === "work-chart") vm.runInContext("loadCost()", ctx).then(async () 
     name:work?.attrs["aria-label"], bars:result,
     css:page.slice(page.indexOf("<style>"), page.indexOf("</style>"))}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "currency") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  await run("Promise.all([loadStatus(), loadCost(), loadSettings()])");
+  const cards = root => descendants(ids[root], "div").filter(el => el.className === "metric-card")
+    .map(el => el.kids[1].textContent);
+  const tables = descendants(ids["#tab-cost"], "table").map(el => ({
+    heading:descendants(el, "th")[2].textContent,
+    amounts:descendants(el, "tr").slice(1).map(row => row.kids[2].textContent)}));
+  const notes = [];
+  walk(ids["#tab-cost"], el => { if (el.tag === "p" || el.className === "metric-note") notes.push(el.textContent); });
+  await run("exportCsv()");
+  await run("saveSettings()");
+  console.log(JSON.stringify({status:cards("#tab-status"), cost:cards("#tab-cost"), tables, notes,
+    priceUnits:run("[T.prices, T.pricesIntro]"), csv:await blobs[0].text(), posted}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "cost-chart") vm.runInContext("loadCost()", ctx).then(async () => {
   const days = given["/api/cost"].days;
   const select = ids["#cost-period"]; select.value = String(days); select.on.change({target:select});
@@ -34664,6 +34679,47 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertIn("unavailable" if language == "en" else "不可用", step["text"])
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_money_uses_us_dollars_in_both_languages_without_changing_data(self):
+        amounts = [0, 1.5, 305.31, 2.346, 1000, 0.004]
+        aggregate = lambda amount: {"tokens": 100, "usd": amount, "unpriced_tokens": 0}
+        categories = ("seat", "day", "model", "lane", "provider", "task")
+        report = {"total": aggregate(305.31), "unpriced_models": [],
+                  "by": {category: {"2026-10-21" if category == "day" else category: aggregate(amount)}
+                         for category, amount in zip(categories, amounts)},
+                  "rows": [{"day": "2026-10-21", "usd": 2.346}]}
+        status = views.status(self.desk)
+        status["last_24h"]["worker_usd"] = 305.31
+        public = public_settings(self.desk)
+        public["settings"]["prices"]["example-model"] = {"in": 1.5, "out": 2.346}
+        harness = self.tmp / "currency-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language, currency in (("en", "USD"), ("zh", "美元")):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(page), "currency", language],
+                                        input=json.dumps({"/api/status": status, "/api/events": [],
+                                                          "/api/cost": report, "/api/settings": public}),
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                output = json.loads(result.stdout)
+                self.assertIn("US$305.31", output["status"])
+                self.assertIn("US$305.31", output["cost"])
+                self.assertEqual([table["amounts"] for table in output["tables"]],
+                                 [[f"US${amount:.2f}"] for amount in amounts])
+                for table in output["tables"]:
+                    self.assertIn(currency, table["heading"])
+                currency_notes = [note for note in output["notes"] if currency in note]
+                self.assertEqual(len(currency_notes), 3)  # total note, estimate explanation and daily chart note
+                self.assertFalse(any("USD" in note for note in output["notes"]) if language == "zh"
+                                 else any("Dollars" in note for note in output["notes"]))
+                for units in output["priceUnits"]:
+                    self.assertIn(currency, units)
+                    self.assertIn("百万" if language == "zh" else "million", units)
+                csv_rows = list(csv.DictReader(io.StringIO(output["csv"])))
+                self.assertEqual(csv_rows[0]["usd"], "2.346")
+                self.assertEqual(output["posted"]["settings"]["prices"], public["settings"]["prices"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_cost_page_periods_breakdowns_warnings_and_csv_round_trip(self):
         aggregate = {"tokens": 2345, "usd": 2.34, "unpriced_tokens": 345, "runs": 3, "turns": 9}
         row = {"day": "2026-10-21", "seat": "worker", "lane": "a,b", "task": 't"001',
@@ -34813,11 +34869,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertEqual(output["plot"], f"grid-template-columns:repeat({days},minmax(0,1fr))")
                     maximum = max(row["usd"] for row in rows.values()) or 1
                     for bar, (day, row) in zip(output["bars"], sorted(rows.items())):
-                        self.assertEqual(bar["label"], f"{day} · ${row['usd']:.2f}")
+                        self.assertEqual(bar["label"], f"{day} · US${row['usd']:.2f}")
                         self.assertEqual(bar["title"], bar["label"])
                         height = float(re.search(r"height:([\d.]+)%", bar["style"])[1])
                         self.assertAlmostEqual(height, row["usd"] / maximum * 100)
-                    self.assertEqual(output["table"], [[day, format(row["tokens"], ","), f"{row['usd']:.2f}", ""]
+                    self.assertEqual(output["table"], [[day, format(row["tokens"], ","), f"US${row['usd']:.2f}", ""]
                                                        for day, row in rows.items()])
                     self.assertEqual(output["order"], ["chart", "table"])
                     self.assertEqual(output["gets"][-1], f"/api/cost?days={days}")
@@ -34825,7 +34881,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertTrue(output["labels"][0]["mobile"] and output["labels"][-1]["mobile"])
                     for label in output["labels"]:
                         day = "2026-" + label["text"][:5]
-                        self.assertEqual(label["text"], f"{day[5:]}${rows[day]['usd']:.2f}")
+                        self.assertEqual(label["text"], f"{day[5:]}US${rows[day]['usd']:.2f}")
                     if days == 30:
                         self.assertLess(len(output["labels"]), days)
                     # PAGE_HARNESS has no layout engine: verify shrinking tracks and mobile label thinning.
@@ -34843,7 +34899,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     output = self.cost_chart_page(days, rows, language)
                     last = output["labels"][-1]
                     self.assertEqual(last["edge"], "last")
-                    self.assertEqual(last["text"], f"10-{days:02}$1.25")
+                    self.assertEqual(last["text"], f"10-{days:02}US$1.25")
                     # The harness cannot lay out text: require a right anchor, real width and no wrapping.
                     self.assertEqual(last["style"], "right:0")
                     rule = re.search(r"\.cost-chart-label\[data-edge=last\]\s*\{([^}]+)\}", output["css"])[1]
@@ -34865,14 +34921,14 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertEqual(len(output["bars"]), len(dates), "interior empty days must keep their own tracks")
                     self.assertEqual(output["plot"], f"grid-template-columns:repeat({len(dates)},minmax(0,1fr))")
                     self.assertEqual([bar["label"] for bar in output["bars"]],
-                                     [f"{dates[0]} · $1.00", *dates[1:-1], f"{dates[-1]} · $2.00"])
+                                     [f"{dates[0]} · US$1.00", *dates[1:-1], f"{dates[-1]} · US$2.00"])
                     for bar, day in zip(output["bars"][1:-1], dates[1:-1]):
                         self.assertEqual(bar["title"], day)
                         self.assertEqual(bar["style"], "height:0%")
                         self.assertNotIn("unpriced", bar["tone"].split())
                     self.assertEqual([label["text"] for label in output["labels"]],
-                                     [f"{dates[0][5:]}$1.00", *[day[5:] for day in dates[1:-1]], f"{dates[-1][5:]}$2.00"])
-                    self.assertEqual(output["table"], [[day, str(row["tokens"]), f"{row['usd']:.2f}", ""]
+                                     [f"{dates[0][5:]}US$1.00", *[day[5:] for day in dates[1:-1]], f"{dates[-1][5:]}US$2.00"])
+                    self.assertEqual(output["table"], [[day, str(row["tokens"]), f"US${row['usd']:.2f}", ""]
                                                        for day, row in rows.items()])
 
     def test_cost_chart_marks_days_with_unpriced_tokens_in_both_languages(self):
@@ -34888,7 +34944,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     bars_by_day = {bar["label"][:10]: bar for bar in output["bars"]}
                     for day, row in rows.items():
                         bar = bars_by_day[day]
-                        self.assertIn(f"{day} · ${row['usd']:.2f}", bar["label"])
+                        self.assertIn(f"{day} · US${row['usd']:.2f}", bar["label"])
                         self.assertIn(warning, bar["label"])
                         self.assertIn(format(row["unpriced_tokens"], ","), bar["label"])
                         self.assertIn("unpriced", bar["tone"].split())
