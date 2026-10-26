@@ -480,8 +480,11 @@ def recorded_lines(stat) -> tuple | None:
 
 def work_history(tasks: list, releases: list, since: float, chart: dict | None = None) -> dict:
     """Outcomes by task, releases by request, and elapsed run time by when each ended.
-    Replaced tasks retain ended_as; attempts are runs, never extra task outcomes."""
-    out = dict.fromkeys(("finished", "merged", "failed", "verifications", "held", "did_not_hold", "unsure",
+    Replaced tasks retain ended_as; attempts are runs, never extra task outcomes.
+    merged_first_try counts the merged tasks that no hansa retry sent back (those have a parent);
+    verdicts counts the verifications that reached a verdict, held, did not hold or unsure."""
+    out = dict.fromkeys(("finished", "merged", "merged_first_try", "failed", "verifications", "held",
+                         "did_not_hold", "unsure", "verdicts",
                          "releases_asked", "releases_out", "lines_added", "lines_removed", "lines_omitted"), 0)
     seconds = 0
     inside = lambda stamp: stamp is not None and stamp > 0 and stamp >= since
@@ -502,6 +505,7 @@ def work_history(tasks: list, releases: list, since: float, chart: dict | None =
                            "unsure": "unsure"}.get(m.get("verdict"))
                 if verdict:
                     out[verdict] += 1
+                    out["verdicts"] += 1
         else:
             if inside(m.get("finished")):
                 if state in ("done", "merged", "merging"):
@@ -509,6 +513,8 @@ def work_history(tasks: list, releases: list, since: float, chart: dict | None =
                 out["failed"] += state == "failed"
             if inside(m.get("merged")):
                 count("merged", m["merged"])
+                if not m.get("parent"):  # a follow-up hansa retry queued was sent back
+                    out["merged_first_try"] += 1
                 lines = recorded_lines(m.get("stat"))
                 if lines is None:
                     out["lines_omitted"] += 1
@@ -563,14 +569,16 @@ def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict
             else:
                 a["usd"] += r["usd"]
         by[key] = {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(agg.items())}
-    total_usd = sum(r["usd"] for r in rows if r["usd"] is not None)
-    return {"days": days, "window": window, "rows": rows, "by": by,
-            "work": {**work_history(tasks, release.releases(desk), since, chart),
-                     # the coordinator's turns with a step in the window, and the time each worked, first step to last
-                     "coordinator_turns": len(got["turns"]),
-                     "coordinator_hours": sum(t["last"] - t["first"] for t in got["turns"]) / 3600},
+    total_usd = round(sum(r["usd"] for r in rows if r["usd"] is not None), 6)
+    work = {**work_history(tasks, release.releases(desk), since, chart),
+            # the coordinator's turns with a step in the window, and the time each worked, first step to last
+            "coordinator_turns": len(got["turns"]),
+            "coordinator_hours": sum(t["last"] - t["first"] for t in got["turns"]) / 3600}
+    # what the period's value, the total shown, comes to per task merged in it; no merge: no figure
+    work["usd_per_merged"] = round(total_usd / work["merged"], 6) if work["merged"] else None
+    return {"days": days, "window": window, "rows": rows, "by": by, "work": work,
             "work_chart": chart,
-            "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": round(total_usd, 6),
+            "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": total_usd,
                       "turns": sum(r.get("turns", 0) for r in rows), "runs": sum(r.get("runs", 0) for r in rows)},
             "unpriced_models": sorted({r["model"] for r in rows if r["usd"] is None}),
             **uncounted(desk),

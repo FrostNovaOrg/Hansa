@@ -830,6 +830,10 @@ Object.assign(T, ZH ? {
   costLoadFailed:"用量加载失败，请重试。", costRetained:n => `仍显示「${T.periodDays(n)}」的上次结果。`, retry:"重试", exporting:"正在导出…", exported:"CSV 已导出。", exportFailed:"导出失败，请重试。",
   tasksFinished:"完成的任务", tasksMerged:"合并的任务", tasksFailed:"失败的任务", historyVerifications:"核对次数",
   historyHeld:"成立（含有附注）", historyNotHeld:"不成立", historyUnsure:"不确定", releasesAsked:"请求的发布", releasesOut:"成功的发布",
+  usdPerMerged:"每个合并任务的金额", usdPerMergedNote:"这段时间的折算金额 ÷ 合并的任务数",
+  firstTryMerged:"首次尝试就合并", firstTryMergedNote:"用 hansa retry 退回的后续任务算作退回重做",
+  verdictsHeld:"核对成立的比例", verdictsHeldNote:"在已有结论的核对中，成立（含有附注）的比例",
+  shareOf:(part, whole) => `${Math.round(part / whole * 100)}%（${fmt(part)} / ${fmt(whole)}）`,
   workerHours:"执行与核对工时", workerHoursNote:"小时 · 含重试，按运行结束时间统计", historyEndNote:"按各自完成或合并的时间统计；核对单独计数。",
   coordinatorTurns:"协调席的轮数", coordinatorTurnsNote:"这段时间里有步骤的轮", coordinatorHours:"协调席工时", coordinatorHoursNote:"小时 · 每轮从第一步到最后一步",
   workDaily:"每日工作", workWeekly:"每周工作", workDayNote:"每栏为一个滚动的 24 小时时段。", workWeekNote:"按工作台当地时间从周一开始；首尾周可能不完整。",
@@ -852,6 +856,10 @@ Object.assign(T, ZH ? {
   costLoadFailed:"Could not load usage. Try again.", costRetained:n => `Still showing the previous report: ${T.periodDays(n)}.`, retry:"Retry", exporting:"Exporting…", exported:"CSV exported.", exportFailed:"Could not export. Try again.",
   tasksFinished:"Tasks finished", tasksMerged:"Tasks merged", tasksFailed:"Tasks failed", historyVerifications:"Verifications",
   historyHeld:"Held (including notes)", historyNotHeld:"Did not hold", historyUnsure:"Unsure", releasesAsked:"Releases asked for", releasesOut:"Releases that went out",
+  usdPerMerged:"US$ per merged task", usdPerMergedNote:"Estimated value ÷ tasks merged",
+  firstTryMerged:"Merged at the first try", firstTryMergedNote:"hansa retry follow-ups count as sent back",
+  verdictsHeld:"Verifications that held", verdictsHeldNote:"Held (including notes) among verifications with a verdict",
+  shareOf:(part, whole) => `${Math.round(part / whole * 100)}% (${fmt(part)} of ${fmt(whole)})`,
   workerHours:"Worker and verifier hours", workerHoursNote:"Hours · retries included, by run end time", historyEndNote:"By each completion or merge time; verifications count separately.",
   coordinatorTurns:"Coordinator turns", coordinatorTurnsNote:"Turns with a step in the period", coordinatorHours:"Coordinator hours", coordinatorHoursNote:"Hours · each turn from its first step to its last",
   workDaily:"Daily work", workWeekly:"Weekly work", workDayNote:"Each bar covers a rolling 24-hour interval.", workWeekNote:"Weeks start Monday in the desk’s local time; the first and last may be partial.",
@@ -2464,6 +2472,7 @@ function workChart(data) {
 }
 function renderCost(r) {
   const seatName = k => k.startsWith("helper:") ? `${T.seat_helper}: ${T["helper_" + k.slice(7)] || k.slice(7)}` : T["seat_" + k] || k;
+  const share = (part, whole) => whole ? T.shareOf(part || 0, whole) : "—";
   const block = key => {
     const rows = Object.entries(r.by[key] || {});
     const charts = key === "day" ? [costDayChart(rows), r.work_chart ? workChart(r.work_chart) : null] : [];
@@ -2505,6 +2514,9 @@ function renderCost(r) {
         [T.historyVerifications, w.verifications], [T.historyHeld, w.held], [T.historyNotHeld, w.did_not_hold],
         [T.historyUnsure, w.unsure], [T.releasesAsked, w.releases_asked], [T.releasesOut, w.releases_out]]
         .map(([label, value]) => summaryCard(label, fmt(value || 0), "", "check")),
+      summaryCard(T.usdPerMerged, w.usd_per_merged == null ? "—" : money(w.usd_per_merged), T.usdPerMergedNote, "cost"),
+      summaryCard(T.firstTryMerged, share(w.merged_first_try, w.merged), T.firstTryMergedNote, "check"),
+      summaryCard(T.verdictsHeld, share(w.held, w.verdicts), T.verdictsHeldNote, "check"),
       summaryCard(T.workerHours, (w.worker_hours || 0).toFixed(2), T.workerHoursNote, "status"),
       summaryCard(T.coordinatorTurns, fmt(w.coordinator_turns || 0), T.coordinatorTurnsNote, "status"),
       summaryCard(T.coordinatorHours, (w.coordinator_hours || 0).toFixed(2), T.coordinatorHoursNote, "status")) : null,

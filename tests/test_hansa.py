@@ -25142,8 +25142,9 @@ def save():'''))
         for days in (1, 7, 30, 90, None):
             with self.subTest(days=days):
                 rep = cost.report(self.desk, days)
-                self.assertEqual(len(rep["work"]), 15)
-                self.assertTrue(all(value == 0 for value in rep["work"].values()))
+                self.assertEqual(len(rep["work"]), 18)
+                self.assertTrue(all(value == 0 for key, value in rep["work"].items() if key != "usd_per_merged"))
+                self.assertIsNone(rep["work"]["usd_per_merged"])
                 self.assertEqual(rep["total"]["tokens"], 0)
                 self.assertTrue(all(b["finished"] == b["merged"] == 0 for b in rep["work_chart"]["buckets"]))
                 if days in (1, 7, 30):
@@ -25190,6 +25191,53 @@ def save():'''))
             self.assertEqual((work["verifications"], work["held"], work["did_not_hold"], work["unsure"]), (4, 2, 1, 1))
             self.assertEqual((work["releases_asked"], work["releases_out"]), (3, 1))
             self.assertEqual((work["finished"], work["merged"], work["failed"]), (0, 0, 0))
+
+    def test_work_history_first_try_merges_usd_per_merge_and_verdict_share(self):
+        ended = time.time() - 60
+        for i in range(3):
+            tid = self.desk.new_task(f"Done in one try {i}")
+            self.desk.update(tid, state="merged", finished=ended, merged=ended, provider="claude",
+                             usage={"claude-opus-5": {"in": 100000}})
+        original = self.desk.new_task("Sent back twice")
+        self.desk.update(original, state="done", finished=ended)
+        self.hansa("retry", original, "--fresh", "Do it again")
+        [followup] = [m for m in self.desk.tasks() if m.get("parent") == original]
+        self.desk.update(followup["id"], state="done", finished=ended)
+        self.hansa("retry", followup["id"], "--fresh", "And once more")
+        [second] = [m for m in self.desk.tasks() if m.get("parent") == followup["id"]]
+        self.desk.update(second["id"], state="merged", finished=ended, merged=ended, provider="claude",
+                         usage={"claude-opus-5": {"in": 100000}})
+        for verdict in ("holds", "holds, with notes", "holds", "does not hold"):
+            vid = self.desk.new_task("Check the work", kind="verify")
+            self.desk.update(vid, state="done", finished=ended, verdict=verdict)
+        work = cost.report(self.desk)["work"]
+        # 4 merged, one of them the second retry: a retry of a retry is sent back once, not twice
+        self.assertEqual((work["merged"], work["merged_first_try"]), (4, 3))
+        self.assertAlmostEqual(work["usd_per_merged"], 0.5)  # US$2.00 over 4 merges
+        self.assertEqual((work["held"], work["did_not_hold"], work["unsure"], work["verdicts"]), (3, 1, 0, 4))
+
+    def test_work_history_new_figures_follow_the_period_and_are_none_without_merges(self):
+        boundary = time.time() - 86400
+        old = self.desk.new_task("Merged before the period")
+        self.desk.update(old, state="merged", finished=boundary - 60, merged=boundary - 60, provider="claude",
+                         usage={"claude-opus-5": {"in": 1000000}})
+        new = self.desk.new_task("Merged inside the period")
+        self.desk.update(new, state="merged", finished=boundary + 60, merged=boundary + 60, provider="claude",
+                         usage={"claude-opus-5": {"in": 2000000}})
+        for finished, verdict in ((boundary - 60, "holds"), (boundary + 60, "does not hold")):
+            vid = self.desk.new_task("Check the work", kind="verify")
+            self.desk.update(vid, state="done", finished=finished, verdict=verdict)
+        recent = cost.report(self.desk, since=boundary)["work"]
+        self.assertEqual((recent["merged"], recent["merged_first_try"], recent["verdicts"]), (1, 1, 1))
+        self.assertAlmostEqual(recent["usd_per_merged"], 10.0)  # US$10.00 in the period over its 1 merge
+        self.assertEqual((recent["held"], recent["did_not_hold"]), (0, 1))
+        whole = cost.report(self.desk, None)["work"]
+        self.assertEqual((whole["merged"], whole["merged_first_try"], whole["verdicts"]), (2, 2, 2))
+        self.assertAlmostEqual(whole["usd_per_merged"], 7.5)  # US$15.00 over both merges
+        self.assertEqual((whole["held"], whole["did_not_hold"]), (1, 1))
+        blank = cost.report(self.desk, since=boundary + 120)["work"]
+        self.assertEqual((blank["merged"], blank["merged_first_try"], blank["verdicts"]), (0, 0, 0))
+        self.assertIsNone(blank["usd_per_merged"])
 
     def test_work_history_queued_or_failed_verification_with_stale_finish_is_not_completed(self):
         ended = time.time() - 60
@@ -25294,10 +25342,10 @@ def save():'''))
         write_json(self.desk.state_dir / "releases.json", [
             {"id": i, "state": "done", "asked": end, "ended": end}
             for i, end in enumerate((boundary - 0.01, boundary, boundary + 0.01), 1)])
-        expected = {"finished": 2, "merged": 2, "failed": 2, "verifications": 2, "held": 0, "did_not_hold": 0,
-                    "unsure": 2, "releases_asked": 2, "releases_out": 2, "worker_hours": 6,
-                    "lines_added": 0, "lines_removed": 0, "lines_omitted": 2, "coordinator_turns": 0,
-                    "coordinator_hours": 0}
+        expected = {"finished": 2, "merged": 2, "merged_first_try": 2, "failed": 2, "verifications": 2,
+                    "held": 0, "did_not_hold": 0, "unsure": 2, "verdicts": 2, "releases_asked": 2,
+                    "releases_out": 2, "worker_hours": 6, "lines_added": 0, "lines_removed": 0,
+                    "lines_omitted": 2, "usd_per_merged": 0, "coordinator_turns": 0, "coordinator_hours": 0}
         self.assertEqual(cost.report(self.desk, since=boundary)["work"], expected)
         with unittest.mock.patch("hansa.cost.time.time", return_value=boundary + 90 * 86400):
             self.assertEqual(cost.report(self.desk, 90)["work"], expected)
@@ -25349,7 +25397,8 @@ def save():'''))
                 self.assertEqual(rep["days"], None if period == "all" else 90)
                 self.assertEqual(rep["work_chart"]["interval"], "week")
                 self.assertEqual("rows" in rep, bool(suffix))
-                self.assertTrue(all(value == 0 for value in rep["work"].values()))
+                self.assertTrue(all(value == 0 for key, value in rep["work"].items() if key != "usd_per_merged"))
+                self.assertIsNone(rep["work"]["usd_per_merged"])
 
     def test_cache_price_defaults_and_explicit_one_hour_prices(self):
         for model, entry, write5m, write1h in (
@@ -32269,11 +32318,20 @@ else if (ask === "cost-history") (async () => {
   await run("loadCost()");
   const zh = process.argv[4] === "zh";
   check(descendants(root, "h1")[0]?.textContent === (zh ? "工作与成本" : "Work and cost"), "history title missing");
-  const labels = zh ? ["完成的任务", "合并的任务", "失败的任务", "核对次数", "成立（含有附注）", "不成立", "不确定", "请求的发布", "成功的发布", "执行与核对工时", "协调席的轮数", "协调席工时"]
-    : ["Tasks finished", "Tasks merged", "Tasks failed", "Verifications", "Held (including notes)", "Did not hold", "Unsure", "Releases asked for", "Releases that went out", "Worker and verifier hours", "Coordinator turns", "Coordinator hours"];
-  const values = ["11", "7", "3", "4", "2", "1", "1", "3", "1", "12.50", "42", "3.25"];
-  const cards = descendants(root, "div").filter(el => el.className === "metric-card");
-  labels.forEach((label, index) => check(cards.some(el => el.kids[0]?.textContent === label && el.kids[1]?.textContent === values[index]), "history metric missing: " + label));
+  const labels = zh ? ["完成的任务", "合并的任务", "失败的任务", "核对次数", "成立（含有附注）", "不成立", "不确定", "请求的发布", "成功的发布", "每个合并任务的金额", "首次尝试就合并", "核对成立的比例", "执行与核对工时", "协调席的轮数", "协调席工时"]
+    : ["Tasks finished", "Tasks merged", "Tasks failed", "Verifications", "Held (including notes)", "Did not hold", "Unsure", "Releases asked for", "Releases that went out", "US$ per merged task", "Merged at the first try", "Verifications that held", "Worker and verifier hours", "Coordinator turns", "Coordinator hours"];
+  const values = zh ? ["11", "4", "3", "4", "3", "1", "0", "3", "1", "US$1.50", "75%（3 / 4）", "75%（3 / 4）", "12.50", "42", "3.25"]
+    : ["11", "4", "3", "4", "3", "1", "0", "3", "1", "US$1.50", "75% (3 of 4)", "75% (3 of 4)", "12.50", "42", "3.25"];
+  const shown = (label, value) => descendants(root, "div").filter(el => el.className === "metric-card")
+    .some(el => el.kids[0]?.textContent === label && el.kids[1]?.textContent === value);
+  labels.forEach((label, index) => check(shown(label, values[index]), "history metric missing: " + label));
+  // Nothing merged and no verdict: each of the three shows a dash rather than a figure.
+  Object.assign(given["/api/cost"].work, {merged: 0, merged_first_try: 0, verifications: 0, verdicts: 0,
+    held: 0, did_not_hold: 0, unsure: 0, usd_per_merged: null});
+  await run("loadCost()");
+  for (const label of zh ? ["每个合并任务的金额", "首次尝试就合并", "核对成立的比例"]
+      : ["US$ per merged task", "Merged at the first try", "Verifications that held"])
+    check(shown(label, "—"), "blank figure missing: " + label);
   for (const days of [90, "all"]) {
     const select = ids["#cost-period"];
     check(descendants(select, "option").some(el => el.value === String(days)), "history period missing");
@@ -35485,8 +35543,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_work_history_page_translates_counts_periods_and_exports(self):
         report = {"total": {"tokens": 10, "usd": 1}, "by": {}, "rows": [], "unpriced_models": [],
-                  "work": {"finished": 11, "merged": 7, "failed": 3, "verifications": 4, "held": 2,
-                           "did_not_hold": 1, "unsure": 1, "releases_asked": 3, "releases_out": 1, "worker_hours": 12.5,
+                  "work": {"finished": 11, "merged": 4, "merged_first_try": 3, "failed": 3, "verifications": 4,
+                           "held": 3, "did_not_hold": 1, "unsure": 0, "verdicts": 4, "releases_asked": 3,
+                           "releases_out": 1, "usd_per_merged": 1.5, "worker_hours": 12.5,
                            "coordinator_turns": 42, "coordinator_hours": 3.25}}
         harness = self.tmp / "work-history-page.js"
         harness.write_text(self.PAGE_HARNESS)
