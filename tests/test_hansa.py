@@ -36376,6 +36376,24 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertTrue(release.page_rows(self.desk, self.desk.settings())[0]["code_sent"])
         self.assertEqual(alert.queued(self.desk), [])
 
+    def test_a_todo_without_an_id_does_not_block_other_alerts_or_release_codes(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        n = self.desk.add_ask("Still needed")
+        self.hansa("lane", "target", "a", "default", "true")
+        self.hansa("release", "a")
+        code = self.queued_code(1)
+        alert.add(self.desk, "disk", "free space warning")
+        write_json(self.desk.asks_path, self.desk.asks() + [{"text": "Hand edited", "closed": now()}])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        [sent] = self.alerted(out)
+        self.assertEqual(sent["kind"], "ask,release_waiting,disk")
+        self.assertIn(f"to-do #{n} for you: Still needed", sent["text"])
+        self.assertIn(f"#1 code {code}", sent["text"])
+        self.assertIn("\n- free space warning", sent["text"])
+        self.assertTrue(release.page_rows(self.desk, self.desk.settings())[0]["code_sent"])
+        self.assertEqual(alert.queued(self.desk), [])
+
     def test_alerts_that_come_close_together_go_out_in_one_run_one_run_at_a_time(self):
         from hansa import alert
         out = self.alert_fake()
@@ -36542,6 +36560,54 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertTrue(alert.test(self.desk)["ok"])  # the principal's own test press is not held
         self.assertIn("five", self.alerted(out)[-1]["text"])
 
+
+    def test_the_held_back_count_leaves_out_closed_todos(self):
+        from hansa import alert
+        out = self.alert_fake()
+        t = time.time()
+        write_json(alert.last_file(self.desk), {"runs": [t - 60] * alert.MOST_RUNS})
+        closed = [self.desk.add_ask(text) for text in ("Handled first", "Handled second")]
+        n = self.desk.add_ask("Still needed")
+        alert.add(self.desk, "disk", "free space warning")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(self.alerted(out), [])
+        for id_ in closed:
+            self.desk.close_ask_as_coordinator(id_, "Done")
+        with unittest.mock.patch.object(alert.time, "time", return_value=t + alert.HOUR + 1):
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        [sent] = self.alerted(out)
+        self.assertEqual(sent["kind"], "ask,disk")
+        self.assertIn("2 alerts (2 held back by the limit of 20 runs an hour)", sent["text"])
+        self.assertEqual(sent["text"].splitlines()[1:],
+                         [f"- to-do #{n} for you: Still needed", "- free space warning"])
+        self.assertEqual(self.events("alert_sent")[-1]["alerts"], 2)
+        self.assertNotIn("held_since", alert._last(self.desk))
+
+    def test_a_hold_with_only_closed_todos_does_not_mark_the_next_alert_as_held(self):
+        from hansa import alert
+        out = self.alert_fake()
+        t = time.time()
+        runs = [t - 60] * alert.MOST_RUNS
+        write_json(alert.last_file(self.desk), {"runs": runs})
+        ids = [self.desk.add_ask(text) for text in ("Handled first", "Handled second")]
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertTrue(alert._last(self.desk)["held_since"])
+        for n in ids:
+            self.desk.close_ask_as_coordinator(n, "Done")
+        with unittest.mock.patch.object(alert.time, "time", return_value=t + alert.HOUR + 1):
+            self.assertIsNone(alert.send_due(self.desk, gather=0))
+            self.assertEqual(self.alerted(out), [])
+            self.assertEqual(alert.queued(self.desk), [])
+            self.assertEqual(self.events("alert_sent"), [])
+            self.assertNotIn("held_since", alert._last(self.desk))
+            self.assertEqual(alert._last(self.desk)["runs"], runs)
+            alert.add(self.desk, "disk", "later free space warning")
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        [sent] = self.alerted(out)
+        self.assertEqual(sent["kind"], "disk")
+        self.assertIn("later free space warning", sent["text"])
+        self.assertNotIn("held back", sent["text"])
+        self.assertEqual(len(self.events("alert_sent")), 1)
 
     def test_release_alerts_name_the_target_and_a_tick_that_no_longer_holds_alerts_like_any_wait(self):
         from hansa import alert, release

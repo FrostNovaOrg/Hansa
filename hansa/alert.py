@@ -354,18 +354,18 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
                 desk.event("alert_held", alerts=len(good), most_runs=MOST_RUNS)
             return None
         with desk.lock():
-            closed = {a["id"] for a in desk.asks() if a.get("closed")}
+            closed = {a["id"] for a in desk.asks() if "id" in a and a.get("closed")}
             q = [x for x in _clean(desk) if x["kind"] != "ask" or x.get("ask") not in closed]
             write_json(queue_file(desk), [])
         cmd = command(desk.settings())
         codes = [x for x in q if isinstance(x.get("code"), str) and x["code"]]
+        held_since = rec.get("held_since") if isinstance(rec.get("held_since"), (int, float)) else None
+        if held_since:
+            write_json(last_file(desk), {k: v for k, v in rec.items() if k != "held_since"})
         if not cmd or not q:  # cleared since they were queued: nothing to send them with
             _codes_went(desk, codes, "", False)
             return None
-        held_since = rec.get("held_since") if isinstance(rec.get("held_since"), (int, float)) else None
         held = len(q) if held_since else 0
-        if held_since:
-            write_json(last_file(desk), {k: v for k, v in rec.items() if k != "held_since"})
         kinds = ",".join(dict.fromkeys(x["kind"] for x in q))
         text = text_of(desk, q, held)
         result = run(desk, cmd, kinds, text, timeout, codes=[x["code"] for x in codes])
