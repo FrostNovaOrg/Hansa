@@ -529,6 +529,16 @@ def work_history(tasks: list, releases: list, since: float, chart: dict | None =
     return {**out, "worker_hours": seconds / 3600}
 
 
+def calendar(desk: Desk) -> dict:
+    """Local calendar dates and the report's day totals, limited to 53 Monday-first weeks."""
+    today = date.fromisoformat(_day(time.time()))
+    monday = today - timedelta(days=today.weekday())
+    start = max(date.fromisoformat(_day(began(desk))), monday - timedelta(weeks=52))
+    first, last = start.isoformat(), today.isoformat()
+    return {"start": first, "today": last,
+            "days": {day: row for day, row in report(desk, None)["by"]["day"].items() if first <= day <= last}}
+
+
 def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict:
     window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
               else "since the desk began" if days is None else f"last {days} day(s)")

@@ -249,6 +249,17 @@ td .task-detail { min-width:200px; }
 .cost-chart-label[data-edge=first] { transform:none; text-align:left; }
 .cost-chart-label[data-edge=last] { transform:none; text-align:right; width:33%; white-space:nowrap; }
 .cost-chart-label[data-edge=only] { transform:translateX(-50%); }
+.work-calendar { min-width:0; max-width:100%; }
+.calendar-scroll { max-width:100%; overflow-x:auto; padding-bottom:8px; }
+.calendar-grid { display:grid; grid-template-rows:16px repeat(7,12px); gap:3px; width:max-content; padding-right:24px; }
+.calendar-label { font-size:11px; line-height:12px; color:var(--muted); white-space:nowrap; }
+.calendar-day { display:block; width:12px; height:12px; border-radius:2px; background:var(--surface); border:1px solid var(--line); }
+.calendar-day[data-level="1"] { background:color-mix(in srgb,var(--ok) 25%,var(--card)); }
+.calendar-day[data-level="2"] { background:color-mix(in srgb,var(--ok) 50%,var(--card)); }
+.calendar-day[data-level="3"] { background:color-mix(in srgb,var(--ok) 75%,var(--card)); }
+.calendar-day[data-level="4"] { background:var(--ok); }
+.calendar-day:focus { outline:2px solid var(--link); outline-offset:1px; }
+.calendar-legend { display:flex; align-items:center; flex-wrap:wrap; gap:5px; font-size:12px; color:var(--muted); margin-top:8px; }
 .work-chart { position:relative; }
 .work-chart-track > .cost-chart-bar { background:var(--ok); }
 .work-chart-finished { background:var(--accent); border-radius:3px 3px 0 0; }
@@ -828,6 +839,9 @@ Object.assign(T, ZH ? {
   workLegend:"上部：完成的任务 · 下部：合并的任务", linesAdded:"约增加行数", linesRemoved:"约删除行数",
   linesNote:"来自合并任务记录的变更大小；不是合并后的净变化。", linesOmitted:n => `未计入 ${n} 个缺少可用变更大小记录的合并任务。`,
   dailyValue:"每日折算金额", chartDaysNote:"美元 · 显示首末用量记录之间的日期；无记录的日期不显示金额。",
+  workCalendar:"工作日历", calendarLoading:"正在加载工作日历…", calendarError:"工作日历加载失败。",
+  calendarWeekdays:["一", "三", "五"], calendarLess:"少", calendarMore:"多", calendarFloor:"最低上限", calendarPercentile:"有用量日期的第 90 百分位",
+  calendarTop:(top, source) => `标尺上限：${fmt(top)} token（${source}）；最深色：超过 ${fmt(top * 3 / 4)} token。`,
   noCost:"这段时间还没有用量", noCostNote:"模型调用产生用量后，会按席位、日期、模型、工作线、供应和任务显示明细。", seatColumn:"席位", dayColumn:"日期"
 } : {
   statusIntro:"Follow tasks, lanes and the decisions that need your attention.", costIntro:"Explore the desk’s work, token usage and estimated value by period.",
@@ -847,6 +861,9 @@ Object.assign(T, ZH ? {
   workLegend:"Upper: tasks finished · Lower: tasks merged", linesAdded:"Approx. lines added", linesRemoved:"Approx. lines removed",
   linesNote:"From merged tasks’ recorded change sizes; not the net change after merging.", linesOmitted:n => `${n} merged ${n === "1" ? "task" : "tasks"} without a usable recorded change size omitted.`,
   dailyValue:"Daily estimated value", chartDaysNote:"USD · From first to last recorded day; gaps have no amount.",
+  workCalendar:"Work calendar", calendarLoading:"Loading work calendar…", calendarError:"Could not load work calendar.",
+  calendarWeekdays:["Mon", "Wed", "Fri"], calendarLess:"Less", calendarMore:"More", calendarFloor:"floor", calendarPercentile:"90th percentile of active days",
+  calendarTop:(top, source) => `Scale top: ${fmt(top)} tokens (${source}); darkest: over ${fmt(top * 3 / 4)} tokens.`,
   noCost:"No usage in this period", noCostNote:"Model usage will appear by seat, day, model, lane, provider and task.", seatColumn:"Seat", dayColumn:"Date"
 });
 Object.assign(T, ZH ? {
@@ -2294,7 +2311,60 @@ async function loadTasks() {
 /* ---------- cost ---------- */
 const savedCostPeriod = keptChoice("sessionStorage", "hansa.costPeriod", COST_PERIODS.map(String), "7");
 let costDays = savedCostPeriod === "all" ? "all" : Number(savedCostPeriod), costEpoch = 0, costLoading = false, costExporting = false, costLoadError = false, costRenderedDays = null;
-let costSelect, costExportButton, costFeedback, costRetryButton, costPlaceholder;
+let costSelect, costExportButton, costFeedback, costRetryButton, costPlaceholder, costBody;
+let calendarPanel, calendarScroll, calendarFetchedAt = null, calendarLoading = false;
+function scrollWorkCalendar() {
+  setTimeout(() => { if (calendarScroll) calendarScroll.scrollLeft = calendarScroll.scrollWidth; }, 0);
+}
+async function loadWorkCalendar() {
+  scrollWorkCalendar();
+  if (calendarLoading || (calendarFetchedAt !== null && performance.now() - calendarFetchedAt < 60000)) return;
+  calendarLoading = true; calendarFetchedAt = performance.now();
+  calendarPanel.setAttribute("aria-busy", "true");
+  try {
+    const data = await api("/api/cost/calendar");
+    const {scroll, legend} = workCalendar(data);
+    calendarPanel.replaceChildren(h("h2", {}, T.workCalendar), scroll, legend);
+    calendarScroll = scroll; scrollWorkCalendar();
+  } catch (e) {
+    calendarScroll = null;
+    calendarPanel.replaceChildren(h("h2", {}, T.workCalendar), h("p", {class:"bad", role:"alert"}, T.calendarError + " " + String(e.message || e)));
+  } finally {
+    calendarLoading = false; calendarPanel.setAttribute("aria-busy", "false");
+  }
+}
+function workCalendar(data) {
+  // UTC arithmetic preserves the server's local date keys, including across DST changes.
+  const first = new Date(data.start + "T00:00:00Z"), today = new Date(data.today + "T00:00:00Z");
+  const monday = new Date(first); monday.setUTCDate(first.getUTCDate() - (first.getUTCDay() + 6) % 7);
+  const weeks = Math.floor((today - monday) / 604800000) + 1;
+  const amounts = Object.entries(data.days).filter(([day, row]) => day >= data.start && day <= data.today && row.tokens > 0)
+    .map(([, row]) => row.tokens).sort((a, b) => a - b);
+  const percentile = amounts[Math.ceil(amounts.length * 0.9) - 1] || 0, top = Math.max(10000000, percentile);
+  const grid = h("div", {class:"calendar-grid", style:`grid-template-columns:28px repeat(${weeks},12px)`});
+  T.calendarWeekdays.forEach((name, i) => grid.append(h("span", {class:"calendar-label", "aria-hidden":"true", style:`grid-column:1;grid-row:${i * 2 + 2}`}, name)));
+  for (let week = 0; week < weeks; week++) {
+    let month = week === 0 ? first : null;
+    for (let weekday = 0; weekday < 7; weekday++) {
+      const date = new Date(monday); date.setUTCDate(monday.getUTCDate() + week * 7 + weekday);
+      const day = date.toISOString().slice(0, 10);
+      if (day < data.start || day > data.today) continue;
+      if (date.getUTCDate() === 1) month = date;
+      const row = data.days[day] || {tokens:0, usd:0}, tokens = row.tokens;
+      const level = tokens ? Math.min(4, Math.ceil(tokens / (top / 4))) : 0;
+      const label = `${day} · ${fmt(tokens)} ${T.tokens} · ${money(row.usd)}`;
+      grid.append(h("span", {class:"calendar-day", "data-day":day, "data-level":level, role:"img", tabindex:"0",
+        title:label, "aria-label":label, style:`grid-column:${week + 2};grid-row:${weekday + 2}`}));
+    }
+    if (month) grid.append(h("span", {class:"calendar-label", "aria-hidden":"true", style:`grid-column:${week + 2};grid-row:1`},
+      month.toLocaleString(language, {month:"short", timeZone:"UTC"})));
+  }
+  const scroll = h("div", {class:"calendar-scroll", tabindex:"0", role:"group", "aria-label":T.workCalendar}, grid);
+  const legend = h("div", {class:"calendar-legend"}, T.calendarLess,
+    [0, 1, 2, 3, 4].map(level => h("span", {class:"calendar-day", "data-level":level, "aria-hidden":"true"})), T.calendarMore,
+    h("span", {}, T.calendarTop(top, percentile >= 10000000 ? T.calendarPercentile : T.calendarFloor)));
+  return {scroll, legend};
+}
 function costControlsState() {
   if (costSelect) costSelect.disabled = costLoading || costExporting;
   if (costExportButton) {
@@ -2309,10 +2379,11 @@ function costFeedbackState(tone, text, retry = false) {
   costFeedback.replaceChildren(icon(tone === "error" ? "error" : tone === "pending" ? "pending" : "check"), h("span", {}, text), costRetryButton);
   costRetryButton.hidden = !retry;
 }
-async function loadCost() {
+async function loadCost(withCalendar = true) {
   const epoch = ++costEpoch, days = costDays, host = $("#tab-cost");
   costLoading = true; host.setAttribute("aria-busy", "true");
   if (!costFeedback) renderCost(null);
+  if (withCalendar) loadWorkCalendar();
   if (costPlaceholder) { costPlaceholder.textContent = T.costLoading; costPlaceholder.className = "field-note"; }
   costControlsState(); costFeedbackState("pending", T.costLoading);
   try {
@@ -2409,16 +2480,20 @@ function renderCost(r) {
     return panel;
   };
   costSelect = h("select", {id:"cost-period", "aria-label":T.period}, COST_PERIODS.map(days => h("option", {value:String(days), selected:days === costDays}, T.periodDays(days))));
-  costSelect.addEventListener("change", e => { costDays = e.target.value === "all" ? "all" : Number(e.target.value); keepChoice("sessionStorage", "hansa.costPeriod", costDays); loadCost().catch(err); });
+  costSelect.addEventListener("change", e => { costDays = e.target.value === "all" ? "all" : Number(e.target.value); keepChoice("sessionStorage", "hansa.costPeriod", costDays); loadCost(false).catch(err); });
   costExportButton = h("button", {onclick:() => exportCsv()}, T.export);
-  costRetryButton = h("button", {type:"button", hidden:true, onclick:() => loadCost().catch(err)}, T.retry);
+  costRetryButton = h("button", {type:"button", hidden:true, onclick:() => loadCost(false).catch(err)}, T.retry);
   costFeedback = h("div", {class:"cost-feedback", role:"status", "aria-live":"polite"});
   costPlaceholder = r ? null : h("p", {class:"field-note"}, T.costLoading);
   const sections = r ? ["seat", "day", "model", "lane", "provider", "task"].map(block).filter(Boolean) : [];
   const w = r?.work || {};
   const unpriced = r ? Object.values(r.by.model || {}).reduce((sum, value) => sum + (value.unpriced_tokens || 0), 0) : 0;
-  $("#tab-cost").replaceChildren(...shown([
-    pageHeading(T.cost, T.costIntro),
+  if (!calendarPanel) {
+    calendarPanel = h("section", {class:"dashboard-panel work-calendar"}, h("h2", {}, T.workCalendar), h("p", {role:"status"}, T.calendarLoading));
+    costBody = h("div");
+    $("#tab-cost").replaceChildren(pageHeading(T.cost, T.costIntro), calendarPanel, costBody);
+  }
+  costBody.replaceChildren(...shown([
     h("section", {class:"dashboard-panel"}, h("div", {class:"cost-toolbar"},
       h("div", {class:"period-control"}, h("label", {for:"cost-period"}, T.period), costSelect), costExportButton), costFeedback),
     r ? h("div", {class:"metric-grid cost-metrics", "aria-label":T.total},

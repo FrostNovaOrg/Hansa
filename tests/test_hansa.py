@@ -31196,6 +31196,7 @@ const keyPosts = [], windowEvents = {}, confirmations = [];
 const apiGets = [], apiPosts = [], apiRequests = [], blobs = [], downloads = [], revokedUrls = [];
 let costGetError = ask === "cost-interactions" ? "example initial cost failure" : null;
 let costGetGate = null, costRowsError = null, costRowsGate = null;
+let calendarGetError = given.calendarFailure ? "example calendar failure" : null, calendarGetGate = null;
 let statusGetError = ask === "status-picture-initial-error" ? "status connection lost" : null;
 let statusFailPath = "/api/status";
 let statusGetGate = null;
@@ -31228,6 +31229,12 @@ const fetch = async (path, options) => {
     if (path === "/api/pause") given["/api/status"].paused = body.reason || "from page";
     if (path === "/api/resume") given["/api/status"].paused = "";
     return {status:200, json:async () => ({ok:true})};
+  }
+  if (path === "/api/cost/calendar") {
+    if (calendarGetGate) await calendarGetGate;
+    if (calendarGetError) throw new Error(calendarGetError);
+    const r = given[path] || {start:"2026-10-01", today:"2026-10-07", days:{}};
+    return {status:200, json:async () => JSON.parse(JSON.stringify(r))};
   }
   if (path.startsWith("/api/cost")) {
     const rows = path.includes("rows=1"), gate = rows ? costRowsGate : costGetGate;
@@ -32079,6 +32086,49 @@ else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(as
   same(postedTo("/api/release/stop"), {id:18, reason:"Stop this run"}, "release stop payload changed");
   console.log(JSON.stringify({pause:true, resume:true, details:true, asks:true, releases:true}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "cost-calendar") (async () => {
+  const run = code => vm.runInContext(code, ctx), flush = () => new Promise(resolve => setImmediate(resolve));
+  const find = name => {
+    const found = []; walk(ids["#tab-cost"], el => { if (el.className.split(" ").includes(name)) found.push(el); });
+    return found;
+  };
+  const count = () => apiGets.filter(path => path === "/api/cost/calendar").length;
+  let release;
+  if (given.calendarPending) calendarGetGate = new Promise(resolve => { release = resolve; });
+  await run('show("cost")'); await flush();
+  const loading = find("work-calendar")[0].textContent, loadingReport = !!descendants(ids["#tab-cost"], "table").length;
+  if (release) { release(); await flush(); }
+  const panel = find("work-calendar")[0], grid = find("calendar-grid")[0], scroll = find("calendar-scroll")[0];
+  if (scroll) { scroll.clientWidth = given.viewportWidth || 1100; scroll.scrollWidth = 900; }
+  await advance(0);
+  const cells = find("calendar-day").filter(el => el.attrs["data-day"]);
+  const days = cells.map(el => {
+    el.focus();
+    return {day:el.attrs["data-day"], level:Number(el.attrs["data-level"]), label:el.attrs["aria-label"],
+      title:el.attrs.title, style:el.attrs.style, role:el.attrs.role, focused:document.activeElement === el};
+  });
+  const order = ids["#tab-cost"].kids.map(el => el === panel ? "calendar" : el.contains?.(ids["#cost-period"]) ? "period" : "other");
+  const initial = count();
+  if (scroll) scroll.scrollLeft = 0;
+  await run('show("cost")'); await flush(); await advance(0);
+  const reopened = scroll?.scrollLeft;
+  await advance(60001);
+  cells[0]?.focus();
+  for (const value of ["1", "30", "all"]) {
+    const select = ids["#cost-period"]; select.value = value; select.on.change({target:select}); await flush();
+  }
+  const periodCount = count(), retained = panel === find("work-calendar")[0] && grid === find("calendar-grid")[0];
+  const focusRetained = !cells.length || document.activeElement === cells[0];
+  await run('show("cost")'); await flush(); const refreshed = count();
+  await run('show("cost")'); await flush();
+  console.log(JSON.stringify({days, loading, loadingReport, reopened, text:panel.textContent, busy:panel.attrs["aria-busy"], order,
+    grid:grid?.attrs.style, legend:find("calendar-legend")[0]?.textContent,
+    labels:grid?.kids.filter(el => el.className === "calendar-label").map(el => ({text:el.textContent, style:el.attrs.style})),
+    shades:find("calendar-legend")[0]?.kids.filter(el => el instanceof El && el.className === "calendar-day").map(el => el.attrs["data-level"]),
+    scroll:scroll ? {left:scroll.scrollLeft, width:scroll.scrollWidth, client:scroll.clientWidth} : null,
+    initial, periodCount, retained, focusRetained, refreshed, final:count(), report:!!descendants(ids["#tab-cost"], "table").length,
+    css:page.slice(page.indexOf("<style>"), page.indexOf("</style>"))}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "work-chart") vm.runInContext("loadCost()", ctx).then(async () => {
   const select = ids["#cost-period"]; select.value = String(given["/api/cost"].days ?? "all"); select.on.change({target:select});
   await new Promise(resolve => setImmediate(resolve));
@@ -38508,6 +38558,201 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                            env={**os.environ, "PATH": path, "TMPDIR": t2, "CLAUDE_CODE_TMPDIR": t2})
         self.assertIn("done", r.stdout.splitlines(), r.stdout + r.stderr)
         self.assertNotIn("w", r.stdout.splitlines())  # another run's sandbox cannot read it
+
+
+class WorkCalendarTest(unittest.TestCase):
+    PAGE_HARNESS = DeskTest.PAGE_HARNESS
+    web_request = DeskTest.web_request
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        env = unittest.mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "conf"),
+                                                   "XDG_STATE_HOME": str(self.tmp / "state")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.desk = init_desk(self.tmp / "desk")
+
+    def began(self, day):
+        self.desk.events_path.write_text(json.dumps({"ts": time.mktime(time.strptime(day, "%Y-%m-%d")),
+                                                    "event": "desk_created"}) + "\n")
+
+    def worker(self, day, tokens):
+        tid = self.desk.new_task("Calendar work")
+        self.desk.update(tid, finished=time.mktime(time.strptime(day, "%Y-%m-%d")), provider="claude",
+                         usage={"claude-opus-5": {"in": tokens, "out": 2, "cache_read": 3, "cache_write": 4},
+                                "unpriced-engine": {"in": 5}})
+        return tid
+
+    def test_endpoint_matches_report_day_totals_in_local_time_including_today(self):
+        try:
+            with unittest.mock.patch.dict(os.environ, {"TZ": "America/New_York"}):
+                time.tzset()
+                self.began("2026-10-30")
+                for day in ("2026-10-30", "2026-11-01", "2026-11-04", "2026-11-05"):
+                    self.worker(day, 100)
+                # A retry and a coordinator record share a local day across the DST boundary.
+                tid = self.worker("2026-11-04", 200)
+                self.desk.update(tid, attempts=[{"ended": time.mktime(time.strptime("2026-11-01", "%Y-%m-%d")),
+                                               "usage": {"claude-opus-5": {"in": 7}}}])
+                project = self.tmp / "conf" / "projects" / cost.slug(self.desk.root)
+                project.mkdir(parents=True)
+                (project / "session.jsonl").write_text(json.dumps({"timestamp": "2026-11-02T04:30:00Z",
+                    "message": {"id": "calendar-message", "model": "claude-opus-5",
+                                "usage": {"input_tokens": 11, "output_tokens": 13}}}) + "\n")
+                at = time.mktime(time.strptime("2026-11-04 12:00", "%Y-%m-%d %H:%M"))
+                with unittest.mock.patch("hansa.cost.time.time", return_value=at):
+                    rep = cost.report(self.desk, None)
+                    code, calendar, _ = self.web_request("/api/cost/calendar", headers={
+                        "Authorization": "Bearer " + self.desk.web_token()})
+                self.assertEqual(code, 200)
+                self.assertEqual((calendar["start"], calendar["today"]), ("2026-10-30", "2026-11-04"))
+                self.assertEqual(calendar["days"], {day: row for day, row in rep["by"]["day"].items()
+                                                     if "2026-10-30" <= day <= "2026-11-04"})
+                self.assertEqual(calendar["days"]["2026-11-01"]["tokens"], 145)
+                self.assertEqual(calendar["days"]["2026-11-04"]["tokens"], 328)
+                self.assertEqual(calendar["days"]["2026-11-01"]["unpriced_tokens"], 5)
+        finally:
+            time.tzset()
+
+    def test_endpoint_limits_history_to_53_monday_first_weeks(self):
+        self.began("2020-01-01")
+        for day in ("2025-10-05", "2025-10-06", "2026-10-07", "2026-10-08"):
+            self.worker(day, 100)
+        at = time.mktime(time.strptime("2026-10-07 12:00", "%Y-%m-%d %H:%M"))
+        with unittest.mock.patch("hansa.cost.time.time", return_value=at):
+            rep = cost.report(self.desk, None)
+            code, calendar, _ = self.web_request("/api/cost/calendar", headers={
+                "Authorization": "Bearer " + self.desk.web_token()})
+        self.assertEqual(code, 200)
+        self.assertEqual((calendar["start"], calendar["today"]), ("2025-10-06", "2026-10-07"))
+        self.assertEqual(calendar["days"], {day: rep["by"]["day"][day] for day in ("2025-10-06", "2026-10-07")})
+
+    def test_endpoint_requires_the_page_key(self):
+        for headers in ({}, {"Authorization": "Bearer wrong"}):
+            self.assertEqual(self.web_request("/api/cost/calendar", headers=headers)[0], 403)
+
+    def page(self, amounts=(), start="2026-10-01", today="2026-10-07", language="en", **options):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        rows = {day: {"tokens": tokens, "usd": tokens / 1000000, "unpriced_tokens": 0}
+                for day, tokens in amounts}
+        fixture = {"/api/cost/calendar": {"start": start, "today": today, "days": rows},
+                   "/api/cost": {"total": {"tokens": 100, "usd": 1.25}, "unpriced_models": [],
+                                 "by": {"day": {today: {"tokens": 100, "usd": 1.25}}}}, **options}
+        harness = self.tmp / "calendar-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        result = subprocess.run(["node", str(harness), str(Path(__file__).resolve().parent.parent / "hansa" / "ui.html"),
+                                 "cost-calendar", language], input=json.dumps(fixture), capture_output=True,
+                                text=True, timeout=60, env={**os.environ, "TZ": "Pacific/Honolulu"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_empty_days_and_first_token_use_the_floor_in_both_languages(self):
+        for language in ("en", "zh"):
+            for amount in (0, 1, 1000000):
+                with self.subTest(language=language, amount=amount):
+                    start = "2026-10-01" if amount == 0 else "2026-10-07"
+                    out = self.page([("2026-10-07", amount)], start=start, language=language)
+                    self.assertEqual([day["level"] for day in out["days"]], [0] * 7 if amount == 0 else [1])
+                    self.assertIn("10,000,000", out["legend"])
+                    self.assertIn("最低上限" if language == "zh" else "floor", out["legend"])
+                    self.assertEqual(out["shades"], ["0", "1", "2", "3", "4"])
+                    self.assertIn("少" if language == "zh" else "Less", out["legend"])
+                    self.assertIn("多" if language == "zh" else "More", out["legend"])
+
+    def test_nearest_rank_percentile_and_quarter_boundaries_in_both_languages(self):
+        # Ten positive days: nearest rank 9 is 80M, and the 200M outlier stays darkest.
+        amounts = [10000000, 20000000, 30000000, 40000000, 50000000,
+                   60000000, 70000000, 80000000, 80000000, 200000000]
+        rows = [(f"2026-10-{i:02}", amount) for i, amount in enumerate(amounts, 1)]
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                out = self.page(rows, today="2026-10-31", language=language)
+                self.assertEqual([day["level"] for day in out["days"]], [1, 1, 2, 2, 3, 3, 4, 4, 4, 4] + [0] * 21)
+                self.assertIn("80,000,000", out["legend"])
+                self.assertIn("第 90 百分位" if language == "zh" else "90th percentile", out["legend"])
+
+    def test_partial_weeks_month_labels_and_accessible_day_values_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                out = self.page([("2026-10-07", 1234567)], language=language)
+                self.assertEqual([day["day"] for day in out["days"]], [f"2026-10-{i:02}" for i in range(1, 8)])
+                self.assertEqual(out["grid"], "grid-template-columns:28px repeat(2,12px)")
+                self.assertEqual(out["days"][0]["style"], "grid-column:2;grid-row:5")  # Thursday
+                self.assertEqual(out["days"][-1]["style"], "grid-column:3;grid-row:4")  # Wednesday
+                self.assertEqual([label["text"] for label in out["labels"][:3]],
+                                 ["一", "三", "五"] if language == "zh" else ["Mon", "Wed", "Fri"])
+                self.assertEqual(out["labels"][3]["text"], "10月" if language == "zh" else "Oct")
+                for day in out["days"]:
+                    self.assertEqual(day["label"], day["title"])
+                    self.assertTrue(day["focused"])
+                    self.assertEqual(day["role"], "img")
+                self.assertIn("2026-10-07 · 1,234,567", out["days"][-1]["label"])
+                self.assertIn("US$1.23", out["days"][-1]["label"])
+                self.assertIn("0", out["days"][0]["label"])
+                self.assertIn("US$0.00", out["days"][0]["label"])
+                self.assertLess(out["order"].index("calendar"), out["order"].index("period"))
+
+    def test_month_labels_mark_the_start_week_and_exclude_future_months_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                out = self.page(today="2026-11-04", language=language)
+                self.assertEqual(out["labels"][3:], [
+                    {"text": "10月" if language == "zh" else "Oct", "style": "grid-column:2;grid-row:1"},
+                    {"text": "11月" if language == "zh" else "Nov", "style": "grid-column:6;grid-row:1"}])
+                out = self.page(start="2026-12-30", today="2026-12-31", language=language)
+                self.assertEqual(len(out["labels"]), 4)
+                self.assertEqual(out["labels"][-1]["text"], "12月" if language == "zh" else "Dec")
+
+    def test_53_week_grid_ignores_older_amounts_for_scale_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                out = self.page([("2025-10-05", 900000000), ("2026-10-07", 1)],
+                                start="2025-10-06", language=language)
+                self.assertEqual(out["grid"], "grid-template-columns:28px repeat(53,12px)")
+                self.assertEqual(len(out["days"]), 367)
+                self.assertEqual(out["days"][0]["day"], "2025-10-06")
+                self.assertEqual(out["days"][-1]["level"], 1)
+                self.assertIn("10,000,000", out["legend"])
+
+    def test_period_changes_keep_calendar_and_tab_opens_refresh_at_most_once_a_minute(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                out = self.page(language=language, calendarPending=True)
+                self.assertIn("正在加载工作日历" if language == "zh" else "Loading work calendar", out["loading"])
+                self.assertTrue(out["loadingReport"])
+                self.assertEqual((out["initial"], out["periodCount"], out["refreshed"], out["final"]), (1, 1, 2, 2))
+                self.assertTrue(out["retained"])
+                self.assertTrue(out["focusRetained"])
+                self.assertEqual(out["busy"], "false")
+
+    def test_calendar_failure_stays_in_its_panel_and_period_report_loads_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                out = self.page(language=language, calendarFailure=True)
+                self.assertIn("工作日历加载失败" if language == "zh" else "Could not load work calendar", out["text"])
+                self.assertIn("example calendar failure", out["text"])
+                self.assertTrue(out["report"])
+                self.assertEqual(out["days"], [])
+                self.assertEqual(out["busy"], "false")
+
+    def test_wide_and_phone_panels_scroll_to_the_newest_week_in_both_languages(self):
+        for language in ("en", "zh"):
+            for width in (1100, 320):
+                with self.subTest(language=language, width=width):
+                    out = self.page(start="2025-10-06", language=language, viewportWidth=width)
+                    self.assertEqual(out["scroll"]["left"], out["scroll"]["width"])
+                    self.assertEqual(out["reopened"], out["scroll"]["width"])
+                    # PAGE_HARNESS has no layout engine: guard the rules containing the wide grid.
+                    for selector, rules in ((".work-calendar", ("min-width:0", "max-width:100%")),
+                                            (".calendar-scroll", ("max-width:100%", "overflow-x:auto")),
+                                            (".calendar-grid", ("width:max-content", "repeat(7,12px)"))):
+                        css = re.search(re.escape(selector) + r"\s*\{([^}]+)\}", out["css"])[1]
+                        for rule in rules:
+                            self.assertIn(rule, css)
+                    self.assertIn("color-mix(in srgb,var(--ok)", out["css"])
+                    self.assertIn("prefers-color-scheme: dark", out["css"])
 
 
 class LinuxPreludeTest(unittest.TestCase):
