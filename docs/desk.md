@@ -369,6 +369,13 @@ Alongside these totals it counts:
   follow-up count independently. Verifications count separately.
 - Tasks merged, from each task's `merged` time. Finishing and merging in different
   periods contributes to each period's respective count.
+- US$ per merged task, from the period's estimated value (the same total the page
+  shows) divided by the tasks merged in it (`usd_per_merged`); with no merge it
+  shows "—".
+- Merged at the first try: the share of the tasks merged in the period that were
+  not follow-ups made by `hansa retry` (`merged_first_try` of `merged`), shown
+  with its counts. A follow-up made by `hansa retry` counts as sent back, once,
+  even when it is itself a retry of a retry. With no merge it shows "—".
 - Approximate lines added and removed by those merged tasks, parsed from the
   saved `stat` (`git diff --shortstat` at task completion) in their metadata;
   the page never runs git to obtain these counts. Tasks without a readable size
@@ -382,6 +389,9 @@ Alongside these totals it counts:
   `finished` time. Their `verdict` counts as held (`holds` or `holds, with notes`),
   did not hold (`does not hold`) or unsure (`unsure`). A missing verdict contributes
   only to the verification total. Closing a verification retains its result.
+- Verifications that held: the share held among the verifications with a verdict,
+  held, did not hold or unsure (`held` of `verdicts`), shown with its counts. With
+  none it shows "—".
 - Releases asked for, from `.hansa/releases.json`'s `asked` time, including refused
   and failed requests; releases that went out, from records with state `done`, by
   `ended` time.
@@ -405,7 +415,9 @@ reads them once for the usage and the turns, about 3 seconds for 500 MB of
 records (a busy coordinator's month) on a laptop. `/api/cost?days=all` selects all history (`days: null` in
 the response); `days=90` selects 90 days. Both use the usual page key, including
 `&rows=1` for CSV data. `work` holds the counters, including `lines_added`,
-`lines_removed`, `lines_omitted`, `coordinator_turns` and `coordinator_hours`;
+`lines_removed`, `lines_omitted`, `merged_first_try`, `verdicts`,
+`usd_per_merged` (null when nothing merged), `coordinator_turns` and
+`coordinator_hours`;
 `work_chart` supplies the work chart's `interval` and `buckets`. CSV retains its usage rows and columns;
 all-history export is named `cost-all.csv`.
 
