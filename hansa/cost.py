@@ -5,8 +5,9 @@ Two sources, never counted twice:
   each earlier try, kept on its attempt record when the task went back to the queue (or in earlier_runs, for a run
   an earlier hansa serve started and lost track of); each run counted once;
 - the coordinator and its helpers: the transcripts Claude Code writes for sessions
-  started in the desk (<config dir>/projects/<desk path>/**/*.jsonl), and those of the coordinator's sessions
-  started in another folder, by the session ids hansa noted from its commands (note_session).
+  started in the desk (<config dir>/projects/<desk path>/**/*.jsonl), and, since the desk began, those of the
+  coordinator's sessions hansa noted from its commands (note_session) and of every other session in the folder
+  those ran in, its working folder: what the coordinator costs is everything spent there (working_folders).
 
 Prices come from the principal's table. A Claude model with no entry, run on a
 subscription, falls back to Claude Code's own list-price figure; any other model
@@ -16,18 +17,17 @@ is what the tokens are worth, for comparing and spotting waste, not a bill.
 """
 from __future__ import annotations
 
-import calendar
 import json
 import os
 import re
 import time
 from bisect import bisect_right
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import account, notify, release, session_value, up
-from .desk import Desk, read_json, write_json
+from .desk import Desk, event_record, read_json, write_json
 
 TOKEN_FIELDS = ("in", "out", "cache_read", "cache_write")
 # in .hansa/: the Claude Code sessions the coordinator's process ran, each noted at a hansa command run in it
@@ -165,18 +165,52 @@ def session_files(proj: Path, sid: str) -> list:
     return sorted([*projects.glob(f"*/{sid}.jsonl"), *projects.glob(f"*/{sid}/**/*.jsonl")])
 
 
+def began(desk: Desk) -> float:
+    """When the desk began: the time of its first event (hansa init records desk_created), else 0."""
+    try:
+        with open(desk.events_path, "rb") as fh:
+            for line in fh:
+                e = event_record(line)
+                if e is not None and isinstance(e.get("ts"), (int, float)):
+                    return float(e["ts"])
+    except OSError:
+        pass
+    return 0.0
+
+
+def working_folders(desk: Desk, dirs: list) -> list:
+    """(name of the folder's records under projects/, from, until) for each folder the coordinator's noted sessions
+    ran in, in turn, by where their records are: the first from when the desk began, each next one from when hansa
+    noted its first session there. None noted: none, and the desk's own folder counts as it does anyway."""
+    out = []
+    for x in known_sessions(desk):
+        f = next((g for _, proj in dirs if proj.parent.is_dir() for g in proj.parent.glob(f"*/{x['id']}.jsonl")), None)
+        if f is not None and (not out or out[-1][0] != f.parent.name):
+            at = x.get("at") if isinstance(x.get("at"), (int, float)) else 0
+            out.append([f.parent.name, max(at, out[-1][1]) if out else began(desk), float("inf")])
+            if len(out) > 1:
+                out[-2][2] = out[-1][1]
+    return [tuple(w) for w in out]
+
+
 def transcript_files(desk: Desk, since: float):
-    """(provider, file, seat) for every session record file of the coordinator and its helpers changed since then:
-    every session started in the desk, and each session of the coordinator's hansa noted, wherever it started."""
-    dirs, done = coordinator_dirs(desk), set()
+    """(provider, file, seat, from, until) for every session record file of the coordinator and its helpers changed
+    since then: every session started in the desk; each session of the coordinator's hansa noted, wherever it
+    started, since the desk began; and every other session in the folders those ran in (working_folders), while
+    each was the coordinator's."""
+    dirs, done, start = coordinator_dirs(desk), set(), max(since, began(desk))
     ids = [x["id"] for x in known_sessions(desk)]
+    folders = working_folders(desk, dirs) if ids else []
     for provider, proj in dirs:
-        files = sorted(proj.rglob("*.jsonl")) if proj.is_dir() else []
-        files += [f for sid in ids for f in session_files(proj, sid)] if ids and proj.parent.is_dir() else []
-        for f in files:
-            if f not in done and f.stat().st_mtime >= since:
+        files = [(f, since, float("inf")) for f in sorted(proj.rglob("*.jsonl"))] if proj.is_dir() else []
+        if ids and proj.parent.is_dir():
+            files += [(f, start, float("inf")) for sid in ids for f in session_files(proj, sid)]
+            files += [(f, max(since, lo), hi) for name, lo, hi in folders if (proj.parent / name).is_dir()
+                      for f in sorted((proj.parent / name).rglob("*.jsonl"))]
+        for f, lo, hi in files:
+            if f not in done and lo < hi and f.stat().st_mtime >= lo:
                 done.add(f)
-                yield provider, f, helper_seat(f) if "subagents" in f.parts else "coordinator"
+                yield provider, f, helper_seat(f) if "subagents" in f.parts else "coordinator", lo, hi
 
 
 def records(f: Path, usage_only: bool = False):
@@ -193,7 +227,7 @@ def records(f: Path, usage_only: bool = False):
                 yield d
 
 
-def step(d: dict, seen: set, since: float):
+def step(d: dict, seen: set, since: float, until: float = float("inf")):
     """(model, usage in hansa's fields, time) for the first line of one model call in the window, else None.
     A message is spread over several lines with the same id and usage: it counts once."""
     msg = d.get("message") if isinstance(d.get("message"), dict) else {}
@@ -202,7 +236,7 @@ def step(d: dict, seen: set, since: float):
         return None
     seen.add(mid)
     ts = _ts(d.get("timestamp"))
-    if ts < since:
+    if ts < since or ts >= until:
         return None
     cc = u.get("cache_creation") or {}
     out = {"in": u.get("input_tokens", 0), "out": u.get("output_tokens", 0),
@@ -230,12 +264,12 @@ def scan(desk: Desk, since: float) -> dict:
     seen, tools_seen = set(), set()
     out, helpers, unpriced = [], defaultdict(lambda: {"steps": 0, "usd": 0.0}), set()
     shares = {k: 0.0 for k in TOKEN_FIELDS}
-    for provider, f, seat in transcript_files(desk, since):
+    for provider, f, seat, lo, hi in transcript_files(desk, since):
         cur = None
         try:
             for d in records(f):
                 s_ = record_seat(d, seat)
-                got = step(d, seen, since)
+                got = step(d, seen, lo, hi)
                 usd = value(got[0], got[1], prices) if got else None  # each call valued alone
                 if got:
                     row = per[(_day(got[2]), s_, got[0], provider)]
@@ -304,8 +338,10 @@ def _ts(text) -> float:
     if not text:
         return 0.0
     try:
-        return float(calendar.timegm(time.strptime(text[:19], "%Y-%m-%dT%H:%M:%S")))
-    except ValueError:
+        if len(text) < 19 or text[10] != "T":
+            return 0.0
+        return datetime.fromisoformat(text[:19]).replace(tzinfo=timezone.utc).timestamp()  # strptime's is slow
+    except (TypeError, ValueError):
         return 0.0
 
 
@@ -333,8 +369,9 @@ def uncounted(desk: Desk) -> dict:
         return why("", "")  # started in the desk: its records are the desk's folder's, counted as they are
     mine = [x for x in known_sessions(desk) if notify.same(x.get("session"), rec.get("session"))]
     if not mine:
-        return why("untied", f"its session started in {folder}, outside the desk, and hansa counts a session there "
-                             f"once a hansa command run in it has told hansa which session it is; none has yet.", folder)
+        return why("untied", f"its session started in {folder}, outside the desk, and hansa counts the sessions "
+                             f"there once a hansa command run in one has told hansa it is the coordinator's; none has "
+                             f"yet.", folder)
     home = str(mine[-1].get("home") or "")
     if not any(os.path.realpath(home) == os.path.realpath(h) for h in homes):
         return why("login", f"its session runs with the Claude login in {home}, not the workers' "

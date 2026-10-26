@@ -501,7 +501,7 @@ const T = ZH ? {
   total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
   costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。一件活重新排队再试时，每次尝试的 token 都算在里面。",
   coordinatorUncounted:"这里没有算协调席和它的子代理的用量：协调席以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
-  coordinatorUncountedWhy:{untied:"这里没有算协调席和它的子代理的用量：协调席的会话在工作台之外的 {where} 启动，要等它在会话里跑一条 hansa 命令、让 hansa 知道是哪个会话之后才算，目前还没有。",
+  coordinatorUncountedWhy:{untied:"这里没有算协调席和它的子代理的用量：协调席的会话在工作台之外的 {where} 启动，要等那里的某个会话跑一条 hansa 命令、让 hansa 知道它是协调席的会话之后，那里的会话才算，目前还没有。",
     login:"这里没有算协调席和它的子代理的用量：协调席的会话用的是 {where} 里的 Claude 登录，不是执行层的，hansa 只读执行层的登录。",
     missing:"这里没有算协调席和它的子代理的用量：在 {where} 里找不到它的会话记录。",
     unreadable:"这里没有算协调席和它的子代理的用量：hansa 读不了它的会话记录 {where}。"},

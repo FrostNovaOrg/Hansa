@@ -361,7 +361,8 @@ Alongside these totals it counts:
 
 Periods are rolling windows of N × 24 hours, including the starting instant.
 All history uses the same records without a lower time limit and reads no git
-history, the coordinator's and its helpers' session records included: hansa
+history, the coordinator's and its helpers' session records included (its
+working folder's from when the desk began): hansa
 reads them once for the usage and the turns, about 3 seconds for 500 MB of
 records (a busy coordinator's month) on a laptop. `/api/cost?days=all` selects all history (`days: null` in
 the response); `days=90` selects 90 days. Both use the usual page key, including

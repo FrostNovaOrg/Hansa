@@ -3330,8 +3330,10 @@ def main(argv=None):
     p = add("cost", cmd_cost, "tokens and what they are worth")
     p.description = ("Tokens and what they are worth: the workers' runs, and the coordinator's own session with its "
                      "helpers. The coordinator is counted only when it runs with the workers' Claude login (the same "
-                     "config folder), because only then are its session records where hansa reads them; a session "
-                     "started outside the desk counts once a hansa command run in it has told hansa its id. When it "
+                     "config folder), because only then are its session records where hansa reads them. It counts "
+                     "every session in its working folder since the desk began: the desk's own folder, and the "
+                     "folder its sessions run in once a hansa command run in one has told hansa its id; when that "
+                     "folder changes, the old one counts up to the change and the new one from then on. When it "
                      "is not counted, hansa cost says why. It has no lane or task, so in --by lane and --by task its "
                      "usage is a row of its own, (coordinator): in every view the rows add up to the total.")
     p.add_argument("--days", type=int, default=7)

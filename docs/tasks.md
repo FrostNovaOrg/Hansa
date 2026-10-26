@@ -410,17 +410,23 @@ and run `hansa cost --since HH:MM --by seat` when it is done. Spend no turns on 
 
 The coordinator's own session, with its helpers, is counted only when it runs
 with the workers' Claude login (the same config folder), because only then are
-its session records where hansa reads them. Every session started in the desk's
-own folder counts, as `hansa coordinator` starts it there. A coordinator started
-in another folder (one `hansa up` started there, or `hansa notify on` recorded)
-counts by its Claude Code session ids, never by its folder, so another session
-in the same folder is not counted: each hansa command run in the session the
-start record names notes the id Claude Code gives the command, and the login
-folder it runs with, in `.hansa/coordinator-sessions.json`. A compaction keeps
-the id; after a `/clear` the session's next hansa command notes the new one,
-and the whole of each noted session counts, wherever its records are under the
-workers' login. Until then, and when the coordinator runs with another login,
-as another user (root on a Linux server: [On a Linux server](linux-server.md)),
+its session records where hansa reads them. What the coordinator costs is
+everything spent in its working folder. Every session started in the desk's
+own folder counts, as `hansa coordinator` starts it there. For a coordinator
+started in another folder (one `hansa up` started there, or `hansa notify on`
+recorded), each hansa command run in the session the start record names notes
+the id Claude Code gives the command, and the login folder it runs with, in
+`.hansa/coordinator-sessions.json`. A compaction keeps the id; after a `/clear`
+the session's next hansa command notes the new one. The folder the noted
+sessions ran in, found by where their records are, is the working folder: every
+session recorded there under the workers' login counts as the coordinator's,
+noted or not, its helpers as helpers, for its turns since the desk began (the
+desk's first event); sessions in other folders do not. When the noted sessions
+move to another folder, the old folder counts up to when hansa noted the first
+session in the new one, and the new one from then on; a noted session counts
+whole since the desk began, wherever its records are. Until a session is noted
+(the desk's own folder counts all the same), and when the coordinator runs
+with another login, as another user (root on a Linux server: [On a Linux server](linux-server.md)),
 or its records cannot be read or found, `hansa cost`, `hansa cost --turns` and
 the page say it is not counted, and why.
 
