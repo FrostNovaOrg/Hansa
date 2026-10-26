@@ -189,6 +189,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if url.path == "/api/settings":
                 # with the free space of the desk's volume, shown beside the floor (hansa/disk.py)
                 return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0]})
+            if url.path == "/api/cost/calendar":
+                return self._send(200, cost.calendar(desk))
             if url.path == "/api/cost":
                 try:
                     period = q.get("days", ["7"])[0]

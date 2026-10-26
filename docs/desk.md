@@ -334,6 +334,27 @@ matches what that list recorded.
 
 Work and cost offers the last 1, 7, 30 or 90 days and **Since the desk began**,
 with token usage, estimated value and unpriced tokens above the six category tables.
+
+Above the period choice, the work calendar shows one square per local day from
+the desk's start through today (including today's usage so far), capped at the
+last 53 weeks. Weeks run left to right with Monday at the top; dates before the
+desk began and after today stay blank. On phones the panel scrolls sideways,
+opening at the newest week. Hovering a day shows its date, tokens and `US$`
+value, using the same totals as **By day**; screen readers read these values
+when a day has focus.
+
+The scale top T is the greater of 10,000,000 tokens and the nearest-rank 90th
+percentile of visible days with tokens (sorted position `ceil(0.9 × N)`). Empty
+days use the empty shade; positive days use four shades, up to T/4, T/2, 3T/4,
+and above 3T/4, including days above T. The legend names T and whether the
+percentile or floor set it. The page requests `/api/cost/calendar` when the tab
+opens, at most once a minute, independently of the selected period. This keyed
+endpoint returns `start` and `today` as local date keys and `days` as the report's
+`by.day` totals within those bounds; zero-usage dates may have no row. A calendar
+error stays in its panel while the period report loads as usual. After a failed
+request, reopening the tab or retrying the period report retries the calendar
+immediately.
+
 Money on the Status and Work and cost pages uses `US$` before every amount,
 including table cells, chart labels and tooltips (for example, `US$305.31`).
 Currency headings and notes say **USD** in English and **美元** in Chinese.
