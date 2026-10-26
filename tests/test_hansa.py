@@ -25591,15 +25591,21 @@ def save():'''))
             main(["--desk", str(self.desk.root), *words])
         return out.getvalue()
 
-    def test_cost_counts_the_coordinator_started_outside_the_desk_by_its_sessions_not_the_folders_others(self):
+    def desk_began_at(self, t):
+        """The desk as if hansa init had made it then: its first event."""
+        path = self.desk.events_path
+        path.write_text(json.dumps({"ts": t, "event": "desk_created"}) + "\n" + path.read_text())
+
+    def test_cost_counts_the_coordinator_started_outside_the_desk_by_its_sessions_and_their_folders_others(self):
         conf, proj = self.coordinator_outside()
         t0 = time.time() - 3 * 3600
+        self.desk_began_at(t0 - 3600)
         self.transcript(proj / "sid-coord-1.jsonl", t0, [(0, "human", [(10, "c1", 100), (70, "c2", 200)])])
         self.transcript(proj / "sid-coord-1" / "subagents" / "agent-1.jsonl", t0, [(1, "human", [(5, "h1", 7)])])
         (proj / "sid-coord-1" / "subagents" / "agent-1.meta.json").write_text(json.dumps({"agentType": "scout"}))
         # the same session after a /clear: the same process, a new id and file
         self.transcript(proj / "sid-coord-2.jsonl", t0, [(10, "peer", [(0, "c3", 1000), (60, "c4", 2000), (300, "c5", 3000)])])
-        # another session in the same folder, not the coordinator: never counted
+        # another session in the same folder: the coordinator's working folder's, counted once one is tied
         self.transcript(proj / "sid-other-1.jsonl", t0, [(5, "human", [(1, "o1", 50000)])])
         rep = cost.report(self.desk, 1)
         self.assertNotIn("coordinator", rep["by"]["seat"])  # hansa does not know its session yet, and says so
@@ -25608,7 +25614,7 @@ def save():'''))
         self.assertIn("not counted", self.hansa_in_session("sid-other-1", "cost", "--days", "1", pid=os.getppid()))
         self.assertEqual(cost.known_sessions(self.desk), [])  # another process's command notes nothing
         text = self.hansa_in_session("sid-coord-1", "cost", "--days", "1", "--by", "seat")
-        self.assertRegex(text, r"\n  coordinator +300 ")
+        self.assertRegex(text, r"\n  coordinator +56,300 ")  # the whole folder: both sides of the clear and the other
         self.assertIn("helper:scout", text)
         self.assertNotIn("not counted", text)
         self.assertIn(" 2 step(s)", self.hansa_in_session("sid-coord-2", "cost", "--turns", "--days", "1"))
@@ -25616,18 +25622,57 @@ def save():'''))
         for days in (1, None):  # since the desk began too
             rep = cost.report(self.desk, days)
             self.assertEqual((rep["by"]["seat"]["coordinator"]["tokens"], rep["by"]["seat"]["helper:scout"]["tokens"]),
-                             (6300, 7), days)
+                             (56300, 7), days)
             self.assertEqual(rep["coordinator_uncounted"], "")
-            self.assertEqual(rep["work"]["coordinator_turns"], 2)  # one turn each side of the clear
+            self.assertEqual(rep["work"]["coordinator_turns"], 3)  # one turn each side of the clear, and the other's
             self.assertAlmostEqual(rep["work"]["coordinator_hours"], (60 + 300) / 3600)
         turns = cost.turns(self.desk, 1)
         self.assertEqual([(t["session"], t["steps"], t["seconds"]) for t in turns["turns"]],
-                         [("sid-coord-1", 2, 60), ("sid-coord-2", 3, 300)])
+                         [("sid-coord-1", 2, 60), ("sid-other-1", 1, 0), ("sid-coord-2", 3, 300)])
         self.assertEqual(turns["total"]["seconds"], 360)
-        self.assertIn("2 turn(s), 0.10 hour(s) of work", views.cost_text(cost.report(self.desk, 1), "seat"))
+        self.assertIn("3 turn(s), 0.10 hour(s) of work", views.cost_text(cost.report(self.desk, 1), "seat"))
         # a window that starts inside the second turn: its steps and time from there
         later = cost.report(self.desk, since=t0 + 10 * 60 + 30)["work"]
         self.assertEqual((later["coordinator_turns"], later["coordinator_hours"] * 3600), (1, 240))
+
+    def test_cost_counts_every_session_in_the_coordinators_working_folder_while_it_is_that_since_the_desk_began(self):
+        conf, a = self.coordinator_outside()
+        t = time.time() - 10 * 3600
+        self.desk_began_at(t)
+        h = 60  # minutes
+        self.transcript(a / "sid-tied-1.jsonl", t, [(1 * h, "human", [(1, "t1", 100)])])
+        self.transcript(a / "sid-tied-1" / "subagents" / "agent-1.jsonl", t, [(1 * h, "human", [(2, "t1h", 7)])])
+        (a / "sid-tied-1" / "subagents" / "agent-1.meta.json").write_text(json.dumps({"agentType": "scout"}))
+        self.transcript(a / "sid-free-1.jsonl", t, [(2 * h, "human", [(1, "f1", 200)])])  # never tied
+        self.transcript(a / "sid-free-1" / "subagents" / "agent-2.jsonl", t, [(2 * h, "human", [(2, "f1h", 9)])])
+        # began before the desk and went on after it: its turns since the desk began
+        self.transcript(a / "sid-free-2.jsonl", t, [(-2 * h, "human", [(1, "f2a", 1000)]), (3 * h, "peer", [(1, "f2b", 400)])])
+        self.transcript(a / "sid-old-1.jsonl", t, [(-5 * h, "human", [(1, "o1", 5000)])])  # all before the desk
+        self.transcript(conf / "projects" / cost.slug(self.tmp / "elsewhere") / "sid-x.jsonl", t,
+                        [(1 * h, "human", [(1, "x1", 30000)])])  # another folder's: never counted
+        self.assertNotIn("coordinator", cost.report(self.desk, None)["by"]["seat"])  # none tied: the desk's folder
+        self.hansa_in_session("sid-tied-1", "status")
+        rep = cost.report(self.desk, None)
+        self.assertEqual({k: v["tokens"] for k, v in rep["by"]["seat"].items()},
+                         {"coordinator": 700, "helper:scout": 7, "helper": 9})
+        self.assertEqual((rep["work"]["coordinator_turns"], rep["coordinator_uncounted"]), (3, ""))
+        # the working folder changes from a to b: a's sessions up to the change, b's from then on
+        b = conf / "projects" / cost.slug(self.tmp / "b")
+        self.transcript(b / "sid-tied-2.jsonl", t, [(5 * h + 10, "human", [(1, "t2", 2000)])])
+        self.transcript(b / "sid-free-3.jsonl", t, [(6 * h, "human", [(1, "f3", 3000)])])
+        self.transcript(b / "sid-free-5.jsonl", t, [(4 * h, "human", [(1, "f5", 600000)])])  # b before the change
+        self.transcript(a / "sid-free-4.jsonl", t, [(4 * h, "human", [(1, "f4a", 40)]), (7 * h, "human", [(1, "f4b", 80000)])])
+        known = cost.known_sessions(self.desk)
+        write_json(self.desk.state_dir / cost.SESSIONS,
+                   [{**known[0], "at": t + 3600}, {**known[0], "id": "sid-tied-2", "at": t + 5 * 3600}])
+        self.assertEqual([w[0] for w in cost.working_folders(self.desk, cost.coordinator_dirs(self.desk))],
+                         [a.name, b.name])
+        rep = cost.report(self.desk, None)
+        self.assertEqual(rep["by"]["seat"]["coordinator"]["tokens"], 100 + 200 + 400 + 40 + 2000 + 3000)
+        self.assertEqual(cost.report(self.desk, since=t + 4.5 * 3600)["by"]["seat"]["coordinator"]["tokens"], 5000)
+        turns = cost.turns(self.desk, since=t)
+        self.assertEqual(sum(x["steps"] for x in turns["turns"]), 6)
+        self.assertNotIn("sid-x", {x["session"] for x in turns["turns"]})
 
     def test_cost_counts_a_coordinator_started_in_the_desk_as_before(self):
         conf, proj = self.coordinator_outside(self.desk.root)
