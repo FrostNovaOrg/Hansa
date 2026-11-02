@@ -54,10 +54,6 @@ hansa --version
 Add that export to your shell profile too. Either put hansa's `bin` folder on
 `PATH`, as above, or put a symbolic link to `bin/hansa` in a folder already on
 `PATH`, for example `ln -s ~/hansa/bin/hansa /opt/homebrew/bin/hansa`.
-Absolute and relative links, including chains, work even when the installation
-path contains spaces. The launcher follows only file links, keeping directory
-links such as `current/bin/hansa` so switching `current` changes future starts.
-It stops after 40 file links and reports a loop or an overly long chain.
 
 ## Log in (the principal's step)
 
@@ -154,6 +150,17 @@ Follow progress on Status. The coordinator reads `hansa show ID` and
 task is finished when reviewed and merged into the lane's base branch.
 
 ## Work over SSH
+
+After a restart, open the desk menu from your computer, forwarding the page
+ports you need (here 8765 and 8766):
+
+```sh
+ssh -t -L 8765:127.0.0.1:8765 -L 8766:127.0.0.1:8766 HOST /path/to/hansa/bin/hansa
+```
+
+Tick desks with Space, press `s` to start them, Enter to enter a coordinator,
+or `w` for its page address. Ctrl+B then D returns from a coordinator; Ctrl+C
+returns from the page. Nothing starts until you choose. `q` leaves work running.
 
 On your computer, `ssh my-server`, then follow the setup above on that machine.
 Install tmux there. `hansa up` keeps the coordinator open after SSH disconnects.

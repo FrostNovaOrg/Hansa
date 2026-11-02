@@ -15204,6 +15204,34 @@ def save():'''))
         s["providers"]["claude"]["config_dir"] = "/abs/path"
         self.assertEqual(self.desk.save_settings(s), [])
 
+    def patch_sleeps(self, action):
+        """Patch hansa.cli.time.sleep, the time module's own sleep, for this test's thread only. Another thread of
+        this process — one an earlier test left running, say — may sleep while it is patched: its calls sleep as
+        usual, and are neither counted nor handed to action. Returns the patcher and the seconds this thread slept."""
+        real, mine, sleeps = time.sleep, threading.current_thread(), []
+
+        def sleep(seconds):
+            if threading.current_thread() is not mine:
+                return real(seconds)
+            sleeps.append(seconds)
+            return action(seconds)
+        return unittest.mock.patch("hansa.cli.time.sleep", side_effect=sleep), sleeps
+
+    def test_patch_sleeps_lets_another_thread_sleep_without_counting_it(self):
+        slept = threading.Event()
+
+        def other():
+            time.sleep(0.01)  # the real sleep: not this test's action
+            slept.set()
+
+        patcher, sleeps = self.patch_sleeps(lambda _: self.fail("another thread's sleep was acted on"))
+        with patcher:
+            th = threading.Thread(target=other)
+            th.start()
+            th.join(10)
+        self.assertTrue(slept.is_set())
+        self.assertEqual(sleeps, [])
+
     def test_wait_returns_when_a_task_ends(self):
         tid = self.desk.new_task("Add hello.txt")
         d, stop, broke = Dispatcher(self.desk), threading.Event(), []
@@ -15234,8 +15262,10 @@ def save():'''))
 
     def test_wait_with_only_open_todos_returns_without_waiting(self):
         self.desk.add_ask("Review access", holds=True)
-        with unittest.mock.patch("hansa.cli.time.sleep", side_effect=AssertionError("waited on a to-do")):
+        patcher, sleeps = self.patch_sleeps(lambda _: self.fail("waited on a to-do"))
+        with patcher:
             out = self.hansa_out("wait")
+        self.assertEqual(sleeps, [])
         self.assertIn("nothing to wait for", out)
         self.assertNotIn("no task finished", out)
         out = io.StringIO()
@@ -15250,18 +15280,19 @@ def save():'''))
         self.desk.change(tid, lambda m: {"state": "running"})
 
         def progress(_):
-            if sleeping.call_count == 1:
+            if len(sleeps) == 1:
                 asks = self.desk.asks()
                 asks[1].update(closed=now(), answer="Old page answer")
                 write_json(self.desk.asks_path, asks)
-            elif sleeping.call_count == 2:
+            elif len(sleeps) == 2:
                 self.desk.change(tid, lambda m: {"state": "done"})
             else:
                 self.fail("wait did not notice the task ended")
 
-        with unittest.mock.patch("hansa.cli.time.sleep", side_effect=progress) as sleeping:
+        patcher, sleeps = self.patch_sleeps(progress)
+        with patcher:
             out = self.hansa_out("wait", "--timeout", "1")
-        self.assertEqual(sleeping.call_count, 2)
+        self.assertEqual(len(sleeps), 2)
         self.assertIn(f"{tid} done", out)
         self.assertNotIn("request #", out)
         self.assertEqual([a["id"] for a in views.todo_list(self.desk, state="open")["rows"]], [1])
@@ -33691,6 +33722,20 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       allowCleared: vm.runInContext("S.release_mailbox_allow", ctx), ruleLabel, allowLabel}));
     return;
   }
+  if (ask === "release-tick-details") {
+    const rows = [];
+    walk(ids["#tab-settings"], el => {
+      if (el.className !== "tick") return;
+      const info = el.kids[1], commands = [];
+      walk(info, child => { if (child.className.split(" ").includes("release-tick-command"))
+        commands.push({text:child.textContent, title:child.attrs.title, tag:child.tag}); });
+      rows.push({lane:el.attrs["data-lane"], target:el.attrs["data-target"], ticked:el.kids[0].checked,
+        text:el.textContent, lines:info.kids.map(child => child.textContent), commands});
+    });
+    await vm.runInContext("loadStatus()", ctx);
+    console.log(JSON.stringify({rows, settings:ids["#tab-settings"].textContent, status:ids["#tab-status"].textContent}));
+    return;
+  }
   const ticks = [];
   walk(ids["#tab-settings"], el => { if (el.className === "tick") ticks.push({lane: el.attrs["data-lane"], target: el.attrs["data-target"],
     ticked: el.kids[0].checked, text: el.textContent}); });
@@ -36807,6 +36852,122 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         """The page ticks these targets of lane a (and no other) for going out without asking."""
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[
             {"lane": "a", "target": x} for x in ticked])), {"ok": True, "problems": []})
+
+    def test_target_about_changes_only_the_description_and_keeps_the_tick(self):
+        from hansa import release
+        about = "install on the test server; nothing goes outside"
+        self.hansa("lane", "target", "a", "test", "true", "--minutes", "17", "--fixed", "--about", about)
+        self.assertIn(about, self.hansa("lane", "target", "a"))
+        self.tick_targets("test")
+        before = self.desk.settings()
+        target = before["lanes"]["a"]["targets"]["test"]
+        for description in ("仅安装到测试服务器；不发到外面", "x" * 120, "none"):
+            with self.subTest(description=description):
+                count = len(self.events("lane_set"))
+                self.hansa("lane", "target", "a", "test", "--about", description)
+                saved = self.desk.settings()
+                expected = {k: v for k, v in target.items() if k != "about"}
+                if description != "none":
+                    expected["about"] = description
+                    self.assertIn(description, self.hansa("lane", "target", "a"))
+                self.assertEqual(saved["lanes"]["a"]["targets"]["test"], expected)
+                self.assertEqual(saved["releases_without_asking"], before["releases_without_asking"])
+                self.assertTrue(release.lane_listed(saved, "a", "test"))
+                self.assertEqual(len(self.events("lane_set")), count + 1)
+                self.assertEqual(self.events("lane_set")[-1]["target"], "test")
+        self.hansa("release", "a", "test")
+        self.assertEqual(release.get(self.desk, 1)["state"], "approved")
+        self.assertIn("--about", self.hansa("help", "release-flow"))
+        helped = io.StringIO()
+        with contextlib.redirect_stdout(helped), self.assertRaises(SystemExit) as exited:
+            main(["lane", "target", "--help"])
+        self.assertEqual(exited.exception.code, 0)
+        help_text = " ".join(helped.getvalue().split())
+        for words in ("--about", "120 characters", "keeps the principal's tick", "none"):
+            self.assertIn(words, help_text)
+
+    def test_target_about_holding_a_key_is_refused_without_changes(self):
+        key = "sk-demo-release-123456"
+        self.desk.write_key("demo", key)
+        self.with_targets(test="true", described="true")
+        self.hansa("lane", "target", "a", "described", "--about", "install on the test server")
+        self.tick_targets("test", "described")
+        before, events = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        for target, command in (("new", ["true"]), ("test", []), ("described", ["false"])):
+            with self.subTest(target=target):
+                said = self.refused("lane", "target", "a", target, *command,
+                                    "--minutes", "19", "--about", f"install using {key}")
+                self.assertIn(f"description of target {target} holds the key of demo", said)
+                self.assertIn("a description is stored and shown as written", said)
+                self.assertNotIn(key, said)
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+                self.assertEqual(self.desk.events_path.read_bytes(), events)
+
+    def test_target_about_refuses_long_or_multiline_text_without_changes(self):
+        self.with_targets(test="true")
+        self.tick_targets("test")
+        before, events = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        for bad in ("x" * 121, "one\ntwo", "one\rtwo", "one\u2028two", "one\u2029two"):
+            with self.subTest(bad=bad):
+                said = self.refused("lane", "target", "a", "test", "false", "--minutes", "19", "--about", bad)
+                self.assertIn("about must be one line", said)
+                self.assertIn("120 characters", said)
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+                self.assertEqual(self.desk.events_path.read_bytes(), events)
+        self.assertIn("--about", self.refused("lane", "target", "a", "test", "none", "--about", "words"))
+        for bad in (None, 12, [], {}):
+            with self.subTest(bad=bad):
+                s = self.desk.settings()
+                s["lanes"]["a"]["targets"]["test"]["about"] = bad
+                self.assertTrue(any("about must be one line" in p for p in self.desk.save_settings(s)))
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_release_ticks_show_descriptions_commands_and_plain_wording_in_both_languages(self):
+        from hansa import web
+        about, command = "install on the test server; nothing goes outside <&>", "echo '" + "command <&> " * 30 + "'"
+        self.hansa("lane", "target", "a", "test", command, "--about", about)
+        self.with_targets(push="true", removed="false")
+        self.tick_targets("test", "removed")
+        self.hansa("lane", "target", "a", "removed", "none")
+        self.hansa("release", "a", "test")
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        given = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk), "/api/events": []}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(web.UI), "release-tick-details", language],
+                                        input=json.dumps(given), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                page = json.loads(result.stdout)
+                rows = {r["target"]: r for r in page["rows"]}
+                self.assertEqual(rows["test"]["lines"], ["test · a", about, command])
+                self.assertEqual(rows["push"]["lines"], ["push · a", "true"])
+                for name, cmd in (("test", command), ("push", "true"), ("removed", "false")):
+                    self.assertEqual(rows[name]["commands"], [{"text": cmd, "title": cmd, "tag": "div"}])
+                self.assertTrue(rows["removed"]["ticked"])
+                self.assertIn("no lane has this release target now" if language == "en" else "现在没有哪条工作线有这个发布目标",
+                              rows["removed"]["text"])
+                for words in (("Asking you before a release", "Targets that go out without asking you",
+                               "Ticked: a release can run without asking you", "Unticked: each one waits for your yes",
+                               "Each target is ticked on its own. A tick stops counting once the lane's repository "
+                               "or base branch, the target's command or an outside file it names, the target it must "
+                               "follow or the way it runs (fixed) changes: a release asked for by hand then waits "
+                               "for your yes, and one that runs by itself after merges waits until you tick it again.",
+                               "Rules the lane's workers and verifiers may use directly") if language == "en" else
+                              ("发布前要不要问你", "不用问你就发布的目标", "勾上：提出发布后可以不用问你就执行", "不勾：每次等你点头",
+                               "每个目标单独勾。工作线的仓库或基础分支、目标的命令或它用到的仓库外文件、"
+                               "它要跟在哪个目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效："
+                               "手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
+                               "这条线的执行层和核验可以直接用的规则")):
+                    self.assertIn(words, page["settings"])
+                self.assertIn("not asked: this target is ticked in Settings" if language == "en" else
+                              "没有问你：设置里勾了这个目标", page["status"])
+        # PAGE_HARNESS has no layout engine: check the CSS applied to the command and its shrinking parent.
+        css = web.UI.read_text().split("</style>")[0]
+        self.assertIn(".tick > span { min-width:0; }", css)
+        self.assertIn(".release-tick-info { flex:1; }", css)
+        self.assertIn(".release-tick-command { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }", css)
 
     def test_an_old_settings_file_with_one_release_command_and_an_old_entry_works_unchanged(self):
         from hansa import release
@@ -40644,6 +40805,8 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("Ran 3 tests", r.stdout)
 
+
+from tests.test_menu import MenuTest  # noqa: E402 - included in the lane's existing test entry point
 
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 

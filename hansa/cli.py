@@ -95,7 +95,7 @@ TOPICS = {
 COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
                   ("watching", ("status", "desks", "wait", "notify", "ask", "explain", "notes", "gaps", "cost")),
                   ("lanes and releases", ("lane", "release", "changelog", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
-                  ("the desk", ("init", "up", "serve", "web", "coordinator", "ping", "help")))
+                  ("the desk", ("init", "menu", "up", "serve", "web", "coordinator", "ping", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
@@ -1554,7 +1554,12 @@ def cmd_serve(a):
 
 def cmd_up(a):
     desk = Desk.find(a.desk, optional=True)
+    if getattr(a, "all", False) and desk is not None:
+        raise SystemExit("hansa: up --all is for outside a desk, without --desk or HANSA_DESK")
     if desk is None:
+        from . import menu
+        if not getattr(a, "all", False) and menu.available():
+            return cmd_menu(a)
         ok = up.all_desks_up()
     else:
         if not (desk.settings_path.is_file() and desk.tasks_dir.is_dir()):
@@ -1562,6 +1567,15 @@ def cmd_up(a):
         ok = up.desk_up(desk)
     if not ok:
         raise SystemExit(1)
+
+
+def cmd_menu(a):
+    from . import menu
+    if os.environ.get("HANSA_ROLE") or os.environ.get("HANSA_TASK") or session_vars():
+        raise SystemExit("hansa: the menu is for the principal; open it in a terminal outside an agent's session")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise SystemExit("hansa: menu needs a terminal on stdin and stdout; use hansa desks or hansa up")
+    menu.run(getattr(a, "lang", None))
 
 
 def web_port(desk: Desk) -> int:
@@ -2349,7 +2363,8 @@ def _target_text(name: str, t: dict, ln: dict) -> str:
             + ("" if t.get("timeout_min") else ", the lane's") + "]"
             + (f"  after {t['after']}" if t.get("after") else "")
             + (f"  after merges: {t['after_merge_min']} min" if t.get("after_merge_min") else "")
-            + f"  ({release.runs_text(t)})")
+            + f"  ({release.runs_text(t)})"
+            + (f"\n  {t['about']}" if t.get("about") else ""))
 
 
 def _lane_target(desk: Desk, a, new: dict) -> None:
@@ -2373,9 +2388,9 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
     named = ln.get("targets") if isinstance(ln.get("targets"), dict) else {}
     old = named.get(a.target)
     if cmd == "none":  # the help's word for taking it out
-        if a.minutes is not None or a.after is not None or a.fixed is not None or a.after_merge is not None:
-            raise SystemExit("hansa: none takes the target out, so it cannot come with --minutes, --after, --fixed "
-                             "or --after-merge. "
+        if any(x is not None for x in (a.minutes, a.after, a.fixed, a.after_merge, a.about)):
+            raise SystemExit("hansa: none takes the target out, so it cannot come with --minutes, --after, --fixed, "
+                             "--after-merge or --about. "
                              "Nothing was changed. " + see_more("release-flow"))
         if old is None:
             raise SystemExit(f"hansa: lane {a.name} has no release target {a.target}; its targets: "
@@ -2403,6 +2418,11 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
         if not cmd.strip():
             raise SystemExit("hansa: a target's command cannot be empty (none takes the target out). Nothing was changed. " + see_more("release-flow"))
         t["command"] = cmd
+    if a.about is not None:
+        if a.about == "none":
+            t.pop("about", None)
+        else:
+            t["about"] = a.about
     if a.minutes is not None:
         if a.minutes == "none":
             t.pop("timeout_min", None)
@@ -3263,12 +3283,14 @@ def main(argv=None):
         "the same lane already sent out (none: no order). --after-merge MINUTES asks the target by itself after "
         "merges settle for that many minutes (1-1440; none: off), only with the principal's tick; refused with "
         "--after. Failed runs reach the coordinator as failed checks; only failure alerts the principal. "
+        "--about TEXT describes what the target does in plain words (one line, up to 120 characters; none removes "
+        "it); the page shows it above the command and the target list includes it. Changes are recorded. "
         "Options alone change only those fields. hansa lane target "
         "L NAME none takes it out. An older unnamed release is now the target default, keeping its tick. "
         "hansa release L TARGET [note] asks for one; the principal answers each request, and ticks "
         "each target on its own for going out without asking. A tick stops counting when the lane's repository or "
-        "base branch, or the target's command or --after, changes (a target taken out and set again with the same "
-        "command, --after and --fixed keeps it; --minutes alone does not untick). A release runs in the lane's "
+        "base branch, or the target's command, --after or --fixed, changes (a target taken out and set again with the same "
+        "command, --after and --fixed keeps it; --minutes or --about alone does not untick). A release runs in the lane's "
         "repository and holds it while it runs: merges there wait for it, a long install too. --fixed runs the "
         "target instead from a detached checkout of the release's commit that hansa makes for it under the desk "
         "(removed when it ends, however it ends, and swept after a restart), holding nothing: merges and checks in "
@@ -3286,6 +3308,8 @@ def main(argv=None):
     q.add_argument("command", nargs="*", metavar="COMMAND", help="the command line (/bin/sh -c), quoted; none takes "
                    "the target out")
     q.add_argument("--minutes", metavar="N", help="its own time limit, 1-1440 (none: the lane's timeout_min)")
+    q.add_argument("--about", metavar="TEXT", help="what it does, in plain words: one line, up to 120 characters "
+                   "(none: remove the description); alone changes only this field and keeps the principal's tick")
     q.add_argument("--after", metavar="TARGET", help="another target of the lane that must have sent out the same "
                    "commit first (none: no order)")
     q.add_argument("--after-merge", metavar="MINUTES", help="ask this target by itself after merges have settled "
@@ -3404,8 +3428,11 @@ def main(argv=None):
     p.description += (". It runs the claude program the recorded hansa serve start used, not necessarily this "
                       "shell's, and says so when they differ.")
     p.add_argument("provider", nargs="?")
+    p = add("menu", cmd_menu, "the principal's screen: choose, start and enter this account's desks")
+    p.add_argument("--lang", choices=("zh", "en"), help="screen language (default: the shell's locale)")
     p = add("up", cmd_up, "start this desk's server and the coordinator's session again as they last ran; outside "
-            "a desk, start this account's desks")
+            "a desk in a terminal, open the principal's menu")
+    p.add_argument("--all", action="store_true", help="outside a desk: start every listed desk without the menu")
     p.epilog = see_more("bringing-up")
     p = add("serve", cmd_serve, "run the dispatcher and the web page in the foreground (what hansa up starts)")
     p.add_argument("--host", default=up.DEFAULTS["host"])
@@ -3468,6 +3495,9 @@ def main(argv=None):
         sub.choices["coordinator"].print_help()
         return 0
     if not getattr(a, "fn", None):
+        from . import menu
+        if a.cmd is None and menu.available():
+            return cmd_menu(a)
         ap.print_help()
         return 0
     if a.cmd == "add" and not a.text and not a.file:
@@ -3476,9 +3506,9 @@ def main(argv=None):
         ap.error("ask needs what the principal must do" if a.close is None else
                  "ask --close needs the outcome: hansa ask --close N \"<outcome>\"")
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
-    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks"):
+    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks", "menu"):
         _as_desk_account(a, argv)
-    if a.cmd not in ("init", "desks") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
+    if a.cmd not in ("init", "desks", "menu") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
         try:
             cost.note_session(Desk.find(a.desk))
         except SystemExit:  # no desk: the command says so itself
