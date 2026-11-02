@@ -58,7 +58,8 @@ with `name`, `state`, `found`, `need`, `fix`; states are `ok`, `note`, `fails`,
 `skipped`. `--lang zh|en` selects language as in `hansa menu`.
 Commands time out after 15 seconds, with a short cleanup wait for inherited output.
 
-Add that export to your shell profile too. Either put hansa's `bin` folder on
+Add `export PATH="$HOME/hansa/bin:$PATH"` to your shell profile too.
+Either put hansa's `bin` folder on
 `PATH`, as above, or put a symbolic link to `bin/hansa` in a folder already on
 `PATH`, for example `ln -s ~/hansa/bin/hansa /opt/homebrew/bin/hansa`.
 
@@ -82,6 +83,8 @@ git -C ~/shop/repo config user.name "Your Name"
 git -C ~/shop/repo config user.email "you@example.com"
 git -C ~/shop/repo commit --allow-empty -m "Initial commit"
 ```
+
+Then:
 
 ```sh
 hansa init ~/shop/desk --repo ~/shop/repo
