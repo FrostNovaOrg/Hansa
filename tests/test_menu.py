@@ -575,6 +575,7 @@ class MenuTest(unittest.TestCase):
         command = self.executable("interrupted command", source)
         child = subprocess.Popen([str(command)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait = child.wait
+        poll = child.poll
         try:
             self.assertTrue(select.select([child.stdout], [], [], 15)[0], "child did not become ready")
             self.assertEqual(child.stdout.readline(), b"ready\n")
@@ -582,11 +583,13 @@ class MenuTest(unittest.TestCase):
             def interrupt(*args, **kwargs):
                 # Model the terminal's SIGINT to both processes without signalling the test runner.
                 child.wait.side_effect = wait
+                child.poll.side_effect = poll
                 child.send_signal(signal.SIGINT)
                 raise KeyboardInterrupt
 
             with patch.object(menu.subprocess, "Popen", return_value=child), \
-                    patch.object(child, "wait", side_effect=interrupt):
+                    patch.object(child, "wait", side_effect=interrupt), \
+                    patch.object(child, "poll", side_effect=interrupt):
                 yield child, [str(command)]
         finally:
             if child.poll() is None:
@@ -623,37 +626,109 @@ class MenuTest(unittest.TestCase):
             started = time.monotonic()
             with self.assertRaises(KeyboardInterrupt):
                 menu.run_command(argv, env=dict(os.environ), interrupt_timeout=0.5)
-            self.assertGreaterEqual(time.monotonic() - started, 0.5)
+            elapsed = time.monotonic() - started
+            self.assertGreaterEqual(elapsed, 0.5)
+            self.assertLess(elapsed, 2)
             self.assertEqual(child.returncode, -signal.SIGKILL)
             self.assertRaises(ChildProcessError, os.waitpid, child.pid, os.WNOHANG)
 
+    def test_command_fast_second_interrupt_kills_child_without_a_pty(self):
+        child_pid = self.tmp / "child-pid"
+        command = self.executable("ignores interrupt", f"""
+            from pathlib import Path
+            import os, signal
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            Path({str(child_pid)!r}).write_text(str(os.getpid()))
+            print('ready', flush=True)
+            while True: signal.pause()
+        """)
+        driver = self.executable("command driver", f"""
+            import os, subprocess, sys
+            sys.path.insert(0, {str(Path(hansa.__file__).resolve().parent.parent)!r})
+            from hansa import menu
+
+            class ReadyCommand(subprocess.Popen):
+                announced = False
+
+                def announce(self):
+                    if not self.announced:
+                        self.announced = True
+                        print('waiting', flush=True)
+
+                def poll(self):
+                    self.announce()
+                    return super().poll()
+
+                def _wait(self, *args, **kwargs):
+                    self.announce()
+                    return super()._wait(*args, **kwargs)
+
+            menu.subprocess.Popen = ReadyCommand
+            try:
+                menu.run_command([{str(command)!r}], env=dict(os.environ))
+            except KeyboardInterrupt:
+                print('interrupted', flush=True)
+            else:
+                raise SystemExit('command returned without KeyboardInterrupt')
+        """)
+        proc = subprocess.Popen([str(driver)], start_new_session=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        try:
+            # Both the child's SIGINT handler and the driver's protected wait must be ready.
+            ready = set()
+            for _ in range(2):
+                self.assertTrue(select.select([proc.stdout], [], [], 15)[0], "processes did not become ready")
+                ready.add(proc.stdout.readline())
+            self.assertEqual(ready, {b"ready\n", b"waiting\n"})
+            started = time.monotonic()
+            os.killpg(proc.pid, signal.SIGINT)
+            # Space two key presses; a signal burst with no gap is not keyboard input.
+            time.sleep(0.05)
+            os.killpg(proc.pid, signal.SIGINT)
+            stdout, stderr = proc.communicate(timeout=15)
+            elapsed = time.monotonic() - started
+            self.assertEqual(proc.returncode, 0, stderr.decode(errors="replace"))
+            self.assertIn(b"interrupted", stdout)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(child_pid.read_text()), 0)
+            self.assertLess(elapsed, 2, "second Ctrl-C waited for the default grace period")
+        finally:
+            # Also cover a driver failure that leaves its child in the process group.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=15)
+            proc.stdout.close()
+            proc.stderr.close()
+
     def test_command_second_interrupt_kills_and_reaps_child(self):
         child = Mock()
-        child.wait.side_effect = [KeyboardInterrupt, KeyboardInterrupt, -signal.SIGKILL]
-        child.poll.return_value = None
-        with patch.object(menu.subprocess, "Popen", return_value=child), self.assertRaises(KeyboardInterrupt):
+        child.poll.side_effect = [KeyboardInterrupt, KeyboardInterrupt, None, None, -signal.SIGKILL]
+        with patch.object(menu.subprocess, "Popen", return_value=child), \
+                patch.object(menu.time, "sleep"), self.assertRaises(KeyboardInterrupt):
             menu.run_command(["command"], env={})
-        self.assertEqual(child.wait.call_count, 3)
-        child.wait.assert_any_call(timeout=5)
         child.kill.assert_called_once_with()
-        child.wait.assert_called_with()
+        self.assertEqual(child.poll.call_count, 5)
+        child.wait.assert_not_called()
 
-    def test_command_preserves_return_code_and_reaps_child_on_wait_error(self):
-        for outcome in (7, OSError("wait failed")):
+    def test_command_preserves_return_code_and_reaps_child_on_poll_error(self):
+        for outcome in (7, OSError("poll failed")):
             with self.subTest(outcome=outcome):
                 child = Mock()
-                child.wait.side_effect = [outcome, 7]
-                child.poll.return_value = 7 if outcome == 7 else None
+                child.returncode = 7
+                child.poll.side_effect = [7, 7, 7] if outcome == 7 else [outcome, None, 7]
                 with patch.object(menu.subprocess, "Popen", return_value=child) as popen:
                     if outcome == 7:
                         self.assertEqual(menu.run_command(["command"], env={}), 7)
                         child.kill.assert_not_called()
                     else:
-                        with self.assertRaisesRegex(OSError, "wait failed"):
+                        with self.assertRaisesRegex(OSError, "poll failed"):
                             menu.run_command(["command"], env={})
                         child.kill.assert_called_once_with()
                 popen.assert_called_once_with(["command"], env={})
-                self.assertEqual(child.wait.call_count, 2)
+                self.assertEqual(child.poll.call_count, 3)
+                child.wait.assert_not_called()
 
     def test_loop_uses_actual_terminal_width_instead_of_stale_columns(self):
         terminal = Mock()

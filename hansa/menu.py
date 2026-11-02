@@ -282,17 +282,23 @@ def run_command(argv, *, env, interrupt_timeout=5):
     child = subprocess.Popen(argv, env=env)
     try:
         try:
-            return child.wait()
+            # Popen.wait swallows a second Ctrl-C during its own short SIGINT wait.
+            while child.poll() is None:
+                time.sleep(0.05)
+            return child.returncode
         except KeyboardInterrupt:
             try:
-                child.wait(timeout=interrupt_timeout)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                end = time.monotonic() + interrupt_timeout
+                while child.poll() is None and time.monotonic() < end:
+                    time.sleep(0.05)
+            except KeyboardInterrupt:
                 pass
             raise
     finally:
         if child.poll() is None:
             child.kill()
-        child.wait()
+        while child.poll() is None:
+            time.sleep(0.05)
 
 
 def perform(key, row, targets, terminal, lang):
