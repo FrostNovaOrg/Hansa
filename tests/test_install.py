@@ -302,6 +302,17 @@ sys.exit(42)
                     for words in ("工作台", "协调员", "入门指南", "Enter", "s"):
                         self.assertIn(words, self.output)
 
+    def test_the_last_next_step_sends_claude_code_to_setup_in_either_language(self):
+        for env, words in (({}, ("Open Claude Code", "set up Hansa with me")),
+                           ({"LANG": "zh_CN.UTF-8"}, ("打开 Claude Code", "和我一起装好 Hansa"))):
+            with self.subTest(env=env):
+                result = self.run_install(**env)
+                self.assert_success(result)
+                last = result.stdout.splitlines()[-1]
+                self.assertIn("~/.local/share/hansa/SETUP.md", last)
+                for word in words:
+                    self.assertIn(word, last)
+
     def test_interrupted_clone_removes_partial_folder(self):
         self.tool("git", """import os, pathlib, signal, sys
 target = pathlib.Path(sys.argv[-1])
