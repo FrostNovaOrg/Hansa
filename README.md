@@ -32,10 +32,10 @@ your yes, given each time or in advance.
 ## Quick start
 
 ```sh
-git clone https://github.com/FrostNovaOrg/Hansa.git ~/hansa
-~/hansa/bin/hansa doctor
-~/hansa/bin/hansa init ~/shop/desk --repo ~/shop/repo
-~/hansa/bin/hansa
+curl -fsSL https://raw.githubusercontent.com/FrostNovaOrg/Hansa/main/install.sh | sh
+hansa doctor
+hansa init ~/shop/desk --repo ~/shop/repo
+hansa
 ```
 
 `~/shop/repo` is your project's git repository, with at least one commit; `~/shop/desk` is the new desk, the folder that holds your team's settings and tasks. [Getting started](docs/getting-started.md) covers the rest.
