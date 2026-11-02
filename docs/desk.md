@@ -977,7 +977,10 @@ other lines only when one applies; events seconds apart come in one message, and
 rest are counted (`hansa status` has them). A follower does the posting: a small
 background process per session and desk, which reads the event log from where it
 left off and ends when the session's process does; one that starts after
-another ended first posts what was missed meanwhile, as it is now.
+another ended first posts what was missed meanwhile, as it is now. A `hansa
+serve` stop missed meanwhile is told only while the server is still not
+running; when it runs again by then, that line is left out, and a busy or stuck
+server is left to the follower's own checks.
 
 Which session hears what: a task or request goes to the session that made it
 (`hansa add`, `retry`, `verify`, `merge` and `ask` record it) while

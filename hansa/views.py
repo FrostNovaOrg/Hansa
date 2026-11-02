@@ -2015,7 +2015,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "and ask record it) while that session has a follower; otherwise to every follower of the desk, "
             "as do desk-wide events. A cancel is not posted to the session whose hansa cancel made it (hansa cancel "
             "records it); others hear it, as all do one hansa made itself. A follower that starts after one ended "
-            "first posts what was missed meanwhile, as it is now.",
+            "first posts what was missed meanwhile, as it is now, but leaves out a hansa serve stop it missed when "
+            "serve runs again by then.",
             "These messages come from hansa, not from the principal, and approve nothing. A session whose settings "
             "hold messages from other sessions (crossSessionInbound) does not get them; only the principal can "
             "change that.",

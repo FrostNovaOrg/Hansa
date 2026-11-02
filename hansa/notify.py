@@ -463,6 +463,7 @@ def handle(desk: Desk, req: dict) -> dict:
         prev = max(mine, key=lambda r: r.get("seen") or 0, default=None)
         if prev and prev.get("caught_up"):  # a follower after it already said what it missed
             prev = None
+        srv = _server(desk)  # what this follower is told of hansa serve
         summary = []
         if prev and int(prev.get("pos") or 0) < end:  # it ended before reading to the end: what was missed
             events, _ = read_log(desk, int(prev.get("pos") or 0), end - int(prev.get("pos") or 0))
@@ -471,6 +472,8 @@ def handle(desk: Desk, req: dict) -> dict:
                 k = ("task", x["key"][1]) if x["key"][0] in ("task", "merge") else tuple(x["key"])
                 if k in seen:
                     continue
+                if k == ("server",) and srv["server"]["state"] != "gone":
+                    continue  # it runs now: that it stopped while this session was away is not news
                 seen.add(k)
                 try:
                     summary.append(desk.redact(task_line(desk, desk.meta(k[1]))) if k[0] == "task" else x["line"])
@@ -485,7 +488,7 @@ def handle(desk: Desk, req: dict) -> dict:
             missed = {"key": prev["key"], "pid": ps.get("pid"), "name": prev.get("name") or "",
                       "at": prev.get("ended") or prev.get("seen"), "session_ended": _proc_gone(ps)}
             review = [k[1] for k in seen if k[0] == "task" and waits_review(desk, k[1])]
-        return {"pos": end, "summary": summary, "missed": missed, "summary_review": review, **_server(desk)}
+        return {"pos": end, "summary": summary, "missed": missed, "summary_review": review, **srv}
     if op == "caught_up":  # the follower posted what an ended one missed: nobody is to post it again
         k = str(req.get("of", ""))
         r = read_json(register_dir(desk) / f"{k}.json", {}) if KEY.match(k) else {}

@@ -15608,6 +15608,58 @@ def save():'''))
         self.assertEqual(self.posts(sc), [])
         self.assertEqual(len(self.posts(sb)), 1)
 
+    def missed_a_server_stop(self, desk=None):
+        """A follower record that ended before hansa serve stopped, and the log's stop after it."""
+        desk = desk or self.desk
+        old = {"pid": 4242, "start": "boot:77"}
+        key = notify.key_of(old)
+        notify._write_record(desk, key, {"key": key, "uid": os.getuid(), "session": old,
+                                         "seen": time.time() - 60, "ended": time.time() - 60,
+                                         "pos": notify.log_end(desk)})
+        desk.event("server_stopped")
+        new = {"pid": 5252, "start": "boot:78"}
+        return key, {"key": notify.key_of(new), "session": new, "uid": os.getuid()}
+
+    def starts_again(self, me, server, desk=None):
+        """The next follower starting, with hansa serve as server_state reads it now."""
+        with unittest.mock.patch.object(notify, "server_state", return_value=server):
+            return notify.handle(desk or self.desk, {"op": "start", "me": me})
+
+    def test_a_server_stop_missed_while_away_is_not_posted_when_the_server_runs_again(self):
+        key, me = self.missed_a_server_stop()
+        r = self.starts_again(me, {"state": "up", "pid": 123, "quiet": 0, "answers": True})
+        self.assertEqual(r["summary"], [])  # no post: nothing starts a turn
+        self.assertIsNone(r["missed"])
+        self.assertIn("caught_up", notify.read_json(notify.register_dir(self.desk) / f"{key}.json"))
+
+    def test_a_task_ended_too_is_posted_without_the_server_stop_it_missed(self):
+        key, me = self.missed_a_server_stop()
+        tid = self.desk.new_task("Added while nobody listened")
+        self.desk.update(tid, state="done")
+        self.desk.event("task_finished", task=tid, state="done")
+        r = self.starts_again(me, {"state": "up", "pid": 123, "quiet": 0, "answers": True})
+        self.assertEqual(len(r["summary"]), 1, r["summary"])
+        self.assertIn(f"{tid} done: Added while nobody listened", r["summary"][0])
+        self.assertNotIn("hansa serve stopped", r["summary"][0])
+        self.assertIsNotNone(r["missed"])  # the task's line is still posted, as the ended session's
+
+    def test_a_server_stop_it_missed_is_still_told_when_the_server_does_not_run(self):
+        key, me = self.missed_a_server_stop()
+        r = self.starts_again(me, {"state": "gone", "pid": None, "quiet": None, "answers": False})
+        self.assertEqual(len(r["summary"]), 1, r["summary"])
+        self.assertIn("hansa serve stopped: no task starts or ends until it runs again · next: hansa up",
+                      r["summary"][0])
+        self.assertIsNotNone(r["missed"])
+
+    def test_a_server_busy_or_stuck_when_the_next_follower_starts_is_not_told_it_stopped(self):
+        for state in ("busy", "stuck"):
+            with self.subTest(state=state):
+                desk = init_desk(self.tmp / f"desk-{state}", "", "a")
+                key, me = self.missed_a_server_stop(desk)
+                r = self.starts_again(me, {"state": state, "pid": 123, "quiet": 900, "answers": False}, desk)
+                self.assertEqual(r["summary"], [])
+                self.assertIn("caught_up", notify.read_json(notify.register_dir(desk) / f"{key}.json"))
+
     def test_a_follower_killed_outright_counts_as_ended_when_the_next_one_starts(self):
         a, sa = self.session()
         with self.in_session(a, sa):
