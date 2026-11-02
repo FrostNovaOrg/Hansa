@@ -12,4 +12,4 @@ problems in those products to their makers.
 Describe how to reproduce the problem and its impact. Do not include real keys,
 tokens or release codes; use invented examples and redact sensitive output.
 
-Hansa is an alpha maintained in spare time. There is no promised response time.
+Hansa is alpha software maintained in spare time. No response time is promised.
