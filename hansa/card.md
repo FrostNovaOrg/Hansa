@@ -63,7 +63,7 @@ a gap in hansa, not in you: say so with `hansa ask`.
 |---|---|
 | `hansa status` | whether `hansa serve` runs; when it is not running, `hansa up` starts it again as it last ran; what runs, waits (and why) or failed; lanes, providers, usage |
 | `hansa desks [--json]` | every desk on this account's list: server, page address without its key, server version, task counts and principal's waiting release/to-do counts; reads only. More: `hansa help bringing-up` |
-| `hansa add "<task>" [--lane L] [--effort E] [--model M] [--title T] [--max-turns N] [--file PATH] [--attach PATH]` | queue a task |
+| `hansa add "<task>" [--lane L] [--effort E] [--model M] [--title T] [--max-turns N] [--file PATH] [--attach PATH] [--verify] [--verify-lane L] [--verify-effort E] [--verify-note "text"]` | queue a task |
 | `hansa show <id> [--full \| --report \| --check \| --check-log \| --merge-check-log]` | report, changes, refused calls, check (failing tests, last lines), next step |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base; `--new`: only what a follow-up added |
 | `hansa git L [--worktree] <git command>` | a git command that reads, in lane L's repository (with every `task/<id>` branch) or worktree, keys hidden |
@@ -147,6 +147,7 @@ task's doing and cannot be run again, and say why. If the setup failed, the work
 retry. More: `hansa help check-output`.
 
 ## Checking before you merge
+When you know at queue time that you want verification, use `hansa add` or `hansa retry` with `--verify` (or `--verify-lane`, `--verify-effort`, `--verify-note`): hansa queues it after a passing check, or with no check, and posts its verdict without a turn between them.
 The lane's check runs on every changed task; `hansa diff <id> --stat` shows the changes:
 - Text or documentation only: the check is enough; read the diff yourself.
 - Code or tests: `hansa verify <id>` first. A worker runs the change: it undoes the code to see new
