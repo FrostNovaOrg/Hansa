@@ -28,11 +28,13 @@
 ## 快速开始
 
 ```sh
-git clone https://github.com/FrostNovaOrg/Hansa.git ~/hansa
-~/hansa/bin/hansa doctor
-~/hansa/bin/hansa init ~/shop/desk --repo ~/shop/repo
-~/hansa/bin/hansa
+curl -fsSL https://raw.githubusercontent.com/FrostNovaOrg/Hansa/main/install.sh | sh
+hansa doctor
+hansa init ~/shop/desk --repo ~/shop/repo
+hansa
 ```
+
+如果 shell 找不到 `hansa`，请添加安装程序打印的 `export PATH` 那一行。
 
 `~/shop/repo` 是你项目的 git 仓库（存放代码和改动历史的地方），至少要有一次提交；`~/shop/desk` 是新的工作台，也就是存放你团队设置和任务的文件夹。其余内容见[上手指南](docs/getting-started.md)。
 

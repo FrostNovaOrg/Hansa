@@ -45,7 +45,7 @@ This clones into `~/.local/share/hansa` and links `~/.local/bin/hansa`.
 No administrator rights needed; your shell profile stays untouched.
 
 To update, pause the desk and wait for running work as in the
-[upgrade steps](../README.md#upgrading-and-going-back), rerun the installer,
+[upgrade steps](concepts.md#upgrading-and-going-back), rerun the installer,
 then restart and resume. To remove hansa (desks stay where they are):
 
 ```sh

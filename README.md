@@ -38,6 +38,8 @@ hansa init ~/shop/desk --repo ~/shop/repo
 hansa
 ```
 
+If your shell cannot find `hansa`, add the `export PATH` line the installer printed.
+
 `~/shop/repo` is your project's git repository, with at least one commit; `~/shop/desk` is the new desk, the folder that holds your team's settings and tasks. [Getting started](docs/getting-started.md) covers the rest.
 
 ## How it works
