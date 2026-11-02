@@ -100,12 +100,9 @@ def record_tmux() -> dict:
     return {"server": tmux_server(socket), "session": session}
 
 
-def record_start(desk: Desk, options) -> None:
-    """Called after serve removes session identity, while it holds serve.lock."""
-    rec = {"hansa": hansa_command(), "options": {k: getattr(options, k) for k in DEFAULTS},
-           "port_explicit": options.port is not None,
-           "env": start_env(desk, os.environ), "tmux": record_tmux(), "at": now()}
-    write_json(desk.state_dir / "serve-start.json", rec)
+def list_desk(desk: Desk, at=None) -> str:
+    """Add or update this desk's entry on the account's list of desks, as each hansa serve start does. Returns
+    what kept it from being written, worded for the caller to report, or '' when it was written."""
     listed = desks_file()
     try:
         listed.parent.mkdir(parents=True, exist_ok=True)
@@ -114,14 +111,60 @@ def record_start(desk: Desk, options) -> None:
             fcntl.flock(held, fcntl.LOCK_EX)
             entries, problem = _desks_entries()
             if problem:  # rewriting it would drop the other desks and let runs start with nothing of them hidden
-                print(desk.redact(f"hansa serve: left the account's list of desks as it is: {problem}"),
-                      file=sys.stderr, flush=True)
-                return
+                return f"left the account's list of desks as it is: {problem}"
             entries = [x for x in entries if isinstance(x, dict) and x.get("desk") != str(desk.root)]
-            entries.append({"desk": str(desk.root), "hansa": rec["hansa"], "at": rec["at"]})
+            entries.append({"desk": str(desk.root), "hansa": hansa_command(), "at": now() if at is None else at})
             write_json(listed, entries)
     except OSError as e:
-        print(desk.redact(f"hansa serve: could not update account's desk list: {e}"), file=sys.stderr, flush=True)
+        return f"could not update account's desk list: {e}"
+    return ""
+
+
+def _same_desk(spelled: str, root: Path) -> bool:
+    """Whether an entry's desk folder, as it was written, is root: the same spelling, or else the same folder with
+    its links followed."""
+    return spelled == str(root) or os.path.realpath(spelled) == os.path.realpath(str(root))
+
+
+def forget_desk(folder) -> tuple:
+    """Take one desk off the account's list of desks, for hansa desks --forget; its folder and files stay, and no
+    other entry changes. Returns (the desk's folder as taken off, '') or (None, why it was not): its server runs, it
+    is not on the list, or the list cannot be read. An entry whose folder is gone can still be taken off."""
+    root = Desk(folder).root
+    listed = desks_file()
+    try:
+        listed.parent.mkdir(parents=True, exist_ok=True)
+        # The same lock list_desk takes, so a start and a forget one after the other leave one list, not two.
+        with open(listed.with_suffix(".lock"), "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            entries, problem = _desks_entries()
+            if problem:  # rewriting it would drop the other desks, and hansa cannot tell whether root is listed
+                return None, problem
+            found = [x for x in entries if isinstance(x, dict) and isinstance(x.get("desk"), str)
+                     and _same_desk(x["desk"], root)]
+            if not found:
+                return None, f"{root} is not on the account's list of desks; nothing was changed"
+            state = server_state(Desk(found[0]["desk"]))
+            if state["state"] != "gone":
+                return None, (f"the server for {found[0]['desk']} is running; stop it first (press x on its row in "
+                              "the hansa menu), then run hansa desks --forget again. Nothing was changed")
+            write_json(listed, [x for x in entries
+                                if not (isinstance(x, dict) and isinstance(x.get("desk"), str)
+                                        and _same_desk(x["desk"], root))])
+            return str(root), ""
+    except OSError as e:
+        return None, f"could not update the account's list of desks: {e}"
+
+
+def record_start(desk: Desk, options) -> None:
+    """Called after serve removes session identity, while it holds serve.lock."""
+    rec = {"hansa": hansa_command(), "options": {k: getattr(options, k) for k in DEFAULTS},
+           "port_explicit": options.port is not None,
+           "env": start_env(desk, os.environ), "tmux": record_tmux(), "at": now()}
+    write_json(desk.state_dir / "serve-start.json", rec)
+    problem = list_desk(desk, rec["at"])
+    if problem:
+        print(desk.redact(f"hansa serve: {problem}"), file=sys.stderr, flush=True)
 
 
 def serve_command(desk: Desk, rec: dict) -> list:

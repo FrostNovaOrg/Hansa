@@ -95,7 +95,8 @@ TOPICS = {
 COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
                   ("watching", ("status", "desks", "wait", "notify", "ask", "explain", "notes", "gaps", "cost")),
                   ("lanes and releases", ("lane", "release", "changelog", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
-                  ("the desk", ("doctor", "init", "menu", "up", "serve", "web", "coordinator", "ping", "help")))
+                  ("the desk", ("doctor", "example", "init", "menu", "up", "serve", "web", "coordinator", "ping",
+                                "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
@@ -355,6 +356,11 @@ def cmd_init(a):
           "the coordinator adds lanes with `hansa lane add` and queues work with `hansa add`.")
 
 
+def cmd_example(a):
+    from .example import make
+    make(Path(a.dir) if a.dir else None, a.lang)
+
+
 def _init_for(a) -> None:
     """hansa init DIR --user ACCOUNT: make DIR, give it to the account, and run the rest of init as it.
     Returns only when hansa already runs as that account."""
@@ -472,6 +478,12 @@ def cmd_status(a):
 
 
 def cmd_desks(a):
+    if a.forget:
+        root, problem = up.forget_desk(a.forget)
+        if problem:
+            raise SystemExit(f"hansa: {problem}")
+        print(f"Took {root} off the account's list of desks; its folder and files are untouched.")
+        return
     st = views.desks()
     print(json.dumps(st, ensure_ascii=False, indent=1) if a.json else views.desks_text(st))
 
@@ -2972,6 +2984,10 @@ def main(argv=None):
         p.add_argument("--verify-note", metavar="TEXT", help="what the verification should look at in particular; "
                        "implies --verify. These options apply only to this task, never to a follow-up")
 
+    p = add("example", cmd_example, "set up a small sample project, desk and first task to try hansa on; it starts "
+            "nothing and calls no model")
+    p.add_argument("dir", nargs="?", help="folder to create (default: ~/hansa-example); it must be new or empty")
+    p.add_argument("--lang", choices=("zh", "en"), help="language of the next steps (default: the shell's locale)")
     p = add("init", cmd_init, "create a desk")
     p.add_argument("dir")
     p.add_argument("--repo", help="git checkout the first lane works on")
@@ -3004,7 +3020,10 @@ def main(argv=None):
     p = add("status", cmd_status, "what is running, queued, waiting for review, and why")
     p.add_argument("--json", action="store_true")
     p = add("desks", cmd_desks, "this account's listed desks: servers, page addresses without keys, and counts")
-    p.add_argument("--json", action="store_true")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--json", action="store_true")
+    g.add_argument("--forget", metavar="PATH", help="take this desk off the account's list of desks (it deletes no "
+                   "file); refused while that desk's server runs, and when PATH is not on the list")
     p.epilog = see_more("bringing-up")
     p = add("show", cmd_show, "one task: its text, report, changes, refused commands, usage, next step")
     p.add_argument("id")
@@ -3519,9 +3538,9 @@ def main(argv=None):
         ap.error("ask needs what the principal must do" if a.close is None else
                  "ask --close needs the outcome: hansa ask --close N \"<outcome>\"")
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
-    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks", "menu", "doctor"):
+    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks", "menu", "doctor", "example"):
         _as_desk_account(a, argv)
-    if a.cmd not in ("init", "desks", "menu", "doctor") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
+    if a.cmd not in ("init", "desks", "menu", "doctor", "example") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
         try:
             cost.note_session(Desk.find(a.desk))
         except SystemExit:  # no desk: the command says so itself

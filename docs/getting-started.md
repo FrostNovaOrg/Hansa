@@ -77,6 +77,12 @@ run the desk. A new desk's provider `claude` uses that account's login.
 Alternatively, set an Anthropic-compatible endpoint and key on the page below;
 this needs no subscription login. The principal handles credentials, not an agent.
 
+## Try the sample first
+
+Run `hansa example` (the installer's copy at `~/.local/share/hansa`, linked as
+`~/.local/bin/hansa`) to watch one task go through hansa on your own login
+before real work; it starts nothing and calls no model.
+
 ## Create and start the desk
 
 Your checkout at `~/shop/repo` needs a commit before `hansa init` or

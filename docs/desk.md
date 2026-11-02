@@ -761,6 +761,15 @@ empty list says `No desks listed`; an unreadable list gives the same reason as
 list-level `problem` string. Neither format includes task titles, notes,
 reports, to-do texts, provider keys, release codes or the page's key.
 
+`hansa desks --forget PATH` takes that one entry off the list, leaving the desk's
+folder and files and every other entry as they are. It refuses while that desk's
+server runs, saying to stop it first, and says so when `PATH` is not on the
+list; both change nothing and exit 1. An entry whose folder is gone can still be
+taken off this way, so removing a desk takes three steps: stop its server (`x` in
+the menu), `hansa desks --forget DIR`, then delete `DIR`. The lock the list is
+written under is the one `hansa serve` takes, so a start and a forget cannot
+leave two versions of the list.
+
 ### The coordinator's session
 
 Each start of the coordinator's session saves `.hansa/coordinator-start.json`;
