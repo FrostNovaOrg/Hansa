@@ -248,6 +248,15 @@ class SrtSettings(Scratch):
     def test_settings_unset(self):
         self.assertIn("HANSA_CODEX_BIN is not set", self.refused(HANSA_CODEX_BIN=""))
 
+    def test_only_codex_adapter_settings_are_supported(self):
+        supported = {"HANSA_CODEX_BIN", "HANSA_CODEX_HOME", "HANSA_CODEX_MODEL", "HANSA_CODEX_EFFORT",
+                     "HANSA_CODEX_LOGS", "HANSA_CODEX_SRT", "HANSA_REAL_CLAUDE", "HANSA_CODEX_CA_FILE",
+                     "HANSA_CODEX_WEB_SEARCH", "HANSA_CODEX_DISABLE"}
+        self.assertEqual(set(shim.SETTINGS), supported)
+        values = {k: "adapter-value" for k in supported}
+        self.assertEqual(self.settings_from(env=values), values)
+        self.assertEqual(self.settings_from(codex_env="\n".join(f"{k}={v}" for k, v in values.items())), values)
+
     def settings_from(self, codex_env="", trial_env="", env=None):
         """shim.settings(env) with these files as codex.env and trial.env beside it; '' leaves one out."""
         kept = shim.CODEX_ENV, shim.OLD_ENV

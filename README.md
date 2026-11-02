@@ -8,7 +8,7 @@ worker's changes, runs the lane's check and keeps the record. A person, the prin
 keys and settings through a local web page, and hansa releases nothing without the principal's yes: given
 for each release, or once for a release target the principal lets go out without asking.
 A worker may also run Codex's command line instead, through the optional adapter in
-[`contrib/codex`](contrib/codex/README.md) (macOS only), which also has a Cursor backend, off by default.
+[`contrib/codex`](contrib/codex/README.md) (macOS only).
 
 | | |
 |---|---|
@@ -213,10 +213,6 @@ More: [The desk: files, keys and notes](docs/desk.md).
 - With the [Codex adapter](contrib/codex/README.md), a Codex run's commands can read the Codex login: Codex and
   the commands it runs share one sandbox, and every Codex run, on any lane, uses that one login. Claude workers
   cannot read it, and a Codex run's network reaches only the lane's hosts and OpenAI's.
-- With the adapter's [Cursor backend](contrib/codex/README.md#the-cursor-backend), Cursor runs outside the
-  operating system's sandbox and its commands in Cursor's own, which lets them write the git folder of any
-  repository the workspace's `.git` is pointed at, the lane's included. The adapter keeps the lane's git folders
-  read-only for the run and fails a run that changed them, but a commit that landed there stays.
 - A release's command runs outside the sandbox, as the desk's account, and so does what it builds and
   starts from the base branch: list a lane's build and release files as its `release_files`.
 - The coordinator's rules against pushing and publishing catch only the forms they name; a command run another

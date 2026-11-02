@@ -126,7 +126,7 @@ HOME_SECRETS = (
     # Teleport
     ".tsh", ".tbot",
     # other AI tools (.config/anthropic: the settings and keys of Anthropic's own command-line tools)
-    ".codex", ".gemini", ".cursor", ".grok", ".qwen", ".continue", ".codeium", ".windsurf", ".aider",
+    ".codex", ".gemini", ".grok", ".qwen", ".continue", ".codeium", ".windsurf", ".aider",
     ".config/github-copilot", ".config/opencode", ".local/share/opencode", ".config/goose", ".config/openai",
     ".openai", ".anthropic", ".config/anthropic", ".cache/huggingface/token", ".huggingface/token", ".kaggle", ".config/kaggle",
     # cloud and hosting tools
