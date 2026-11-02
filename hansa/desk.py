@@ -1452,9 +1452,9 @@ def listed_mismatch(s: dict, entry, zh: bool = False, now_as: dict | None = None
     # a lane or target gone now is said as such first, whenever and however its entry was saved
     ln = s.get("lanes", {}).get(lane)
     if not ln:
-        return f"工作线 {lane} 不在桌面上" if zh else f"lane {lane} is not on the desk"
+        return f"工作线 {lane} 不在工作台上" if zh else f"lane {lane} is not on the desk"
     if target == "":
-        return (f"这是工作线 {lane} 未命名发布的旧勾选：现在不涵盖任何目标；若要无需询问就发布，请重新勾选 default" if zh else
+        return (f"这是工作线 {lane} 未命名发布的旧勾选：现在不涵盖任何发布目标；若要无需询问就发布，请重新勾选 default" if zh else
                 f"an old tick for lane {lane}'s unnamed release: it covers no target now; "
                 "tick default again if it should go out without asking")
     if target not in lane_targets(ln):
@@ -1465,14 +1465,14 @@ def listed_mismatch(s: dict, entry, zh: bool = False, now_as: dict | None = None
         return ("保存清单时 hansa 还没记下各工作线的仓库、基础分支和发布命令" if zh else
                 "the list was saved before hansa recorded each lane's repository, base branch and release command")
     if not entry.get("repo"):
-        return f"保存清单时工作线 {lane} 还不在桌面上" if zh else f"lane {lane} was not on the desk when the list was saved"
+        return f"保存清单时工作线 {lane} 还不在工作台上" if zh else f"lane {lane} was not on the desk when the list was saved"
     if now_as is None:
         now_as = listed_as(ln, target)
     # an entry saved without after (before hansa recorded it) stands for a target that must follow none
     then = {**entry, "command": entry.get("command", entry.get("release", ""))}
     changed = [what for k, what in (("repo", ("repository", "仓库")), ("base", ("base branch", "基础分支")),
                                     ("command", ("release command", "发布命令")),
-                                    ("after", ("order (the target it must follow)", "顺序（它要跟在哪个目标之后）")),
+                                    ("after", ("order (the target it must follow)", "顺序（它要跟在哪个发布目标之后）")),
                                     ("fixed", ("way it runs (--fixed)", "运行方式（--fixed）")))
                if then.get(k, "") != now_as.get(k, "")]
     if not changed:

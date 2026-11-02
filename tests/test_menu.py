@@ -294,8 +294,8 @@ class MenuTest(unittest.TestCase):
     def test_keys_fit_eighty_columns_and_a_short_screen_drops_rows_not_keys(self):
         for lang, labels in (("en", ("↑↓ choose", "Space tick", "a all", "s start", "Enter enter", "w page",
                                      "x stop", "p pause/resume", "r refresh", "q quit")),
-                             ("zh", ("↑↓ 选择", "空格 勾选", "a 全选", "s 启动", "回车 进入", "w 页面",
-                                     "x 停止", "p 暂停/恢复派活", "r 刷新", "q 退出"))):
+                             ("zh", ("↑↓ 选择", "空格 勾选", "a 全选", "s 启动", "回车 进入", "w 网页",
+                                     "x 停止", "p 暂停/恢复派发任务", "r 刷新", "q 退出"))):
             text = menu.screen(self.state(), 1, set(), lang, 80, 6)
             first, second = text.splitlines()[-2:]
             self.assertTrue(all(x in first for x in labels[:6]) and all(x in second for x in labels[6:]))
@@ -308,8 +308,8 @@ class MenuTest(unittest.TestCase):
             ("gone", False, {}, None, (("s", "start", "Space", "several"), ("s", "启动", "空格", "多个"))),
             ("up", True, {"server": ["-L", "default"], "session": "shop-coordinator"}, None,
              (("Enter", "coordinator", "on this machine", "tmux attach -t shop-coordin"),  # Clipped at 80 columns.
-              ("回车", "协调席", "本机", "tmux attach -t shop-coordinator"))),
-            ("up", False, {}, None, (("s", "open", "coordinator"), ("s", "打开", "协调席"))),
+              ("回车", "协调员", "本机", "tmux attach -t shop-coordinator"))),
+            ("up", False, {}, None, (("s", "open", "coordinator"), ("s", "打开", "协调员"))),
             ("up", True, {}, None, (("not in tmux", "Enter cannot"), ("不在 tmux", "回车无法"))),
             ("gone", False, {}, "folder is gone", ((), ())),
             ("gone", False, {}, "folder cannot be read as a desk", ((), ())),

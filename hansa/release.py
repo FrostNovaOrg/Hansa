@@ -294,7 +294,7 @@ def what(r: dict) -> str:
 
 
 def what_zh(r: dict) -> str:
-    return f"工作线 {r.get('lane')}" + (f" 的目标 {r['target']}" if r.get("target") else "")
+    return f"工作线 {r.get('lane')}" + (f" 的发布目标 {r['target']}" if r.get("target") else "")
 
 
 def ask_again(r: dict) -> str:
@@ -325,9 +325,9 @@ def before_it(desk: Desk, s: dict, lane: str, target: str, repo, base: str, comm
         return ""
     prev = last_out(desk, lane, repo, base, after)
     if zh:
-        return (f"工作线 {lane} 的目标 {target} 要等目标 {after} 先发出同一个提交才能发出，而"
+        return (f"工作线 {lane} 的发布目标 {target} 要等发布目标 {after} 先发出同一个提交才能发出，而"
                 + (f" {after} 上一次发出的发布（#{prev['id']}）是 {prev['commit'][:10]}，不是 {commit[:10]}"
-                   if prev else f"目标 {after} 还没有从 {base} 发出过发布")
+                   if prev else f"发布目标 {after} 还没有从 {base} 发出过发布")
                 + f"：先发布 {after}（hansa release {lane} {after}）")
     return (f"lane {lane} target {target} goes out only after target {after} sent out the same commit, and "
             + (f"{after}'s last release that went out (#{prev['id']}) was {prev['commit'][:10]}, not {commit[:10]}"
@@ -979,7 +979,7 @@ def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
     """stale in English and Chinese, from one look at the outside files and base branch: (English, Chinese)."""
     ln = s["lanes"].get(r.get("lane"))
     if not ln:
-        return f"lane {r.get('lane')} is no longer on the desk", f"工作线 {r.get('lane')} 已不在桌面上"
+        return f"lane {r.get('lane')} is no longer on the desk", f"工作线 {r.get('lane')} 已不在工作台上"
     target = r.get("target") or ""
     t = lane_targets(ln).get(target)
     if t is None and target:
@@ -1372,9 +1372,9 @@ def _not_ready(desk: Desk, s: dict, r: dict) -> tuple | None:
     if r.get("after_merge"):
         t = lane_targets(s["lanes"].get(r["lane"])).get(target) or {}
         if not _is_int(t.get("after_merge_min"), 1, 1440) or t.get("after"):
-            return ("runs after merges were turned off for this target", "此目标已关闭合并后自动运行")
+            return ("runs after merges were turned off for this target", "此发布目标已关闭合并后自动运行")
         if not lane_listed(s, r["lane"], target):
-            return ("the principal's tick no longer counts for this target", "此目标的负责人勾选已不再有效")
+            return ("the principal's tick no longer counts for this target", "此发布目标的负责人勾选已不再有效")
     if r.get("without_asking") and not r.get("after_merge") and not lane_listed(s, r["lane"], target):
         # Automatic requests already checked their tick above; fingerprint outside files once.
         change(desk, rid, lambda x: {"state": "waiting", "without_asking": None, "answered": None})
@@ -1671,7 +1671,7 @@ def after_merge_rows(desk: Desk, s: dict, tasks: list) -> list:
                 en = f"starts at {when(at)}, {delay} minute{'s' if delay != 1 else ''} after the last merge"
                 zh = f"于 {when(at)} 开始，即上次合并后 {delay} 分钟"
             en = f"{target} on lane {lane} at {commit[:10]} {en}"
-            zh = f"工作线 {lane} 的目标 {target} 在提交 {commit[:10]} 上{zh}"
+            zh = f"工作线 {lane} 的发布目标 {target} 在提交 {commit[:10]} 上{zh}"
             if desk.paused():
                 en += "; " + waits_text(desk, s, {"without_asking": True})
                 zh += "；" + waits_text(desk, s, {"without_asking": True}, zh=True)
@@ -1812,7 +1812,7 @@ def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> st
     """What an approved release waits for, in words (zh: in Chinese, for the page)."""
     paused = desk.paused()
     if r.get("without_asking") and paused:
-        return (f"等桌面恢复（桌面已暂停：{paused}）：暂停时只运行你点过头的发布" if zh else
+        return (f"等工作台恢复（工作台已暂停：{paused}）：暂停时只运行你点过头的发布" if zh else
                 f"waits until the desk is resumed (it is paused: {paused}): while it is paused, only a release the "
                 "principal said yes to runs")
     other = next((x for x in releases(desk) if x.get("state") in ("starting", "running") and x.get("repo") == r.get("repo")
@@ -1823,7 +1823,7 @@ def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> st
     m = not r.get("fixed") and merging_on(desk, s, r.get("repo"), tasks)
     if m:
         lane = merge_check_lane(s, m)
-        return (f"等同一仓库上工作线 {lane} 的 {m['id']} 合并验收结束" if zh else
+        return (f"等同一仓库上工作线 {lane} 的 {m['id']} 合并检查结束" if zh else
                 f"waits for {m['id']}'s merge check on lane {lane}, on the same repository")
     from .run import not_looking
     from . import disk, memory
@@ -1846,7 +1846,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
     if st == "waiting":
         code = code_text(r, zh)
         if zh:
-            return "等你在网页上点头" + (f"，或在对话里把提醒里的一次性码告诉协调者（{code}）" if code_live(r) else
+            return "等你在网页上点头" + (f"，或在对话里把提醒里的一次性码告诉协调员（{code}）" if code_live(r) else
                                        f"（{code}）" if code else "")
         return "waiting for the principal's yes on the page" + (
             f", or the one-time code of their alert said in the conversation ({code})" if code_live(r) else
@@ -1854,7 +1854,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
     if st == "approved":
         if zh:
             how = ("不用问你就发布（这个发布目标在你的清单上）" if r.get("without_asking")
-                   else f"你在 {when(r.get('answered'))} 点了头" + ("（在对话里用提醒里的一次性码，经协调者）" if coded else ""))
+                   else f"你在 {when(r.get('answered'))} 点了头" + ("（在对话里用提醒里的一次性码，经协调员）" if coded else ""))
             return f"{how}；{waits_text(desk, s or desk.settings(), r, zh=True)}"
         how = "released without asking (it is on the principal's list)" if r.get("without_asking") \
             else f"the principal said yes {when(r.get('answered'))}" + (
@@ -1891,7 +1891,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
                 + (f": {r['problem']}" if r.get("problem") else "") + late)
     if st == "refused":
         if zh:
-            return (f"你在 {when(r.get('answered'))} 拒绝了" + ("（在对话里用提醒里的一次性码，经协调者）" if coded else "")
+            return (f"你在 {when(r.get('answered'))} 拒绝了" + ("（在对话里用提醒里的一次性码，经协调员）" if coded else "")
                     + (f"：{r['reason']}" if r.get("reason") else ""))
         return (f"refused by the principal {when(r.get('answered'))}"
                 + (" (through the coordinator, with the one-time code of their alert)" if coded else "")
@@ -1920,7 +1920,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
 def _who(r: dict, zh: bool = False) -> str:
     by = r.get("stopped_by") or ""
     if zh:
-        return "你" if by == "page" else "协调者" if by == "coordinator" else by or "?"
+        return "你" if by == "page" else "协调员" if by == "coordinator" else by or "?"
     return "the principal" if by == "page" else "the coordinator" if by == "coordinator" else by or "?"
 
 
