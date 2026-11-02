@@ -95,7 +95,7 @@ TOPICS = {
 COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
                   ("watching", ("status", "desks", "wait", "notify", "ask", "explain", "notes", "gaps", "cost")),
                   ("lanes and releases", ("lane", "release", "changelog", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
-                  ("the desk", ("init", "menu", "up", "serve", "web", "coordinator", "ping", "help")))
+                  ("the desk", ("doctor", "init", "menu", "up", "serve", "web", "coordinator", "ping", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
@@ -1536,6 +1536,14 @@ def cmd_menu(a):
     menu.run(getattr(a, "lang", None))
 
 
+def cmd_doctor(a):
+    from . import doctor
+    result = doctor.check(a.lang)
+    print(json.dumps(result, ensure_ascii=False) if a.json else doctor.text(result, a.lang))
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
 def web_port(desk: Desk) -> int:
     """The port this desk's hansa serve last served the page on: another desk's server may hold the default."""
     return views.web_address(desk)[1]
@@ -2919,6 +2927,11 @@ def main(argv=None):
     p.add_argument("--lane", default="a")
     p.add_argument("--base", help="base branch; must resolve to an existing commit (default: the checkout's current branch)")
     p.add_argument("--user", help="as root on a Linux server: the account the desk belongs to and hansa runs as")
+    p = add("doctor", cmd_doctor, "read-only installation checks; run first when helping someone install, "
+            "or after installing; needs no desk and installs nothing")
+    p.add_argument("--json", action="store_true", help="machine-readable rows and overall ok status")
+    p.add_argument("--lang", choices=("zh", "en"), help="output language (default: the shell's locale)")
+    p.epilog = "Each command has a 15-second limit. Exit 1 if any row fails; notes do not fail. See docs/getting-started.md."
     p = add("add", cmd_add, "queue a task")
     p.add_argument("text", nargs="*")
     p.add_argument("--attach", action="append", default=[], metavar="PATH",
@@ -3453,9 +3466,9 @@ def main(argv=None):
         ap.error("ask needs what the principal must do" if a.close is None else
                  "ask --close needs the outcome: hansa ask --close N \"<outcome>\"")
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
-    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks", "menu"):
+    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks", "menu", "doctor"):
         _as_desk_account(a, argv)
-    if a.cmd not in ("init", "desks", "menu") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
+    if a.cmd not in ("init", "desks", "menu", "doctor") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
         try:
             cost.note_session(Desk.find(a.desk))
         except SystemExit:  # no desk: the command says so itself
