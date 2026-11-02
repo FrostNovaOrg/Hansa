@@ -1,8 +1,8 @@
 # Getting started
 
 Run hansa on a Mac or Linux machine that stays on. You, the **principal**, own
-logins, keys and page settings; the coordinator plans work and sends tasks to
-workers. If you work as root, first follow the account setup in
+logins, keys and settings; the coordinator plans tasks for workers. As root,
+first follow
 [On a Linux server](linux-server.md#the-coordinator-as-root-the-desk-as-an-ordinary-account).
 
 ## Install the tools
@@ -23,14 +23,8 @@ With Node and npm installed:
 
 ```sh
 npm install -g @anthropic-ai/claude-code@2.1.307 @anthropic-ai/sandbox-runtime@0.0.79
-python3 --version
-git --version
-claude --version
-node --version
-npm ls -g --depth=0
 ```
 
-Check srt's **package** version with npm; its CLI version string may differ.
 [Tools and upgrades](sandbox.md#tools-and-upgrades) records the baseline and upgrade checks.
 
 Workers require Claude Code's operating-system sandbox. macOS supplies it.
@@ -38,18 +32,31 @@ On Linux install `bubblewrap` and `socat` (Debian/Ubuntu:
 `sudo apt-get install bubblewrap socat tmux`); unprivileged user namespaces must
 work. Ubuntu 24.04+ AppArmor restrictions can block them. Follow
 [Claude Code's Linux sandbox setup](https://code.claude.com/docs/en/sandboxing#set-up-linux-and-wsl2)
-for your distribution. Test the actual lane below; installed packages alone do
-not prove the sandbox works.
+for your distribution.
 
 ## Get the current code
 
-Use **alpha**; `main` holds the older Bellhop version.
+Use **alpha**; `main` holds Bellhop.
 
 ```sh
 git clone --branch alpha https://github.com/FrostNovaOrg/Hansa.git ~/hansa
 export PATH="$HOME/hansa/bin:$PATH"
 hansa --version
+hansa doctor
 ```
+
+Run `hansa doctor` after installing; an agent helping install runs it first.
+It needs no desk, checks tools and sandbox operation, and changes nothing.
+The login row fails until the principal logs in below; endpoint-only setups
+can ignore that row. Rerun after fixes.
+It reads no credentials, discards login output and removes its sandbox temporary
+folder afterwards.
+
+Rows give findings, requirements and fixes; notes do not fail. Exit 0 means no
+failures; exit 1 means a failed row. `--json` gives `{"ok": ..., "rows": [...]}`
+with `name`, `state`, `found`, `need`, `fix`; states are `ok`, `note`, `fails`,
+`skipped`. `--lang zh|en` selects language as in `hansa menu`.
+Commands time out after 15 seconds, with a short cleanup wait for inherited output.
 
 Add that export to your shell profile too. Either put hansa's `bin` folder on
 `PATH`, as above, or put a symbolic link to `bin/hansa` in a folder already on
@@ -57,15 +64,15 @@ Add that export to your shell profile too. Either put hansa's `bin` folder on
 
 ## Log in (the principal's step)
 
-For a subscription, run `claude` and complete login as the account that will
-run the desk, then exit. A new desk's provider `claude` uses that account's login.
+For a subscription, run `claude auth login` yourself as the account that will
+run the desk. A new desk's provider `claude` uses that account's login.
 Alternatively, set an Anthropic-compatible endpoint and key on the page below;
 this needs no subscription login. The principal handles credentials, not an agent.
 
 ## Create and start the desk
 
-Use your project's checkout at `~/shop/repo`. It needs at least one commit
-before `hansa init` or `hansa lane add` can use it. For a new, empty project
+Use your project's checkout at `~/shop/repo`. It needs a commit before
+`hansa init` or `hansa lane add`. For a new, empty project
 (replace the author placeholders with your details):
 
 ```sh
@@ -75,8 +82,6 @@ git -C ~/shop/repo config user.name "Your Name"
 git -C ~/shop/repo config user.email "you@example.com"
 git -C ~/shop/repo commit --allow-empty -m "Initial commit"
 ```
-
-Then:
 
 ```sh
 hansa init ~/shop/desk --repo ~/shop/repo
@@ -90,9 +95,9 @@ Init creates lane `a` on the checkout's current branch. With a subscription
 login, run `hansa up`: it starts the server, then the coordinator in tmux.
 
 For an endpoint without a login, first run `hansa serve`, keeping that terminal
-open. Configure the page below from another terminal,
-then run `hansa up` to start the coordinator. For remote use, keep this initial
-server in tmux too (`tmux new -s shop-server`, then `hansa serve` in the desk).
+open. Configure the page below from another terminal, then run `hansa up`.
+Over SSH, keep this initial server in tmux too (`tmux new -s shop-server`, then
+`hansa serve` in the desk).
 
 Attach using the coordinator's printed `attach:` command. Answer Claude Code's
 folder-trust question yes so its allowed commands work.
@@ -110,9 +115,9 @@ hansa web
 ```
 
 Open its printed address, including `?t=...`, and keep the terminal open.
-The token is the page's key, including permission to approve releases. Run this
-and server startup from a plain shell, not a Claude Code session: `hansa web`
-refuses to expose the token inside a session.
+The token is the page's key, including permission to approve releases.
+Start the server and page from a plain shell: `hansa web` refuses to expose
+the token inside a Claude Code session.
 
 In **Settings → Providers**, add endpoints, default models and effort; use
 **Save settings** and the separate **Save key** button. In **Coordinator**, select
@@ -130,7 +135,7 @@ Ask the coordinator:
 > testable improvement, review the result and check, verify if needed, and merge
 > it when it holds. Do not release it.
 
-For an empty project, ask for a small Python function and a unittest instead.
+For an empty project, ask for a Python function and unittest.
 The coordinator sets the check, for example
 `hansa lane set a check "python3 -m unittest discover"`, and the download hosts
 with `hansa lane set a network HOST ...`. The default network list is empty;
@@ -140,10 +145,10 @@ list each required registry or download host. See [network lists](sandbox.md#a-l
 passes, and check that `hansa explain server` says `hansa serve tried srt` and
 `it ran` for the server's sandboxed probe.
 Workers also require their own sandbox probe to pass.
-Without srt, a check says **could not run**: a machine setup problem, not the
-task's failure. A configured setup cannot run either and stops the worker from
-starting. Fix the tools on the server's PATH and restart the server; the
-coordinator can then recheck before merging (`hansa merge ID --recheck`).
+Without srt, setup and check commands say **could not run**: a machine setup
+problem, not the task's failure; configured setup stops workers from starting.
+Fix the tools on the server's PATH and restart the server; recheck before merging
+(`hansa merge ID --recheck`).
 
 Follow progress on Status. The coordinator reads `hansa show ID` and
 `hansa diff ID`; hansa commits the worker's changes and checks them. The first
@@ -164,9 +169,9 @@ returns from the page. Nothing starts until you choose. `q` leaves work running.
 
 On your computer, `ssh my-server`, then follow the setup above on that machine.
 Install tmux there. `hansa up` keeps the coordinator open after SSH disconnects.
-Detach with Ctrl+B then D; reconnect and use its printed attach command again
-(including its `-L` or `-S` socket option). `hansa status` describes the session;
-run `hansa up` to bring back a stopped one, continuing its conversation.
+Detach with Ctrl+B then D; reconnect using its printed attach command
+(including `-L` or `-S`). `hansa status` describes the session; `hansa up` brings
+back a stopped one, continuing its conversation.
 
 For the page, first read `hansa status` or `hansa explain server` on the server.
 The port starts at 8765 but can change; it is saved in `.hansa/web-port`.
