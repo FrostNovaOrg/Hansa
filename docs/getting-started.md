@@ -1,19 +1,18 @@
 # Getting started
 
-Run hansa on a Mac or Linux machine that stays on. You, the **principal**, own
+Run hansa on an always-on Mac or Linux machine. You, the **principal**, own
 logins, keys and settings; the coordinator plans tasks for workers. As root,
 first follow
 [On a Linux server](linux-server.md#the-coordinator-as-root-the-desk-as-an-ordinary-account).
 
 ## Install the tools
 
-Install these outside the project's worktree, available to the account running
-the desk and on the `PATH` used to start `hansa serve`:
+Install these outside the worktree, on the desk account's `PATH` when starting `hansa serve`:
 
 | Tool | Version |
 |---|---|
 | Python | 3.9 or newer; standard library only, nothing to build |
-| Git | Required; no minimum declared. Git 2.32+ preserves global configuration when hiding Linux sandbox placeholders ([details](linux-server.md#what-a-lanes-commands-meet-in-linuxs-sandbox)). |
+| Git | Required; no minimum enforced. On Linux, Git 2.32+ recommended: preserves global configuration when hiding sandbox placeholders ([details](linux-server.md#what-a-lanes-commands-meet-in-linuxs-sandbox)). |
 | [Claude Code](https://code.claude.com/docs/en/overview) | 2.1.290+ for the coordinator plugin; CI uses 2.1.307 |
 | Node | 22.12.0+ for srt; CI uses 24.22.0 |
 | srt (`@anthropic-ai/sandbox-runtime`) | 0.0.79 |
@@ -34,18 +33,31 @@ work. Ubuntu 24.04+ AppArmor restrictions can block them. Follow
 [Claude Code's Linux sandbox setup](https://code.claude.com/docs/en/sandboxing#set-up-linux-and-wsl2)
 for your distribution.
 
-## Get the current code
+## Install hansa
 
-Use **alpha**; `main` holds Bellhop.
+With Git and Python 3.9+, run:
 
 ```sh
-git clone --branch alpha https://github.com/FrostNovaOrg/Hansa.git ~/hansa
-export PATH="$HOME/hansa/bin:$PATH"
-hansa --version
-hansa doctor
+curl -fsSL https://raw.githubusercontent.com/FrostNovaOrg/Hansa/main/install.sh | sh
+```
+
+This clones into `~/.local/share/hansa` and links `~/.local/bin/hansa`.
+No administrator rights needed; your shell profile stays untouched.
+
+To update, pause the desk and wait for running work as in the
+[upgrade steps](concepts.md#upgrading-and-going-back), rerun the installer,
+then restart and resume. To remove hansa (desks stay where they are):
+
+```sh
+rm -rf ~/.local/share/hansa ~/.local/bin/hansa
 ```
 
 Run `hansa doctor` after installing; an agent helping install runs it first.
+
+```sh
+hansa doctor
+```
+
 It needs no desk, checks tools and sandbox operation, and changes nothing.
 The login row fails until the principal logs in below; endpoint-only setups
 can ignore that row. Rerun after fixes.
@@ -57,11 +69,6 @@ failures; exit 1 means a failed row. `--json` gives `{"ok": ..., "rows": [...]}`
 with `name`, `state`, `found`, `need`, `fix`; states are `ok`, `note`, `fails`,
 `skipped`. `--lang zh|en` selects language as in `hansa menu`.
 Commands time out after 15 seconds, with a short cleanup wait for inherited output.
-
-Add `export PATH="$HOME/hansa/bin:$PATH"` to your shell profile too.
-Either put hansa's `bin` folder on
-`PATH`, as above, or put a symbolic link to `bin/hansa` in a folder already on
-`PATH`, for example `ln -s ~/hansa/bin/hansa /opt/homebrew/bin/hansa`.
 
 ## Log in (the principal's step)
 
@@ -77,9 +84,8 @@ real work; it starts nothing and calls no model.
 
 ## Create and start the desk
 
-Use your project's checkout at `~/shop/repo`. It needs a commit before
-`hansa init` or `hansa lane add`. For a new, empty project
-(replace the author placeholders with your details):
+Your checkout at `~/shop/repo` needs a commit before `hansa init` or
+`hansa lane add`. For an empty project (replace the author details):
 
 ```sh
 mkdir -p ~/shop
@@ -102,10 +108,9 @@ if a path is rejected.
 Init creates lane `a` on the checkout's current branch. With a subscription
 login, run `hansa up`: it starts the server, then the coordinator in tmux.
 
-For an endpoint without a login, first run `hansa serve`, keeping that terminal
-open. Configure the page below from another terminal, then run `hansa up`.
-Over SSH, keep this initial server in tmux too (`tmux new -s shop-server`, then
-`hansa serve` in the desk).
+For an endpoint without a login, keep `hansa serve` running, configure the page
+below from another terminal, then run `hansa up`. Over SSH, use tmux
+(`tmux new -s shop-server`, then `hansa serve`).
 
 Attach using the coordinator's printed `attach:` command. Answer Claude Code's
 folder-trust question yes so its allowed commands work.
@@ -168,25 +173,24 @@ After a restart, open the desk menu from your computer, forwarding the page
 ports you need (here 8765 and 8766):
 
 ```sh
-ssh -t -L 8765:127.0.0.1:8765 -L 8766:127.0.0.1:8766 HOST /path/to/hansa/bin/hansa
+ssh -t -L 8765:127.0.0.1:8765 -L 8766:127.0.0.1:8766 HOST '"$HOME/.local/bin/hansa"'
 ```
 
 Tick desks with Space, press `s` to start them, Enter to enter a coordinator,
 or `w` for its page address. Ctrl+B then D returns from a coordinator; Ctrl+C
 returns from the page. Nothing starts until you choose. `q` leaves work running.
 
-On your computer, `ssh my-server`, then follow the setup above on that machine.
-Install tmux there. `hansa up` keeps the coordinator open after SSH disconnects.
+Install tmux on the server; `hansa up` keeps the coordinator open after SSH disconnects.
 Detach with Ctrl+B then D; reconnect using its printed attach command
 (including `-L` or `-S`). `hansa status` describes the session; `hansa up` brings
 back a stopped one, continuing its conversation.
 
-For the page, first read `hansa status` or `hansa explain server` on the server.
-The port starts at 8765 but can change; it is saved in `.hansa/web-port`.
+Find the page's port (initially 8765) through `hansa status`,
+`hansa explain server`, or `.hansa/web-port` on the server.
 If the actual port is **8766**, run this from your own computer:
 
 ```sh
-ssh -L 127.0.0.1:8766:127.0.0.1:8766 my-server '"$HOME/hansa/bin/hansa" --desk "$HOME/shop/desk" web'
+ssh -L 127.0.0.1:8766:127.0.0.1:8766 my-server '"$HOME/.local/bin/hansa" --desk "$HOME/shop/desk" web'
 ```
 
 Replace both 8766s with the actual port. Open the printed URL locally. Keep the
@@ -198,8 +202,7 @@ This works for a Mac mini or Linux server without exposing the page publicly.
 
 | What you see | Why | Fix |
 |---|---|---|
-| Older Bellhop files | Cloned `main` | Use the `alpha` clone above. |
-| `No module named hansa` | Unreadable checkout | Ensure the desk account can read the checkout; either its `bin` on PATH or a launcher symlink works. |
+| `No module named hansa` | Unreadable checkout | Ensure the desk account can read the checkout. |
 | Init refuses the repository | No commit | Make its first commit, then retry. |
 | Server runs, no coordinator | tmux absent | Install tmux and rerun `hansa up`, or run `hansa coordinator`. |
 | Coordinator cannot run allowed commands | Folder not trusted | Answer Claude Code's folder-trust question yes. |

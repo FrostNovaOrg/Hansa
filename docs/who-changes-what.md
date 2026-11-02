@@ -185,14 +185,16 @@ process can post into other sessions as that session, and
 and others. Every `hansa` command takes them out of its own environment as it
 starts: by name, and by rule every `CLAUDE_CODE_MESSAGING_*`,
 `CLAUDE_CODE_SESSION_*` and `CLAUDE_CODE_CHILD_*` (the list is in
-[`hansa/__init__.py`](../hansa/__init__.py)). So nothing hansa starts gets
+[`hansa/__init__.py`](../hansa/__init__.py)). So nothing hansa starts inherits
 them: not a release's command, the alert command, git and its hooks, the follower that posts to a session, nor the
 desk's account on a Linux server. Workers and the lanes' setups and checks
-never had them, as hansa builds their environment itself. Only hansa's
-notifying uses them, in the command run from the session: `CLAUDE_PID` says
-which session asked for a task or request (the desk's account is given that
-one alone), and `hansa notify on` hands `CLAUDE_CODE_MESSAGING_SOCKET` to its
-follower on the follower's command line. How Claude Code runs
+never had them, as hansa builds their environment itself. The command run
+from the session keeps them for itself and passes on only two, both for
+notifying. `CLAUDE_PID` goes to the desk's account, in its environment, so that
+the command it runs there can record which session asked for a task or request.
+`CLAUDE_CODE_MESSAGING_SOCKET` goes to the follower of `hansa notify on`, on
+the follower's command line (`--socket`, with `CLAUDE_PID`'s value as `--pid`),
+as the inbox it posts to; its environment holds neither. How Claude Code runs
 (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR`, `CLAUDE_CODE_MAX_RETRIES` and the
 like) is not a session's identity and stays.
 
@@ -205,7 +207,7 @@ The page's address carries its token, which approves releases. `hansa web`
 prints it only outside a Claude Code session: in one (any of the variables
 above set, the `!` prefix's shell included) it refuses, prints nothing of the
 address, and says how the principal opens the page from a terminal of their own, as the
-README's `ssh -L` line does. It refuses for `HANSA_ROLE` or `HANSA_TASK` as
+`ssh -L` line in [Getting started](getting-started.md#work-over-ssh) does. It refuses for `HANSA_ROLE` or `HANSA_TASK` as
 before. `--file` (`hansa add`, `retry`, `lane brief`) admits only files workers may read,
 using the same rules as new attachments, including the principal's list and the built-in private
 folders. It follows symbolic links and checks private hard links. `--file -` applies those checks

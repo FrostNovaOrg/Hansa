@@ -10,8 +10,6 @@ instead of Claude Code, without changing hansa. hansa runs every worker with `cl
 - **hansa's provider check on it** (the same, with no `--session-id`) runs `codex exec` once, in srt, in a new
   empty folder of its own (below, "The provider check").
 - **`--resume` on it** gets an error answer: resume is not supported.
-- **A call on the Cursor provider** (`ANTHROPIC_BASE_URL=http://cursor.invalid`) goes to the Cursor backend when a
-  desk turns it on (below, "The Cursor backend"); while it is off, to the real claude, as every other call.
 - **Every other call** is `exec`ed to the real claude, unchanged: same arguments, stdin, environment, exit code.
 
 The wrapper is perl because it must hand on the environment exactly: a shell adds `PWD`, `SHLVL` and `_`, and
@@ -138,7 +136,9 @@ What it cannot close:
 - A task stopped at a ceiling has only Codex's last message.
 - **None of hansa's tool rules** (`--allowedTools`, `--disallowedTools`, Read denials) and no browser
   (`--mcp-config` is ignored): srt's file and network rules are the boundary. `permission_denials` is always empty.
-- **Cost is 0**; the tokens are counted from `turn.completed`. A failed run's usage is unknown and shown as zero.
+- **hansa shows these runs' cost as 0 because it has no price for them**, until the principal adds the model to the
+  price table. The tokens are still counted, from `turn.completed`, and the provider's own charges are not known to
+  hansa. A failed run's usage is unknown and shown as zero.
 - The watchdog looks every half second; a process that leaves and loses its parent between two looks can escape.
   Codex's unlimited reconnect is kept: it waits for the network in place, and hansa's time ceiling still holds.
 
@@ -204,76 +204,10 @@ as a link). Afterwards `hello.txt` should be there with only the `init` commit, 
 at once with `Codex refused its configuration`. Workers never run it: it needs the real Codex and its login. hansa's
 checkout is the one the script is in, unless `HANSA_SRC` names another.
 
-## The Cursor backend
-
-A second backend, **off unless a desk turns it on**: a provider whose base URL is `http://cursor.invalid` runs
-Cursor's headless command line (`cursor-agent -p`) in place of Codex (`shim/hansa_cursor.py`). It handles a worker
-run, hansa's provider check (Cursor once, in an empty folder of its own) and `--resume` (an error answer). While
-`HANSA_CURSOR_ENABLE` is not `on`, in the environment or else in `codex.env`, a call on that provider goes to the
-real claude unchanged, as a call on any other provider does, whatever else of Cursor's is set.
-
-**Not in srt, but in Cursor's own sandbox.** On macOS Cursor cannot run inside srt: it needs the login keychain
-when it starts, and srt refuses it. So Cursor itself runs outside srt, and its commands run in Cursor's sandbox,
-set up for each run with a `HOME` of the run's own (a link to the account's keychain, and `.cursor/sandbox.json`)
-and a `CURSOR_CONFIG_DIR` (no MCP tools, no web fetch). Commands may read and write the workspace, write the run's
-temporary folder and the lane's write list, read `HANSA_CURSOR_READ`, write no `/tmp`, and reach the lane's hosts
-alone, never this machine. Cursor never gets `--force` or `--sandbox disabled`.
-
-**On a copy of the worktree.** Cursor's sandbox opens the workspace's git folder for writing, and follows it
-wherever a command points the workspace's `.git`. So Cursor never gets hansa's worktree: it works in a copy, with
-a one-commit repository of its own, and the adapter brings its change back as a patch between two snapshots of the
-copy, taken in a repository Cursor is never given; hansa commits it as it commits a Claude worker's. A failed
-run's change, or one stopped at `--max-turns`, comes back too. What that closes:
-
-- **The copy's git boundary.** For the run's length the adapter takes every write permission off the worktree's
-  git folders (its own and the repository's common one), recording the modes in `hansa-cursor-hold/` there, and
-  the last Cursor run on the repository to end puts them back (a watchdog does, if the adapter is killed). After
-  the run it compares the repository's refs, HEADs and objects: if they moved, the run fails, bringing nothing back.
-- **What a later run would obey.** A patch touching `.cursor`, `.claude`, `.codex` or `.agents`, or a submodule,
-  brings nothing back. A run is refused while the worktree holds a `.cursor`, a `.claude/settings.json` (Cursor runs
-  its hooks outside its sandbox) or a nested repository, or a folder above the copy holds a `CLAUDE.md`,
-  `CLAUDE.local.md`, `AGENTS.md` or `.cursorrules`, which Cursor would give the model.
-- **A changed Cursor.** A run is refused when `cursor-agent -v` is not `HANSA_CURSOR_VERSION`: the sandbox was
-  checked on that version. What Cursor leaves running (a `cursorsandbox` per command, a detached `worker-server`)
-  is stopped after every run, on a signal and past `--max-turns`.
-
-What it does not close: Cursor itself runs outside any sandbox, as the desk's account. The write permissions the
-hold takes off are that account's, so a command Cursor's sandbox lets write a git folder can put them back; the
-after-run check then fails the run, but a commit that landed in the repository stays there.
-
-**Setting it up.** Install Cursor's command line and log in once (`cursor-agent login`). With the real Cursor, run
-`./dry-run-cursor.sh`: one run as hansa starts a worker, on a scratch repository, whose task asks Cursor to try
-each way out (git in its workspace, the copy's `.git` pointed at the main repository five ways, writes outside it,
-the network); it prints whether the main repository changed (it must not) and what of the run is left running
-(nothing must be). Then set these in `codex.env`, and add a `compatible` provider with base URL
-`http://cursor.invalid`, such a key and any model name, to a lane on a repository of its own (below):
-
-| setting | meaning | default |
-|---|---|---|
-| `HANSA_CURSOR_ENABLE` | `on` turns the backend on; unset or anything else leaves it off | off |
-| `HANSA_CURSOR_BIN` | the `cursor-agent` program | (required) |
-| `HANSA_CURSOR_VERSION` | what `cursor-agent -v` says; change it only after the dry run passes on the new version | (required) |
-| `HANSA_CURSOR_MODEL` | `--model`; for `grok-4.7` hansa's `--effort` picks `grok-4.7-low` … `-xhigh` (`max` as `xhigh`, none as `high`); others as given | `grok-4.7` |
-| `HANSA_CURSOR_READ` | extra folders Cursor's commands may read, separated by `:` | none |
-| `HANSA_CURSOR_LOGS` | where each run's `.jsonl`, `.err`, `.patch`, `.sandbox.json` and `.cli-config.json` are kept | `logs/` here |
-
-**Limits.** The first four were seen when it was tried on a desk:
-
-- While a Cursor run runs, the repository's git directory is read-only, so no lane on that repository can commit,
-  switch branches or merge until it ends. Give a Cursor lane a repository of its own.
-- hansa's own tests, which make git repositories, cannot run in Cursor's sandbox (it cannot create `.git/hooks`),
-  so a Cursor worker on hansa leans on the lane's check.
-- hansa sees no progress until the run ends.
-- The usage Cursor reports can be less than what the run used. Cost is shown as 0.
-- A crash that takes the watchdog too leaves the git directory read-only until a later Cursor run repairs the
-  hold, or a `chmod` by hand.
-- Failures are classed as Codex's are; of Cursor's own words, only those for a missing login have been seen.
-
 ## Tests
 
 The adapter's tests run in hansa's suite (`python3 tests/run_parallel.py`), and alone with
 `python3 -m unittest contrib.codex.tests`. They import hansa from this checkout (`HANSA_SRC` wins), so hansa's own
-readings judge every answer, and use fakes for codex, srt, claude, cursor-agent and cursorsandbox, replaying
-hand-written JSONL: no real Codex or Cursor, no network. A test that starts a Codex worker run, runs the fake Cursor
-or works on a worktree for it skips off macOS. `HANSA_CODEX_TEST_*` and `HANSA_CURSOR_TEST_*` switches are for the
-tests only.
+readings judge every answer, and use fakes for codex, srt and claude, replaying hand-written JSONL: no real
+Codex, no network. A test that starts a Codex worker run skips off macOS. `HANSA_CODEX_TEST_*` switches are for
+the tests only.

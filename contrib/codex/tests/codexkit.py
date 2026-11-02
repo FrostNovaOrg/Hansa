@@ -37,62 +37,6 @@ def skip_unless_macos(test):
         test.skipTest(ONLY_MACOS)
 
 
-def refused_above(d: Path) -> str:
-    """The first file the Cursor backend refuses above its workspace (hansa_cursor.ABOVE_FILES) in `d` or a folder
-    above it, as given or with links resolved; '' when none."""
-    import hansa_cursor
-    for p in (d, d.resolve()):
-        for f in (p, *p.parents):
-            for n in hansa_cursor.ABOVE_FILES:
-                if os.path.lexists(f / n):
-                    return str(f / n)
-    return ""
-
-
-_CURSOR_PLACE = []  # (the folder Cursor tests make their temporary roots in, or None; why none), found once a run
-
-
-def cursor_place():
-    """(a folder to make a Cursor test's temporary root in, with none of the files the backend refuses above it, or
-    None; why there is none): the suite's temporary folder when it is clear, else macOS's own temporary folders, else
-    the nearest folder above the suite's temporary folder that is clear; the first a folder can be made in."""
-    if _CURSOR_PLACE:
-        return _CURSOR_PLACE[0]
-    given = Path(tempfile.gettempdir())
-    places = [given]
-    if sys.platform == "darwin":
-        user_tmp = subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True).stdout.strip()
-        places += [Path(user_tmp)] if user_tmp else []
-    places += [Path("/tmp"), Path("/var/tmp"), *given.resolve().parents]
-    tried = []
-    for place in dict.fromkeys(places):
-        try:
-            made = Path(tempfile.mkdtemp(prefix="cursor-place-", dir=str(place)))
-        except OSError as e:
-            tried.append(f"{place}: {e.strerror or e}")
-            continue
-        found = refused_above(made)
-        made.rmdir()
-        if not found:
-            _CURSOR_PLACE.append((place, ""))
-            return _CURSOR_PLACE[0]
-        tried.append(f"{place}: {found}")
-    _CURSOR_PLACE.append((None, "no temporary root with none of the files the Cursor backend refuses above its "
-                                "workspace could be made (" + "; ".join(tried) + ")"))
-    return _CURSOR_PLACE[0]
-
-
-def cursor_root(test, prefix) -> Path:
-    """A temporary folder of `test`'s own, removed after it, with none of the files the Cursor backend refuses above
-    it, whatever lies above the suite's temporary folder; the test skips, saying why, when none can be made."""
-    place, why = cursor_place()
-    if place is None:
-        test.skipTest(why)
-    root = Path(tempfile.mkdtemp(prefix=prefix, dir=str(place))).resolve()
-    test.addCleanup(shutil.rmtree, root, True)
-    return root
-
-
 def git(*args, cwd):
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=str(cwd), check=True,
                    capture_output=True)
