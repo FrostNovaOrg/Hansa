@@ -32615,7 +32615,7 @@ else if (ask === "gaps") (async () => {
   check(root.textContent.includes(run("T.gapsIntro")) && root.textContent.includes("hansa gaps mark"), "read-only instructions missing");
   const labels = descendants(root, "th").map(el => el.textContent);
   check(JSON.stringify(labels) === JSON.stringify(zh
-    ? ["附注编号", "任务", "附注", "标记", "原因", "标记者", "标记时间"]
+    ? ["备注编号", "任务", "备注", "标记", "原因", "标记者", "标记时间"]
     : ["Note ID", "Task", "Note", "Mark", "Why", "Marked by", "Marked at"]), "columns untranslated");
   const options = descendants(root, "option");
   check(JSON.stringify(options.map(el => el.textContent)) === JSON.stringify(zh

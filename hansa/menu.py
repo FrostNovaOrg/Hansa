@@ -41,7 +41,7 @@ WORDS = {
     "started": ("{desk}: started; {attach}", "{desk}：已启动；{attach}"),
     "not_started": ("{desk}: not started; see the lines above.", "{desk}：未启动；请看上面的输出。"),
     "empty": ("No desks listed. hansa init makes a desk; its first server start lists it. q quits.",
-              "没有工作台。hansa init 创建工作台；首次启动后台后，工作台会显示在列表中。q 退出。"),
+              "没有工作台。hansa init 创建工作台；首次启动后台后，工作台显示在列表中。q 退出。"),
     "gone": ("folder is gone; nothing to do", "文件夹已不存在；没有可做的操作"),
     "unreadable": ("folder cannot be read as a desk; nothing to do", "无法读取工作台；没有可做的操作"),
     "up": ("running", "运行中"), "busy": ("busy", "在忙"), "stuck": ("stuck", "卡住了"),

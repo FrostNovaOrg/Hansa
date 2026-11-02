@@ -521,7 +521,7 @@ const T = ZH ? {
   savedAlerts:"提醒设置用于下次提醒检查。",
   last24h:"最近 24 小时", finished:"做完", merged:"已合并", tokens:"token", listValue:"按价目折算",
   total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
-  costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。一件任务返工时，每次尝试的 token 都算在里面。",
+  costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。一件任务重新排队时，每次尝试的 token 都算在里面。",
   coordinatorUncounted:"这里没有算协调员和它的助手的用量：协调员以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
   coordinatorUncountedWhy:{untied:"这里没有算协调员和它的助手的用量：协调员的会话在工作台之外的 {where} 启动。在该会话中运行一次 hansa 命令后，hansa 才能识别并统计它；目前还没有。",
     login:"这里没有算协调员和它的助手的用量：协调员的会话用的是 {where} 里的 Claude 登录，不是工作者的，hansa 只读工作者的登录。",
@@ -531,7 +531,7 @@ const T = ZH ? {
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按工作线", bymodel:"按模型", bytask:"按任务", byprovider:"按服务商",
   seat_coordinator:"协调员", seat_helper:"协调员的助手", seat_worker:"工作者", seat_verify:"核验任务", helper_reviewer:"复核助手", helper_scout:"调研助手", helper_operator:"操作助手",
   events:"最近发生的事", none:"无", forbidden:"没有权限：请用 hansa web 给的地址打开",
-  eventStates:{queued:"返工", running:"运行中", checking:"转入检查", done:"待审", failed:"失败", cancelled:"已取消", merged:"已合并", waiting:"等批准", approved:"已批准", stopped:"已停止"},
+  eventStates:{queued:"重新排队", running:"运行中", checking:"转入检查", done:"待审", failed:"失败", cancelled:"已取消", merged:"已合并", waiting:"等批准", approved:"已批准", stopped:"已停止"},
   eventResult:e => e.could_not_run ? "无法运行" : e.ok === true ? "通过" : e.ok === false ? "未通过" : "结果未知",
   eventSentences:{
     task_started:e => `任务开始：工作线 ${e.lane || "—"}，服务商 ${e.provider || "—"}`,
@@ -836,7 +836,7 @@ Object.assign(T, ZH ? {
   firstTryMerged:"首次尝试就合并", firstTryMergedNote:"用 hansa retry 退回的后续任务算作返工",
   verdictsHeld:"核验通过的比例", verdictsHeldNote:"在已有结论的核验中，通过（含有备注）的比例",
   shareOf:(part, whole) => `${Math.round(part / whole * 100)}%（${fmt(part)} / ${fmt(whole)}）`,
-  workerHours:"工作者与核验者工时", workerHoursNote:"小时 · 含返工，按运行结束时间统计", historyEndNote:"按各自完成或合并的时间统计；核验单独计数。",
+  workerHours:"工作者与核验者工时", workerHoursNote:"小时 · 含自动重新排队和返工，按运行结束时间统计", historyEndNote:"按各自完成或合并的时间统计；核验单独计数。",
   coordinatorTurns:"协调员的轮数", coordinatorTurnsNote:"统计期内有活动记录的轮次", coordinatorHours:"协调员工时", coordinatorHoursNote:"小时 · 每轮从第一步到最后一步",
   workDaily:"每日工作", workWeekly:"每周工作", workDayNote:"每栏为一个滚动的 24 小时时段。", workWeekNote:"按工作台当地时间从周一开始；首尾周可能不完整。",
   workLegend:"上部：完成的任务 · 下部：合并的任务", linesAdded:"约增加行数", linesRemoved:"约删除行数",
@@ -878,7 +878,7 @@ Object.assign(T, ZH ? {
   timeline:"工作线最近 24 小时", timelineAgo:"24 小时前", timelineNow:"现在", timelineEmpty:"最近 24 小时没有工作",
   timelineLoading:"正在加载工作线历史…", timelineError:"工作线历史加载失败", timelineMinutes:n => `${n} 分钟`,
   timeline_worker:"工作者", timeline_check:"检查", timeline_verification:"核验", timeline_merge:"合并检查", timeline_try:"工作线试跑", timeline_release:"发布",
-  timeline_failed:"失败", timeline_running:"进行中", timeline_done:"完成", timeline_passed:"通过", timeline_stopped:"已停止", timeline_cancelled:"已取消", timeline_queued:"运行失败，返工", timeline_could_not_run:"无法运行",
+  timeline_failed:"失败", timeline_running:"进行中", timeline_done:"完成", timeline_passed:"通过", timeline_stopped:"已停止", timeline_cancelled:"已取消", timeline_queued:"运行失败，已重新排队", timeline_could_not_run:"无法运行",
   pipeline_worker:"工作者运行中", pipeline_check:"检查中", pipeline_verification:"核验中",
   laneTrying:"试跑中", laneHeld:"沙箱暂缓", startedAt:"开始", lastNote:"最近留言", verifyingTask:"核验任务",
   laneQueued:n => `${n} 件排队`, laneReplies:n => `${n} 轮回复`, laneIdle:n => `空闲 ${n} 分钟`, timeBudget:(n, limit) => `已用 ${n} 分钟，时限 ${limit} 分钟`
@@ -902,8 +902,8 @@ Object.assign(T, ZH ? {
   noteBinary:"Not UTF-8 text; cannot display.", noteCut:"Truncated: showing only the first 1 MB.", notesFailed:"Could not load notes. Try again."
 });
 Object.assign(T, ZH ? {
-  gaps:"已知问题", gapsIntro:"核验留下的附注。此处只读；请用 hansa gaps mark 标记。", noGaps:"暂无已知问题",
-  gapId:"附注编号", gapText:"附注", gapMark:"标记", gapWhy:"原因", gapBy:"标记者", gapAt:"标记时间",
+  gaps:"已知问题", gapsIntro:"核验留下的备注。此处只读；请用 hansa gaps mark 标记。", noGaps:"暂无已知问题",
+  gapId:"备注编号", gapText:"备注", gapMark:"标记", gapWhy:"原因", gapBy:"标记者", gapAt:"标记时间",
   gapMarks:{open:"未标记或以后处理", all:"全部", none:"尚未标记", later:"以后处理", wontfix:"不修复", fixed:"已修复"},
   gapsLoading:"正在加载已知问题…", gapsFailed:"已知问题加载失败，请重试。"
 } : {
