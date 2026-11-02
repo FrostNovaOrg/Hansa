@@ -15204,6 +15204,34 @@ def save():'''))
         s["providers"]["claude"]["config_dir"] = "/abs/path"
         self.assertEqual(self.desk.save_settings(s), [])
 
+    def patch_sleeps(self, action):
+        """Patch hansa.cli.time.sleep, the time module's own sleep, for this test's thread only. Another thread of
+        this process — one an earlier test left running, say — may sleep while it is patched: its calls sleep as
+        usual, and are neither counted nor handed to action. Returns the patcher and the seconds this thread slept."""
+        real, mine, sleeps = time.sleep, threading.current_thread(), []
+
+        def sleep(seconds):
+            if threading.current_thread() is not mine:
+                return real(seconds)
+            sleeps.append(seconds)
+            return action(seconds)
+        return unittest.mock.patch("hansa.cli.time.sleep", side_effect=sleep), sleeps
+
+    def test_patch_sleeps_lets_another_thread_sleep_without_counting_it(self):
+        slept = threading.Event()
+
+        def other():
+            time.sleep(0.01)  # the real sleep: not this test's action
+            slept.set()
+
+        patcher, sleeps = self.patch_sleeps(lambda _: self.fail("another thread's sleep was acted on"))
+        with patcher:
+            th = threading.Thread(target=other)
+            th.start()
+            th.join(10)
+        self.assertTrue(slept.is_set())
+        self.assertEqual(sleeps, [])
+
     def test_wait_returns_when_a_task_ends(self):
         tid = self.desk.new_task("Add hello.txt")
         d, stop, broke = Dispatcher(self.desk), threading.Event(), []
@@ -15234,8 +15262,10 @@ def save():'''))
 
     def test_wait_with_only_open_todos_returns_without_waiting(self):
         self.desk.add_ask("Review access", holds=True)
-        with unittest.mock.patch("hansa.cli.time.sleep", side_effect=AssertionError("waited on a to-do")):
+        patcher, sleeps = self.patch_sleeps(lambda _: self.fail("waited on a to-do"))
+        with patcher:
             out = self.hansa_out("wait")
+        self.assertEqual(sleeps, [])
         self.assertIn("nothing to wait for", out)
         self.assertNotIn("no task finished", out)
         out = io.StringIO()
@@ -15250,18 +15280,19 @@ def save():'''))
         self.desk.change(tid, lambda m: {"state": "running"})
 
         def progress(_):
-            if sleeping.call_count == 1:
+            if len(sleeps) == 1:
                 asks = self.desk.asks()
                 asks[1].update(closed=now(), answer="Old page answer")
                 write_json(self.desk.asks_path, asks)
-            elif sleeping.call_count == 2:
+            elif len(sleeps) == 2:
                 self.desk.change(tid, lambda m: {"state": "done"})
             else:
                 self.fail("wait did not notice the task ended")
 
-        with unittest.mock.patch("hansa.cli.time.sleep", side_effect=progress) as sleeping:
+        patcher, sleeps = self.patch_sleeps(progress)
+        with patcher:
             out = self.hansa_out("wait", "--timeout", "1")
-        self.assertEqual(sleeping.call_count, 2)
+        self.assertEqual(len(sleeps), 2)
         self.assertIn(f"{tid} done", out)
         self.assertNotIn("request #", out)
         self.assertEqual([a["id"] for a in views.todo_list(self.desk, state="open")["rows"]], [1])
