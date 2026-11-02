@@ -290,6 +290,60 @@ class MenuTest(unittest.TestCase):
         self.assertIn("做完待审", menu.screen(state, 0, set(), "zh", 200, 24))
         self.assertNotIn("\x1b", menu.cut("folder\x1b[2J\n", 100))
 
+    def test_keys_fit_eighty_columns_and_a_short_screen_drops_rows_not_keys(self):
+        for lang, labels in (("en", ("↑↓ choose", "Space tick", "a all", "s start", "Enter enter", "w page",
+                                     "x stop", "p pause/resume", "r refresh", "q quit")),
+                             ("zh", ("↑↓ 选择", "空格 勾选", "a 全选", "s 启动", "回车 进入", "w 页面",
+                                     "x 停止", "p 暂停/恢复派活", "r 刷新", "q 退出"))):
+            text = menu.screen(self.state(), 1, set(), lang, 80, 7)
+            first, second = text.splitlines()[-2:]
+            self.assertTrue(all(x in first for x in labels[:6]) and all(x in second for x in labels[6:]))
+            self.assertTrue(menu.cells(first) <= 80 and menu.cells(second) <= 80)
+            self.assertIn("二/工作台", text)  # a short screen drops rows, not keys
+            self.assertNotIn("one/desk", text)
+
+    def test_pause_and_web_print_what_start_prints_for_an_unusable_installation(self):
+        row = self.state()["desks"][0]
+        row["server"] = "up"
+        not_ours = self.tmp / "another account's hansa"
+        not_ours.write_text("#!/bin/sh\n")
+        not_ours.chmod(0o600)
+        terminal = Mock(outside=contextlib.nullcontext)
+        for saved in (self.tmp / "missing installation", self.executable("too old", "raise SystemExit(2)"), not_ours):
+            row["saved"]["hansa"] = str(saved)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertFalse(up.listed_desk_up(Path(row["desk"]), row["saved"], stream=True))
+            for key in ("p", "w"):
+                with patch.object(menu.subprocess, "call") as call, contextlib.redirect_stdout(io.StringIO()):
+                    argv, _, note = menu.command(row, key, "en")
+                    self.assertEqual((argv, note), ([], out.getvalue().rstrip("\n")))
+                    menu.perform(key, row, [row], terminal, "en")
+                call.assert_not_called()
+
+    def test_enter_and_web_wait_for_a_key_only_after_a_failed_command(self):
+        row, terminal = self.state()["desks"][0], Mock(outside=contextlib.nullcontext)
+        for key in ("\r", "w"):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    patch.object(menu, "command", return_value=(["then"], {}, "")):
+                for outcome, waits in ((1, True), (0, False), (KeyboardInterrupt, False)):
+                    terminal.key.reset_mock()
+                    with patch.object(menu.subprocess, "call", side_effect=[outcome]) as call:
+                        menu.perform(key, row, [row], terminal, "en")
+                    call.assert_called_once()
+                    self.assertEqual(terminal.key.called, waits)
+
+    def test_zero_sized_terminal_draws_as_eighty_by_twenty_four(self):
+        text = menu.screen(self.state(), 0, set(), "en", 0, 0).replace("\x1b[H\x1b[2J", "")
+        self.assertIn("hansa · choose a desk", text)
+        self.assertIn("q quit", text)
+        self.assertTrue(all(menu.cells(line) <= 80 for line in text.splitlines()))
+
+    def test_no_desks_does_not_ask_to_tick_or_start(self):
+        self.list_desks()
+        text = menu.screen(self.state(), 0, set(), "en", 200, 24)
+        self.assertIn("No desks listed", text)
+        self.assertNotIn("Tick the desks", text)
+
     def test_cli_routes_only_principals_with_both_terminals_to_menu(self):
         with patch.object(sys.stdin, "isatty", return_value=True), patch.object(sys.stdout, "isatty", return_value=True), \
                 patch.object(menu, "run") as run, patch.object(Desk, "find", return_value=None), \
@@ -300,7 +354,9 @@ class MenuTest(unittest.TestCase):
             cli.main(["up", "--all"])
             all_up.assert_called_once()
             for name in ("HANSA_ROLE", "HANSA_TASK", "CLAUDE_PID"):
-                with patch.dict(os.environ, {name: "agent"}), contextlib.redirect_stdout(io.StringIO()) as out:
+                out = io.StringIO()
+                out.isatty = lambda: True
+                with patch.dict(os.environ, {name: "agent"}), contextlib.redirect_stdout(out):
                     cli.main([])
                     self.assertIn("usage:", out.getvalue())
                     cli.main(["up"])

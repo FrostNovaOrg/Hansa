@@ -892,6 +892,20 @@ def desk_up(desk: Desk) -> bool:
     return coordinator_up(desk) and ok
 
 
+def installation_up(command: str) -> bool:
+    """Whether a saved hansa can start a desk: it is there, executable, and knows `up` (the check `listed_desk_up` makes)."""
+    return bool(command and os.path.isfile(command) and os.access(command, os.X_OK)
+                and subprocess.run([command, "up", "--help"], capture_output=True, text=True,
+                                   timeout=15).returncode == 0)
+
+
+def listed_problem(desk: Desk, rec: dict) -> str:
+    """What hansa prints for a listed desk whose saved installation cannot start it."""
+    last = {**(read_json(desk.state_dir / "serve-start.json", {}) or {}), "hansa": rec.get("hansa", "")}
+    return ("Its hansa is missing or too old for up; nothing started.\n"
+            "Last server command: " + shlex.join(serve_command(desk, last)))
+
+
 def listed_desk_up(root, rec: dict, *, stream: bool = False) -> bool:
     """One listed desk, by its own installation. The principal's menu streams its output untouched."""
     print(f"Desk {root}:", flush=True)
@@ -900,13 +914,8 @@ def listed_desk_up(root, rec: dict, *, stream: bool = False) -> bool:
     last["hansa"] = rec.get("hansa", "")
     command = rec.get("hansa") or ""
     try:
-        supported = bool(command and os.path.isfile(command) and os.access(command, os.X_OK))
-        if supported:
-            supported = subprocess.run([command, "up", "--help"], capture_output=True,
-                                       text=True, timeout=15).returncode == 0
-        if not supported:
-            print("Its hansa is missing or too old for up; nothing started.")
-            print("Last server command: " + shlex.join(serve_command(desk, last)))
+        if not installation_up(command):
+            print(listed_problem(desk, rec))
             return False
         r = subprocess.run([command, "--desk", str(root), "up"], capture_output=not stream,
                            text=True, timeout=None if stream else 30)
