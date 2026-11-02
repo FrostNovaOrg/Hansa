@@ -7095,7 +7095,7 @@ def save():'''))
             with small_pattern_limits():
                 coordinator = c.refused("release", "a")
 
-            def grouped(text, zh=False, code="line", where="unchecked.txt"):
+            def grouped(text, zh=False, code="line", where="unchecked.txt", page=False):
                 ordinary = "查到的禁发字眼:" if zh else "Words found that must not go out:"
                 limit = "这一行无法检查:" if zh else "The line could not be checked:"
                 c.assertEqual(text.count(ordinary), 1)
@@ -7109,10 +7109,13 @@ def save():'''))
                            "scan": ("over 1 s in this scan, so the rest was not checked", "总耗时超过 1 秒，因此剩余内容未检查"),
                            "long": ("longer than 10,000 characters, so patterns could not check it", "超过 10,000 字符，因此正则无法检查它"),
                            "thread": ("off the main thread", "不在主线程上，正则未运行")}
-                c.assertIn(reasons[code][int(zh)], limits)
-                if code in ("line", "thread"):
-                    c.assertIn("检查到此停止" if zh else "scan stopped", limits)
-                    c.assertIn("这一行及剩余内容未检查" if zh else "this line and the rest were not checked", limits)
+                if page and zh and code == "thread":
+                    c.assertIn("当前环境无法运行正则检查；该行及后续内容均未检查", limits)
+                else:
+                    c.assertIn(reasons[code][int(zh)], limits)
+                    if code in ("line", "thread"):
+                        c.assertIn("检查到此停止" if zh else "scan stopped", limits)
+                        c.assertIn("这一行及剩余内容未检查" if zh else "this line and the rest were not checked", limits)
                 if zh:
                     c.assertNotIn("so the line was not checked", limits)
 
@@ -7162,7 +7165,7 @@ def save():'''))
                         c.assertEqual(result.returncode, 0, result.stderr)
                         text = json.loads(result.stdout)
                         if len(selected) == 2:
-                            grouped(text, zh, code)
+                            grouped(text, zh, code, page=True)
                         else:
                             c.assertNotIn(("查到的禁发字眼:" if zh else "Words found that must not go out:") if selected == hits[1:] else
                                           ("这一行无法检查:" if zh else "The line could not be checked:"), text)
@@ -9824,7 +9827,7 @@ def save():'''))
         harness = self.tmp / "page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
-        for language, words in (("en", "Checked with"), ("zh", "一起验收")):
+        for language, words in (("en", "Checked with"), ("zh", "一起检查")):
             r = subprocess.run(["node", str(harness), str(page), "status", language],
                                input=json.dumps({"/api/status": views.status(self.desk)}),
                                capture_output=True, text=True, timeout=60)
@@ -18125,19 +18128,19 @@ def save():'''))
                                            "console.log(JSON.stringify({nulls, text: ids['#state-list'].textContent, "
                                            "warn: ids['#state'].className, settings: ids['#tab-settings'].textContent}));")
         for version, says, zh, warn in (
-                ("2.1.296", self.MOD_LOADED, "hansa 加载了协调席的 mod；命令行里的 --autocompact 选项：--autocompact 550000",
+                ("2.1.296", self.MOD_LOADED, "hansa 加载了协调员的 mod；命令行里的 --autocompact 选项：--autocompact 550000",
                  "muted"),
                 ("2.1.200", "hansa did not load the coordinator's mod, because Claude Code 2.1.200 is older than 2.1.290; "
                  "--autocompact options of its command line: none",
-                 "hansa 没有加载协调席的 mod，因为：Claude Code 2.1.200 is older than 2.1.290；命令行里的 --autocompact 选项：无",
+                 "hansa 没有加载协调员的 mod，因为：Claude Code 2.1.200 is older than 2.1.290；命令行里的 --autocompact 选项：无",
                  "warn"),
                 ("caller", "--autocompact options of its command line: --autocompact 550000 --autocompact=700000.",
                  "命令行里的 --autocompact 选项：--autocompact 550000 --autocompact=700000", "muted"),
-                ("unrecorded", self.MOD_UNKNOWN, "hansa 是否加载了协调席的 mod：不知道；命令行里的 --autocompact 选项：不知道",
+                ("unrecorded", self.MOD_UNKNOWN, "hansa 是否加载了协调员的 mod：不知道；命令行里的 --autocompact 选项：不知道",
                  "warn"),
                 ("no reason", "hansa did not load the coordinator's mod, because of what is not known; --autocompact "
                  "options of its command line: --autocompact 550000",
-                 "hansa 没有加载协调席的 mod，因为：不知道；命令行里的 --autocompact 选项：--autocompact 550000", "warn")):
+                 "hansa 没有加载协调员的 mod，因为：不知道；命令行里的 --autocompact 选项：--autocompact 550000", "warn")):
             if version == "no reason":
                 self.start_with_mod()
                 (self.desk.mod_dir / "start.json").write_text(
@@ -18357,9 +18360,9 @@ def save():'''))
                 {k: v for k, v in self.mod_record().items() if k != "clear_daily"}))
         for make, says, zh, warn in (
                 (none, "no daily clear, because the coordinator was started without --clear-daily.",
-                 "没有每日清空，因为协调席启动时没带 --clear-daily", "muted"),
+                 "没有每日清空，因为协调员启动时没带 --clear-daily", "muted"),
                 (unloaded, "no daily clear 04-09, because hansa did not load the coordinator's mod",
-                 "没有每日清空 04-09，因为 hansa 没有加载协调席的 mod（Claude Code 2.1.200 is older than 2.1.290）", "warn"),
+                 "没有每日清空 04-09，因为 hansa 没有加载协调员的 mod（Claude Code 2.1.200 is older than 2.1.290）", "warn"),
                 (last, "daily clear 04-09: last cleared 09-22 04:20.", "每日清空 04-09：上次清空在 09-22 04:20", "muted"),
                 (missed, "WARNING: daily clear 04-09: not cleared since the start at 09-20 10:00; 2 windows ended since "
                  "without a clear.", "每日清空 04-09：自 09-20 10:00 启动以来没有清空过；此后已有 2 个时段过去而没有清空",
@@ -25205,7 +25208,7 @@ def save():'''))
         harness = self.tmp / "page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
-        for language, verdict in (("en", "holds, with notes"), ("zh", "成立，附注")):
+        for language, verdict in (("en", "holds, with notes"), ("zh", "通过，有备注")):
             with self.subTest(language=language):
                 r = subprocess.run(["node", str(harness), str(page), "status", language],
                                    input=json.dumps({"/api/status": views.status(self.desk)}),
@@ -26931,9 +26934,9 @@ def save():'''))
                 ("en", "Waiting for review", "merge check running for 0 min",
                  f"merge check queued: waits for {t2}'s merge check on lane b",
                  f"merge check queued: waits for lane b, busy with {t2}"),
-                ("zh", "做完待审", "合并验收已跑了 0 分钟",
-                 f"合并验收在排队：同一个仓库和基础分支一次只跑一个合并验收，先等工作线 b 上 {t2} 的合并验收",
-                 f"合并验收在排队：等工作线 b 空出来（现在在做 {t2}）")):
+                ("zh", "做完待审", "合并检查已跑了 0 分钟",
+                 f"合并检查在排队：同一个仓库和基础分支一次只跑一个合并检查，先等工作线 b 上 {t2} 的合并检查",
+                 f"合并检查在排队：等工作线 b 空出来（现在在做 {t2}）")):
             for waiting_for_check, expected in ((True, ahead), (False, busy)):
                 with self.subTest(language=language, waiting_for_check=waiting_for_check):
                     reply = json.loads(json.dumps(status))
@@ -26972,7 +26975,7 @@ def save():'''))
         for language, [rendered] in self.picture_pages(status):
             row = rendered["rows"][0]
             self.assertEqual((row["step"], row["bars"][0]["value"]), ("check", "8"))
-            self.assertIn("1 min so far (8 min in all)" if language == "en" else "验收已跑 1 分钟（一共 8 分钟）", row["text"])
+            self.assertIn("1 min so far (8 min in all)" if language == "en" else "检查已跑 1 分钟（一共 8 分钟）", row["text"])
 
     def web_request(self, path, *, method="GET", headers=None, data=b""):
         """Run the real request handler and response writer without opening a socket."""
@@ -27085,7 +27088,7 @@ def save():'''))
         from hansa import notes
         root = self.desk.notes_dir
         (root / "PROJECT.md").unlink()
-        text = "# 当前工作\n待办事项\n```\n# not a heading\n```\n## 下一步 ###\n"
+        text = "# 当前工作\n待办\n```\n# not a heading\n```\n## 下一步 ###\n"
         (root / "中文.md").write_text(text, encoding="utf-8")
         (root / "older.md").write_text("# Older\n")
         (root / "archive").mkdir()
@@ -28587,7 +28590,7 @@ def save():'''))
         self.assertIn("waits until the desk is resumed", self.hansa("release"))
         [row] = views.status(self.desk)["releases"]
         self.assertIn("waits until the desk is resumed", row["what"])
-        self.assertIn("等桌面恢复", row["what_zh"])
+        self.assertIn("等工作台恢复", row["what_zh"])
         # one the principal said yes to runs while paused
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[])), {"ok": True, "problems": []})
         d.tick()  # off the list: #1 waits for the yes now
@@ -31052,7 +31055,7 @@ def save():'''))
                                      release.when(start), "20 minutes" if language == "en" else "20 分钟"):
                             self.assertIn(word, text)
                         self.assertEqual("waits until the desk is resumed" in text if language == "en" else
-                                         "等桌面恢复" in text, paused)
+                                         "等工作台恢复" in text, paused)
                     else:
                         for row in status["releases"]:
                             self.assertIn(row["what" if language == "en" else "what_zh"], text)
@@ -31783,7 +31786,7 @@ def save():'''))
                  {"wait": release.waits_text(self.desk, s, r), "state": release.state_text(self.desk, r, s),
                   "page": row["what"], "release": self.hansa("release"), "status": self.hansa("status"),
                   "explain": self.hansa("explain", "lane", "a")}),
-                (True, f"等同一仓库上工作线 {lane} 的 {tid} 合并验收结束",
+                (True, f"等同一仓库上工作线 {lane} 的 {tid} 合并检查结束",
                  {"wait": release.waits_text(self.desk, s, r, zh=True),
                   "state": release.state_text(self.desk, r, s, zh=True), "page": row["what_zh"]})):
             for surface, text in shown.items():
@@ -32608,15 +32611,15 @@ else if (ask === "gaps") (async () => {
     control.value = value; await control.on.change({target:control}); };
   const sameIds = expected => check(JSON.stringify(rowIds()) === JSON.stringify(expected), "wrong filtered notes: " + rowIds());
   const zh = process.argv[4] === "zh";
-  check(descendants(root, "h1")[0].textContent === (zh ? "已知缺口" : "Known gaps"), "title untranslated");
+  check(descendants(root, "h1")[0].textContent === (zh ? "已知问题" : "Known gaps"), "title untranslated");
   check(root.textContent.includes(run("T.gapsIntro")) && root.textContent.includes("hansa gaps mark"), "read-only instructions missing");
   const labels = descendants(root, "th").map(el => el.textContent);
   check(JSON.stringify(labels) === JSON.stringify(zh
-    ? ["附注编号", "任务", "附注", "标记", "原因", "标记者", "标记时间"]
+    ? ["备注编号", "任务", "备注", "标记", "原因", "标记者", "标记时间"]
     : ["Note ID", "Task", "Note", "Mark", "Why", "Marked by", "Marked at"]), "columns untranslated");
   const options = descendants(root, "option");
   check(JSON.stringify(options.map(el => el.textContent)) === JSON.stringify(zh
-    ? ["未标记及以后处理", "全部", "尚未标记", "以后处理", "不修复", "已修复"]
+    ? ["未标记或以后处理", "全部", "尚未标记", "以后处理", "不修复", "已修复"]
     : ["Unmarked and later", "All", "None yet", "Later", "Won’t fix", "Fixed"]), "filters untranslated");
   check(options.find(el => el.value === "open").attrs.selected === "", "default filter not selected");
   sameIds([notes[0].id, notes[1].id]);
@@ -32648,7 +32651,7 @@ else if (ask === "gaps") (async () => {
   await choose("fixed"); sameIds([notes[2].id]);
   check(root.textContent.includes("New reason") && !root.textContent.includes("Outside scope"), "old decision retained");
   given["/api/gaps"] = []; await run("loadGaps()");
-  check(root.textContent.includes(zh ? "暂无已知缺口" : "No known gaps"), "empty label missing");
+  check(root.textContent.includes(zh ? "暂无已知问题" : "No known gaps"), "empty label missing");
   given["/api/gaps"] = {}; await run("loadGaps()");
   check(root.textContent.includes(run("T.gapsFailed")), "failure label missing");
   given["/api/gaps"] = notes;
@@ -32665,7 +32668,7 @@ else if (ask === "todos") (async () => {
   await run('show("todos")');
   const root = ids["#tab-todos"], report = given["/api/todos"];
   const rows = () => descendants(root, "tr");
-  check(descendants(root, "h1")[0].textContent === (process.argv[4] === "zh" ? "待办事项" : "To-dos"), "to-do title untranslated");
+  check(descendants(root, "h1")[0].textContent === (process.argv[4] === "zh" ? "待办" : "To-dos"), "to-do title untranslated");
   check(root.textContent.includes(run("T.todosIntro")), "conversation instructions missing");
   check(rows().length === 51, "not 50 items on first page");
   const cells = rows()[1].kids;
@@ -33250,7 +33253,7 @@ else if (ask === "cost-history") (async () => {
   await run("loadCost()");
   const zh = process.argv[4] === "zh";
   check(descendants(root, "h1")[0]?.textContent === (zh ? "工作与成本" : "Work and cost"), "history title missing");
-  const labels = zh ? ["完成的任务", "合并的任务", "失败的任务", "核对次数", "成立（含有附注）", "不成立", "不确定", "请求的发布", "成功的发布", "每个合并任务的金额", "首次尝试就合并", "核对成立的比例", "执行与核对工时", "协调席的轮数", "协调席工时"]
+  const labels = zh ? ["完成的任务", "合并的任务", "失败的任务", "核验次数", "通过（含有备注）", "未通过", "无法判断", "请求的发布", "成功的发布", "每个合并任务的金额", "首次尝试就合并", "核验通过的比例", "工作者与核验者工时", "协调员的轮数", "协调员工时"]
     : ["Tasks finished", "Tasks merged", "Tasks failed", "Verifications", "Held (including notes)", "Did not hold", "Unsure", "Releases asked for", "Releases that went out", "US$ per merged task", "Merged at the first try", "Verifications that held", "Worker and verifier hours", "Coordinator turns", "Coordinator hours"];
   const values = zh ? ["11", "4", "3", "4", "3", "1", "0", "3", "1", "US$1.50", "75%（3 / 4）", "75%（3 / 4）", "12.50", "42", "3.25"]
     : ["11", "4", "3", "4", "3", "1", "0", "3", "1", "US$1.50", "75% (3 of 4)", "75% (3 of 4)", "12.50", "42", "3.25"];
@@ -33261,7 +33264,7 @@ else if (ask === "cost-history") (async () => {
   Object.assign(given["/api/cost"].work, {merged: 0, merged_first_try: 0, verifications: 0, verdicts: 0,
     held: 0, did_not_hold: 0, unsure: 0, usd_per_merged: null});
   await run("loadCost()");
-  for (const label of zh ? ["每个合并任务的金额", "首次尝试就合并", "核对成立的比例"]
+  for (const label of zh ? ["每个合并任务的金额", "首次尝试就合并", "核验通过的比例"]
       : ["US$ per merged task", "Merged at the first try", "Verifications that held"])
     check(shown(label, "—"), "blank figure missing: " + label);
   for (const days of [90, "all"]) {
@@ -33272,7 +33275,7 @@ else if (ask === "cost-history") (async () => {
     check(apiGets.at(-1) === "/api/cost?days=" + days, "history period request incorrect");
   }
   check(root.textContent.includes(zh ? "从工作台开始至今" : "Since the desk began"), "whole-history label untranslated");
-  check(!root.textContent.includes(zh ? "未计入协调席" : "omit coordinator"), "whole history claims to omit the coordinator");
+  check(!root.textContent.includes(zh ? "未计入协调员" : "omit coordinator"), "whole history claims to omit the coordinator");
   await run("exportCsv()");
   check(apiGets.at(-1) === "/api/cost?days=all&rows=1" && downloads.at(-1).name === "cost-all.csv", "whole-history export missing");
   console.log(JSON.stringify({ok:true}));
@@ -33410,11 +33413,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
           zh ? ["价目", "立即", "历史用量", "重算", "密钥"] : ["Prices", "immediately", "past usage", "recalculated", "key"]]
       ] : ask.endsWith("security") ? [
         ['S.workers_may_not_read = ["/private/example-hidden"]',
-          zh ? ["禁读", "下次", "工作者", "验证者", "协调席", "正在运行"] : ["Not-read", "next", "worker", "verifier", "coordinator", "running"]],
+          zh ? ["禁读", "下次", "工作者", "核验者", "协调员", "正在运行"] : ["Not-read", "next", "worker", "verifier", "coordinator", "running"]],
         ['S.providers.compatible.model = "new-model"; S.cool_minutes = 38; S.release_direct = "hold"; S.alert.command = "echo example"',
-          zh ? ["供应", "新运行", "休息", "下次", "发布", "检查", "提醒"] : ["Provider", "new runs", "rest", "next", "Release", "check", "Alert"]]
+          zh ? ["服务商", "新运行", "休息", "下次", "发布", "检查", "提醒"] : ["Provider", "new runs", "rest", "next", "Release", "check", "Alert"]]
       ] : [
-        ['S.coordinator.model = "new-model"', zh ? ["协调席", "下次启动"] : ["Coordinator", "next start"]],
+        ['S.coordinator.model = "new-model"', zh ? ["协调员", "下次启动"] : ["Coordinator", "next start"]],
         ['S.coordinator_compact.working_at = 600000', zh ? ["工作中压缩", "下次启动"] : ["working compaction", "next start"]],
         ['S.coordinator_compact.idle_at = 300000', zh ? ["空闲压缩", "下次判断"] : ["Idle compaction", "next decision"]]
       ];
@@ -33424,7 +33427,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         settingsPostReply = {ok:true}; await run("saveSettings()");
         const message = run("settingsSaveState.textContent");
         for (const part of parts) check(message.includes(part), "save timing missing: " + part + ": " + message);
-        check(!message.includes(zh ? "下一件活起生效" : "applies from the next task"), "blanket timing remains");
+        check(!message.includes(zh ? "下一件任务起生效" : "applies from the next task"), "blanket timing remains");
         run('KEY_DRAFTS = {}'); await run("saveSettings()");
         check(run("settingsMessage === T.saved"), "unchanged save repeated old timing or key advice");
       }
@@ -33505,9 +33508,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       await run("saveSettings()");
       const notice = find(el => el.attrs.role === "status" && el.className === "notice");
       const zh = process.argv[4] === "zh";
-      const elsewhere = zh ? "提醒, 工作线, 模型供应, 协调席, 价目, 发布, 工作者不能读的" :
+      const elsewhere = zh ? "提醒, 工作线, 模型服务商, 协调员, 价目, 发布, 工作者不能读的" :
         "Alerts, Lanes, Providers, Coordinator, Prices, Releases, What workers may not read";
-      const both = zh ? "模型供应, 协调席" : "Providers, Coordinator";
+      const both = zh ? "模型服务商, 协调员" : "Providers, Coordinator";
       check(notice && notice.textContent === run(`T.staleReloaded(${JSON.stringify(elsewhere)}, ${JSON.stringify(both)})`),
         "stale notice did not use the page's translated group names: " + notice?.textContent);
       for (const name of Object.keys(next)) check(!new RegExp("\\b" + name + "\\b").test(notice.textContent),
@@ -33515,7 +33518,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     } else if (ask === "settings-fix-not-read-starts") {
       run('showSettingsGroup("security")');
       const parts = process.argv[4] === "zh"
-        ? ["只要列表里有", "()[]{}*?\\", "hansa 就不启动任何工作者、验证者或协调席", "直到这里改掉它"]
+        ? ["只要列表里有", "()[]{}*?\\", "hansa 就不启动任何工作者、核验者或协调员", "直到这里改掉它"]
         : ["While the list holds", "()[]{}*?\\", "hansa starts no worker, verifier or coordinator", "until it is changed here"];
       for (const part of parts) check(visibleText(part, run("settingsPanels.security")),
         "visible not-read warning does not describe starting no runs: " + part);
@@ -33543,7 +33546,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       while (card && card.className !== "lane") card = card.parentElement;
       check(card, "provider key controls missing");
       if (ask.endsWith("use")) {
-        const parts = zh ? ["保存在本机", "不回显已保存的内容", "系统账号", "工作者或适配器", "发给上方的供应接口地址"]
+        const parts = zh ? ["保存在本机", "不回显已保存的内容", "系统账号", "工作者或适配器", "发给上方的服务商接口地址"]
           : ["Saved on this machine", "does not show the saved value", "OS account running hansa", "worker or adapter", "send it to the provider endpoint above"];
         for (const part of parts) check(visibleText(part, card), "key use guidance missing: " + part);
         check(keyPosts.length === 0 && !key().value, "guidance requires entering or saving a key");
@@ -33562,16 +33565,16 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       const zh = process.argv[4] === "zh";
       const labels = run('SETTINGS_GROUPS.map(([,label]) => label)');
       check(JSON.stringify(labels) === JSON.stringify(zh
-        ? ["模型供应", "协调席", "工作线", "工作者不能读的", "发布", "提醒", "价目"]
+        ? ["模型服务商", "协调员", "工作线", "工作者不能读的", "发布", "提醒", "价目"]
         : ["Providers", "Coordinator", "Lanes", "What workers may not read", "Releases", "Alerts", "Prices"]), "group names do not match desk vocabulary");
-      check(has(zh ? "模型（空＝用供应的）" : "Model (blank = the provider's)"), "coordinator model wrongly called default");
+      check(has(zh ? "模型（空＝用服务商的）" : "Model (blank = the provider's)"), "coordinator model wrongly called default");
       run('showSettingsGroup("providers")');
       check(visible(number(), run("settingsPanels.providers")), "rest minutes are not in Providers");
       await run('saveProviderKey("compatible", true)');
       check(has(zh ? "密钥已清除。" : "Key cleared.") && !has(zh ? "密钥已保存。" : "Key saved."), "clearing a key said saved");
       check(has(zh ? "其余各项（只读）" : "Other fields (read only)"), "lane fold sounds editable");
       await run("loadStatus()");
-      check(has(zh ? "(模型供应)" : "(Providers)", ids["#tab-status"]), "status rest minutes name wrong group");
+      check(has(zh ? "(模型服务商)" : "(Providers)", ids["#tab-status"]), "status rest minutes name wrong group");
       await run("loadCost()");
       check(has(zh ? "按设置中的价目折算" : "using the Settings price table", ids["#tab-cost"]), "cost card does not name Settings price table");
       check(!/供应商|审批|定价|管理|workspace/i.test(run('Object.values(T).filter(v => typeof v === "string").join(" ")')), "inconsistent vocabulary remains");
@@ -33582,7 +33585,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         ["alerts", zh ? "提醒命令以这台机器的账号在沙箱外运行" : "The alert command runs as this machine's account, outside the sandbox"],
         ["releases", zh ? "每项最多 200 字符；只在一行之内匹配，只查 UTF-8 文字" : "at most 200 characters per entry. Matches within one line, in UTF-8 text only"],
         ["releases", zh ? "合并和发布时都检查" : "Checked at merges as well as releases"],
-        ["lanes", zh ? "并发数和磁盘下限由协调席设定，这里只能看" : "Concurrency and the disk floor are set by the coordinator and only shown here"]]) {
+        ["lanes", zh ? "并发数和磁盘下限由协调员设定，这里只能看" : "Concurrency and the disk floor are set by the coordinator and only shown here"]]) {
         run(`showSettingsGroup(${JSON.stringify(group)})`);
         check(visibleText(text, run(`settingsPanels.${group}`)), "required explanation folded or missing: " + group);
       }
@@ -34387,11 +34390,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 with self.subTest(language=language, paused=paused):
                     page = self.relocated_panels_page("settings-dispatch-state", language, paused)
                     self.assertEqual(page["headings"][:3], ["Lanes", "Dispatch control", "General"] if language == "en"
-                                     else ["工作线", "派活控制", "总体"])
+                                     else ["工作线", "派发任务控制", "总体"])
                     self.assertFalse(page["hidden"])
                     self.assertEqual(page["nav"], page["headings"][0])
-                    self.assertIn(("paused" if paused else "dispatching") if language == "en" else ("已暂停" if paused else "正在派活"), page["text"])
-                    self.assertEqual(page["buttons"], [("Resume" if paused else "Pause") if language == "en" else ("恢复派活" if paused else "暂停派活")])
+                    self.assertIn(("paused" if paused else "dispatching") if language == "en" else ("已暂停" if paused else "正在派发任务"), page["text"])
+                    self.assertEqual(page["buttons"], [("Resume" if paused else "Pause") if language == "en" else ("恢复派发任务" if paused else "暂停派发任务")])
                     self.assertEqual(page["reasons"], [] if paused else ["reason (optional)" if language == "en" else "暂停原因（可不填）"])
                     if paused:
                         self.assertIn(paused, page["text"])
@@ -34462,7 +34465,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     if empty:
                         self.assertIn("No work" if language == "en" else "没有工作", page["text"])
                     else:
-                        labels = ["Worker", "Check", "Verification", "Merge check", "Lane try", "Release"] if language == "en" else ["执行", "验收", "核对", "合并验收", "工作线试跑", "发布"]
+                        labels = ["Worker", "Check", "Verification", "Merge check", "Lane try", "Release"] if language == "en" else ["工作者", "检查", "核验", "合并检查", "工作线试跑", "发布"]
                         for segment, label in zip(page["segments"], labels):
                             self.assertEqual(segment["text"], "")
                             self.assertEqual(segment["aria"], segment["label"])
@@ -34598,7 +34601,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 with self.subTest(language=language, phase=phase):
                     row = page["rows"][0]
                     self.assertEqual(row["step"], "merge")
-                    self.assertEqual(row["marked"], ["Merge check" if language == "en" else "合并验收"])
+                    self.assertEqual(row["marked"], ["Merge check" if language == "en" else "合并检查"])
                     self.assertNotIn("free" if language == "en" else "空闲", row["pills"])
                     self.assertEqual(row["bars"][0]["max"], "9")
 
@@ -34628,11 +34631,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertIn("claude (" + st["providers"][0]["model"] + ")", row["text"])
                     if row["lane"] == "m":
                         for word in (("merge lane", "lanes a", "takes no work") if language == "en"
-                                     else ("工作线 a", "合并验收线", "不接活")):
+                                     else ("工作线 a", "合并检查工作线", "不接任务")):
                             self.assertIn(word, row["text"])
                     elif row["lane"] == "v":
                         for word in (("verify lane", "lanes a", "takes only verifications") if language == "en"
-                                     else ("工作线 a", "核对线", "只接核对")):
+                                     else ("工作线 a", "核验工作线", "只接核验")):
                             self.assertIn(word, row["text"])
 
     def test_status_picture_sandbox_hold_pill_is_held(self):
@@ -34710,7 +34713,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             row = page["rows"][0]
             self.assertEqual(row["step"], "worker")
             self.assertIn("1 queued" if language == "en" else "1 件排队", row["text"])
-            self.assertEqual(row["marked"], ["Worker" if language == "en" else "执行"])
+            self.assertEqual(row["marked"], ["Worker" if language == "en" else "工作者"])
             for word in ("t0042", "Picture task <&>", "claude (test-model)", "7", "3", "Last note <&>",
                          "browser" if language == "en" else "浏览器"):
                 self.assertIn(word, row["text"])
@@ -34730,7 +34733,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         for language, [page] in self.picture_pages(st):
             row = page["rows"][0]
             self.assertEqual((row["step"], row["bars"][0]["value"]), ("check", "16"))
-            self.assertIn("2 min so far (16 min in all)" if language == "en" else "验收已跑 2 分钟（一共 16 分钟）", row["text"])
+            self.assertIn("2 min so far (16 min in all)" if language == "en" else "检查已跑 2 分钟（一共 16 分钟）", row["text"])
 
     def test_status_picture_check_budget_follows_server_start(self):
         tid = self.desk.new_task("Check budget", lane="a")
@@ -34744,7 +34747,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     row = page["rows"][0]
                     self.assertEqual(row["bars"][0]["value"], str(expected))
                     self.assertIn("2 min so far (16 min in all)" if language == "en"
-                                  else "验收已跑 2 分钟（一共 16 分钟）", row["text"])
+                                  else "检查已跑 2 分钟（一共 16 分钟）", row["text"])
 
     def test_status_picture_warning_pills_use_warning_icon(self):
         for held in (False, True):
@@ -34773,7 +34776,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                            "waiting_code": "future", "waiting_values": {}}]
         for language, [page] in self.picture_pages(st):
             with self.subTest(language=language):
-                self.assertIn("dispatch is paused" if language == "en" else "派活已暂停", page["rows"][0]["text"])
+                self.assertIn("dispatch is paused" if language == "en" else "派发任务已暂停", page["rows"][0]["text"])
                 self.assertIn("lane a is busy" if language == "en" else "工作线 a 正忙", page["text"])
                 self.assertIn("lane b is not in settings" if language == "en" else "设置中没有工作线 b", page["text"])
                 self.assertIn("future reason <&>", page["text"])
@@ -34804,12 +34807,12 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             expected.append((en, zh))
             return detail["waiting_values"]
 
-        add("paused", "dispatch is paused", "派活已暂停", lk={"paused": "yes"})
+        add("paused", "dispatch is paused", "派发任务已暂停", lk={"paused": "yes"})
         add("no_lanes", "no lanes in settings", "设置中没有工作线", lanes={}, task={"lane": None})
-        add("no_work_lanes", "no lanes that take work", "没有接活", lanes={"a": {"merge_lane": True}}, task={"lane": None})
+        add("no_work_lanes", "no lanes that take work", "没有接任务", lanes={"a": {"merge_lane": True}}, task={"lane": None})
         add("lanes", "lane b is not in settings", "设置中没有工作线 b", task={"lane": "b"})
-        add("lanes", "takes no work", "不接活", lanes={"a": {"merge_lane": True}})
-        add("lanes", "takes only verifications", "只接核对", lanes={"a": {"verify_for": ["b"]}})
+        add("lanes", "takes no work", "不接任务", lanes={"a": {"merge_lane": True}})
+        add("lanes", "takes only verifications", "只接核验", lanes={"a": {"verify_for": ["b"]}})
         add("lanes", "lane a is busy", "工作线 a 正忙", busy={"a"})
         add("lanes", "sandbox probe <&>", "沙箱暂缓", lk={"held": {"a": {"work": {"why": "sandbox probe <&>", "kind": "worker"}}}})
         for server, en, zh in (("up", "within seconds", "几秒内"), ("busy", "within seconds", "几秒内"),
@@ -34819,7 +34822,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         at = 1700000000
         problems = [("no endpoint address", {}, {}, "no endpoint address", "没有接口地址"),
                     ("no key", {}, {}, "no key", "没有密钥"),
-                    ("not in settings", {}, {}, "not in settings", "没有这家供应"),
+                    ("not in settings", {}, {}, "not in settings", "没有这家服务商"),
                     ("refused this task", {}, {"attempts": [{"kind": "refused", "provider": "claude"}]}, "refused this task", "拒绝"),
                     ("credit rest", {"credit_since": at}, {}, "credit balance", "余额不足"),
                     ("quota rest", {"cool_until": time.time() + 3600, "rest_how": "fixed", "rest_minutes": 30}, {}, "30 minutes", "30 分钟"),
@@ -34886,7 +34889,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                   unreached=["no listening session <&>", "review waits <&>"])
         for language, [page] in self.picture_pages(st):
             with self.subTest(language=language):
-                labels = ("Server code", "Alert failed", "Coordinator unreached") if language == "en" else ("服务代码", "提醒失败", "协调席未收到")
+                labels = ("Server code", "Alert failed", "Coordinator unreached") if language == "en" else ("服务代码", "提醒失败", "协调员未收到")
                 for label, raw in ((labels[0], st["serve_code"]), (labels[1], st["alert_failed"]),
                                    *((labels[2], raw) for raw in st["unreached"])):
                     self.assertIn(label + ": " + raw, page["warnings"])
@@ -34899,17 +34902,17 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         samples = [
             ("task_started", {"lane": "a", "provider": "claude"}, "started", "开始"),
             ("task_finished", {"state": "done"}, "finished", "结束"),
-            ("check_started", {}, "Check started", "验收开始"),
-            ("task_checked", {"ok": False}, "failed", "没通过"),
-            ("verification_closed", {}, "Verification closed", "核对已关闭"),
-            ("merge_check_queued", {}, "Merge check queued", "合并验收排队"),
-            ("merge_check_started", {"lane": "a"}, "Merge check started", "合并验收开始"),
+            ("check_started", {}, "Check started", "检查开始"),
+            ("task_checked", {"ok": False}, "failed", "未通过"),
+            ("verification_closed", {}, "Verification closed", "核验已关闭"),
+            ("merge_check_queued", {}, "Merge check queued", "合并检查排队"),
+            ("merge_check_started", {"lane": "a"}, "Merge check started", "合并检查开始"),
             ("merge_checked", {"ok": True}, "passed", "通过"),
-            ("merge_check_ended", {"ok": False}, "failed", "没通过"),
+            ("merge_check_ended", {"ok": False}, "failed", "未通过"),
             ("task_merged", {"into": "main"}, "merged", "已合并"),
             ("release_asked", {"id": 7, "lane": "a", "target": "web", "state": "waiting"}, "Release #7", "发布 #7"),
             ("release_started", {"id": 7, "lane": "a"}, "started", "开始"),
-            ("release_ended", {"id": 7, "ok": False}, "failed", "没通过"),
+            ("release_ended", {"id": 7, "ok": False}, "failed", "未通过"),
             ("lane_try_started", {"lane": "a"}, "try started", "试跑开始"),
             ("lane_tried", {"lane": "a", "ok": True}, "passed", "通过"),
             ("sandbox_held", {"lane": "a", "why": "probe <&>"}, "Sandbox held", "沙箱暂缓"),
@@ -34939,25 +34942,25 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_status_recent_events_results_and_other_sentences(self):
         st = self.picture_status()
         samples = [
-            ("check_killed", {}, "Check killed", "验收被终止"),
-            ("check_rerun_queued", {}, "Check rerun queued", "验收重跑已排队"),
+            ("check_killed", {}, "Check killed", "检查被终止"),
+            ("check_rerun_queued", {}, "Check rerun queued", "检查重跑已排队"),
             ("merge_queued", {}, "Merge queued", "合并已排队"),
-            ("merge_check_killed", {}, "Merge check killed", "合并验收被终止"),
-            ("merge_check_cancel", {}, "Merge check cancelled", "合并验收已取消"),
+            ("merge_check_killed", {}, "Merge check killed", "合并检查被终止"),
+            ("merge_check_cancel", {}, "Merge check cancelled", "合并检查已取消"),
             ("merge_check_base_moved", {}, "Base moved", "基础分支已移动"),
             ("merge_batch_split", {}, "batch split", "批次已拆分"),
             ("release_answered", {"id": 8, "yes": True}, "approved", "已批准"),
             ("release_answered", {"id": 8, "yes": False}, "refused", "已拒绝"),
             ("release_void", {"id": 8}, "voided", "已作废"),
             ("release_forbidden", {"id": 8}, "forbidden words", "禁词"),
-            ("release_waits", {"id": 8, "lane": "a", "target": "web"}, "waits for the principal's answer again", "再次等待主理人答复"),
+            ("release_waits", {"id": 8, "lane": "a", "target": "web"}, "waits for the principal's answer again", "再次等待负责人答复"),
             ("release_stopping", {"id": 8}, "stopping", "正在停止"),
             ("release_stopped", {"id": 8}, "stopped", "已停止"),
             ("lane_try_queued", {"lane": "a"}, "try queued", "试跑已排队"),
             ("lane_try_withdrawn", {"lane": "a"}, "try withdrawn", "试跑已撤回"),
             ("sandbox_ready", {"lane": "a"}, "Sandbox ready", "沙箱已恢复"),
             ("task_checked", {"ok": None}, "result unknown", "结果未知"),
-            ("task_checked", {"ok": None, "could_not_run": True}, "could not run", "没跑成"),
+            ("task_checked", {"ok": None, "could_not_run": True}, "could not run", "无法运行"),
         ]
         for language in ("en", "zh"):
             events = [{"event": kind, "ts": 1700000000, "task": "t0042", **fields}
@@ -34988,10 +34991,10 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 text = page["events"][0]["text"]
                 self.assertIn("Release #1" if language == "en" else "发布 #1", text)
                 # The release needs a fresh answer because its exemption ceased to count; the lane is not busy.
-                self.assertIn("waits for the principal's answer again" if language == "en" else "再次等待主理人答复", text)
-                self.assertIn("lane a, target web" if language == "en" else "工作线 a，目标 web", text)
+                self.assertIn("waits for the principal's answer again" if language == "en" else "再次等待负责人答复", text)
+                self.assertIn("lane a, target web" if language == "en" else "工作线 a，发布目标 web", text)
                 self.assertIn("target is no longer on their list of releases without asking" if language == "en"
-                              else "此目标已不在免询问发布列表中", text)
+                              else "此发布目标已不在免询问发布列表中", text)
                 self.assertIn("or no longer matches what the list recorded" if language == "en"
                               else "或已与列表记录不符", text)
                 self.assertNotIn("waits for lane" if language == "en" else "等待工作线", text)
@@ -35006,7 +35009,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertEqual(row["step"], "verification")
             self.assertIn("t0009", row["text"])
             self.assertIn("t0042", row["text"])
-            self.assertEqual(row["marked"], ["Verification" if language == "en" else "核对"])
+            self.assertEqual(row["marked"], ["Verification" if language == "en" else "核验"])
 
     def test_status_picture_verify_lane_keeps_its_role_when_free_or_running(self):
         st = self.picture_status()
@@ -35020,7 +35023,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 with self.subTest(language=language, running=running):
                     row = page["rows"][0]
                     for word in (("verify lane", "b, c", "takes only verifications") if language == "en"
-                                 else ("工作线 b、c", "核对线", "只接核对")):
+                                 else ("工作线 b、c", "核验工作线", "只接核验")):
                         self.assertIn(word, row["text"])
 
     def test_status_picture_merge_lane_uses_merge_task_minutes(self):
@@ -35033,9 +35036,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             for word in ("t0042", "Merge task", "b", "c"):
                 self.assertIn(word, row["text"])
             for word in (("merge lane", "b, c", "takes no work") if language == "en"
-                         else ("工作线 b、c", "合并验收线", "不接活")):
+                         else ("工作线 b、c", "合并检查工作线", "不接任务")):
                 self.assertIn(word, row["text"])
-            self.assertEqual(row["marked"], ["Merge check" if language == "en" else "合并验收"])
+            self.assertEqual(row["marked"], ["Merge check" if language == "en" else "合并检查"])
 
     def test_status_picture_lane_try(self):
         st = self.picture_status()
@@ -35094,7 +35097,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertIn(title, row["text"])
             self.assertEqual(len(page["boxes"]), 7)
             self.assertFalse(page["alerts"])
-            warning = "new tasks will not start" if language == "en" else "新活不会开始"
+            warning = "new tasks will not start" if language == "en" else "新任务不会开始"
             self.assertEqual((page["state"] + page["text"]).count(warning), 1)
 
     def test_status_picture_fetch_failure_clears_counts_and_recovers(self):
@@ -35435,7 +35438,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             with self.subTest(language=language, case="warning cleared"):
                 pages = self.interactive_header(language, [{"advance": 1000},
                     {"update": {"paused": ""}, "refresh": True}, {"advance": 3000}], paused="review queue")["snapshots"]
-                self.assertIn("dispatch" if language == "en" else "派活", pages[2]["text"])
+                self.assertIn("dispatch" if language == "en" else "派发任务", pages[2]["text"])
                 self.assertEqual(pages[2]["dot"], "muted")
                 self.assertIn("running" if language == "en" else "运行", pages[-1]["text"])
             with self.subTest(language=language, case="repeated notes"):
@@ -35577,7 +35580,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             status.update(paused="", server_up=True, server={"state":"up"})
             [page] = self.page_header("status-parts", status, language)
             self.assertFalse(any(p["tone"] == "warn" for p in page["parts"]))
-            self.assertTrue(any("3" in p["text"] and ("dispatch" if language == "en" else "派活") in p["text"]
+            self.assertTrue(any("3" in p["text"] and ("dispatch" if language == "en" else "派发任务") in p["text"]
                                 for p in page["parts"]))
             status["memory"] = {"low_text": "MEMORY LOW: waits for memory", "unknown": []}
             [page] = self.page_header("status-parts", status, language)
@@ -35921,7 +35924,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         pages = self.principal_layout_page(providers=[{"credit_since": 1700000000}],
                                            scenario="status-sections")
         for page, heading, providers in zip(pages,
-                ("Top-ups to confirm", "等你确认充值"), ("Providers", "模型供应")):
+                ("Top-ups to confirm", "等你确认充值"), ("Providers", "模型服务商")):
             with self.subTest(heading=heading):
                 self.assertEqual(page["headings"][0], heading)
                 self.assertEqual(page["headings"].count(providers), 1)
@@ -35935,7 +35938,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual(page["navs"], 0)
                 self.assertNotIn("section-links", page["css"])
                 self.assertNotIn("Lanes over the last 24 hours" if language == "en" else "工作线最近 24 小时", page["text"])
-                self.assertNotIn("Dispatch control" if language == "en" else "派活控制", page["text"])
+                self.assertNotIn("Dispatch control" if language == "en" else "派发任务控制", page["text"])
                 self.assertTrue(page["noteBesideMark"])
 
     def assert_principal_layout(self, page, count):
@@ -36227,7 +36230,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 steps = shown["steps"]
                 self.assertEqual([s["step"] for s in steps], ["queued", "run", "check", "merge-check", "merged"])
                 for step, label in zip(steps, ("Queued", "Run 1", "Lane check", "Merge check", "Merged") if language == "en"
-                                       else ("排队", "运行 1", "工作线验收", "合并验收", "已合并")):
+                                       else ("排队", "运行 1", "工作线检查", "合并检查", "已合并")):
                     self.assertIn(label, step["text"])
                     self.assertTrue(step["times"])
                     self.assertNotEqual(step.get("current"), "step")
@@ -36298,9 +36301,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 parent = self.task_steps_record(id="t0001", verify="t0042")
                 shown = self.task_steps_page(meta, language, {"t0001": parent}, "t0001")
                 self.assertEqual([s["step"] for s in shown["steps"]], ["queued", "run", "verification"])
-                self.assertIn("holds, with notes" if language == "en" else "成立，附注", shown["steps"][-1]["text"])
+                self.assertIn("holds, with notes" if language == "en" else "通过，有备注", shown["steps"][-1]["text"])
                 self.assertIn("ok", shown["steps"][-1]["tone"].split())
-                self.assertIn("Verifies" if language == "en" else "核对任务", shown["text"])
+                self.assertIn("Verifies" if language == "en" else "核验任务", shown["text"])
                 self.assertIn("/api/task?id=t0001", shown["gets"])
                 self.assertIn("Related task t0001", shown["opened"])
                 # The work task names its verification; it gets that record's verdict and timing.
@@ -36340,7 +36343,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_task_box_steps_sparse_history_and_check_outcomes(self):
         for language in ("en", "zh"):
             for result, word in (({"ok": False, "exit": 2, "at": 1700000390, "seconds": 30},
-                                  "failed" if language == "en" else "没通过"),
+                                  "failed" if language == "en" else "未通过"),
                                  ({"ok": False, "note": "stopped on request", "at": 1700000390, "seconds": 30},
                                   "cancelled" if language == "en" else "已取消")):
                 with self.subTest(language=language, outcome=word):
@@ -36357,7 +36360,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertIn("lost-provider", shown["steps"][2]["text"])
                     self.assertIn("server stopped", shown["steps"][2]["text"])
                     check, merge = shown["steps"][-2:]
-                    self.assertIn("could not run" if language == "en" else "没跑成", check["text"])
+                    self.assertIn("could not run" if language == "en" else "无法运行", check["text"])
                     self.assertIn("bad", check["tone"].split())
                     self.assertEqual(check["times"], [])
                     self.assertIn(word, merge["text"])
@@ -36706,7 +36709,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_both_page_languages_name_ping_and_operator(self):
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
         for label in ('check:"Ping"', 'lastCheck:"last ping"', 'lastCheck:"上次 Ping"',
-                      'helper_operator:"operator"', 'helper_operator:"操作"',
+                      'helper_operator:"operator"', 'helper_operator:"操作助手"',
                       'laneCommandsNote:'):
             self.assertIn(label, ui)
         self.assertEqual(ui.count('check:"Ping"'), 2)
@@ -36761,7 +36764,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual((u["lane"], u["target"], u["gone"], u["was"]), ("a", "", True, "true"))
                 self.assertEqual(u["why"], "an old tick for lane a's unnamed release: it covers no target now; "
                                  "tick default again if it should go out without asking")
-                self.assertEqual(u["why_zh"], "这是工作线 a 未命名发布的旧勾选：现在不涵盖任何目标；若要无需询问就发布，请重新勾选 default")
+                self.assertEqual(u["why_zh"], "这是工作线 a 未命名发布的旧勾选：现在不涵盖任何发布目标；若要无需询问就发布，请重新勾选 default")
 
     def test_the_list_keeps_the_reason_for_a_missing_named_target_in_both_languages(self):
         self.with_targets(default="true", prod="false")
@@ -37233,14 +37236,14 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                "follow or the way it runs (fixed) changes: a release asked for by hand then waits "
                                "for your yes, and one that runs by itself after merges waits until you tick it again.",
                                "Rules the lane's workers and verifiers may use directly") if language == "en" else
-                              ("发布前要不要问你", "不用问你就发布的目标", "勾上：提出发布后可以不用问你就执行", "不勾：每次等你点头",
-                               "每个目标单独勾。工作线的仓库或基础分支、目标的命令或它用到的仓库外文件、"
-                               "它要跟在哪个目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效："
+                              ("发布前要不要问你", "不用问你就执行的发布目标", "勾上：提出发布后可以不用问你就执行", "不勾：每次等你点头",
+                               "每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、"
+                               "它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效："
                                "手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
-                               "这条线的执行层和核验可以直接用的规则")):
+                               "这条工作线的工作者和核验者可以直接用的规则")):
                     self.assertIn(words, page["settings"])
                 self.assertIn("not asked: this target is ticked in Settings" if language == "en" else
-                              "没有问你：设置里勾了这个目标", page["status"])
+                              "没有问你：设置里勾了这个发布目标", page["status"])
         # PAGE_HARNESS has no layout engine: check the CSS applied to the command and its shrinking parent.
         css = web.UI.read_text().split("</style>")[0]
         self.assertIn(".tick > span { min-width:0; }", css)
@@ -37522,7 +37525,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         r = release.get(self.desk, 2)
         self.assertEqual(r["state"], "void", r)
         self.assertIn("goes out only after target stage", r["void"])
-        self.assertIn("工作线 a 的目标 prod 要等目标 stage 先发出同一个提交才能发出", r["void_zh"])
+        self.assertIn("工作线 a 的发布目标 prod 要等发布目标 stage 先发出同一个提交才能发出", r["void_zh"])
         self.assertNotIn("goes out only", r["void_zh"])  # its own Chinese, not the English line
         # the order is checked as the lane is set
         self.assertIn("after must name another release target", self.refused("lane", "target", "a", "prod", "--after", "nope"))
@@ -38923,9 +38926,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         root = Path(__file__).resolve().parent.parent
         page = (root / "hansa" / "ui.html").read_text()
         self.assertNotIn("in the desk's folder", page)
-        self.assertNotIn("在桌面文件夹里运行", page)
+        self.assertNotIn("在工作台文件夹里运行", page)
         self.assertIn("in a temporary folder of its own under the desk's secrets/alert-runs", page)
-        self.assertIn("在桌面 secrets/alert-runs 下它自己的临时文件夹里运行", page)
+        self.assertIn("在工作台 secrets/alert-runs 下它自己的临时文件夹里运行", page)
         self.assertNotIn("in the desk's folder", (root / "hansa" / "alert.py").read_text())
 
     def test_a_code_given_as_two_words_is_refused_without_counting_a_wrong_code(self):
@@ -39916,7 +39919,7 @@ class WorkCalendarTest(unittest.TestCase):
                     out = self.page([("2026-10-07", amount)], start=start, language=language)
                     self.assertEqual([day["level"] for day in out["days"]], [0] * 7 if amount == 0 else [1])
                     self.assertIn("10,000,000", out["legend"])
-                    self.assertIn("最低上限" if language == "zh" else "floor", out["legend"])
+                    self.assertIn("标尺上限的最低值" if language == "zh" else "floor", out["legend"])
                     self.assertEqual(out["shades"], ["0", "1", "2", "3", "4"])
                     self.assertIn("少" if language == "zh" else "Less", out["legend"])
                     self.assertIn("多" if language == "zh" else "More", out["legend"])

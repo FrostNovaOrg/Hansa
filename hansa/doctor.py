@@ -106,7 +106,7 @@ def check(lang=None):
 
     def path_note(path):
         return tr(f"; {path} is outside PATH; hansa serve needs it on its PATH",
-                  f"；{path} 不在 PATH 中；hansa serve 需要在其 PATH 中找到它")
+                  f"；{path} 不在 PATH 中；请把这个工具所在目录加入 hansa serve 的 PATH")
 
     def path_fix(path):
         return "export PATH=" + shlex.quote(str(Path(path).absolute().parent)) + ':"$PATH"'
@@ -126,12 +126,12 @@ def check(lang=None):
         need = ">= " + version_text(minimum) if minimum else tr("present", "已安装")
         if name == "tmux":
             need = tr("recommended; hansa up needs it to start the coordinator",
-                      "建议安装；hansa up 需要它来启动协调席")
+                      "建议安装；hansa up 需要它来启动协调员")
         if not path:
             found = tr("missing", "未找到")
             if name == "tmux":
                 found += tr("; hansa up cannot start the coordinator without tmux",
-                            "；没有 tmux，hansa up 无法启动协调席")
+                            "；没有 tmux，hansa up 无法启动协调员")
             row(label, "note" if name == "tmux" else "fails", found, need, fix(name))
             continue
         ok, error, output = run([path, *args])
@@ -152,7 +152,7 @@ def check(lang=None):
         row(label, state, found, need, repair)
 
     login_fix = tr("Run claude auth login yourself (the principal).",
-                   "请主理人亲自运行 claude auth login。")
+                   "请负责人亲自运行 claude auth login。")
     if claude:
         ok, error, _ = run([claude, "auth", "status"], quiet=True)
         row("Claude login", "ok" if ok else "fails", tr("logged in", "已登录") if ok else error,

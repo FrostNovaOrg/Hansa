@@ -36,8 +36,8 @@ STEPS = {
         "made": "hansa example 已在 {root} 建好示例。",
         "next": "接下来：",
         "run": "运行 `hansa` 打开工作台菜单。",
-        "pick": "选择工作台 {name}，按 s 启动，再按回车进入协调席。",
-        "say": "对协调席说：“Do the task in notes/first-task.md, verify it, and merge it when it holds. "
+        "pick": "选择工作台 {name}，按 s 启动，再按回车进入协调员。",
+        "say": "对协调员说：“Do the task in notes/first-task.md, verify it, and merge it when it holds. "
                "Do not release it.”",
         "remove": "以后要删除示例：先在菜单里按 x 停止它的后台，再运行 `hansa desks --forget {desk}`，"
                   "最后删除 {root}。",
