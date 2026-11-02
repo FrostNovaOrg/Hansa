@@ -38605,11 +38605,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(self.code_answer("Yes", "1", code)[1], "")
         self.assertEqual(release.get(self.desk, 1)["state"], "approved")
 
-    def test_the_readme_and_the_page_say_the_alert_command_must_not_keep_the_alerts_text(self):
+    def test_the_release_guide_and_the_page_say_the_alert_command_must_not_keep_the_alerts_text(self):
         root = Path(__file__).resolve().parent.parent
-        readme = " ".join((root / "README.md").read_text().split())
-        self.assertIn("Your alert command must not keep the alert's text anywhere the coordinator can read it (a "
-                      "file, a log, a chat history): the code in it approves a release.", readme)
+        guide = " ".join((root / "docs" / "releases.md").read_text().split())
+        self.assertIn("alert command must not keep the alert's text anywhere the coordinator can read it (a "
+                      "file, a log, a chat history): the code in it approves a release.", guide)
         self.assertIn("must not keep the alert's text anywhere the coordinator can read it",
                       (root / "hansa" / "ui.html").read_text())
 
