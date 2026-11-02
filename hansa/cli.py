@@ -434,12 +434,19 @@ def _title_allowed(desk: Desk, s: dict, title: str | None, text: str, lane: str)
 
 def cmd_add(a):
     desk = Desk.find(a.desk)
+    with desk.lock():
+        _add(desk, a)
+
+
+def _add(desk: Desk, a) -> None:
     s = desk.settings()
     _work_lane(s, a.lane)
+    verification = _verify_request(desk, a, {"id": "the task", "lane": a.lane or ""})
     text = _text(a)
     _title_allowed(desk, s, a.title, text, a.lane)
     tid = desk.new_task(text, lane=a.lane or "", effort=a.effort or "", model=a.model or "",
                         title=a.title or "", max_turns=a.max_turns or 0, attach=a.attach,
+                        **verification,
                         **notify.recorded(notify.session_here()))
     if a.lane and a.lane not in s["lanes"]:
         print(f"note: there is no lane {a.lane} yet; the task waits until it is added: hansa lane add {a.lane} --repo PATH")
@@ -454,7 +461,8 @@ def cmd_add(a):
               f" To give one, cancel it (hansa cancel {tid}) and add it again with"
               f" --title \"...\"")
     print(f"{tid} queued" + (f" for lane {a.lane}" if a.lane else "")
-          + (f". {_wait_for(desk, tid)}; hansa show {tid} says where it is" if notify.hears_of(desk, tid)
+          + _verification_follows(verification)
+          + (f". {_queued_wait(desk, tid, verification)}; hansa show {tid} says where it is" if notify.hears_of(desk, tid)
              else f". Follow it with: hansa show {tid}") + _waits(desk, tid))
 
 
@@ -879,6 +887,7 @@ def _retry(desk: Desk, a) -> None:
                  f"to see whether it holds; its verdict: {verdict}):\n" + vreport.read_text(encoding="utf-8").strip())
     opts = {"lane": lane, "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
             "parent": a.id, "title": f"{own_title(m['title'])} (retry of {a.id})",
+            **_verify_request(desk, a, {**m, "lane": lane}),
             **notify.recorded(notify.session_here())}
     base = (own or {}).get("base") or "main"
     if a.update:  # the base's tip when it starts is merged into its branch then (run.prepare)
@@ -894,10 +903,11 @@ def _retry(desk: Desk, a) -> None:
         desk.update(a.id, state="replaced", replaced_by=tid, ended_as=m["state"])
         close_verification(desk, m, f"closed: {a.id} was replaced by {tid}")
     print(f"{tid} queued as a follow-up to {a.id}" + (f" on lane {lane}" if lane != m.get("lane", "") else "")
+          + _verification_follows(opts)
           + (" from the base branch" if a.fresh else
                                                       f", with the current {base} merged into its branch when it starts "
                                                       f"(a conflict is left for the worker to settle)" if a.update else "")
-          + (f". {_wait_for(desk, tid)}" if notify.hears_of(desk, tid) else "") + _waits(desk, tid))
+          + (f". {_queued_wait(desk, tid, opts)}" if notify.hears_of(desk, tid) else "") + _waits(desk, tid))
 
 
 NOTE_FILE = "note.md"  # beside a follow-up's task.md: the note it was sent back with, on its own (empty: none)
@@ -1006,26 +1016,38 @@ def cmd_verify(a):
 
 
 def _verify(desk: Desk, a) -> None:
-    m = desk.meta(a.id)
+    vid, selected = queue_verification(desk, a.id, lane=a.lane, effort=a.effort,
+                                      note=" ".join(a.note).strip(), session=notify.session_here())
+    m, v = desk.meta(a.id), desk.meta(vid)
+    print(f"{vid} queued" + (f" on lane {v['lane']}" if v["lane"] != m.get("lane", "") else "")
+          + (f" (chosen as a verify lane for lane {m['lane']})" if selected else "")
+          + f": a worker will run {a.id}'s change to see whether it holds. "
+          + (_wait_for(desk, vid) if notify.hears_of(desk, vid) else f"Follow it with: hansa wait {vid}")
+          + f"; the verdict shows in hansa show {a.id}" + _waits(desk, vid))
+
+
+def queue_verification(desk: Desk, tid: str, *, lane="", effort="", note="", session=None) -> tuple:
+    """Build a verification for the command or server. The caller holds desk.lock()."""
+    m = desk.meta(tid)
     if m.get("kind") == "verify":
-        raise SystemExit(f"hansa: {a.id} is itself a verification; verify the task it checks ({m.get('parent')})")
+        raise SystemExit(f"hansa: {tid} is itself a verification; verify the task it checks ({m.get('parent')})")
     if m["state"] != "done" or not m.get("commits"):
-        raise SystemExit(f"hansa: only a finished task with changes can be verified; {a.id} is {m['state']}"
+        raise SystemExit(f"hansa: only a finished task with changes can be verified; {tid} is {m['state']}"
                          + ("" if m.get("commits") else ", with nothing to merge"))
     v = views.verification(desk, m)
     if v and v["state"] in ("queued", "running"):
-        raise SystemExit(f"hansa: {v['task']} is already verifying {a.id}")
-    lane = m.get("lane", "")
+        raise SystemExit(f"hansa: {v['task']} is already verifying {tid}")
+    target, lane = lane, m.get("lane", "")
     s = desk.settings()
     selected = ""
-    if not a.lane:
+    if not target:
         candidates = [n for n, ln in s["lanes"].items() if lane in ln.get("verify_for", [])]
         if candidates:
             tasks = desk.tasks()
             busy = {occupied_lane(t) for t in tasks if lane_occupied(t)}
             queued = {n: sum(t["state"] == "queued" and t.get("lane") == n for t in tasks) for n in candidates}
             selected = min(candidates, key=lambda n: (n in busy or queued[n] > 0, queued[n]))
-    target = a.lane or selected or lane
+    target = target or selected or lane
     _work_lane(s, target, verifying=True)
     own = s["lanes"].get(lane)
     moved = own is not None and m.get("repo") and not _same_repo(own["repo"], m["repo"])
@@ -1034,30 +1056,45 @@ def _verify(desk: Desk, a) -> None:
         lane = target
     held = branch_holds(desk.settings()["lanes"][lane]["repo"], m)  # what is verified is the recorded commit
     if held:
-        raise SystemExit(f"hansa: {held}; nothing was queued. hansa show {a.id} says what it holds")
-    d = desk.tasks_dir / a.id
+        raise SystemExit(f"hansa: {held}; nothing was queued. hansa show {tid} says what it holds")
+    d = desk.tasks_dir / tid
     task = (d / "task.md").read_text(encoding="utf-8").strip()
     report = (d / "result.md").read_text(encoding="utf-8").strip() if (d / "result.md").exists() else ""
-    note = " ".join(a.note).strip()
-    sess = notify.session_here()
-    text = (VERIFY_TASK.format(id=a.id, base=m["base"][:12], head=m["head"][:12]) + _check_ran(desk, m)
+    text = (VERIFY_TASK.format(id=tid, base=m["base"][:12], head=m["head"][:12]) + _check_ran(desk, m)
             + (f"\nLook in particular at: {note}\n" if note else "")
             + ("\nThis task is a follow-up: what it asked is the original task together with this round's note, "
                "which restates what still holds of earlier rounds' notes. Where the two differ, the note stands; "
                "judge each of those asks against the whole change.\n" if m.get("parent") else "")
-            + f"\n## Task {a.id} as it was given\n{task}\n\n## The report of the worker who did it\n{report or '(none)'}\n")
-    vid = desk.new_task(text, kind="verify", parent=a.id, lane=lane, effort=a.effort or "",
-                        attachments_from=a.id,
-                        start_from=m["head"], base=m["head"], title=f"Verify {a.id}: {m['title']}"[:80],
-                        **notify.recorded(sess))
+            + f"\n## Task {tid} as it was given\n{task}\n\n## The report of the worker who did it\n{report or '(none)'}\n")
+    vid = desk.new_task(text, kind="verify", parent=tid, lane=lane, effort=effort or "",
+                        attachments_from=tid,
+                        start_from=m["head"], base=m["head"], title=f"Verify {tid}: {m['title']}"[:80],
+                        **notify.recorded(session))
     if v:
-        close_verification(desk, m, f"closed: {vid} verifies {a.id} again")
-    desk.update(a.id, verify=vid, **notify.recorded(sess))
-    print(f"{vid} queued" + (f" on lane {lane}" if lane != m.get("lane", "") else "")
-          + (f" (chosen as a verify lane for lane {m['lane']})" if selected else "")
-          + f": a worker will run {a.id}'s change to see whether it holds. "
-          + (_wait_for(desk, vid) if notify.hears_of(desk, vid) else f"Follow it with: hansa wait {vid}")
-          + f"; the verdict shows in hansa show {a.id}" + _waits(desk, vid))
+        close_verification(desk, m, f"closed: {vid} verifies {tid} again")
+    desk.update(tid, verify=vid, **notify.recorded(session))
+    return vid, selected
+
+
+def _verify_request(desk: Desk, a, m: dict) -> dict:
+    """Queue-time options belong only to this attempt; validate an explicit lane before making a task."""
+    if not (a.verify or a.verify_lane is not None or a.verify_effort is not None or a.verify_note is not None):
+        return {}
+    if a.verify_lane is not None:
+        _work_lane(desk.settings(), a.verify_lane, verifying=True)
+        _lane_reaches(desk, a.verify_lane, m, queued=True)
+    return {"verify_after": {"lane": a.verify_lane or "", "effort": a.verify_effort or "",
+                             "note": desk.redact((a.verify_note or "").strip())}}
+
+
+def _verification_follows(opts: dict) -> str:
+    return ("; verification will follow if its check passes (or it has no check) and it has changes"
+            if opts.get("verify_after") else "")
+
+
+def _queued_wait(desk: Desk, tid: str, opts: dict) -> str:
+    return ("hansa tells this session the verdict, or the task's result if verification cannot follow"
+            if opts.get("verify_after") else _wait_for(desk, tid))
 
 
 def _check_ran(desk: Desk, m: dict) -> str:
@@ -1087,12 +1124,17 @@ def _work_lane(s: dict, name, *, verifying: bool = False) -> None:
         raise SystemExit(f"hansa: {why}{detail}; nothing was queued")
 
 
-def _lane_reaches(desk: Desk, name: str, m: dict) -> None:
+def _lane_reaches(desk: Desk, name: str, m: dict, *, queued: bool = False) -> None:
     """Refuses, queueing nothing, a lane that cannot reach the task's change: one that is not on the desk, or not on
     the repository of the task's own lane, where the task's branch is."""
     lanes = desk.settings()["lanes"]
     nothing = "; nothing was queued"
     own = lanes.get(m.get("lane"))
+    if queued:
+        if name not in lanes:
+            raise SystemExit(f"hansa: there is no lane {name}; lanes: {', '.join(sorted(lanes)) or 'none'}{nothing}")
+        if own is None:  # its work lane is not known until it starts
+            return
     if own is not None and m.get("repo") and not _same_repo(own["repo"], m["repo"]):
         if name == m["lane"]:  # removed and made again on another repository: not where the task's branch is
             raise SystemExit(f"hansa: {m['id']}'s lane {name} is now on {own['repo']}, not on {m['repo']}, where "
@@ -2893,6 +2935,15 @@ def main(argv=None):
         visible.append(name)
         return p
 
+    def verify_options(p):
+        p.add_argument("--verify", action="store_true", help="queue a verification after the check passes (or "
+                       "there is no check), if the task has changes; never merge it automatically")
+        p.add_argument("--verify-lane", metavar="L", help="verify on lane L, as hansa verify --lane L; implies --verify")
+        p.add_argument("--verify-effort", metavar="E", choices=["low", "medium", "high", "xhigh", "max"],
+                       help="the verification's effort; implies --verify")
+        p.add_argument("--verify-note", metavar="TEXT", help="what the verification should look at in particular; "
+                       "implies --verify. These options apply only to this task, never to a follow-up")
+
     p = add("init", cmd_init, "create a desk")
     p.add_argument("dir")
     p.add_argument("--repo", help="git checkout the first lane works on")
@@ -2900,6 +2951,7 @@ def main(argv=None):
     p.add_argument("--base", help="base branch; must resolve to an existing commit (default: the checkout's current branch)")
     p.add_argument("--user", help="as root on a Linux server: the account the desk belongs to and hansa runs as")
     p = add("add", cmd_add, "queue a task")
+    verify_options(p)
     p.add_argument("text", nargs="*")
     p.add_argument("--attach", action="append", default=[], metavar="PATH",
                    help="copy a file into the task when queued (repeatable; at most 20 files, 20 MB in all). "
@@ -2958,6 +3010,7 @@ def main(argv=None):
     p.epilog = see_more("merge-check")
     p = add("retry", cmd_retry, "queue a follow-up task (new id) that continues from this task's last commit with "
             "your note; this task becomes replaced")
+    verify_options(p)
     p.add_argument("id")
     p.add_argument("note", nargs="*")
     p.description = (p.description + ". Its worker is given the original task, one line per earlier round "

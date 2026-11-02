@@ -203,6 +203,8 @@ def task_line(desk: Desk, m: dict) -> str:
                  " (its check could not run: the machine's problem, not the task's)" if chk.get("could_not_run") else
                  " (check passed)" if chk.get("ok") else
                  f" (check FAILED{': ' + chk['note'] if chk.get('note') else ''})" if chk else "")
+        if m.get("verify_after_error"):
+            head += f" · verification could not be queued: {m['verify_after_error']}"
     elif st in ("failed", "cancelled") and m.get("error") and m.get("error") != st:
         head += f" ({str(m['error'])[:200]})"
     elif st == "merging":
@@ -226,8 +228,6 @@ def _item(desk: Desk, e: dict):
     or None. The session that cancelled a task with hansa cancel does not hear that it was cancelled."""
     kind, tid = e.get("event"), e.get("task")
     if kind in ("task_finished", "task_checked", "task_not_started", "merge_check_ended", "task_merged"):
-        if kind == "task_finished" and e.get("state") in ("checking", "queued"):  # not ended yet / moved on
-            return None
         if kind == "merge_check_ended" and e.get("note") == "cancelled":  # the coordinator cancelled it
             return None
         if kind == "task_merged" and not e.get("merge_checked") and not e.get("waited"):  # the coordinator saw it
@@ -235,6 +235,16 @@ def _item(desk: Desk, e: dict):
         try:
             m = desk.meta(tid)
         except SystemExit:
+            return None
+        if kind in ("task_finished", "task_checked"):
+            from .run import verification_takes_over
+            if m.get("verify_after") and (m.get("state") in ("queued", "running") or verification_takes_over(m)):
+                return None
+            # A refusal has its own completion event: an older event read during the error write
+            # must not post the same line before that event arrives.
+            if m.get("verify_after_error") and not e.get("verification_error"):
+                return None
+        if kind == "task_finished" and e.get("state") in ("checking", "queued"):
             return None
         if kind == "merge_check_ended":
             key = ("merge", tid)
@@ -393,14 +403,18 @@ def items_for(desk: Desk, events: list, me: dict) -> list:
 
 
 def waits_review(desk: Desk, tid) -> bool:
-    """Whether a task waits for the coordinator's review now: done, and not a verification (as hansa status has it)."""
+    """Whether finished work needs review now, after any pending or running verification."""
     if not isinstance(tid, str) or not TASK_ID.match(tid):
         return False
     try:
         m = desk.meta(tid)
     except SystemExit:
         return False
-    return m.get("state") == "done" and m.get("kind") != "verify"
+    from .run import verification_due
+    from .views import verification
+    v = verification(desk, m)
+    return (m.get("state") == "done" and m.get("kind") != "verify" and not verification_due(m)
+            and not (v and v["state"] in ("queued", "running")))
 
 
 def _srt_ran(desk: Desk):
