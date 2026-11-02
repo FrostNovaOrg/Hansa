@@ -60,8 +60,12 @@ def check(lang=None):
             return "npm install -g @anthropic-ai/sandbox-runtime@" + SRT_VERSION
         if sys.platform == "darwin":
             return "brew install " + name
+        if name == "node":
+            minimum = version_text(NODE_MIN)
+            return tr(f"Install Node {minimum} or newer: https://nodejs.org/en/download",
+                      f"安装 Node {minimum} 或更新版本：https://nodejs.org/en/download")
         if which("apt-get"):
-            return "sudo apt-get install " + {"python": "python3", "node": "nodejs"}.get(name, name)
+            return "sudo apt-get install " + {"python": "python3"}.get(name, name)
         return tr("See ", "参阅 ") + GUIDE
 
     def row(name, state, found, need, repair=""):
@@ -76,12 +80,18 @@ def check(lang=None):
                 try:
                     output, _ = process.communicate(timeout=TIMEOUT)
                 except subprocess.TimeoutExpired:
-                    # srt starts children; kill the whole group so inherited pipes cannot hold us open.
+                    # srt starts children; kill the group, then bound the drain too:
+                    # a child can leave the group while keeping the output pipe open.
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    output, _ = process.communicate()
+                    except (ProcessLookupError, PermissionError):
+                        process.kill()
+                    try:
+                        output, _ = process.communicate(timeout=1)
+                    except subprocess.TimeoutExpired as e:
+                        output = e.output or b""
+                        if isinstance(output, bytes):
+                            output = output.decode("utf-8", errors="replace")
                     return False, tr(f"no answer in {TIMEOUT} s", f"{TIMEOUT} 秒内未响应"), output or ""
             output = (output or "").strip()
             if process.returncode:
@@ -107,8 +117,8 @@ def check(lang=None):
 
     claude = ""
     for name, label, args, minimum in (("git", "Git", ["--version"], None),
-                                       ("claude", "Claude Code", ["--version"], CLAUDE_MIN),
                                        ("node", "Node", ["--version"], NODE_MIN),
+                                       ("claude", "Claude Code", ["--version"], CLAUDE_MIN),
                                        ("tmux", "tmux", ["-V"], None)):
         path, extra = located(name)
         if name == "claude":
@@ -190,7 +200,7 @@ def check(lang=None):
             row("Sandbox", "fails", str(e), need, repair)
 
     # Keep installation order stable for both people and agents.
-    order = ["Python", "Git", "Claude Code", "Claude login", "Node", "srt", "tmux", "bubblewrap", "socat", "Sandbox"]
+    order = ["Python", "Git", "Node", "Claude Code", "Claude login", "srt", "tmux", "bubblewrap", "socat", "Sandbox"]
     rows.sort(key=lambda r: order.index(r["name"]))
     return {"ok": not any(r["state"] == "fails" for r in rows), "rows": rows}
 

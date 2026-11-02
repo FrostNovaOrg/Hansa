@@ -246,6 +246,16 @@ Advice, not a rule hansa enforces:
 `hansa verify ID` chooses a verify lane listing the task's lane: free first, then fewest queued,
 then lanes' order; otherwise its own lane. `--lane L` overrides this.
 
+`hansa add` and `hansa retry` accept `--verify` to queue this verification after a passing check
+(or with no check), if the task ends done with changes. `--verify-lane L`, `--verify-effort E`
+and `--verify-note "text"` give its lane, effort and note; each implies `--verify`.
+These options apply only to that task, never its follow-ups. The verdict goes to the task's
+session without posting the task first; if queueing is refused, the task stays done and is posted
+with the reason, so you can run `hansa verify` yourself. Hansa never merges by itself.
+When these options lead to a verification, the review alert starts when the verification ends by
+itself. After a verification is cancelled, no review alert fires; the task shows in `hansa status`.
+A verification queued by hand leaves the review alert unchanged for tasks queued without these options.
+
 A verification ends with `VERDICT: holds`, `VERDICT: holds, with notes`,
 `VERDICT: does not hold` or `VERDICT: unsure`.
 It says "does not hold" when ordinary use misses something the task asked for

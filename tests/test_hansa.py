@@ -23942,6 +23942,473 @@ def save():'''))
         rec.write_text("".join(json.dumps(r) + "\n" for r in rows))
         self.assertEqual(run.background_left(home, "s61"), [command])
 
+    def queue_time_gap(self, *options, check="true", **lane):
+        """A real completed worker/check, with serve stopped just before the requested queue step."""
+        s = self.desk.settings()
+        s["lanes"]["a"].update(check=check, **lane)
+        self.assertEqual(self.desk.save_settings(s), [])
+        out = self.hansa("add", "Add hello.txt", "--lane", "a", *(options or ("--verify",)))
+        self.assertIn("verification will follow", out)
+        tid = self.desk.tasks()[-1]["id"]
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(d, "verify_after"):
+            self.settle(d, tid)
+        return d, tid
+
+    def queue_time_items(self, tid):
+        # Both events must use the current metadata, including a delayed task_finished(checking).
+        return notify.items_for(self.desk, [
+            {"event": "task_finished", "task": tid, "state": "checking"},
+            {"event": "task_checked", "task": tid}], {"key": "test", "session": None})
+
+    def queue_time_review_alert(self, automatic):
+        from hansa import alert
+        self.assertEqual(self.page_save(lambda s: s["coordinator_alert"].update(
+            no_session_min=0, window_min=0, review_min=1)), {"ok": True, "problems": []})
+        for verdict in ("holds", "holds, with notes", "does not hold", "unsure"):
+            with self.subTest(automatic=automatic, verdict=verdict):
+                if automatic:
+                    _, tid = self.queue_time_gap(check="")
+                else:
+                    _, tid = self.verify_lane_task()
+                sess = {"pid": 4242, "start": "review-session"}
+                me = {"key": notify.key_of(sess), "session": sess, "uid": os.getuid()}
+                watch, pos, at = notify.Watch(sess["pid"]), 0, time.time()
+                minutes = {"window": 0, "review": 1}
+
+                def feed():
+                    nonlocal pos
+                    r = notify.handle(self.desk, {"op": "feed", "me": me, "pos": pos,
+                                                 "review": list(watch.reviews)})
+                    pos = r["pos"]
+                    watch.still(r["review"])
+                    items = [x for x in r["items"] if x["key"][0] == "task"
+                             and x["key"][1] in (tid, self.desk.meta(tid).get("verify"))]
+                    if items:
+                        watch.posted(at, [x["line"] for x in items], [x["review"] for x in items if x.get("review")])
+                    return items
+
+                def review(expected):
+                    self.assertEqual(notify.waits_review(self.desk, tid), expected)
+                    self.assertEqual(list(watch.reviews), [tid] if expected else [])
+                    # Each phase may be the first time the session is found idle.
+                    probe = notify.Watch(sess["pid"], watch.state())
+                    cases = probe.saw(at + 120, "idle", 0, 1)
+                    self.assertEqual([(case, fields["task"]) for case, fields in cases],
+                                     [("review", tid)] if expected else [])
+                    notify._write_record(self.desk, me["key"],
+                                         {**me, "seen": time.time(), "coordinator": probe.holds(at + 120, minutes)})
+                    lines = alert.coordinator_lines(self.desk, self.desk.settings(), at + 120)
+                    self.assertEqual(len(lines), int(expected))
+                    if expected:
+                        self.assertIn("waiting for review", lines[0])
+                        self.assertIn(tid, lines[0])
+
+                feed()
+                review(not automatic)  # a queue-time verification is due, but not queued yet
+                if automatic:
+                    self.desk.pause("hold verification starts")
+                    Dispatcher(self.desk).tick()
+                else:
+                    self.hansa("verify", tid)
+                vid = self.desk.meta(tid)["verify"]
+                feed()
+                review(not automatic)  # queued
+                self.desk.update(vid, state="running")
+                feed()
+                review(not automatic)
+                self.desk.update(vid, state="done", verdict=verdict)
+                self.desk.event("task_finished", task=vid, state="done")
+                [item] = feed()
+                self.assertEqual(item["key"], ["task", vid])
+                self.assertEqual(item.get("review"), tid if automatic else None)
+                review(True)
+            if automatic:
+                self.desk.resume()
+
+    def test_queue_time_verification_manual_review_alert_survives_verification(self):
+        self.queue_time_review_alert(automatic=False)
+
+    def test_queue_time_verification_requested_review_alert_starts_with_each_verdict(self):
+        self.queue_time_review_alert(automatic=True)
+
+    def test_queue_time_verification_missing_folder_keeps_the_task_waiting_for_review(self):
+        for automatic in (False, True):
+            with self.subTest(automatic=automatic):
+                tid = self.desk.new_task("Work waiting for review", lane="a")
+                vid = self.desk.new_task("Verify the work", lane="a", kind="verify", parent=tid)
+                options = {"verify_after": {"lane": "", "effort": "", "note": ""}} if automatic else {}
+                self.desk.update(tid, state="done", commits=1, verify=vid, **options)
+                self.assertEqual(notify.waits_review(self.desk, tid), not automatic)
+                shutil.rmtree(self.desk.tasks_dir / vid)
+                self.assertTrue(notify.waits_review(self.desk, tid))
+                me = {"key": "4242-0123abcd", "session": None, "uid": os.getuid()}
+                feed = notify.handle(self.desk, {"op": "feed", "me": me, "pos": notify.log_end(self.desk),
+                                                 "review": [tid]})
+                self.assertEqual(feed["review"], [tid])
+
+    def test_queue_time_verification_add_reads_stdin_before_locking_the_desk(self):
+        def read():
+            # A slow pipe can block here; another command or server must be able to take the lock.
+            with open(self.desk.state_dir / "lock", "a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(held, fcntl.LOCK_UN)
+            return "Add hello.txt from standard input\n"
+
+        with unittest.mock.patch("sys.stdin", io.StringIO()) as stdin:
+            with unittest.mock.patch.object(stdin, "read", side_effect=read):
+                out = self.hansa("add", "--file", "-", "--lane", "a", "--verify")
+        self.assertIn("verification will follow", out)
+        [m] = self.desk.tasks()
+        self.assertIn("verify_after", m)
+        self.assertEqual((self.desk.tasks_dir / m["id"] / "task.md").read_text(),
+                         "Add hello.txt from standard input\n")
+
+    def test_queue_time_verification_passes_and_posts_only_its_verdict_to_the_tasks_session(self):
+        self.add_verify_lane()
+        self.hansa("lane", "set", "v1", "env", "FAKE_VERDICT=holds")
+        sess = {"pid": 4242, "start": "queue-time-session"}
+        with unittest.mock.patch.object(notify, "session_here", return_value=sess):
+            _, tid = self.queue_time_gap()
+        self.assertIsNone(notify.session_here())  # as in serve, not the coordinator's process
+        self.assertEqual(self.queue_time_items(tid), [])
+        shown = self.hansa("show", tid)
+        self.assertIn("verification requested:", shown)
+        self.assertNotIn(f"hansa verify {tid}", next(x for x in shown.splitlines() if x.startswith("next:")))
+        self.assertFalse(notify.waits_review(self.desk, tid))
+        d = Dispatcher(self.desk)
+        d.tick()
+        m = self.desk.meta(tid)
+        vid = m["verify"]
+        v = self.desk.meta(vid)
+        self.assertEqual((v["kind"], v["lane"], v["session"], v["start_from"]),
+                         ("verify", "v1", sess, m["head"]))
+        text = (self.desk.tasks_dir / vid / "task.md").read_text()
+        self.assertIn("It passed", text)
+        self.assertIn(f"## Task {tid} as it was given", text)
+        self.assertFalse(notify.waits_review(self.desk, tid))
+        self.settle(d, vid)
+        self.assertEqual(self.queue_time_items(tid), [])
+        [event] = [e for e in self.events("task_finished") if e["task"] == vid]
+        item = notify._item(self.desk, event)
+        self.assertEqual(item[2], sess)
+        self.assertIn("verdict: holds", item[1])
+        self.assertTrue(notify.waits_review(self.desk, tid))
+        self.assertEqual(self.desk.meta(tid)["state"], "done")  # no automatic merge
+
+    def test_queue_time_verification_without_a_check_uses_the_own_lane(self):
+        _, tid = self.queue_time_gap(check="")
+        self.assertEqual(self.queue_time_items(tid), [])
+        self.desk.pause("hold starts")
+        Dispatcher(self.desk).tick()
+        vid = self.desk.meta(tid)["verify"]
+        self.assertEqual((self.desk.meta(vid)["lane"], self.desk.meta(vid)["state"]), ("a", "queued"))
+        self.assertIn(f"Task {tid} has no check", (self.desk.tasks_dir / vid / "task.md").read_text())
+
+    def test_queue_time_verification_each_option_implies_verify_and_is_not_inherited(self):
+        _, tid = self.queue_time_gap(check="")
+        self.hansa("lane", "add", "b", "--like", "a")
+        for option, value, field in (("--verify-lane", "b", "lane"), ("--verify-effort", "high", "effort"),
+                                     ("--verify-note", "check the edge case", "note")):
+            for command in ("add", "retry"):
+                with self.subTest(option=option, command=command):
+                    out = self.hansa(*(("add", "work", "--lane", "a") if command == "add" else
+                                       ("retry", tid, "again")), option, value)
+                    self.assertIn("verification will follow", out)
+                    queued = self.desk.tasks()[-1]
+                    self.assertEqual(queued["verify_after"][field], value)
+                    self.assertIn("verification requested:", self.hansa("show", queued["id"]))
+                    if command == "retry":
+                        tid = queued["id"]
+                        self.desk.update(tid, state="done")
+        self.hansa("retry", tid, "without verification")
+        retry = self.desk.tasks()[-1]
+        self.assertNotIn("verify_after", retry)
+        self.assertNotIn("verification requested:", self.hansa("show", retry["id"]))
+        self.hansa("add", "ordinary work")
+        self.assertNotIn("verify_after", self.desk.tasks()[-1])
+        with unittest.mock.patch.object(notify, "hears_of", return_value=True):
+            out = self.hansa("add", "work", "--verify")
+            self.assertIn("tells this session the verdict", out)
+            tid = self.desk.tasks()[-1]["id"]
+            self.desk.update(tid, state="done")
+            out = self.hansa("retry", tid, "again", "--verify")
+            self.assertIn("tells this session the verdict", out)
+
+    def test_queue_time_verification_options_reach_the_shared_builder(self):
+        self.add_verify_lane()
+        _, tid = self.queue_time_gap("--verify-lane", "v1", "--verify-effort", "high",
+                                     "--verify-note", "check the edge case")
+        self.desk.pause("hold starts")
+        queue = cli.queue_verification
+        def locked_queue(desk, *args, **kwargs):
+            self.assertGreater(desk._held, 0)
+            return queue(desk, *args, **kwargs)
+        with unittest.mock.patch.object(cli, "queue_verification", side_effect=locked_queue) as builder:
+            Dispatcher(self.desk).tick()
+            builder.assert_called_once()
+        v = self.desk.meta(self.desk.meta(tid)["verify"])
+        self.assertEqual((v["lane"], v["effort"]), ("v1", "high"))
+        self.assertIn("Look in particular at: check the edge case", (self.desk.tasks_dir / v["id"] / "task.md").read_text())
+        # The command uses the same builder, also while holding the lock.
+        self.desk.update(v["id"], state="done")
+        with unittest.mock.patch.object(cli, "queue_verification", side_effect=locked_queue) as builder:
+            self.hansa("verify", tid)
+            builder.assert_called_once()
+
+    def test_queue_time_verification_refuses_lanes_atomically_for_add_and_retry(self):
+        _, tid = self.queue_time_gap(check="")
+        other = self.tmp / "other"
+        shutil.copytree(self.repo, other)
+        s = self.desk.settings()
+        s["lanes"]["b"] = {**s["lanes"]["a"], "repo": str(other)}
+        s["lanes"]["m"] = {**s["lanes"]["a"], "merge_lane": True}
+        self.assertEqual(self.desk.save_settings(s), [])
+        for lane, why in (("z", "there is no lane z"), ("m", "merge lane and takes no work"),
+                          ("b", "cannot reach")):
+            for args in (("add", "work", "--lane", "a"), ("retry", tid, "again")):
+                before = self.desk.tasks()
+                with self.subTest(args=args, lane=lane), self.assertRaises(SystemExit) as error:
+                    self.hansa(*args, "--verify-lane", lane)
+                self.assertIn(why, str(error.exception))
+                self.assertIn("nothing was queued", str(error.exception))
+                self.assertEqual(self.desk.tasks(), before)
+        for command in (("add", "work"), ("retry", tid, "again")):
+            before = self.desk.tasks()
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.hansa(*command, "--verify-effort", "bogus")
+            self.assertEqual(self.desk.tasks(), before)
+
+    def test_queue_time_verification_unassigned_task_defers_only_the_repository_comparison(self):
+        other = self.tmp / "other"
+        shutil.copytree(self.repo, other)
+        self.hansa("lane", "add", "b", "--repo", str(other))
+        self.hansa("add", "Add hello.txt", "--verify-lane", "b")
+        tid = self.desk.tasks()[-1]["id"]
+        self.assertEqual(self.desk.meta(tid)["lane"], "")
+        self.assertNotIn("verify_after_error", self.desk.meta(tid))
+        d = Dispatcher(self.desk)
+        m = self.settle(d, tid)
+        self.assertEqual((m["lane"], m["state"]), ("a", "done"))
+        self.assertIn("cannot reach", m["verify_after_error"])
+        self.assertNotIn("verify", m)
+        [item] = notify.items_for(self.desk, notify.read_log(self.desk, 0)[0], {"key": "test", "session": None})
+        self.assertEqual(item["key"], ["task", tid])
+        self.assertIn("verification could not be queued", item["line"])
+        self.assertIn("cannot reach", item["line"])
+        self.assertEqual(item["review"], tid)
+        with self.assertRaises(SystemExit):
+            self.hansa("add", "unassigned", "--verify-lane", "missing")
+
+    def test_queue_time_verification_failed_and_unrunnable_checks_post_the_task(self):
+        from hansa import run
+        for check, refusal in (("false", None), ("true", run.SrtCannotRun("sandbox unavailable")),
+                               ("true", OSError("cannot start check"))):
+            with self.subTest(check=check, refusal=refusal):
+                s = self.desk.settings()
+                s["lanes"]["a"]["check"] = check
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.hansa("add", "Add hello.txt", "--verify", "--lane", "a")
+                tid = self.desk.tasks()[-1]["id"]
+                with (unittest.mock.patch.object(run, "start_check", side_effect=refusal) if refusal
+                      else contextlib.nullcontext()):
+                    m = self.settle(Dispatcher(self.desk), tid)
+                self.assertNotIn("verify", m)
+                [item] = self.queue_time_items(tid)
+                self.assertEqual(item["key"], ["task", tid])
+                self.assertIn("could not run" if isinstance(refusal, run.SrtCannotRun) else
+                              "cannot start check" if refusal else "check FAILED", item["line"])
+
+    def test_queue_time_verification_waits_for_a_killed_checks_second_run(self):
+        from hansa import run
+        with self.oom_counter() as vmstat:
+            command = self.oom_command(self.tmp, "kill-once", vmstat)
+            s = self.desk.settings()
+            s["lanes"]["a"]["check"] = command
+            self.assertEqual(self.desk.save_settings(s), [])
+            self.hansa("add", "Add hello.txt", "--verify", "--lane", "a")
+            tid = self.desk.tasks()[-1]["id"]
+            d = Dispatcher(self.desk)
+            original = run.finish_check
+            observed = []
+            def finish_check(*args):
+                m = original(*args)
+                if m.get("check_retry") and m["state"] == "running":
+                    observed.append(m)
+                    self.assertNotIn("verify", m)
+                    self.assertEqual(self.queue_time_items(tid), [])
+                return m
+            with unittest.mock.patch.object(run, "finish_check", side_effect=finish_check):
+                m = self.settle(d, tid)
+            self.assertEqual(len(observed), 1)
+            self.assertEqual((m["check"]["ok"], (self.tmp / "count").read_text()), (True, "2"))
+            self.assertIn("verify", m)
+            self.settle(d, m["verify"])
+
+    def test_queue_time_verification_no_changes_and_failed_workers_post_as_before(self):
+        for env, state, words in (({"FAKE_NO_CHANGES": "1"}, "done", "no changes"),
+                                  ({"FAKE_STOP_AT_TURNS": "1"}, "failed", "failed")):
+            with self.subTest(state=state):
+                _, tid = self.queue_time_gap(env=env)
+                m = self.desk.meta(tid)
+                self.assertEqual(m["state"], state)
+                Dispatcher(self.desk).tick()
+                self.assertNotIn("verify", self.desk.meta(tid))
+                [item] = self.queue_time_items(tid)
+                self.assertIn(words, item["line"])
+        self.hansa("add", "cancel me", "--verify", "--lane", "a")
+        tid = self.desk.tasks()[-1]["id"]
+        self.hansa("cancel", tid)
+        Dispatcher(self.desk).tick()
+        self.assertNotIn("verify", self.desk.meta(tid))
+        self.assertIn("cancelled", self.queue_time_items(tid)[0]["line"])
+
+    def test_queue_time_verification_refusal_posts_the_reason_once_without_retrying(self):
+        for cause in ("gone", "moved", "no verification", "branch moved", "other refusal"):
+            with self.subTest(cause=cause):
+                # Each task has a separate branch, while all explicit verify lanes initially reach it.
+                self.hansa("lane", "add", "b", "--like", "a")
+                _, tid = self.queue_time_gap("--verify-lane", "b")
+                self.desk.pause("hold starts")
+                s = self.desk.settings()
+                if cause == "gone":
+                    del s["lanes"]["b"]
+                elif cause == "moved":
+                    other = self.tmp / cause
+                    shutil.copytree(self.repo, other)
+                    s["lanes"]["b"]["repo"] = str(other)
+                elif cause == "no verification":
+                    s["lanes"]["b"]["merge_lane"] = True
+                elif cause == "branch moved":
+                    sh("git", "update-ref", f"refs/heads/task/{tid}", "main", cwd=self.repo)
+                self.assertEqual(self.desk.save_settings(s), [])
+                pos = notify.log_end(self.desk)
+                with (unittest.mock.patch.object(cli, "queue_verification", side_effect=ValueError("refused here"))
+                      if cause == "other refusal" else contextlib.nullcontext()):
+                    Dispatcher(self.desk).tick()
+                m = self.desk.meta(tid)
+                self.assertEqual(m["state"], "done")
+                self.assertNotIn("verify", m)
+                self.assertTrue(m["verify_after_error"])
+                events, _ = notify.read_log(self.desk, pos)
+                [item] = notify.items_for(self.desk, events, {"key": "test", "session": None})
+                self.assertIn("verification could not be queued", item["line"])
+                self.assertIn(m["verify_after_error"], item["line"])
+                # A delayed original completion must not post the refusal again, on another feed.
+                self.assertEqual(self.queue_time_items(tid), [])
+                self.assertIn(f"hansa verify {tid}", self.hansa("show", tid))
+                self.assertTrue(notify.waits_review(self.desk, tid))
+                pos = notify.log_end(self.desk)
+                Dispatcher(self.desk).tick()
+                self.assertEqual(notify.items_for(self.desk, notify.read_log(self.desk, pos)[0],
+                                                 {"key": "test", "session": None}), [])
+                # Repairing the refusal does not revive the automatic request.
+                s["lanes"].pop("b", None)
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.desk.resume()
+
+    def test_queue_time_verification_restart_and_pause_queue_exactly_one_child(self):
+        _, tid = self.queue_time_gap()
+        self.desk.pause("paused desk")
+        for _ in range(2):
+            Dispatcher(self.desk).tick()
+        [child] = [m for m in self.desk.tasks() if m.get("parent") == tid]
+        self.assertEqual((child["state"], self.desk.meta(tid)["verify"]), ("queued", child["id"]))
+        self.assertEqual(self.queue_time_items(tid), [])
+
+    def test_queue_time_verification_restart_recovers_a_child_without_its_parent_pointer(self):
+        _, tid = self.queue_time_gap()
+        self.desk.pause("hold starts")
+        update = self.desk.update
+        def lose_pointer(task, **fields):
+            if task == tid and "verify" in fields:
+                raise OSError("server stopped before the pointer write")
+            return update(task, **fields)
+        with unittest.mock.patch.object(self.desk, "update", side_effect=lose_pointer), self.assertRaises(OSError):
+            Dispatcher(self.desk).tick()
+        self.assertNotIn("verify", self.desk.meta(tid))
+        Dispatcher(self.desk).tick()
+        children = [m for m in self.desk.tasks() if m.get("parent") == tid]
+        self.assertEqual(len(children), 1)
+        self.assertEqual(self.desk.meta(tid)["verify"], children[0]["id"])
+
+    def test_queue_time_verification_coordinator_actions_win_before_queueing(self):
+        for command in ("merge", "close", "retry", "verify"):
+            with self.subTest(command=command):
+                _, tid = self.queue_time_gap(check="")
+                self.desk.pause("hold starts")
+                d = Dispatcher(self.desk)
+                queue = d.verify_after
+                def act_first(task):  # after tick read the done task, before the queue step takes the lock
+                    self.hansa(command, task)
+                    before = self.desk.tasks()
+                    queue(task)
+                    self.assertEqual(self.desk.tasks(), before)
+                with unittest.mock.patch.object(d, "verify_after", side_effect=act_first) as attempted:
+                    d.tick()
+                    attempted.assert_called_once_with(tid)
+                self.assertEqual(self.queue_time_items(tid), [])
+                self.desk.resume()
+
+    def test_queue_time_verification_recovers_from_metadata_without_a_completion_event(self):
+        _, original = self.verify_lane_task()
+        m = self.desk.meta(original)
+        tid = self.desk.new_task("A saved worker result", lane="a")
+        # Completion metadata saved before its event, with a real branch at the recorded commit.
+        self.desk.update(tid, **{k: m[k] for k in ("state", "commits", "base", "head", "branch")},
+                         verify_after={"lane": "", "effort": "", "note": ""})
+        self.assertFalse(any(e["task"] == tid for e in self.events("task_finished")))
+        self.desk.pause("hold starts")
+        Dispatcher(self.desk).tick()
+        self.assertIsNotNone(self.desk.meta(tid).get("verify"))
+        self.assertEqual(self.desk.meta(self.desk.meta(tid)["verify"])["kind"], "verify")
+        self.assertEqual(self.queue_time_items(tid), [])
+
+    def test_queue_time_verification_retry_builds_and_verifies_the_follow_up(self):
+        d, tid = self.verify_lane_task()
+        self.add_verify_lane()
+        self.hansa("lane", "set", "v1", "env", "FAKE_VERDICT=holds")
+        self.hansa("retry", tid, "also check the edge case", "--verify")
+        retry = self.desk.tasks()[-1]["id"]
+        m = self.settle(d, retry)
+        self.assertEqual(self.desk.meta(tid)["state"], "replaced")
+        vid = m["verify"]
+        text = (self.desk.tasks_dir / vid / "task.md").read_text()
+        self.assertIn("also check the edge case", text)
+        self.assertIn("This task is a follow-up", text)
+        self.assertEqual(self.queue_time_items(retry), [])
+        self.settle(d, vid)
+        self.assertEqual(self.desk.meta(vid)["verdict"], "holds")
+
+    def test_queue_time_verification_return_summary_matches_the_live_feed(self):
+        _, tid = self.queue_time_gap()
+        self.desk.pause("hold starts")
+        pos = 0
+        for phase in ("pending", "queued", "holds", "holds, with notes", "does not hold", "unsure"):
+            with self.subTest(phase=phase):
+                if phase == "queued":
+                    Dispatcher(self.desk).tick()
+                elif phase not in ("pending", "queued"):
+                    vid = self.desk.meta(tid)["verify"]
+                    self.desk.update(vid, state="done", verdict=phase)
+                    self.desk.event("task_finished", task=vid, state="done")
+                old = {"key": "4242-0123abcd", "uid": 123, "session": None, "pos": pos,
+                       "ended": now(), "seen": now()}
+                notify._write_record(self.desk, old["key"], old)
+                me = {"key": "4343-0123abcd", "uid": 123, "session": None}
+                live = notify.handle(self.desk, {"op": "feed", "me": me, "pos": pos})
+                summary = notify.handle(self.desk, {"op": "start", "me": me})
+                task_lines = [x["line"] for x in live["items"] if x["key"][0] == "task"]
+                if phase not in ("pending", "queued"):
+                    self.assertEqual(len(task_lines), 1)
+                    self.assertIn(f"verdict: {phase}", task_lines[0])
+                    self.assertEqual(summary["summary_review"], [tid])
+                    self.assertEqual([x["review"] for x in live["items"] if x["key"][0] == "task"], [tid])
+                else:
+                    self.assertEqual(task_lines, [])
+                    self.assertEqual(summary["summary_review"], [])
+                self.assertEqual([x for x in summary["summary"] if "verdict:" in x], task_lines)
+
     def verify_lane_task(self):
         d = Dispatcher(self.desk)
         tid = self.desk.new_task("Add hello.txt", lane="a")

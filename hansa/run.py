@@ -4490,6 +4490,21 @@ def check_not_started(desk: Desk, tid: str, e: Exception) -> None:
     desk.failed_starts.pop(("check", tid, desk.meta(tid).get("launch")), None)
 
 
+def verification_due(m: dict) -> bool:
+    """A queue-time request ready for serve to handle, including after a restart."""
+    chk = m.get("check") or {}
+    return bool(m.get("verify_after") and m.get("kind") != "verify" and m.get("state") == "done"
+                and m.get("commits") and not m.get("verify") and not m.get("verify_after_error")
+                and (not chk or chk.get("ok")) and not chk.get("could_not_run"))
+
+
+def verification_takes_over(m: dict) -> bool:
+    """The requested verification (or a coordinator's action) replaces the task's completion post."""
+    return bool(m.get("verify_after") and (verification_due(m) or m.get("verify")
+                or m.get("state") in ("merged", "merging", "replaced")
+                or m.get("error") == "closed without merging"))
+
+
 def finish_check(desk: Desk, tid: str) -> dict:
     m = desk.meta(tid)
     memory = oom_result(m.get("check_oom_start"))
@@ -6191,6 +6206,10 @@ class Dispatcher:
                     self.ended(m["id"], None)
         for m in self.tasks():
             with serve_step():
+                if verification_due(m):
+                    self.verify_after(m["id"])
+        for m in self.tasks():
+            with serve_step():
                 if m["state"] != "running":
                     continue
                 limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
@@ -6249,6 +6268,31 @@ class Dispatcher:
                             busy.add(ln)
                             free -= 1
                     break
+
+    def verify_after(self, tid: str) -> None:
+        """Queue once from the current metadata, before the pause gate. Commands share this lock."""
+        from .cli import queue_verification  # cli imports run; never import it at module load
+        desk = self.desk
+        with desk.lock():
+            m = desk.meta(tid)
+            if not verification_due(m):
+                return
+            # A server may have stopped after creating the child but before recording the pointer.
+            children = [t for t in desk.tasks() if t.get("kind") == "verify" and t.get("parent") == tid]
+            if children:
+                desk.update(tid, verify=children[-1]["id"])
+                return
+            try:
+                queue_verification(desk, tid, **m["verify_after"], session=m.get("session"))
+            except (SystemExit, Exception) as e:  # a refusal ends this request, never the completed task
+                # A failed write after creating the child must not queue it twice on the next tick.
+                children = [t for t in desk.tasks() if t.get("kind") == "verify" and t.get("parent") == tid]
+                if children:
+                    desk.update(tid, verify=children[-1]["id"])
+                    return
+                why = desk.redact(str(e) or type(e).__name__)
+                desk.update(tid, verify_after_error=why)
+                desk.event("task_finished", task=tid, state="done", verification_error=why)
 
 
 ROUND_QUIET = 30  # seconds without a finished round after which hansa serve counts as busy

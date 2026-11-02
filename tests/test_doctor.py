@@ -105,7 +105,7 @@ with open({str(self.calls)!r}, 'a') as out:
             with self.subTest(platform=platform):
                 result = self.check(platform)
                 self.assertTrue(result["ok"], result)
-                expected = ["Python", "Git", "Claude Code", "Claude login", "Node", "srt", "tmux"]
+                expected = ["Python", "Git", "Node", "Claude Code", "Claude login", "srt", "tmux"]
                 if platform == "linux":
                     expected += ["bubblewrap", "socat"]
                 self.assertEqual([r["name"] for r in result["rows"]], expected + ["Sandbox"])
@@ -140,13 +140,13 @@ with open({str(self.calls)!r}, 'a') as out:
         for platform, prefix in (("darwin", "brew install "), ("linux", "sudo apt-get install ")):
             with self.subTest(platform=platform):
                 rows = self.rows(platform=platform)
-                for label, package in (("Git", "git"), ("Node", "node" if platform == "darwin" else "nodejs"),
-                                       ("tmux", "tmux")):
+                for label, package in (("Git", "git"), ("tmux", "tmux")):
                     self.assertEqual(rows[label]["state"], "note" if label == "tmux" else "fails")
                     self.assertEqual(rows[label]["fix"], prefix + package)
                 self.assertIn("hansa up", rows["tmux"]["need"])
                 self.assertEqual(rows["Claude Code"]["fix"], "npm install -g @anthropic-ai/claude-code@2.1.290")
                 self.assertEqual(rows["srt"]["fix"], "npm install -g @anthropic-ai/sandbox-runtime@0.0.79")
+                self.assertEqual(rows["srt"]["state"], "fails")
                 self.assertEqual(rows["Claude login"]["state"], "fails")
                 self.assertIn("claude auth login", rows["Claude login"]["fix"])
                 self.assertEqual(rows["Sandbox"]["state"], "skipped")
@@ -157,8 +157,34 @@ with open({str(self.calls)!r}, 'a') as out:
                         self.assertEqual(rows[label]["fix"], prefix + label)
         (self.bin / "apt-get").unlink()
         rows = self.rows(platform="linux")
-        for label in ("Git", "Node", "tmux", "bubblewrap", "socat"):
+        for label in ("Git", "tmux", "bubblewrap", "socat"):
             self.assertIn("docs/getting-started.md", rows[label]["fix"])
+
+    def test_node_fix_uses_brew_or_node_download_for_missing_and_old_versions(self):
+        for platform in ("darwin", "linux", "freebsd"):
+            for apt in (True, False):
+                if apt:
+                    self.tool("apt-get", "")
+                else:
+                    (self.bin / "apt-get").unlink()
+                for version in (None, "v18.19.0", "v20.19.0", "v22.11.9"):
+                    with self.subTest(platform=platform, apt=apt, version=version):
+                        if version is None:
+                            (self.bin / "node").unlink(missing_ok=True)
+                        else:
+                            self.tool("node", f"print({version!r})")
+                        row = self.rows(platform=platform)["Node"]
+                        self.assertEqual(row["state"], "fails")
+                        if platform == "darwin":
+                            self.assertEqual(row["fix"], "brew install node")
+                        else:
+                            self.assertIn("https://nodejs.org/en/download", row["fix"])
+                            self.assertIn("22.12.0 or newer", row["fix"])
+                            self.assertNotIn("apt-get", row["fix"])
+        row = self.rows(platform="linux", lang="zh")["Node"]
+        self.assertIn("https://nodejs.org/en/download", row["fix"])
+        self.assertIn("22.12.0", row["fix"])
+        self.assertIn("更新", row["fix"])
 
     def test_old_unknown_and_new_versions(self):
         for tool, label, versions in (("claude", "Claude Code", ("2.1.289", "unknown", "2.1.290", "2.2.0")),
@@ -245,6 +271,43 @@ with open({str(self.calls)!r}, 'a') as out:
         self.assertIn("15", rows["Git"]["found"])
         self.assertEqual(rows["Sandbox"]["state"], "ok")
 
+    def test_detached_child_holding_output_does_not_hold_doctor(self):
+        ready, stop, stopped = (self.tmp / name for name in ("child-ready", "stop-child", "child-stopped"))
+        child_source = textwrap.dedent(f"""
+            import signal, time
+            from pathlib import Path
+            signal.alarm(45)
+            Path({str(ready)!r}).touch()
+            try:
+                while not Path({str(stop)!r}).exists():
+                    time.sleep(0.01)
+            finally:
+                Path({str(stopped)!r}).touch()
+        """)
+        self.tool("git", f"""
+            import subprocess, time
+            subprocess.Popen([sys.executable, '-c', {child_source!r}], start_new_session=True)
+            deadline = time.monotonic() + 10
+            while not Path({str(ready)!r}).exists():
+                if time.monotonic() > deadline:
+                    raise RuntimeError('child did not start')
+                time.sleep(0.01)
+        """)
+        started = time.monotonic()
+        try:
+            rows = self.rows()
+            self.assertLess(time.monotonic() - started, 30)
+            self.assertEqual(rows["Git"]["state"], "fails")
+            self.assertIn("15", rows["Git"]["found"])
+            self.assertNotIn("cannot start", rows["Git"]["found"])
+            self.assertEqual(rows["Sandbox"]["state"], "ok")
+        finally:
+            stop.touch()
+            deadline = time.monotonic() + 10
+            while not stopped.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(stopped.exists(), "detached child did not stop")
+
     def test_sandbox_settings_environment_and_cleanup(self):
         with patch.dict(os.environ, {"CLAUDECODE": "1", "CLAUDE_PID": "42", "AI_AGENT": "agent",
                                      "CLAUDE_CODE_SESSION_ID": "secret", "CLAUDE_CODE_MESSAGING_TOKEN": "secret"}):
@@ -278,29 +341,41 @@ with open({str(self.calls)!r}, 'a') as out:
         (self.bin / "bwrap").unlink()
         (self.bin / "socat").unlink()
         fix = self.rows(platform="linux")["Sandbox"]["fix"]
-        for package in ("nodejs", "bubblewrap", "socat"):
+        self.assertIn("https://nodejs.org/en/download", fix)
+        self.assertIn("22.12.0 or newer", fix)
+        for package in ("bubblewrap", "socat"):
             self.assertIn("sudo apt-get install " + package, fix)
         self.assertIn("docs/getting-started.md", fix)
 
     def test_sandbox_timeout_start_and_temporary_folder_errors(self):
         communicate = subprocess.Popen.communicate
         sandbox_folders = []
+        drain_timeout = False
 
         def fail_srt(process, *args, **kwargs):
             if "--settings" in process.args:
-                if kwargs.get("timeout"):
+                if kwargs.get("timeout") == 15:
                     self.assertEqual(kwargs["timeout"], 15)
                     sandbox_folders.append(Path(process.args[2]).parent)
                     raise subprocess.TimeoutExpired(process.args, 15)
+                self.assertGreater(kwargs["timeout"], 0)
+                self.assertLessEqual(kwargs["timeout"], 2)
                 communicate(process, *args, **kwargs)
+                if drain_timeout:
+                    raise subprocess.TimeoutExpired(process.args, kwargs["timeout"],
+                                                    output=b"sandbox timeout detail\n")
                 return "sandbox timeout detail\n", None
             self.assertEqual(kwargs["timeout"], 15)
             return communicate(process, *args, **kwargs)
 
-        with patch.object(doctor.subprocess.Popen, "communicate", fail_srt):
-            row = self.rows()["Sandbox"]
-        self.assertEqual(row["state"], "fails")
-        self.assertIn("sandbox timeout detail", row["found"])
+        for drain_timeout in (False, True):
+            with self.subTest(drain_timeout=drain_timeout), \
+                    patch.object(doctor.subprocess.Popen, "communicate", fail_srt), \
+                    patch.object(doctor.os, "killpg", side_effect=PermissionError("group already exited")):
+                row = self.rows()["Sandbox"]
+            self.assertEqual(row["state"], "fails")
+            self.assertIn("sandbox timeout detail", row["found"])
+            self.assertIn("15", row["found"])
         self.assertTrue(sandbox_folders)
         self.assertTrue(all(not folder.exists() for folder in sandbox_folders))
         (self.package / "dist/cli.js").write_text("#!/missing/interpreter\n")
@@ -369,4 +444,5 @@ with open({str(self.calls)!r}, 'a') as out:
             self.assertEqual(re.search(r"\d+\.\d+(?:\.\d+)?", table[tool]).group(), doctor.version_text(version))
         self.assertEqual(table["srt (`@anthropic-ai/sandbox-runtime`)"], doctor.SRT_VERSION)
         self.assertLess(len(guide.split()), 1500)
-        self.assertIn("hansa doctor", guide)
+        commands = "\n".join(re.findall(r"```sh\n(.*?)```", guide, re.S))
+        self.assertRegex(commands, r"(?m)^hansa doctor$")

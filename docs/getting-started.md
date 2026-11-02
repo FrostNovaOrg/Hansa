@@ -1,7 +1,8 @@
 # Getting started
 
-Run hansa on a Mac or Linux machine. You, the **principal**, own logins, keys
-and settings; the coordinator plans tasks for workers. As root, first follow
+Run hansa on a Mac or Linux machine that stays on. You, the **principal**, own
+logins, keys and settings; the coordinator plans tasks for workers. As root,
+first follow
 [On a Linux server](linux-server.md#the-coordinator-as-root-the-desk-as-an-ordinary-account).
 
 ## Install the tools
@@ -45,25 +46,21 @@ hansa doctor
 ```
 
 Run `hansa doctor` after installing; an agent helping install runs it first.
-It needs no desk and changes nothing. It checks tools, Claude
-login and Linux prerequisites, then runs `/usr/bin/true` in srt with minimal
-settings in a temporary folder removed afterwards. It catches missing tools
-and blocked sandboxes; keep it while hansa needs these tools.
-It reads no credentials, discards login-status output, and makes no network
-requests itself. Each command has a 15-second limit; failures do not stop others.
+It needs no desk, checks tools and sandbox operation, and changes nothing.
+The login row fails until the principal logs in below; endpoint-only setups
+can ignore that row. Rerun after fixes.
+It reads no credentials, discards login output and removes its sandbox temporary
+folder afterwards.
 
-Rows give findings, requirements and fixes. Missing tmux, a different srt package
-version, or tools found outside `PATH` are notes; `hansa serve` needs tools on
-its own `PATH`. Missing srt skips the sandbox probe. Exit 0 means no failures;
-exit 1 means a failed row. `--json` gives `{"ok": ..., "rows": [...]}`, each row
+Rows give findings, requirements and fixes; notes do not fail. Exit 0 means no
+failures; exit 1 means a failed row. `--json` gives `{"ok": ..., "rows": [...]}`
 with `name`, `state`, `found`, `need`, `fix`; states are `ok`, `note`, `fails`,
-`skipped`. `--lang zh|en` overrides the locale, as in `hansa menu`. Rerun after fixes.
+`skipped`. `--lang zh|en` selects language as in `hansa menu`.
+Commands time out after 15 seconds, with a short cleanup wait for inherited output.
 
 Add that export to your shell profile too. Either put hansa's `bin` folder on
 `PATH`, as above, or put a symbolic link to `bin/hansa` in a folder already on
 `PATH`, for example `ln -s ~/hansa/bin/hansa /opt/homebrew/bin/hansa`.
-Launcher links support spaces and chains (up to 40 file links), keeping directory
-links such as `current/bin/hansa` so switching `current` changes future starts.
 
 ## Log in (the principal's step)
 
@@ -74,8 +71,9 @@ this needs no subscription login. The principal handles credentials, not an agen
 
 ## Create and start the desk
 
-The checkout needs a commit before `hansa init` or `hansa lane add`. For an
-empty project (replace the author placeholders):
+Use your project's checkout at `~/shop/repo`. It needs a commit before
+`hansa init` or `hansa lane add`. For a new, empty project
+(replace the author placeholders with your details):
 
 ```sh
 mkdir -p ~/shop
@@ -96,9 +94,10 @@ if a path is rejected.
 Init creates lane `a` on the checkout's current branch. With a subscription
 login, run `hansa up`: it starts the server, then the coordinator in tmux.
 
-For an endpoint without a login, run `hansa serve`, keeping that terminal open.
-Configure the page below, then run `hansa up`. Over SSH, keep this initial server
-in tmux too (`tmux new -s shop-server`, then `hansa serve` in the desk).
+For an endpoint without a login, first run `hansa serve`, keeping that terminal
+open. Configure the page below from another terminal, then run `hansa up`.
+Over SSH, keep this initial server in tmux too (`tmux new -s shop-server`, then
+`hansa serve` in the desk).
 
 Attach using the coordinator's printed `attach:` command. Answer Claude Code's
 folder-trust question yes so its allowed commands work.
@@ -116,8 +115,9 @@ hansa web
 ```
 
 Open its printed address, including `?t=...`, and keep the terminal open.
-The token permits release approval. Start the server and page from a plain shell:
-`hansa web` refuses to expose the token inside a Claude Code session.
+The token is the page's key, including permission to approve releases.
+Start the server and page from a plain shell: `hansa web` refuses to expose
+the token inside a Claude Code session.
 
 In **Settings → Providers**, add endpoints, default models and effort; use
 **Save settings** and the separate **Save key** button. In **Coordinator**, select
@@ -145,8 +145,9 @@ list each required registry or download host. See [network lists](sandbox.md#a-l
 passes, and check that `hansa explain server` says `hansa serve tried srt` and
 `it ran` for the server's sandboxed probe.
 Workers also require their own sandbox probe to pass.
-Without srt, setup and check commands say **could not run**; configured setup
-stops workers from starting. Fix the server's PATH and restart it; recheck before merging
+Without srt, setup and check commands say **could not run**: a machine setup
+problem, not the task's failure; configured setup stops workers from starting.
+Fix the tools on the server's PATH and restart the server; recheck before merging
 (`hansa merge ID --recheck`).
 
 Follow progress on Status. The coordinator reads `hansa show ID` and
@@ -166,9 +167,11 @@ Tick desks with Space, press `s` to start them, Enter to enter a coordinator,
 or `w` for its page address. Ctrl+B then D returns from a coordinator; Ctrl+C
 returns from the page. Nothing starts until you choose. `q` leaves work running.
 
-Install tmux on the server. `hansa up` keeps the coordinator open after SSH
-disconnects. Detach with Ctrl+B then D; reconnect using its printed attach command
-(including `-L` or `-S`). `hansa status` describes the session; `hansa up` resumes it.
+On your computer, `ssh my-server`, then follow the setup above on that machine.
+Install tmux there. `hansa up` keeps the coordinator open after SSH disconnects.
+Detach with Ctrl+B then D; reconnect using its printed attach command
+(including `-L` or `-S`). `hansa status` describes the session; `hansa up` brings
+back a stopped one, continuing its conversation.
 
 For the page, first read `hansa status` or `hansa explain server` on the server.
 The port starts at 8765 but can change; it is saved in `.hansa/web-port`.
@@ -181,6 +184,7 @@ ssh -L 127.0.0.1:8766:127.0.0.1:8766 my-server '"$HOME/hansa/bin/hansa" --desk "
 Replace both 8766s with the actual port. Open the printed URL locally. Keep the
 tunnel terminal open while using the page; closing it ends access. Keep the
 server's default `127.0.0.1` binding; open no inbound network ports beyond SSH.
+This works for a Mac mini or Linux server without exposing the page publicly.
 
 ## When something goes wrong
 

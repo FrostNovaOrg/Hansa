@@ -1388,6 +1388,14 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                     + (f", not {m['parent']}'s own lane {own}" if own and own != m.get("lane") else ""))
     out = [head, f"title: {m['title']}", *task_text_lines(desk, m, full), f"meaning: {meaning}"]
     out += [f"attachment: {a['name']} ({a['size']} bytes)" for a in m.get("attachments", [])]
+    if m.get("verify_after"):
+        request = m["verify_after"]
+        out.append("verification requested: after its check passes (or it has no check), if it has changes"
+                   + (f"; lane {request['lane']}" if request.get("lane") else "")
+                   + (f"; effort {request['effort']}" if request.get("effort") else "")
+                   + (f"; look at: {request['note']}" if request.get("note") else ""))
+    if m.get("verify_after_error"):
+        out.append(f"verification could not be queued: {m['verify_after_error']}")
     out += [x for x in (rounds_line(desk, m), "" if verifying else rethink_text(desk, m)) if x]
     if m.get("error"):
         out.append(f"error: {m['error']}")
@@ -1591,6 +1599,9 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     if v and v["state"] in ("queued", "running") and m["state"] == "done":
         nxt["done"] = (f"wait for the verification: {notify.wait_step(desk, v['task'], heard)} "
                        f"(hansa merge {tid} is held until it ends)")
+    from .run import verification_due
+    if verification_due(m):
+        nxt["done"] = "wait for hansa serve to queue the requested verification"
     mr = m.get("merge_check_result") or {}
     if mr.get("waited") and m["state"] == "done":
         nxt["done"] = (f"hansa retry {tid} --update \"<how to settle the conflict>\" · hansa retry {tid} --fresh "
