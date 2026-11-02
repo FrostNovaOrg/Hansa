@@ -1,7 +1,7 @@
 # hansa's test suite on GitHub's machines. No secrets: the suite uses stand-ins for claude and srt, and needs no login.
 #
 # What runs when, and why. GitHub's macOS minutes count ten times, so no macOS job runs unless someone starts one:
-# - A push to alpha or main runs, on one Ubuntu machine with the newest Python, only the tests a sandboxed run
+# - A push to main runs, on one Ubuntu machine with the newest Python, only the tests a sandboxed run
 #   cannot (HANSA_TESTS_ONLY_UNSANDBOXED=1; the rest skip): the maintainers run the whole suite on macOS, in
 #   hansa's sandbox, for every change, and on Linux before every push.
 # - A pull request runs the whole suite on Ubuntu, with Python 3.9 and the newest.
@@ -29,7 +29,7 @@ name: tests
 
 on:
   push:
-    branches: [alpha, main]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
