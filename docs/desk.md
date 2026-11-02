@@ -999,6 +999,25 @@ old, keep their last 256 KB, under a line saying when and how big they were. Tas
 and `hansa show`, release cuts only in the event; no log is cut twice. Text, records, reports, results,
 the event log and all other logs stay whole.
 
+## Backing up and moving a desk
+
+Back up repositories as ordinary git repositories, branches included. First `hansa pause "backup"`, wait
+until `hansa status` shows nothing running, and quit the coordinator's session. There is no `hansa stop`: stop the server
+with `x` in `hansa menu`, Ctrl-C, or `kill PID`.
+
+Copy the desk with `cp -a` or `tar -p`: `secrets/` must stay mode 700, its files 600, and hansa does not repair them.
+Copy everything (settings, `tasks/`, `events.jsonl`, `asks.json`, `notes/`, `lanes/`, `PAUSED`, `.claude/`) except
+`worktrees/`, which hansa remakes, and `.hansa/`. From `.hansa/` keep `releases.json`, `releases/`, `attachments/`,
+`alerts.json`, `providers.json` and `claude-*/`; hansa rebuilds the rest.
+
+On the new machine, install the tools, run `hansa doctor`. Logins are per machine: run `claude auth login`. The
+coordinator's conversation stays behind. Changed paths: `hansa lane set` cannot change `repo`: edit it in
+`settings.json` while stopped, after merging or closing reviewed tasks; check `write`, `env` and `config_dir`. A copied
+repository needs `git worktree prune`.
+
+`hansa up` starts the server, lists the desk for this account, and says how to start the coordinator. Run `hansa lane try
+L` per lane, then `hansa resume`. Success: `hansa status` and `hansa desks` show your tasks and requests.
+
 ## Hearing from hansa
 
 hansa posts to the coordinator's Claude Code session through the session's
