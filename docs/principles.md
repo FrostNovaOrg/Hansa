@@ -45,9 +45,10 @@ Authority: hansa enforces this when the lane has a check.
 
 ## 5. Someone else verifies code, preferably another model
 
-A separate worker runs the change and tries rare cases. When tests changed, it
-must undo the code to see which tests fail, restore it and give a verdict.
-Verification can use a different provider or model configured on another lane.
+A separate worker runs the change and tries rare cases. When tests changed, its
+instructions require undoing the code to see which tests fail, restoring it and
+giving a verdict. Verification can use a different provider or model configured
+on another lane; a different model is chosen, not guaranteed.
 hansa blocks a merge after "does not hold" unless the coordinator explicitly
 overrides it. This guards against shared blind spots between writing and verification.
 

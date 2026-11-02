@@ -1,6 +1,6 @@
 # Getting started
 
-Run hansa on an always-on Mac or Linux machine. The **principal** owns logins,
+Run hansa on an always-on Mac or Linux machine. You, the **principal**, own logins,
 keys and settings; the coordinator plans tasks for workers. As root, first follow
 [On a Linux server](linux-server.md#the-coordinator-as-root-the-desk-as-an-ordinary-account).
 

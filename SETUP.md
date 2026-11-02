@@ -16,7 +16,7 @@ Reply in the person's language. They might not write code: say what each step do
 
 4. Ask which project this is for. If they have none, or want to see it work first, run `hansa example` and follow what it prints. Otherwise, run `hansa init DESK --repo CHECKOUT`, using a new folder beside their project's checkout. The checkout needs a first commit.
 
-5. Tell them to open a plain terminal and explain why: a server and a coordinator started inside another Claude Code session inherit nothing useful, and `hansa web` refuses to run in one.
+5. Tell them to open a plain terminal and explain why: the coordinator has to be a session of its own, and `hansa web` refuses to run inside a Claude Code session.
 
    They run `hansa`, tick the desk with Space, press `s`, any key, then Enter, and answer yes to Claude Code's folder-trust question.
 

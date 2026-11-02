@@ -9,7 +9,7 @@ The [README](../README.md) has the overview.
 | **Principal** | The person the desk works for. On the web page they set providers, keys, models and prices, read their to-dos and approve or refuse releases. They answer to-dos in the conversation, and the coordinator records each outcome. The principal can also answer a release request in the conversation with the one-time code in their alert. |
 | **Coordinator** | An interactive Claude Code session in the desk (`hansa coordinator`). It plans, queues, reviews and merges work through `hansa`, and sets up the lanes. It runs outside the sandbox, so it can install what a lane needs; Claude Code asks the principal before each command not already allowed. Its interface is [`hansa/card.md`](../hansa/card.md), with `hansa help` covering the rest. |
 | **Helpers** | Three subagents in the coordinator's session: `scout` (looks something up) and `reviewer` (reads a high-stakes change) only read; `operator` does one hands-on job on the machine, such as installing software. |
-| **Worker** | One `claude -p` run per task, or per verification (`hansa verify`). It may run any command inside Claude Code's sandbox, but can write only in its worktree and the folders its lane allows and reach only its lane's hosts. It never commits. |
+| **Worker** | One `claude -p` run per task, or per verification (`hansa verify`). It may run any command inside Claude Code's sandbox; its commands write only in its worktree and the folders its lane allows, and reach only its lane's hosts. It never commits. |
 | **Desk** | One folder that holds a team's settings, keys, tasks and an append-only event log. The command line, the web page and the agents all read the same files. |
 | **Lane** | A git checkout for workers: its base branch, a worktree of its own, its provider order, the hosts and folders its workers may reach, and its setup, check and release commands. A lane runs one task at a time; lanes on the same repository run tasks side by side, up to `hansa concurrency`. |
 | **Provider** | Where a run gets its model: a Claude Code login (a subscription), or any endpoint that speaks the Anthropic API, with its key. A provider that hits its usage limit rests, and its task moves to the lane's next ready provider, or waits for one. |
@@ -52,7 +52,7 @@ More: [The desk: files, keys and notes](desk.md).
 - Alpha: settings, commands and files may still change between versions.
 - A worker's commands and the lane's setup and check run in the operating system's sandbox. The coordinator
   runs as the desk's user (or as root on a Linux server). Use a user account or machine for a desk only if that
-  code may reach all its files.
+  code may reach all of that account's or machine's files.
 - With the [Codex adapter](../contrib/codex/README.md), a Codex run's commands can read the Codex login: Codex and
   the commands it runs share one sandbox, and every Codex run, on any lane, uses that one login. Claude workers
   cannot read it, and a Codex run's network reaches only the lane's hosts and OpenAI's.
@@ -84,7 +84,7 @@ lists commands and topics, and `hansa help <topic>` prints one from `docs/`.
 | `hansa status` | Whether `hansa serve` runs, the page's address, the lanes, what is running, waiting or failed, the providers, the last 24 hours |
 | `hansa add "<task>" [--lane L]` | Queue a task |
 | `hansa show ID`, `hansa diff ID` | A task's report, its check, the files it changed, what to do next; its changes against the base |
-| `hansa verify ID` | Have a worker run a finished task's change to see whether it holds; the worker never merges |
+| `hansa verify ID` | Have a worker run a finished task's change to see whether it holds; the verification itself is never merged |
 | `hansa merge ID` | Merge a finished task into its lane's base branch |
 | `hansa retry ID "<what to change>"` | Queue a follow-up on top of the earlier task (`--fresh`: from the base; `--update`: with the base merged in) |
 | `hansa cancel ID`, `hansa close ID` | Stop queued, running or merging work; close finished work without merging |
