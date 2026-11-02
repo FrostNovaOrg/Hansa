@@ -16,10 +16,10 @@ Authority: hansa restricts access; the card reserves these decisions for the pri
 
 ## 2. The coordinator plans and judges, and leaves code to workers
 
-Workers make code changes on task branches. Each change gets the lane's configured
-check and a merge, with the coordinator reviewing the result. A commit made
-directly in a lane's repository is listed with the release that sends it. This
-guards against unreviewed edits reaching a release unnoticed.
+Workers change code on task branches. hansa runs the lane's configured check and
+the coordinator reviews each change before merging. Direct commits in a lane's
+repository are listed with the release that sends them. This guards against
+unreviewed edits reaching a release unnoticed.
 
 Authority: the card requires this; hansa supplies edit denials and records direct commits.
 
@@ -37,31 +37,29 @@ Authority: hansa enforces the sandbox and git restrictions for built-in workers.
 
 ## 4. hansa checks the result itself
 
-After a successful worker run, hansa commits the changes and runs the lane's
-check on that branch, if a check is configured and there is a change. The
-recorded result is independent of the worker's report, so a claim of success
-alone cannot establish that the check passed.
+After a successful worker run with changes, hansa commits them and runs the lane's
+check on that branch, if one is configured. It records its own result, not the
+worker's report, so a worker cannot pass the check just by claiming success.
 
 Authority: hansa enforces this when the lane has a check.
 
 ## 5. Someone else verifies code, preferably another model
 
-A separate worker runs the change and tries rare cases. When tests changed, its
-instructions require undoing the code to see which tests fail, then restoring
-it and giving a verdict. Another lane can supply a different provider or model.
-Verification uses one only when it is configured. hansa blocks a merge after
-"does not hold" unless explicitly overridden. This guards against shared blind
-spots between writing and verification.
+A separate worker runs the change and tries rare cases. When tests changed, it
+must undo the code to see which tests fail, restore it and give a verdict.
+Verification can use a different provider or model configured on another lane.
+hansa blocks a merge after "does not hold" unless the coordinator explicitly
+overrides it. This guards against shared blind spots between writing and verification.
 
 Authority: the card requires verification for code; hansa enforces the negative-verdict gate.
 
 ## 6. One task has one goal, sized for one run
 
-A task says what done means and asks only for what that goal needs. Work too
-large for one worker run is split. If verification will judge a task, include a
-table of cases and state whether each rare case should be refused or accepted
-unchanged. This guards against vague tasks that grow in scope and cannot be
-judged fairly.
+A task says what counts as done and asks only for the work needed to finish.
+Work too large for one worker run is split. If verification will judge a task,
+include a table of cases and state whether each rare case should be refused or
+accepted unchanged. This guards against vague tasks that grow in scope and
+cannot be judged fairly.
 
 Authority: the card asks the coordinator to write tasks this way.
 
@@ -78,10 +76,10 @@ Authority: the card asks for this; hansa prompts after repeated failed verdicts.
 
 A defect in ordinary use is fixed now; a task that asked for the wrong thing
 needs rewriting. Small gaps in rare combinations of states can receive
-"holds, with notes" and stay on record in `hansa gaps`, marked later or won't
-fix with a reason. Losing work, exposing keys, merging into the wrong branch
-or falsely reporting a passed check always calls for rejection. This guards
-against endless polishing and findings getting lost.
+"holds, with notes"; they stay on record in `hansa gaps`, where they can be
+marked as later or won't fix with a reason. Losing work, exposing keys, merging
+into the wrong branch or falsely reporting a passed check always calls for
+rejection. This guards against endless polishing and findings getting lost.
 
 Authority: the card directs review; hansa gives verifiers these criteria and keeps notes and marks.
 
@@ -89,10 +87,10 @@ Authority: the card directs review; hansa gives verifiers these criteria and kee
 
 Merges stop at the lane's base branch. A release needs the principal's yes on
 the page, their alert's one-time code, or a target they ticked to go out without
-asking. Approval applies only while its recorded inputs still match. The
-forbidden-word scan uses the principal's rules and refuses a release when it
-finds a match. This guards against an agent publishing without the principal's
-authority.
+asking. Approval remains valid only while the release still matches its recorded
+inputs. The forbidden-word scan uses the principal's rules and refuses a release
+when it finds a match. This guards against an agent publishing without the
+principal's authority.
 
 Authority: hansa enforces release approval and the word scan; the card forbids publishing directly.
 
@@ -100,7 +98,7 @@ Authority: hansa enforces release approval and the word scan; the card forbids p
 
 Tasks, reports, verdicts, merges, releases and principal to-dos are kept. Token
 usage is valued at the principal's prices, with costs by seat, lane, task and
-model. Subscription values are not bills; hansa identifies missing coordinator
+model. Subscription values are not bills; hansa flags missing coordinator
 usage. The page shows what waits for the principal, what changed and
 what it cost; the coordinator operates hansa for them. This guards against
 losing track of decisions, changes and spending.

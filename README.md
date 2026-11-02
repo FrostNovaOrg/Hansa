@@ -6,8 +6,8 @@
 
 You talk to one agent, the coordinator. It splits the work into tasks. Each task goes to a worker, another agent, in
 its own sandbox (a fenced-off space) and on its own branch (a separate line of your code). Hansa commits the result and
-runs your tests; another worker tries the change to see whether it holds; then it merges. A release goes out only with
-your approval, given each time or in advance.
+runs your tests; another worker tries the change, and the coordinator decides whether to merge it or send it back.
+Releases need your approval, given each time or in advance.
 
 | | |
 |---|---|
@@ -21,7 +21,7 @@ your approval, given each time or in advance.
 **For:**
 
 - Someone who runs a product and wants a team of agents, but does not write code.
-- A developer with more work than one agent session can hold.
+- A developer with more work than one agent session can handle.
 
 **Not for:**
 
@@ -70,8 +70,7 @@ flowchart TB
 ```
 
 1. **The coordinator queues a task**: one change a worker can make and check on its own.
-2. **`hansa serve`, the program that stays running, starts it** on a free lane: a worker makes the change in its sandbox
-   and reports.
+2. **`hansa serve` stays running and starts it** on a free lane: a worker makes the change in its sandbox and reports.
 3. **hansa commits and checks.** It runs the lane's tests itself, so the result does not depend on the worker's report.
 4. **The coordinator reviews.** For code, another worker tries the change to see whether it holds; the coordinator then
    merges it or sends it back.
@@ -93,7 +92,7 @@ Hansa is developed with Hansa. These figures come from one desk over the 60 days
 | Changes merged | 345 |
 | Merged without being sent back | 57% |
 | Verifications that said "does not hold" | 37% |
-| Cost per merged change, at list prices | US$8.65, everything included (coordinator, workers and verification) |
+| Cost per merged change, at list prices | US$8.65, including coordinator, workers and verification |
 
 With a subscription, your bill is the subscription fee; the figure values tokens at list prices.
 
@@ -111,12 +110,12 @@ with or endorsed by Anthropic or OpenAI.
   hosts it lists, and cannot read the desk's keys; web tools you allow on a lane run outside that list.
   [Workers and the sandbox](docs/sandbox.md)
 - **The coordinator is not sandboxed.** Claude Code asks you before each command not already allowed, and rules deny
-  key access and direct code edits. Rules against pushing catch only the forms they name; other forms depend on
-  Claude Code asking you. [Who changes what](docs/who-changes-what.md)
+  key access and direct code edits. Rules against pushing catch only the forms they name; for other forms, the safeguard
+  is Claude Code asking you first. [Who changes what](docs/who-changes-what.md)
 - **Releases wait for you.** A release runs only after your approval, or for a target you approved in advance. It runs
   outside the sandbox, with the desk account's logins. [Releases and alerts](docs/releases.md)
 - **Keys stay out of sight.** They live in `secrets/`, readable by hansa's account, and go only to the provider. hansa
-  hides keys wherever they would show and refuses to merge one, but cannot see into compressed files.
+  hides keys wherever they might appear and refuses to merge one, but cannot see into compressed files.
   [The desk](docs/desk.md#where-a-desks-files-are)
 - **The page is private by default.** It listens only on the machine itself, and its data and actions need the token in
   the address `hansa web` prints. `hansa serve --host` can open it wider, and whoever holds that address can approve a

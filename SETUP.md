@@ -12,7 +12,7 @@ Reply in the person's language. They might not write code: say what each step do
 
 2. Run `hansa doctor --json`. Go through each row whose `state` is `fails`: say what it means, offer its `fix`, run it if the person agrees, then run the doctor again. Do the same for a missing `tmux`: step 5 needs it. A row that needs a login or an administrator's password is the person's to do: tell them the exact command and wait.
 
-3. The login is theirs: they run `claude auth login` in their own terminal. Never ask for a password, key or token in the conversation, and never read one. The person enters an endpoint and its key on the page.
+3. The login is theirs: they run `claude auth login` in their own terminal. Never ask for a password, key or token in the conversation, and never read one. For an endpoint, they enter it and its key on the page.
 
 4. Ask which project this is for. If they have none, or want to see it work first, run `hansa example` and follow what it prints. Otherwise, run `hansa init DESK --repo CHECKOUT`, using a new folder beside their project's checkout. The checkout needs a first commit.
 

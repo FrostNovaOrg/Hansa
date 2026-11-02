@@ -51,20 +51,20 @@ More: [The desk: files, keys and notes](desk.md).
 
 - Alpha: settings, commands and files may still change between versions.
 - A worker's commands and the lane's setup and check run in the operating system's sandbox. The coordinator
-  runs as the desk's user (or as root on a Linux server). Run a desk only with a user account or on a machine
-  whose files that code may reach.
+  runs as the desk's user (or as root on a Linux server). Use a user account or machine for a desk only if that
+  code may reach all its files.
 - With the [Codex adapter](../contrib/codex/README.md), a Codex run's commands can read the Codex login: Codex and
   the commands it runs share one sandbox, and every Codex run, on any lane, uses that one login. Claude workers
   cannot read it, and a Codex run's network reaches only the lane's hosts and OpenAI's.
 - A release's command runs outside the sandbox, as the desk's account. Anything it builds and starts from the base
   branch also runs outside the sandbox as that account, so list a lane's build and release files as its `release_files`.
-- The coordinator's rules against pushing and publishing catch only the forms they name. If a command takes another
-  form, it waits for the principal only when Claude Code asks before running it.
+- The coordinator's rules against pushing and publishing catch only the forms they name. A command in another
+  form waits for the principal only if Claude Code asks before running it.
 - hansa replaces the principal's keys wherever it shows or records text, and will not merge a change that
   holds one. It cannot see into compressed files, and the event log keeps what it recorded before a key was
   saved.
-- When a run ends, hansa stops what it left running, but a process that moved out of every marker between
-  two of `hansa serve`'s rounds, and whose parent ended before the next one, can escape: see
+- When a run ends, hansa stops what it left running. A process can still escape if it moves out of every marker
+  between two of `hansa serve`'s rounds and its parent ends before the next round: see
   [what hansa stops when a run ends](sandbox.md#what-hansa-stops-when-a-run-ends).
 - A lane repository's merge hooks run while `hansa merge` holds the desk, so `hansa serve` waits for them.
 - One `hansa serve` per desk, on one machine.
@@ -84,7 +84,7 @@ lists commands and topics, and `hansa help <topic>` prints one from `docs/`.
 | `hansa status` | Whether `hansa serve` runs, the page's address, the lanes, what is running, waiting or failed, the providers, the last 24 hours |
 | `hansa add "<task>" [--lane L]` | Queue a task |
 | `hansa show ID`, `hansa diff ID` | A task's report, its check, the files it changed, what to do next; its changes against the base |
-| `hansa verify ID` | Have a worker run a finished task's change to see whether it holds; never merged |
+| `hansa verify ID` | Have a worker run a finished task's change to see whether it holds; the worker never merges |
 | `hansa merge ID` | Merge a finished task into its lane's base branch |
 | `hansa retry ID "<what to change>"` | Queue a follow-up on top of the earlier task (`--fresh`: from the base; `--update`: with the base merged in) |
 | `hansa cancel ID`, `hansa close ID` | Stop queued, running or merging work; close finished work without merging |
@@ -116,6 +116,6 @@ Then run `hansa resume`. The first line of `hansa status` shows the version and 
 **Going back.** Follow the same steps with the commit you ran before. Newer commands may
 write settings older code does not know: `hansa status` and `hansa add` can still work, but
 saving settings is refused with `unknown setting: NAME` for each unfamiliar setting.
-Settings set with newer commands are best undone before going back.
+Undo settings made by newer commands before going back.
 
 **What changed:** in the clone, run `git log --oneline OLD..NEW`.
