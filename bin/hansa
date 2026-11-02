@@ -2,7 +2,22 @@
 # hansa: run the desk CLI from this checkout, whatever the current directory. `python3 -m` would put the
 # current directory first on Python's path, so a hansa package there (another checkout) would run instead;
 # here this checkout's folder takes that place. Python 3.9 has no -P or PYTHONSAFEPATH to do it.
-HERE=$(cd "$(dirname "$0")/.." && pwd)
+# Follow the file's links, keeping directory links such as current/bin/hansa so a switch changes future starts.
+launcher=$0
+links=0
+while [ -L "$launcher" ]; do
+    if [ "$links" -ge 40 ]; then
+        echo 'hansa: symbolic link loop or chain exceeds 40 links' >&2
+        exit 1
+    fi
+    target=$(readlink "$launcher") || exit 1
+    case $target in
+        /*) launcher=$target ;;
+        *) launcher=$(dirname "$launcher")/$target ;;
+    esac
+    links=$((links + 1))
+done
+HERE=$(cd "$(dirname "$launcher")/.." && pwd) || exit 1
 PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -c '
 import runpy, sys
 sys.path[0] = sys.argv.pop(1)
