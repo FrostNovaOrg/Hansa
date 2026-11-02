@@ -277,6 +277,42 @@ class Terminal:
         return key.decode("utf-8", errors="replace")
 
 
+def run_command(argv, *, env, interrupt_timeout=5):
+    """Let a foreground command finish handling Ctrl-C before reaping it."""
+    interrupts = []
+
+    def interrupted(signum, frame):
+        interrupts.append(time.monotonic())
+
+    # Never raise inside Popen: an interrupted wait/poll can swallow a second
+    # Ctrl-C or leave its waitpid lock held. A Python handler also lets the
+    # executed command receive SIGINT normally, unlike inheritable SIG_IGN.
+    previous = signal.signal(signal.SIGINT, interrupted)
+    try:
+        child = subprocess.Popen(argv, env=env)
+        try:
+            while True:
+                try:
+                    code = child.wait(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if interrupts and (len(interrupts) >= 2 or
+                                   time.monotonic() - interrupts[0] >= interrupt_timeout):
+                    child.kill()
+                    code = child.wait()
+                    break
+        finally:
+            if child.returncode is None:
+                child.kill()
+                child.wait()
+        if interrupts:
+            raise KeyboardInterrupt
+        return code
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def perform(key, row, targets, terminal, lang):
     with terminal.outside():
         wait = True
@@ -310,7 +346,7 @@ def perform(key, row, targets, terminal, lang):
                 if note:
                     print(note, flush=True)
                 if argv:
-                    wait = subprocess.call(argv, env=env) != 0 or key == "p"
+                    wait = run_command(argv, env=env) != 0 or key == "p"
         except KeyboardInterrupt:
             wait = False
         except (OSError, subprocess.SubprocessError) as e:
