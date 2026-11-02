@@ -205,7 +205,7 @@ The page's address carries its token, which approves releases. `hansa web`
 prints it only outside a Claude Code session: in one (any of the variables
 above set, the `!` prefix's shell included) it refuses, prints nothing of the
 address, and says how the principal opens the page from a terminal of their own, as the
-README's `ssh -L` line does. It refuses for `HANSA_ROLE` or `HANSA_TASK` as
+`ssh -L` line in [Getting started](getting-started.md#work-over-ssh) does. It refuses for `HANSA_ROLE` or `HANSA_TASK` as
 before. `--file` (`hansa add`, `retry`, `lane brief`) admits only files workers may read,
 using the same rules as new attachments, including the principal's list and the built-in private
 folders. It follows symbolic links and checks private hard links. `--file -` applies those checks
