@@ -6737,7 +6737,7 @@ def save():'''))
             entries = ["@realmail.hansa", "@.realmail.hansa", "@a..realmail.hansa", "@realmail.hansa.", "@"]
             line = ("x@realmail.hansa x@sub.realmail.hansa x@a..realmail.hansa x@sub.a..realmail.hansa "
                     "x@.realmail.hansa x@realmail.hansa. x@notrealmail.hansa x@realmail.hansa.evil.io "
-                    "X@REALMAIL.COM x@example.com x@sub.example.org x@domain.test")
+                    "X@REALMAIL.HANSA x@example.com x@sub.example.org x@domain.test")
             for mask in range(1 << len(entries)):
                 allow = [entry for i, entry in enumerate(entries) if mask & (1 << i)]
                 for ordered in (allow, list(reversed(allow))):
@@ -28548,7 +28548,7 @@ def save():'''))
         def key(enabled, allow):
             return release.scan_key(self.repo, "", head, [], "true", enabled, allow)
         self.assertEqual(key(True, ["Jane@RealMail.hansa", "@PYTHON.org"]),
-                         key(True, ["@python.ORG", "jane@realmail.COM"]))
+                         key(True, ["@python.ORG", "jane@realmail.HANSA"]))
         self.assertNotEqual(key(True, []), key(False, []))
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
@@ -37097,9 +37097,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                      (["@realmail.c"], "last label must be at least two letters"),
                      (["jane@realmail.c1"], "last label must be at least two letters"),
                      (["@realmail.12"], "last label must be at least two letters"),
-                     (["a" * 242 + "@realmail.hansa"], "at most 254 characters"),
+                     (["a" * 240 + "@realmail.hansa"], "at most 254 characters"),
                      (["@" + "a" * 251 + ".com"], "at most 254 characters"),
-                     (["Jane@RealMail.hansa", "jane@realmail.COM"], "entry 2 repeats entry 1"),
+                     (["Jane@RealMail.hansa", "jane@realmail.HANSA"], "entry 2 repeats entry 1"),
                      (["@PYTHON.org", "jane@realmail.hansa", "@python.ORG"], "entry 3 repeats entry 1")]
         for entries, reason in bad_lists:
             with self.subTest(reason=reason):
@@ -37122,7 +37122,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertIn("release_mailbox_allow is the principal's", " ".join(self.desk.save_settings(settings)))
         self.assertEqual(self.desk.settings()["release_mailbox_allow"], entries)
         entries = [f"person{i}@realmail.hansa" for i in range(498)]
-        entries += ["a" * 241 + "@realmail.hansa", "@" + "a" * 249 + ".com"]  # both 254 characters
+        entries += ["a" * 239 + "@realmail.hansa", "@" + "a" * 249 + ".com"]  # both 254 characters
         self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=entries)),
                          {"ok": True, "problems": []})
         self.assertEqual(self.page_save(lambda s: s.update(release_mailbox_allow=[])), {"ok": True, "problems": []})
