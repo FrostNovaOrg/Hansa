@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import pty
 import select
+import shlex
 import signal
 import struct
 import subprocess
@@ -295,12 +296,129 @@ class MenuTest(unittest.TestCase):
                                      "x stop", "p pause/resume", "r refresh", "q quit")),
                              ("zh", ("↑↓ 选择", "空格 勾选", "a 全选", "s 启动", "回车 进入", "w 页面",
                                      "x 停止", "p 暂停/恢复派活", "r 刷新", "q 退出"))):
-            text = menu.screen(self.state(), 1, set(), lang, 80, 7)
+            text = menu.screen(self.state(), 1, set(), lang, 80, 6)
             first, second = text.splitlines()[-2:]
             self.assertTrue(all(x in first for x in labels[:6]) and all(x in second for x in labels[6:]))
             self.assertTrue(menu.cells(first) <= 80 and menu.cells(second) <= 80)
             self.assertIn("二/工作台", text)  # a short screen drops rows, not keys
             self.assertNotIn("one/desk", text)
+
+    def test_chosen_desk_guide_covers_each_state_in_both_languages_at_eighty_columns(self):
+        cases = [
+            ("gone", False, {}, None, (("s", "start", "Space", "several"), ("s", "启动", "空格", "多个"))),
+            ("up", True, {"server": ["-L", "default"], "session": "shop-coordinator"}, None,
+             (("Enter", "coordinator", "on this machine", "tmux attach -t shop-coordinator"),
+              ("回车", "协调席", "本机", "tmux attach -t shop-coordinator"))),
+            ("up", False, {}, None, (("s", "open", "coordinator"), ("s", "打开", "协调席"))),
+            ("up", True, {}, None, (("not in tmux", "Enter cannot"), ("不在 tmux", "回车无法"))),
+            ("gone", False, {}, "folder is gone", ((), ())),
+            ("gone", False, {}, "folder cannot be read as a desk", ((), ())),
+        ]
+        state = self.state()
+        state["desks"][1].update(server="up", coordinator=True)
+        for server, coordinator, tmux, problem, labels in cases:
+            for index, lang in enumerate(("en", "zh")):
+                with self.subTest(server=server, coordinator=coordinator, problem=problem, lang=lang):
+                    row = state["desks"][0]
+                    row.update(server=server, coordinator=coordinator, problem=problem)
+                    with patch.object(menu, "program", return_value="tmux"), \
+                            patch.object(up, "read_coordinator", return_value={"tmux": tmux}):
+                        lines = menu.screen(state, 0, set(), lang, 80, 24).replace("\x1b[H\x1b[2J", "").splitlines()
+                    guide = lines[4:-2]
+                    expected_lines = 0 if problem else 2 if tmux else 1
+                    self.assertEqual(len(guide), expected_lines)
+                    if guide:
+                        self.assertTrue(all(label in guide[0] for label in labels[index]), guide)
+                    if tmux:
+                        self.assertTrue(all(label in guide[1] for label in
+                                            (("Inside", "Ctrl+B", "then D", "keeps running") if lang == "en"
+                                             else ("进入后", "Ctrl+B", "再按 D", "继续运行"))))
+                    if problem:
+                        self.assertIn("nothing to do" if lang == "en" else "没有可做", lines[2])
+                    self.assertTrue(all(menu.cells(line) <= 80 for line in lines))
+
+    def test_guide_and_enter_share_recorded_attach_command_without_running_tmux(self):
+        state = self.state()
+        row = state["desks"][0]
+        row.update(server="up", coordinator=True)
+        for server, launch, expected in (
+                (["-L", "remembered"], {"TMUX_TMPDIR": "/saved tmp"},
+                 "env 'TMUX_TMPDIR=/saved tmp' /tools/tmux -L remembered attach -t shop-coordinator"),
+                (["-S", "/saved socket"], {}, "/tools/tmux -S '/saved socket' attach -t shop-coordinator"),
+                (["-L", "default"], {}, "/tools/tmux attach -t shop-coordinator")):
+            rec = {"tmux": {"server": server, "session": "shop-coordinator"}, "env": launch}
+            with self.subTest(server=server), patch.dict(os.environ, {"TMUX_TMPDIR": "/wrong"}), \
+                    patch.object(up, "read_coordinator", return_value=rec), \
+                    patch.object(menu, "program", return_value="/tools/tmux"), \
+                    patch.object(menu.subprocess, "Popen", side_effect=AssertionError("no process on draw")):
+                argv, env, _ = menu.command(row, "\r", "en")
+                self.assertEqual(argv, shlex.split(expected))
+                self.assertEqual(env.get("TMUX_TMPDIR"), launch.get("TMUX_TMPDIR"))
+                for lang in ("en", "zh"):
+                    wide = menu.screen(state, 0, set(), lang, 240, 24).splitlines()
+                    narrow = menu.screen(state, 0, set(), lang, 80, 24).splitlines()
+                    self.assertIn(expected, wide[-4])
+                    self.assertEqual(narrow[-4], menu.cut(wide[-4], 80))
+                    self.assertEqual(len(narrow), len(wide))  # cut, never wrap
+        self.assertFalse(self.tmux_calls.exists())
+
+    def test_short_screen_preserves_both_guide_lines_and_keys_before_rows(self):
+        state = self.state()
+        state["desks"][1].update(server="up", coordinator=True)
+        rec = {"tmux": {"server": ["-L", "default"], "session": "shop-coordinator"}}
+        with patch.object(up, "read_coordinator", return_value=rec), patch.object(menu, "program", return_value="tmux"):
+            for lang in ("en", "zh"):
+                full = menu.screen(state, 1, set(), lang, 80, 24).splitlines()
+                for height in (4, 5, 6, 7):
+                    with self.subTest(lang=lang, height=height):
+                        lines = menu.screen(state, 1, set(), lang, 80, height).replace("\x1b[H\x1b[2J", "").splitlines()
+                        self.assertEqual(lines[-4:], full[-4:])
+                        self.assertEqual(len(lines), height)
+                        self.assertNotIn("one/desk", "\n".join(lines))
+                        self.assertEqual("二/工作台" in "\n".join(lines), height == 7)
+
+    def test_start_summary_rereads_desks_and_reports_success_and_failure_in_both_languages(self):
+        terminal = Mock(outside=contextlib.nullcontext)
+        state = self.state()
+        rec = {"session": {"pid": os.getpid()}, "env": {"TMUX_TMPDIR": "/saved"},
+               "tmux": {"server": ["-L", "remembered"], "session": "shop-coordinator"}}
+        for lang in ("en", "zh"):
+            def start(root, saved, stream):
+                print("own startup output")
+                if root == self.first.root:
+                    write_json(self.first.state_dir / up.COORDINATOR_START, rec)
+                return False  # the summary must use the fresh desk state
+
+            def server(desk):
+                return {"state": "up" if desk.root == self.first.root else "gone", "pid": os.getpid()}
+
+            with self.subTest(lang=lang), patch.object(up, "listed_desk_up", side_effect=start) as launch, \
+                    patch.object(views, "server_state", side_effect=server), \
+                    patch.object(menu, "program", return_value="tmux"), contextlib.redirect_stdout(io.StringIO()) as out:
+                menu.perform("s", state["desks"][0], state["desks"], terminal, lang)
+            self.assertEqual(launch.call_count, 2)
+            lines = out.getvalue().splitlines()
+            self.assertEqual(lines[:2], ["own startup output"] * 2)
+            self.assertIn(str(self.first.root), lines[2])
+            self.assertIn("started;" if lang == "en" else "已启动", lines[2])
+            self.assertIn("env TMUX_TMPDIR=/saved tmux -L remembered attach -t shop-coordinator", lines[2])
+            self.assertIn(str(self.second.root), lines[3])
+            self.assertIn("not started" if lang == "en" else "未启动", lines[3])
+            self.assertIn("above" if lang == "en" else "上面的输出", lines[3])
+            self.assertIn("Ctrl+B", lines[4])
+            self.assertIn("keeps running" if lang == "en" else "继续运行", lines[4])
+            self.assertIn("any key" if lang == "en" else "任意键", lines[5])
+        self.assertEqual(terminal.key.call_count, 2)
+
+    def test_failed_start_summary_has_no_detach_line_without_an_open_coordinator(self):
+        terminal = Mock(outside=contextlib.nullcontext)
+        row = self.state()["desks"][0]
+        for lang in ("en", "zh"):
+            with self.subTest(lang=lang), patch.object(up, "listed_desk_up", return_value=False), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                menu.perform("s", row, [row], terminal, lang)
+            self.assertIn("not started" if lang == "en" else "未启动", out.getvalue())
+            self.assertNotIn("Ctrl+B", out.getvalue())
 
     def test_pause_and_web_print_what_start_prints_for_an_unusable_installation(self):
         row = self.state()["desks"][0]

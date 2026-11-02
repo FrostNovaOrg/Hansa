@@ -602,6 +602,7 @@ Nothing starts when it opens. Each row shows the last two folders of the path,
 server state (running, busy, stuck, stopped), whether the coordinator's session
 is open, whether dispatch is paused, running tasks and tasks awaiting review,
 and releases and to-dos waiting for you. It refreshes every five seconds.
+Above the keys, a guide explains the chosen desk's next step and how to attach and return with Ctrl+B then D while the coordinator keeps running; after `s`, a fresh summary gives each desk's result and attach command before waiting for a key.
 
 | Key | Action |
 |---|---|
