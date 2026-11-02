@@ -94,4 +94,7 @@ print('从另一台电脑连接：' if zh else 'From another computer:')
 print('ssh -t -L 8765:127.0.0.1:8765 YOUR-HOST ' + shlex.quote(shlex.quote(link)))
 print()
 print(('入门指南：' if zh else 'Getting started: ') + guide)
+print()
+print('打开 Claude Code，然后说：“读 ~/.local/share/hansa/SETUP.md，和我一起装好 Hansa”' if zh else
+      'Open Claude Code and say: "read ~/.local/share/hansa/SETUP.md and set up Hansa with me"')
 PY
