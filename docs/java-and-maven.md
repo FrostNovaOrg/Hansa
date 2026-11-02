@@ -88,5 +88,5 @@ Mockito documents; in the pom:
   network list, which opens the machine's whole loopback. Have such tests skip
   when the bind is refused (JUnit's `Assumptions`, say), as hansa's own do.
 
-Gradle is not covered yet: the prelude sets nothing for it but
+Gradle is not covered: the prelude sets nothing for it but
 `JAVA_TOOL_OPTIONS`.
