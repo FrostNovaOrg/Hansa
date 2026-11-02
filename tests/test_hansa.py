@@ -2085,6 +2085,51 @@ class DesksTest(unittest.TestCase):
         write_json(desk.settings_path, {})
         return desk
 
+    def test_init_with_a_repository_lists_the_stopped_desk_in_desks_and_the_menu(self):
+        repo = self.tmp / "repo"
+        sh("git", "init", "-q", "-b", "main", str(repo), cwd=self.tmp)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "init", cwd=repo)
+        root = self.tmp / "new-desk"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(main(["init", str(root), "--repo", str(repo)]), 0)
+        self.assertEqual(err.getvalue(), "")
+        root = root.resolve()
+        entries = json.loads(self.listed.read_text())
+        self.assertEqual(entries, [{"desk": str(root), "hansa": up.hansa_command(), "at": entries[0]["at"]}])
+        self.assertTrue(entries[0]["at"])
+        self.assertIn(str(root), self.say())
+        self.assertIn("not running", self.say())
+        rows = menu.rows()["desks"]
+        self.assertEqual([(r["desk"], r["server"]) for r in rows], [(str(root), "gone")])
+        self.assertFalse((root / ".hansa" / "serve-start.json").exists())
+
+    def test_init_keeps_the_desk_and_warns_once_when_the_list_cannot_be_read_or_written(self):
+        for failure in ("read", "json", "write"):
+            with self.subTest(failure=failure), contextlib.ExitStack() as patches:
+                # Each case has its own list, always under the test's isolated state directory.
+                patches.enter_context(unittest.mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.tmp / failure)}))
+                listed = up.desks_file()
+                listed.parent.mkdir(parents=True)
+                if failure == "read":
+                    listed.mkdir()  # a list that cannot be read as a file, even when tests run as root
+                else:
+                    listed.write_text("not JSON" if failure == "json" else "[]")
+                if failure == "write":
+                    patches.enter_context(unittest.mock.patch.object(up, "write_json", side_effect=PermissionError("unwritable")))
+                root = self.tmp / (failure + "-desk")
+                with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(main(["init", str(root)]), 0)
+                self.assertTrue(Desk(root).settings_path.is_file())
+                self.assertIn("desk ready", out.getvalue())
+                self.assertEqual(len(err.getvalue().splitlines()), 1)
+                for word in ("desk was made", "list", "first server start", "hansa up"):
+                    self.assertIn(word, err.getvalue())
+                self.assertIn("could not update" if failure == "write" else "cannot read", err.getvalue())
+                if failure == "read":
+                    self.assertTrue(listed.is_dir())
+                else:
+                    self.assertEqual(listed.read_text(), "not JSON" if failure == "json" else "[]")
+
     def test_desks_shows_only_counts_addresses_and_the_running_servers_version_without_writes(self):
         first, second = self.desk("first"), self.desk("second")
         write_json(self.listed, [{"desk": str(d.root)} for d in (first, second)])
@@ -2649,6 +2694,34 @@ class UpTest(unittest.TestCase):
         self.assertEqual(entries[-1], {"desk": str(self.desk.root), "hansa": "/new/bin/hansa", "at": "later"})
         del os.environ["XDG_STATE_HOME"]
         self.assertEqual(up.desks_file(), self.tmp / ".local/state/hansa/desks.json")
+
+    def test_up_and_serve_after_init_keep_one_entry_and_preserve_other_desks(self):
+        other = {"desk": str(self.desk.root), "hansa": "/other/hansa", "at": "earlier"}
+        up.desks_file().parent.mkdir(parents=True)
+        write_json(up.desks_file(), [other])
+        self.desk = Desk(self.tmp / "new-desk")
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["init", str(self.desk.root)])
+        self.assertEqual(len(json.loads(up.desks_file().read_text())), 2)
+
+        def bind(desk, host, port):
+            return types.SimpleNamespace(server_address=(host, port))
+
+        def launch(*args):
+            self.fake_serve(bind)
+            return "fake tmux session"
+
+        with unittest.mock.patch.object(up, "program", return_value="/fake/tmux"), \
+                unittest.mock.patch.object(up, "launch_tmux", side_effect=launch) as started, \
+                unittest.mock.patch.object(up, "server_state", side_effect=[self.gone, self.running]):
+            self.assertIn("server started", self.say("up"))
+        started.assert_called_once()
+        self.fake_serve(bind)  # a later direct serve start updates the same entry too
+        entries = json.loads(up.desks_file().read_text())
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0], other)
+        rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
+        self.assertEqual(entries[1], {"desk": str(self.desk.root), "hansa": rec["hansa"], "at": rec["at"]})
 
     def test_serve_survives_desk_list_errors(self):
         from hansa import up, web
@@ -18751,6 +18824,27 @@ def save():'''))
                 self.assertEqual(public_settings(self.desk)["settings"]["coordinator"]["effort"], effort)
                 self.assertEqual(cli.coordinator_desk(self.desk, os.getuid())["effort"], effort)
                 self.assertEqual(self.desk.settings_path.read_bytes(), before)
+
+    def test_init_for_an_account_lists_the_desk_as_that_account(self):
+        self.as_root()
+        log, ran = self.stand_in_runuser()
+        me = account.name_of(os.getuid())
+        root = self.tmp / "account-desk"
+        listed = up.desks_file()
+        self.assertTrue(str(listed).startswith(str(self.tmp)))  # never the real account's list
+        with unittest.mock.patch("os.chown"), \
+                unittest.mock.patch.object(up, "list_desk", side_effect=AssertionError("root must not list the desk")), \
+                self.assertRaises(SystemExit) as done:
+            main(["init", str(root), "--repo", str(self.repo), "--user", me])
+        self.assertEqual(done.exception.code, 0, ran[-1].stderr)
+        command = json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(command[:3], ["-u", me, "--"])
+        self.assertIn("init", command)
+        self.assertNotIn("--user", command)  # the child now runs as the desk's account
+        entries = json.loads(listed.read_text())
+        self.assertEqual([r["desk"] for r in entries], [str(root.resolve())])
+        self.assertEqual(entries[0]["hansa"], up.hansa_command())
+        self.assertFalse((Desk(root).state_dir / "serve-start.json").exists())
 
     def test_init_for_an_account_refuses_a_link_or_a_folder_with_things_in_it(self):
         self.as_root()

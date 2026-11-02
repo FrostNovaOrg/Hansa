@@ -106,7 +106,8 @@ cd ~/shop/desk
 Use plain folder names; see [paths hansa refuses](sandbox.md#paths-hansa-refuses)
 if a path is rejected.
 
-Init creates lane `a` on the checkout's current branch. With a subscription
+Init creates lane `a` on the checkout's current branch and lists the stopped desk
+for this account, so `hansa` shows it in the menu immediately. With a subscription
 login, run `hansa up`: it starts the server, then the coordinator in tmux.
 
 For an endpoint without a login, keep `hansa serve` running, configure the page

@@ -18,9 +18,7 @@ Reply in the person's language. They may not write code: say what each step does
 
 5. Tell them to open a plain terminal. Say why here and not in this session: a server and a coordinator started inside another Claude Code session inherit nothing useful, and `hansa web` refuses to run in one.
 
-   The menu lists a desk from `hansa init` only after its first start: they first run `cd DESK`, then `hansa up`.
-
-   Then they run `hansa`, tick the desk with Space, press `s`, any key, then Enter, and answer yes to Claude Code's folder-trust question.
+   They run `hansa`, tick the desk with Space, press `s`, any key, then Enter, and answer yes to Claude Code's folder-trust question.
 
    If they are not at the machine, give them this line with the real path and HOST; `ssh HOST` gives a terminal for `hansa up`:
 
