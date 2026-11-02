@@ -54,10 +54,6 @@ hansa --version
 Add that export to your shell profile too. Either put hansa's `bin` folder on
 `PATH`, as above, or put a symbolic link to `bin/hansa` in a folder already on
 `PATH`, for example `ln -s ~/hansa/bin/hansa /opt/homebrew/bin/hansa`.
-Absolute and relative links, including chains, work even when the installation
-path contains spaces. The launcher follows only file links, keeping directory
-links such as `current/bin/hansa` so switching `current` changes future starts.
-It stops after 40 file links and reports a loop or an overly long chain.
 
 ## Log in (the principal's step)
 
