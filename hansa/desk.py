@@ -105,7 +105,7 @@ LISTED_AS = ("repo", "base", "command", "after", "fixed")
 LISTED_KEYS = ("lane", "target", *LISTED_AS, "release", "outside")
 MAX_TARGETS = 20  # named release targets on one lane
 MAX_RELEASE_FILES = 100  # paths or globs on one lane's release_files
-TARGET_FIELDS = ("command", "timeout_min", "after", "fixed", "after_merge_min")
+TARGET_FIELDS = ("command", "timeout_min", "after", "fixed", "after_merge_min", "about")
 # a lane's forms for the messages hansa writes into its repository; unset, hansa's own (task_message, merge_message)
 MESSAGE_FIELDS = ("commit_message", "merge_message")
 MESSAGE_PLACES = "{task}, {title} and {lane}"
@@ -1319,7 +1319,7 @@ def target_problems(ln: dict) -> list:
         if not isinstance(name, str) or not NAME.match(name):
             p.append(f"{at}: use lowercase letters, digits and '-'")
         if not isinstance(t, dict):
-            p.append(f"{at}: must be an object with command, and optionally timeout_min, after, fixed and after_merge_min")
+            p.append(f"{at}: must be an object with command, and optionally timeout_min, after, fixed, after_merge_min and about")
             continue
         extra = set(t) - set(TARGET_FIELDS)
         if extra:
@@ -1327,6 +1327,8 @@ def target_problems(ln: dict) -> list:
         cmd = t.get("command")
         if not isinstance(cmd, str) or not cmd.strip() or len(cmd) > 1000:
             p.append(f"{at}: command must be one shell command line (up to 1000 characters)")
+        if "about" in t and (not isinstance(t["about"], str) or len(t["about"]) > 120 or _has_control(t["about"])):
+            p.append(f"{at}: about must be one line of text, up to 120 characters")
         if "timeout_min" in t and not _is_int(t["timeout_min"], 1, 1440):
             p.append(f"{at}: timeout_min must be from 1 to 1440")
         if "after_merge_min" in t and not _is_int(t["after_merge_min"], 1, 1440):

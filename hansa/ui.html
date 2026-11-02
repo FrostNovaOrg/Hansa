@@ -72,6 +72,8 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .tick { display:flex; gap:9px; align-items:baseline; margin:2px 0; cursor:pointer; }
 .tick > input { flex:none; margin:0; }
 .tick > span { min-width:0; }
+.release-tick-info { flex:1; }
+.release-tick-command { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .settings-head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin:0 0 30px; }
 .settings-head h1 { margin:0 0 8px; font-size:28px; line-height:1.3; font-weight:650; letter-spacing:-.7px; }
 .settings-head p, .group-head p { margin:0; color:var(--muted); font-size:13px; max-width:68ch; }
@@ -485,7 +487,7 @@ const T = ZH ? {
   clearNever:(w, t) => `每日清空 ${w}：自 ${t} 启动以来没有清空过`, clearMissed:n => `；此后已有 ${n} 个时段过去而没有清空`,
   repo:"代码仓路径", base:"基础分支", maxTurns:"每件最多轮数（只当断路器，设高些：碰到就说明任务太大、没说清或卡住了）", timeout:"每件最长分钟（同上，只当断路器）",
   env:"给执行层的环境变量（每行 名字=值；一般不用动，装了新工具要让执行层找得到时才加）",
-  allow:"这条线的执行层和核验不用问就能用的规则（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着命令规则。网页工具在沙箱的网络名单之外联网：每个网站写一条 WebFetch(domain:docs.python.org)，光写 WebFetch 会被拒绝；WebSearch 会把搜索词发到本机之外。git 的规则写了也不算：提交由框架来做）",
+  allow:"这条线的执行层和核验可以直接用的规则（每行一条。Bash(pnpm test:*) 的意思是：可以跑以 pnpm test 开头的命令。执行层在沙箱里干活，用不着命令规则。网页工具在沙箱的网络名单之外联网：每个网站写一条 WebFetch(domain:docs.python.org)，光写 WebFetch 会被拒绝；WebSearch 会把搜索词发到本机之外。git 的规则写了也不算：提交由框架来做）",
   network:"执行层做活时能连的主机", write:"执行层还能写的文件夹（工作树以外）",
   laneCheck:"验收命令：每件活做完后由框架自己在工作树里跑，不经执行层；不通过就不让合并（空＝不验收）", checkCol:"验收", passed:"通过", notPassed:"没通过", couldNotRun:"没跑成（机器的问题，不是活的问题）", verifyCol:"实跑核对", v_holds:"成立", "v_holds, with notes":"成立，附注", "v_does not hold":"不成立", v_unsure:"拿不准", v_running:"正在核对", v_none:"没给结论", checkingWork:"执行层已做完，正在验收", withBrowser:"（带浏览器）",
   setup:"每个任务开工前装依赖的命令（比如 pnpm install；空＝不用装）",
@@ -569,7 +571,7 @@ const T = ZH ? {
   releaseTakeBack:"按现在的样子重新算进来（之后点保存）",
   releaseFiles:n => `改动了 ${n} 个文件`, releaseNamed:"（命令里点名了这个文件：它会被运行）", releaseYes:"发布", releaseNo:"拒绝",
   releaseReason:"拒绝原因（可不填）", releaseMoved:"已经不是请求时的样子，点发布也不会运行：", releaseHits:"查到的禁发字眼", releaseUnchecked:"这一行无法检查",
-  releaseListed:"这个发布目标不用问你就发布（设置里勾着它）", releaseTarget:"目标",
+  releaseListed:"没有问你：设置里勾了这个目标", releaseTarget:"目标",
   releaseOutside:"仓库外的文件", releaseOutsideFolder:"命令运行所在的仓库外文件夹（不记录指纹）", outsideUnhashed:"未记录指纹",
   releaseDirectCommits:(n, shown) => `直接提交：${n} 个` + (shown < n ? `（列出前 ${shown} 个）` : ""),
   releaseDirectReason:"直接提交的原因", releaseDirectWait:"这些直接提交须等你点头，即使发布目标已勾选",
@@ -577,7 +579,7 @@ const T = ZH ? {
   releaseGone:"现在没有哪条工作线有这个发布目标：取消勾选再保存，就从清单上去掉", releaseGoneWas:"当时的命令：", releaseGoneUnknown:"（保存时没记下它当时的命令）",
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
   releaseStopNote:"叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。装到一半停下，服务器可能停在半路：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
-  releasesWithoutAsking:"不用问你就能发布的发布目标（每个目标单独勾；一个都不勾＝每次发布都要你点头。工作线的仓库或基础分支、目标的命令、它要跟在哪个目标之后或它的运行方式（fixed），只要有一样变了，勾就不再算数）",
+  releasesWithoutAsking:"每个目标单独勾。工作线的仓库或基础分支、目标的命令、它要跟在哪个目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效，下次发布会再问你。",
   releaseForbidden:"不许发出去的字眼（每行一个词、短语或 re:Python 正则表达式，不分大小写；每项最多 200 字符，正则必须能编译且不能匹配空字符串；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
   releaseForbiddenExcept:"按 lane 豁免字眼（从上面的列表选择字眼；lane 用空格或逗号分隔；不影响邮箱规则）",
   forbiddenEntry:"字眼", forbiddenLanes:"豁免的 lane", addForbiddenException:"添加豁免",
@@ -642,7 +644,7 @@ const T = ZH ? {
   compactNote:"Once a turn has ended with an answer and the session is idle, the coordinator's mod compacts it after a minute if its context is at or above the first figure, while the whole context is still in the prompt cache. A new turn cancels the wait. While it works nothing interrupts it: Claude Code's own auto-compact compacts it at the second (hansa coordinator gives it with --autocompact). Both figures take 100,000 to 1,000,000 tokens. The defaults suit a model with a 1M-token window. A figure at or near the model's window, or a first figure at or above the second, never comes: Claude Code compacts on its own first. A second figure above the model's window is taken as that window: Claude Code compacts at the model's own limit, as with no figure. A change to the first applies from the session's next decision (when a turn ends, or a wait ends); a change to the second from the session's next start. The coordinator cannot change them. Claude Code (2.1.299 or later) also compacts by itself a conversation of 200,000 tokens or more left idle about 54 minutes; hansa neither sets nor reads that. The mod needs Claude Code 2.1.290 or later; the status line at the top says whether the session was started with it, and why not.",
   repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
-  allow:"Rules the lane's workers and verifiers are given without asking (one per line; Bash(pnpm test:*) means any command starting with pnpm test). Workers work in a sandbox and need no command rule. Web tools reach the network outside the sandbox: WebFetch(domain:docs.python.org) for each site (a bare WebFetch is refused), WebSearch sends search queries out of the machine. Git rules count for nothing: hansa does the committing",
+  allow:"Rules the lane's workers and verifiers may use directly (one per line; Bash(pnpm test:*) means any command starting with pnpm test). Workers work in a sandbox and need no command rule. Web tools reach the network outside the sandbox: WebFetch(domain:docs.python.org) for each site (a bare WebFetch is refused), WebSearch sends search queries out of the machine. Git rules count for nothing: hansa does the committing",
   network:"Hosts workers may reach during a task", write:"Extra folders workers may write to (besides the worktree)",
   laneCheck:"Check command: hansa runs it in the worktree after each task, not the worker; a failed check blocks the merge (blank = none)", checkCol:"Check", passed:"passed", notPassed:"failed", couldNotRun:"could not run (the machine, not the task)", verifyCol:"Verified by running", v_holds:"holds", "v_holds, with notes":"holds, with notes", "v_does not hold":"does not hold", v_unsure:"unsure", v_running:"verifying", v_none:"no verdict", checkingWork:"worker done, checking", withBrowser:" (with a browser)",
   setup:"Command that installs dependencies before each task, e.g. pnpm install (blank = none)",
@@ -721,7 +723,7 @@ const T = ZH ? {
   releaseTakeBack:"Take them back in as they are now (then Save)",
   releaseFiles:n => `${n} file(s) changed`, releaseNamed:" (named by the command: it runs)", releaseYes:"Release", releaseNo:"Refuse",
   releaseReason:"reason for refusing (optional)", releaseMoved:"No longer what was asked, so Release would not run it: ", releaseHits:"Words found that must not go out", releaseUnchecked:"The line could not be checked",
-  releaseListed:"this target goes out without asking you (it is ticked in Settings)", releaseTarget:"target",
+  releaseListed:"not asked: this target is ticked in Settings", releaseTarget:"target",
   releaseOutside:"outside file", releaseOutsideFolder:"outside folder the command runs in (no fingerprint)", outsideUnhashed:"not fingerprinted",
   releaseDirectCommits:(n, shown) => `${n} direct commit(s)` + (shown < n ? ` (the first ${shown} shown)` : ""),
   releaseDirectReason:"reason for direct commits", releaseDirectWait:"Direct commits require your yes even when the target is ticked",
@@ -729,7 +731,7 @@ const T = ZH ? {
   releaseGone:"no lane has this release target now: untick it and Save to take it off the list", releaseGoneWas:"its command then: ", releaseGoneUnknown:"(its command then was not recorded)",
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
   releaseStopNote:"Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
-  releasesWithoutAsking:"Release targets that go out without asking you (each target ticked on its own; none ticked = every release waits for your yes. A tick stops counting once the lane's repository or base branch, or the target's command, the target it must follow or the way it runs (fixed), changes)",
+  releasesWithoutAsking:"Each target is ticked on its own. A tick stops counting once the lane's repository or base branch, the target's command, the target it must follow or the way it runs (fixed) changes: the next release asks you again.",
   releaseForbidden:"Words, phrases or re:Python patterns no release may send out (one per line, any case; at most 200 characters per entry; patterns must compile and must not match the empty string; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
   releaseForbiddenExcept:"Exceptions by lane (choose an entry from the list above; lanes separated by spaces or commas; the mailbox rule still applies)",
   forbiddenEntry:"Entry", forbiddenLanes:"Excepted lanes", addForbiddenException:"Add exception",
@@ -765,7 +767,7 @@ Object.assign(T, ZH ? {
   providerName:"供应名称", priceName:"模型名称", baseModel:"模型（空＝用供应的）",
   cooldown:"额度用完后休息（分钟）", contextTitle:"上下文压缩", compactHint:"范围 100,000–1,000,000 token。详细生效方式见说明。",
   protectedPaths:"不可读取的路径", protectedHint:"每行一个绝对路径。常见登录信息、密钥与浏览器数据已内置保护。",
-  releaseApproval:"发布是否等你点头", autoRelease:"不用逐次点头的目标", autoReleaseHint:"未勾选的目标，每次发布都要等你点头。",
+  releaseApproval:"发布前要不要问你", autoRelease:"不用问你就发布的目标", autoReleaseHint:"勾上：提出发布后可以不用问你就执行。不勾：每次等你点头。",
   directPolicy:"直接提交的点头规则", contentRules:"发布内容检查", forbiddenWords:"禁止发布的字眼",
   forbiddenHint:"每行一个词、短语或 re:Python 正则表达式，每项最多 200 字符；只在一行之内匹配，只查 UTF-8 文字。", exceptionsTitle:"按工作线豁免", mailboxTitle:"检查新增行中的邮箱",
   mailboxAllowTitle:"邮箱允许名单", mailboxHint:"每行一个完整邮箱地址，或 @域名。", alertCommandTitle:"提醒命令",
@@ -791,7 +793,7 @@ Object.assign(T, ZH ? {
   providerName:"Provider name", priceName:"Model name", baseModel:"Model (blank = the provider's)",
   cooldown:"Rest after a usage limit (minutes)", contextTitle:"Context management", compactHint:"100,000–1,000,000 tokens. See the explanation for when each applies.",
   protectedPaths:"Paths workers must not read", protectedHint:"One absolute path per line. Common logins, keys and browser data are already protected.",
-  releaseApproval:"Release approvals", autoRelease:"Targets allowed without individual approval", autoReleaseHint:"Unticked targets need your approval for every release.",
+  releaseApproval:"Asking you before a release", autoRelease:"Targets that go out without asking you", autoReleaseHint:"Ticked: a release can run without asking you. Unticked: each one waits for your yes.",
   directPolicy:"Approval for direct commits", contentRules:"Release content checks", forbiddenWords:"Forbidden words",
   forbiddenHint:"One word, phrase or re:Python pattern per line, at most 200 characters per entry. Matches within one line, in UTF-8 text only.", exceptionsTitle:"Exceptions by lane", mailboxTitle:"Check mailboxes in added lines",
   mailboxAllowTitle:"Mailbox allowlist", mailboxHint:"One full mailbox or @domain per line.", alertCommandTitle:"Alert command",
@@ -2036,15 +2038,19 @@ function releaseTicks() {
   const same = (lane, t) => x => { const [a, b] = listedKey(x); return a === lane && b === t; };
   if (!rows.length) return h("span", {class:"muted"}, T.none);
   return h("div", {}, rows.map(([lane, t]) => {
+    const target = S.lanes[lane]?.targets?.[t] || {command:S.lanes[lane]?.release || ""};
     const was = targetGone(lane, t) ? (S.releases_without_asking || []).filter(same(lane, t))
       .map(x => typeof x === "object" ? x.command ?? x.release ?? "" : "").find(x => x) ?? "" : null;
     return h("label", {class:"tick", "data-lane":lane, "data-target":t},
       h("input", {type:"checkbox", checked:(S.releases_without_asking || []).some(same(lane, t)), onchange: e => {
         S.releases_without_asking = (S.releases_without_asking || []).filter(x => !same(lane, t)(x));
         if (e.target.checked) S.releases_without_asking.push({lane, target:t}); refreshSettingsState(); }}),
-      h("span", {}, lane + (t ? ` · ${T.releaseTarget} ${t}` : ""),
+      h("span", {class:"release-tick-info"}, t ? `${t} · ${lane}` : lane,
+        was == null && target.about ? h("div", {}, target.about) : null,
+        was == null ? h("div", {class:"mono muted release-tick-command", title:target.command}, target.command) : null,
         was == null ? null : h("span", {class:"warn"}, " — " + T.releaseGone,
-          h("div", {class:"muted"}, was ? [T.releaseGoneWas, h("span", {class:"mono"}, was)] : T.releaseGoneUnknown))));
+          h("div", {class:"muted"}, was ? [T.releaseGoneWas,
+            h("div", {class:"mono release-tick-command", title:was}, was)] : T.releaseGoneUnknown))));
   }));
 }
 function renderSettings(problems = settingsProblems) {

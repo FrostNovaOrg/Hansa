@@ -11,13 +11,20 @@ there; a lane's release command (a push, a wait for CI such as `gh run watch
 that sends it out in more than one way (a push to the public repository, an
 install on a test server, an install on the production server) names its
 release targets, with `hansa lane target L NAME "<command>"
-[--minutes N] [--after OTHER] [--fixed]`: each has its own command, its own time limit
+[--minutes N] [--after OTHER] [--fixed] [--about "<words>"]`: each has its own command, its own time limit
 (else the lane's `timeout_min`; an invalid target limit in a hand-edited settings file also uses the lane's)
 and optionally another target of the lane
 that must have sent out the same commit first. An older unnamed release
 moves to `default` if absent, taking only its tick for the same command.
 Other unnamed ticks match nothing, even if `default` has the same command.
-`hansa lane target L` lists them, each with the way it runs. `hansa
+`--about "install on the test server; nothing goes outside"` describes a target
+in plain words: one line of up to 120 characters; a longer description or a line
+break is refused without changing anything. `--about none` removes it.
+`--about` alone changes only the description, and is recorded like other target changes.
+Settings shows each tick with the target's name, then its lane, its description
+if present, and always its command on a separate line. The command is cut at the
+row's width; hovering shows it whole.
+`hansa lane target L` lists them, each with its description and the way it runs. `hansa
 release L [TARGET] [note]` (TARGET needed when there is more than one)
 records the request (a new request for the same target replaces one still
 waiting): the target, the commit, the command, the note, the
@@ -45,7 +52,7 @@ whether it is `--fixed` are what they were when the list was saved, and while th
 change to any of them, `--after` dropped or changed included, unticks it
 until the principal takes it back in (the page's button that takes changed
 entries back in as they are now, or unticking and ticking it again, then
-Save; a plain Save keeps the old entry); `--minutes` alone does not, and a
+Save; a plain Save keeps the old entry); `--minutes` or `--about` alone does not, and a
 target taken out and set again with the same command and `--after` keeps its
 tick. An entry for a target no lane has now (the lane is gone, has no release, or its
 release command became named targets) stays on the list, ticked, among the
