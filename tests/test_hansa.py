@@ -27088,7 +27088,7 @@ def save():'''))
         from hansa import notes
         root = self.desk.notes_dir
         (root / "PROJECT.md").unlink()
-        text = "# 当前工作\n待办事项\n```\n# not a heading\n```\n## 下一步 ###\n"
+        text = "# 当前工作\n待办\n```\n# not a heading\n```\n## 下一步 ###\n"
         (root / "中文.md").write_text(text, encoding="utf-8")
         (root / "older.md").write_text("# Older\n")
         (root / "archive").mkdir()
