@@ -34,7 +34,12 @@ WORDS = {
     "keys1": ("↑↓ choose  Space tick  a all  s start  Enter enter  w page",
               "↑↓ 选择  空格 勾选  a 全选  s 启动  回车 进入  w 页面"),
     "keys2": ("x stop  p pause/resume  r refresh  q quit", "x 停止  p 暂停/恢复派活  r 刷新  q 退出"),
-    "choose": ("Tick the desks you need with Space, then press s to start.", "空格勾选需要的工作台，再按 s 启动。"),
+    "start": ("Press s to start this desk; Space ticks several.", "按 s 启动这个工作台；空格可勾选多个。"),
+    "enter": ("Press Enter for its coordinator; or on this machine: {attach}",
+              "按回车进入协调席；或在本机运行：{attach}"),
+    "open_session": ("Press s to open its coordinator.", "按 s 打开协调席。"),
+    "started": ("{desk}: started; {attach}", "{desk}：已启动；{attach}"),
+    "not_started": ("{desk}: not started; see the lines above.", "{desk}：未启动；请看上面的输出。"),
     "empty": ("No desks listed. hansa init makes a desk; its first server start lists it. q quits.",
               "没有工作台。hansa init 创建工作台；首次启动后台后列入清单。q 退出。"),
     "gone": ("folder is gone; nothing to do", "文件夹已不存在；没有可做的操作"),
@@ -46,11 +51,11 @@ WORDS = {
     "principal": ("{releases} releases, {todos} to-dos", "{releases} 发布，{todos} 待办"),
     "return": ("Press any key to return to the menu.", "按任意键返回菜单。"),
     "session": ("The coordinator's session is not open. Press s to start it.", "协调席未打开。按 s 启动。"),
-    "no_tmux": ("Its session record names no tmux server and session; cannot enter it here.",
-                "协调席的记录中没有 tmux 后台和会话，无法在这里进入。"),
+    "no_tmux": ("Its coordinator is not in tmux; Enter cannot reach it.", "协调席不在 tmux 中，回车无法进入。"),
     "install_tmux": ("tmux is missing; install it to enter the session.", "找不到 tmux；安装后才能进入协调席。"),
     "leave_tmux": ("Leave tmux first (Ctrl+B, then D), then run: ", "请先离开 tmux（Ctrl+B，再按 D），然后运行："),
-    "detach": ("Ctrl+B, then D leaves the session and returns to the menu.", "Ctrl+B，再按 D 离开协调席并返回菜单。"),
+    "detach": ("Inside, press Ctrl+B, then D to return; the coordinator keeps running.",
+               "进入后，按 Ctrl+B，再按 D 返回菜单；协调席会继续运行。"),
     "server": ("The server is stopped. Press s to start it.", "后台已停止。按 s 启动。"),
     "tunnel": ("The computer with the browser needs a tunnel: ssh -L {port}:127.0.0.1:{port} HOST",
                "浏览器所在的电脑需要隧道：ssh -L {port}:127.0.0.1:{port} HOST"),
@@ -84,6 +89,31 @@ def rows():
     return state
 
 
+def attachment(desk, env):
+    rec = up.read_coordinator(desk)
+    saved, launch = rec.get("tmux") or {}, rec.get("env") or {}
+    server, session = saved.get("server"), saved.get("session")
+    if launch.get("TMUX_TMPDIR"):
+        env["TMUX_TMPDIR"] = launch["TMUX_TMPDIR"]
+    else:
+        env.pop("TMUX_TMPDIR", None)
+    tmux = program("tmux") or program("tmux", env=launch)
+    attach = up.attach_command(tmux or "tmux", server, session, env) if server and session else ""
+    return tmux, server, session, attach
+
+
+def guide(row, lang):
+    if row.get("problem"):
+        return []
+    if row["server"] == "gone":
+        return [words(lang, "start")]
+    if not row["coordinator"]:
+        return [words(lang, "open_session")]
+    attach = attachment(Desk(row["desk"]), dict(os.environ))[3]
+    return ([words(lang, "enter", attach=attach), words(lang, "detach")] if attach
+            else [words(lang, "no_tmux")])
+
+
 def command(row, key, lang):
     """(argv, environment, message): decide without running tmux or changing the desk."""
     desk, env = Desk(row["desk"]), dict(os.environ)
@@ -99,20 +129,11 @@ def command(row, key, lang):
         return base + ["web"], env, note
     if not row["coordinator"]:
         return [], env, words(lang, "session")
-    rec = up.read_coordinator(desk)
-    saved = rec.get("tmux") or {}
-    server, session = saved.get("server"), saved.get("session")
+    tmux, server, session, attach = attachment(desk, env)
     if not server or not session:
         return [], env, words(lang, "no_tmux")
-    launch = rec.get("env") or {}
-    if launch.get("TMUX_TMPDIR"):
-        env["TMUX_TMPDIR"] = launch["TMUX_TMPDIR"]
-    else:
-        env.pop("TMUX_TMPDIR", None)
-    tmux = program("tmux") or program("tmux", env=launch)
     if not tmux:
         return [], env, words(lang, "install_tmux")
-    attach = up.attach_command(tmux, server, session, env)
     if os.environ.get("TMUX"):
         socket = (Path(server[1]) if server[0] == "-S" else
                   Path(env.get("TMUX_TMPDIR", "/tmp")) / f"tmux-{os.getuid()}" / server[1])
@@ -193,14 +214,13 @@ def screen(state, chosen, ticks, lang, width, height):
         table.append(values)
     sizes = [max(cells(cut(r[i], 200)) for r in table) for i in range(7)]
     rendered = ["  ".join(cut(v, 200) + " " * (sizes[i] - cells(cut(v, 200))) for i, v in enumerate(r)) for r in table]
-    room = max(1, height - 6)
+    tail = [state["problem"] or words(lang, "empty")] if state["problem"] or not state["desks"] else []
+    tail += guide(state["desks"][chosen], lang) if state["desks"] else []
+    tail += [words(lang, "keys1"), words(lang, "keys2")]
+    room = max(0, height - 2 - len(tail))
     offset = max(0, chosen - room + 1)
     lines += rendered[:1] + rendered[1 + offset:1 + offset + room]
-    if state["problem"] or not state["desks"]:
-        lines.append(state["problem"] or words(lang, "empty"))
-    if state["desks"] and not any(r.get("server", "gone") != "gone" for r in state["desks"]):
-        lines.append(words(lang, "choose"))
-    lines += [words(lang, "keys1"), words(lang, "keys2")]
+    lines = lines[:max(0, height - len(tail))] + tail
     return "\x1b[H\x1b[2J" + "\r\n".join(cut(line.rstrip(), width) for line in lines[:height])
 
 
@@ -267,6 +287,17 @@ def perform(key, row, targets, terminal, lang):
                         print(target["desk"] + ": " + words(lang, "gone" if target["problem"] == "folder is gone" else "unreadable"))
                     else:
                         up.listed_desk_up(Path(target["desk"]), target["saved"], stream=True)
+                fresh = {r["desk"]: r for r in rows()["desks"]}
+                opened = False
+                for target in targets:
+                    current = fresh.get(target["desk"], {})
+                    opened |= bool(current.get("coordinator"))
+                    attach = (attachment(Desk(target["desk"]), dict(os.environ))[3]
+                              if current.get("coordinator") and not current.get("problem")
+                              and current.get("server", "gone") != "gone" else "")
+                    print(words(lang, "started" if attach else "not_started", desk=target["desk"], attach=attach))
+                if opened:
+                    print(words(lang, "detach"))
             elif row.get("problem"):
                 print(words(lang, "gone" if row["problem"] == "folder is gone" else "unreadable"))
             elif key == "x":
