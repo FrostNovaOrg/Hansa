@@ -2802,13 +2802,19 @@ class Desk:
         return added, there, refused, lane_warnings(s) if added else []
 
     def keys_in_release(self, old: dict, new: dict) -> list:
-        """A new or changed release command that holds a key the desk knows: refused, as the command is stored and
-        shown as written (in the settings, on the page, in hansa release)."""
+        """A new or changed release command or description holding a known key is refused: stored and shown as written."""
         lanes, before = new.get("lanes"), old.get("lanes") or {}
         out = []
         for name, ln in (lanes.items() if isinstance(lanes, dict) else []):
             was = lane_targets(before.get(name))
             for target, t in lane_targets(ln).items():
+                about = t.get("about")
+                if isinstance(about, str) and about != (was.get(target) or {}).get("about"):
+                    found = self.keys_in(about)
+                    if found:
+                        out.append(f"lanes.{name}: the description of target {target} holds the key of "
+                                   f"{', '.join(found)}, and a description is stored and shown as written; "
+                                   "remove the key from the description")
                 cmd = t.get("command")
                 if not isinstance(cmd, str) or cmd == (was.get(target) or {}).get("command"):
                     continue

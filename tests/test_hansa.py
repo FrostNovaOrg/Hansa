@@ -36403,6 +36403,23 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         for words in ("--about", "120 characters", "keeps the principal's tick", "none"):
             self.assertIn(words, help_text)
 
+    def test_target_about_holding_a_key_is_refused_without_changes(self):
+        key = "sk-demo-release-123456"
+        self.desk.write_key("demo", key)
+        self.with_targets(test="true", described="true")
+        self.hansa("lane", "target", "a", "described", "--about", "install on the test server")
+        self.tick_targets("test", "described")
+        before, events = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        for target, command in (("new", ["true"]), ("test", []), ("described", ["false"])):
+            with self.subTest(target=target):
+                said = self.refused("lane", "target", "a", target, *command,
+                                    "--minutes", "19", "--about", f"install using {key}")
+                self.assertIn(f"description of target {target} holds the key of demo", said)
+                self.assertIn("a description is stored and shown as written", said)
+                self.assertNotIn(key, said)
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+                self.assertEqual(self.desk.events_path.read_bytes(), events)
+
     def test_target_about_refuses_long_or_multiline_text_without_changes(self):
         self.with_targets(test="true")
         self.tick_targets("test")
@@ -36450,10 +36467,16 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                               rows["removed"]["text"])
                 for words in (("Asking you before a release", "Targets that go out without asking you",
                                "Ticked: a release can run without asking you", "Unticked: each one waits for your yes",
-                               "Each target is ticked on its own", "the way it runs (fixed) changes",
+                               "Each target is ticked on its own. A tick stops counting once the lane's repository "
+                               "or base branch, the target's command or an outside file it names, the target it must "
+                               "follow or the way it runs (fixed) changes: a release asked for by hand then waits "
+                               "for your yes, and one that runs by itself after merges waits until you tick it again.",
                                "Rules the lane's workers and verifiers may use directly") if language == "en" else
                               ("发布前要不要问你", "不用问你就发布的目标", "勾上：提出发布后可以不用问你就执行", "不勾：每次等你点头",
-                               "每个目标单独勾", "它的运行方式（fixed）", "这条线的执行层和核验可以直接用的规则")):
+                               "每个目标单独勾。工作线的仓库或基础分支、目标的命令或它用到的仓库外文件、"
+                               "它要跟在哪个目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效："
+                               "手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
+                               "这条线的执行层和核验可以直接用的规则")):
                     self.assertIn(words, page["settings"])
                 self.assertIn("not asked: this target is ticked in Settings" if language == "en" else
                               "没有问你：设置里勾了这个目标", page["status"])

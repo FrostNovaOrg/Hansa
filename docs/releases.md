@@ -21,6 +21,9 @@ Other unnamed ticks match nothing, even if `default` has the same command.
 in plain words: one line of up to 120 characters; a longer description or a line
 break is refused without changing anything. `--about none` removes it.
 `--about` alone changes only the description, and is recorded like other target changes.
+A new or changed description holding a key the desk knows is refused to prevent
+storing and showing the key as written; this check is needed while descriptions
+are stored and shown as written.
 Settings shows each tick with the target's name, then its lane, its description
 if present, and always its command on a separate line. The command is cut at the
 row's width; hovering shows it whole.
