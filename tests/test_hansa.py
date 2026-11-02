@@ -23930,6 +23930,94 @@ def save():'''))
             {"event": "task_finished", "task": tid, "state": "checking"},
             {"event": "task_checked", "task": tid}], {"key": "test", "session": None})
 
+    def queue_time_review_alert(self, automatic):
+        from hansa import alert
+        self.assertEqual(self.page_save(lambda s: s["coordinator_alert"].update(
+            no_session_min=0, window_min=0, review_min=1)), {"ok": True, "problems": []})
+        for verdict in ("holds", "holds, with notes", "does not hold", "unsure"):
+            with self.subTest(automatic=automatic, verdict=verdict):
+                if automatic:
+                    _, tid = self.queue_time_gap(check="")
+                else:
+                    _, tid = self.verify_lane_task()
+                sess = {"pid": 4242, "start": "review-session"}
+                me = {"key": notify.key_of(sess), "session": sess, "uid": os.getuid()}
+                watch, pos, at = notify.Watch(sess["pid"]), 0, time.time()
+                minutes = {"window": 0, "review": 1}
+
+                def feed():
+                    nonlocal pos
+                    r = notify.handle(self.desk, {"op": "feed", "me": me, "pos": pos,
+                                                 "review": list(watch.reviews)})
+                    pos = r["pos"]
+                    watch.still(r["review"])
+                    items = [x for x in r["items"] if x["key"][0] == "task"
+                             and x["key"][1] in (tid, self.desk.meta(tid).get("verify"))]
+                    if items:
+                        watch.posted(at, [x["line"] for x in items], [x["review"] for x in items if x.get("review")])
+                    return items
+
+                def review(expected):
+                    self.assertEqual(notify.waits_review(self.desk, tid), expected)
+                    self.assertEqual(list(watch.reviews), [tid] if expected else [])
+                    # Each phase may be the first time the session is found idle.
+                    probe = notify.Watch(sess["pid"], watch.state())
+                    cases = probe.saw(at + 120, "idle", 0, 1)
+                    self.assertEqual([(case, fields["task"]) for case, fields in cases],
+                                     [("review", tid)] if expected else [])
+                    notify._write_record(self.desk, me["key"],
+                                         {**me, "seen": time.time(), "coordinator": probe.holds(at + 120, minutes)})
+                    lines = alert.coordinator_lines(self.desk, self.desk.settings(), at + 120)
+                    self.assertEqual(len(lines), int(expected))
+                    if expected:
+                        self.assertIn("waiting for review", lines[0])
+                        self.assertIn(tid, lines[0])
+
+                feed()
+                review(not automatic)  # a queue-time verification is due, but not queued yet
+                if automatic:
+                    self.desk.pause("hold verification starts")
+                    Dispatcher(self.desk).tick()
+                else:
+                    self.hansa("verify", tid)
+                vid = self.desk.meta(tid)["verify"]
+                feed()
+                review(not automatic)  # queued
+                self.desk.update(vid, state="running")
+                feed()
+                review(not automatic)
+                self.desk.update(vid, state="done", verdict=verdict)
+                self.desk.event("task_finished", task=vid, state="done")
+                [item] = feed()
+                self.assertEqual(item["key"], ["task", vid])
+                self.assertEqual(item.get("review"), tid if automatic else None)
+                review(True)
+            if automatic:
+                self.desk.resume()
+
+    def test_queue_time_verification_manual_review_alert_survives_verification(self):
+        self.queue_time_review_alert(automatic=False)
+
+    def test_queue_time_verification_requested_review_alert_starts_with_each_verdict(self):
+        self.queue_time_review_alert(automatic=True)
+
+    def test_queue_time_verification_add_reads_stdin_before_locking_the_desk(self):
+        def read():
+            # A slow pipe can block here; another command or server must be able to take the lock.
+            with open(self.desk.state_dir / "lock", "a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(held, fcntl.LOCK_UN)
+            return "Add hello.txt from standard input\n"
+
+        with unittest.mock.patch("sys.stdin", io.StringIO()) as stdin:
+            with unittest.mock.patch.object(stdin, "read", side_effect=read):
+                out = self.hansa("add", "--file", "-", "--lane", "a", "--verify")
+        self.assertIn("verification will follow", out)
+        [m] = self.desk.tasks()
+        self.assertIn("verify_after", m)
+        self.assertEqual((self.desk.tasks_dir / m["id"] / "task.md").read_text(),
+                         "Add hello.txt from standard input\n")
+
     def test_queue_time_verification_passes_and_posts_only_its_verdict_to_the_tasks_session(self):
         self.add_verify_lane()
         self.hansa("lane", "set", "v1", "env", "FAKE_VERDICT=holds")
@@ -24051,11 +24139,18 @@ def save():'''))
         self.hansa("lane", "add", "b", "--repo", str(other))
         self.hansa("add", "Add hello.txt", "--verify-lane", "b")
         tid = self.desk.tasks()[-1]["id"]
+        self.assertEqual(self.desk.meta(tid)["lane"], "")
+        self.assertNotIn("verify_after_error", self.desk.meta(tid))
         d = Dispatcher(self.desk)
         m = self.settle(d, tid)
         self.assertEqual((m["lane"], m["state"]), ("a", "done"))
         self.assertIn("cannot reach", m["verify_after_error"])
         self.assertNotIn("verify", m)
+        [item] = notify.items_for(self.desk, notify.read_log(self.desk, 0)[0], {"key": "test", "session": None})
+        self.assertEqual(item["key"], ["task", tid])
+        self.assertIn("verification could not be queued", item["line"])
+        self.assertIn("cannot reach", item["line"])
+        self.assertEqual(item["review"], tid)
         with self.assertRaises(SystemExit):
             self.hansa("add", "unassigned", "--verify-lane", "missing")
 
@@ -24243,13 +24338,13 @@ def save():'''))
         _, tid = self.queue_time_gap()
         self.desk.pause("hold starts")
         pos = 0
-        for phase in ("pending", "queued", "verdict"):
+        for phase in ("pending", "queued", "holds", "holds, with notes", "does not hold", "unsure"):
             with self.subTest(phase=phase):
                 if phase == "queued":
                     Dispatcher(self.desk).tick()
-                elif phase == "verdict":
+                elif phase not in ("pending", "queued"):
                     vid = self.desk.meta(tid)["verify"]
-                    self.desk.update(vid, state="done", verdict="holds")
+                    self.desk.update(vid, state="done", verdict=phase)
                     self.desk.event("task_finished", task=vid, state="done")
                 old = {"key": "4242-0123abcd", "uid": 123, "session": None, "pos": pos,
                        "ended": now(), "seen": now()}
@@ -24258,11 +24353,14 @@ def save():'''))
                 live = notify.handle(self.desk, {"op": "feed", "me": me, "pos": pos})
                 summary = notify.handle(self.desk, {"op": "start", "me": me})
                 task_lines = [x["line"] for x in live["items"] if x["key"][0] == "task"]
-                if phase == "verdict":
+                if phase not in ("pending", "queued"):
                     self.assertEqual(len(task_lines), 1)
-                    self.assertIn("verdict: holds", task_lines[0])
+                    self.assertIn(f"verdict: {phase}", task_lines[0])
+                    self.assertEqual(summary["summary_review"], [tid])
+                    self.assertEqual([x["review"] for x in live["items"] if x["key"][0] == "task"], [tid])
                 else:
                     self.assertEqual(task_lines, [])
+                    self.assertEqual(summary["summary_review"], [])
                 self.assertEqual([x for x in summary["summary"] if "verdict:" in x], task_lines)
 
     def verify_lane_task(self):

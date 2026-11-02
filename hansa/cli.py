@@ -434,15 +434,15 @@ def _title_allowed(desk: Desk, s: dict, title: str | None, text: str, lane: str)
 
 def cmd_add(a):
     desk = Desk.find(a.desk)
+    text = _text(a)
     with desk.lock():
-        _add(desk, a)
+        _add(desk, a, text)
 
 
-def _add(desk: Desk, a) -> None:
+def _add(desk: Desk, a, text: str) -> None:
     s = desk.settings()
     _work_lane(s, a.lane)
     verification = _verify_request(desk, a, {"id": "the task", "lane": a.lane or ""})
-    text = _text(a)
     _title_allowed(desk, s, a.title, text, a.lane)
     tid = desk.new_task(text, lane=a.lane or "", effort=a.effort or "", model=a.model or "",
                         title=a.title or "", max_turns=a.max_turns or 0, attach=a.attach,

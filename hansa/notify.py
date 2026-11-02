@@ -396,14 +396,30 @@ def items_for(desk: Desk, events: list, me: dict) -> list:
             continue  # it cancelled the task itself
         if not (desk_wide or not sess or same(sess, me.get("session")) or not any(same(sess, o) for o in others)):
             continue  # its own session hears it
+        review = _review_task(desk, key)
         out.pop(key, None)  # the latest line of a task comes last
         out[key] = {"key": list(key), "line": desk.redact(line),  # review: the task waits for review (Watch)
-                    **({"review": key[1]} if key[0] in ("task", "merge") and waits_review(desk, key[1]) else {})}
+                    **({"review": review} if review else {})}
     return list(out.values())
 
 
+def _review_task(desk: Desk, key: tuple):
+    """A completion's review task: queue-time verifications post on behalf of their parent."""
+    if key[0] not in ("task", "merge"):
+        return None
+    try:
+        m = desk.meta(key[1])
+        if m.get("kind") == "verify":
+            m = desk.meta(m.get("parent") or "")
+            if not m.get("verify_after"):
+                return None
+    except SystemExit:
+        return None
+    return m["id"] if waits_review(desk, m["id"]) else None
+
+
 def waits_review(desk: Desk, tid) -> bool:
-    """Whether finished work needs review now, after any pending or running verification."""
+    """Whether finished work needs review now; queue-time requests wait for their verification."""
     if not isinstance(tid, str) or not TASK_ID.match(tid):
         return False
     try:
@@ -414,7 +430,7 @@ def waits_review(desk: Desk, tid) -> bool:
     from .views import verification
     v = verification(desk, m)
     return (m.get("state") == "done" and m.get("kind") != "verify" and not verification_due(m)
-            and not (v and v["state"] in ("queued", "running")))
+            and not (m.get("verify_after") and v and v["state"] in ("queued", "running")))
 
 
 def _srt_ran(desk: Desk):
@@ -478,7 +494,7 @@ def handle(desk: Desk, req: dict) -> dict:
         if prev and prev.get("caught_up"):  # a follower after it already said what it missed
             prev = None
         srv = _server(desk)  # what this follower is told of hansa serve
-        summary = []
+        summary, review = [], set()
         if prev and int(prev.get("pos") or 0) < end:  # it ended before reading to the end: what was missed
             events, _ = read_log(desk, int(prev.get("pos") or 0), end - int(prev.get("pos") or 0))
             seen = set()
@@ -493,16 +509,17 @@ def handle(desk: Desk, req: dict) -> dict:
                     summary.append(desk.redact(task_line(desk, desk.meta(k[1]))) if k[0] == "task" else x["line"])
                 except SystemExit:  # a task folder gone meanwhile
                     continue
+                if x.get("review"):
+                    review.add(x["review"])
         if prev and not summary:  # nothing to tell: whoever starts next need not tell it either
             _write_record(desk, prev["key"], {**prev, "caught_up": now()})
         _write_record(desk, key, {**me, "pos": end, "since": me.get("since") or now(), "seen": now(), "ended": None})
-        missed, review = None, []
+        missed = None
         if summary:
             ps = prev.get("session") or {}
             missed = {"key": prev["key"], "pid": ps.get("pid"), "name": prev.get("name") or "",
                       "at": prev.get("ended") or prev.get("seen"), "session_ended": _proc_gone(ps)}
-            review = [k[1] for k in seen if k[0] == "task" and waits_review(desk, k[1])]
-        return {"pos": end, "summary": summary, "missed": missed, "summary_review": review, **srv}
+        return {"pos": end, "summary": summary, "missed": missed, "summary_review": sorted(review), **srv}
     if op == "caught_up":  # the follower posted what an ended one missed: nobody is to post it again
         k = str(req.get("of", ""))
         r = read_json(register_dir(desk) / f"{k}.json", {}) if KEY.match(k) else {}
