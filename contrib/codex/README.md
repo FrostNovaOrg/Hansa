@@ -136,7 +136,9 @@ What it cannot close:
 - A task stopped at a ceiling has only Codex's last message.
 - **None of hansa's tool rules** (`--allowedTools`, `--disallowedTools`, Read denials) and no browser
   (`--mcp-config` is ignored): srt's file and network rules are the boundary. `permission_denials` is always empty.
-- **Cost is 0**; the tokens are counted from `turn.completed`. A failed run's usage is unknown and shown as zero.
+- **hansa shows these runs' cost as 0 because it has no price for them**, until the principal adds the model to the
+  price table. The tokens are still counted, from `turn.completed`, and the provider's own charges are not known to
+  hansa. A failed run's usage is unknown and shown as zero.
 - The watchdog looks every half second; a process that leaves and loses its parent between two looks can escape.
   Codex's unlimited reconnect is kept: it waits for the network in place, and hansa's time ceiling still holds.
 

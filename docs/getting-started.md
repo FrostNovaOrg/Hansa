@@ -13,7 +13,7 @@ the desk and on the `PATH` used to start `hansa serve`:
 | Tool | Version |
 |---|---|
 | Python | 3.9 or newer; standard library only, nothing to build |
-| Git | Required; no minimum declared. Git 2.32+ preserves global configuration when hiding Linux sandbox placeholders ([details](linux-server.md#what-a-lanes-commands-meet-in-linuxs-sandbox)). |
+| Git | Required; no minimum enforced. On Linux, Git 2.32+ recommended: preserves global configuration when hiding sandbox placeholders ([details](linux-server.md#what-a-lanes-commands-meet-in-linuxs-sandbox)). |
 | [Claude Code](https://code.claude.com/docs/en/overview) | 2.1.290+ for the coordinator plugin; CI uses 2.1.307 |
 | Node | 22.12.0+ for srt; CI uses 24.22.0 |
 | srt (`@anthropic-ai/sandbox-runtime`) | 0.0.79 |
