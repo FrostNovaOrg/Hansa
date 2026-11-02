@@ -110,6 +110,7 @@ Hansa 运行的是你自己安装的 Claude Code，登录用的是你自己的�
 | [`hansa/card.md`](hansa/card.md) | 协调席每一轮都需要知道的内容：工作怎么流转、每条命令、它可以改什么；其余内容由 `hansa help <topic>` 从 `docs/` 打印。`hansa help card` 打印这份文件，每个工作台都存有一份副本，名为 `CLAUDE.md`。 |
 | [概念](docs/concepts.md) | 关键术语、工作台的文件、macOS 和 Linux、限制、命令、升级 |
 | [上手指南](docs/getting-started.md) | 安装、登录、创建工作台、通过 SSH 打开它的页面，并完成第一个任务 |
+| [SETUP.md](SETUP.md) | 写给智能体的说明，让它陪你装好 Hansa：对你的 Claude Code 说“读 SETUP.md，和我一起装好 Hansa” |
 | [工作台怎么运转](docs/principles.md) | hansa 遵循的规则、靠什么执行、各自防范什么 |
 | [谁改什么](docs/who-changes-what.md) | 你在页面上设置的内容和协调席用 `hansa` 设置的内容：工作线、提交信息和身份、对协调席始终关闭的部分 |
 | [工作者与沙箱](docs/sandbox.md) | 工作者和核对任务能碰什么；git 的文件夹；沙箱试跑；写入清单和环境变量；允许清单及其网页工具；hansa 拒绝的路径；一次运行结束时 hansa 会停掉什么 |
