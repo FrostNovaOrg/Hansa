@@ -3795,6 +3795,125 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertIn("hansa notify on in it", line)
 
 
+class LauncherTest(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.tmp = Path(folder.name).resolve()
+        code = Path(__file__).resolve().parent.parent
+        self.install = self.tmp / "installation with spaces"
+        shutil.copytree(code / "hansa", self.install / "hansa", ignore=shutil.ignore_patterns("__pycache__"))
+        (self.install / "hansa/BUILD").write_text("launcher-test\n")
+        (self.install / "bin").mkdir()
+        self.launcher = self.install / "bin/hansa"
+        shutil.copy2(code / "bin/hansa", self.launcher)
+        self.tools = self.tmp / "tools"
+        self.tools.mkdir()
+        (self.tools / "python3").symlink_to(sys.executable)
+        self.env = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.defpath, "PYTHONPATH": ""}
+        self.env.pop("HANSA_BUILD", None)
+        self.cwd = self.tmp / "unrelated folder"
+        (self.cwd / "hansa").mkdir(parents=True)
+        (self.cwd / "hansa/__init__.py").write_text("")
+        (self.cwd / "hansa/__main__.py").write_text("raise RuntimeError('wrong checkout')\n")
+
+    def launch(self, command, *, cwd=None, env=None):
+        return subprocess.run([str(x) for x in command], cwd=cwd or self.cwd, env=env or self.env,
+                              capture_output=True, text=True, timeout=30)
+
+    def assert_version(self, result, build="launcher-test"):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(result.stdout.startswith(f"hansa {hansa.__version__} {build}, installed "), result.stdout)
+
+    def source_launcher(self, path):
+        # The kernel cannot execute a loop (and some systems refuse even 40 links). Source the real
+        # launcher in sh with the linked path as $0, so its own limit and diagnostic are exercised.
+        return self.launch(["/bin/sh", "-c", 'script=$1; shift; . "$script"',
+                            path, self.launcher, "--version"])
+
+    def test_real_path_and_bin_on_path(self):
+        self.assert_version(self.launch([self.launcher, "--version"]))
+        env = {**self.env, "PATH": str(self.install / "bin") + os.pathsep + self.env["PATH"]}
+        self.assert_version(self.launch(["hansa", "--version"], env=env))
+
+    def test_absolute_link_from_different_folders(self):
+        link = self.tools / "hansa"
+        link.symlink_to(self.launcher)
+        for cwd in (self.tmp, self.cwd):
+            with self.subTest(cwd=cwd):
+                self.assert_version(self.launch([link, "--version"], cwd=cwd))
+        self.assert_version(self.launch(["hansa", "--version"]))
+
+    def test_relative_link_uses_its_own_folder(self):
+        link = self.tools / "hansa"
+        link.symlink_to(os.path.relpath(self.launcher, link.parent))
+        self.assert_version(self.launch([link, "--version"]))
+
+    def test_chain_of_two_links(self):
+        middle = self.tmp / "links" / "middle"
+        middle.parent.mkdir()
+        middle.symlink_to(os.path.relpath(self.launcher, middle.parent))
+        link = self.tools / "hansa"
+        link.symlink_to(middle)
+        self.assert_version(self.launch([link, "--version"]))
+
+    def test_file_link_keeps_current_directory_link_for_future_starts(self):
+        current = self.tmp / "current"
+        current.symlink_to(self.install, target_is_directory=True)
+        link = self.tools / "hansa"
+        link.symlink_to(current / "bin/hansa")
+        probe = self.tmp / "probe"
+        probe.mkdir()
+        (probe / "sitecustomize.py").write_text(
+            "import atexit\n"
+            "def report():\n"
+            "    from hansa.up import hansa_command\n"
+            "    print(hansa_command())\n"
+            "atexit.register(report)\n")
+        env = {**self.env, "PYTHONPATH": str(probe)}
+        for start in (current / "bin/hansa", link):
+            with self.subTest(start=start):
+                result = self.launch([start, "--version"], env=env)
+                self.assert_version(result)
+                recorded = result.stdout.splitlines()[-1]
+                self.assertEqual(recorded, str(current / "bin/hansa"))
+        updated = self.tmp / "updated installation"
+        shutil.copytree(self.install, updated)
+        (updated / "hansa/BUILD").write_text("updated-launcher-test\n")
+        current.unlink()
+        current.symlink_to(updated, target_is_directory=True)
+        self.assert_version(self.launch([recorded, "--version"]), "updated-launcher-test")
+
+    def test_link_limit_allows_40_and_rejects_41(self):
+        target = self.launcher
+        for i in range(41):
+            link = self.tmp / f"link-{i}"
+            link.symlink_to(target)
+            target = link
+            if i == 39:
+                self.assert_version(self.source_launcher(link))
+        result = self.source_launcher(target)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+        self.assertIn("40", result.stderr)
+
+    def test_link_loops_report_one_line_and_exit_1(self):
+        for chain in (False, True):
+            with self.subTest(chain=chain):
+                link = self.tmp / f"loop-{chain}"
+                other = self.tmp / "other"
+                link.symlink_to(other.name if chain else link.name)
+                if chain:
+                    other.symlink_to(link.name)
+                result = self.source_launcher(link)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                self.assertIn("loop", result.stderr.lower())
+
+
 class DeskTest(unittest.TestCase):
     def setUp(self):
         started = time.time()

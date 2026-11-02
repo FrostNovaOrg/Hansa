@@ -51,10 +51,13 @@ export PATH="$HOME/hansa/bin:$PATH"
 hansa --version
 ```
 
-Add that export to your shell profile too. Put hansa's real `bin` folder on
-`PATH`. A symbolic link to `bin/hansa` in another folder fails with
-`No module named hansa`: the launcher locates the code relative to the path
-used to start it. Remove that launcher link from use and use the real `bin` path.
+Add that export to your shell profile too. Either put hansa's `bin` folder on
+`PATH`, as above, or put a symbolic link to `bin/hansa` in a folder already on
+`PATH`, for example `ln -s ~/hansa/bin/hansa /opt/homebrew/bin/hansa`.
+Absolute and relative links, including chains, work even when the installation
+path contains spaces. The launcher follows only file links, keeping directory
+links such as `current/bin/hansa` so switching `current` changes future starts.
+It stops after 40 file links and reports a loop or an overly long chain.
 
 ## Log in (the principal's step)
 
@@ -176,7 +179,7 @@ This works for a Mac mini or Linux server without exposing the page publicly.
 | What you see | Why | Fix |
 |---|---|---|
 | Older Bellhop files | Cloned `main` | Use the `alpha` clone above. |
-| `No module named hansa` | Launcher symlink, or unreadable checkout | Use the real `bin` on PATH; ensure the desk account can read the checkout. |
+| `No module named hansa` | Unreadable checkout | Ensure the desk account can read the checkout; either its `bin` on PATH or a launcher symlink works. |
 | Init refuses the repository | No commit | Make its first commit, then retry. |
 | Server runs, no coordinator | tmux absent | Install tmux and rerun `hansa up`, or run `hansa coordinator`. |
 | Coordinator cannot run allowed commands | Folder not trusted | Answer Claude Code's folder-trust question yes. |
