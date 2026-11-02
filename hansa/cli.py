@@ -95,7 +95,7 @@ TOPICS = {
 COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
                   ("watching", ("status", "desks", "wait", "notify", "ask", "explain", "notes", "gaps", "cost")),
                   ("lanes and releases", ("lane", "release", "changelog", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
-                  ("the desk", ("init", "up", "serve", "web", "coordinator", "ping", "help")))
+                  ("the desk", ("init", "menu", "up", "serve", "web", "coordinator", "ping", "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
 # Claude Code's own general-purpose helpers run on the coordinator's model and effort with no
@@ -1512,7 +1512,12 @@ def cmd_serve(a):
 
 def cmd_up(a):
     desk = Desk.find(a.desk, optional=True)
+    if getattr(a, "all", False) and desk is not None:
+        raise SystemExit("hansa: up --all is for outside a desk, without --desk or HANSA_DESK")
     if desk is None:
+        from . import menu
+        if not getattr(a, "all", False) and menu.available():
+            return cmd_menu(a)
         ok = up.all_desks_up()
     else:
         if not (desk.settings_path.is_file() and desk.tasks_dir.is_dir()):
@@ -1520,6 +1525,15 @@ def cmd_up(a):
         ok = up.desk_up(desk)
     if not ok:
         raise SystemExit(1)
+
+
+def cmd_menu(a):
+    from . import menu
+    if os.environ.get("HANSA_ROLE") or os.environ.get("HANSA_TASK") or session_vars():
+        raise SystemExit("hansa: the menu is for the principal; open it in a terminal outside an agent's session")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise SystemExit("hansa: menu needs a terminal on stdin and stdout; use hansa desks or hansa up")
+    menu.run(getattr(a, "lang", None))
 
 
 def web_port(desk: Desk) -> int:
@@ -3351,8 +3365,11 @@ def main(argv=None):
     p.description += (". It runs the claude program the recorded hansa serve start used, not necessarily this "
                       "shell's, and says so when they differ.")
     p.add_argument("provider", nargs="?")
+    p = add("menu", cmd_menu, "the principal's screen: choose, start and enter this account's desks")
+    p.add_argument("--lang", choices=("zh", "en"), help="screen language (default: the shell's locale)")
     p = add("up", cmd_up, "start this desk's server and the coordinator's session again as they last ran; outside "
-            "a desk, start this account's desks")
+            "a desk in a terminal, open the principal's menu")
+    p.add_argument("--all", action="store_true", help="outside a desk: start every listed desk without the menu")
     p.epilog = see_more("bringing-up")
     p = add("serve", cmd_serve, "run the dispatcher and the web page in the foreground (what hansa up starts)")
     p.add_argument("--host", default=up.DEFAULTS["host"])
@@ -3415,6 +3432,9 @@ def main(argv=None):
         sub.choices["coordinator"].print_help()
         return 0
     if not getattr(a, "fn", None):
+        from . import menu
+        if a.cmd is None and menu.available():
+            return cmd_menu(a)
         ap.print_help()
         return 0
     if a.cmd == "add" and not a.text and not a.file:
@@ -3423,9 +3443,9 @@ def main(argv=None):
         ap.error("ask needs what the principal must do" if a.close is None else
                  "ask --close needs the outcome: hansa ask --close N \"<outcome>\"")
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
-    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks"):
+    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks", "menu"):
         _as_desk_account(a, argv)
-    if a.cmd not in ("init", "desks") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
+    if a.cmd not in ("init", "desks", "menu") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
         try:
             cost.note_session(Desk.find(a.desk))
         except SystemExit:  # no desk: the command says so itself

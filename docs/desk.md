@@ -596,6 +596,48 @@ editing before that reply arrives, the reply leaves their new draft alone.
 
 ## Starting the server and the coordinator again
 
+In a terminal, `hansa` alone or `hansa menu` opens the principal's list of all
+this account's desks, even from inside a desk or with `--desk` or `HANSA_DESK`.
+Nothing starts when it opens. Each row shows the last two folders of the path,
+server state (running, busy, stuck, stopped), whether the coordinator's session
+is open, whether dispatch is paused, running tasks and tasks awaiting review,
+and releases and to-dos waiting for you. It refreshes every five seconds.
+
+| Key | Action |
+|---|---|
+| Up / Down | Choose a desk |
+| Space / `a` | Tick this desk / tick all (or untick all) |
+| `s` | Start the ticked desks, or the chosen desk if none are ticked; clear ticks afterwards |
+| Enter | Enter its recorded tmux session; Ctrl+B then D returns to the menu |
+| `w` | Run its own `hansa --desk DIR web`; Ctrl+C returns |
+| `x` | Ask for `y`, then stop its server with TERM; its coordinator stays open |
+| `p` | Run its own `pause "hansa menu"`, or `resume` when paused |
+| `r` | Refresh now |
+| `q` / Ctrl+C | Leave; running work stays running |
+
+`s` starts what is stopped, server then coordinator, through each chosen desk's
+saved hansa installation; desks not chosen are left alone. `s` and `p` show the
+command's output as it comes and wait for a key before returning. Ctrl+C while
+a command runs ends that command and returns. Drawing the list runs no tmux
+command and writes nothing in a desk. Enter uses `switch-client` inside the
+same tmux server; for another server it asks you to detach first and gives the
+attach command. An attached session can still be entered from elsewhere.
+
+`x` refuses while tasks, verifications, merge checks, releases or lane tries
+run, and lists their kinds and counts. Use `p` to keep new work from starting,
+then stop once that work ends. After TERM it waits up to 30 seconds, reports
+whether the server stopped, and never sends KILL. A missing desk folder is
+shown and skipped. An empty list explains `hansa init`; a broken list shows
+the same problem as `hansa desks`.
+
+Use `hansa menu --lang zh` or `--lang en` to choose Chinese or English.
+Otherwise the first set of `LC_ALL`, `LC_MESSAGES`, `LANG` chooses Chinese if
+it starts with `zh`, English otherwise. The screen uses UTF-8. `hansa menu`
+requires a terminal on stdin and stdout and refuses agents and Claude Code
+sessions; `hansa` alone prints usage in those conditions. Over SSH, `w` first
+shows the tunnel command needed on the computer with the browser, using this
+desk's page port, then lets the desk's own `web` print its address and key.
+
 For first startup and the alternative without tmux, follow
 [Getting started](getting-started.md#create-and-start-the-desk). This section
 describes saved starts, port selection and restoring sessions.
@@ -674,9 +716,12 @@ A list that is there but cannot be used (empty, not JSON, not a JSON list, a
 link that leads nowhere, unreadable) is left as it is, with the reason on
 stderr: rewriting it would drop the other desks, whose runs wait until the
 list is fixed. A missing list is made.
-Outside any desk, with no `--desk` or `HANSA_DESK`,
-`hansa up` visits every listed folder that is still a desk, printing a block
-for each. Each is started by its own installation with
+Outside any desk, with no `--desk` or `HANSA_DESK`, `hansa up` opens this menu
+when stdin and stdout are terminals. `hansa up --all` instead visits every
+listed folder that is still a desk, printing a block for each. Without those
+terminals, or with `HANSA_ROLE`, `HANSA_TASK` or Claude Code session variables
+set, `hansa up` still starts every listed desk. `--all` is refused inside a
+desk or when `--desk` or `HANSA_DESK` names one. Each is started by its own installation with
 `<saved hansa> --desk <folder> up`. If that installation is missing or too old
 to have `up`, nothing starts there and hansa prints the last server command
 instead. A new desk gets on the list when its server starts once. Each desk's

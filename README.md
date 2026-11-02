@@ -98,6 +98,7 @@ principal's (`init`, `serve`, `web`, `coordinator`, `ping`) among them, and `han
 
 | Command | What it does |
 |---|---|
+| `hansa`, `hansa menu` | The principal's terminal menu: choose, start, stop and enter this account's desks |
 | `hansa status` | Whether `hansa serve` runs, the page's address, the lanes, what runs, waits or failed, the providers, the last 24 hours |
 | `hansa add "<task>" [--lane L]` | Queue a task |
 | `hansa show ID`, `hansa diff ID` | A task's report, its check, the files it changed, what to do next; its changes against the base |
