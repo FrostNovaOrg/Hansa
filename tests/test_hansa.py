@@ -40224,6 +40224,8 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertIn("Ran 3 tests", r.stdout)
 
 
+from tests.test_menu import MenuTest  # noqa: E402 - included in the lane's existing test entry point
+
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 
 

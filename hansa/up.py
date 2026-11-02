@@ -892,34 +892,41 @@ def desk_up(desk: Desk) -> bool:
     return coordinator_up(desk) and ok
 
 
+def listed_desk_up(root, rec: dict, *, stream: bool = False) -> bool:
+    """One listed desk, by its own installation. The principal's menu streams its output untouched."""
+    print(f"Desk {root}:", flush=True)
+    desk = Desk(root)
+    last = read_json(desk.state_dir / "serve-start.json", {}) or {}
+    last["hansa"] = rec.get("hansa", "")
+    command = rec.get("hansa") or ""
+    try:
+        supported = bool(command and os.path.isfile(command) and os.access(command, os.X_OK))
+        if supported:
+            supported = subprocess.run([command, "up", "--help"], capture_output=True,
+                                       text=True, timeout=15).returncode == 0
+        if not supported:
+            print("Its hansa is missing or too old for up; nothing started.")
+            print("Last server command: " + shlex.join(serve_command(desk, last)))
+            return False
+        r = subprocess.run([command, "--desk", str(root), "up"], capture_output=not stream,
+                           text=True, timeout=None if stream else 30)
+        if not stream:
+            print(desk.redact((r.stdout + r.stderr).rstrip()))
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError) as e:
+        detail = f"Could not run its hansa: {e}"
+        print(detail if stream else desk.redact(detail))
+        print("Last server command: " + shlex.join(serve_command(desk, last)))
+        return False
+
+
 def all_desks_up() -> bool:
     found, ok = False, True
     for root, rec in listed_desks():
         if found:
             print()
         found = True
-        print(f"Desk {root}:", flush=True)
-        desk = Desk(root)
-        last = read_json(desk.state_dir / "serve-start.json", {}) or {}
-        last["hansa"] = rec.get("hansa", "")
-        command = rec.get("hansa") or ""
-        try:
-            supported = bool(command and os.path.isfile(command) and os.access(command, os.X_OK))
-            if supported:
-                supported = subprocess.run([command, "up", "--help"], capture_output=True,
-                                           text=True, timeout=15).returncode == 0
-            if not supported:
-                print("Its hansa is missing or too old for up; nothing started.")
-                print("Last server command: " + shlex.join(serve_command(desk, last)))
-                ok = False
-                continue
-            r = subprocess.run([command, "--desk", str(root), "up"], capture_output=True, text=True, timeout=30)
-            print(desk.redact((r.stdout + r.stderr).rstrip()))
-            ok = ok and r.returncode == 0
-        except (OSError, subprocess.SubprocessError) as e:
-            print(desk.redact(f"Could not run its hansa: {e}"))
-            print("Last server command: " + shlex.join(serve_command(desk, last)))
-            ok = False
+        ok = listed_desk_up(root, rec) and ok
     if not found and desks_list_problem():
         print(desks_list_problem())
         return False
