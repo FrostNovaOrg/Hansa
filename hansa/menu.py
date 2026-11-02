@@ -31,8 +31,9 @@ def language(lang=None):
 WORDS = {
     "headers": ("Tick|Desk|Server|Coordinator|Paused|Work|For you", "勾选|工作台|后台|协调席|已暂停|任务|等主理人答复"),
     "title": ("hansa · choose a desk · refreshes every 5 seconds", "hansa · 选择工作台 · 每 5 秒刷新"),
-    "keys": ("↑↓ choose  Space tick  a all  s start  Enter enter  w page  x stop  p pause/resume  r refresh  q quit",
-             "↑↓ 选择  空格 勾选  a 全选  s 启动  回车 进入  w 页面  x 停止  p 暂停/恢复派活  r 刷新  q 退出"),
+    "keys1": ("↑↓ choose  Space tick  a all  s start  Enter enter  w page",
+              "↑↓ 选择  空格 勾选  a 全选  s 启动  回车 进入  w 页面"),
+    "keys2": ("x stop  p pause/resume  r refresh  q quit", "x 停止  p 暂停/恢复派活  r 刷新  q 退出"),
     "choose": ("Tick the desks you need with Space, then press s to start.", "空格勾选需要的工作台，再按 s 启动。"),
     "empty": ("No desks listed. hansa init makes a desk; its first server start lists it. q quits.",
               "没有工作台。hansa init 创建工作台；首次启动后台后列入清单。q 退出。"),
@@ -87,6 +88,8 @@ def command(row, key, lang):
     """(argv, environment, message): decide without running tmux or changing the desk."""
     desk, env = Desk(row["desk"]), dict(os.environ)
     base = [row["saved"].get("hansa") or "", "--desk", row["desk"]]
+    if key in ("p", "w") and not up.installation_up(base[0]):
+        return [], env, f"Desk {row['desk']}:\n" + up.listed_problem(desk, row["saved"])
     if key == "p":
         return base + (["resume"] if row["paused"] else ["pause", "hansa menu"]), env, ""
     if key == "w":
@@ -174,6 +177,7 @@ def cut(text, width):
 
 
 def screen(state, chosen, ticks, lang, width, height):
+    width, height = width or 80, height or 24
     lines = [words(lang, "title")]
     table = [words(lang, "headers").split("|")]
     for i, row in enumerate(state["desks"]):
@@ -189,14 +193,14 @@ def screen(state, chosen, ticks, lang, width, height):
         table.append(values)
     sizes = [max(cells(cut(r[i], 200)) for r in table) for i in range(7)]
     rendered = ["  ".join(cut(v, 200) + " " * (sizes[i] - cells(cut(v, 200))) for i, v in enumerate(r)) for r in table]
-    room = max(1, height - 5)
+    room = max(1, height - 6)
     offset = max(0, chosen - room + 1)
     lines += rendered[:1] + rendered[1 + offset:1 + offset + room]
     if state["problem"] or not state["desks"]:
         lines.append(state["problem"] or words(lang, "empty"))
-    if not any(r.get("server", "gone") != "gone" for r in state["desks"]):
+    if state["desks"] and not any(r.get("server", "gone") != "gone" for r in state["desks"]):
         lines.append(words(lang, "choose"))
-    lines.append(words(lang, "keys"))
+    lines += [words(lang, "keys1"), words(lang, "keys2")]
     return "\x1b[H\x1b[2J" + "\r\n".join(cut(line.rstrip(), width) for line in lines[:height])
 
 
@@ -275,8 +279,7 @@ def perform(key, row, targets, terminal, lang):
                 if note:
                     print(note, flush=True)
                 if argv:
-                    subprocess.call(argv, env=env)
-                    wait = key == "p"
+                    wait = subprocess.call(argv, env=env) != 0 or key == "p"
         except KeyboardInterrupt:
             wait = False
         except (OSError, subprocess.SubprocessError) as e:
