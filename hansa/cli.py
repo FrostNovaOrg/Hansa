@@ -348,6 +348,10 @@ def cmd_init(a):
         _init_for(a)
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base or "")
     print(f"desk ready at {desk.root}")
+    problem = up.list_desk(desk)
+    if problem:
+        print(desk.redact(f"hansa init: the desk was made; {problem}; its first server start "
+                          "(`hansa up` in the desk) will try to list it again"), file=sys.stderr)
     for d in listed_overlaps(desk.root):  # the runs are kept from the other desk's files, but the folders still overlap
         where = "holds this desk" if _above(d, str(desk.root)) else "is inside this desk"
         print(f"warning: desk {d}, on this account's list of desks, {where}: keep each desk in a folder of its own, "

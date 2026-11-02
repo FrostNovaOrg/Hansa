@@ -2335,7 +2335,7 @@ def lane_repos(s: dict) -> list:
 
 
 def desks_file() -> Path:
-    """The account's list of desks: each desk's server puts itself on it (up.record_start), and hansa up starts them."""
+    """The account's list of desks: init and each server start list the desk, and hansa up starts them."""
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "hansa" / "desks.json"
 
 

@@ -711,7 +711,7 @@ command to run as that account, so the server uses that account's tmux and home.
 Each server start also adds or updates one entry for its desk in this account's
 `$XDG_STATE_HOME/hansa/desks.json`, or `~/.local/state/hansa/desks.json` when
 `XDG_STATE_HOME` is unset. That list holds the desk folder, the absolute hansa
-command and when it started. If the list cannot be updated, `hansa serve`
+command and when it was last listed. If the list cannot be updated, `hansa serve`
 warns on stderr and keeps serving; the desk's own start record is still saved.
 A list that is there but cannot be used (empty, not JSON, not a JSON list, a
 link that leads nowhere, unreadable) is left as it is, with the reason on
@@ -725,8 +725,11 @@ set, `hansa up` still starts every listed desk. `--all` is refused inside a
 desk or when `--desk` or `HANSA_DESK` names one. Each is started by its own installation with
 `<saved hansa> --desk <folder> up`. If that installation is missing or too old
 to have `up`, nothing starts there and hansa prints the last server command
-instead. A new desk gets on the list when its server starts once. Each desk's
-runs are kept from the other listed desks and from the list itself
+instead. `hansa init` puts the new desk on this account's list, stopped. If the
+list cannot be read or written, init still makes the desk and warns in one line;
+its first server start (`hansa up` in the desk) tries to list it again. With
+`init --user`, listing runs as the desk's account, as a server start does.
+Each desk's runs are kept from the other listed desks and from the list itself
 ([sandbox.md](sandbox.md#what-workers-and-verifiers-may-touch)).
 
 `hansa desks` shows this account's whole list from any folder, including inside

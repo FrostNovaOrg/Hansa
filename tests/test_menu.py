@@ -124,7 +124,10 @@ class MenuTest(unittest.TestCase):
 
     def test_empty_broken_and_missing_desks_keep_the_shared_problem(self):
         self.list_desks()
-        self.assertIn("hansa init", menu.screen(self.state(), 0, set(), "en", 200, 24))
+        for lang, words in (("en", "makes and lists"), ("zh", "创建工作台并将其列入列表")):
+            empty = menu.screen(self.state(), 0, set(), lang, 200, 24)
+            self.assertIn("hansa init", empty)
+            self.assertIn(words, empty)
         desks_file().write_text("not json")
         self.assertEqual(self.state()["problem"], views.desks()["problem"])
         gone = Desk(self.tmp / "missing")
