@@ -279,26 +279,38 @@ class Terminal:
 
 def run_command(argv, *, env, interrupt_timeout=5):
     """Let a foreground command finish handling Ctrl-C before reaping it."""
-    child = subprocess.Popen(argv, env=env)
+    interrupts = []
+
+    def interrupted(signum, frame):
+        interrupts.append(time.monotonic())
+
+    # Never raise inside Popen: an interrupted wait/poll can swallow a second
+    # Ctrl-C or leave its waitpid lock held. A Python handler also lets the
+    # executed command receive SIGINT normally, unlike inheritable SIG_IGN.
+    previous = signal.signal(signal.SIGINT, interrupted)
     try:
+        child = subprocess.Popen(argv, env=env)
         try:
-            # Popen.wait swallows a second Ctrl-C during its own short SIGINT wait.
-            while child.poll() is None:
-                time.sleep(0.05)
-            return child.returncode
-        except KeyboardInterrupt:
-            try:
-                end = time.monotonic() + interrupt_timeout
-                while child.poll() is None and time.monotonic() < end:
-                    time.sleep(0.05)
-            except KeyboardInterrupt:
-                pass
-            raise
+            while True:
+                try:
+                    code = child.wait(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if interrupts and (len(interrupts) >= 2 or
+                                   time.monotonic() - interrupts[0] >= interrupt_timeout):
+                    child.kill()
+                    code = child.wait()
+                    break
+        finally:
+            if child.returncode is None:
+                child.kill()
+                child.wait()
+        if interrupts:
+            raise KeyboardInterrupt
+        return code
     finally:
-        if child.poll() is None:
-            child.kill()
-        while child.poll() is None:
-            time.sleep(0.05)
+        signal.signal(signal.SIGINT, previous)
 
 
 def perform(key, row, targets, terminal, lang):
