@@ -58,8 +58,8 @@ class MenuTest(unittest.TestCase):
             with open({str(self.calls)!r}, 'a') as out:
                 out.write(json.dumps(sys.argv[1:]) + '\\n')
             if os.environ.get('MENU_TEST_WAIT'):
-                print('command is waiting', flush=True)
                 try:
+                    print('command is waiting', flush=True)
                     while True: signal.pause()
                 except KeyboardInterrupt:
                     print('command interrupted', flush=True)
@@ -435,7 +435,7 @@ class MenuTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertFalse(up.listed_desk_up(Path(row["desk"]), row["saved"], stream=True))
             for key in ("p", "w"):
-                with patch.object(menu.subprocess, "call") as call, contextlib.redirect_stdout(io.StringIO()):
+                with patch.object(menu, "run_command") as call, contextlib.redirect_stdout(io.StringIO()):
                     argv, _, note = menu.command(row, key, "en")
                     self.assertEqual((argv, note), ([], out.getvalue().rstrip("\n")))
                     menu.perform(key, row, [row], terminal, "en")
@@ -448,7 +448,7 @@ class MenuTest(unittest.TestCase):
                     patch.object(menu, "command", return_value=(["then"], {}, "")):
                 for outcome, waits in ((1, True), (0, False), (KeyboardInterrupt, False)):
                     terminal.key.reset_mock()
-                    with patch.object(menu.subprocess, "call", side_effect=[outcome]) as call:
+                    with patch.object(menu, "run_command", side_effect=[outcome]) as call:
                         menu.perform(key, row, [row], terminal, "en")
                     call.assert_called_once()
                     self.assertEqual(terminal.key.called, waits)
@@ -555,20 +555,105 @@ class MenuTest(unittest.TestCase):
         terminal = Mock()
         terminal.outside = contextlib.nullcontext
         for key in ("p", "w", "s"):
-            with self.subTest(key=key), patch.object(menu.subprocess, "call", side_effect=KeyboardInterrupt), \
+            with self.subTest(key=key), patch.object(menu, "run_command", side_effect=KeyboardInterrupt), \
                     patch.object(up, "listed_desk_up", side_effect=KeyboardInterrupt), \
                     contextlib.redirect_stdout(io.StringIO()):
                 menu.perform(key, row, [row], terminal, "en")
             terminal.key.assert_not_called()
-        with patch.object(menu.subprocess, "call", return_value=0) as call:
+        with patch.object(menu, "run_command", return_value=0) as call:
             menu.perform("w", row, [row], terminal, "en")
         self.assertEqual(call.call_args.args[0], [str(self.hansa), "--desk", str(self.first.root), "web"])
         self.assertEqual(set(call.call_args.kwargs), {"env"})
         terminal.key.assert_not_called()
         terminal.key.side_effect = KeyboardInterrupt
-        with patch.object(menu.subprocess, "call", return_value=0), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(menu, "run_command", return_value=0), contextlib.redirect_stdout(io.StringIO()):
             menu.perform("p", row, [row], terminal, "en")
         terminal.key.assert_called_once()
+
+    @contextlib.contextmanager
+    def interrupted_command(self, source):
+        command = self.executable("interrupted command", source)
+        child = subprocess.Popen([str(command)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait = child.wait
+        try:
+            self.assertTrue(select.select([child.stdout], [], [], 15)[0], "child did not become ready")
+            self.assertEqual(child.stdout.readline(), b"ready\n")
+
+            def interrupt(*args, **kwargs):
+                # Model the terminal's SIGINT to both processes without signalling the test runner.
+                child.wait.side_effect = wait
+                child.send_signal(signal.SIGINT)
+                raise KeyboardInterrupt
+
+            with patch.object(menu.subprocess, "Popen", return_value=child), \
+                    patch.object(child, "wait", side_effect=interrupt):
+                yield child, [str(command)]
+        finally:
+            if child.poll() is None:
+                child.kill()
+            wait(timeout=15)
+            child.stdout.close()
+            child.stderr.close()
+
+    def test_command_interrupt_allows_slow_child_cleanup_without_a_pty(self):
+        cleaned = self.tmp / "cleaned"
+        with self.interrupted_command(f"""
+            from pathlib import Path
+            import signal, time
+            try:
+                print('ready', flush=True)
+                while True: signal.pause()
+            except KeyboardInterrupt:
+                time.sleep(1)
+                Path({str(cleaned)!r}).write_text('cleaned')
+        """) as (child, argv):
+            with self.assertRaises(KeyboardInterrupt):
+                menu.run_command(argv, env=dict(os.environ))
+            self.assertTrue(cleaned.exists(), "child was killed before writing its cleanup file")
+            self.assertEqual(cleaned.read_text(), "cleaned")
+            self.assertEqual(child.returncode, 0)
+
+    def test_command_interrupt_kills_and_reaps_child_after_shortened_limit_without_a_pty(self):
+        with self.interrupted_command("""
+            import signal
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            print('ready', flush=True)
+            while True: signal.pause()
+        """) as (child, argv):
+            started = time.monotonic()
+            with self.assertRaises(KeyboardInterrupt):
+                menu.run_command(argv, env=dict(os.environ), interrupt_timeout=0.5)
+            self.assertGreaterEqual(time.monotonic() - started, 0.5)
+            self.assertEqual(child.returncode, -signal.SIGKILL)
+            self.assertRaises(ChildProcessError, os.waitpid, child.pid, os.WNOHANG)
+
+    def test_command_second_interrupt_kills_and_reaps_child(self):
+        child = Mock()
+        child.wait.side_effect = [KeyboardInterrupt, KeyboardInterrupt, -signal.SIGKILL]
+        child.poll.return_value = None
+        with patch.object(menu.subprocess, "Popen", return_value=child), self.assertRaises(KeyboardInterrupt):
+            menu.run_command(["command"], env={})
+        self.assertEqual(child.wait.call_count, 3)
+        child.wait.assert_any_call(timeout=5)
+        child.kill.assert_called_once_with()
+        child.wait.assert_called_with()
+
+    def test_command_preserves_return_code_and_reaps_child_on_wait_error(self):
+        for outcome in (7, OSError("wait failed")):
+            with self.subTest(outcome=outcome):
+                child = Mock()
+                child.wait.side_effect = [outcome, 7]
+                child.poll.return_value = 7 if outcome == 7 else None
+                with patch.object(menu.subprocess, "Popen", return_value=child) as popen:
+                    if outcome == 7:
+                        self.assertEqual(menu.run_command(["command"], env={}), 7)
+                        child.kill.assert_not_called()
+                    else:
+                        with self.assertRaisesRegex(OSError, "wait failed"):
+                            menu.run_command(["command"], env={})
+                        child.kill.assert_called_once_with()
+                popen.assert_called_once_with(["command"], env={})
+                self.assertEqual(child.wait.call_count, 2)
 
     def test_loop_uses_actual_terminal_width_instead_of_stale_columns(self):
         terminal = Mock()

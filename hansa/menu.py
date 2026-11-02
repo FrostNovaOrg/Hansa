@@ -277,6 +277,24 @@ class Terminal:
         return key.decode("utf-8", errors="replace")
 
 
+def run_command(argv, *, env, interrupt_timeout=5):
+    """Let a foreground command finish handling Ctrl-C before reaping it."""
+    child = subprocess.Popen(argv, env=env)
+    try:
+        try:
+            return child.wait()
+        except KeyboardInterrupt:
+            try:
+                child.wait(timeout=interrupt_timeout)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                pass
+            raise
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+
+
 def perform(key, row, targets, terminal, lang):
     with terminal.outside():
         wait = True
@@ -310,7 +328,7 @@ def perform(key, row, targets, terminal, lang):
                 if note:
                     print(note, flush=True)
                 if argv:
-                    wait = subprocess.call(argv, env=env) != 0 or key == "p"
+                    wait = run_command(argv, env=env) != 0 or key == "p"
         except KeyboardInterrupt:
             wait = False
         except (OSError, subprocess.SubprocessError) as e:

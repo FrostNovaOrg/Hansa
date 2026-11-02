@@ -619,10 +619,12 @@ Above the keys, a guide explains the chosen desk's next step and how to attach a
 `s` starts what is stopped, server then coordinator, through each chosen desk's
 saved hansa installation; desks not chosen are left alone. `s` and `p` show the
 command's output as it comes and wait for a key before returning. Ctrl+C while
-a command runs ends that command and returns. Drawing the list runs no tmux
-command and writes nothing in a desk. Enter uses `switch-client` inside the
-same tmux server; for another server it asks you to detach first and gives the
-attach command. An attached session can still be entered from elsewhere.
+a command runs gives it up to five seconds to end by itself before killing it
+and returning. A second Ctrl+C during that wait kills it immediately and returns.
+Drawing the list runs no tmux command and writes nothing in a desk. Enter uses
+`switch-client` inside the same tmux server; for another server it asks you to
+detach first and gives the attach command. An attached session can still be
+entered from elsewhere.
 
 `x` refuses while tasks, verifications, merge checks, releases or lane tries
 run, and lists their kinds and counts. Use `p` to keep new work from starting,
