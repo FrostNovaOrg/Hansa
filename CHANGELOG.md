@@ -1,7 +1,7 @@
 # Changelog
 
 Up to 0.4 this project was called Bellhop, and its command was `bellhop`. The
-entries for those versions keep the names of their time.
+entries for those versions keep the names of their time. Commits up to 9 October 2026 carry the licence of their time, the AGPL-3.0-or-later with a commercial licence; since then Hansa has been under the Apache License 2.0 alone.
 
 ## 0.5.0a1 — alpha, unreleased
 
