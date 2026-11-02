@@ -31,7 +31,7 @@ worktree, one task at a time. Built-in workers' commands cannot commit or push,
 read the desk's keys or state, or reach hosts outside the lane's network list.
 Writes stay within the worktree, the run's temporary folder and the lane's write
 list. Separately allowed web tools and optional adapters have
-[limits](../README.md#limits), explained in [the sandbox guide](sandbox.md).
+[limits](concepts.md#limits), explained in [the sandbox guide](sandbox.md).
 This contains a worker's mistake or hostile input it reads.
 
 Authority: hansa enforces the sandbox and git restrictions for built-in workers.

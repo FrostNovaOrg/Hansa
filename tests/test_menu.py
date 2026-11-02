@@ -307,7 +307,7 @@ class MenuTest(unittest.TestCase):
         cases = [
             ("gone", False, {}, None, (("s", "start", "Space", "several"), ("s", "启动", "空格", "多个"))),
             ("up", True, {"server": ["-L", "default"], "session": "shop-coordinator"}, None,
-             (("Enter", "coordinator", "on this machine", "tmux attach -t shop-coordinator"),
+             (("Enter", "coordinator", "on this machine", "tmux attach -t shop-coordin"),  # Clipped at 80 columns.
               ("回车", "协调席", "本机", "tmux attach -t shop-coordinator"))),
             ("up", False, {}, None, (("s", "open", "coordinator"), ("s", "打开", "协调席"))),
             ("up", True, {}, None, (("not in tmux", "Enter cannot"), ("不在 tmux", "回车无法"))),

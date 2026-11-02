@@ -796,10 +796,10 @@ def partial_write(path, after=None):
 # The write inventory below groups callers that use the same writer. The failure column describes the tests
 # in `tests.test_hansa.FailedWriteTest`: replacement rows check old bytes, no leftover temporary, and a file
 # starting at `0600`. New-only rows check that the destination stays absent and a retry works.
-# The alpha column records the original writer: replacement replaces the link itself; in-place writing
-# keeps the link and now replaces its target whole. Notes archive already resolves its validated paths.
+# The writer column groups replacement and in-place cases: replacement cases replace the link itself;
+# in-place cases keep the link and replace its target whole. Notes archive resolves its validated paths.
 #
-# | Desk file and writer | Alpha writer / link behaviour | Write fails part way |
+# | Desk file and writer | Writer / link behaviour under test | Write fails part way |
 # |---|---|---|
 # | JSON records through `desk.write_json`: settings, task records, requests, provider state, heartbeat and runtime records (disk, sandbox, server, followers, alert and release state) | Replacement; replace link | Whole replacement; JSON row in `test_partial_replacement_matrix` |
 # | `secrets/<provider>.key`, `Desk.write_key` | Replacement; replace link | Whole replacement at `0600`; private-files matrix |
@@ -4667,7 +4667,7 @@ def save():'''))
             for name in run.SANDBOX_PLACEHOLDERS:  # git in the sandbox does not list these (LINUX_PRELUDE)
                 self.assertNotIn(name, flat)
 
-    # Protected-index regression cases (the numbers match the requested table):
+    # The table maps protected-index regression cases to the tests that cover them:
     # | # | Case | Test below |
     # | 1 | cacheinfo .claude/settings.json, absent on disk, skip-worktree | protected_blobs |
     # | 2 | .mcp.json, .vscode/settings.json, .Claude/Settings.json | protected_blobs |
@@ -23907,7 +23907,7 @@ def save():'''))
     def test_background_agents_with_notices_are_not_listed_as_still_running(self):
         # Four background agents each have a "completed" notice; a test run has none.
         from hansa import run
-        home = self.tmp / "t0061-home"
+        home = self.tmp / "agent-notices-home"
         rec = home / "projects" / "-work" / "s61.jsonl"
         rec.parent.mkdir(parents=True)
         agents = [("aaeaa54cef8eb6489", "Review the catalog schema"), ("a1b2c3d4e5f60718", "Review the checkout flow"),
@@ -36449,8 +36449,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(ui.count('check:"Ping"'), 2)
         self.assertNotIn('release:T.laneRelease', ui)
 
-    def principals_release_desk(self):
-        """A desk with lane a and two release targets, one with a long command of few spaces,
+    def long_command_release_desk(self):
+        """A desk with two release targets on lane a, one with a long command of few spaces,
         lanes b, c and d with no release, and three old entries for the unnamed releases of a, b and c."""
         long = ('git push --receive-pack="runuser -u hansa -- git-receive-pack" '
                 'shop-test.example.org:/srv/shop/repositories/shop-mirror-for-the-integration-test-machine.git '
@@ -36472,7 +36472,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         return long
 
     def test_old_entries_for_targets_no_lane_has_are_said_as_such(self):
-        self.principals_release_desk()
+        self.long_command_release_desk()
         shown = public_settings(self.desk)
         self.assertEqual(shown["problems"], [])
         self.assertEqual([(u["lane"], u["target"], u["gone"], u["was"], u["why"]) for u in shown["release_unmatched"]],
@@ -36513,7 +36513,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_the_settings_page_renders_a_desk_with_long_commands_and_old_entries(self):
-        self.principals_release_desk()
+        self.long_command_release_desk()
         self.assertEqual(self.page_save(lambda s: s["releases_without_asking"].append({"lane": "a", "target": "shop-test"})),
                          {"ok": True, "problems": []})
         harness = self.tmp / "page.js"
@@ -38605,11 +38605,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(self.code_answer("Yes", "1", code)[1], "")
         self.assertEqual(release.get(self.desk, 1)["state"], "approved")
 
-    def test_the_readme_and_the_page_say_the_alert_command_must_not_keep_the_alerts_text(self):
+    def test_the_release_guide_and_the_page_say_the_alert_command_must_not_keep_the_alerts_text(self):
         root = Path(__file__).resolve().parent.parent
-        readme = " ".join((root / "README.md").read_text().split())
-        self.assertIn("Your alert command must not keep the alert's text anywhere the coordinator can read it (a "
-                      "file, a log, a chat history): the code in it approves a release.", readme)
+        guide = " ".join((root / "docs" / "releases.md").read_text().split())
+        self.assertIn("alert command must not keep the alert's text anywhere the coordinator can read it (a "
+                      "file, a log, a chat history): the code in it approves a release.", guide)
         self.assertIn("must not keep the alert's text anywhere the coordinator can read it",
                       (root / "hansa" / "ui.html").read_text())
 
@@ -39120,7 +39120,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertIn("coordinator", alert.KINDS)
         self.assertIn("`coordinator`", self.hansa_out("help", "alerts"))
 
-    # -- small fixes from earlier verifications --
+    # Helpers post page requests; tests check responses and tool results.
 
     def page_post(self, path: str, body: dict) -> dict:
         """What the page's server answers to a POST, handled over a socket pair (no port is opened)."""
