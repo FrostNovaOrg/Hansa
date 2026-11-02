@@ -252,8 +252,9 @@ and `--verify-note "text"` give its lane, effort and note; each implies `--verif
 These options apply only to that task, never its follow-ups. The verdict goes to the task's
 session without posting the task first; if queueing is refused, the task stays done and is posted
 with the reason, so you can run `hansa verify` yourself. Hansa never merges by itself.
-When these options lead to a verification, the review alert waits for its verdict; a verification
-queued by hand leaves the task's review alert unchanged.
+When these options lead to a verification, the review alert starts when the verification ends by
+itself. After a verification is cancelled, no review alert fires; the task shows in `hansa status`.
+A verification queued by hand leaves the review alert unchanged for tasks queued without these options.
 
 A verification ends with `VERDICT: holds`, `VERDICT: holds, with notes`,
 `VERDICT: does not hold` or `VERDICT: unsure`.

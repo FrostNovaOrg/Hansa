@@ -428,7 +428,10 @@ def waits_review(desk: Desk, tid) -> bool:
         return False
     from .run import verification_due
     from .views import verification
-    v = verification(desk, m)
+    try:
+        v = verification(desk, m)
+    except SystemExit:  # its verification folder is gone
+        v = None
     return (m.get("state") == "done" and m.get("kind") != "verify" and not verification_due(m)
             and not (m.get("verify_after") and v and v["state"] in ("queued", "running")))
 

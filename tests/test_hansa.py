@@ -24032,6 +24032,21 @@ def save():'''))
     def test_queue_time_verification_requested_review_alert_starts_with_each_verdict(self):
         self.queue_time_review_alert(automatic=True)
 
+    def test_queue_time_verification_missing_folder_keeps_the_task_waiting_for_review(self):
+        for automatic in (False, True):
+            with self.subTest(automatic=automatic):
+                tid = self.desk.new_task("Work waiting for review", lane="a")
+                vid = self.desk.new_task("Verify the work", lane="a", kind="verify", parent=tid)
+                options = {"verify_after": {"lane": "", "effort": "", "note": ""}} if automatic else {}
+                self.desk.update(tid, state="done", commits=1, verify=vid, **options)
+                self.assertEqual(notify.waits_review(self.desk, tid), not automatic)
+                shutil.rmtree(self.desk.tasks_dir / vid)
+                self.assertTrue(notify.waits_review(self.desk, tid))
+                me = {"key": "4242-0123abcd", "session": None, "uid": os.getuid()}
+                feed = notify.handle(self.desk, {"op": "feed", "me": me, "pos": notify.log_end(self.desk),
+                                                 "review": [tid]})
+                self.assertEqual(feed["review"], [tid])
+
     def test_queue_time_verification_add_reads_stdin_before_locking_the_desk(self):
         def read():
             # A slow pipe can block here; another command or server must be able to take the lock.
