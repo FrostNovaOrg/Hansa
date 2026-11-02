@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import hansa  # noqa: E402
-from hansa import account, cli, cost, notify, plugin, views  # noqa: E402
+from hansa import account, cli, cost, menu, notify, plugin, up, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, validate, write_json, write_problems  # noqa: E402
 from hansa.run import (Dispatcher, provider_problem, text_only,  # noqa: E402
@@ -2169,6 +2169,181 @@ class DesksTest(unittest.TestCase):
         self.assertEqual(row["server"], "stuck")
         self.assertIsNone(row["version"])
         self.assertEqual(row["address"], "http://[::1]:8765/")
+
+
+class ExampleTest(unittest.TestCase):
+    """hansa example: the sample repository, the desk and the first task, and the rows of its table."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        env = unittest.mock.patch.dict(os.environ, {
+            "HOME": str(self.home), "XDG_STATE_HOME": str(self.tmp / "state"),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            # no identity from global or system settings: what the row about a missing git identity needs
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(self.home / ".gitconfig")})
+        env.start()
+        self.addCleanup(env.stop)
+        for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+                  "EMAIL", "HANSA_DESK"):
+            os.environ.pop(k, None)
+
+    def make(self, folder, lang="en") -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main(["example", str(folder), "--lang", lang]), 0)
+        return out.getvalue()
+
+    def example(self, folder=None, lang="en"):
+        """The sample made under the test's temporary folder, and what the command printed."""
+        folder = self.tmp / (folder or "sample")
+        said = self.make(folder, lang)
+        desk = Desk(folder / "desk")
+        return folder, desk, said
+
+    def git(self, repo, *args) -> str:
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                              timeout=60, check=True).stdout.strip()
+
+    def test_it_makes_the_three_things_in_a_new_folder_and_in_an_empty_one(self):
+        for name, prepare in (("new", lambda d: None), ("empty", lambda d: d.mkdir())):
+            with self.subTest(folder=name):
+                folder = self.tmp / name
+                prepare(folder)
+                folder, desk, said = self.example(name, lang="en")
+                repo = folder / "repo"
+                self.assertTrue((repo / "receipt.py").is_file())
+                self.assertTrue((repo / "test_receipt.py").is_file())
+                self.assertTrue((repo / "receipt.txt").is_file())
+                self.assertLessEqual(len((repo / "receipt.py").read_text(encoding="utf-8").splitlines()), 40)
+                self.assertEqual(self.git(repo, "rev-list", "--count", "HEAD"), "1")
+                self.assertEqual(self.git(repo, "status", "--porcelain"), "")
+                # the sample's own tests, and the program on the receipt committed beside them
+                ran = subprocess.run([sys.executable, "-m", "unittest", "discover"], cwd=str(repo), capture_output=True,
+                                     text=True, timeout=120)
+                self.assertEqual(ran.returncode, 0, ran.stderr)
+                self.assertIn("Ran 3 tests", ran.stderr)
+                receipt = subprocess.run([sys.executable, str(repo / "receipt.py"), "receipt.txt"], cwd=str(repo),
+                                         capture_output=True, text=True, timeout=60)
+                self.assertEqual((receipt.returncode, receipt.stdout), (0, "Total: $5.75\n"))
+                # the desk init makes, with lane a's check set
+                self.assertTrue(desk.settings_path.is_file())
+                lane = desk.settings()["lanes"]["a"]
+                self.assertEqual(lane["check"], "python3 -m unittest discover")
+                self.assertEqual(lane["repo"], os.path.realpath(repo))
+                self.assertEqual((desk.notes_dir / "first-task.md").read_text(encoding="utf-8").strip(),
+                                 (cli_example_sample("first-task.md")).strip())
+                # on the account's list of desks, so hansa desks and the menu show it; nothing started
+                entries = json.loads(up.desks_file().read_text(encoding="utf-8"))
+                mine = [x for x in entries if x["desk"] == str(desk.root)]
+                self.assertEqual(len(mine), 1)
+                self.assertTrue(mine[0]["hansa"])
+                listed = io.StringIO()
+                with contextlib.redirect_stdout(listed):
+                    self.assertEqual(main(["desks"]), 0)
+                self.assertIn(str(desk.root), listed.getvalue())
+                self.assertIn(str(desk.root), [r["desk"] for r in menu.rows()["desks"]])
+                self.assertEqual(up.read_coordinator(desk), {})
+                self.assertFalse((desk.state_dir / "serve-start.json").exists())
+                self.assertIn("not running", listed.getvalue())
+
+    def test_the_default_folder_is_hansa_example_in_the_home_folder(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main(["example", "--lang", "en"]), 0)
+        root = self.home / "hansa-example"
+        self.assertTrue((root / "repo" / "receipt.py").is_file())
+        self.assertTrue((root / "desk" / "settings.json").is_file())
+        self.assertTrue((root / "desk" / "notes" / "first-task.md").is_file())
+        self.assertIn(os.path.realpath(root), out.getvalue())
+
+    def test_first_task_is_four_sentences_with_the_change_and_how_to_tell_it_worked(self):
+        folder, desk, _ = self.example("first")
+        task = (desk.notes_dir / "first-task.md").read_text(encoding="utf-8")
+        self.assertLessEqual(len(re.findall(r"[.!?](?=\s|$)", task)), 4)
+        self.assertIn("--discount PERCENT", task)
+        self.assertIn("round", task.lower())
+        self.assertIn("test", task.lower())
+        self.assertIn("python3 -m unittest discover", task)
+        self.assertIn("Total: $4.89", task)
+        self.assertEqual(task, cli_example_sample("first-task.md"))
+
+    def test_it_refuses_a_folder_that_holds_anything_and_creates_nothing(self):
+        folder = self.tmp / "taken"
+        folder.mkdir()
+        kept = folder / "keep.txt"
+        kept.write_text("mine\n")
+        with self.assertRaises(SystemExit) as e:
+            self.make(folder)
+        message = str(e.exception.code)
+        self.assertIn(str(folder), message)
+        self.assertIn("already holds something", message)
+        self.assertIn("created nothing", message)
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["keep.txt"])
+        self.assertEqual(kept.read_text(encoding="utf-8"), "mine\n")
+        # a file where the folder would be is refused the same way, and the exit status is 1
+        path = self.tmp / "a-file"
+        path.write_text("x\n")
+        ran = subprocess.run([sys.executable, "-m", "hansa", "example", str(path)],
+                             cwd=str(Path(__file__).resolve().parent.parent),
+                             capture_output=True, text=True, timeout=120)
+        self.assertEqual(ran.returncode, 1)
+        self.assertIn("already holds something", ran.stderr)
+        self.assertEqual(path.read_text(encoding="utf-8"), "x\n")
+
+    def test_a_missing_git_identity_is_no_problem_and_nothing_is_written_to_git_settings(self):
+        self.assertNotEqual(subprocess.run(["git", "config", "--global", "--get", "user.email"],
+                                           capture_output=True, text=True).returncode, 0)
+        folder, desk, _ = self.example("no-identity")
+        repo = folder / "repo"
+        self.assertEqual(self.git(repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>"),
+                         "Hansa Example <hansa-example@example.invalid>|"
+                         "Hansa Example <hansa-example@example.invalid>")
+        self.assertFalse((self.home / ".gitconfig").exists())
+        self.assertFalse((self.home / ".config" / "git" / "config").exists())
+
+    def test_a_step_that_fails_says_which_one_and_keeps_what_was_made(self):
+        folder = self.tmp / "part-way"
+        with unittest.mock.patch("hansa.cli.init_desk", side_effect=OSError("no space left")) as init:
+            with self.assertRaises(SystemExit) as e:
+                self.make(folder)
+        init.assert_called_once()
+        message = str(e.exception.code)
+        made = os.path.realpath(folder)
+        self.assertIn("could not make the desk", message)
+        self.assertIn("no space left", message)
+        self.assertIn(f"stays in {made}", message)
+        self.assertIn(f"rm -rf {made}", message)
+        self.assertIn("run hansa example again", message)
+        self.assertTrue((folder / "repo" / "receipt.py").is_file())  # what the first step made stays
+        self.assertEqual(self.git(folder / "repo", "rev-list", "--count", "HEAD"), "1")
+        self.assertFalse((folder / "desk").exists())
+
+    def test_the_next_steps_speak_the_menu_language_and_say_how_to_remove_the_sample(self):
+        sentence = ("Do the task in notes/first-task.md, verify it, and merge it when it holds. Do not release it.")
+        english = self.example("en-sample", lang="en")[2]
+        chinese = self.example("zh-sample", lang="zh")[2]
+        for said in (english, chinese):
+            self.assertIn(sentence, said)
+        self.assertIn("press s", english)
+        self.assertIn("按 s", chinese)
+        self.assertIn("Next:", english)
+        self.assertIn("Run `hansa`", english)
+        self.assertIn("remove the entry for", english)
+        self.assertIn(str(up.desks_file()), english)
+        self.assertIn("接下来", chinese)
+        self.assertIn("运行 `hansa`", chinese)
+        self.assertIn("删掉", chinese)
+        self.assertIn(str(up.desks_file()), chinese)
+        self.assertNotIn("Next:", chinese)
+
+
+def cli_example_sample(name: str) -> str:
+    """A sample file as it is in the package, so a test compares the copy with what hansa ships."""
+    from hansa.example import SAMPLE
+    return (SAMPLE / name).read_text(encoding="utf-8")
 
 
 class UpTest(unittest.TestCase):
@@ -39268,6 +39443,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         for f in ("mod/.claude-plugin/plugin.json", "mod/hooks/hooks.json", "mod/hooks/register.js",
                   "mod/tests/register.test.ts"):  # the coordinator's mod: what its session loads, and its tests
             self.assertTrue(hansa.shipped(Path(f)), f)
+        for f in ("example/__init__.py", "example/sample_receipt.py", "example/sample_test_receipt.py",
+                  "example/sample_receipt.txt", "example/first-task.md"):  # the sample hansa example copies
+            self.assertTrue(hansa.shipped(Path(f)), f)
+        for f in ("example/__pycache__/x.pyc", "example/.DS_Store", "example/._receipt.py", "example/x/y.py"):
+            self.assertFalse(hansa.shipped(Path(f)), f)
         for f in ("mod/.DS_Store", "mod/hooks/.DS_Store", "mod/hooks/register.js~", "mod/hooks/._register.js",
                   "mod/.claude-plugin/._plugin.json", "mod/tests/._register.test.ts", "mod/__pycache__/x.pyc",
                   "mod/x.py", "mod/hooks/x/y.js", "mod/register.js", "x/mod/hooks/register.js",
