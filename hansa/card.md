@@ -317,12 +317,15 @@ or ask `scout` when reading is enough; say what you need back.
   points to a stuck command): read them, then split the task or make it clearer rather than re-running it unchanged.
 - A failed write (a full disk) does not stop `hansa serve`: free space so it can record what it kept.
   More: `hansa help free-space`.
-- A key never shows in reports, errors or the event log (More: `hansa help desk-files`). A change
-  that holds one is never merged: redo it with `hansa retry <id> --fresh`.
+- hansa replaces the keys it knows wherever it shows or records text. It cannot see into compressed
+  files, and the event log keeps what it recorded before a key was saved (More:
+  `hansa help desk-files`). hansa refuses to merge a change that holds a key it knows: redo it with
+  `hansa retry <id> --fresh`.
 - When a run ends, hansa stops what it left running (a dev server, a watcher) before it commits and
   before the check; `hansa show` lists them. More: `hansa help leftovers`.
-- Nothing hansa starts gets a Claude Code session's identity. `hansa web` refuses in a Claude Code
-  session; `--file` (including redirected files with `--file -`) admits only files workers may read.
+- What hansa starts does not inherit a Claude Code session's identity, except what notifying needs.
+  `hansa web` refuses in a Claude Code session; `--file` (including redirected files with `--file
+  -`) admits only files workers may read.
   More: `hansa help session-identity`.
 - To say what one job cost, note the time `hansa status` shows when you start it, then run `hansa
   cost --since HH:MM --by seat`. Spend no turns on cost. More: `hansa help cost-figures`.
