@@ -29,9 +29,8 @@ STEPS = {
         "pick": "Pick the desk {name}; press s to start it, then Enter to open its coordinator.",
         "say": "Tell the coordinator: \"Do the task in notes/first-task.md, verify it, and merge it when it holds. "
                "Do not release it.\"",
-        "remove": "To remove the sample again: stop its server (press x in the menu), remove the entry for {desk} "
-                  "from {list} (the account's list of desks; hansa has no command that removes one), then delete "
-                  "{root}.",
+        "remove": "To remove the sample again: stop its server (press x in the menu), run "
+                  "`hansa desks --forget {desk}`, then delete {root}.",
     },
     "zh": {
         "made": "hansa example 已在 {root} 建好示例。",
@@ -40,8 +39,8 @@ STEPS = {
         "pick": "选择工作台 {name}，按 s 启动，再按回车进入协调席。",
         "say": "对协调席说：“Do the task in notes/first-task.md, verify it, and merge it when it holds. "
                "Do not release it.”",
-        "remove": "以后要删除示例：先在菜单里按 x 停止它的后台，再从 {list}（本账号的工作台清单）里删掉 {desk} "
-                  "那一条（hansa 没有删除清单条目的命令），最后删除 {root}。",
+        "remove": "以后要删除示例：先在菜单里按 x 停止它的后台，再运行 `hansa desks --forget {desk}`，"
+                  "最后删除 {root}。",
     },
 }
 
@@ -119,7 +118,7 @@ def _list_desk(desk) -> None:
 def next_steps(root: Path, desk, lang: str) -> str:
     words = STEPS[lang]
     name = "/".join(desk.root.parts[-2:])
-    values = {"root": root, "name": name, "desk": desk.root, "list": up.desks_file()}
+    values = {"root": root, "name": name, "desk": shlex.quote(str(desk.root))}
     return "\n".join([words["made"].format(**values), "", words["next"],
                       f"  1. {words['run'].format(**values)}",
                       f"  2. {words['pick'].format(**values)}",

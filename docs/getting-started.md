@@ -72,29 +72,8 @@ this needs no subscription login. The principal handles credentials, not an agen
 
 ## Try the sample first
 
-To watch one whole task go through hansa on your own login before pointing it at
-real work, run:
-
-```sh
-hansa example
-```
-
-It makes `~/hansa-example/repo` (a tiny Python receipt program and its tests,
-in one commit), `~/hansa-example/desk` (a desk for it, with lane `a`'s check
-set to `python3 -m unittest discover`) and
-`~/hansa-example/desk/notes/first-task.md` (a small change for the
-coordinator). It starts no server and calls no model. Give another folder as
-`hansa example DIR`; it must be new or empty.
-
-Then run `hansa`, pick the sample desk, press `s` to start it and Enter to open
-its coordinator, and tell the coordinator:
-
-> Do the task in notes/first-task.md, verify it, and merge it when it holds. Do not release it.
-
-To remove the sample again, stop its server (`x` in the menu), remove its entry
-from the account's list of desks, `$XDG_STATE_HOME/hansa/desks.json` or
-`~/.local/state/hansa/desks.json` when `XDG_STATE_HOME` is unset (hansa has no
-command that removes a desk from that list), then delete `~/hansa-example`.
+Run `hansa example` to watch one task go through hansa on your own login before
+real work; it starts nothing and calls no model.
 
 ## Create and start the desk
 

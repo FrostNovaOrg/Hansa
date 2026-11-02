@@ -478,6 +478,12 @@ def cmd_status(a):
 
 
 def cmd_desks(a):
+    if a.forget:
+        root, problem = up.forget_desk(a.forget)
+        if problem:
+            raise SystemExit(f"hansa: {problem}")
+        print(f"Took {root} off the account's list of desks; its folder and files are untouched.")
+        return
     st = views.desks()
     print(json.dumps(st, ensure_ascii=False, indent=1) if a.json else views.desks_text(st))
 
@@ -3014,7 +3020,10 @@ def main(argv=None):
     p = add("status", cmd_status, "what is running, queued, waiting for review, and why")
     p.add_argument("--json", action="store_true")
     p = add("desks", cmd_desks, "this account's listed desks: servers, page addresses without keys, and counts")
-    p.add_argument("--json", action="store_true")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--json", action="store_true")
+    g.add_argument("--forget", metavar="PATH", help="take this desk off the account's list of desks (it deletes no "
+                   "file); refused while that desk's server runs, and when PATH is not on the list")
     p.epilog = see_more("bringing-up")
     p = add("show", cmd_show, "one task: its text, report, changes, refused commands, usage, next step")
     p.add_argument("id")

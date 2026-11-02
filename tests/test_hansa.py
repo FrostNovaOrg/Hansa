@@ -2158,6 +2158,11 @@ class DesksTest(unittest.TestCase):
         self.listed.mkdir()
         self.assertEqual(self.say().strip(), desks_list_problem())
         self.assertEqual(json.loads(self.say("--json")), {"desks": [], "problem": desks_list_problem()})
+        # --forget leaves an unreadable list alone too: it cannot tell whether the desk is on it
+        with self.assertRaises(SystemExit) as e:
+            self.say("--forget", str(self.tmp / "desk"))
+        self.assertIn(desks_list_problem(), str(e.exception.code))
+        self.assertTrue(self.listed.is_dir())
 
     def test_desks_uses_unknown_for_a_stale_server_version_and_brackets_ipv6(self):
         d = self.desk("desk")
@@ -2169,6 +2174,64 @@ class DesksTest(unittest.TestCase):
         self.assertEqual(row["server"], "stuck")
         self.assertIsNone(row["version"])
         self.assertEqual(row["address"], "http://[::1]:8765/")
+
+    def test_forget_takes_that_one_entry_off_the_list_and_deletes_no_file(self):
+        first, second = self.desk("first"), self.desk("second")
+        write_json(self.listed, [{"desk": str(first.root), "hansa": "/bin/hansa", "at": 1},
+                                 {"desk": str(second.root), "hansa": "/bin/hansa", "at": 2}])
+        kept = {p: p.read_bytes() for d in (first, second) for p in d.root.rglob("*") if p.is_file()}
+        self.assertEqual(self.say("--forget", str(first.root)).strip(),
+                         f"Took {first.root} off the account's list of desks; its folder and files are untouched.")
+        self.assertEqual(json.loads(self.listed.read_text(encoding="utf-8")),
+                         [{"desk": str(second.root), "hansa": "/bin/hansa", "at": 2}])
+        self.assertEqual(kept, {p: p.read_bytes() for d in (first, second) for p in d.root.rglob("*") if p.is_file()})
+        self.assertIn(str(second.root), self.say())  # the other desk stays on the list
+        self.assertNotIn(str(first.root), self.say())
+        # the folder's other spelling (through a link) names the same entry
+        alias = self.tmp / "alias"
+        alias.symlink_to(second.root, target_is_directory=True)
+        self.say("--forget", str(alias))
+        self.assertEqual(json.loads(self.listed.read_text(encoding="utf-8")), [])
+
+    def test_forget_refuses_while_that_desks_server_runs_and_changes_nothing(self):
+        desk = self.desk("running")
+        write_json(self.listed, [{"desk": str(desk.root)}])
+        before = self.listed.read_bytes()
+        lock = open(desk.state_dir / "serve.lock", "w")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)  # a hansa serve holding its lock, as server_state asks
+        with self.assertRaises(SystemExit) as e:
+            self.say("--forget", str(desk.root))
+        message = str(e.exception.code)
+        self.assertIn(f"the server for {desk.root} is running", message)
+        self.assertIn("stop it first", message)
+        self.assertIn("hansa desks --forget again", message)
+        self.assertIn("Nothing was changed", message)
+        self.assertEqual(self.listed.read_bytes(), before)
+        self.assertTrue(desk.settings_path.is_file())
+
+    def test_forget_says_so_when_the_desk_is_not_on_the_list(self):
+        listed = self.desk("listed")
+        write_json(self.listed, [{"desk": str(listed.root)}])
+        before = self.listed.read_bytes()
+        other = Desk(self.tmp / "other")
+        with self.assertRaises(SystemExit) as e:
+            self.say("--forget", str(other.root))
+        message = str(e.exception.code)
+        self.assertIn(f"{other.root} is not on the account's list of desks", message)
+        self.assertIn("nothing was changed", message)
+        self.assertEqual(self.listed.read_bytes(), before)
+
+    def test_forget_takes_off_an_entry_whose_folder_is_gone(self):
+        gone = Desk(self.tmp / "gone")
+        other = self.desk("other")
+        write_json(self.listed, [{"desk": str(gone.root), "hansa": "/bin/hansa", "at": 1},
+                                 {"desk": str(other.root), "hansa": "/bin/hansa", "at": 2}])
+        self.assertEqual(self.say("--forget", str(gone.root)).strip(),
+                         f"Took {gone.root} off the account's list of desks; its folder and files are untouched.")
+        self.assertEqual(json.loads(self.listed.read_text(encoding="utf-8")),
+                         [{"desk": str(other.root), "hansa": "/bin/hansa", "at": 2}])
+        self.assertFalse(gone.root.exists())  # taking the entry off made nothing
 
 
 class ExampleTest(unittest.TestCase):
@@ -2323,21 +2386,46 @@ class ExampleTest(unittest.TestCase):
 
     def test_the_next_steps_speak_the_menu_language_and_say_how_to_remove_the_sample(self):
         sentence = ("Do the task in notes/first-task.md, verify it, and merge it when it holds. Do not release it.")
-        english = self.example("en-sample", lang="en")[2]
-        chinese = self.example("zh-sample", lang="zh")[2]
+        _, en_desk, english = self.example("en-sample", lang="en")
+        _, zh_desk, chinese = self.example("zh-sample", lang="zh")
         for said in (english, chinese):
             self.assertIn(sentence, said)
+            self.assertIn("hansa desks --forget", said)
+            self.assertNotIn(str(up.desks_file()), said)  # no hand-edited list in the removal steps
+        self.assertIn(f"hansa desks --forget {shlex.quote(str(en_desk.root))}", english)
+        self.assertIn(f"hansa desks --forget {shlex.quote(str(zh_desk.root))}", chinese)
         self.assertIn("press s", english)
         self.assertIn("按 s", chinese)
         self.assertIn("Next:", english)
         self.assertIn("Run `hansa`", english)
-        self.assertIn("remove the entry for", english)
-        self.assertIn(str(up.desks_file()), english)
+        self.assertIn("To remove the sample again", english)
         self.assertIn("接下来", chinese)
         self.assertIn("运行 `hansa`", chinese)
-        self.assertIn("删掉", chinese)
-        self.assertIn(str(up.desks_file()), chinese)
+        self.assertIn("以后要删除示例", chinese)
+        self.assertIn("再运行", chinese)
         self.assertNotIn("Next:", chinese)
+
+    def test_the_removal_steps_it_prints_take_the_desk_off_the_list(self):
+        _, desk, said = self.example("removal")
+        self.assertIn(f"hansa desks --forget {shlex.quote(str(desk.root))}", said)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main(["desks", "--forget", str(desk.root)]), 0)
+        self.assertIn(f"Took {desk.root} off the account's list of desks", out.getvalue())
+        entries = json.loads(up.desks_file().read_text(encoding="utf-8"))
+        self.assertEqual([x for x in entries if x.get("desk") == str(desk.root)], [])
+        listed = io.StringIO()
+        with contextlib.redirect_stdout(listed):
+            self.assertEqual(main(["desks"]), 0)
+        self.assertNotIn(str(desk.root), listed.getvalue())
+        self.assertTrue(desk.settings_path.is_file())  # the removal deletes no file
+
+    def test_the_guide_tries_the_sample_first_in_at_most_forty_words(self):
+        guide = (Path(__file__).resolve().parent.parent / "docs" / "getting-started.md").read_text(encoding="utf-8")
+        self.assertLess(guide.index("## Try the sample first"), guide.index("## Create and start the desk"))
+        section = guide.split("## Try the sample first", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("hansa example", section)
+        self.assertLessEqual(len(section.split()), 40)
 
 
 def cli_example_sample(name: str) -> str:

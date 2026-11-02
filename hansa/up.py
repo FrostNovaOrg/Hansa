@@ -120,6 +120,42 @@ def list_desk(desk: Desk, at=None) -> str:
     return ""
 
 
+def _same_desk(spelled: str, root: Path) -> bool:
+    """Whether an entry's desk folder, as it was written, is root: the same spelling, or else the same folder with
+    its links followed."""
+    return spelled == str(root) or os.path.realpath(spelled) == os.path.realpath(str(root))
+
+
+def forget_desk(folder) -> tuple:
+    """Take one desk off the account's list of desks, for hansa desks --forget; its folder and files stay, and no
+    other entry changes. Returns (the desk's folder as taken off, '') or (None, why it was not): its server runs, it
+    is not on the list, or the list cannot be read. An entry whose folder is gone can still be taken off."""
+    root = Desk(folder).root
+    listed = desks_file()
+    try:
+        listed.parent.mkdir(parents=True, exist_ok=True)
+        # The same lock list_desk takes, so a start and a forget one after the other leave one list, not two.
+        with open(listed.with_suffix(".lock"), "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            entries, problem = _desks_entries()
+            if problem:  # rewriting it would drop the other desks, and hansa cannot tell whether root is listed
+                return None, problem
+            found = [x for x in entries if isinstance(x, dict) and isinstance(x.get("desk"), str)
+                     and _same_desk(x["desk"], root)]
+            if not found:
+                return None, f"{root} is not on the account's list of desks; nothing was changed"
+            state = server_state(Desk(found[0]["desk"]))
+            if state["state"] != "gone":
+                return None, (f"the server for {found[0]['desk']} is running; stop it first (press x on its row in "
+                              "the hansa menu), then run hansa desks --forget again. Nothing was changed")
+            write_json(listed, [x for x in entries
+                                if not (isinstance(x, dict) and isinstance(x.get("desk"), str)
+                                        and _same_desk(x["desk"], root))])
+            return str(root), ""
+    except OSError as e:
+        return None, f"could not update the account's list of desks: {e}"
+
+
 def record_start(desk: Desk, options) -> None:
     """Called after serve removes session identity, while it holds serve.lock."""
     rec = {"hansa": hansa_command(), "options": {k: getattr(options, k) for k in DEFAULTS},
