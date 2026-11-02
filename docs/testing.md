@@ -20,3 +20,13 @@ with its source file, line, destination and whether the file or anchor is missin
 A temporary Git repository with a missing file and a missing anchor proves that
 the checker reports both failures. Keep this check until a replacement provides
 the same coverage for local documentation links.
+
+## Runner output
+
+When `tests/run_parallel.py` reports failures or errors, its last line is
+`Failed tests: <name>, <name>`, on the same stream as unittest's summary and
+after the optional `--slowest K` list. Names use `str(test)` in unittest's
+reporting order (errors, then failures). It lists at most ten names, followed
+by `and N more` for any remaining entries. Skipped tests do not count, and a
+run without failures or errors has no such line. This keeps failing test names
+visible in the last lines shown by lane checks and release reports.

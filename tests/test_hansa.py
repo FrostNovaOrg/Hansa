@@ -40742,6 +40742,56 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertNotIn("test_pass", lifted)
         self.assertNotIn("test_skip", lifted)
 
+    def test_1_failed_tests_last_line_follows_unittest_order_and_slowest(self):
+        self.module('''
+            import unittest
+            class Case(unittest.TestCase):
+                def test_pass(self): pass
+                def test_fail(self): self.fail("assertion marker")
+                def test_error(self): raise ValueError("exception marker")
+                @unittest.skip("not available")
+                def test_skip(self): pass
+        ''')
+        for options in ((), ("--slowest", "2")):
+            with self.subTest(options=options):
+                r = subprocess.run(self.command("--jobs", "2", *options), cwd=self.tmp, env=self.env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+                self.assertNotEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout, "")
+                names = re.findall(r"^(?:ERROR|FAIL): (.+)$", r.stderr, re.MULTILINE)
+                self.assertEqual(len(names), 2, r.stderr)
+                self.assertTrue(names[0].startswith("test_error ("), names)
+                self.assertTrue(names[1].startswith("test_fail ("), names)
+                self.assertEqual(r.stderr.splitlines()[-1], "Failed tests: " + ", ".join(names))
+                if options:
+                    self.assertIn("Slowest tests:", r.stderr)
+
+    def test_1_failed_tests_line_is_absent_when_only_passes_and_skips(self):
+        self.module('''
+            import unittest
+            class Case(unittest.TestCase):
+                def test_pass(self): pass
+                @unittest.skip("not available")
+                def test_skip(self): pass
+        ''')
+        r = self.run_sample("--jobs", "2")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn("Failed tests:", r.stdout)
+
+    def test_1_failed_tests_last_line_limits_names_to_ten(self):
+        self.module('''
+            import unittest
+            class Case(unittest.TestCase):
+                def fail_sample(self): self.fail("assertion marker")
+            for i in range(12):
+                setattr(Case, f"test_fail_{i:02d}", Case.fail_sample)
+        ''')
+        r = self.run_sample("--jobs", "2")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        names = re.findall(r"^FAIL: (.+)$", r.stdout, re.MULTILINE)
+        self.assertEqual(len(names), 12, r.stdout)
+        self.assertEqual(r.stdout.splitlines()[-1], "Failed tests: " + ", ".join(names[:10]) + ", and 2 more")
+
     def test_2_success_and_skip_exit_zero(self):
         self.module('''
             import unittest

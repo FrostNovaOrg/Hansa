@@ -431,6 +431,12 @@ def main():
         print("\nSlowest tests:", file=sys.stderr)
         for seconds, name in sorted(suite.timings, reverse=True)[:args.slowest]:
             print(f"{seconds:.3f}s {name}", file=sys.stderr)
+    failed = result.errors + result.failures  # the order TextTestResult.printErrors uses
+    if failed:
+        names = [str(test) for test, _ in failed[:10]]
+        if len(failed) > 10:
+            names.append(f"and {len(failed) - 10} more")
+        print("Failed tests: " + ", ".join(names), file=result.stream)
     return 1 if suite.interrupted or not result.wasSuccessful() else 0
 
 
