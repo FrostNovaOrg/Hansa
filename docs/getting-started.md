@@ -34,16 +34,31 @@ work. Ubuntu 24.04+ AppArmor restrictions can block them. Follow
 [Claude Code's Linux sandbox setup](https://code.claude.com/docs/en/sandboxing#set-up-linux-and-wsl2)
 for your distribution.
 
-## Get the current code
+## Install hansa
 
-Use **alpha**; `main` holds Bellhop.
+With Git and Python 3.9 or newer available, run:
 
 ```sh
-git clone --branch alpha https://github.com/FrostNovaOrg/Hansa.git ~/hansa
-export PATH="$HOME/hansa/bin:$PATH"
-hansa --version
-hansa doctor
+curl -fsSL https://raw.githubusercontent.com/FrostNovaOrg/Hansa/main/install.sh | sh
 ```
+
+The installer clones the remote's default branch into `~/.local/share/hansa`
+and links `~/.local/bin/hansa` to its launcher. It needs no administrator rights,
+installs no other tools, and leaves your shell profile alone. If `~/.local/bin`
+is missing from `PATH`, it prints `export PATH="$HOME/.local/bin:$PATH"` for you
+to add yourself, and prints commands using the full path so you can start now.
+
+To update, first run `hansa pause "upgrade"` in the desk and wait for running
+work to finish, as in the [upgrade steps](../README.md#upgrading-and-going-back).
+Then run the install command again. It updates the existing clone with
+`git pull --ff-only`; follow the upgrade steps to restart and resume the desk.
+To remove the program, run:
+
+```sh
+rm -rf ~/.local/share/hansa ~/.local/bin/hansa
+```
+
+Your desks stay where they are.
 
 Run `hansa doctor` after installing; an agent helping install runs it first.
 It needs no desk, checks tools and sandbox operation, and changes nothing.
@@ -57,11 +72,6 @@ failures; exit 1 means a failed row. `--json` gives `{"ok": ..., "rows": [...]}`
 with `name`, `state`, `found`, `need`, `fix`; states are `ok`, `note`, `fails`,
 `skipped`. `--lang zh|en` selects language as in `hansa menu`.
 Commands time out after 15 seconds, with a short cleanup wait for inherited output.
-
-Add `export PATH="$HOME/hansa/bin:$PATH"` to your shell profile too.
-Either put hansa's `bin` folder on
-`PATH`, as above, or put a symbolic link to `bin/hansa` in a folder already on
-`PATH`, for example `ln -s ~/hansa/bin/hansa /opt/homebrew/bin/hansa`.
 
 ## Log in (the principal's step)
 
@@ -193,7 +203,6 @@ This works for a Mac mini or Linux server without exposing the page publicly.
 
 | What you see | Why | Fix |
 |---|---|---|
-| Older Bellhop files | Cloned `main` | Use the `alpha` clone above. |
 | `No module named hansa` | Unreadable checkout | Ensure the desk account can read the checkout; either its `bin` on PATH or a launcher symlink works. |
 | Init refuses the repository | No commit | Make its first commit, then retry. |
 | Server runs, no coordinator | tmux absent | Install tmux and rerun `hansa up`, or run `hansa coordinator`. |
