@@ -93,7 +93,8 @@ target set `--fixed` runs instead in a detached checkout of the release's
 commit made for it under the desk (removed when it ends, however it ends,
 and swept after a restart), with `HANSA_RELEASE_COMMIT`,
 `HANSA_RELEASE_TARGET` and `HANSA_RELEASE_REPO` in its environment, and
-holds nothing, so a long install leaves the repository's merges going on;
+does not hold the repository's merge lock, so merges and merge checks go on
+during a long install;
 its command should send the commit (`$HANSA_RELEASE_COMMIT`, or `HEAD`), not
 the base branch, which may have moved past what the principal saw. hansa
 refuses a fixed target whose command line itself names the base branch as
