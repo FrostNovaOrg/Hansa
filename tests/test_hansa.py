@@ -21194,7 +21194,7 @@ def save():'''))
     def test_more_logins_and_keys_are_kept_from_workers_and_the_macos_ones_only_on_macos(self):
         from hansa import run
         home, p = Path.home(), self.desk.settings()["providers"]["claude"]
-        everywhere = (".ssh", ".tsh", ".tbot", ".codex", ".gemini", ".grok", ".config/gcloud", ".azure", ".oci",
+        everywhere = (".ssh", ".tsh", ".tbot", ".codex", ".gemini", ".cursor", ".grok", ".config/gcloud", ".azure", ".oci",
                       ".git-credentials", ".config/git/credentials", ".cargo/credentials", ".cargo/credentials.toml",
                       ".gem/credentials", ".config/hub", ".config/glab-cli", ".terraform.d", ".vault-token",
                       ".password-store", ".local/share/keyrings", ".config/op", ".mozilla", ".config/google-chrome",
