@@ -79,8 +79,9 @@ this needs no subscription login. The principal handles credentials, not an agen
 
 ## Try the sample first
 
-Run `hansa example` to watch one task go through hansa on your own login before
-real work; it starts nothing and calls no model.
+Run `hansa example` (the installer's copy at `~/.local/share/hansa`, linked as
+`~/.local/bin/hansa`) to watch one task go through hansa on your own login
+before real work; it starts nothing and calls no model.
 
 ## Create and start the desk
 
