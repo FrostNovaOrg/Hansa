@@ -2321,7 +2321,8 @@ def _target_text(name: str, t: dict, ln: dict) -> str:
             + ("" if t.get("timeout_min") else ", the lane's") + "]"
             + (f"  after {t['after']}" if t.get("after") else "")
             + (f"  after merges: {t['after_merge_min']} min" if t.get("after_merge_min") else "")
-            + f"  ({release.runs_text(t)})")
+            + f"  ({release.runs_text(t)})"
+            + (f"\n  {t['about']}" if t.get("about") else ""))
 
 
 def _lane_target(desk: Desk, a, new: dict) -> None:
@@ -2345,9 +2346,9 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
     named = ln.get("targets") if isinstance(ln.get("targets"), dict) else {}
     old = named.get(a.target)
     if cmd == "none":  # the help's word for taking it out
-        if a.minutes is not None or a.after is not None or a.fixed is not None or a.after_merge is not None:
-            raise SystemExit("hansa: none takes the target out, so it cannot come with --minutes, --after, --fixed "
-                             "or --after-merge. "
+        if any(x is not None for x in (a.minutes, a.after, a.fixed, a.after_merge, a.about)):
+            raise SystemExit("hansa: none takes the target out, so it cannot come with --minutes, --after, --fixed, "
+                             "--after-merge or --about. "
                              "Nothing was changed. " + see_more("release-flow"))
         if old is None:
             raise SystemExit(f"hansa: lane {a.name} has no release target {a.target}; its targets: "
@@ -2375,6 +2376,11 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
         if not cmd.strip():
             raise SystemExit("hansa: a target's command cannot be empty (none takes the target out). Nothing was changed. " + see_more("release-flow"))
         t["command"] = cmd
+    if a.about is not None:
+        if a.about == "none":
+            t.pop("about", None)
+        else:
+            t["about"] = a.about
     if a.minutes is not None:
         if a.minutes == "none":
             t.pop("timeout_min", None)
@@ -3224,12 +3230,14 @@ def main(argv=None):
         "the same lane already sent out (none: no order). --after-merge MINUTES asks the target by itself after "
         "merges settle for that many minutes (1-1440; none: off), only with the principal's tick; refused with "
         "--after. Failed runs reach the coordinator as failed checks; only failure alerts the principal. "
+        "--about TEXT describes what the target does in plain words (one line, up to 120 characters; none removes "
+        "it); the page shows it above the command and the target list includes it. Changes are recorded. "
         "Options alone change only those fields. hansa lane target "
         "L NAME none takes it out. An older unnamed release is now the target default, keeping its tick. "
         "hansa release L TARGET [note] asks for one; the principal answers each request, and ticks "
         "each target on its own for going out without asking. A tick stops counting when the lane's repository or "
-        "base branch, or the target's command or --after, changes (a target taken out and set again with the same "
-        "command, --after and --fixed keeps it; --minutes alone does not untick). A release runs in the lane's "
+        "base branch, or the target's command, --after or --fixed, changes (a target taken out and set again with the same "
+        "command, --after and --fixed keeps it; --minutes or --about alone does not untick). A release runs in the lane's "
         "repository and holds it while it runs: merges there wait for it, a long install too. --fixed runs the "
         "target instead from a detached checkout of the release's commit that hansa makes for it under the desk "
         "(removed when it ends, however it ends, and swept after a restart), holding nothing: merges and checks in "
@@ -3247,6 +3255,8 @@ def main(argv=None):
     q.add_argument("command", nargs="*", metavar="COMMAND", help="the command line (/bin/sh -c), quoted; none takes "
                    "the target out")
     q.add_argument("--minutes", metavar="N", help="its own time limit, 1-1440 (none: the lane's timeout_min)")
+    q.add_argument("--about", metavar="TEXT", help="what it does, in plain words: one line, up to 120 characters "
+                   "(none: remove the description); alone changes only this field and keeps the principal's tick")
     q.add_argument("--after", metavar="TARGET", help="another target of the lane that must have sent out the same "
                    "commit first (none: no order)")
     q.add_argument("--after-merge", metavar="MINUTES", help="ask this target by itself after merges have settled "
