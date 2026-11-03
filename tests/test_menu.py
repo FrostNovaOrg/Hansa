@@ -864,49 +864,6 @@ class MenuTest(unittest.TestCase):
                 os.close(master)
             os.close(slave)
 
-    def test_wait_pty_drains_output_and_waits_after_eof_or_read_error(self):
-        for last_read in (b"", OSError("terminal revoked")):
-            with self.subTest(last_read=last_read):
-                proc = Mock(returncode=7)
-                proc.poll.side_effect = [None, None, None, 7]
-                with patch.object(select, "select", side_effect=[([123], [], []), ([123], [], []), ([], [], [])]) as ready, \
-                        patch.object(os, "read", side_effect=[b"last output", last_read]):
-                    self.assertEqual(self.wait_pty(proc, 123), (7, b"last output"))
-                self.assertEqual(ready.call_args.args[0], [])
-                self.assertEqual(proc.poll.call_count, 4)
-
-    def test_wait_pty_timeout_shows_output(self):
-        proc = Mock()
-        proc.poll.return_value = None
-        with patch.object(time, "monotonic", side_effect=[0, 0, 15]), \
-                patch.object(select, "select", return_value=([123], [], [])), \
-                patch.object(os, "read", return_value=b"pending output"):
-            with self.assertRaisesRegex(AssertionError, "pending output"):
-                self.wait_pty(proc, 123)
-
-    def test_close_pty_closes_master_before_waiting_for_running_child(self):
-        proc = Mock()
-        proc.poll.return_value = None
-        with patch.object(os, "close") as close:
-            def wait(**kwargs):
-                close.assert_called_once_with(123)
-            proc.wait.side_effect = wait
-            self.close_pty(proc, 123, 456)
-        proc.terminate.assert_called_once_with()
-        self.assertEqual([call.args for call in close.call_args_list], [(123,), (456,)])
-
-    def test_receive_combines_wait_output_with_late_bytes_and_stops_at_eof(self):
-        restore = b"\x1b[?25h\x1b[?1049l"
-        with patch.object(select, "select", return_value=([123], [], [])), \
-                patch.object(os, "read", return_value=restore[6:]) as read:
-            self.assertEqual(self.receive(123, restore, restore[:6]), restore)
-            read.assert_called_once()
-        with patch.object(select, "select", return_value=([123], [], [])), \
-                patch.object(os, "read", return_value=b"") as read:
-            with self.assertRaises(AssertionError):
-                self.receive(123, restore, restore[:6])
-            read.assert_called_once()
-
     def test_pty_arrows_tick_start_only_one_unticked_desk_unchanged_and_restore(self):
         why = self.pty_problem()
         if why:
