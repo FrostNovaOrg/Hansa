@@ -25,10 +25,10 @@ follow [SECURITY.md](SECURITY.md).
 
 ### What GitHub's checks run
 
-- Every CI job also runs the adapter's suite and `claude plugin validate hansa/mod` and `claude plugin test hansa/mod`, with no model or login. Adapter worker runs skip on Ubuntu; the manual macOS jobs exercise them with fakes. The pinned tool baseline and upgrade checks are in [Tools and upgrades](docs/sandbox.md#tools-and-upgrades).
-- On GitHub's Ubuntu machine, every push to `main` runs the main tests that cannot run in a sandbox: those that listen on the loopback or make a Unix socket (`HANSA_TESTS_ONLY_UNSANDBOXED=1`; not the real srt, which GitHub's Ubuntu machines cannot start), plus the adapter and plugin checks above.
+- Every CI job also runs the adapter's suite and `claude plugin validate hansa/mod` and `claude plugin test hansa/mod`, with no model or login. Adapter worker runs skip on Ubuntu; the macOS jobs exercise them with fakes. The pinned tool baseline and upgrade checks are in [Tools and upgrades](docs/sandbox.md#tools-and-upgrades).
+- Every push to `main` runs the whole suite on Ubuntu and macOS, with Python 3.9 and the latest version, and the real srt on macOS. The repository is public, so GitHub's macOS minutes no longer count against a quota.
 - Every pull request runs the whole suite on Ubuntu, with Python 3.9 and the latest version.
-- GitHub counts macOS minutes ten times, so macOS runs only in a manually started workflow (Actions, tests, Run workflow): the whole suite on Ubuntu and macOS with both Python versions. That is the only run that tests the real srt on macOS; start it before a release whose changes touch the sandbox (the settings hansa gives srt or a worker's sandbox) or the web page.
+- A manually started workflow (Actions, tests, Run workflow) runs the whole suite on Ubuntu and macOS with both Python versions, and the real srt on macOS; start it before a release whose changes touch the sandbox (the settings hansa gives srt or a worker's sandbox) or the web page.
 
 ### Sandbox tests
 

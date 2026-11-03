@@ -1,14 +1,12 @@
 # hansa's test suite on GitHub's machines. No secrets: the suite uses stand-ins for claude and srt, and needs no login.
 #
-# What runs when, and why. GitHub's macOS minutes count ten times, so no macOS job runs unless someone starts one:
-# - A push to main runs, on one Ubuntu machine with the newest Python, only the tests a sandboxed run
-#   cannot (HANSA_TESTS_ONLY_UNSANDBOXED=1; the rest skip): the maintainers run the whole suite on macOS, in
-#   hansa's sandbox, for every change, and on Linux before every push.
+# What runs when. The repository is public, so GitHub's macOS minutes no longer count against a quota:
+# - A push to main runs the whole suite on Ubuntu and macOS, with Python 3.9 and the newest, and the real srt
+#   on macOS.
 # - A pull request runs the whole suite on Ubuntu, with Python 3.9 and the newest.
 # - A run started by hand (workflow_dispatch) runs the whole suite on Ubuntu and macOS, with Python 3.9 and the
-#   newest, and the real srt on macOS. Only that run tests the real srt on macOS: start it (Actions, tests, Run
-#   workflow) before a release whose changes touch the sandbox (the settings hansa gives srt or a worker's
-#   sandbox) or the web page.
+#   newest, and the real srt on macOS. Start it (Actions, tests, Run workflow) before a release whose changes
+#   touch the sandbox (the settings hansa gives srt or a worker's sandbox) or the web page.
 # Every job also runs the Codex adapter's suite (worker runs skip off macOS) and the coordinator plugin's
 # validation and tests. Those use stand-ins too; installing Claude Code's test kit needs no login.
 # Tool versions and the upgrade checks are recorded in docs/sandbox.md, under Tools and upgrades.
@@ -16,9 +14,9 @@
 # (tests/test_hansa.py): they listen on the loopback, make a Unix socket or run the real srt. Unlike a sandboxed
 # run, ports on the loopback work here, on Ubuntu and on macOS, so the tests that serve the web page run too;
 # HANSA_TESTS_NEED_PORTS makes them fail rather than skip if not. So do Unix sockets, which srt on Linux refuses:
-# HANSA_TESTS_NEED_UNIX_SOCKETS makes the tests that make one fail rather than skip too. Both jobs set both.
-# On macOS (a run started by hand) the real srt is installed too, and one test runs it with the sandbox settings
-# hansa gives a worker, a verifier and a design session (HANSA_TESTS_NEED_SRT makes it fail rather than skip
+# HANSA_TESTS_NEED_UNIX_SOCKETS makes the tests that make one fail rather than skip too. Every job sets both.
+# On macOS (a push or a run started by hand) the real srt is installed too, and one test runs it with the sandbox
+# settings hansa gives a worker, a verifier and a design session (HANSA_TESTS_NEED_SRT makes it fail rather than skip
 # without it): that the sandbox starts, leaves open what git needs (the worktree's own folder, a design session's branch ref and
 # objects/) and keeps the rest (other worktrees' folders, the shared settings and hooks, new files atop the
 # common folder such as commondir, other refs, and names next to the open ones), and that hansa's own try of
@@ -41,47 +39,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  unsandboxed:
-    name: Ubuntu, Python 3.x, the tests a sandbox cannot run
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      HANSA_TESTS_ONLY_UNSANDBOXED: "1"
-      HANSA_TESTS_NEED_PORTS: "1"
-      HANSA_TESTS_NEED_UNIX_SOCKETS: "1"
-      # not HANSA_TESTS_NEED_SRT: bubblewrap is restricted on GitHub's Ubuntu machines (above)
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
-        with:
-          python-version: "3.x"
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        with:
-          node-version: "24.22.0"
-      - name: Install Claude Code's plugin test kit
-        run: npm install -g @anthropic-ai/claude-code@2.1.307
-      - name: Run the tests
-        run: python3 -m unittest -v tests.test_hansa
-      - name: Run the Codex adapter's tests
-        run: python3 -m unittest -v contrib.codex.tests
-      - name: Validate the coordinator plugin
-        run: claude plugin validate hansa/mod
-      - name: Run the coordinator plugin's tests
-        run: claude plugin test hansa/mod
-
   test:
     name: ${{ matrix.os }}, Python ${{ matrix.python }}
-    if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        # macOS only in a run started by hand
-        os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        # Pushes and runs started by hand include macOS; pull requests use Ubuntu only.
+        os: ${{ github.event_name != 'pull_request' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
         python: ["3.9", "3.x"]  # the lowest hansa supports, and the newest
     env:
       HANSA_TESTS_NEED_PORTS: "1"
