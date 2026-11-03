@@ -9,12 +9,10 @@ its own sandbox (a fenced-off space) and on its own branch (a separate line of y
 runs your tests; another worker tries the change, and the coordinator decides whether to merge it or send it back.
 Releases need your approval, given each time or in advance.
 
-| | |
-|---|---|
-| **Status** | Alpha, `0.5.0a1`: settings, commands and files may still change. Up to 0.4 the project was called Bellhop. |
-| **Runs on** | macOS or Linux, with Python 3.9 or newer, git and Claude Code; [`hansa doctor`](#quick-start) checks the machine |
-| **Interfaces** | The `hansa` menu and command; a web page reached through an SSH tunnel (a private link from your computer) |
-| **License** | Apache-2.0 |
+- **Status:** Alpha, `0.5.0a1`: settings, commands and files may still change. Up to 0.4 the project was called Bellhop.
+- **Runs on:** macOS or Linux, with Python 3.9 or newer, git and Claude Code; [`hansa doctor`](#quick-start) checks the machine
+- **Interfaces:** The `hansa` menu and command; a web page reached through an SSH tunnel (a private link from your computer)
+- **License:** Apache-2.0
 
 ## Who it is for
 
@@ -87,7 +85,7 @@ model from the one that wrote the change, and a model provider at its usage limi
 
 Hansa is developed with Hansa. These figures come from one desk over the 60 days ending 2 November 2026; yours will differ.
 
-| | |
+| Measure | Figure |
 |---|---|
 | Changes merged | 345 |
 | Merged without being sent back | 57% |
