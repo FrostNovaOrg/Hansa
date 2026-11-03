@@ -48,7 +48,7 @@ import uuid
 from pathlib import Path
 
 from . import account, disk, session_value, without_session
-from .desk import Desk, event_record, now, read_json, write_json
+from .desk import Desk, event_record, lane_targets, now, read_json, write_json
 from .run import alive, claude_bin, proc_start, rethink_text, server_state, srt_needed, srt_record
 
 LIVE_SECONDS = 30  # a follower not seen for this long is not live (it polls every second or two)
@@ -353,6 +353,17 @@ def _release_item(desk: Desk, e: dict):
                 f"{head} FAILED" + (f" (exit {e.get('exit')})" if e.get("exit") is not None else "")
                 + (f": {e.get('problem')}" if e.get("problem") else "") + (f" · last lines: {tail}" if tail else "")
                 + " · next: hansa release; fix what failed, then ask again: " + release.ask_again(r))
+        if e.get("ok"):
+            ln = desk.settings()["lanes"].get(r.get("lane")) or {}
+            rs = [x for x in release.releases(desk) if x.get("lane") == r.get("lane")]
+            for target, t in lane_targets(ln).items():
+                if t.get("after") != r.get("target"):
+                    continue
+                if any(x.get("target") == target and (x.get("state") in release.OPEN or
+                       (x.get("state") == "done" and x.get("commit") == r.get("commit")))
+                       for x in rs):
+                    continue
+                line += f" · next: hansa release {r['lane']} {target}"
         if r.get("after_merge") and not e.get("ok"):
             line = (f"{head} check FAILED" + (f" (exit {e.get('exit')})" if e.get("exit") is not None else "")
                     + (f": {e.get('problem')}" if e.get("problem") else "")

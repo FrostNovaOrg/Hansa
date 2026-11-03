@@ -37630,6 +37630,89 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.hansa("release", "a", "prod")  # no order now
         self.assertEqual(release.releases(self.desk)[-1]["state"], "waiting")
 
+    def test_passing_release_notice_names_the_target_that_can_be_asked_next(self):
+        from hansa import release
+        self.with_targets(linux="true", github=("true", {"after": "linux"}))
+        self.hansa("lane", "target", "a", "linux", "--after-merge", "1")
+        self.tick_targets("linux", "github")
+        self.recorded_after_merge(time.time() - 120)
+        d = Dispatcher(self.desk)
+        d.tick()
+        r = self.settle_release(d, 1)
+        self.assertEqual(r["state"], "done")
+        self.assertTrue(r["after_merge"])
+        before = release.releases_file(self.desk).read_bytes()
+        [item] = notify.items_for(self.desk, self.events("release_ended"), {"key": "k", "session": None})
+        self.assertIn("next: hansa release a github", item["line"])
+        self.assertNotIn("next:", self.hansa("release"))
+        d.tick()
+        self.assertEqual(release.releases_file(self.desk).read_bytes(), before)
+        self.assertEqual([r["target"] for r in release.releases(self.desk)], ["linux"])
+
+    def release_notice_fixture(self):
+        from hansa import release
+        self.with_targets(linux="true", github=("true", {"after": "linux"}))
+        self.hansa("release", "a", "linux")
+        r = release.change(self.desk, 1, lambda r: {"state": "done", "exit": 0})
+        return r, {"event": "release_ended", "id": 1, "ok": True, "exit": 0}
+
+    def test_release_notice_omits_a_successor_that_already_sent_the_commit(self):
+        from hansa import release
+        r, event = self.release_notice_fixture()
+        sent = {**r, "id": 2, "target": "github"}
+        for changed, omitted in (({}, True), ({"commit": "other"}, False), ({"repo": "other"}, True),
+                                 ({"base": "other"}, True), ({"lane": "other"}, False),
+                                 ({"state": "failed"}, False), ({"state": "stopped"}, False)):
+            with self.subTest(changed=changed):
+                # A later successful release of another commit must not hide the earlier matching one.
+                write_json(release.releases_file(self.desk), [r, {**sent, **changed},
+                                                           {**sent, "id": 3, "commit": "newer"}])
+                line = notify._item(self.desk, event)[1]
+                self.assertEqual("next: hansa release a github" not in line, omitted)
+
+    def test_release_notice_omits_a_successor_with_an_open_release(self):
+        from hansa import release
+        r, event = self.release_notice_fixture()
+        for state in ("waiting", "approved", "starting", "running", "failed", "void", "stopped", "refused"):
+            with self.subTest(state=state):
+                write_json(release.releases_file(self.desk), [r, {**r, "id": 2, "target": "github",
+                                                                "state": state, "commit": "other"}])
+                line = notify._item(self.desk, event)[1]
+                self.assertEqual("next: hansa release a github" not in line, state in release.OPEN)
+
+    def test_release_notice_keeps_failed_void_and_stopped_next_steps(self):
+        from hansa import release
+        r, event = self.release_notice_fixture()
+        for state, fields, words, next_step in (
+                ("failed", {"ok": False, "exit": 7}, "FAILED (exit 7)",
+                 "hansa release; fix what failed, then ask again: hansa release a linux"),
+                ("void", {"event": "release_void", "why": "base changed"}, "is void",
+                 "ask again, hansa release a linux"),
+                ("stopped", {"event": "release_stopped", "by": "page", "ran": True}, "was stopped",
+                 "ask again when it should go out, hansa release a linux")):
+            with self.subTest(state=state):
+                write_json(release.releases_file(self.desk), [{**r, "state": state}])
+                line = notify._item(self.desk, {**event, **fields})[1]
+                self.assertIn(words, line)
+                self.assertIn("next: " + next_step, line)
+                self.assertNotIn("hansa release a github", line)
+
+    def test_release_notice_names_each_direct_successor_in_its_own_lane(self):
+        r, event = self.release_notice_fixture()
+        self.with_targets(mirror=("true", {"after": "linux"}), prod=("true", {"after": "github"}))
+        settings = self.desk.settings()
+        settings["lanes"]["b"] = {**settings["lanes"]["a"], "targets": {
+            "linux": {"command": "true"}, "elsewhere": {"command": "true", "after": "linux"}}}
+        self.assertEqual(self.desk.save_settings(settings), [])
+        line = notify._item(self.desk, event)[1]
+        for target in ("github", "mirror"):
+            self.assertIn("next: hansa release a " + target, line)
+        self.assertNotIn("hansa release a prod", line)
+        self.assertNotIn("elsewhere", line)
+        self.hansa("lane", "target", "a", "github", "--after", "none")
+        self.hansa("lane", "target", "a", "mirror", "--after", "none")
+        self.assertNotIn("next:", notify._item(self.desk, event)[1])
+
     def test_each_target_counts_what_goes_out_from_its_own_last_release(self):
         from hansa import release
         self.with_targets(test="true", push="true")
