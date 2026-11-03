@@ -38,7 +38,7 @@ follow [SECURITY.md](SECURITY.md).
 
 ## Licensing of contributions
 
-Hansa is licensed under the Apache License 2.0. By submitting a contribution you agree that:
+Hansa is licensed under the MIT License. By submitting a contribution you agree that:
 
 1. you have the right to submit it; and
-2. it is licensed under the Apache License 2.0, as section 5 of the license says.
+2. it is licensed under the MIT License, like the rest of Hansa.

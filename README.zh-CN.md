@@ -9,7 +9,7 @@
 - **状态**：Alpha 版，`0.5.0a1`，设置、命令和文件都还可能变。0.4 及以前，这个项目叫 Bellhop。
 - **运行环境**：macOS 或 Linux，需要 Python 3.9 以上、git 和 Claude Code；可以用 [`hansa doctor`](#快速开始) 检查这台机器是否满足。
 - **使用方式**：`hansa` 菜单和命令，以及一个经 SSH 隧道打开的网页。
-- **许可证**：Apache-2.0
+- **许可证**：MIT
 
 ## 适合谁
 
@@ -124,4 +124,4 @@ Hansa 运行的是你自己安装的 Claude Code，用你自己的账号或密�
 
 想修改 Hansa，请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-[Apache-2.0](LICENSE)。Copyright (c) 2026 FrostNovaOrg.
+[MIT](LICENSE)。Copyright (c) 2026 FrostNovaOrg.

@@ -12,7 +12,7 @@ Releases need your approval, given each time or in advance.
 - **Status:** Alpha, `0.5.0a1`: settings, commands and files may still change. Up to 0.4 the project was called Bellhop.
 - **Runs on:** macOS or Linux, with Python 3.9 or newer, git and Claude Code; [`hansa doctor`](#quick-start) checks the machine
 - **Interfaces:** The `hansa` menu and command; a web page reached through an SSH tunnel (a private link from your computer)
-- **License:** Apache-2.0
+- **License:** MIT
 
 ## Who it is for
 
@@ -146,4 +146,4 @@ You do not need to read hansa's code to use it.
 
 To change hansa, read [CONTRIBUTING.md](CONTRIBUTING.md).
 
-[Apache-2.0](LICENSE). Copyright (c) 2026 FrostNovaOrg.
+[MIT](LICENSE). Copyright (c) 2026 FrostNovaOrg.
