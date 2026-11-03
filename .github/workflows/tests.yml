@@ -42,12 +42,12 @@ jobs:
   test:
     name: ${{ matrix.os }}, Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
         # Pushes and runs started by hand include macOS; pull requests use Ubuntu only.
-        os: ${{ github.event_name != 'pull_request' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        os: ${{ github.event_name != 'pull_request' && fromJSON('["ubuntu-24.04", "macos-latest"]') || fromJSON('["ubuntu-24.04"]') }}
         python: ["3.9", "3.x"]  # the lowest hansa supports, and the newest
     env:
       HANSA_TESTS_NEED_PORTS: "1"

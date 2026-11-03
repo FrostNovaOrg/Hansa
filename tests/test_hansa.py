@@ -40685,7 +40685,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotRegex(jobs["test"], r"(?m)^    if:")
         self.assertIn("runs-on: ${{ matrix.os }}", jobs["test"])
         self.assertIn("os: ${{ github.event_name != 'pull_request' && "
-                      "fromJSON('[\"ubuntu-latest\", \"macos-latest\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
+                      "fromJSON('[\"ubuntu-24.04\", \"macos-latest\"]') || fromJSON('[\"ubuntu-24.04\"]') }}",
                       jobs["test"])
         self.assertIn('python: ["3.9", "3.x"]', jobs["test"])
         self.assertIn("python-version: ${{ matrix.python }}", jobs["test"])
