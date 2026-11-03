@@ -40677,16 +40677,26 @@ class WorkflowTest(unittest.TestCase):
                     self.assertRegex(package, r"^@anthropic-ai/[\w-]+@\d+\.\d+\.\d+$")
         self.assertRegex(self.workflow, r"@anthropic-ai/sandbox-runtime@\d+\.\d+\.\d+")
 
-    def test_existing_jobs_run_all_suites_and_keep_macos_manual(self):
+    def test_push_and_manual_run_all_suites_on_ubuntu_and_macos_and_prs_on_ubuntu_only(self):
         jobs = dict(self.jobs)
-        self.assertEqual(set(jobs), {"unsandboxed", "test"})
-        self.assertIn("if: github.event_name == 'push'", jobs["unsandboxed"])
-        self.assertIn("runs-on: ubuntu-latest", jobs["unsandboxed"])
-        self.assertNotIn("matrix:", jobs["unsandboxed"])
-        self.assertIn("if: github.event_name != 'push'", jobs["test"])
-        self.assertIn("github.event_name == 'workflow_dispatch' && "
-                      "fromJSON('[\"ubuntu-latest\", \"macos-latest\"]') || fromJSON('[\"ubuntu-latest\"]')",
+        self.assertEqual(set(jobs), {"test"})
+        self.assertRegex(self.workflow, r"(?m)^on:\n  push:\n    branches: \[main\]\n"
+                                       r"  pull_request:\n  workflow_dispatch:\n")
+        self.assertNotRegex(jobs["test"], r"(?m)^    if:")
+        self.assertIn("runs-on: ${{ matrix.os }}", jobs["test"])
+        self.assertIn("os: ${{ github.event_name != 'pull_request' && "
+                      "fromJSON('[\"ubuntu-latest\", \"macos-latest\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
                       jobs["test"])
+        self.assertIn('python: ["3.9", "3.x"]', jobs["test"])
+        self.assertIn("python-version: ${{ matrix.python }}", jobs["test"])
+        self.assertNotIn("HANSA_TESTS_ONLY_UNSANDBOXED", jobs["test"])
+        for variable in ("HANSA_TESTS_NEED_PORTS", "HANSA_TESTS_NEED_UNIX_SOCKETS"):
+            self.assertIn(f'{variable}: "1"', jobs["test"])
+        self.assertIn("HANSA_TESTS_NEED_SRT: ${{ startsWith(matrix.os, 'macos') && '1' || '' }}",
+                      jobs["test"])
+        self.assertRegex(jobs["test"], r"- name: Install srt, the sandbox runtime \(macOS\)\n"
+                                      r"        if: runner.os == 'macOS'\n"
+                                      r"        run: npm install -g @anthropic-ai/sandbox-runtime@")
         for name, job in self.jobs:
             with self.subTest(job=name):
                 for command in ("python3 -m unittest -v tests.test_hansa",
