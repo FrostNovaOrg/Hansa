@@ -796,7 +796,7 @@ class MenuTest(unittest.TestCase):
     def pty_process(self, source=None):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 200, 0, 0))
-        before = termios.tcgetattr(slave)
+        before = termios.tcgetattr(master)
 
         def controlling_terminal():
             os.setsid()
@@ -823,21 +823,45 @@ class MenuTest(unittest.TestCase):
         os.close(slave)
         return ""
 
-    def receive(self, master, needle):
-        output, end = b"", time.monotonic() + 20
+    def receive(self, master, needle, output=b""):
+        end = time.monotonic() + 20
         while needle not in output:
             self.assertLess(time.monotonic(), end, repr(output))
             if select.select([master], [], [], max(0, end - time.monotonic()))[0]:
-                output += os.read(master, 65536)
+                chunk = os.read(master, 65536)
+                if not chunk:
+                    break
+                output += chunk
+        self.assertIn(needle, output)
         return output
+
+    def wait_pty(self, proc, master):
+        output, end = b"", time.monotonic() + 15
+        readers = [master]
+        while proc.poll() is None:
+            remaining = end - time.monotonic()
+            self.assertGreater(remaining, 0, repr(output))
+            if select.select(readers, [], [], min(0.1, remaining))[0]:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    chunk = b""
+                if chunk:
+                    output += chunk
+                else:
+                    readers = []
+        return proc.returncode, output
 
     def close_pty(self, proc, master, slave):
         try:
             if proc.poll() is None:
                 proc.terminate()
+                os.close(master)
+                master = None
             proc.wait(timeout=15)
         finally:
-            os.close(master)
+            if master is not None:
+                os.close(master)
             os.close(slave)
 
     def test_pty_arrows_tick_start_only_one_unticked_desk_unchanged_and_restore(self):
@@ -865,9 +889,10 @@ class MenuTest(unittest.TestCase):
             os.write(master, b".")
             self.assertNotIn(b"[x]", self.receive(master, b"q quit"))
             os.write(master, b"q")
-            self.assertEqual(proc.wait(timeout=15), 0)
-            self.assertEqual(termios.tcgetattr(slave), before)
-            self.receive(master, b"\x1b[?25h\x1b[?1049l")
+            code, output = self.wait_pty(proc, master)
+            self.assertEqual(code, 0)
+            self.assertEqual(termios.tcgetattr(master), before)
+            self.receive(master, b"\x1b[?25h\x1b[?1049l", output)
         finally:
             self.close_pty(proc, master, slave)
 
@@ -886,8 +911,10 @@ class MenuTest(unittest.TestCase):
             self.assertIn(b"command interrupted", returned)
             self.assertIsNone(proc.poll())
             os.write(master, b"\x03")
-            self.assertEqual(proc.wait(timeout=15), 0)
-            self.assertEqual(termios.tcgetattr(slave), before)
+            code, output = self.wait_pty(proc, master)
+            self.assertEqual(code, 0)
+            self.assertEqual(termios.tcgetattr(master), before)
+            self.receive(master, b"\x1b[?25h\x1b[?1049l", output)
         finally:
             self.close_pty(proc, master, slave)
 
@@ -900,9 +927,10 @@ class MenuTest(unittest.TestCase):
             "def broken(): raise RuntimeError('drawing failed')\n"
             "menu.rows = broken\nmenu.run()")
         try:
-            self.assertNotEqual(proc.wait(timeout=15), 0)
-            self.assertEqual(termios.tcgetattr(slave), before)
-            self.receive(master, b"\x1b[?25h\x1b[?1049l")
+            code, output = self.wait_pty(proc, master)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(termios.tcgetattr(master), before)
+            self.receive(master, b"\x1b[?25h\x1b[?1049l", output)
         finally:
             self.close_pty(proc, master, slave)
         proc, master, slave, _ = self.pty_process()
