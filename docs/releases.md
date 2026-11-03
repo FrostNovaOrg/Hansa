@@ -106,7 +106,12 @@ commit's own change once (a merge's: only what it adds beyond its parents,
 git's `--cc`), and recorded only if they are still what goes out; hansa
 serve checks again at the start only when the commit, the starting point,
 the words or the command changed. The coordinator hears when the principal answers
-and when the release ends. `hansa release` lists them; `hansa explain lane L`
+and when the release ends. When a release passes, the posted line includes
+`next: hansa release L U` for each target U of that lane whose `--after` names
+the passing target, unless U already sent that commit or has a release waiting,
+approved, starting or running. A target
+with `--after` runs only when asked; the hint does not ask for it or start it.
+`hansa release` lists them; `hansa explain lane L`
 shows each target's command and its last release.
 
 Put a step that cannot be taken back (pushing a tag, publishing a package) last in a target's
