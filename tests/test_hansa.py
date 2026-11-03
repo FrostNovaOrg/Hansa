@@ -33347,7 +33347,7 @@ else if (ask === "cost-history") (async () => {
   await run("loadCost()");
   const zh = process.argv[4] === "zh";
   check(descendants(root, "h1")[0]?.textContent === (zh ? "工作与成本" : "Work and cost"), "history title missing");
-  const labels = zh ? ["完成的任务", "合并的任务", "失败的任务", "核验次数", "通过（含有备注）", "未通过", "无法判断", "请求的发布", "成功的发布", "每个合并任务的金额", "首次尝试就合并", "核验通过的比例", "工作者与核验者工时", "协调员的轮数", "协调员工时"]
+  const labels = zh ? ["完成的任务", "合并的任务", "失败的任务", "核验次数", "通过（含有备注）", "未通过", "无法判断", "请求的发布", "成功的发布", "每个合并任务的金额", "首次尝试就合并", "核验通过的比例", "工作智能体与核验者工时", "协调员的轮数", "协调员工时"]
     : ["Tasks finished", "Tasks merged", "Tasks failed", "Verifications", "Held (including notes)", "Did not hold", "Unsure", "Releases asked for", "Releases that went out", "US$ per merged task", "Merged at the first try", "Verifications that held", "Worker and verifier hours", "Coordinator turns", "Coordinator hours"];
   const values = zh ? ["11", "4", "3", "4", "3", "1", "0", "3", "1", "US$1.50", "75%（3 / 4）", "75%（3 / 4）", "12.50", "42", "3.25"]
     : ["11", "4", "3", "4", "3", "1", "0", "3", "1", "US$1.50", "75% (3 of 4)", "75% (3 of 4)", "12.50", "42", "3.25"];
@@ -33507,7 +33507,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
           zh ? ["价目", "立即", "历史用量", "重算", "密钥"] : ["Prices", "immediately", "past usage", "recalculated", "key"]]
       ] : ask.endsWith("security") ? [
         ['S.workers_may_not_read = ["/private/example-hidden"]',
-          zh ? ["禁读", "下次", "工作者", "核验者", "协调员", "正在运行"] : ["Not-read", "next", "worker", "verifier", "coordinator", "running"]],
+          zh ? ["禁读", "下次", "工作智能体", "核验者", "协调员", "正在运行"] : ["Not-read", "next", "worker", "verifier", "coordinator", "running"]],
         ['S.providers.compatible.model = "new-model"; S.cool_minutes = 38; S.release_direct = "hold"; S.alert.command = "echo example"',
           zh ? ["服务商", "新运行", "休息", "下次", "发布", "检查", "提醒"] : ["Provider", "new runs", "rest", "next", "Release", "check", "Alert"]]
       ] : [
@@ -33602,7 +33602,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       await run("saveSettings()");
       const notice = find(el => el.attrs.role === "status" && el.className === "notice");
       const zh = process.argv[4] === "zh";
-      const elsewhere = zh ? "提醒, 工作线, 模型服务商, 协调员, 价目, 发布, 工作者不能读的" :
+      const elsewhere = zh ? "提醒, 工作线, 模型服务商, 协调员, 价目, 发布, 工作智能体不能读的" :
         "Alerts, Lanes, Providers, Coordinator, Prices, Releases, What workers may not read";
       const both = zh ? "模型服务商, 协调员" : "Providers, Coordinator";
       check(notice && notice.textContent === run(`T.staleReloaded(${JSON.stringify(elsewhere)}, ${JSON.stringify(both)})`),
@@ -33612,7 +33612,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     } else if (ask === "settings-fix-not-read-starts") {
       run('showSettingsGroup("security")');
       const parts = process.argv[4] === "zh"
-        ? ["只要列表里有", "()[]{}*?\\", "hansa 就不启动任何工作者、核验者或协调员", "直到这里改掉它"]
+        ? ["只要列表里有", "()[]{}*?\\", "hansa 就不启动任何工作智能体、核验者或协调员", "直到这里改掉它"]
         : ["While the list holds", "()[]{}*?\\", "hansa starts no worker, verifier or coordinator", "until it is changed here"];
       for (const part of parts) check(visibleText(part, run("settingsPanels.security")),
         "visible not-read warning does not describe starting no runs: " + part);
@@ -33640,7 +33640,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       while (card && card.className !== "lane") card = card.parentElement;
       check(card, "provider key controls missing");
       if (ask.endsWith("use")) {
-        const parts = zh ? ["保存在本机", "不回显已保存的内容", "系统账号", "工作者或适配器", "发给上方的服务商接口地址"]
+        const parts = zh ? ["保存在本机", "不回显已保存的内容", "系统账号", "工作智能体或适配器", "发给上方的服务商接口地址"]
           : ["Saved on this machine", "does not show the saved value", "OS account running hansa", "worker or adapter", "send it to the provider endpoint above"];
         for (const part of parts) check(visibleText(part, card), "key use guidance missing: " + part);
         check(keyPosts.length === 0 && !key().value, "guidance requires entering or saving a key");
@@ -33659,7 +33659,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       const zh = process.argv[4] === "zh";
       const labels = run('SETTINGS_GROUPS.map(([,label]) => label)');
       check(JSON.stringify(labels) === JSON.stringify(zh
-        ? ["模型服务商", "协调员", "工作线", "工作者不能读的", "发布", "提醒", "价目"]
+        ? ["模型服务商", "协调员", "工作线", "工作智能体不能读的", "发布", "提醒", "价目"]
         : ["Providers", "Coordinator", "Lanes", "What workers may not read", "Releases", "Alerts", "Prices"]), "group names do not match desk vocabulary");
       check(has(zh ? "模型（空＝用服务商的）" : "Model (blank = the provider's)"), "coordinator model wrongly called default");
       run('showSettingsGroup("providers")');
@@ -34559,7 +34559,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     if empty:
                         self.assertIn("No work" if language == "en" else "没有工作", page["text"])
                     else:
-                        labels = ["Worker", "Check", "Verification", "Merge check", "Lane try", "Release"] if language == "en" else ["工作者", "检查", "核验", "合并检查", "工作线试跑", "发布"]
+                        labels = ["Worker", "Check", "Verification", "Merge check", "Lane try", "Release"] if language == "en" else ["工作智能体", "检查", "核验", "合并检查", "工作线试跑", "发布"]
                         for segment, label in zip(page["segments"], labels):
                             self.assertEqual(segment["text"], "")
                             self.assertEqual(segment["aria"], segment["label"])
@@ -34807,7 +34807,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             row = page["rows"][0]
             self.assertEqual(row["step"], "worker")
             self.assertIn("1 queued" if language == "en" else "1 件排队", row["text"])
-            self.assertEqual(row["marked"], ["Worker" if language == "en" else "工作者"])
+            self.assertEqual(row["marked"], ["Worker" if language == "en" else "工作智能体"])
             for word in ("t0042", "Picture task <&>", "claude (test-model)", "7", "3", "Last note <&>",
                          "browser" if language == "en" else "浏览器"):
                 self.assertIn(word, row["text"])
@@ -37334,7 +37334,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                                "每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、"
                                "它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效："
                                "手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
-                               "这条工作线的工作者和核验者可以直接用的规则")):
+                               "这条工作线的工作智能体和核验者可以直接用的规则")):
                     self.assertIn(words, page["settings"])
                 self.assertIn("not asked: this target is ticked in Settings" if language == "en" else
                               "没有问你：设置里勾了这个发布目标", page["status"])
