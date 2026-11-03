@@ -796,7 +796,7 @@ class MenuTest(unittest.TestCase):
     def pty_process(self, source=None):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 200, 0, 0))
-        before = termios.tcgetattr(slave)
+        before = termios.tcgetattr(master)
 
         def controlling_terminal():
             os.setsid()
@@ -823,22 +823,89 @@ class MenuTest(unittest.TestCase):
         os.close(slave)
         return ""
 
-    def receive(self, master, needle):
-        output, end = b"", time.monotonic() + 20
+    def receive(self, master, needle, output=b""):
+        end = time.monotonic() + 20
         while needle not in output:
             self.assertLess(time.monotonic(), end, repr(output))
             if select.select([master], [], [], max(0, end - time.monotonic()))[0]:
-                output += os.read(master, 65536)
+                chunk = os.read(master, 65536)
+                if not chunk:
+                    break
+                output += chunk
+        self.assertIn(needle, output)
         return output
+
+    def wait_pty(self, proc, master):
+        output, end = b"", time.monotonic() + 15
+        readers = [master]
+        while proc.poll() is None:
+            remaining = end - time.monotonic()
+            self.assertGreater(remaining, 0, repr(output))
+            if select.select(readers, [], [], min(0.1, remaining))[0]:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    chunk = b""
+                if chunk:
+                    output += chunk
+                else:
+                    readers = []
+        return proc.returncode, output
 
     def close_pty(self, proc, master, slave):
         try:
             if proc.poll() is None:
                 proc.terminate()
+                os.close(master)
+                master = None
             proc.wait(timeout=15)
         finally:
-            os.close(master)
+            if master is not None:
+                os.close(master)
             os.close(slave)
+
+    def test_wait_pty_drains_output_and_waits_after_eof_or_read_error(self):
+        for last_read in (b"", OSError("terminal revoked")):
+            with self.subTest(last_read=last_read):
+                proc = Mock(returncode=7)
+                proc.poll.side_effect = [None, None, None, 7]
+                with patch.object(select, "select", side_effect=[([123], [], []), ([123], [], []), ([], [], [])]) as ready, \
+                        patch.object(os, "read", side_effect=[b"last output", last_read]):
+                    self.assertEqual(self.wait_pty(proc, 123), (7, b"last output"))
+                self.assertEqual(ready.call_args.args[0], [])
+                self.assertEqual(proc.poll.call_count, 4)
+
+    def test_wait_pty_timeout_shows_output(self):
+        proc = Mock()
+        proc.poll.return_value = None
+        with patch.object(time, "monotonic", side_effect=[0, 0, 15]), \
+                patch.object(select, "select", return_value=([123], [], [])), \
+                patch.object(os, "read", return_value=b"pending output"):
+            with self.assertRaisesRegex(AssertionError, "pending output"):
+                self.wait_pty(proc, 123)
+
+    def test_close_pty_closes_master_before_waiting_for_running_child(self):
+        proc = Mock()
+        proc.poll.return_value = None
+        with patch.object(os, "close") as close:
+            def wait(**kwargs):
+                close.assert_called_once_with(123)
+            proc.wait.side_effect = wait
+            self.close_pty(proc, 123, 456)
+        proc.terminate.assert_called_once_with()
+        self.assertEqual([call.args for call in close.call_args_list], [(123,), (456,)])
+
+    def test_receive_combines_wait_output_with_late_bytes_and_stops_at_eof(self):
+        restore = b"\x1b[?25h\x1b[?1049l"
+        with patch.object(select, "select", return_value=([123], [], [])), \
+                patch.object(os, "read", return_value=restore[6:]) as read:
+            self.assertEqual(self.receive(123, restore, restore[:6]), restore)
+            read.assert_called_once()
+        with patch.object(select, "select", return_value=([123], [], [])), \
+                patch.object(os, "read", return_value=b"") as read:
+            with self.assertRaises(AssertionError):
+                self.receive(123, restore, restore[:6])
+            read.assert_called_once()
 
     def test_pty_arrows_tick_start_only_one_unticked_desk_unchanged_and_restore(self):
         why = self.pty_problem()
@@ -865,9 +932,10 @@ class MenuTest(unittest.TestCase):
             os.write(master, b".")
             self.assertNotIn(b"[x]", self.receive(master, b"q quit"))
             os.write(master, b"q")
-            self.assertEqual(proc.wait(timeout=15), 0)
-            self.assertEqual(termios.tcgetattr(slave), before)
-            self.receive(master, b"\x1b[?25h\x1b[?1049l")
+            code, output = self.wait_pty(proc, master)
+            self.assertEqual(code, 0)
+            self.assertEqual(termios.tcgetattr(master), before)
+            self.receive(master, b"\x1b[?25h\x1b[?1049l", output)
         finally:
             self.close_pty(proc, master, slave)
 
@@ -886,8 +954,10 @@ class MenuTest(unittest.TestCase):
             self.assertIn(b"command interrupted", returned)
             self.assertIsNone(proc.poll())
             os.write(master, b"\x03")
-            self.assertEqual(proc.wait(timeout=15), 0)
-            self.assertEqual(termios.tcgetattr(slave), before)
+            code, output = self.wait_pty(proc, master)
+            self.assertEqual(code, 0)
+            self.assertEqual(termios.tcgetattr(master), before)
+            self.receive(master, b"\x1b[?25h\x1b[?1049l", output)
         finally:
             self.close_pty(proc, master, slave)
 
@@ -900,9 +970,10 @@ class MenuTest(unittest.TestCase):
             "def broken(): raise RuntimeError('drawing failed')\n"
             "menu.rows = broken\nmenu.run()")
         try:
-            self.assertNotEqual(proc.wait(timeout=15), 0)
-            self.assertEqual(termios.tcgetattr(slave), before)
-            self.receive(master, b"\x1b[?25h\x1b[?1049l")
+            code, output = self.wait_pty(proc, master)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(termios.tcgetattr(master), before)
+            self.receive(master, b"\x1b[?25h\x1b[?1049l", output)
         finally:
             self.close_pty(proc, master, slave)
         proc, master, slave, _ = self.pty_process()
