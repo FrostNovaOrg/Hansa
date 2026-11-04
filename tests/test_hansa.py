@@ -29338,6 +29338,22 @@ def save():'''))
                 self.assertRegex(output["css"], r"\.scroll\s*\{[^}]*overflow-x:auto;[^}]*max-width:100%")
                 self.assertRegex(output["css"], r"@media \(max-width:640px\)[^}]*\} \.grid, \.facts \{ grid-template-columns:minmax\(0, 1fr\)")
 
+    def test_goals_page_cost_matches_work_and_cost_in_both_languages(self):
+        from hansa import goals
+        self.web_goal_records()
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                self.assertTrue(self.goals_page(goals.page_list(self.desk), scenario="goals-cost",
+                                                language=language)["ok"])
+
+    def test_goals_page_release_label_uses_singular_and_plural_in_both_languages(self):
+        from hansa import goals
+        self.web_goal_records()
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                self.assertTrue(self.goals_page(goals.page_list(self.desk), scenario="goals-releases",
+                                                language=language)["ok"])
+
     def test_goals_page_minute_polling_backoff_visibility_and_revalidation(self):
         from hansa import goals
         self.web_goal_records()
@@ -35054,7 +35070,7 @@ else if (ask === "notes") (async () => {
   check(apiPosts.length === 0, "notes wrote to the desk");
   console.log(JSON.stringify({ok:true}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
-else if (ask === "goals") (async () => {
+else if (["goals", "goals-cost", "goals-releases"].includes(ask)) (async () => {
   const run = code => vm.runInContext(code, ctx);
   const check = (ok, why) => { if (!ok) throw new Error(why); };
   const zh = process.argv[4] === "zh";
@@ -35070,17 +35086,54 @@ else if (ask === "goals") (async () => {
     check(root.textContent.includes("hansa goal add"), "empty state does not say how to add goals");
     console.log(JSON.stringify({ok:true})); return;
   }
+  if (ask === "goals-cost") {
+    const labels = zh ? ["Token 用量", "折算金额", "没有价目的 token"] : ["Token usage", "Estimated value", "Unpriced tokens"];
+    const expected = `${labels[0]}: 1,107 · ${labels[1]}: US$0.01 · ${labels[2]}: 7`;
+    const rows = descendants(root, "tr").slice(1);
+    check(descendants(root, "th")[9].textContent === labels[1], "goal value heading differs from Work and cost");
+    check(rows[0].kids[9].textContent === expected, "goal cost differs from Work and cost: " + rows[0].kids[9].textContent);
+    check(rows[1].kids[9].textContent === `${labels[0]}: 0 · ${labels[1]}: US$0.00`, "zero cost or unpriced tokens incorrect");
+    await descendants(rows[0], "button")[0].click();
+    const total = descendants(ids["#goal-selected"], "section").at(-1);
+    check(descendants(total, "h2")[0].textContent === labels[1] && descendants(total, "p")[0].textContent === expected,
+      "goal total differs from its list value");
+    const cost = data[0].cost;
+    given["/api/cost"] = {total:{tokens:cost.tokens, usd:cost.usd},
+      by:{model:{"goal-model":{tokens:cost.tokens, usd:cost.usd, unpriced_tokens:cost.unpriced_tokens}}}, unpriced_models:[]};
+    given["/api/timeline"] = {start:0, end:86400, lanes:[]};
+    await run('show("cost")');
+    const cards = descendants(ids["#tab-cost"], "div").filter(el => el.className === "metric-card");
+    for (const [index, value] of ["1,107", "US$0.01", "7"].entries())
+      check(cards.some(el => el.kids[0]?.textContent === labels[index] && el.kids[1]?.textContent === value),
+        "Work and cost label or value differs: " + labels[index]);
+    console.log(JSON.stringify({ok:true, example:expected})); return;
+  }
+  if (ask === "goals-releases") {
+    const chain = data[0].chains.find(c => c.releases.length === 2), releases = chain.releases;
+    await descendants(root, "button").find(el => el.attrs["data-goal-focus"] === data[0].id).click();
+    for (const count of [2, 1, 0]) {
+      chain.releases = releases.slice(0, count); await run("loadGoals()");
+      const work = descendants(ids["#goal-selected"], "div").find(el => el.className === "lane" &&
+        descendants(el, "button").some(button => button.textContent === chain.id));
+      const lines = descendants(work, "p").filter(el => /^(Releases?|发布)( #|:)/.test(el.textContent)).map(el => el.textContent);
+      const label = zh ? "发布" : count === 1 ? "Release" : "Releases";
+      const expected = count ? chain.releases.map(r => `${label} #${r.id}: ${r.target} · ` +
+        (zh ? r.state === "done" ? "已完成" : "失败" : r.state)) : [`${label}: ${zh ? "无" : "none"}`];
+      check(JSON.stringify(lines) === JSON.stringify(expected), "release label for " + count + ": " + lines.join("; "));
+    }
+    console.log(JSON.stringify({ok:true})); return;
+  }
   const rows = () => descendants(root, "tr").slice(1);
   check(rows().length === 2, "closed goal included by default");
   const headers = descendants(root, "th").map(el => el.textContent);
   check(JSON.stringify(headers) === JSON.stringify(zh
-    ? ["目标", "状态", "排队或运行中", "做完待审", "已合并", "失败", "未完成待办", "已合并但缺少证据", "已发布", "总成本"]
-    : ["Goals", "State", "Queued/running", "Waiting for review", "Merged", "Failed", "Open to-dos", "Merged missing evidence", "Released", "Total cost"]), "goal columns untranslated");
+    ? ["目标", "状态", "排队或运行中", "做完待审", "已合并", "失败", "未完成待办", "已合并但缺少证据", "已发布", "折算金额"]
+    : ["Goals", "State", "Queued/running", "Waiting for review", "Merged", "Failed", "Open to-dos", "Merged missing evidence", "Released", "Estimated value"]), "goal columns untranslated");
   const g = data[0];
   for (const [i, k] of ["active", "review", "merged", "failed", "todos", "missing", "released"].entries())
     check(rows()[0].kids[i + 2].textContent === String(g.counts[k]), "count mismatch: " + k);
-  check(rows()[0].kids[9].textContent.includes("US$0.012000") &&
-    rows()[0].kids[9].textContent.includes(zh ? "7 没有价目的 token" : "7 unpriced tokens"), "cost or unpriced tokens missing");
+  check(rows()[0].kids[9].textContent.includes("US$0.01") &&
+    rows()[0].kids[9].textContent.includes(zh ? "没有价目的 token: 7" : "Unpriced tokens: 7"), "cost or unpriced tokens missing");
   check(!root.textContent.includes("Delivered the original format."), "closed outcome visible by default");
   const toggle = async checked => { const input = descendants(root, "input")[0];
     input.checked = checked; await input.on.change({target:input}); };
@@ -35092,8 +35145,8 @@ else if (ask === "goals") (async () => {
   let detail = ids["#goal-selected"];
   check(detail.textContent.includes(g.why), "principal reason missing");
   for (const label of ["goalWhy", "goalCreated", "goalSession", "goalDecisions", "goalReplaced", "goalReason", "goalBy", "goalAt",
-    "goalReplaces", "goalReplacedBy", "goalChains", "goalRounds", "goalCheck", "goalVerification", "goalMerge", "goalMissing", "goalCost", "goalTokens",
-    "goalWorth", "goalUnpriced", "goalTodos", "goalVerificationOf", "releases", "lane", "task"])
+    "goalReplaces", "goalReplacedBy", "goalChains", "goalRounds", "goalCheck", "goalVerification", "goalMerge", "goalMissing", "estimatedCost", "totalTokens",
+    "unpricedTokens", "goalTodos", "goalVerificationOf", "releases", "lane", "task"])
     check(detail.textContent.includes(run("T." + label)), "label missing: " + label);
   const current = g.decisions.find(d => !d.replaced_by), old = g.decisions.find(d => d.replaced_by);
   const fold = descendants(detail, "details")[0];
@@ -35117,7 +35170,7 @@ else if (ask === "goals") (async () => {
     for (const r of c.releases) check(detail.textContent.includes(r.target) &&
       detail.textContent.includes(run(`T.goalReleaseStates[${JSON.stringify(r.state)}]`)), "release missing or untranslated");
   }
-  check(detail.textContent.includes(g.todos[0].text) && detail.textContent.includes("US$0.012000"), "todo or total cost missing");
+  check(detail.textContent.includes(g.todos[0].text) && detail.textContent.includes("US$0.01"), "todo or total cost missing");
   const total = descendants(detail, "section").at(-1);
   check(total.textContent.includes(run("T.goalRounds") + ": " + g.rounds), "total rounds missing");
   fold.open = true; await fold.on.toggle({target:fold});
@@ -35135,7 +35188,7 @@ else if (ask === "goals") (async () => {
     ids["#goal-selected"].textContent.includes(run("T.goalEnded")), "ended goal detail missing outcome or time");
   await descendants(rows()[1], "button")[0].click();
   check(ids["#goal-selected"].textContent.includes(run("T.goalNone")) &&
-    ids["#goal-selected"].textContent.includes("US$0.000000"), "empty goal detail broken");
+    ids["#goal-selected"].textContent.includes("US$0.00"), "empty goal detail broken");
   // Opening and closing the work uses the same task-details part as the other tabs.
   await descendants(rows()[0], "button")[0].click();
   const taskButton = descendants(ids["#goal-selected"], "button").find(el => el.textContent === g.chains[0].id);

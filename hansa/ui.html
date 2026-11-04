@@ -939,7 +939,7 @@ Object.assign(T, ZH ? {
   goalDecisions:"当前决定", goalReplaced:"被替代的决定", goalReason:"原因", goalBy:"决定者", goalAt:"决定时间",
   goalReplaces:"替代", goalReplacedBy:"已被替代为", goalChains:"工作（每个重试链的最新任务）", goalRounds:"轮数",
   goalCheck:"检查", goalVerification:"核验", goalMerge:"合并", goalMissing:"缺少", goalNothing:"无缺项", goalNone:"无",
-  goalCost:"总成本", goalTokens:"token", goalWorth:"折算金额", goalUnpriced:"没有价目的 token", goalTodos:"未完成待办",
+  goalTodos:"未完成待办", goalReleases:n => "发布",
   goalVerificationOf:"核验对象", goalRoles:{principal:"负责人", coordinator:"协调员", assumption:"待确认的假设"},
   goalChecks:{passed:"通过", failed:"失败", "could not run":"无法运行", none:"无"},
   goalMerges:{"not merged":"尚未合并", "merged despite a failed check or verdict":"检查或核验未通过仍合并", "merged after its merge check":"合并检查通过后合并", "merged without one":"未做合并检查就合并"},
@@ -954,7 +954,7 @@ Object.assign(T, ZH ? {
   goalDecisions:"Current decisions", goalReplaced:"Replaced decisions", goalReason:"Reason", goalBy:"Decided by", goalAt:"Decided at",
   goalReplaces:"Replaces", goalReplacedBy:"Replaced by", goalChains:"Work (latest task in each retry chain)", goalRounds:"Rounds",
   goalCheck:"check", goalVerification:"verification", goalMerge:"merge", goalMissing:"missing", goalNothing:"nothing", goalNone:"none",
-  goalCost:"Total cost", goalTokens:"tokens", goalWorth:"worth", goalUnpriced:"unpriced tokens", goalTodos:"Open to-dos",
+  goalTodos:"Open to-dos", goalReleases:n => n === 1 ? "Release" : "Releases",
   goalVerificationOf:"Verification of", goalRoles:{principal:"principal", coordinator:"coordinator", assumption:"assumption"},
   goalChecks:{passed:"passed", failed:"failed", "could not run":"could not run", none:"none"},
   goalMerges:{"not merged":"not merged", "merged despite a failed check or verdict":"merged despite a failed check or verdict", "merged after its merge check":"merged after its merge check", "merged without one":"merged without one"},
@@ -2289,8 +2289,8 @@ let goalsRows = null, goalsAll = false, goalSelected = "", goalsFlight = null, g
 let goalsFailures = 0, goalsLastGood = 0;
 const goalFolds = new Map();
 function goalCost(c) {
-  return `${fmt(c.tokens)} ${T.goalTokens} · US$${c.usd.toFixed(6)} ${T.goalWorth}`
-    + (c.unpriced_tokens ? ` · ${fmt(c.unpriced_tokens)} ${T.goalUnpriced}` : "");
+  return `${T.totalTokens}: ${fmt(c.tokens)} · ${T.estimatedCost}: ${money(c.usd)}`
+    + (c.unpriced_tokens ? ` · ${T.unpricedTokens}: ${fmt(c.unpriced_tokens)}` : "");
 }
 function goalDecision(d) {
   return h("div", {class:"lane"}, h("strong", {}, d.id), h("pre", {}, d.text),
@@ -2326,7 +2326,7 @@ function goalDetail(g) {
           c.verification_task ? ` (${c.verification_task})` : ""),
         h("p", {}, T.goalMerge, ": ", T.goalMerges[c.merge] || c.merge,
           c.merge_commit ? " · " + c.merge_commit : ""),
-        c.releases.length ? c.releases.map(r => h("p", {}, T.releases, " #", r.id, ": ", r.target, " · ",
+        c.releases.length ? c.releases.map(r => h("p", {}, T.goalReleases(c.releases.length), " #", r.id, ": ", r.target, " · ",
           T.goalReleaseStates[r.state] || r.state)) : h("p", {}, T.releases, ": ", T.goalNone),
         c.missing !== null ? h("p", {class:c.missing.length ? "goal-missing warn notice" : "muted"},
           T.goalMissing, ": ", c.missing.length ? c.missing.join("; ") : T.goalNothing) : null, box);
@@ -2335,7 +2335,7 @@ function goalDetail(g) {
       " · ", T.goalVerificationOf, " ", v.parent, " · ", T["v_" + (v.verdict || "none")] || v.verdict))),
     section(T.goalTodos, g.todos.length ? g.todos.map(a => h("div", {class:"row"}, "#", a.id, " ", h("pre", {}, a.text)))
       : h("p", {class:"muted"}, T.goalNone)),
-    section(T.goalCost, h("p", {}, goalCost(g.cost)), h("p", {}, T.goalRounds, ": ", fmt(g.rounds))));
+    section(T.estimatedCost, h("p", {}, goalCost(g.cost)), h("p", {}, T.goalRounds, ": ", fmt(g.rounds))));
 }
 function renderGoals() {
   const host = $("#tab-goals"), active = document.activeElement;
@@ -2349,7 +2349,7 @@ function renderGoals() {
       onchange:e => { goalsAll = e.target.checked; renderGoals(); }}), T.goalsAll),
     h("p", {id:"goals-connection", class:"warn", role:"status", hidden:true}),
     goalsRows === null ? h("p", {id:"goals-loading", role:"status"}, T.goalsLoading) : rows.length ? dashboardPanel(T.goals, "goals", rows.length,
-      table([T.goals, T.taskState, ...Object.values(T.goalCounts), T.goalCost], rows.map(g => [
+      table([T.goals, T.taskState, ...Object.values(T.goalCounts), T.estimatedCost], rows.map(g => [
         h("button", {class:"link", "data-goal-focus":g.id, "aria-expanded":String(g.id === goalSelected),
           "aria-controls":"goal-selected", onclick:() => { goalSelected = g.id === goalSelected ? "" : g.id; renderGoals(); }}, g.id, " · ", g.title),
         [T.goalStates[g.state], g.state !== "open" ? h("pre", {}, g.outcome) : null],

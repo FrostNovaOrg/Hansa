@@ -66,11 +66,15 @@ from `hansa goal list`: queued/running, waiting for review, merged, failed, open
 to-dos, merged chains missing evidence and released chains, plus its lifetime
 cost. “Show done and dropped goals” includes ended goals with their outcome.
 With no goals, the empty state explains how to record one.
+Goal rows and totals use the same “Token usage”, “Estimated value” and “Unpriced
+tokens” labels as Work and cost, in either language, and the same two-decimal
+`US$` format (for example, `US$0.012000` is shown as `US$0.01`).
 
 Open a goal to read the principal's reason, current decisions with their reasons,
 author, time and task, and replaced decisions in a closed fold. The work section
 uses `hansa goal show`: the latest task in each retry chain, state, rounds, check,
 verification, merge and releases, plus open to-dos, total cost and rounds.
+The English release label is “Release” for one release and “Releases” for more.
 Nonempty `missing:` lines are highlighted and keep the command's exact wording;
 an empty missing list says “nothing”. The labels are available in English and
 Chinese; recorded text stays as recorded and displays as plain text. Task numbers
