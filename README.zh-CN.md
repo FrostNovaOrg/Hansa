@@ -34,6 +34,8 @@ hansa
 
 如果提示找不到 `hansa`，按安装程序的提示，加上它打印的那行 `export PATH`。
 
+也可以在那台机器上打开 Claude Code，让它按 [SETUP.md](SETUP.md) 一步一步问你，和你一起装好 Hansa。
+
 `~/shop/repo` 是你项目的 git 仓库，里面至少要有一次提交；`~/shop/desk` 是新建的工作台，团队的设置和任务都放在这里。后面的步骤见[上手指南](docs/getting-started.md)。
 
 ## 工作原理
