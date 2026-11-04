@@ -468,6 +468,12 @@ def trim(desk: Desk, at: float | None = None) -> list:
             size = _trim_one(release.log_dir(desk) / name, at)
             if size is not None:
                 releases.append((r["id"], name, size))
+            watch = r.get("watch_run") or {}
+            if watch.get("state") in ("passed", "failed", "timed_out") and at - (watch.get("ended") or at) >= TRIM_AFTER:
+                name = f"{r['id']}.watch.log"
+                size = _trim_one(release.log_dir(desk) / name, at)
+                if size is not None:
+                    releases.append((r["id"], name, size))
     if done or releases:
         desk.event("logs_trimmed", tasks=sorted({t for t, _, _ in done}), files=len(done) + len(releases),
                    bytes=sum(n for _, _, n in done) + sum(n for _, _, n in releases),

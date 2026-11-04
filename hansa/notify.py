@@ -278,7 +278,7 @@ def _item(desk: Desk, e: dict):
                 + "; ".join(f"request #{a['id']} ({str(a.get('text', ''))[:120]})" for a in named)
                 + " (the principal answers in the conversation; record the outcome: hansa ask --close N \"<outcome>\")",
                 sessions[0] if all(same(x, sessions[0]) for x in sessions) else None, False, None)
-    if kind in ("release_answered", "release_ended", "release_void", "release_forbidden",
+    if kind in ("release_answered", "release_ended", "release_watch_ended", "release_void", "release_forbidden",
                 "release_stopped") and not e.get("quiet"):
         return _release_item(desk, e)
     if kind == "release_after_merge_waits":
@@ -346,6 +346,14 @@ def _release_item(desk: Desk, e: dict):
                 if e.get("yes") else
                 f"{head}: the principal refused it" + (f": {e.get('reason')}" if e.get("reason") else "")
                 + " · nothing was run; do not push or deploy it yourself")
+    elif kind == "release_watch_ended":
+        key = ("release-watch", rid)
+        line = f"{head}: {release.watch_text(r)}"
+        w = r.get("watch_run") or {}
+        if w.get("state") == "failed":
+            tail = " | ".join(w.get("tail", [])[-5:])
+            if tail:
+                line += f" · last lines: {tail}"
     elif kind == "release_ended":
         key = ("release", rid)
         tail = " | ".join((r.get("tail") or [])[-5:])

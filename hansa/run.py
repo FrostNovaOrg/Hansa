@@ -5712,6 +5712,7 @@ class Dispatcher:
         self.merge_procs = {}  # merge checks this server started
         self.try_procs = {}  # tries (hansa lane try) this server started, by lane
         self.release_procs = {}  # releases (hansa release) this server started, by id
+        self.release_watch_procs = {}  # CI watches, outside the repository's merge and release queue
         self.pending_stops = {}  # stop marks whose writes failed, by kind/id and launch
         self.resting = None  # the providers resting at the last round; None before the first
         self.probes = {}  # at most one background check per unreachable provider
@@ -6268,7 +6269,8 @@ class Dispatcher:
             self.tries(s, starting=not low)
         from .release import tick as releases
         with serve_step():  # before merge checks: a yes waits for none only queued
-            releases(desk, s, self.release_procs, starting=not low, tasks=self.tasks, pending=self.pending_stops)
+            releases(desk, s, self.release_procs, starting=not low, tasks=self.tasks, pending=self.pending_stops,
+                     watch_procs=self.release_watch_procs)
         with serve_step():
             self.merge_checks(s, starting=not low)
         with serve_step():

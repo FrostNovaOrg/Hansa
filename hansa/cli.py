@@ -2388,6 +2388,7 @@ def _target_text(name: str, t: dict, ln: dict) -> str:
             + (f"  after {t['after']}" if t.get("after") else "")
             + (f"  after merges: {t['after_merge_min']} min" if t.get("after_merge_min") else "")
             + f"  ({release.runs_text(t)})"
+            + (f"\n  watch: {t['watch']} [{t.get('watch_timeout_min', 90)} min]" if t.get("watch") else "")
             + (f"\n  {t['about']}" if t.get("about") else ""))
 
 
@@ -2412,9 +2413,9 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
     named = ln.get("targets") if isinstance(ln.get("targets"), dict) else {}
     old = named.get(a.target)
     if cmd == "none":  # the help's word for taking it out
-        if any(x is not None for x in (a.minutes, a.after, a.fixed, a.after_merge, a.about)):
+        if any(x is not None for x in (a.minutes, a.after, a.fixed, a.after_merge, a.about, a.watch, a.watch_minutes)):
             raise SystemExit("hansa: none takes the target out, so it cannot come with --minutes, --after, --fixed, "
-                             "--after-merge or --about. "
+                             "--after-merge, --about, --watch or --watch-minutes. "
                              "Nothing was changed. " + see_more("release-flow"))
         if old is None:
             raise SystemExit(f"hansa: lane {a.name} has no release target {a.target}; its targets: "
@@ -2447,6 +2448,17 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
             t.pop("about", None)
         else:
             t["about"] = a.about
+    if a.watch is not None:
+        if a.watch == "none":
+            t.pop("watch", None)
+        else:
+            t["watch"] = a.watch
+    if a.watch_minutes is not None:
+        try:
+            t["watch_timeout_min"] = int(a.watch_minutes)
+        except ValueError:
+            raise SystemExit("hansa: --watch-minutes takes one whole number from 1 to 1440. Nothing was changed. "
+                             + see_more("release-flow"))
     if a.minutes is not None:
         if a.minutes == "none":
             t.pop("timeout_min", None)
@@ -2491,6 +2503,12 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
               f"longer runs. Tell the principal, in the conversation, what you changed and why. Ask for a release "
               f"with: hansa release {a.name} {a.target} \"<note>\"")
     _say_forbidden(desk, a.name, ln, a.target)
+    if (old or {}).get("watch", "") != t.get("watch", ""):
+        desk.event("lane_command_changed", lane=a.name, field="watch", target=a.target,
+                   old=(old or {}).get("watch", ""), new=t.get("watch", ""))
+        print("The watch runs outside the sandbox after a successful release. Changing it voids a waiting "
+              "release and stops its tick counting until the principal takes the target back in on the page. "
+              "Tell the principal, in the conversation, what you changed and why.")
     if t.get("after_merge_min"):
         print(release.after_merge_text(new, a.name, a.target))
     if bool((old or {}).get("fixed")) != bool(t.get("fixed")):
@@ -3132,14 +3150,17 @@ def main(argv=None):
                      "(unless the principal lists that target as released without asking and the desk is not "
                      "paused, and direct commits do not require their yes; a tick stops counting when the lane's "
                      "repository or base branch, or the target's "
-                     "command, --after or --fixed, changes, not when only --minutes does); then hansa serve runs the "
+                     "command, --watch, --after or --fixed, changes, not when only --minutes does); then hansa serve runs the "
                      "command, as the desk's account, outside the sandbox, with hansa's environment and the target's "
                      "minutes (else the lane's) as its limit, and only while the base branch and the command are what "
                      "the principal saw. One release runs at a time per repository. A release runs in the lane's "
                      "repository and holds it: merges there wait while it runs, a long install too. A target set "
                      "--fixed (hansa lane target L NAME --fixed) runs instead from a checkout of the release's commit "
                      "made for it, removed when it ends, and holds nothing: merges there go on; its command names the "
-                     "commit as $HANSA_RELEASE_COMMIT, never the base branch. Each says which way it runs. The commits "
+                     "commit as $HANSA_RELEASE_COMMIT, never the base branch. Each says which way it runs. "
+                     "A target's --watch checks the pushed commit after exit 0, without holding merges or later "
+                     "releases; --watch-minutes sets its separate limit (default 90). hansa posts its result, and "
+                     "hansa release and the page show it. An unfinished watch starts over after a server restart. The commits "
                      "going out are read and checked for forbidden words without holding the desk (other commands, the "
                      "page and hansa serve go on meanwhile), each commit's own change once (a merge's: only what it "
                      "adds beyond its parents); hansa serve checks again at the start only when the commit, the "
@@ -3330,7 +3351,7 @@ def main(argv=None):
         "L NAME none takes it out. An older unnamed release is now the target default, keeping its tick. "
         "hansa release L TARGET [note] asks for one; the principal answers each request, and ticks "
         "each target on its own for going out without asking. A tick stops counting when the lane's repository or "
-        "base branch, or the target's command, --after or --fixed, changes (a target taken out and set again with the same "
+        "base branch, or the target's command, --watch, --after or --fixed, changes (a target taken out and set again with the same "
         "command, --after and --fixed keeps it; --minutes or --about alone does not untick). A release runs in the lane's "
         "repository and holds it while it runs: merges there wait for it, a long install too. --fixed runs the "
         "target instead from a detached checkout of the release's commit that hansa makes for it under the desk "
@@ -3343,12 +3364,19 @@ def main(argv=None):
         "branch as what to send (main, refs/heads/main, main~0, main^{commit}, main@{0}, or the source of main:prod; "
         "HEAD:main names it only as where to send, and is allowed); a variable the command expands or a script it "
         "runs is not looked into, so a fixed target's command should send $HANSA_RELEASE_COMMIT. "
-        "--fixed none runs it in the repository again"))
+        "--fixed none runs it in the repository again. --watch COMMAND checks the pushed commit after exit 0, "
+        "outside the repository's merge and release queue, from the release's own checkout with hansa's environment "
+        "and HANSA_RELEASE_COMMIT. hansa posts passed, failed (exit code and last lines, keys removed), or timed out "
+        "to the coordinator. --watch-minutes N sets its own limit (1-1440, default 90). --watch none removes it. "
+        "A watch interrupted by a server restart starts again from the beginning"))
     q.add_argument("name")
     q.add_argument("target", nargs="?", metavar="NAME")
     q.add_argument("command", nargs="*", metavar="COMMAND", help="the command line (/bin/sh -c), quoted; none takes "
                    "the target out")
     q.add_argument("--minutes", metavar="N", help="its own time limit, 1-1440 (none: the lane's timeout_min)")
+    q.add_argument("--watch", metavar="COMMAND", help="watch the pushed commit after exit 0, without holding merges "
+                   "or releases; hansa posts the result (none: remove)")
+    q.add_argument("--watch-minutes", metavar="N", help="watch time limit, 1-1440 minutes (default 90)")
     q.add_argument("--about", metavar="TEXT", help="what it does, in plain words: one line, up to 120 characters "
                    "(none: remove the description); alone changes only this field and keeps the principal's tick")
     q.add_argument("--after", metavar="TARGET", help="another target of the lane that must have sent out the same "
