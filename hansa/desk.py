@@ -3023,7 +3023,7 @@ class Desk:
             if opts.get("parent"):
                 parent = read_json(self.tasks_dir / opts["parent"] / "meta.json", {}) or {}
                 opts["goal"] = parent.get("goal", "")
-            if opts.get("goal"):
+            elif opts.get("goal"):
                 goals.goal(self, opts["goal"], open_only=True)
             lane = opts.get("lane")
             why = work_lane_problem(self.settings(), lane, verifying=opts.get("kind") == "verify")

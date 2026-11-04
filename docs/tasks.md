@@ -36,11 +36,13 @@ Verifications appear as verifications of their task, without counting the produc
 for the rest. With no goals it adds no goal lines. Ended goals remain readable with `show`,
 `list --all` and `decisions --goal G`.
 
-New links require an open goal, including retries and verifications of linked tasks. `--task`
-requires an existing task. `--replaces D` requires a current decision; if it was already replaced,
+An explicit `--goal G` on `hansa add`, `hansa ask` or `hansa decide` requires an open goal.
+Retries and verifications, including automatic verification, keep their task's goal even when
+the goal is done or dropped. `--task` requires an existing task.
+`--replaces D` requires a current decision; if it was already replaced,
 the refusal names its replacement. A decision is never edited or deleted: record a change of mind
 as a new decision with `--replaces D`. Pass `--goal G` on the new decision to keep it under that goal.
-These reference checks prevent recording work under a missing or ended goal or overwriting a change
+These reference checks prevent recording new work under a missing or ended goal or overwriting a change
 of mind; they remain needed while these commands accept references.
 
 The append-only entries live under `.hansa/intent/`, separate from `notes/`. Each new goal,

@@ -4525,6 +4525,75 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(verification["goal"], "g1")
         self.settle(d, verification["id"])
 
+    def test_goal_retry_keeps_ended_goal_and_shows_latest_round_only(self):
+        for action in ("done", "drop"):
+            with self.subTest(action=action):
+                gid = self.hansa("goal", "add", "Export").strip()
+                tid = self.hansa("add", "Build the export", "--lane", "a", "--goal", gid).split()[0]
+                self.desk.update(tid, state="done")
+                self.hansa("goal", action, gid, "Plans settled")
+                retry = self.hansa("retry", tid, "Include refunds").split()[0]
+                m = self.desk.meta(retry)
+                self.assertEqual((m["state"], m["goal"], m["parent"]), ("queued", gid, tid))
+                shown = self.hansa("goal", "show", gid)
+                self.assertIn(f"{retry} queued · 2 rounds", shown)
+                self.assertNotRegex(shown, rf"(?m)^{tid} ")
+
+    def test_goal_manual_verification_keeps_ended_goal(self):
+        d = Dispatcher(self.desk)
+        for action in ("done", "drop"):
+            with self.subTest(action=action):
+                gid = self.hansa("goal", "add", "Export").strip()
+                tid = self.hansa("add", "Add hello.txt", "--lane", "a", "--goal", gid).split()[0]
+                self.assertEqual(self.settle(d, tid)["state"], "done")
+                self.hansa("goal", action, gid, "Plans settled")
+                self.hansa("verify", tid)
+                verification = self.desk.meta(self.desk.meta(tid)["verify"])
+                self.assertEqual((verification["state"], verification["goal"], verification["parent"]),
+                                 ("queued", gid, tid))
+                shown = self.hansa("goal", "show", gid)
+                self.assertIn(f"{verification['id']} queued", shown)
+                self.assertIn(f"verification of {tid}", shown)
+                self.settle(d, verification["id"])
+
+    def test_goal_automatic_verification_keeps_goal_ended_during_check(self):
+        ready, release = self.tmp / "check-ready", self.tmp / "check-release"
+        gate = self.tmp / "check.py"
+        gate.write_text("from pathlib import Path\nimport time\n"
+                        f"Path({str(ready)!r}).touch()\n"
+                        "deadline = time.monotonic() + 90\n"
+                        f"while not Path({str(release)!r}).exists():\n"
+                        "    if time.monotonic() >= deadline: raise SystemExit('check was not released')\n"
+                        "    time.sleep(.05)\n")
+        self.addCleanup(release.touch)
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(gate))}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("goal", "add", "Export")
+        self.hansa("add", "Add hello.txt", "--lane", "a", "--goal", "g1", "--verify")
+        d = Dispatcher(self.desk)
+        try:
+            deadline = time.monotonic() + 60
+            while not ready.exists() and time.monotonic() < deadline:
+                d.tick()
+                time.sleep(.05)
+            self.assertTrue(ready.exists(), self.desk.meta("t0001"))
+            self.assertEqual(self.desk.meta("t0001")["phase"], "checking")
+            self.assertNotIn("verify", self.desk.meta("t0001"))
+            self.hansa("goal", "done", "g1", "shipped")
+            self.desk.pause("Keep the verification queued so its state can be checked")
+        finally:
+            release.touch()
+            parent = self.settle(d, "t0001")
+        d.tick()
+        self.assertTrue(parent["check"]["ok"], parent)
+        parent = self.desk.meta("t0001")
+        self.assertNotIn("verify_after_error", parent, parent)
+        verification = self.desk.meta(parent["verify"])
+        self.assertEqual((verification["state"], verification["goal"], verification["parent"]),
+                         ("queued", "g1", "t0001"))
+        self.assertIn("verification of t0001", self.hansa("goal", "show", "g1"))
+
     def test_goal_ask_open_todos_counts_and_closing(self):
         self.hansa("goal", "add", "Export")
         self.hansa("ask", "Which fields?", "--goal", "g1")

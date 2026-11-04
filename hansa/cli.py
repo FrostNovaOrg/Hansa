@@ -3105,7 +3105,7 @@ def main(argv=None):
     p.epilog = see_more("merge-check")
     p = add("retry", cmd_retry, "queue a follow-up task (new id) that continues from this task's last commit with "
             "your note; this task becomes replaced")
-    p.description += ". The follow-up keeps its goal, which must still be open"
+    p.description += ". The follow-up keeps its goal, even when the goal is done or dropped"
     verify_options(p)
     p.add_argument("id")
     p.add_argument("note", nargs="*")
@@ -3131,7 +3131,7 @@ def main(argv=None):
     p.epilog = see_more("effort")
     p = add("verify", cmd_verify, "have a worker run a finished task's change to see whether it holds (never merged)")
     p.description = ("have a worker run a finished task's change to see whether it holds (never merged). "
-                     "The verification keeps its task's goal, which must still be open. "
+                     "The verification keeps its task's goal, even when the goal is done or dropped. "
                      "By default it uses a verify lane listing the task's lane: free first, then fewest queued, "
                      "then lanes' order. Without one it runs on the task's own lane. "
                      "--lane L runs it on lane L instead: a verification by another model is a "
