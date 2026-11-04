@@ -20,8 +20,9 @@ this section.
 | Command | What it records or shows |
 |---|---|
 | `hansa goal add "<title>" [--why "<what the principal asked, in their words>"]` | a new open goal; prints `g1`, `g2`, … |
-| `hansa goal list [--all]` | one line per open goal: id, title, task counts and open to-do count; `--all` includes done and dropped goals with their outcome |
-| `hansa goal show G` | the goal, current decisions newest first (reason, who, time, task), replaced decisions naming their replacement, latest task in each retry chain with state and round count, and open to-dos |
+| `hansa goal list [--all] [--json]` | one line per open goal: id, title, task counts, merged chains missing evidence, released chains and open to-do count; `--all` includes done and dropped goals with their outcome |
+| `hansa goal show G [--json]` | the goal, current decisions newest first (reason, who, time, task), replaced decisions naming their replacement, latest task in each retry chain with state, rounds and evidence, total cost and rounds, and open to-dos |
+| `hansa cost --by goal [--days N \| --since "YYYY-MM-DD HH:MM"]` | tokens and worth per goal in the same window as `hansa cost`; tasks without a goal and coordinator/helper usage are under `(no goal)` |
 | `hansa goal done G "<outcome>"` | ends an open goal as done, keeping its outcome |
 | `hansa goal drop G "<why>"` | ends an open goal as dropped, keeping the reason |
 | `hansa decide "<decision>" --why "<reason>" [--goal G] [--by principal\|coordinator\|assumption] [--task T] [--replaces D]` | a decision; prints `d1`, `d2`, …; `--by` defaults to `coordinator`; `assumption` means still to be confirmed |
@@ -32,9 +33,49 @@ this section.
 Task counts use the latest task in each retry chain: queued/running, waiting for review (`done`
 or `merging`), merged and failed. Cancelled tasks stay in `show` but do not add to these counts.
 Verifications appear as verifications of their task, without counting the product work twice.
-`hansa status` shows at most five open goals with the same counts and points to `hansa goal list`
+`hansa status` shows at most five open goals with the task and to-do counts and points to `hansa goal list`
 for the rest. With no goals it adds no goal lines. Ended goals remain readable with `show`,
 `list --all` and `decisions --goal G`.
+
+Under each chain, `goal show` adds the evidence recorded for its latest task:
+
+- `check:` passed, failed, could not run, or none, from the lane's check after that task.
+- `verification:` holds, holds with notes (printed as `holds, with notes`), does not hold,
+  unsure, running (including queued), or none; it names the verification task when present.
+- `merge:` merged after its merge check, merged without one, merged despite a failed check
+  or verdict, or not merged. A lane check and a merge check are distinct evidence.
+- `release #N: TARGET · STATE` for each release whose outgoing commits include the merge,
+  including releases from another lane or base. One release can appear under several chains.
+  Pending and failed releases stay visible; only a `done` release makes the chain count as
+  released in `goal list`. With none, it prints `releases: none`.
+- For merged chains only, `missing:` repeats the merge's saved unverified note, and names
+  any recorded merge despite a failed check or verdict or merge not checked. Older tasks
+  without a saved note use the same `unverified_note` rule as `hansa merge`, including its
+  exemption for text-only changes and its explanation of earlier retry verdicts.
+  `missing: nothing` means none of those notes or marks applies; it does not imply a release
+  happened or a separate merge check was needed. `goal list` counts each merged chain with
+  any such note once as `merged missing evidence`.
+
+Release links use the saved outgoing commit list, not just the release's tip commit. When
+that list was capped, hansa reads the recorded commit range from the repository; if that
+history is no longer available, it can only link the commits still in the saved list.
+These views read evidence; they do not change what the merge gate checks.
+
+The final `cost:` line is the goal's lifetime token count and dollar worth, including every
+run of its tasks, follow-ups and verifications, with unpriced tokens called out. `rounds:`
+is the sum of its chains' rounds; verifications add no chains or rounds. An empty goal has
+zero cost and rounds. `cost --by goal` uses the usual prices, `--days` (default 7), `--since`
+(also accepts `HH:MM`) and `--json`. Its rows add up to the ordinary cost total for that
+window, including coordinator and helper usage in `(no goal)`; a desk without goals has
+only that row.
+
+`goal show --json` returns the goal record plus `decisions`, `chains`, `verifications`,
+`todos`, `cost` and `rounds`. Each chain carries its latest task's id, title, state, lane,
+rounds, check, verification and verification task id, merge description and commit, merge
+marks, releases (id, lane, target, state, commit and times), and `missing`: `null` before
+merging, an empty list when nothing is missing, otherwise a list of the same notes printed
+as text. `goal list --json` returns an array of goal records with `counts`: `active`,
+`review`, `merged`, `missing`, `released`, `failed` and `todos`; `--all` keeps its usual meaning.
 
 An explicit `--goal G` on `hansa add`, `hansa ask` or `hansa decide` requires an open goal.
 Retries and verifications, including automatic verification, keep their task's goal even when
@@ -50,8 +91,8 @@ decision, goal ending and decision replacement is a new entry, published atomica
 lock; earlier entries are unchanged. Hansa supplies the time and writing session, as for tasks.
 Text holding a known provider key is refused before anything is recorded, to keep keys out of
 the record; this check remains needed while the coordinator can supply text. Goals and decisions
-are internal records and do not undergo the release word scan. No goal page or goal evidence is
-collected here; reports, checks, merges and releases remain on their tasks.
+are internal records and do not undergo the release word scan. Goal evidence is read from
+existing task, merge and release records; reports and checks remain on their tasks.
 
 ## Time limits, and work left running in the background
 

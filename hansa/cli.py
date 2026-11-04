@@ -1297,9 +1297,11 @@ def cmd_goal(a):
     if a.action == "add":
         print(goals.add(desk, a.title, a.why))
     elif a.action == "list":
-        print("\n".join(goals.summary_text(g) for g in goals.summaries(desk, all_=a.all)))
+        rows = goals.summaries(desk, all_=a.all, evidence=True)
+        print(json.dumps(rows, ensure_ascii=False, indent=1) if a.json else
+              "\n".join(goals.summary_text(g) for g in rows))
     elif a.action == "show":
-        print(goals.show_text(desk, a.id))
+        print(json.dumps(goals.show(desk, a.id), ensure_ascii=False, indent=1) if a.json else goals.show_text(desk, a.id))
     else:
         goals.end(desk, a.id, "done" if a.action == "done" else "dropped", a.outcome)
         print(f"{a.id} {'done' if a.action == 'done' else 'dropped'}")
@@ -1472,7 +1474,7 @@ def _since(text: str) -> float:
 def cmd_cost(a):
     if a.turns and a.by:
         raise SystemExit("hansa: --turns lists the coordinator's turns session by session, with totals by what "
-                         "started them; it has no --by. For totals by day, seat, lane, task, model or provider: "
+                         "started them; it has no --by. For totals by day, seat, lane, task, goal, model or provider: "
                          "hansa cost --by ...")
     if a.turns:
         rep = cost.turns(Desk.find(a.desk), a.days, _since(a.since) if a.since else None)
@@ -3256,11 +3258,13 @@ def main(argv=None):
     q.add_argument("title", help="what the principal wants")
     q.add_argument("--why", default="", help="what the principal asked, in their words")
     q = goal_commands.add_parser("list", help="open goals, their task counts and open to-dos",
-                                 description="One line per open goal: id, title, queued/running, waiting for review, merged, failed, open to-dos.")
+                                 description="One line per open goal: id, title, queued/running, waiting for review, merged, merged missing evidence, released, failed, open to-dos. Counts use each chain's latest task; released means at least one release is done.")
     q.add_argument("--all", action="store_true", help="also show done and dropped goals with their outcome")
+    q.add_argument("--json", action="store_true", help="the same goal records and counts as JSON")
     q = goal_commands.add_parser("show", help="a goal, current and replaced decisions, latest tasks and open to-dos",
-                                 description="Show current decisions newest first with reason, who, time and task; replaced decisions name their replacement. Each retry chain shows its latest task, state and rounds; verifications name their task.")
+                                 description="Show current decisions newest first with reason, who, time and task; replaced decisions name their replacement. Each retry chain shows its latest task, state, rounds, check, verification, merge and releases by target and state. Merged chains show missing evidence using the merge's note and override marks, or missing: nothing. Then lifetime cost (including follow-ups and verifications) and total chain rounds; verifications name their task without adding chains or rounds.")
     q.add_argument("id", metavar="G")
+    q.add_argument("--json", action="store_true", help="the same goal, decisions, chains, evidence, cost, rounds and to-dos as JSON")
     for action, description in (("done", "end an open goal with its outcome"), ("drop", "drop an open goal with its reason")):
         q = goal_commands.add_parser(action, help=description, description=description + "; hansa appends an entry and keeps the original.")
         q.add_argument("id", metavar="G")
@@ -3550,11 +3554,13 @@ def main(argv=None):
                      "folder its sessions run in once a hansa command run in one has told hansa its id; when that "
                      "folder changes, the old one counts up to the change and the new one from then on. When it "
                      "is not counted, hansa cost says why. It has no lane or task, so in --by lane and --by task its "
-                     "usage is a row of its own, (coordinator): in every view the rows add up to the total.")
+                     "usage is a row of its own, (coordinator): in every view the rows add up to the total. "
+                     "--by goal counts each goal's tasks, follow-ups and verifications in the same --days or --since "
+                     "window; tasks without a goal and coordinator/helper usage go under (no goal).")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--since", help="HH:MM (today's, or yesterday's when still ahead), or YYYY-MM-DD "
                    "HH:MM: count from then instead of --days")
-    p.add_argument("--by", choices=["day", "seat", "lane", "task", "model", "provider"], help="the totals by "
+    p.add_argument("--by", choices=["day", "seat", "lane", "task", "goal", "model", "provider"], help="the totals by "
                    "(default: day); not with --turns")
     p.add_argument("--json", action="store_true")
     p.add_argument("--rows", action="store_true", help="with --json: include every row")

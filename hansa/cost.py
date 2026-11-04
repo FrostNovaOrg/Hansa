@@ -105,7 +105,7 @@ def worker_rows(desk: Desk, since: float, s: dict | None = None, tasks: list | N
                 if usd is None and kind == "subscription" and u.get("claude_code_usd") is not None:
                     usd, source = u["claude_code_usd"], "Claude Code list price"
                 rows.append({"day": _day(when), "seat": seat, "lane": m.get("lane", ""), "task": m["id"],
-                             "provider": run["provider"], "model": model,
+                             "provider": run["provider"], "model": model, "goal": m.get("goal", ""),
                              **{k: u.get(k, 0) for k in TOKEN_FIELDS}, "usd": usd,
                              "priced_by": source if usd is not None else "no price",
                              "turns": run["turns"] if i == 0 else 0, "runs": 1 if i == 0 else 0})
@@ -314,7 +314,7 @@ def scan(desk: Desk, since: float) -> dict:
     rows = []
     for (day, seat, model, provider), u in sorted(per.items()):
         usd = None if u["unpriced"] else u["usd"]
-        rows.append({"day": day, "seat": seat, "lane": "", "task": "", "provider": provider,
+        rows.append({"day": day, "seat": seat, "lane": "", "task": "", "goal": "", "provider": provider,
                      "model": model, **{k: u[k] for k in TOKEN_FIELDS}, "usd": usd,
                      "priced_by": "price table" if usd is not None else "no price"})
     return {"rows": rows, "turns": sorted((t for t in out if t["steps"]), key=lambda t: t["start"]),
@@ -545,6 +545,25 @@ def calendar(desk: Desk) -> dict:
             "days": {day: row for day, row in report(desk, None)["by"]["day"].items() if first <= day <= last}}
 
 
+def grouped(rows: list, key: str) -> dict:
+    """The same accounting for the cost report and a goal's lifetime worker cost."""
+    agg = defaultdict(lambda: {"tokens": 0, "usd": 0.0, "unpriced_tokens": 0, "turns": 0, "runs": 0})
+    for r in rows:
+        name = r.get(key) or ("(no goal)" if key == "goal" else unassigned(r))
+        a = agg[name]
+        t = sum(r[k] for k in TOKEN_FIELDS)
+        a["tokens"] += t
+        a["turns"] += r.get("turns", 0)
+        a["runs"] += r.get("runs", 0)
+        if r["usd"] is None:
+            a["unpriced_tokens"] += t
+        else:
+            a["usd"] += r["usd"]
+    if key == "goal" and not agg:
+        agg["(no goal)"]  # an empty desk still has a zero row
+    return {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(agg.items())}
+
+
 def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict:
     window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
               else "since the desk began" if days is None else f"last {days} day(s)")
@@ -555,20 +574,7 @@ def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict
     # the coordinator's records too since the desk began: one read of them, about 3 s for 500 MB of a weeks-long session
     got = scan(desk, since)
     rows = worker_rows(desk, since, tasks=tasks) + got["rows"]
-    by = {}
-    for key in ("day", "seat", "lane", "task", "model", "provider"):
-        agg = defaultdict(lambda: {"tokens": 0, "usd": 0.0, "unpriced_tokens": 0, "turns": 0, "runs": 0})
-        for r in rows:
-            a = agg[r[key] or unassigned(r)]  # the coordinator's usage has no lane or task: a row of its own
-            t = sum(r[k] for k in TOKEN_FIELDS)
-            a["tokens"] += t
-            a["turns"] += r.get("turns", 0)  # the workers' runs: the coordinator's turns are hansa cost --turns
-            a["runs"] += r.get("runs", 0)
-            if r["usd"] is None:
-                a["unpriced_tokens"] += t
-            else:
-                a["usd"] += r["usd"]
-        by[key] = {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(agg.items())}
+    by = {key: grouped(rows, key) for key in ("day", "seat", "lane", "task", "goal", "model", "provider")}
     total_usd = round(sum(r["usd"] for r in rows if r["usd"] is not None), 6)
     work = {**work_history(tasks, release.releases(desk), since, chart),
             # the coordinator's turns with a step in the window, and the time each worked, first step to last
