@@ -4,7 +4,7 @@
 
 **You say what you want and approve what ships; a team of coding agents plans, builds, tests and checks each other's work, on a machine you control.**
 
-You talk to one agent, the coordinator. It splits the work into tasks. Each task goes to a worker, another agent, in
+You talk to one agent, the coordinator. It works out what you need, asks when something is unclear and suggests improvements, then splits the work into tasks; changes of scope come back to you. Each task goes to a worker, another agent, in
 its own sandbox (a fenced-off space) and on its own branch (a separate line of your code). Hansa commits the result and
 runs your tests; another worker tries the change, and the coordinator decides whether to merge it or send it back.
 Releases need your approval, given each time or in advance.
@@ -23,7 +23,7 @@ Releases need your approval, given each time or in advance.
 
 **Not for:**
 
-- Designing a feature interactively: design elsewhere, then hand the result to hansa as a task's input.
+- Designing screens and interactions round after round: do that elsewhere, then hand the result to hansa as a task's input.
 - A laptop you close at night. Hansa belongs on a machine that stays on, such as a Mac mini, home server or Linux box.
   You reach it over SSH and tmux (remote access and a session that survives disconnection) from wherever you are.
 
