@@ -23,7 +23,8 @@ class ProviderCheck(Scratch):
         super().setUp()
         self.desk = init_desk(self.root / "desk")
         s = self.desk.settings()
-        s["providers"]["codex"] = {"kind": "compatible", "model": "codex", "effort": "", "base_url": shim.PLACEHOLDER}
+        s["providers"]["codex"] = {"kind": "compatible", "model": shim.DEFAULT_MODEL, "effort": "",
+                                   "base_url": shim.PLACEHOLDER}
         self.assertEqual(self.desk.save_settings(s), [])
         self.desk.write_key("codex", "sk-placeholder-0001")
         self.claude_record = self.root / "claude-record"
@@ -117,12 +118,34 @@ class ProviderCheck(Scratch):
         self.assertEqual([p for p in self.tmp.iterdir() if p.name.startswith("codex-check-")], [],
                          "the check's folder is removed")
 
+    def set_model(self, model):
+        s = self.desk.settings()
+        s["providers"]["codex"]["model"] = model
+        self.assertEqual(self.desk.save_settings(s), [])
+
+    def test_the_check_runs_the_providers_model(self):
+        """A provider whose model is not the adapter's default: the check runs that model and names it."""
+        self.set_model("gpt-6-astra")
+        r = self.check(HANSA_CODEX_MODEL="gpt-6.1-sol")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["detail"], "gpt-6-astra")
+        argv = self.assert_codex_ran()["argv"]
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-6-astra")
+
+    def test_a_model_the_login_cannot_use_fails_the_check(self):
+        self.set_model("gpt-6-astra")
+        r = self.check("model_not_found.jsonl")
+        self.assertFalse(r["ok"])
+        self.assertIn("model is not available", r["detail"])
+        argv = self.assert_codex_ran()["argv"]
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-6-astra")
+
 
 class CheckAnswer(Scratch):
     """The check called as hansa calls it, its answer read as check_provider reads it."""
 
     def check_argv(self, *more):
-        return ["-p", "--output-format", "json", "--max-turns", "1", "--model", "codex",
+        return ["-p", "--output-format", "json", "--max-turns", "1", "--model", shim.DEFAULT_MODEL,
                 *hansa_run.isolated(self.wt), *more]
 
     def ask(self, argv, fixture="check_ok.jsonl"):

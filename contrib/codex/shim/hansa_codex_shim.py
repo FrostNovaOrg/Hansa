@@ -825,7 +825,8 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
     a = parse(argv)
     sid = str(uuid.uuid4()) if check else a["--session-id"]
     name = f"check-{sid}" if check else sid  # the log files'
-    model = conf.get("HANSA_CODEX_MODEL") or DEFAULT_MODEL
+    # the provider's model, which hansa passes; HANSA_CODEX_MODEL and then DEFAULT_MODEL only when it passes none
+    model = a.get("--model") or conf.get("HANSA_CODEX_MODEL") or DEFAULT_MODEL
     effort = a.get("--effort") or conf.get("HANSA_CODEX_EFFORT") or DEFAULT_EFFORT
     try:
         max_turns = int(a.get("--max-turns") or DEFAULT_MAX_TURNS)
