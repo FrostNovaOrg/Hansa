@@ -16548,6 +16548,32 @@ def save():'''))
                 self.round_at(run.ROUND_QUIET + 5)
                 self.assertEqual(run.server_state(self.desk)["state"], "gone")
 
+    def test_a_failed_process_lookup_does_not_say_the_process_serve_lock_names_is_gone(self):
+        from hansa import run
+        p = self.sleeper()
+        start = run.proc_start(p.pid)
+        self.assertTrue(start)
+        self.assertTrue(run._exists(p.pid, start))  # it runs: still there, as before
+        for error in (PermissionError(errno.EPERM, "denied"), PermissionError(errno.EACCES, "denied"),
+                      OSError(errno.EIO, "denied")):
+            with self.subTest(errno=error.errno), unittest.mock.patch.object(run.os, "kill", side_effect=error):
+                self.assertTrue(run._exists(p.pid, start))  # the start saved is the one it has: still there
+                self.assertFalse(run._exists(p.pid, "1.000000"))  # another start: gone
+            with self.subTest(errno=error.errno, start_unreadable=True), \
+                    unittest.mock.patch.object(run.os, "kill", side_effect=error), \
+                    unittest.mock.patch.object(run, "proc_start", return_value=""):
+                self.assertTrue(run._exists(p.pid, start))  # its start cannot be read now: still there
+        with unittest.mock.patch.object(run.os, "kill",
+                                        side_effect=ProcessLookupError(errno.ESRCH, "no such process")):
+            self.assertFalse(run._exists(p.pid, start))  # ESRCH: gone
+        self.desk.state_dir.mkdir(exist_ok=True)
+        (self.desk.state_dir / "serve.lock").write_text(f"{p.pid} {start}")
+        self.round_at(run.STUCK_AFTER + 60)
+        with unittest.mock.patch.object(run, "lock_held", lambda desk: None), \
+                unittest.mock.patch.object(run.os, "kill", side_effect=OSError(errno.EIO, "I/O error")):
+            self.assertEqual(run.server_state(self.desk)["state"], "stuck")  # not gone: no second server starts
+        self.assertIsNone(p.poll())
+
     def test_asking_whether_a_server_runs_does_not_keep_one_from_starting(self):
         self.desk.state_dir.mkdir(exist_ok=True)
         asking = open(self.desk.state_dir / "serve.lock", "a")  # as run.lock_held holds it for a moment

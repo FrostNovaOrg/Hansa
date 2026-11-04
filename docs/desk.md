@@ -652,6 +652,13 @@ It starts the server as it last ran, then the coordinator's session as it last
 started ([below](#the-coordinators-session)). A running server, including a busy or stuck
 one, is left running and its pid is shown. It does not arrange startup at boot,
 or stop or restart a running server or session.
+Whether a server runs is asked of the lock hansa serve holds; where that lock cannot be
+asked, of the process it names. Where the lock names a start time, a lookup of that process
+that fails for a reason other than that there is no such process (`EPERM`, `EACCES`, `EIO`,
+say) does not make the server stopped, so nothing starts a second server over one hansa
+cannot look at: only `ESRCH`, or a start time that reads differently from the saved one,
+says it is gone. A lock naming only a number, as older servers wrote it, is still judged by
+the server's last round.
 
 Each `hansa serve` start saves `.hansa/serve-start.json`: the absolute path of
 its installation's `bin/hansa`, `--host`, `--every`, whether `--port` was given
