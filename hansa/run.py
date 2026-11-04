@@ -3292,9 +3292,9 @@ def task_processes(marks: list, folders: list = ()) -> list:
     return [(p, [a.decode(errors="replace") for a in args]) for p, args in found]
 
 
-# A process's parent in its kinfo_proc (e_ppid), on macOS; and its working folder through libproc
-# (PROC_PIDVNODEPATHINFO: a struct proc_vnodepathinfo of 2352 bytes, the folder's path at 152).
-_KP_PPID, _PROC_PIDVNODEPATHINFO, _VNODEPATHINFO_SIZE = 560, 9, 2352
+# A process's parent and controlling terminal in its kinfo_proc (e_ppid, e_tdev), on macOS; its working folder
+# through libproc (PROC_PIDVNODEPATHINFO: a struct proc_vnodepathinfo of 2352 bytes, the folder's path at 152).
+_KP_PPID, _KP_TDEV, _PROC_PIDVNODEPATHINFO, _VNODEPATHINFO_SIZE = 560, 572, 9, 2352
 
 
 def process_table() -> dict:
@@ -3342,11 +3342,12 @@ def record_descendants(top: int, seen: dict, table: dict | None = None) -> bool:
     return added
 
 
-def working_in(folders: list, since: float = 0) -> dict:
-    """This account's orphans (their parent is the system's first process, as for a daemon that forked twice) whose
-    working folder is one of `folders` or inside one, started at `since` or later: {pid: start}. Never this process
-    or its parent, and never one whose parent still runs: a terminal's shell, an editor or a watcher the principal
-    started there."""
+def working_in(folders: list, since: float = 0, table: dict | None = None) -> dict:
+    """This account's processes without a controlling terminal whose working folder is one of `folders` or
+    inside one, started at `since` or later: {pid: start}. Never this process or its parent. A terminal's shell
+    or an editor the principal opened there is left alone, even with its input and output redirected.
+    The caller also excludes hansa's own processes and what it started itself, from the same `table`
+    (process_table() read already) when given."""
     paths = {os.path.normpath(x) for f in folders if f for x in (f, os.path.realpath(f))}
     if not paths:
         return {}
@@ -3359,17 +3360,23 @@ def working_in(folders: list, since: float = 0) -> dict:
         except (ImportError, OSError):
             return {}
     out = {}
-    for pid, (ppid, start, when) in process_table().items():
-        if pid in (os.getpid(), os.getppid()) or ppid != 1 or when < since - 2:  # 2 s for both clocks' rounding
+    for pid, (_, start, when) in (process_table() if table is None else table).items():
+        if pid in (os.getpid(), os.getppid()) or when < since - 2:  # 2 s for both clocks' rounding
             continue
         try:
             if lib is None:
+                fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+                if int(fields[4]) != 0:  # tty_nr: the controlling terminal, regardless of open file descriptors
+                    continue
                 cwd = os.readlink(f"/proc/{pid}/cwd")
-            elif lib.proc_pidinfo(pid, _PROC_PIDVNODEPATHINFO, 0, buf, _VNODEPATHINFO_SIZE) == _VNODEPATHINFO_SIZE:
-                cwd = buf.raw[152:152 + 1024].split(b"\0")[0].decode(errors="replace")
             else:
-                continue
-        except OSError:
+                k = _mac_proc(pid)
+                if k is None or struct.unpack_from("@i", k, _KP_TDEV)[0] != -1:  # NODEV
+                    continue
+                if lib.proc_pidinfo(pid, _PROC_PIDVNODEPATHINFO, 0, buf, _VNODEPATHINFO_SIZE) != _VNODEPATHINFO_SIZE:
+                    continue
+                cwd = buf.raw[152:152 + 1024].split(b"\0")[0].decode(errors="replace")
+        except (OSError, IndexError, ValueError):
             continue
         cwd = os.path.normpath(cwd) if cwd else ""
         if cwd and any(cwd == x or cwd.startswith(x + "/") for x in paths):
@@ -3520,24 +3527,30 @@ def proc_cwd(pid) -> str:
     return next((x[1:] for x in r.stdout.splitlines() if x.startswith("n")), "")
 
 
-def sweep(desk: Desk, tid: str) -> list:
+def sweep(desk: Desk, tid: str, *, run: dict | None = None) -> list:
     """Stop what a task's processes left running once nothing of the task should run any more: a server or
     watcher that left the process group hansa stops, in a session of its own. Never hansa serve itself, nor
     the command doing this. First what hansa serve recorded below the task's runs while they ran (record_run):
     each run's process group, then each recorded process that still runs and is still the same process (its
     start); then what it finds now by the marker of one of the task's runs (HANSA_RUN, run_marks) in their
     environment, or by one of the task's run folders (worker_tmps, run_folders) in their arguments or TMPDIR: a process
-    started without the marker still names its run's folder, and one started between two recordings is found so. The record is cleared.
+    started without the marker still names its run's folder, and one started between two recordings is found so.
+    Finally processes working in the ended run's worktree, started since the run, without a controlling terminal:
+    also finds an unmarked process never observed below the run. Hansa's own processes and their descendants
+    are excluded from this last look. `run` supplies that worktree and started time for a check; by default,
+    the task's worker or verifier run. Never fall back to an earlier run's folder or time. The record is cleared.
     What was stopped goes on the task (left_running) and in the event log."""
-    keep = {os.getpid(), os.getppid()}
+    servers = {os.getpid()}
     try:
-        keep.add(int((desk.state_dir / "serve.lock").read_text().split()[0]))
+        servers.add(int((desk.state_dir / "serve.lock").read_text().split()[0]))
     except (OSError, ValueError, IndexError):
         pass
+    keep = servers | {os.getppid()}
 
     def running(p, start):
         return alive(p, start) and _state(p) != "Z"
     m = desk.meta(tid)
+    run = m if run is None else run
     seen = {p: st for p, st in run_recorded(m).items() if p not in keep}
     groups = m.get("run_groups") or {}
     if not isinstance(groups, dict):  # recorded before a group kept its leader's start
@@ -3561,6 +3574,13 @@ def sweep(desk: Desk, tid: str) -> list:
     folders = [*(r["path"] for r in m.get("worker_tmps") or [] if r.get("path")), *(m.get("run_folders") or [])]
     found += [(p, args, proc_start(p)) for p, args in task_processes(m.get("run_marks") or [], folders)
               if p not in keep and p not in done | {x[0] for x in found}]
+    if run.get("worktree") and run.get("started"):
+        ours, table = {}, process_table()
+        for pid in servers:
+            record_descendants(pid, ours, table)
+        excluded = keep | set(ours) | done | {x[0] for x in found}
+        found += [(p, _args(p), st) for p, st in working_in([run["worktree"]], since=run["started"], table=table).items()
+                  if p not in excluded]
     found = [(p, args, s) for p, args, s in found if running(p, s)]
     if m.get("started_procs") or m.get("run_groups"):
         desk.change(tid, lambda x: {"started_procs": {}, "run_groups": {}})
@@ -4481,12 +4501,13 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
 
 
 def check_not_started(desk: Desk, tid: str, e: Exception) -> None:
+    m = desk.meta(tid)
     why = desk.redact(f"the lane's check could not run: {e}")[:600]
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "check.log")
     desk.change(tid, lambda x: {"state": "failed", "phase": "", "pid": None, "pid_start": "", "error": why})
     desk.event("task_checked", task=tid, ok=False, exit=None, note=why)
-    sweep(desk, tid)
+    sweep(desk, tid, run={"worktree": m.get("worktree"), "started": m.get("check_started")})
     desk.failed_starts.pop(("check", tid, desk.meta(tid).get("launch")), None)
 
 
@@ -4507,6 +4528,7 @@ def verification_takes_over(m: dict) -> bool:
 
 def finish_check(desk: Desk, tid: str) -> dict:
     m = desk.meta(tid)
+    ended = {"worktree": m.get("worktree"), "started": m.get("check_started")}
     memory = oom_result(m.get("check_oom_start"))
     raw, d = desk.state_dir / "runs" / tid, desk.tasks_dir / tid
     done = raw / "check.exit" if (raw / "check.exit").exists() else d / "check.exit"
@@ -4537,7 +4559,7 @@ def finish_check(desk: Desk, tid: str) -> dict:
                                   "check_started": None, "lookup_failing_since": None})
             if queued:
                 done.unlink(missing_ok=True)
-                sweep(desk, tid)
+                sweep(desk, tid, run=ended)
                 desk.event("check_killed", task=tid, exit=code, **memory)
                 return desk.meta(tid)
             latest = desk.meta(tid)  # a stop arrived while the output was being published
@@ -4549,7 +4571,7 @@ def finish_check(desk: Desk, tid: str) -> dict:
                                            "error": changed or ("cancelled" if now_meta.get("cancel") else "")})
     done.unlink(missing_ok=True)  # the exit remains recoverable until the end is recorded
     desk.event("task_checked", task=tid, ok=check["ok"], exit=code, note=check["note"])
-    sweep(desk, tid)
+    sweep(desk, tid, run=ended)
     return desk.meta(tid)
 
 
@@ -5111,7 +5133,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
     (raw / "merge-setup.log.done").unlink(missing_ok=True)
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, *MERGE_FILES)  # what the check printed can hold a key the change holds
-    sweep(desk, tid)  # what the merge check left running
+    sweep(desk, tid, run=mc)  # the merge check's lane may differ, and the task's lane may now run another task
 
     def read(name):
         return (d / name).read_text(encoding="utf-8", errors="replace") if (d / name).exists() else ""
@@ -5928,6 +5950,7 @@ class Dispatcher:
         """Run the lane's check on a task whose worker is done: or take over the one an earlier
         server started, or finish the one it left finished."""
         desk, tid = self.desk, m["id"]
+        ended = {"worktree": m.get("worktree"), "started": m.get("check_started")}
         key = ("check", tid, m.get("launch"))
         if retry_start_failure(desk, key, lambda e: check_not_started(desk, tid, e)):
             return
@@ -5965,7 +5988,7 @@ class Dispatcher:
                                         "finished": now()} if x.get("cancel") else
                         {"state": "done", "phase": "", "pid": None, "pid_start": "", "check": check})
             desk.event("task_checked", task=tid, ok=None, exit=None, note=check["note"], could_not_run=True)
-            sweep(desk, tid)
+            sweep(desk, tid, run=ended)
             return
         except Exception as e:  # noqa: BLE001 - say: the check cannot run, so the task fails
             check_not_started(desk, tid, e)
@@ -5976,7 +5999,7 @@ class Dispatcher:
         publish(desk, tid, "check.log")  # cancelled first, or the principal removed the check meanwhile
         desk.change(tid, lambda x: {"state": "cancelled", "phase": "", "error": "cancelled", "finished": now()}
                     if x.get("cancel") else {"state": "done", "phase": ""})
-        sweep(desk, tid)
+        sweep(desk, tid, run=ended)
 
     def merge_checks(self, s: dict, starting: bool = True) -> None:
         """Finish merge checks that ended, stop those cancelled or over the lane's time, take over or finish

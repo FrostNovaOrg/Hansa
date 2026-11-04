@@ -224,8 +224,8 @@ the run's branch from the old id to the new one (`git update-ref` with the
 old id, without following a link). The old id is what the branch's ref file
 (or `packed-refs`) holds, read as a plain file, and what the run left running
 is stopped before hansa commits (and before the lane's check), so what hansa
-finds can no longer change the ref; a leftover it cannot find (one that
-cleared its environment, or on macOS a system program such as `/bin/sh`)
+finds can no longer change the ref; a leftover it cannot find (one never
+observed below the run that cleared its markers and left the worktree)
 still could. So if the ref changed all the same (a link made, another id), or
 the branch does not end on the new commit with the old id as its parent, the
 task fails, the ref is put back to the old id and the work is left staged.
@@ -491,8 +491,8 @@ would close `a1/desk/secrets` and leave the real folder open. `hansa init`, `han
 
 ## What hansa stops when a run ends
 
-What hansa stops when a run ends (a worker, a verifier, or
-the lane's check after one): the run's process group; then each process
+What hansa stops when a run ends (a worker, a verifier,
+the lane's check after one, or a merge check): the run's process group; then each process
 `hansa serve` recorded below the run while it ran, whatever its group,
 environment or working folder (on each of its rounds, every few seconds, on
 the task, so a restarted server still has the record), if it still runs and
@@ -504,7 +504,26 @@ that number later, and its group, are never taken for the run's; then each proce
 `run_marks`; `HANSA_TASK` alone finds nothing, since task ids repeat from desk to
 desk and one account may run several desks), or one of the run's temporary folders
 (the worker's; a setup's or check's, and its own folder on disk on Linux, kept on
-the task as `run_folders`) in its arguments or as its TMPDIR. TERM first, KILL 5 seconds later to what still runs; `hansa show`
-lists what was stopped, with its group or alone, and the event log has it. What can still escape: a process started and moved
-out of every marker (`env -i`, another folder, a session of its own) between
-two rounds, whose parent ended before the next round.
+the task as `run_folders`) in its arguments or as its TMPDIR. Finally, hansa
+finds processes working in the worktree where the run that just ended ran,
+or a folder inside it, that started since that run began and have no controlling
+terminal. A lane check uses its own start time; a merge check uses its recorded
+worktree and start time, including after a server restart. With a merge lane,
+this is the merge lane's worktree, so the scan leaves alone a new task running
+in the original task's lane. Without a merge lane, it is the task lane's
+worktree. If the ended run's worktree or start time is missing, there is no
+folder scan; hansa still uses the records and markers above. This folder
+scan catches an unmarked process that detached between observations or while
+the server was down; it is needed while runs can detach without being recorded.
+It leaves alone a shell or editor with a controlling terminal, even with its
+input and output redirected, and hansa's own processes (the server, the command
+doing the cleanup and their descendants). These exclusions apply to the folder
+scan; the existing records and markers still identify a run's own processes.
+Hansa stops and lists each leftover once, before it commits and before the
+lane's check, including when a restarted server finishes the run.
+
+TERM first, KILL 5 seconds later to what still runs; `hansa show` lists what
+was stopped, with its group or alone, and the event log has it. What can still
+escape: a process started and moved out of every marker (`env -i`, another
+folder, a session of its own) and out of the worktree between two rounds,
+whose parent ended before the next round.
