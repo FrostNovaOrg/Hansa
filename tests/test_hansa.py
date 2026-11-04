@@ -21106,7 +21106,8 @@ def save():'''))
         index = self.hansa_out("help")
         self.assertLessEqual(len(index.splitlines()), 40)
         self.assertNotIn("# The card", index)
-        for name in ("add", "merge", "lane (add, set, target, brief, remove, try)", "disk-floor", "coordinator"):
+        for name in ("add", "merge", "lane (add, set, target, brief, remove, try)", "disk-floor", "coordinator",
+                     "explain (history)"):
             self.assertIn(name, index)
         self.assertNotIn("notify-follow", index)  # the hidden ones stay hidden
         self.assertIn(self.hansa_out("help", "topics"), index)
@@ -33484,7 +33485,7 @@ def save():'''))
                         s = c.desk.settings()
                         s["release_direct"] = "hold"
                         with c.assertRaises(SystemExit) as refused:
-                            cli._save(c.desk, s)
+                            cli._save(c.desk, s, "hansa lane set")
                         c.assertIn("release_direct is the principal's", str(refused.exception))
                         c.assertIn("release_direct is the principal's", " ".join(c.desk.save_settings(s)))
                         c.assertEqual(c.desk.settings_path.read_bytes(), before)

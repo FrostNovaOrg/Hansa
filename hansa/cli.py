@@ -1999,7 +1999,7 @@ def _save_topic(problem: str) -> str:
 
 def _save(desk: Desk, new: dict, command: str) -> None:
     """Save the coordinator's change, checked as the page's are; on problems print them, with a pointer for each
-    field they are about, and change nothing."""
+    field they are about, and change nothing. Callers name their command for settings history."""
     problems = desk.save_settings(new, by="coordinator", command=command)
     if problems:
         topics = dict.fromkeys(filter(None, map(_save_topic, problems)))
@@ -2938,11 +2938,10 @@ def index_text(commands: list, lane_commands: list) -> str:
     """`hansa help` with no word: the commands, a few to a line, then the topics."""
     grouped = [list(names) for _, names in COMMAND_GROUPS]
     grouped[-1] += [x for x in commands if not any(x in g for g in grouped)]
-    shown = {"lane": f"lane ({', '.join(lane_commands)})"}
+    shown = {"lane": f"lane ({', '.join(lane_commands)})", "explain": "explain (history)"}
     return "\n".join([
         "hansa help COMMAND: command help; hansa help TOPIC: one topic; hansa help card: the card; "
         "hansa help topics: all topics.",
-        "Commands:",
         *(f"  {label}: {', '.join(shown.get(x, x) for x in g if x in commands)}"
           for (label, _), g in zip(COMMAND_GROUPS, grouped)),
         topics_text()])
