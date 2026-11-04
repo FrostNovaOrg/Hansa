@@ -1536,6 +1536,7 @@ def cmd_serve(a):
     if not held:
         raise SystemExit(f"hansa: another hansa serve is already running on {desk.root}; one per desk, so no task is "
                          f"started twice. Stop that one first if you want to restart it")
+    d = Dispatcher(desk)  # keep recovery's log boundary before any startup events, however this server was launched
     record_serve_code(desk)  # which code this server runs, for hansa status to tell from what is installed later
     record_serve_locale(desk)  # the locale its lanes' commands get, for hansa explain lane to say
     dropped = record_serve_session(desk)  # a Claude Code session's identity, which nothing it starts gets
@@ -1569,7 +1570,6 @@ def cmd_serve(a):
     beat(desk)  # its rounds count from now, not from the last server's
     pulse(desk)
     alert.start_thread(desk)  # the principal's alert command, run from here only (hansa/alert.py)
-    d = Dispatcher(desk)
     desk.event("server_started", port=port)
     print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port}{port_note} "
           "(run `hansa web` for the address)", flush=True)

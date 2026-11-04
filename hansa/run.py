@@ -5728,6 +5728,9 @@ def run_running(run: dict, proc=None) -> bool:
     return not has_ended(proc) if proc is not None else alive(run.get("pid"), run.get("pid_start", ""))
 
 
+END_RECOVERY_BYTES = 1 << 20
+
+
 class Dispatcher:
     """Starts queued tasks while lanes are free, and finishes the ones that ended."""
 
@@ -5745,6 +5748,10 @@ class Dispatcher:
         self.sandbox_seen = set()  # runs (by session) with a Bash call that succeeded: nothing more to look for
         self.retried = False  # whether the held lanes' sandbox was tried again as this server started (sandbox_retry)
         self.ends_recovered = False  # saved task ends whose event an earlier server did not get to write
+        try:
+            self.ends_before = desk.events_path.stat().st_size  # before this startup appends its own events
+        except FileNotFoundError:
+            self.ends_before = 0
         self.swept = 0.0  # when it last swept hansa's leftover empty folders in the temporary folder (sweep_tmp)
         self.trimmed = 0.0  # when this server last trimmed what old tasks kept (disk.trim)
         self.look_error = None  # the error of its look of free space while that fails as a whole (disk.look_failed)
@@ -5760,9 +5767,10 @@ class Dispatcher:
         return self.read[1]
 
     def recover_ends(self) -> None:
-        """Repair the save/event gap once at startup. Only the hour before the log's newest event (and later)
-        needs recovery; read its tail once, rather than the whole history for every ended task. The saved end's
-        time keeps alerts and the page from treating a restart as the time the task ended."""
+        """Repair the save/event gap once at startup, using the log's pre-startup time. Read a byte-bounded
+        tail, including later appends on a retry: repaired events keep their saved times, so an old timestamp
+        cannot end the scan. The saved time also keeps alerts and the page from dating an end to its repair.
+        This repair can go when saving an end and appending its event become one durable operation."""
         desk = self.desk
         latest, newest = {}, 0
         try:
@@ -5771,25 +5779,23 @@ class Dispatcher:
             source = None
         if source:
             with source:
-                pos, pending, past = source.seek(0, os.SEEK_END), b"", False
-                while pos and not past:
-                    size = min(pos, 65536)
-                    pos -= size
-                    source.seek(pos)
-                    lines = (source.read(size) + pending).split(b"\n")
-                    pending = lines.pop(0) if pos else b""
-                    for line in reversed(lines):
-                        e = event_record(line)
-                        if not e or not isinstance(e.get("ts"), (int, float)) or not math.isfinite(e["ts"]):
-                            continue
+                end = source.seek(0, os.SEEK_END)
+                pos = max(0, self.ends_before - END_RECOVERY_BYTES)
+                source.seek(pos)
+                lines = source.read(end - pos).split(b"\n")
+                if pos:
+                    pos += len(lines.pop(0)) + 1  # the first line may start outside the tail
+                for line in lines:
+                    pos += len(line) + 1
+                    e = event_record(line)
+                    if not e or not isinstance(e.get("ts"), (int, float)) or not math.isfinite(e["ts"]):
+                        continue
+                    if pos <= self.ends_before:
                         newest = max(newest, e["ts"])
-                        if e["ts"] < newest - 3600:
-                            past = True
-                            break
-                        if e.get("event") == "task_finished" and e.get("state") in ("queued", "checking"):
-                            continue  # a run handed to another try or its check has not ended the task
-                        key = (e.get("task"), e.get("event"))
-                        latest[key] = max(latest.get(key, 0), e["ts"])
+                    if e.get("event") == "task_finished" and e.get("state") in ("queued", "checking"):
+                        continue  # a run handed to another try or its check has not ended the task
+                    key = (e.get("task"), e.get("event"))
+                    latest[key] = max(latest.get(key, 0), e["ts"])
 
         def missing(m, kind, at, **fields):
             if at is None or at < newest - 3600:
