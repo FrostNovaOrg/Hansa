@@ -265,7 +265,14 @@ on branch task/{tid}, which was made for this task.
   and give any time limit seconds of room; check what the code does and the words that matter,
   not whole sentences; skip a test the sandbox cannot run (one that binds a local port, say) with
   the reason in the skip, rather than leave it failing or delete it.
-{long}- End with a short report: what you changed, how you checked it, and anything left undone.
+{long}- Before you report a change done, use it as its user would, as far as the sandbox allows and
+  without paid calls to a model or another outside service (run the command, call the code), and
+  say in the report what you saw; if you could not, say why.
+- When you change what a page or a command shows, say in the report what it showed before and
+  what it shows now, for the case you changed.
+- When the task says to leave something as it is, or not to do something yet, leave it, even where
+  a change looks better, and name it in the report.
+- End with a short report: what you changed, how you checked it, and anything left undone.
   Its last line is `Changelog: ` and one sentence on the change for the project's users,
   or `Changelog: none` when they would not notice it. A follow-up writes that line for the
   whole change as it stands on its branch, not only for this round.
