@@ -1047,7 +1047,10 @@ the end, and the event list and review alerts can see it. Recovery keeps the sav
 fields, and leaves existing end events alone, including on a second restart. A queued task's recorded
 cancellation already counts as its end; recovery adds no separate end event. Merge records and their
 events share the saved timestamp; recovery also recognizes older merges' rounded event times. To keep
-startup quick, it checks saved ends from the hour before the newest event in the log, or later; it does not recreate
+startup quick, it reads the last MiB of the log as it stood before startup, plus events appended since,
+and checks saved ends from the hour before that tail's newest event, or later. A stop of any length
+does not move this window; startup events cannot move it either. The scan follows the log's byte
+order, so an older repaired timestamp cannot hide ends already recorded. It does not recreate
 missing task-added events or release ends. This repair is needed while saving an end and appending
 its event are separate writes; it can go when both become one durable operation.
 

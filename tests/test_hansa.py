@@ -16561,6 +16561,97 @@ def save():'''))
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 91, result.stderr)
 
+    def start_server_once(self, command="serve"):
+        """Run the real startup and one dispatcher round, without a web server or daemon threads."""
+        from hansa import web
+
+        class Once(Dispatcher):
+            def tick(self):
+                super().tick()
+                raise KeyboardInterrupt
+
+        def launch(desk, rec, cmd, *args):
+            self.assertEqual(cmd[3], "serve")
+            main(cmd[1:])  # the server hansa up would launch in another process
+            return "watch the server"
+
+        with cli.hold_server_lock(self.desk) as held, \
+                unittest.mock.patch.object(cli, "hold_server_lock", return_value=held), \
+                unittest.mock.patch.object(web, "start_web", return_value=types.SimpleNamespace(server_address=("h", 1))), \
+                unittest.mock.patch.object(cli, "pulse"), \
+                unittest.mock.patch.object(cli, "Dispatcher", Once), \
+                unittest.mock.patch.object(cli.alert, "start_thread"), \
+                unittest.mock.patch.object(cli.signal, "signal"), \
+                unittest.mock.patch.object(cli, "try_srt_at_start", return_value={"ran": True}), \
+                unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                unittest.mock.patch.object(up, "server_state", side_effect=[
+                    {"state": "gone"}, {"state": "up", "pid": os.getpid(), "answers": True}]), \
+                unittest.mock.patch.object(up, "launch_tmux", side_effect=launch), \
+                unittest.mock.patch.object(up, "coordinator_up", return_value=True):
+            self.hansa_out(command)
+
+    def test_startup_repairs_an_end_after_long_and_short_stops_through_serve_and_up(self):
+        for command in ("serve", "up"):
+            for stopped in (3 * 3600, 5 * 60):
+                with self.subTest(command=command, stopped=stopped):
+                    at = now() - stopped
+                    with unittest.mock.patch("hansa.desk.now", return_value=at):
+                        desk = init_desk(self.tmp / f"restart-{command}-{stopped}", str(self.repo), "a")
+                        tid = desk.new_task("Saved just before the stop")
+                    with unittest.mock.patch.object(self, "desk", desk):
+                        p, sock = self.session()
+                        self.addCleanup(stop_started_on, desk.root, time.time())
+                        with self.in_session(p, sock):
+                            self.hansa_out("notify", "on")
+                        self.desk.update(tid, state="done", finished=at, error="")
+                        pos = notify.log_end(self.desk)
+                        self.start_server_once(command)
+                        ends = [e for e in self.events("task_finished") if e.get("task") == tid]
+                        self.assertEqual([(e["task"], e["ts"]) for e in ends], [(tid, at)])
+                        [item] = [x for x in notify.items_for(self.desk, notify.read_log(self.desk, pos)[0],
+                                                            {"key": "probe", "session": None})
+                                  if x["key"] == ["task", tid]]
+                        self.assertIn(f"{tid} done", item["line"])
+                        self.soon(lambda: [x for x in self.posts(sock) if f"{tid} done" in x], timeout=30)
+                        end = notify.log_end(self.desk)
+                        self.start_server_once(command)
+                        self.assertEqual([e for e in self.events("task_finished") if e.get("task") == tid], ends)
+                        self.assertEqual([x for x in notify.items_for(
+                            self.desk, notify.read_log(self.desk, end)[0], {"key": "probe", "session": None})
+                                          if x["key"] == ["task", tid]], [])
+                        after = notify.log_end(self.desk)
+                        self.soon(lambda: any(r.get("pos", 0) >= after for r in notify.records(self.desk)), timeout=30)
+                        self.assertEqual(len([x for x in self.posts(sock) if f"{tid} done" in x]), 1)
+
+    def test_startup_does_not_repeat_posted_ends_before_an_older_repaired_event(self):
+        at = now() - 4000
+        repaired = self.desk.new_task("Needs its end repaired")
+        earlier = self.desk.new_task("End already posted before the repair")
+        self.desk.update(repaired, state="done", finished=at, error="")
+        self.desk.update(earlier, state="done", finished=at + 100, error="")
+        self.desk.events_path.write_bytes(b"")
+        self.desk.event("task_finished", ts=at + 100, task=earlier, state="done")
+        Dispatcher(self.desk).recover_ends()
+        self.assertEqual([e["task"] for e in self.events("task_finished")], [earlier, repaired])
+        with unittest.mock.patch("hansa.desk.now", return_value=at + 3650):
+            newer = self.desk.new_task("End posted after the repair")
+        self.desk.update(newer, state="done", finished=at + 3650, error="")
+        self.desk.event("task_finished", ts=at + 3650, task=newer, state="done")
+        sock = "inbox-posted-ends"
+        items = notify.items_for(self.desk, notify.read_log(self.desk, 0)[0],
+                                 {"key": "probe", "session": None})
+        self.assertEqual({item["key"][1] for item in items}, {earlier, repaired, newer})
+        for item in items:
+            notify.post(sock, notify.message(str(self.desk.root), [item["line"]]))
+        before = self.desk.events_path.read_bytes()
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).recover_ends()
+        Dispatcher(self.desk).recover_ends()
+        self.assertEqual(self.desk.events_path.read_bytes(), before)
+        self.assertEqual(notify.items_for(self.desk, notify.read_log(self.desk, pos)[0],
+                                        {"key": "probe", "session": None}), [])
+        self.assertEqual(len(self.posts(sock)), 3)
+
     def test_startup_repairs_an_end_lost_by_process_exit_and_a_follower_posts_it(self):
         from hansa import run
         p, sock = self.session()
@@ -16724,10 +16815,14 @@ def save():'''))
             self.desk.update(tid, state="done", finished=finished)
         self.desk.events_path.write_bytes(
             (b'{"ts":1,"event":"old_note"}\n' * 100000)
-            + b'{"ts":199999,"event":"note","text":"' + ("中é" * 40000).encode() + b'"}\n'
+            + b'{"ts":199999,"event":"note","text":"' + ("中é" * run.END_RECOVERY_BYTES).encode() + b'"}\n'
             + json.dumps({"ts": at, "event": "note"}).encode() + b'\n\xff\n[]\n{"ts":"bad"}\nbroken\n')
-        with unittest.mock.patch.object(run, "event_record", wraps=run.event_record) as read:
+        with open(self.desk.events_path, "rb") as source, \
+                unittest.mock.patch.object(run, "open", create=True) as opened, \
+                unittest.mock.patch.object(run, "event_record", wraps=run.event_record) as read:
+            opened.return_value = tail = unittest.mock.MagicMock(wraps=source)
             Dispatcher(self.desk).recover_ends()
+        self.assertEqual(tail.read.call_args_list, [unittest.mock.call(run.END_RECOVERY_BYTES)])
         self.assertLess(read.call_count, 20)  # the large old history was neither read nor parsed
         self.assertEqual({e["task"]: e["ts"] for e in notify.read_log(self.desk, 0, 10 ** 7)[0]
                           if e.get("event") == "task_finished"},
