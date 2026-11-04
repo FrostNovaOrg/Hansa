@@ -39199,6 +39199,220 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         with unittest.mock.patch.object(alert, "time", unittest.mock.Mock(wraps=time, time=lambda: t)):
             return self.hansa_out("status")
 
+    def follow_with_refusing_inbox(self, seconds, accepts, at=None, sess=None, resume=None, restart_at=None,
+                                   start=None) -> dict:
+        """A real follower and desk feed, with only its inbox and clock replaced. Sleeps advance the clock and
+        run due desk changes; every post attempt is recorded, including those the inbox refuses."""
+        from hansa import alert
+        sess = sess or dict(self.WATCHED)
+        t0 = float(int(time.time())) if start is None else start
+        clock, todo = [t0], sorted((at or {}).items())
+        got = {"posts": [], "attempts": [], "requests": [], "start": t0, "resume": None}
+
+        def sleep(seconds):
+            clock[0] += seconds
+            while todo and todo[0][0] <= clock[0] - t0:
+                todo.pop(0)[1]()
+
+        def post(sock, text):
+            elapsed = clock[0] - t0
+            got["attempts"].append((elapsed, text))
+            if not accepts(elapsed):
+                raise ConnectionRefusedError("test inbox refuses posts")
+            got["posts"].append((elapsed, text))
+
+        def ask(req):
+            got["requests"].append(json.loads(json.dumps(req)))
+            return notify.handle(self.desk, req)
+
+        def restart(state):
+            raise self.Restarted(state)
+
+        fake = unittest.mock.Mock(wraps=time, time=lambda: clock[0], sleep=sleep)
+        with unittest.mock.patch.object(notify, "time", fake), unittest.mock.patch.object(alert, "time", fake), \
+                unittest.mock.patch.object(notify, "now", lambda: clock[0]), \
+                unittest.mock.patch.object(notify, "gone", lambda _: clock[0] - t0 >= seconds), \
+                unittest.mock.patch.object(notify, "post", post), \
+                unittest.mock.patch.object(notify, "source", lambda _: ask), \
+                unittest.mock.patch.object(notify, "Namer", self.Named), \
+                unittest.mock.patch.object(notify, "code_mark", lambda: "new" if restart_at is not None
+                                           and clock[0] - t0 >= restart_at else "old"), \
+                unittest.mock.patch.object(notify, "CODE_SETTLE", 0), \
+                unittest.mock.patch.object(notify, "_restart", restart), \
+                unittest.mock.patch.object(notify.signal, "signal", lambda *_: None), \
+                unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_POLL": "1", "HANSA_NOTIFY_GATHER": "0", **(
+                    {"HANSA_NOTIFY_RESUME": json.dumps(resume)} if resume else {})}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            try:
+                self.assertEqual(notify.follow(self.desk, notify.key_of(sess), sess, "fake-inbox", "nonce",
+                                               name="desk-test"), 0)
+            except self.Restarted as e:
+                got["resume"] = e.args[0]
+        got["end"] = clock[0]
+        return got
+
+    def test_refused_lines_are_retried_with_new_lines_and_the_latest_per_subject(self):
+        self.coordinator_desk("refused", no_session_min=0, window_min=0, review_min=0)
+        tids = []
+
+        def first():
+            tids.append(self.coordinator_task_ended("Refused task"))
+
+        def meanwhile():
+            tids.append(self.coordinator_task_ended("Old title"))
+            self.desk.event("memory_low", floor=4, available=0)
+            aid = self.desk.add_ask("Old provider request")
+            self.desk.event("ask_ready", provider="test-provider", ids=[aid])
+
+        def latest():
+            self.desk.update(tids[1], title="Latest title")
+            self.desk.event("task_finished", task=tids[1], state="done")
+            self.desk.event("memory_ok", floor=4)
+            aid = self.desk.add_ask("Latest provider request")
+            self.desk.event("ask_ready", provider="test-provider", ids=[aid])
+
+        got = self.follow_with_refusing_inbox(90, lambda t: t >= 65, at={1: first, 10: meanwhile, 30: latest})
+        self.assertEqual(len(got["posts"]), 1)
+        text = got["posts"][0][1]
+        self.assertIn(f"{tids[0]} done: Refused task", text)
+        self.assertIn(f"{tids[1]} done: Latest title", text)
+        self.assertEqual(text.count(f"- {tids[1]} "), 1)
+        self.assertNotIn("Old title", text)
+        self.assertIn("available memory is back over the floor", text)
+        self.assertNotIn("available memory is under the floor", text)
+        self.assertEqual(text.count("test-provider is ready now"), 1)
+        self.assertIn("Latest provider request", text)
+        self.assertNotIn("Old provider request", text)
+        tries = [t for t, _ in got["attempts"]]
+        self.assertGreater(tries[-1] - tries[0], notify.POST_WAIT)
+        self.assertTrue(all(b - a >= 2 for a, b in zip(tries, tries[1:])), tries)
+        self.assertEqual(notify.records(self.desk)[0]["pos"], notify.log_end(self.desk))
+
+    def missed_task_for_inbox(self) -> tuple:
+        """An ended follower, followed by a task end its next follower must summarize."""
+        sess = {"pid": 3131, "start": "previous"}
+        key = notify.key_of(sess)
+        notify._write_record(self.desk, key, {"key": key, "session": sess, "uid": os.getuid(),
+                                             "pos": notify.log_end(self.desk), "seen": time.time() - 10,
+                                             "ended": time.time() - 10})
+        return key, self.coordinator_task_ended("Missed task")
+
+    def test_a_refused_startup_summary_is_caught_up_only_after_posting(self):
+        self.coordinator_desk("summary", no_session_min=1, window_min=0, review_min=0)
+        key, tid = self.missed_task_for_inbox()
+        before = []
+
+        def meanwhile():
+            self.desk.update(tid, title="Missed task, updated")
+            self.desk.event("task_finished", task=tid, state="done")
+            self.coordinator_task_ended("New task during summary refusal")
+
+        got = self.follow_with_refusing_inbox(90, lambda t: t >= 65, at={
+            10: meanwhile,
+            64: lambda: before.append(notify.read_json(notify.register_dir(self.desk) / f"{key}.json"))})
+        self.assertEqual(len(got["posts"]), 1)
+        self.assertIn(f"{tid} done: Missed task, updated", got["posts"][0][1])
+        self.assertEqual(got["posts"][0][1].count(f"- {tid} "), 1)
+        self.assertIn("New task during summary refusal", got["posts"][0][1])
+        self.assertNotIn("caught_up", before[0])
+        self.assertTrue(notify.read_json(notify.register_dir(self.desk) / f"{key}.json")["caught_up"])
+        [caught] = [r for r in got["requests"] if r["op"] == "caught_up"]
+        self.assertFalse(caught["me"]["last_post"].get("failed"))
+        [text] = self.coordinator_alerts()
+        self.assertIn("inbox refuses posts", text)
+
+    def test_refused_lines_survive_the_sessions_exit_including_a_startup_summary(self):
+        for summary in (False, True):
+            with self.subTest(summary=summary):
+                self.coordinator_desk(f"exit-{summary}", no_session_min=0, window_min=0, review_min=0)
+                if summary:
+                    key, tid = self.missed_task_for_inbox()
+                    got = self.follow_with_refusing_inbox(70, lambda _: False)
+                    self.assertNotIn("caught_up", notify.read_json(notify.register_dir(self.desk) / f"{key}.json"))
+                else:
+                    tids = []
+                    got = self.follow_with_refusing_inbox(70, lambda _: False, at={
+                        1: lambda: tids.append(self.coordinator_task_ended("Missed task"))})
+                    [tid] = tids
+                self.assertEqual(got["posts"], [])
+                rec = next(r for r in notify.records(self.desk) if r["session"] == self.WATCHED)
+                self.assertTrue(rec["ended"])
+                self.assertLess(rec["pos"], notify.log_end(self.desk))
+                next_ = self.follow_with_refusing_inbox(5, lambda _: True, sess={"pid": 5252, "start": "next"})
+                self.assertEqual(len(next_["posts"]), 1)
+                self.assertIn(f"{tid} done: Missed task", next_["posts"][0][1])
+
+    def test_an_inbox_refusal_alerts_once_and_starts_anew_after_a_success(self):
+        self.coordinator_desk("inbox-alert", no_session_min=2, window_min=0, review_min=0)
+        snapshots = []
+
+        def snapshot():
+            snapshots.append((len(self.coordinator_alerts()), self.hansa_out("status")))
+
+        got = self.follow_with_refusing_inbox(720, lambda t: 330 <= t < 360 or t >= 660, at={
+            1: lambda: self.coordinator_task_ended("First refusal"), 120: snapshot, 210: snapshot,
+            350: snapshot, 360: lambda: self.coordinator_task_ended("Second refusal"),
+            479: snapshot, 610: snapshot, 680: snapshot})
+        self.assertEqual([n for n, _ in snapshots], [0, 1, 1, 1, 2, 2])
+        alerts = self.coordinator_alerts()
+        self.assertEqual(len(alerts), 2)
+        for text in alerts:
+            self.assertIn("pid 4242 (desk-test)", text)
+            self.assertIn("inbox refuses posts", text)
+        self.assertIn("inbox refuses posts", snapshots[1][1])
+        self.assertNotIn("inbox refuses posts", snapshots[2][1])
+        self.assertNotIn("inbox refuses posts", snapshots[-1][1])
+        self.assertEqual(len(got["posts"]), 2)
+
+    def test_inbox_refusal_alerts_are_off_with_zero_minutes_or_no_alert_command(self):
+        for command, minutes in ((True, 0), (False, 1)):
+            with self.subTest(command=command, minutes=minutes):
+                self.coordinator_desk(f"inbox-off-{command}", command=command, no_session_min=minutes,
+                                      window_min=0, review_min=0)
+                self.follow_with_refusing_inbox(240, lambda _: False, at={
+                    1: lambda: self.coordinator_task_ended("Refused task")})
+                self.assertEqual(self.coordinator_alerts(), [])
+                self.assertEqual(self.looked_up(), 0)
+
+    def test_refused_lines_and_their_alert_survive_a_code_restart(self):
+        self.coordinator_desk("inbox-restart", no_session_min=1, window_min=0, review_min=0)
+        got = self.follow_with_refusing_inbox(300, lambda _: False, restart_at=90, at={
+            1: lambda: self.coordinator_task_ended("Refused before restart")})
+        carried = got["resume"]
+        self.assertIsNotNone(carried)
+        self.assertTrue(carried["last_post"]["failed"])
+        self.assertTrue(carried["last_post"]["told"])
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        later = self.follow_with_refusing_inbox(180, lambda t: t >= 65, start=got["end"], resume=carried, at={
+            10: lambda: self.coordinator_task_ended("New after restart")})
+        self.assertEqual(len(later["posts"]), 1)
+        self.assertIn("Refused before restart", later["posts"][0][1])
+        self.assertIn("New after restart", later["posts"][0][1])
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+
+    def test_an_inbox_refusal_does_not_hide_a_window_alert_ready_in_the_same_turn(self):
+        watch = notify.Watch(4242)
+        watch.posted(1, ["Already posted"])
+        watch.thread = unittest.mock.Mock(is_alive=lambda: False)
+        watch.got = (120, {"status": "waiting"}, "")
+        watch.clock.at = 120
+        failed = {"failed": True, "since": 1, "at": 61}
+        cases = watch.tick(120, True, {"no_session": 1, "window": 1, "review": 0}, last_post=failed)
+        self.assertEqual([case for case, _ in cases], ["inbox", "window"])
+        self.assertTrue(failed["told"])
+
+    def test_successful_posts_advance_once_without_an_inbox_alert(self):
+        self.coordinator_desk("inbox-success", no_session_min=1, window_min=0, review_min=0)
+        got = self.follow_with_refusing_inbox(180, lambda _: True, at={
+            1: lambda: self.coordinator_task_ended("First success"),
+            5: lambda: self.coordinator_task_ended("Second success")})
+        self.assertEqual(len(got["attempts"]), 2)
+        self.assertEqual(len(got["posts"]), 2)
+        self.assertIn("First success", got["posts"][0][1])
+        self.assertIn("Second success", got["posts"][1][1])
+        self.assertEqual(self.coordinator_alerts(), [])
+        self.assertEqual(notify.records(self.desk)[0]["pos"], notify.log_end(self.desk))
+
     def follow_on_a_clock(self, minutes, at=None, start=None, restart_at=None, resume=None, step=10.0, namer=False,
                           also=()) -> tuple:
         """Run a follower of the stand-in session WATCHED (named desk-4242) in this process, on a clock the test moves

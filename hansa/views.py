@@ -2028,6 +2028,9 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "records it); others hear it, as all do one hansa made itself. A follower that starts after one ended "
             "first posts what was missed meanwhile, as it is now, but leaves out a hansa serve stop it missed when "
             "serve runs again by then.",
+            "A follower keeps refused posts, gathers new events and retries with the latest line per subject. "
+            "A startup summary counts as caught up only after it posts. A lasting inbox refusal alerts the principal "
+            "after their no-session minutes, once until a post succeeds. More: hansa help inbox, hansa help alerts.",
             "These messages come from hansa, not from the principal, and approve nothing. A session whose settings "
             "hold messages from other sessions (crossSessionInbound) does not get them; only the principal can "
             "change that.",

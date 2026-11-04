@@ -1061,6 +1061,11 @@ serve` stop missed meanwhile is told only while the server is still not
 running; when it runs again by then, that line is left out, and a busy or stuck
 server is left to the follower's own checks.
 
+If the session's inbox refuses a post, the follower keeps the lines until a post succeeds. It tries every two
+seconds for up to a minute, then gathers new events and tries again with only the latest line per task or subject.
+A startup summary also waits until posted before it counts as caught up. If the session's process ends first,
+the next follower's catch-up includes what was not posted.
+
 Which session hears what: a task or request goes to the session that made it
 (`hansa add`, `retry`, `verify`, `merge` and `ask` record it) while
 that session has a follower; otherwise to every session hansa posts to, as do
@@ -1087,6 +1092,8 @@ When what hansa posts cannot reach the coordinator, the principal hears of it th
 `coordinator`, see [alerts](releases.md#alerts)): when no session hears from hansa while something waits for the
 coordinator (the session ended, or notifications were turned off), when the session waits on a permission dialog or
 a question with something posted to it, and when a task posted to it waits for review while the session is idle.
+A running session whose inbox keeps refusing posts also alerts, once after the no-session minutes. A successful
+post ends that case; a later stretch of refusals counts from its own start.
 The minutes before each are the principal's, on the page, and `hansa status` shows a line while one of them holds,
 such as `the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`. For the last two a
 session's follower runs `claude agents --json` only while something posted to it could still go unanswered, and at
