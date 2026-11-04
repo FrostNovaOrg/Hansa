@@ -496,7 +496,9 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   The same minutes also cover a running session whose inbox refuses posts: its follower alerts once, saying that
   the inbox refuses posts, and keeps the lines to try again. A successful post ends that stretch; a later stretch
   counts from its own first refusal. A failed startup summary also waits for a successful post before it counts
-  as caught up. The refusal's wait and whether it was alerted survive a follower's restart on new code.
+  as caught up. The refusal's wait and whether it was alerted survive a follower's restart on new code. Only
+  refusals while lines wait count; a failed post an older hansa recorded starts none. While its follower tries
+  again, the session still counts as heard, and `hansa status` keeps the line.
 - **The session waits on its window** (10 minutes): `claude agents --json` lists the session as `waiting` (a
   permission dialog or a question is open) that long after something was posted to it. Once per stretch of waiting.
   Only `waiting` counts: `busy`, `idle`, `shell`, a status hansa does not know, or no answer sends nothing, and a

@@ -482,7 +482,7 @@ def _server(desk: Desk) -> dict:
 
 
 def handle(desk: Desk, req: dict) -> dict:
-    """The desk's part of a follower's work, done as the desk's owner: start, feed, end, list."""
+    """The desk's part of a follower's work, done as the desk's owner: start, feed, seen, end, list."""
     op = req.get("op")
     if op == "list":
         return {"followers": live_records(desk)}
@@ -543,12 +543,14 @@ def handle(desk: Desk, req: dict) -> dict:
         if isinstance(r, dict) and r.get("ended"):
             _write_record(desk, k, {**r, "caught_up": now()})
         return {}
-    if op == "feed":
-        events, pos = read_log(desk, int(req.get("pos") or 0))
+    if op in ("feed", "seen"):  # seen: a follower still trying a post (_deliver) stays live meanwhile
+        events, pos = read_log(desk, int(req.get("pos") or 0)) if op == "feed" else ([], 0)
         items = items_for(desk, events, me) if events else []
         rec = {**old, **me, "pos": int(req.get("done") or 0), "ended": None}
         if {**rec, "seen": None} != {**old, "seen": None} or time.time() - (old.get("seen") or 0) >= SEEN_EVERY:
             _write_record(desk, key, {**rec, "seen": now()})  # else nothing changed but seen, and it is recent
+        if op == "seen":
+            return {}
         out = {"pos": pos, "items": items, **_server(desk), "srt_ran": _srt_ran(desk)}
         if req.get("minutes"):  # what the follower watches its session for (Watch); it asks once a minute
             from .alert import session_minutes
@@ -712,7 +714,8 @@ class Namer:
 
 class Watch:
     """The follower's part of the principal's `coordinator` alert: a refusing inbox, and its second and third cases.
-    The inbox's wait and whether it was alerted are kept in last_post until a post succeeds. It looks its
+    The inbox's wait and whether it was alerted are kept in last_post until a post succeeds, and count only while
+    lines wait to be posted (refused_since). It looks its
     session's status up in `claude agents --json`, in a thread of its own so that posting never waits for it, at most
     once every LOOK_EVERY seconds counting the name lookup's (clock, shared with Namer), and only while one of them
     could hold: something waits to be posted, or was posted
@@ -781,11 +784,10 @@ class Watch:
         the session's name from each answer."""
         window, review = (int(minutes.get(k) or 0) for k in ("window", "review"))
         out = []
-        post = last_post or {}
-        since = post.get("since", post.get("at") or t)
-        if minutes.get("no_session") and post.get("failed") and not post.get("told") \
+        since = refused_since(last_post, pending)
+        if minutes.get("no_session") and since is not None and not last_post.get("told") \
                 and t - since >= minutes["no_session"] * 60:
-            post["told"] = t
+            last_post["told"] = t
             out.append(("inbox", {"since": since}))
         if self.thread and not self.thread.is_alive():
             self.thread = None
@@ -829,13 +831,13 @@ class Watch:
                     out.append(("review", {"task": tid, "posted": v["posted"]}))
         return out
 
-    def holds(self, t: float, minutes: dict, last_post=None) -> dict:
-        """What the follower's record says for hansa status: since when the session waits on its window, when that
-        holds; each task alerted of while the session was last seen idle, with when it was posted."""
+    def holds(self, t: float, minutes: dict, last_post=None, pending: bool = False) -> dict:
+        """What the follower's record says for hansa status: since when the session's inbox refuses posts and since
+        when it waits on its window, when that holds; each task alerted of while the session was last seen idle, with
+        when it was posted."""
         out = {}
-        post = last_post or {}
-        since = post.get("since", post.get("at") or t)
-        if minutes.get("no_session") and post.get("failed") and t - since >= minutes["no_session"] * 60:
+        since = refused_since(last_post, pending)
+        if minutes.get("no_session") and since is not None and t - since >= minutes["no_session"] * 60:
             out["inbox"] = since
         if minutes.get("window") and self.status == "waiting" and self.first \
                 and t - self.first >= minutes["window"] * 60:
@@ -844,6 +846,15 @@ class Watch:
         if minutes.get("review") and self.status == "idle" and told:
             out["review"] = told
         return out
+
+
+def refused_since(last_post, pending: bool):
+    """Since when the session's inbox refuses posts, while lines wait to be posted (pending); None when it does not.
+    Only a failure _deliver records counts, with its since: an older follower's failed post (no since) dropped its
+    lines, and nothing waits for it."""
+    p = last_post if isinstance(last_post, dict) else {}
+    since = p.get("since")
+    return float(since) if pending and p.get("failed") and isinstance(since, (int, float)) else None
 
 
 def _say(text: str) -> None:
@@ -942,6 +953,12 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
         first, last, errors = 0.0, 0.0, 0
         namer = Namer(sess["pid"], me["name"], clock=watch.clock)
         mark, changed = code_mark(), 0.0
+
+        def beat():  # at each try of a refused post: the record stays live, for hansa status and hears()
+            try:
+                ask({"op": "seen", "me": me, "done": done})
+            except Exception as e:  # noqa: BLE001 - the next feed writes it
+                _say(f"could not keep this follower's record live: {e}")
         while True:
             if gone(sess):
                 _say("the session's process ended; so does this follower")
@@ -989,7 +1006,8 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 first = first or last
             if pending and (summary or time.time() - last >= gather or time.time() - first >= 20):
                 lines = [x["line"] for x in pending.values()]
-                if _deliver(sock, message(str(desk.root), lines, missed_head(missed) if summary else ""), sess, me):
+                if _deliver(sock, message(str(desk.root), lines, missed_head(missed) if summary else ""), sess, me,
+                            beat=beat):
                     watch.posted(time.time(), lines, [x["review"] for x in pending.values() if x.get("review")])
                     pending, first, done, srt_done = {}, 0.0, pos, told_srt
                     if summary:
@@ -1009,7 +1027,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                         if r.get("told") else "was not queued: no alert command is set"))
                 except Exception as e:  # noqa: BLE001 - told is told: no retry, as for any alert
                     _say(f"could not queue the principal's coordinator alert ({case}): {e}")
-            me["coordinator"] = watch.holds(time.time(), minutes, me["last_post"])
+            me["coordinator"] = watch.holds(time.time(), minutes, me["last_post"], bool(pending or summary))
             time.sleep(poll)
     finally:
         try:
@@ -1049,12 +1067,13 @@ def server_news(r: dict, items: list, was_up, told_down: float, told_stuck: floa
     return items, told_down, told_stuck
 
 
-def _deliver(sock: str, text: str, sess: dict, me: dict) -> bool:
-    """True only when posted. After a minute of refusals, gather new lines before trying again; stop if gone."""
+def _deliver(sock: str, text: str, sess: dict, me: dict, beat=None) -> bool:
+    """True only when posted. After a minute of refusals, gather new lines before trying again; stop if gone.
+    beat: called at each refused try, to keep the follower's record live while this blocks."""
     end = time.time() + POST_WAIT
     failed = me.get("last_post") or {}
-    failed = failed if failed.get("failed") else {}
-    since = failed.get("since", failed.get("at"))
+    failed = failed if refused_since(failed, True) is not None else {}  # an older follower's failure: a new stretch
+    since = failed.get("since")
     while True:
         try:
             post(sock, text)
@@ -1067,6 +1086,8 @@ def _deliver(sock: str, text: str, sess: dict, me: dict) -> bool:
             if gone(sess):
                 _say(f"the session's process ended before the post ({e}); so does this follower")
                 return False
+            if beat:
+                beat()
             if time.time() >= end:
                 me["last_post"] = {**failed, "at": now(), "text": f"could not post: {e}", "failed": True,
                                    "since": since}

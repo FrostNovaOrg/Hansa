@@ -39413,6 +39413,49 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(self.coordinator_alerts(), [])
         self.assertEqual(notify.records(self.desk)[0]["pos"], notify.log_end(self.desk))
 
+    def test_an_inbox_refusal_counts_only_from_this_codes_failure_while_lines_wait(self):
+        # restarted onto this code with a failed last post: an older code's has no since (it dropped its lines)
+        for name, ours, refusing in (("older, nothing waits", False, False), ("older, then refused", False, True),
+                                     ("this code's, nothing waits", True, False)):
+            with self.subTest(name):
+                self.coordinator_desk(name.replace(" ", "-").replace(",", ""), no_session_min=3, window_min=0,
+                                      review_min=0)
+                t0, statuses = float(int(time.time())), []
+                failed = {"at": t0 - 200, "text": "could not post: refused", "failed": True,
+                          **({"since": t0 - 260} if ours else {})}
+                carried = {"pos": notify.log_end(self.desk), "since": t0 - 300, "name": "desk-test",
+                           "last_post": failed}
+                at = {120: lambda: statuses.append(self.hansa_out("status"))}
+                if refusing:  # refused from 1 s to 150 s: under the 3 min, counted from this code's own first try
+                    at[1] = lambda: self.coordinator_task_ended("Refused after the restart")
+                got = self.follow_with_refusing_inbox(240, (lambda t: t >= 150) if refusing else (lambda _: True),
+                                                      start=t0, resume=carried, at=at)
+                self.assertEqual(self.coordinator_alerts(), [])
+                self.assertNotIn("inbox refuses posts", statuses[0])
+                self.assertEqual([("Refused after the restart" in text) for _, text in got["posts"]],
+                                 [True] if refusing else [])
+
+    def test_a_follower_stays_live_while_it_tries_a_refused_post(self):
+        self.coordinator_desk("inbox-live", no_session_min=2, window_min=0, review_min=0)
+        lives, statuses = [], []
+
+        def look():
+            rec = next(r for r in notify.records(self.desk) if notify.same(r.get("session"), self.WATCHED))
+            lives.append((notify.is_live(rec), notify.hears(self.desk, self.WATCHED)))
+
+        at = {s: look for s in range(3, 300, 3)}
+        at.update({s: lambda: statuses.append(self.hansa_out("status")) for s in range(140, 300, 20)})
+        at[1] = lambda: self.coordinator_task_ended("Refused while live")
+        got = self.follow_with_refusing_inbox(330, lambda t: t >= 300, at=at)
+        self.assertEqual(lives, [(True, True)] * len(lives))
+        self.assertEqual(len(statuses), 8)
+        for text in statuses:  # alerted after 2 min of refusals; status keeps the line through each minute of tries
+            self.assertIn("inbox refuses posts", text)
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        tries = [t for t, _ in got["attempts"]]
+        self.assertTrue(all(b - a >= 2 for a, b in zip(tries, tries[1:])), tries)
+        self.assertEqual([("Refused while live" in text) for _, text in got["posts"]], [True])
+
     def follow_on_a_clock(self, minutes, at=None, start=None, restart_at=None, resume=None, step=10.0, namer=False,
                           also=()) -> tuple:
         """Run a follower of the stand-in session WATCHED (named desk-4242) in this process, on a clock the test moves
@@ -40011,7 +40054,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 restarts.append(state)
                 raise Restarted
 
-            def deliver(sock, text, sess, me):
+            def deliver(sock, text, sess, me, beat=None):
                 delivered.append(text)
                 return True
             with unittest.mock.patch.object(notify, "source", lambda desk: ask), \
