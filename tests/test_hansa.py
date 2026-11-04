@@ -33313,7 +33313,7 @@ let costGetError = ask === "cost-interactions" ? "example initial cost failure" 
 let costGetGate = null, costRowsError = null, costRowsGate = null;
 let calendarGetError = given.calendarFailure ? "example calendar failure" : null, calendarGetGate = null;
 let statusGetError = ask === "status-picture-initial-error" ? "status connection lost"
-  : ask === "status-picture-events-initial-error" ? "events connection lost" : null;
+  : ask === "status-picture-events-initial-error" ? "events connection lost" : given.headerInitialError || null;
 let statusFailPath = ask === "status-picture-events-initial-error" ? "/api/events" : "/api/status";
 let statusGetGate = null;
 let pollErrorStatus = 0;
@@ -33544,7 +33544,7 @@ if (ask === "tunnel-polls") (async () => {
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "header") (async () => {
   const run = code => vm.runInContext(code, ctx);
-  await run("loadStatus()");
+  await run("loadStatus()").catch(e => { if (!given.headerInitialError) throw e; });
   const text = ids["#state-text"], viewport = ids["#state-window"], caption = ids["#title"].kids[1].kids[1];
   const snapshot = () => ({text:text.textContent, tone:text.className, transform:text.style.transform,
     dot:ids["#state"].className, parts:descendants(ids["#state-list"], "li").map(el =>
@@ -36611,7 +36611,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
-    def interactive_header(self, language, actions=(), reduced_motion=False, **status):
+    def interactive_header(self, language, actions=(), reduced_motion=False, initial_error=None, **status):
         if not shutil.which("node"):
             self.skipTest("needs node to run the page's script")
         st = self.picture_status()
@@ -36623,6 +36623,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
         replies = {"/api/status": st, "/api/events": [], "headerActions": actions, "reducedMotion": reduced_motion,
+                   "headerInitialError": initial_error,
                    "pagePreferences": {}, "pageClock": {"now": "2026-10-26T08:00:00Z", "browserLanguage": language}}
         result = subprocess.run(["node", str(harness), str(page), "header", language], input=json.dumps(replies),
                                 capture_output=True, text=True, timeout=60)
@@ -36665,10 +36666,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             for long in (False, True):
                 with self.subTest(language=language, long=long):
                     message = "Cannot read shop/desk " * (20 if long else 1)
-                    actions = [{"error": message, "refresh": True, "widths": [100, 400 if long else 80]},
+                    # Only a failure before any status was shown replaces the header with the error.
+                    actions = [{"widths": [100, 400 if long else 80]},
                                {"advance": 800}, {"advance": 1000}, {"advance": 5000},
                                {"advance": 800}, {"advance": 1800}]
-                    pages = self.interactive_header(language, actions)["snapshots"][1:]
+                    pages = self.interactive_header(language, actions, initial_error=message)["snapshots"][1:]
                     self.assertTrue(all(p["text"] == message and p["dot"] == "bad" for p in pages))
                     self.assertTrue(all(p["parts"] == [{"text": message, "tone": "bad", "warning": True}] for p in pages))
                     self.assertEqual([self.header_offset(p) for p in pages], [0, 0, 50, 300, 0, 50] if long else [0] * 6)
@@ -36768,8 +36770,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     {"motion": True, "advance": 40}], paused="Read shop/desk " * 20)["snapshots"]
                 self.assertEqual([self.header_offset(p) for p in pages[1:]], [50, 0])
                 message = "Cannot read shop/desk " * 20
-                pages = self.interactive_header(language, [{"error": message, "refresh": True,
-                    "widths": [100, 400]}, {"advance": 12000}], reduced_motion=True)["snapshots"][1:]
+                pages = self.interactive_header(language, [{"widths": [100, 400]}, {"advance": 12000}],
+                    reduced_motion=True, initial_error=message)["snapshots"][1:]
                 self.assertTrue(all(p["text"] == message and self.header_offset(p) == 0 for p in pages))
 
     def test_header_caption_and_phone_layout_keep_content_inside_header_in_both_languages(self):
