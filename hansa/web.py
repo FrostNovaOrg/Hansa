@@ -8,6 +8,8 @@ The HTML shell is public; every API request requires the bearer token.
 """
 from __future__ import annotations
 
+import gzip
+import hashlib
 import hmac
 import http.server
 import json
@@ -23,6 +25,18 @@ from .desk import Desk, KeyScrubError, SettingsError, event_record, lane_warning
 from .run import check_provider
 
 UI = Path(__file__).with_name("ui.html")
+
+
+def _accepts_gzip(value: str) -> bool:
+    encodings = {}
+    for item in value.lower().split(","):
+        coding, *params = item.strip().split(";")
+        quality = next((p.split("=", 1)[1].strip() for p in params if p.strip().startswith("q=")), "1")
+        try:
+            encodings[coding.strip()] = 0 < float(quality) <= 1
+        except ValueError:
+            encodings[coding.strip()] = False
+    return encodings.get("gzip", encodings.get("*", False))
 
 
 def _last_lines(path, n: int, block: int = 65536) -> list:
@@ -117,6 +131,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
 
     class Page(http.server.BaseHTTPRequestHandler):
         server_version = "hansa"
+        protocol_version = "HTTP/1.1"
 
         def log_message(self, *args):
             pass
@@ -125,15 +140,34 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             return hmac.compare_digest(self.headers.get("Authorization", "").encode(),
                                        ("Bearer " + token).encode())
 
-        def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8"):
+        def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", *, conditional=False):
             data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
+            # Weak validators cover either content coding. Only the public shell may be stored;
+            # poll validators and their data live in page memory, with auth checked before _send.
+            conditional = conditional and self.command == "GET" and code == 200
+            tag = 'W/"' + hashlib.sha256(data).hexdigest() + '"' if conditional else None
+            if tag and any(t.strip().removeprefix("W/") in ("*", tag[2:])
+                           for t in self.headers.get("If-None-Match", "").split(",")):
+                code = 304
+            compressed = code != 304 and _accepts_gzip(self.headers.get("Accept-Encoding", ""))
+            if compressed:
+                data = gzip.compress(data, mtime=0)
             self.send_response(code)
             self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
+            if code != 304:
+                self.send_header("Content-Length", str(len(data)))
+            if compressed:
+                self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+            self.send_header("Cache-Control", "private, no-cache" if tag and ctype.startswith("text/html") else "no-store")
+            if tag:
+                self.send_header("ETag", tag)
+            if getattr(self, "close_connection", False):
+                self.send_header("Connection", "close")
             self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
-            self.wfile.write(data)
+            if code != 304:
+                self.wfile.write(data)
 
         def _bad_request(self, code: str, field: str, problem: str):
             return self._send(400, {"ok": False, "code": code, "field": field, "problems": [problem]})
@@ -150,7 +184,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
         def _get(self):
             url = urllib.parse.urlparse(self.path)
             if url.path == "/":
-                return self._send(200, UI.read_bytes(), "text/html; charset=utf-8")
+                return self._send(200, UI.read_bytes(), "text/html; charset=utf-8", conditional=True)
             if not self._authed():
                 return self._send(403, b"Open the address that `hansa web` prints.", "text/plain; charset=utf-8")
             q = urllib.parse.parse_qs(url.query, keep_blank_values=True)
@@ -164,7 +198,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 except (OSError, ValueError):
                     return self._send(404, {"error": "note unavailable"})
             if url.path == "/api/status":
-                return self._send(200, views.status(desk))
+                return self._send(200, views.status(desk), conditional=True)
             if url.path == "/api/timeline":
                 return self._send(200, views.timeline(desk))
             if url.path == "/api/todos":
@@ -206,7 +240,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     n = max(1, min(200, int(q.get("n", ["60"])[0])))
                 except ValueError:  # not a number: the default
                     n = 60
-                return self._send(200, _events(desk, n, q.get("event", [""])[0]))
+                return self._send(200, _events(desk, n, q.get("event", [""])[0]), conditional=True)
             if url.path == "/api/task":
                 tid = q.get("id", [""])[0]
                 if not re.fullmatch(r"t\d+", tid) or not (desk.tasks_dir / tid / "meta.json").is_file():
@@ -217,9 +251,14 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
 
         def do_POST(self):
             if not self._authed() or self.headers.get("X-Hansa") != "1":
+                self.close_connection = True  # the unread body cannot become the next HTTP/1.1 request
                 return self._send(403, {"error": "forbidden"})
+            length = self.headers.get("Content-Length", "0")
+            if self.headers.get("Transfer-Encoding") or not re.fullmatch(r"[0-9]+", length):
+                self.close_connection = True
+                return self._bad_request("invalid_length", "Content-Length", "body needs a nonnegative Content-Length")
             try:
-                data = self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}"
+                data = self.rfile.read(int(length)) or b"{}"
                 try:
                     body = json.loads(data)
                 except ValueError:

@@ -11,7 +11,9 @@
 # Needs, in codex.env beside this script (or in the environment):
 #   HANSA_CODEX_BIN   a codex outside ~/.codex (hansa's sandbox denies reading ~/.codex, srt too)
 #   HANSA_CODEX_HOME  its CODEX_HOME, logged in once with:  CODEX_HOME=<it> <codex> login
-# and srt on the PATH (or HANSA_CODEX_SRT). hansa's checkout is the one this script is in (contrib/codex), unless
+# and srt on the PATH (or HANSA_CODEX_SRT). HANSA_CODEX_MODEL in the environment is passed as hansa passes the
+# provider's model (--model); without it the shim takes codex.env's, then its default.
+# hansa's checkout is the one this script is in (contrib/codex), unless
 # HANSA_SRC names another.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd -P)
@@ -44,7 +46,8 @@ box = {"sandbox": {  # hansa's sandbox_settings for a lane with no network list 
 system = hansa_run.PROTOCOL.format(tid="dry-run", lane="codex", tmp=tmp, long="")
 argv = [os.path.join(here, "bin", "claude-or-codex"), "-p", "--output-format", "json",
         "--session-id", str(uuid.uuid4()), "--permission-mode", "acceptEdits", "--max-turns", "30",
-        "--model", "codex", "--append-system-prompt", system, *hansa_run.isolated(wt, box)]
+        *(("--model", os.environ["HANSA_CODEX_MODEL"]) if os.environ.get("HANSA_CODEX_MODEL") else ()),
+        "--append-system-prompt", system, *hansa_run.isolated(wt, box)]
 env = {k: os.environ[k] for k in hansa_run.BASE_ENV if k in os.environ}
 env.update({k: v for k, v in os.environ.items() if k.startswith("HANSA_CODEX_")})
 env.update({"TERM": "dumb", "ANTHROPIC_BASE_URL": "http://codex.invalid", "ANTHROPIC_AUTH_TOKEN": "placeholder",

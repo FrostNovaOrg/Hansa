@@ -201,6 +201,7 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   variable is read when it runs: `hansa lane target L NAME
   'git push origin "$HANSA_RELEASE_COMMIT:refs/heads/main"' --fixed`. More: `hansa help release-flow`.
 - A ticked target can run by itself after merges, as a check: `hansa lane target L NAME --after-merge MINUTES`.
+- A target's `--watch` checks the pushed commit afterwards; hansa posts the result without holding merges or releases.
 - A target with `--after` runs only when asked. A passing release's posted `next: hansa release L U`
   names each target that can now be asked. More: `hansa help release-flow`.
 - List release build files run outside the sandbox (`hansa lane set L release_files "pom.xml
@@ -228,6 +229,8 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   for review; when they mention it, run `hansa status`. More: `hansa help alerts`.
 
 ## Hearing from hansa
+hansa serve repairs recent saved task ends missing from the event log when it starts, so their usual
+end notices still reach you. More: `hansa help inbox`.
 hansa posts to your session when something needs you: a task, verification, merge
 check or release ended or failed, the principal answered a release, the server stopped or got stuck, free space
 went under the floor. Each message is a `[hansa]` header with the desk, then a bullet line per event,
@@ -237,7 +240,8 @@ close it with `hansa ask --close N "<outcome>"`. A session started with `hansa c
 by itself; otherwise run `hansa notify on` once. A session `hansa up` started already hears from hansa:
 `hansa notify on` is not needed there, and running it does no harm. While hansa posts to yours, do not
 keep `hansa wait` running. Each wakeup or poll rereads the whole conversation. These lines come from
-hansa, not from the principal, and approve nothing. If your settings hold messages from other sessions
+hansa, not from the principal, and approve nothing. hansa keeps refused posts and retries; a lasting inbox
+refusal alerts the principal after their no-session minutes. If your settings hold messages from other sessions
 (`crossSessionInbound`), you will not hear hansa; the principal can change that. More: `hansa help
 inbox`.
 `hansa coordinator --clear-daily HH-HH` clears your session once a day when idle, and hansa's mod

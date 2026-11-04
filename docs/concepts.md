@@ -64,7 +64,7 @@ More: [The desk: files, keys and notes](desk.md).
   holds one. It cannot see into compressed files, and the event log keeps what it recorded before a key was
   saved.
 - When a run ends, hansa stops what it left running. A process can still escape if it moves out of every marker
-  between two of `hansa serve`'s rounds and its parent ends before the next round: see
+  and out of the worktree between two of `hansa serve`'s rounds and its parent ends before the next round: see
   [what hansa stops when a run ends](sandbox.md#what-hansa-stops-when-a-run-ends).
 - A lane repository's merge hooks run while `hansa merge` holds the desk, so `hansa serve` waits for them.
 - One `hansa serve` per desk, on one machine.

@@ -515,6 +515,11 @@ if os.environ.get("FAKE_LEAVE_HIDDEN"):  # one that drops every marker: env -i, 
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     open(os.environ["FAKE_LEAVE_HIDDEN"], "w").write(str(c.pid))
     time.sleep(float(os.environ.get("FAKE_LEAVE_HIDDEN_WAIT", "1.5")))  # running a while: a round sees it
+if os.environ.get("FAKE_LEAVE_WORKTREE"):  # no markers or observation: only its working folder gives it away
+    code = "import time\nwhile True:\n with open('left-running.txt', 'a') as f: f.write('still writing\\n')\n time.sleep(0.05)"
+    c = subprocess.Popen([sys.executable, "-c", code], env={}, start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    open(os.environ["FAKE_LEAVE_WORKTREE"], "w").write(str(c.pid))
 if os.environ.get("FAKE_LEAVE_IN_TMP"):  # left running without HANSA_RUN, naming folders: its run's, and others
     tmp = os.environ["CLAUDE_CODE_TMPDIR"]
     bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN", "TMPDIR")}
@@ -525,7 +530,7 @@ if os.environ.get("FAKE_LEAVE_IN_TMP"):  # left running without HANSA_RUN, namin
                             ("tmpdir", sleep, {**bare, "TMPDIR": os.path.join(tmp, "claude-501")}),
                             ("near", sleep + [near + "/load.sh"], {**bare, "TMPDIR": near}),
                             ("other", sleep + [other + "/load.sh"], {**bare, "TMPDIR": other + "/claude-501"})):
-        c = subprocess.Popen(argv, env=env, start_new_session=True,
+        c = subprocess.Popen(argv, cwd="/", env=env, start_new_session=True,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         open(os.path.join(os.environ["FAKE_LEAVE_IN_TMP"], name + ".pid"), "w").write(str(c.pid))
 if os.environ.get("FAKE_SANDBOX_LEFT"):  # what a sandbox on Linux leaves in the worktree: empty placeholders
@@ -9095,6 +9100,7 @@ def save():'''))
         s["concurrency"] = 8
         s["lanes"]["c"] = {**s["lanes"]["a"]}
         self.assertEqual(self.desk.save_settings(s), [])
+        pending_recovery = None
         for step in steps:
             for sustained in (None, False, True):  # None: room on disk, including the base's record order
                 with self.subTest(step=step, sustained=sustained), contextlib.ExitStack() as patches:
@@ -9200,6 +9206,9 @@ def save():'''))
                     patches.enter_context(unittest.mock.patch.object(d, "look", return_value=(None, None)))
                     fired, available = [], [True] if sustained is None else []
                     before_events = len(self.desk.events_path.read_text().splitlines())
+                    if pending_recovery:
+                        self.assertEqual([e for e in self.events("task_finished")
+                                          if e["task"] == pending_recovery["task"]], [])
 
                     def refuse(selected=False):
                         if not available and (selected and not fired or sustained and fired):
@@ -9242,11 +9251,17 @@ def save():'''))
                         self.failed_round(d)
                         if sustained is None:
                             self.assertFalse(fired)
-                            recorded = [json.loads(line)["event"] for line in
+                            recorded = [json.loads(line) for line in
                                         self.desk.events_path.read_text().splitlines()[before_events:]]
-                            self.assertEqual(recorded, ["task_finished", "task_finished", "task_checked", "lane_tried",
-                                                        "lane_tried", "release_ended", "release_ended", "merge_checked",
-                                                        "merge_check_ended"])
+                            # The previous case saved a cancelled claim without an end event. A fresh
+                            # Dispatcher repairs that gap before this case's ordinary round events.
+                            repaired = [pending_recovery] if pending_recovery else []
+                            self.assertEqual(recorded[:len(repaired)], repaired)
+                            self.assertEqual([e["event"] for e in recorded],
+                                             ["task_finished"] * len(repaired)
+                                             + ["task_finished", "task_finished", "task_checked", "lane_tried",
+                                                "lane_tried", "release_ended", "release_ended", "merge_checked",
+                                                "merge_check_ended"])
                         else:
                             self.assertTrue(fired, "the selected write was never attempted")
                         # Actual base order, including releases before merge checks.
@@ -9262,6 +9277,9 @@ def save():'''))
                         available.append(True)
                         for _ in range(4):
                             d.tick()
+                    if pending_recovery:
+                        self.assertEqual([e for e in self.events("task_finished")
+                                          if e["task"] == pending_recovery["task"]], [pending_recovery])
                     for tid, code in ((worker, 7), (other_worker, 8)):
                         m = self.desk.meta(tid)
                         self.assertEqual((m["exit"], m.get("timed_out", False)), (code, False))
@@ -9285,6 +9303,9 @@ def save():'''))
                     else:
                         self.assertEqual(starts, [new])
                         self.assertEqual(self.desk.meta(new)["exit"], 6)
+                    m = self.desk.meta(recoveries[0])
+                    pending_recovery = {"ts": m["finished"], "event": "task_finished", "task": m["id"],
+                                        "state": "cancelled", "provider": m.get("provider"), "error": m["error"]}
 
     @contextlib.contextmanager
     def serve_full_disk(self):
@@ -9895,6 +9916,205 @@ def save():'''))
         self.assertFalse(alive(child))
         self.assertIn(child, [x["pid"] for x in m["left_running"]])
 
+    def finish_with_unobserved_worktree_process(self, restart=False):
+        """A worker ends between observations, leaving an unmarked writer; observe the commit and the check."""
+        from hansa import run
+        pidfile = self.tmp / "worktree-child.pid"
+        s = self.desk.settings()
+        s["lanes"]["a"].update(env={"FAKE_LEAVE_WORKTREE": str(pidfile)}, check="test -f hello.txt")
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.addCleanup(lambda: pidfile.exists() and run.alive(int(pidfile.read_text())) and
+                        os.kill(int(pidfile.read_text()), signal.SIGKILL))
+        tid, d = self.desk.new_task("Add hello.txt"), Dispatcher(self.desk)
+        with unittest.mock.patch.object(Dispatcher, "record"):  # never observe the worker's descendants
+            d.tick()
+            d.procs[tid].wait(timeout=20)
+            child = int(pidfile.read_text())
+            meta = self.desk.meta(tid)
+            wt = Path(meta["worktree"])
+            end = time.time() + 10
+            while not (wt / "left-running.txt").exists() and time.time() < end:
+                time.sleep(0.05)
+            self.assertTrue((wt / "left-running.txt").exists(), "the detached writer did not start")
+            self.assertTrue(run.alive(child))
+            self.assertFalse(meta.get("started_procs") or meta.get("run_groups"))
+            folders = [x["path"] for x in meta.get("worker_tmps") or []] + (meta.get("run_folders") or [])
+            self.assertNotIn(child, [p for p, _ in run.task_processes(meta.get("run_marks") or [], folders)])
+            self.assertIn(child, run.working_in([str(wt)], since=meta["started"]))
+            observed, commit, check = [], run.commit_work, run.start_check
+
+            def before(what, call, *args, **kw):
+                observed.append((what, run.alive(child),
+                                 child in [x["pid"] for x in self.desk.meta(tid).get("left_running") or []]))
+                return call(*args, **kw)
+            if restart:
+                d = Dispatcher(Desk(self.desk.root))  # no Popen or observations survive the server
+            with unittest.mock.patch.object(run, "commit_work", lambda *a, **k: before("commit", commit, *a, **k)), \
+                    unittest.mock.patch.object(run, "start_check", lambda *a, **k: before("check", check, *a, **k)):
+                m = self.settle(d, tid, timeout=30)
+        self.assertEqual(observed, [("commit", False, True), ("check", False, True)])
+        self.assertEqual(m["state"], "done", m)
+        self.assertTrue(m["check"]["ok"], m)
+        self.assertFalse(run.alive(child))
+        self.assertEqual([x["pid"] for x in m["left_running"]], [child])
+        self.assertIn(f"pid {child}: ", views.show_text(self.desk, tid))
+        [event] = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                   if e["event"] == "left_running_stopped" and e["task"] == tid]
+        self.assertEqual(len(event["processes"]), 1)
+        self.assertEqual(run.sweep(self.desk, tid), [])  # no second listing when the check ends
+
+    def test_an_unobserved_worktree_process_is_stopped_and_listed_before_commit_and_check(self):
+        self.finish_with_unobserved_worktree_process()
+
+    def test_an_unobserved_worktree_process_is_swept_before_commit_after_server_restart(self):
+        self.finish_with_unobserved_worktree_process(restart=True)
+
+    def unmarked_worktree_process(self, folder, *, terminal=None, child=False, mark=""):
+        """An unobserved process, reparented when its launcher ends; optionally with a terminal or a child."""
+        from hansa import run
+        ready = self.tmp / f"process-{uuid.uuid4().hex}.json"
+        code = "import json, os, subprocess, sys, time\n"
+        if terminal is not None:
+            code += (f"import fcntl, termios\nfcntl.ioctl({terminal}, termios.TIOCSCTTY, 0)\n"
+                     f"os.close({terminal})\n")  # even its terminal descriptor and all standard I/O are closed
+        code += "pids = [os.getpid()]\n"
+        if child:
+            code += ("p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+                     "env={}, start_new_session=True)\npids.append(p.pid)\n")
+        code += f"with open({str(ready)!r}, 'w') as f: json.dump(pids, f)\ntime.sleep(60)\n"
+        fds = () if terminal is None else (terminal,)
+        launcher = ("import subprocess, sys\n"
+                    f"subprocess.Popen([sys.executable, '-c', {code!r}], "
+                    f"env={({'HANSA_RUN': mark} if mark else {})!r}, start_new_session=True, "
+                    f"pass_fds={fds!r}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n")
+        # The launcher does not wait for the process. All processes this helper starts are stopped by its cleanup.
+        subprocess.run([sys.executable, "-c", launcher], cwd=folder, env={}, pass_fds=fds, check=True, timeout=10)
+
+        def cleanup():
+            if ready.exists() and ready.read_text():
+                run.stop_recorded({p: run.proc_start(p) for p in json.loads(ready.read_text())}, grace=0.1)
+        self.addCleanup(cleanup)
+        end = time.time() + 10
+        while time.time() < end:
+            try:
+                pids = json.loads(ready.read_text())
+                if all(run.alive(p) for p in pids):
+                    return pids
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.05)
+        self.fail("the unobserved process did not become ready")
+
+    def test_worktree_sweep_leaves_processes_outside_the_worktree_and_older_than_the_run(self):
+        from hansa import run
+        wt, near = self.tmp / "worktree", self.tmp / "worktree2"
+        wt.mkdir()
+        near.mkdir()
+        for kind in ("outside", "older", "no run start"):
+            with self.subTest(kind=kind):
+                [pid] = self.unmarked_worktree_process(near if kind == "outside" else wt)
+                when = run.process_table()[pid][2]
+                tid = self.desk.new_task("Add hello.txt")
+                self.desk.update(tid, worktree=str(wt),
+                                 started=None if kind == "no run start" else when + 10 if kind == "older" else when - 10)
+                self.assertEqual(run.sweep(self.desk, tid), [])
+                self.assertTrue(run.alive(pid))
+                self.assertFalse(self.desk.meta(tid).get("left_running"))
+
+    def test_worktree_sweep_leaves_a_process_with_a_controlling_terminal(self):
+        from hansa import run
+        try:
+            master, slave = os.openpty()
+        except PermissionError as e:
+            skip_in_sandbox(self, f"cannot open a pseudo-terminal here: {e}")
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        started = time.time()
+        [pid] = self.unmarked_worktree_process(self.repo, terminal=slave)
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, worktree=str(self.repo), started=started)
+        self.assertNotIn(pid, run.working_in([str(self.repo)], since=started))
+        self.assertEqual(run.sweep(self.desk, tid), [])
+        self.assertTrue(run.alive(pid))
+
+    def test_working_in_checks_the_controlling_terminal_and_skips_unreadable_processes(self):
+        import ctypes
+        from hansa import run
+        folder = str(self.repo)
+        table = {p: (1, f"start-{p}", 200) for p in (8101, 8102, 8103)}
+
+        def linux_stat(path):
+            pid = int(path.parent.name)
+            if pid == 8103:
+                raise PermissionError("unreadable terminal")
+            return f"{pid} (a name with ) in it) S 1 {pid} {pid} {0 if pid == 8101 else 123}"
+
+        def mac_proc(pid):
+            if pid == 8103:
+                return None
+            rec = bytearray(run._KINFO_PROC_SIZE)
+            struct.pack_into("@i", rec, 572, -1 if pid == 8101 else 123)  # e_tdev in Darwin's kinfo_proc
+            return bytes(rec)
+
+        def cwd(pid, kind, arg, buf, size):
+            buf.raw = (b"\0" * 152 + folder.encode() + b"\0").ljust(size, b"\0")
+            return size
+        for system in ("linux", "macos"):
+            with self.subTest(system=system), \
+                    unittest.mock.patch.object(run, "process_table", return_value=table) as listing, \
+                    unittest.mock.patch.object(Path, "is_dir", return_value=system == "linux"), \
+                    unittest.mock.patch.object(Path, "read_text", linux_stat), \
+                    unittest.mock.patch.object(os, "readlink", return_value=folder), \
+                    unittest.mock.patch.object(run, "_mac_proc", side_effect=mac_proc), \
+                    unittest.mock.patch.object(ctypes, "CDLL", return_value=types.SimpleNamespace(proc_pidinfo=cwd)):
+                self.assertEqual(run.working_in([folder], since=100), {8101: "start-8101"})
+                listing.return_value = {}  # a supplied snapshot also keeps hansa's exclusions consistent with the scan
+                self.assertEqual(run.working_in([folder], since=100, table=table), {8101: "start-8101"})
+
+    def test_worktree_sweep_finds_an_unobserved_process_with_a_live_parent_in_a_subfolder(self):
+        from hansa import run
+        folder = self.repo / "nested"
+        folder.mkdir()
+        started = time.time()
+        pids = self.unmarked_worktree_process(folder, child=True)
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, worktree=str(self.repo), started=started)
+        self.assertCountEqual(run.working_in([str(self.repo)], since=started), pids)
+        self.assertCountEqual([x["pid"] for x in run.sweep(self.desk, tid)], pids)
+        self.assertFalse(any(run.alive(p) for p in pids))
+
+    def test_worktree_sweep_leaves_the_server_and_its_descendants_and_the_commands_children(self):
+        from hansa import run
+        started = time.time()
+        pids = self.unmarked_worktree_process(self.repo, child=True)
+        # The server may be another process: hansa's command reads its pid from the desk's lock.
+        (self.desk.state_dir / "serve.lock").write_text(f"{pids[0]}\n")
+        own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=self.repo,
+                               env={}, start_new_session=True)
+        self.addCleanup(lambda: (own.kill(), own.wait()))
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, worktree=str(self.repo), started=started)
+        self.assertCountEqual(run.working_in([str(self.repo)], since=started), [*pids, own.pid])
+        self.assertEqual(run.sweep(self.desk, tid), [])
+        self.assertTrue(all(run.alive(p) for p in [*pids, own.pid]))
+
+    def test_a_leftover_also_found_by_worktree_is_listed_once(self):
+        from hansa import run
+        for source in ("recorded", "group", "marker"):
+            with self.subTest(source=source):
+                started, mark = time.time(), uuid.uuid4().hex
+                [pid] = self.unmarked_worktree_process(self.repo, mark=mark if source == "marker" else "")
+                tid = self.desk.new_task("Add hello.txt")
+                start = run.proc_start(pid)
+                self.desk.update(tid, worktree=str(self.repo), started=started,
+                                 started_procs={str(pid): start} if source != "marker" else {},
+                                 run_groups={str(pid): start} if source == "group" else {},
+                                 run_marks=[mark] if source == "marker" else [])
+                self.assertIn(pid, run.working_in([str(self.repo)], since=started))
+                self.assertEqual([x["pid"] for x in run.sweep(self.desk, tid)], [pid])
+                self.assertEqual([x["pid"] for x in self.desk.meta(tid)["left_running"]], [pid])
+                self.assertFalse(run.alive(pid))
+
     def test_a_recorded_process_whose_number_went_to_another_is_not_stopped(self):
         from hansa import run
         bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
@@ -10044,6 +10264,175 @@ def save():'''))
         d, tid = self.merge_check_lane(check="true")
         self.merge_lane_for_checks(command, **fields)
         return d, tid
+
+    def detached_worktree_command(self, pidfile):
+        """A check command leaving an unmarked process with no parent chain back to hansa serve."""
+        from hansa import run
+        script = pidfile.with_suffix(".py")
+        child = ("import os, time\nfrom pathlib import Path\n"
+                 f"Path({str(pidfile)!r}).write_text(str(os.getpid()))\ntime.sleep(120)\n")
+        script.write_text("import subprocess, sys\n"
+                          f"subprocess.Popen([sys.executable, '-c', {child!r}], env={{}}, start_new_session=True, "
+                          "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n")
+        self.addCleanup(lambda: pidfile.exists() and run.stop_recorded(
+            {int(pidfile.read_text()): run.proc_start(int(pidfile.read_text()))}, grace=0.1))
+        return shlex.join([sys.executable, str(script)])
+
+    def merge_lane_sweep_with_new_work(self, restart=False):
+        from hansa import run
+        merge_go, check_go, ready = (self.tmp / name for name in ("merge-go", "check-go", "check-ready"))
+        self.addCleanup(merge_go.touch)
+        self.addCleanup(check_go.touch)
+        d, tid = self.merge_lane_task(f"while ! test -f {shlex.quote(str(merge_go))}; do sleep 0.05; done")
+        self.hansa("merge", tid)
+        d.tick()
+        merge_proc = d.merge_procs[tid]
+        self.addCleanup(lambda: (merge_go.touch(), merge_proc.wait(timeout=20)))
+        pidfile = self.tmp / "new-work.pid"
+        command = (self.detached_worktree_command(pidfile) + f"; touch {shlex.quote(str(ready))}; "
+                   f"while ! test -f {shlex.quote(str(check_go))}; do sleep 0.05; done")
+        self.hansa("lane", "set", "a", "check", command)
+        self.hansa("lane", "set", "a", "env", "FAKE_HELLO=new-work.txt")
+        work = self.desk.new_task("New work in the task lane", lane="a")
+        end = time.time() + 30
+        while time.time() < end:
+            d.tick()
+            if ready.exists() and pidfile.exists() and pidfile.read_text():
+                break
+            time.sleep(0.05)
+        self.assertTrue(ready.exists() and pidfile.exists(), "the new task's check did not become ready")
+        check_proc = d.procs[work]
+        self.addCleanup(lambda: (check_go.touch(), check_proc.wait(timeout=20)))
+        pid, meta = int(pidfile.read_text()), self.desk.meta(work)
+        self.assertEqual((meta["state"], meta["phase"]), ("running", "checking"))
+        self.assertNotIn(pid, run.run_recorded(meta))
+        self.assertNotIn(pid, [p for p, _ in run.task_processes(meta.get("run_marks") or [], meta.get("run_folders") or [])])
+        ours = {}
+        run.record_descendants(os.getpid(), ours)
+        self.assertNotIn(pid, ours)
+        self.assertIn(pid, run.working_in([meta["worktree"]], since=meta["check_started"]))
+        merge_go.touch()
+        merge_proc.wait(timeout=20)
+        if restart:
+            d = Dispatcher(Desk(self.desk.root))
+        merged = self.settle_merge(d, tid, timeout=30)
+        self.assertEqual(merged["state"], "merged", merged)
+        self.assertEqual(self.desk.meta(work)["state"], "running")
+        self.assertEqual((run.alive(pid), [x["pid"] for x in merged.get("left_running") or []],
+                          [x["pid"] for x in self.desk.meta(work).get("left_running") or []]), (True, [], []))
+        run.stop_recorded({pid: run.proc_start(pid)}, grace=0.1)
+        check_go.touch()
+        check_proc.wait(timeout=20)
+        self.assertEqual(self.settle(d, work, timeout=30)["state"], "done")
+
+    def test_a_merge_lane_sweep_leaves_a_new_tasks_detached_worktree_process_alone(self):
+        self.merge_lane_sweep_with_new_work()
+
+    def test_a_restarted_merge_lane_sweep_leaves_a_new_tasks_detached_worktree_process_alone(self):
+        self.merge_lane_sweep_with_new_work(restart=True)
+
+    def merge_check_sweeps_its_worktree(self, merge_lane=False):
+        from hansa import run
+        d, tid = self.merge_check_lane(check="true")
+        pidfile, go = self.tmp / "merge-leftover.pid", self.tmp / "merge-go"
+        command = (self.detached_worktree_command(pidfile) +
+                   f"; while ! test -f {shlex.quote(str(go))}; do sleep 0.05; done")
+        self.addCleanup(go.touch)
+        if merge_lane:
+            self.merge_lane_for_checks(command)
+        else:
+            self.hansa("lane", "set", "a", "merge_check", command)
+        self.hansa("merge", tid)
+        d.tick()
+        proc = d.merge_procs[tid]
+        self.addCleanup(lambda: (go.touch(), proc.wait(timeout=20)))
+        end = time.time() + 20
+        while not (pidfile.exists() and pidfile.read_text()) and time.time() < end:
+            time.sleep(0.05)
+        self.assertTrue(pidfile.exists(), "the merge check's detached process did not start")
+        pid, mc = int(pidfile.read_text()), self.desk.meta(tid)["merge_check"]
+        self.assertEqual(mc["worktree"], str(self.desk.worktrees_dir / ("m" if merge_lane else "a")))
+        self.assertIn(pid, run.working_in([mc["worktree"]], since=mc["started"]))
+        go.touch()
+        proc.wait(timeout=20)
+        before_land, land = [], run.land_merge
+
+        def landing(*args, **kwargs):
+            before_land.append((run.alive(pid), [x["pid"] for x in self.desk.meta(tid).get("left_running") or []]))
+            return land(*args, **kwargs)
+        with unittest.mock.patch.object(run, "land_merge", side_effect=landing):
+            merged = self.settle_merge(Dispatcher(Desk(self.desk.root)), tid, timeout=30)
+        self.assertEqual(merged["state"], "merged", merged)
+        self.assertEqual(before_land, [(False, [pid])])
+        self.assertEqual([x["pid"] for x in merged["left_running"]], [pid])
+
+    def test_a_merge_check_sweeps_its_detached_process_in_the_task_worktree(self):
+        self.merge_check_sweeps_its_worktree()
+
+    def test_a_merge_check_sweeps_its_detached_process_in_the_merge_worktree(self):
+        self.merge_check_sweeps_its_worktree(merge_lane=True)
+
+    def test_a_merge_check_folder_scan_never_uses_the_workers_folder_or_start_as_a_fallback(self):
+        from hansa import run
+        for scope in ("older than merge check", "no merge check start", "no merge check worktree"):
+            with self.subTest(scope=scope):
+                [pid] = self.unmarked_worktree_process(self.repo)
+                when = run.process_table()[pid][2]
+                tid = self.desk.new_task("A finished merge check", lane="a")
+                mc = {"phase": "running", "worktree": str(self.repo), "started": when + 10, "command": "false"}
+                if scope == "no merge check start":
+                    mc.pop("started")
+                elif scope == "no merge check worktree":
+                    mc.pop("worktree")
+                    mc["started"] = when - 10
+                self.desk.update(tid, state="merging", worktree=str(self.repo), started=when - 20, merge_check=mc)
+                (self.desk.raw_dir(tid) / "merge-check.exit").write_text("1\n")
+                m = run.finish_merge_check(self.desk, tid)
+                self.assertEqual(m["state"], "done")
+                self.assertTrue(run.alive(pid))
+                self.assertFalse(m.get("left_running"))
+
+    def test_check_sweeps_use_the_checks_start_including_before_retry_and_when_it_never_started(self):
+        from hansa import run
+        for ending in ("finished", "retry", "failed start", "sandbox unavailable", "cancelled before start"):
+            with self.subTest(ending=ending):
+                [pid] = self.unmarked_worktree_process(self.repo)
+                when = run.process_table()[pid][2]
+                tid = self.desk.new_task("A finished check", lane="a")
+                m = self.desk.update(tid, state="running", phase="checking", worktree=str(self.repo),
+                                     started=when - 20, check_started=when + 10 if ending in ("finished", "retry") else None)
+                raw = self.desk.raw_dir(tid)
+                if ending in ("finished", "retry"):
+                    (raw / "check.exit").write_text("137\n" if ending == "retry" else "0\n")
+                    with unittest.mock.patch.object(run, "check_killed", return_value=ending == "retry"):
+                        run.finish_check(self.desk, tid)
+                    if ending == "retry":
+                        self.assertIsNone(self.desk.meta(tid)["check_started"])
+                        self.assertTrue(self.desk.meta(tid)["check_retry"])
+                elif ending == "failed start":
+                    run.check_not_started(self.desk, tid, RuntimeError("could not launch"))
+                else:
+                    with unittest.mock.patch.object(run, "start_check", return_value=None,
+                                                    side_effect=run.SrtCannotRun("unavailable")
+                                                    if ending == "sandbox unavailable" else None):
+                        Dispatcher(self.desk).check(m, self.desk.settings())
+                self.assertTrue(run.alive(pid))
+                self.assertFalse(self.desk.meta(tid).get("left_running"))
+
+    def test_a_check_retry_sweeps_its_detached_process_after_clearing_the_checks_start(self):
+        from hansa import run
+        [pid] = self.unmarked_worktree_process(self.repo)
+        when = run.process_table()[pid][2]
+        tid = self.desk.new_task("A killed check", lane="a")
+        self.desk.update(tid, state="running", phase="checking", worktree=str(self.repo),
+                         started=when - 20, check_started=when - 10)
+        (self.desk.raw_dir(tid) / "check.exit").write_text("137\n")
+        with unittest.mock.patch.object(run, "check_killed", return_value=True):
+            m = run.finish_check(self.desk, tid)
+        self.assertIsNone(m["check_started"])
+        self.assertTrue(m["check_retry"])
+        self.assertFalse(run.alive(pid))
+        self.assertEqual([x["pid"] for x in m["left_running"]], [pid])
 
     def batch_queue(self, count=3, *, limit=None, conflict=False, fail=False, start=True):
         """Queue finished branches behind a gated running check, then start the next batch."""
@@ -16140,6 +16529,358 @@ def save():'''))
                 return got
             time.sleep(0.1)
         self.fail(f"not within {timeout} s: {what()!r}")
+
+    def stop_before_end_event(self, tid, kind, ending):
+        """Really lose the process after its metadata write; no exception unwinding or mocked recovery."""
+        script = textwrap.dedent('''\
+            import os, sys
+            from hansa import run
+            from hansa.desk import Desk
+            desk = Desk(sys.argv[1])
+            original = Desk.event
+            def event(self, kind, **fields):
+                if kind == sys.argv[3]:
+                    os._exit(91)
+                return original(self, kind, **fields)
+            Desk.event = event
+            tid = sys.argv[2]
+            ''') + ending
+        result = subprocess.run([sys.executable, "-c", script, str(self.desk.root), tid, kind],
+                                cwd=Path(hansa.__file__).resolve().parent.parent,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 91, result.stderr)
+
+    def test_startup_repairs_an_end_lost_by_process_exit_and_a_follower_posts_it(self):
+        from hansa import run
+        p, sock = self.session()
+        sess = {"pid": p.pid, "start": notify.proc_start(p.pid)}
+        with self.in_session(p, sock):
+            self.hansa_out("notify", "on")
+            self.hansa_out("add", "Add hello.txt")
+        tid = "t0001"
+        proc = run.start(self.desk, tid, "a", "claude")
+        self.assertIsNotNone(proc)
+        self.assertEqual(proc.wait(timeout=30), 0)
+        pos = notify.log_end(self.desk)
+        self.stop_before_end_event(tid, "task_finished", "run.finish(desk, tid, 0)\n")
+        saved = self.desk.meta(tid)
+        self.assertEqual(saved["state"], "done")
+        self.assertEqual(self.events("task_finished"), [])
+        d = Dispatcher(self.desk)
+        d.tick()
+        feed = notify.handle(self.desk, {"op": "feed", "me": {"key": "5252-0123abcd", "session": sess},
+                                         "pos": pos, "done": pos})
+        self.assertEqual([x["key"] for x in feed["items"]], [["task", tid]])
+        self.assertEqual(feed["items"][0]["review"], tid)
+        first = self.soon(lambda: [x for x in self.posts(sock) if f"{tid} done" in x], timeout=30)
+        self.assertEqual(len(first), 1)
+        [event] = self.events("task_finished")
+        self.assertEqual(event, {"ts": saved["finished"], "event": "task_finished", "task": tid,
+                                 "state": "done", "provider": saved["provider"], "error": saved["error"]})
+        end = notify.log_end(self.desk)
+        d.tick()
+        Dispatcher(self.desk).tick()
+        self.assertEqual(len(self.events("task_finished")), 1)
+        self.assertEqual(notify.items_for(self.desk, notify.read_log(self.desk, end)[0],
+                                        {"key": "probe", "session": sess}), [])
+
+    def test_startup_repairs_saved_terminal_states_and_verifications_once(self):
+        self.desk.pause("hold queued work")
+        sess = {"pid": os.getpid(), "start": notify.proc_start(os.getpid())}
+        expected = {}
+        at = now() - 60
+        for kind in ("task", "verify"):
+            for state, error in (("done", ""), ("failed", "worker failed"), ("cancelled", "cancelled"),
+                                 ("failed", "stopped at the ceiling of 200 turns"),
+                                 ("failed", "stopped at the ceiling of 30 minutes"),
+                                 ("failed", "could not start: missing executable")):
+                tid = self.desk.new_task(f"{kind}: {error or state}", kind=kind, session=sess)
+                self.desk.update(tid, state=state, finished=at, error=error, provider="claude",
+                                 verdict="holds" if kind == "verify" and state == "done" else "")
+                event = "task_not_started" if error.startswith("could not start:") else "task_finished"
+                expected[tid] = {"ts": at, "event": event, "task": tid, "error": error,
+                                 **({"state": state, "provider": "claude"} if event == "task_finished" else {})}
+                # An earlier try or the hand-off to a check must not hide a missing terminal event.
+                self.desk.event("task_finished", ts=at, task=tid, state="queued")
+                self.desk.event("task_finished", ts=at, task=tid, state="checking")
+        pos = notify.log_end(self.desk)
+        d = Dispatcher(self.desk)
+        d.tick()
+        events, end = notify.read_log(self.desk, pos)
+        repaired = [e for e in events if e.get("task") in expected]
+        self.assertEqual({e["task"]: e for e in repaired}, expected)
+        self.assertEqual(len(repaired), len(expected))
+        items = notify.items_for(self.desk, repaired, {"key": "probe", "session": sess})
+        self.assertEqual({x["key"][1] for x in items}, set(expected))
+        for x in items:
+            self.assertIn(x["key"][1], x["line"])
+        d.tick()
+        Dispatcher(self.desk).tick()
+        self.assertEqual(notify.read_log(self.desk, end)[0], [])
+
+    def test_startup_repairs_a_verification_lost_by_process_exit(self):
+        from hansa import run
+        tid = self.desk.new_task("Verify the change", kind="verify", lane="a")
+        self.desk.update(tid, state="running", provider="claude")
+        write_json(self.desk.raw_dir(tid) / "run.json",
+                   {"subtype": "success", "result": "VERDICT: holds"})
+        self.stop_before_end_event(tid, "task_finished", "run.finish(desk, tid, 0)\n")
+        self.assertEqual((self.desk.meta(tid)["state"], self.desk.meta(tid)["verdict"]), ("done", "holds"))
+        Dispatcher(self.desk).tick()
+        [event] = self.events("task_finished")
+        [item] = notify.items_for(self.desk, [event], {"key": "probe", "session": None})
+        self.assertIn(tid, item["line"])
+        self.assertIn("holds", item["line"])
+        self.assertEqual(event["ts"], self.desk.meta(tid)["finished"])
+
+    def test_startup_repairs_a_merge_check_lost_by_process_exit(self):
+        tid = self.desk.new_task("Check the merge", lane="a")
+        self.desk.update(tid, state="merging", finished=now() - 120, error="",
+                         merge_check={"phase": "running", "command": "false", "started": now() - 30})
+        # The worker's end was already delivered; this repair is the merge check's own end.
+        self.desk.event("task_finished", task=tid, state="done")
+        (self.desk.raw_dir(tid) / "merge-check.exit").write_text("1\n")
+        self.stop_before_end_event(tid, "merge_check_ended", "run.finish_merge_check(desk, tid)\n")
+        saved = self.desk.meta(tid)
+        self.assertEqual(saved["state"], "done")
+        self.assertEqual(self.events("merge_check_ended"), [])
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).tick()
+        [event] = self.events("merge_check_ended")
+        self.assertEqual(event, {"event": "merge_check_ended", "ts": saved["merge_check_result"]["at"],
+                                 "task": tid, "ok": False, "note": "", "command": "false"})
+        [item] = notify.items_for(self.desk, notify.read_log(self.desk, pos)[0],
+                                 {"key": "probe", "session": None})
+        self.assertEqual(item["key"], ["merge", tid])
+        self.assertIn("merge check ended", item["line"])
+        self.assertIn("false", item["line"])
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.events("merge_check_ended"), [event])
+
+    def test_startup_repairs_a_saved_check_and_successful_merge(self):
+        self.desk.pause("hold queued work")
+        at = now() - 60
+        checked = self.desk.new_task("Worker check")
+        self.desk.update(checked, state="done", finished=at,
+                         check={"ok": None, "exit": None, "note": "could not run", "could_not_run": True})
+        self.desk.event("task_finished", task=checked, state="checking")
+        merged = self.desk.new_task("Merge passed")
+        self.desk.update(merged, state="merged", merged=at, merge_base="main",
+                         merge_check_result={"ok": True, "at": at - 1, "onto": "old-tip", "command": "true",
+                                             "batch": [merged, "t9999"], "output_task": merged})
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).tick()
+        events, end = notify.read_log(self.desk, pos)
+        self.assertEqual(events, [
+            {"event": "task_checked", "ts": at, "task": checked, "ok": None, "exit": None,
+             "note": "could not run", "could_not_run": True},
+            {"event": "task_merged", "ts": at, "task": merged, "into": "main", "merge_checked": True,
+             "onto": "old-tip", "command": "true", "members": [merged, "t9999"], "check_task": merged}])
+        items = notify.items_for(self.desk, events, {"key": "probe", "session": None})
+        self.assertEqual([x["key"] for x in items], [["task", checked], ["merge", merged]])
+        Dispatcher(self.desk).tick()
+        self.assertEqual(notify.read_log(self.desk, end)[0], [])
+
+    def test_startup_leaves_present_ends_active_tasks_and_missing_adds_alone(self):
+        self.desk.pause("hold queued work")
+        at = now()
+        ended = self.desk.new_task("Already ended")
+        self.desk.update(ended, state="done", finished=at, error="")
+        self.desk.event("task_finished", ts=at, task=ended, state="done")
+        self.desk.events_path.write_bytes(self.desk.events_path.read_bytes().replace(
+            next(line for line in self.desk.events_path.read_bytes().splitlines(keepends=True)
+                 if b'"task_added"' in line), b""))
+        for state, phase in (("queued", ""), ("running", ""), ("running", "checking"), ("merging", "running")):
+            tid = self.desk.new_task(f"Active {state} {phase}")
+            self.desk.update(tid, state=state, phase=phase, finished=at,
+                             merge_check={"phase": phase}, merge_check_result={"at": at, "note": "older try"})
+        pos = notify.log_end(self.desk)
+        d = Dispatcher(self.desk)
+        # Only startup recovery: the ordinary rounds would correctly finish these stand-in running processes.
+        d.recover_ends()
+        Dispatcher(self.desk).recover_ends()
+        self.assertEqual(notify.log_end(self.desk), pos)
+        self.assertEqual([e["task"] for e in self.events("task_added")],
+                         [m["id"] for m in self.desk.tasks() if m["id"] != ended])
+
+    def test_startup_recovery_reads_only_the_recent_log_tail_and_uses_its_time(self):
+        from hansa import run
+        at = 200000  # a desk stopped long ago still repairs ends near its last event, not near today's clock
+        old = self.desk.new_task("Old saved end")
+        edge = self.desk.new_task("Exactly one hour before")
+        later = self.desk.new_task("After the last event")
+        for tid, finished in ((old, at - 3601), (edge, at - 3600), (later, at + 1)):
+            self.desk.update(tid, state="done", finished=finished)
+        self.desk.events_path.write_bytes(
+            (b'{"ts":1,"event":"old_note"}\n' * 100000)
+            + b'{"ts":199999,"event":"note","text":"' + ("中é" * 40000).encode() + b'"}\n'
+            + json.dumps({"ts": at, "event": "note"}).encode() + b'\n\xff\n[]\n{"ts":"bad"}\nbroken\n')
+        with unittest.mock.patch.object(run, "event_record", wraps=run.event_record) as read:
+            Dispatcher(self.desk).recover_ends()
+        self.assertLess(read.call_count, 20)  # the large old history was neither read nor parsed
+        self.assertEqual({e["task"]: e["ts"] for e in notify.read_log(self.desk, 0, 10 ** 7)[0]
+                          if e.get("event") == "task_finished"},
+                         {edge: at - 3600, later: at + 1})
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).recover_ends()
+        self.assertEqual(notify.log_end(self.desk), pos)
+
+    def test_startup_repairs_ends_when_the_event_log_is_missing(self):
+        tid = self.desk.new_task("Saved without a log")
+        at = now() - 7200
+        self.desk.update(tid, state="failed", finished=at, error="failed")
+        self.desk.events_path.unlink()
+        Dispatcher(self.desk).recover_ends()
+        [event] = self.events("task_finished")
+        self.assertEqual((event["task"], event["ts"], event["state"]), (tid, at, "failed"))
+        self.assertEqual(self.events("task_added"), [])
+
+    def test_startup_repaired_end_is_in_a_new_followers_catch_up(self):
+        key, me = self.missed_a_server_stop()
+        tid = self.desk.new_task("Ended while the session was away", session={"pid": 4242, "start": "boot:77"})
+        self.desk.update(tid, state="done", finished=now(), error="")
+        Dispatcher(self.desk).tick()
+        caught = self.starts_again(me, {"state": "up", "pid": 123, "quiet": 0, "answers": True})
+        self.assertEqual(len(caught["summary"]), 1)
+        self.assertIn(f"{tid} done", caught["summary"][0])
+        self.assertEqual(caught["missed"]["key"], key)
+
+    def test_startup_preserves_existing_check_and_merge_end_events(self):
+        at = now() - 60
+        for kind in ("task_not_started", "task_checked", "merge_check_ended", "task_merged"):
+            tid = self.desk.new_task(kind)
+            state = "merged" if kind == "task_merged" else "failed" if kind == "task_not_started" else "done"
+            self.desk.update(tid, state=state, finished=at, merged=at, merge_base="main",
+                             error="could not start: no worker" if kind == "task_not_started" else "",
+                             check={"ok": True, "exit": 0, "note": ""} if kind == "task_checked" else None,
+                             merge_check_result={"at": at, "note": "failed", "ok": False}
+                             if kind in ("merge_check_ended", "task_merged") else None)
+            if kind == "merge_check_ended":
+                self.desk.event("task_finished", ts=at, task=tid, state="done")
+            self.desk.event(kind, ts=at + 1, task=tid)
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).recover_ends()
+        self.assertEqual(notify.log_end(self.desk), pos)
+
+    def test_startup_preserves_merge_events_rounded_before_the_saved_time(self):
+        self.desk.pause("hold queued work")
+        at = int(now()) - 60 + 0.0004
+        for checked in (False, True):
+            tid = self.desk.new_task(f"Merged with check: {checked}")
+            self.desk.update(tid, state="merged", merged=at, merge_base="main",
+                             merge_check_result={"ok": checked, "at": at - 1, "onto": "old-tip"})
+            self.desk.event("task_merged", ts=round(at, 3), task=tid, into="main",
+                            **({"merge_checked": True} if checked else {}))
+        before = self.desk.events_path.read_bytes()
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).tick()
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.desk.events_path.read_bytes(), before)
+        feed = notify.handle(self.desk, {"op": "feed", "me": {"key": "5252-0123abcd", "session": None},
+                                         "pos": pos, "done": pos})
+        self.assertEqual(feed["items"], [])
+
+    def test_startup_preserves_a_queued_tasks_cancel_without_posting_an_end(self):
+        owner = {"pid": 4242, "start": "boot:77"}
+        other = {"pid": 4343, "start": "boot:88"}
+        tid = self.desk.new_task("Cancel before it starts", session=owner)
+        with unittest.mock.patch.object(notify, "session_here", return_value=owner):
+            self.hansa("cancel", tid)
+        self.assertEqual(self.desk.meta(tid)["state"], "cancelled")
+        self.assertEqual([e["task"] for e in self.events("task_cancel")], [tid])
+        self.assertEqual(self.events("task_finished"), [])
+        before = self.desk.events_path.read_bytes()
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).tick()
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.desk.events_path.read_bytes(), before)
+        for sess in (owner, other):
+            feed = notify.handle(self.desk, {"op": "feed", "me": {"key": "5252-0123abcd", "session": sess},
+                                             "pos": pos, "done": pos})
+            self.assertEqual(feed["items"], [])
+
+    def test_startup_repairs_cancelled_claims_without_a_current_cancel_event(self):
+        at = now() - 60
+        tids = []
+        for earlier_cancel in (False, True):
+            tid = self.desk.new_task(f"Cancelled claim with older cancel: {earlier_cancel}")
+            tids.append(tid)
+            self.desk.update(tid, state="cancelled", finished=at, error="cancelled before it started")
+            if earlier_cancel:
+                self.desk.event("task_cancel", ts=at - 1, task=tid)
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.events("task_finished"), [
+            {"event": "task_finished", "ts": at, "task": tid, "state": "cancelled", "provider": None,
+             "error": "cancelled before it started"} for tid in tids])
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).tick()
+        self.assertEqual(notify.log_end(self.desk), pos)
+
+    def test_startup_merge_writes_use_the_saved_time_for_the_event(self):
+        from hansa import run
+        for path in ("immediate", "waited", "checked", "batch"):
+            with self.subTest(path=path):
+                _, tid = self.merge_check_lane()
+                m = self.desk.meta(tid)
+                lane = self.desk.settings()["lanes"]["a"]
+                onto = self.git_out("rev-parse", "main")
+                result = {"ok": True, "at": now(), "onto": onto, "commit": m["head"], "command": "true"}
+                if path != "immediate":
+                    self.desk.update(tid, state="merging", merge_check={"phase": "queued", "plain": True})
+                clock = [int(now()) + 0.0004]
+                saved_at = round(clock[0], 3)
+                update = Desk.update
+
+                def save_then_time_passes(desk, *args, **fields):
+                    saved = update(desk, *args, **fields)
+                    if fields.get("state") == "merged":
+                        clock[0] += 0.007  # closing verifications can take time before the event is written
+                    return saved
+
+                with unittest.mock.patch.object(time, "time", side_effect=lambda: clock[0]), \
+                        unittest.mock.patch.object(Desk, "update", autospec=True, side_effect=save_then_time_passes):
+                    if path == "immediate":
+                        self.hansa("merge", tid)
+                    elif path == "waited":
+                        run.plain_merge(self.desk, tid, lane)
+                    elif path == "checked":
+                        run.land_merge(self.desk, tid, result)
+                    else:
+                        result.update(batch=[tid], batch_commits=[{"task": tid, "onto": onto,
+                                                                  "commit": m["head"], "message_note": ""}])
+                        run.record_batch_landing(self.desk, {"result": result, "leader": tid,
+                                                            "repo": lane["repo"], "base": "main"},
+                                                 self.tmp / "landing.json")
+                [event] = [e for e in self.events("task_merged") if e["task"] == tid]
+                self.assertEqual(self.desk.meta(tid)["merged"], saved_at)
+                self.assertEqual(event["ts"], saved_at)
+                pos = notify.log_end(self.desk)
+                Dispatcher(self.desk).recover_ends()
+                self.assertEqual(notify.log_end(self.desk), pos)
+
+    def test_startup_repairs_waited_merge_ends_and_retries_a_failed_event_write(self):
+        at = now() - 60
+        for i in range(2):
+            tid = self.desk.new_task(f"Waited merge {i}")
+            self.desk.update(tid, state="done", finished=at - 60,
+                             merge_check_result={"at": at, "note": "base moved", "waited": True})
+            self.desk.event("task_finished", ts=at - 60, task=tid, state="done")
+        original = self.desk.event
+        d = Dispatcher(self.desk)
+        calls = []
+        def fail_second(kind, **fields):
+            calls.append(fields["task"])
+            if len(calls) == 2:
+                raise OSError(errno.ENOSPC, "event log full")
+            original(kind, **fields)
+        with unittest.mock.patch.object(self.desk, "event", side_effect=fail_second), self.assertRaises(OSError):
+            d.recover_ends()
+        self.assertFalse(d.ends_recovered)
+        d.recover_ends()
+        self.assertTrue(d.ends_recovered)
+        self.assertEqual(self.events("merge_check_ended"), [
+            {"event": "merge_check_ended", "ts": at, "task": tid, "ok": False, "note": "base moved", "waited": True}
+            for tid in calls])
 
     def test_a_task_that_ends_after_its_check_is_posted_once_to_its_session(self):
         s = self.desk.settings()
@@ -27544,13 +28285,14 @@ def save():'''))
             self.assertEqual((row["step"], row["bars"][0]["value"]), ("check", "8"))
             self.assertIn("1 min so far (8 min in all)" if language == "en" else "检查已跑 1 分钟（一共 8 分钟）", row["text"])
 
-    def web_request(self, path, *, method="GET", headers=None, data=b""):
+    def web_request(self, path, *, method="GET", headers=None, data=b"", raw=False):
         """Run the real request handler and response writer without opening a socket."""
         from hansa import web
         with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
                 unittest.mock.patch.object(web.threading, "Thread"):
             start_web(self.desk, "127.0.0.1", 0)
         page = object.__new__(server.call_args.args[1])
+        page.command = method
         page.path = path
         page.headers = {"Content-Length": str(len(data)), **(headers or {})}
         page.rfile, page.wfile = io.BytesIO(data), io.BytesIO()
@@ -27559,9 +28301,186 @@ def save():'''))
         code = page.send_response.call_args.args[0]
         outgoing = dict(call.args for call in page.send_header.call_args_list)
         body = page.wfile.getvalue()
-        if outgoing["Content-Type"].startswith("application/json"):
+        if not raw and outgoing.get("Content-Encoding") == "gzip":
+            import gzip
+            body = gzip.decompress(body)
+        if not raw and body and outgoing["Content-Type"].startswith("application/json"):
             body = json.loads(body)
         return code, body, outgoing
+
+    def test_web_gzip_negotiation_and_lengths(self):
+        import gzip
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        for path in ("/", "/api/status", "/api/events", "/api/settings", "/missing"):
+            _, plain, _ = self.web_request(path, headers=auth, raw=True)
+            for accept in ("gzip", "br, GZip; q=0.5", "*;q=1"):
+                with self.subTest(path=path, accept=accept):
+                    _, body, headers = self.web_request(path, headers={**auth, "Accept-Encoding": accept}, raw=True)
+                    self.assertEqual(headers.get("Content-Encoding"), "gzip")
+                    self.assertEqual(int(headers["Content-Length"]), len(body))
+                    self.assertEqual(gzip.decompress(body), plain)
+                    self.assertIn("Accept-Encoding", headers["Vary"])
+            for accept in ("", "br", "gzip;q=0", "gzip;q=0, *;q=1", "gzip;q=invalid"):
+                with self.subTest(path=path, accept=accept):
+                    _, body, headers = self.web_request(path, headers={**auth, "Accept-Encoding": accept}, raw=True)
+                    self.assertNotIn("Content-Encoding", headers)
+                    self.assertEqual(int(headers["Content-Length"]), len(body))
+                    self.assertEqual(body, plain)
+
+    def test_web_page_etag_revalidates_public_shell_and_changes_with_file(self):
+        from hansa import web
+        token = self.desk.web_token()
+        code, body, headers = self.web_request("/?t=" + token, raw=True)
+        self.assertEqual(code, 200)
+        self.assertNotIn(token.encode(), body)
+        self.assertEqual(headers["Cache-Control"], "private, no-cache")
+        for encoding in ("", "gzip"):
+            code, body, checked = self.web_request("/", headers={"If-None-Match": headers["ETag"],
+                                                               "Accept-Encoding": encoding}, raw=True)
+            self.assertEqual((code, body), (304, b""))
+            self.assertEqual(checked["ETag"], headers["ETag"])
+            # A 304 has no body and must not claim its zero-byte body is the representation's length.
+            self.assertNotIn("Content-Length", checked)
+        with unittest.mock.patch.object(web, "UI", unittest.mock.Mock(read_bytes=lambda: b"changed public shell")):
+            code, body, changed = self.web_request("/", headers={"If-None-Match": headers["ETag"]}, raw=True)
+        self.assertEqual((code, body), (200, b"changed public shell"))
+        self.assertNotEqual(changed["ETag"], headers["ETag"])
+
+    def test_web_poll_etags_change_with_data_and_never_bypass_auth(self):
+        from hansa import web
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        status = views.status(self.desk)
+        events = [{"event": "task_added", "task": "t0001"}]
+        for path, target, reply in (("/api/status", "views.status", status),
+                                     ("/api/events", "_events", events)):
+            with unittest.mock.patch("hansa.web." + target, return_value=reply):
+                code, body, headers = self.web_request(path, headers=auth)
+                self.assertEqual((code, body), (200, reply))
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                tag = headers["ETag"]
+                for condition in (tag, tag.removeprefix("W/"), '"other", ' + tag, "*"):
+                    code, body, checked = self.web_request(path, headers={**auth, "If-None-Match": condition}, raw=True)
+                    self.assertEqual((code, body), (304, b""))
+                    self.assertEqual(checked["Cache-Control"], "no-store")
+                for credentials in ({}, {"Authorization": "Bearer wrong"}):
+                    self.assertEqual(self.web_request(path, headers={**credentials, "If-None-Match": tag})[0], 403)
+            changed = {**status, "paused": "changed"} if path.endswith("status") else events + [{"event": "paused"}]
+            with unittest.mock.patch("hansa.web." + target, return_value=changed):
+                code, body, headers = self.web_request(path, headers={**auth, "If-None-Match": tag})
+                self.assertEqual((code, body), (200, changed))
+                self.assertNotEqual(headers["ETag"], tag)
+
+    def test_web_posts_are_no_store_and_never_conditional(self):
+        import gzip
+        from hansa import web
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1",
+                "If-None-Match": "*", "Accept-Encoding": "gzip"}
+        cases = [("/api/pause", {}, None), ("/api/resume", {}, None),
+                 ("/api/settings", {"settings": {}}, "_save_settings"),
+                 ("/api/key", {"provider": "mimo", "key": ""}, "desk.write_key"),
+                 ("/api/provider/top-up", {"provider": "mimo"}, "_top_up_provider"),
+                 ("/api/check", {"provider": "mimo"}, "check_provider"),
+                 ("/api/release/answer", {"id": 1, "yes": True}, "release.answer"),
+                 ("/api/release/stop", {"id": 1}, "release.stop_release"),
+                 ("/api/alert/test", {}, "alert.test"), ("/missing", {}, None)]
+        for path, data, target in cases:
+            patch = (unittest.mock.patch.object(self.desk, "write_key") if target == "desk.write_key" else
+                     unittest.mock.patch("hansa.web." + target, return_value={"ok": True}) if target else
+                     contextlib.nullcontext())
+            with self.subTest(path=path), patch:
+                code, body, headers = self.web_request(path, method="POST", headers=auth,
+                                                     data=json.dumps(data).encode(), raw=True)
+                self.assertEqual(code, 404 if path == "/missing" else 200)
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                self.assertNotIn("ETag", headers)
+                self.assertTrue(json.loads(gzip.decompress(body)))
+                self.assertEqual(len(body), int(headers["Content-Length"]))
+
+    def test_web_http11_reuses_connection_and_frames_responses_without_ports(self):
+        from hansa import web
+        import http.client
+        with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
+                unittest.mock.patch.object(web.threading, "Thread"):
+            start_web(self.desk, "127.0.0.1", 0)
+        handler = server.call_args.args[1]
+        token = self.desk.web_token()
+
+        class Buffer(io.BytesIO):
+            def close(self):
+                pass
+
+        class Wire:
+            def __init__(self, requests):
+                self.input, self.output = Buffer(requests), Buffer()
+
+            def makefile(self, *args):
+                return self.input
+
+            def sendall(self, data):
+                self.output.write(data)
+
+        def exchange(requests):
+            wire = Wire(requests)
+            handler(wire, ("127.0.0.1", 12345), server.return_value)
+            return Wire(wire.output.getvalue())
+
+        request = f"GET /api/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n".encode()
+        wire = exchange(request + request)
+        for _ in range(2):
+            response = http.client.HTTPResponse(wire)
+            response.begin()
+            self.assertEqual((response.version, response.status), (11, 200))
+            self.assertFalse(response.will_close)
+            body = response.read()
+            self.assertEqual(len(body), int(response.getheader("Content-Length")))
+            self.assertIsInstance(json.loads(body), list)
+        # A bodyless 304 must also leave the following response at the correct byte.
+        tag = response.getheader("ETag")
+        checked = request.replace(b"\r\n\r\n", ("\r\nIf-None-Match: " + tag + "\r\n\r\n").encode())
+        wire = exchange(checked + request)
+        for code in (304, 200):
+            response = http.client.HTTPResponse(wire)
+            response.begin()
+            self.assertEqual(response.status, code)
+            self.assertEqual(bool(response.read()), code == 200)
+        post = (f"POST /api/pause HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n"
+                "X-Hansa: 1\r\nContent-Length: 2\r\n\r\n{}").encode()
+        wire = exchange(post + request)
+        for _ in range(2):
+            response = http.client.HTTPResponse(wire)
+            response.begin()
+            self.assertEqual(response.status, 200)
+            response.read()
+        self.assertTrue(self.desk.paused())
+        # Refusing a POST before reading its body must close, rather than interpret that body as a request.
+        cases = [("", 403)] + [(f"Authorization: Bearer {token}\r\nX-Hansa: 1\r\n" + framing, 400)
+                              for framing in ("Content-Length: -1\r\n", "Content-Length: invalid\r\n",
+                                              "Transfer-Encoding: chunked\r\n")]
+        for extra, code in cases:
+            wire = exchange(("POST /api/pause HTTP/1.1\r\nHost: localhost\r\n" + extra + "\r\n{}").encode() + request)
+            response = http.client.HTTPResponse(wire)
+            response.begin()
+            self.assertEqual(response.status, code)
+            self.assertEqual(response.getheader("Connection"), "close")
+            response.read()
+            self.assertEqual(wire.input.read(), b"")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_tunnel_polls_back_off_revalidate_and_recover_in_both_languages(self):
+        from hansa import web
+        harness = self.tmp / "tunnel-polls.js"
+        harness.write_text(self.PAGE_HARNESS)
+        replies = {"/api/status": views.status(self.desk), "/api/events": [],
+                   "pagePreferences": {"session": {"hansa.token": "example-page-key"}}}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(web.UI), "tunnel-polls", language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                output = json.loads(result.stdout)
+                self.assertTrue(output["ok"])
+                self.assertTrue(output["lastGood"])
+                self.assertEqual(output["delays"], [5000, 10000, 20000, 40000, 60000, 60000])
 
     def known_gap_records(self):
         from hansa import gaps
@@ -32734,6 +33653,7 @@ const ids = {};
 const descendants = (root, tag) => !root ? [] : root.kids.flatMap(child => child instanceof El
   ? [...(child.tag === tag ? [child] : []), ...descendants(child, tag)] : []);
 const document = {createElement: t => new El(t), createElementNS: (namespace, t) => new El(t),
+  addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
   createTextNode: s => new Text(s), title: "", body: new El("body"), documentElement: new El("html"),
   hidden: false, activeElement: null, querySelectorAll: s => {
     const match = /^(#[\w-]+) (\w+)$/.exec(s); return match ? descendants(ids[match[1]], match[2]) : []; },
@@ -32751,9 +33671,11 @@ let calendarGetError = given.calendarFailure ? "example calendar failure" : null
 let statusGetError = ask === "status-picture-initial-error" ? "status connection lost" : null;
 let statusFailPath = "/api/status";
 let statusGetGate = null;
+let pollErrorStatus = 0;
+const pollResponses = [];
 let confirmReply = true, dispatchPostError = null, dispatchPostReply = null;
 const fetch = async (path, options) => {
-  apiRequests.push({path, headers:{...options?.headers}, credentials:options?.credentials, mode:options?.mode});
+  apiRequests.push({path, headers:{...options?.headers}, credentials:options?.credentials, mode:options?.mode, cache:options?.cache});
   if (options && options.method === "POST") apiPosts.push({path, body:JSON.parse(options.body)});
   else apiGets.push(path);
   if (options && options.method === "POST" && path === "/api/settings") {
@@ -32798,11 +33720,21 @@ const fetch = async (path, options) => {
   }
   if (path === "/api/settings") { settingsGetCount++; if (settingsGetError) throw new Error(settingsGetError); }
   if (path === statusFailPath && statusGetError) throw new Error(statusGetError);
+  if (path === statusFailPath && pollErrorStatus) return {status:pollErrorStatus, json:async () => ({error:"tunnel unavailable"})};
   const r = reply(path); if (r === null) return new Promise(() => {});
   if (r?.code === "settings_unavailable") return {status:503, json:async () => r};
   const snapshot = JSON.parse(JSON.stringify(r));
   if (path === "/api/status" && statusGetGate) await statusGetGate;
   if (path === "/api/settings" && settingsGetGate) await settingsGetGate;
+  if (ask === "tunnel-polls" && ["/api/status", "/api/events"].includes(path)) {
+    const etag = 'W/"' + require("crypto").createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") + '"';
+    const status = options.headers["If-None-Match"] === etag ? 304 : 200;
+    pollResponses.push({path, status});
+    return {status, headers:{get:name => name === "ETag" ? etag : null}, json:async () => {
+      if (status === 304) throw new Error("304 must not be parsed as JSON");
+      return snapshot;
+    }};
+  }
   return {status: 200, json: async () => JSON.parse(JSON.stringify(snapshot))};
 };
 // Existing scenarios deliberately omit storage. Preference scenarios reuse these stand-ins across page loads.
@@ -32884,7 +33816,78 @@ function openPage(search = "") {
 let ctx = openPage(preferences.search);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 const stateBeforeCost = document.querySelector("#state").textContent;
-if (ask === "header") (async () => {
+if (ask === "tunnel-polls") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const count = () => apiGets.filter(p => p === "/api/status").length;
+  const delay = () => [...timers.values()].find(t => t.delay >= 5000)?.at - timerNow;
+  await run("loadStatus()");
+  check(count() === 1, "initial calls overlapped");
+  check(delay() === 5000, "initial cadence");
+  const lastGood = run("statusLastGood");
+  await advance(5000);
+  check(pollResponses.slice(-2).every(r => r.status === 304), "unchanged polls did not revalidate");
+  given["/api/status"].paused = "updated data";
+  given["/api/events"] = [{ts:1700000000, event:"updated event"}];
+  await advance(5000);
+  check(pollResponses.slice(-2).every(r => r.status === 200), "changed polls were not refreshed");
+  check(ids["#tab-status"].textContent.includes("updated event"), "new data not rendered");
+  const before = count();
+  let finish;
+  statusGetGate = new Promise(resolve => { finish = resolve; });
+  await advance(5000);
+  const first = run("loadStatus()"), second = run("loadStatus()");
+  given["/api/status"].paused = "after forced action";
+  const forced = run("loadStatus(true)");
+  await advance(20000);
+  document.hidden = true; windowEvents.visibilitychange[0]();
+  document.hidden = false; windowEvents.visibilitychange[0](); await flush();
+  check(count() === before + 1, "polls overlapped while waiting for the network");
+  finish(); await Promise.all([first, second, forced]); statusGetGate = null;
+  check(count() === before + 2 && ids["#state-list"].textContent.includes("after forced action"), "forced refresh did not wait for fresh data");
+  check(delay() === 5000, "success did not restart the timer after completion");
+  pollErrorStatus = 503;
+  const delays = [];
+  const shownAt = run("statusLastGood");
+  for (const expected of [5000, 10000, 20000, 40000, 60000, 60000]) {
+    await advance(delay());
+    check(delay() === expected, "wrong retry delay: " + delay() + " expected " + expected);
+    delays.push(delay());
+    check(run("statusLastGood") === shownAt, "failed poll moved the data timestamp");
+    const notice = ids["#status-connection"];
+    check(!notice.hidden && notice.textContent.includes(run("ZH ? '重新连接' : 'Reconnecting'")), "missing reconnect notice");
+    check(notice.textContent.includes(run("when(statusLastGood)")), "missing data timestamp");
+    if (expected === 20000) {
+      const failures = count(); await advance(19999);
+      check(count() === failures, "third failure retried before 20 seconds");
+    }
+  }
+  pollErrorStatus = 0;
+  const hiddenCount = count();
+  document.hidden = true; windowEvents.visibilitychange[0](); await advance(120000);
+  check(count() === hiddenCount, "hidden document polled");
+  document.hidden = false; windowEvents.visibilitychange[0](); await flush();
+  check(count() === hiddenCount + 1 && delay() === 5000, "visibility did not fetch immediately and reset backoff");
+  check(ids["#status-connection"].hidden, "success left reconnect notice visible");
+  const afterRecovery = count(); await advance(4999);
+  check(count() === afterRecovery, "success retried too early");
+  await advance(1); check(count() === afterRecovery + 1, "success did not resume 5-second polling");
+  // An events-only failure also backs off, even when status succeeds and remains useful.
+  statusFailPath = "/api/events"; statusGetError = "events tunnel lost";
+  await advance(5000); await advance(5000);
+  check(delay() === 10000 && !ids["#status-connection"].hidden, "events-only failure did not back off");
+  statusGetError = null; await advance(10000);
+  check(delay() === 5000 && ids["#status-connection"].hidden, "events recovery did not reset backoff");
+  // A write must not inherit a GET's validator, even on the same path.
+  await run('api("/api/status", {})');
+  const post = apiRequests.at(-1);
+  check(!post.headers["If-None-Match"], "POST inherited conditional cache headers");
+  check(apiRequests.every(r => r.cache === "no-store"), "API responses may enter the browser cache");
+  check(apiRequests.filter(r => r.path === "/api/status").slice(1, -1).every(r => r.headers["If-None-Match"]), "poll lost its validator");
+  console.log(JSON.stringify({delays, lastGood:!!lastGood, ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "header") (async () => {
   const run = code => vm.runInContext(code, ctx);
   await run("loadStatus()");
   const text = ids["#state-text"], viewport = ids["#state-window"], caption = ids["#title"].kids[1].kids[1];
@@ -33431,7 +34434,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     // The next background refresh must also run after a mouse click leaves a button focused.
     button(label).focus();
     st.queued[0].title = "Updated after focused " + action;
-    windowEvents.interval[0](); await flush();
+    await advance(5000); await flush();
     check(root.textContent.includes(st.queued[0].title), action + " button focus blocked background lists");
     check(document.activeElement === button(label), action + " button focus was not restored");
   } else if (ask === "status-button-refresh") {
@@ -33444,23 +34447,23 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     st.lanes.push({...st.lanes[0], name:"new-background-lane"});
     given["/api/events"] = [{ts:1700000000, event:"new-background-event"}];
     const previous = document.activeElement;
-    windowEvents.interval[0](); await flush();
+    await advance(5000); await flush();
     check(root.textContent.includes("New queued task") && root.textContent.includes("new-background-lane") &&
       root.textContent.includes("new-background-event"), "focused button blocked lane, task or event updates");
     const approvals = descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"));
     check(document.activeElement === approvals[1] && document.activeElement !== previous, "focus moved to another release after reorder");
     for (const label of ["releaseYes", "releaseNo", "releaseStop", "check"]) {
       button(label).focus();
-      windowEvents.interval[0](); await flush();
+      await advance(5000); await flush();
       check(document.activeElement === button(label), "focus not restored for " + label);
     }
     const pipelineButton = () => find(el => el.attrs["data-pipeline-step"] === "queued");
-    pipelineButton().focus(); windowEvents.interval[0](); await flush();
+    pipelineButton().focus(); await advance(5000); await flush();
     check(document.activeElement === pipelineButton(), "pipeline control lost focus");
     // A vanished action must not move focus to the same action on a different record.
     descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"))[1].focus();
     st.releases = st.releases.filter(r => r.id !== 17);
-    windowEvents.interval[0](); await flush();
+    await advance(5000); await flush();
     check(document.activeElement === document.body, "removed release transferred focus to another record");
   } else if (ask === "status-focus") {
     const answer = input("releaseReason"); answer.value = draft("releaseReason");
@@ -33473,7 +34476,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
       control.focus();
       st.build = "focused-build";
       st.queued[0].title = "Update held while editing";
-      for (let cycle = 0; cycle < 2; cycle++) { windowEvents.interval[0](); await flush(); }
+      for (let cycle = 0; cycle < 2; cycle++) { await advance(5000); await flush(); }
       check(document.activeElement === control && root.contains(control), "polling replaced a focused field");
       check(ids["#state-list"].textContent.includes("focused-build"), "focused interaction blocked header updates");
       check(input("releaseReason") === answer && answer.value === draft("releaseReason"), "polling lost draft or input identity");
@@ -33482,7 +34485,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     }
     for (let cycle = 0; cycle < 2; cycle++) {
       const taskButton = find(el => el.tag === "button" && el.textContent === "t0042");
-      taskButton.focus(); windowEvents.interval[0](); await flush();
+      taskButton.focus(); await advance(5000); await flush();
       const refreshedTask = find(el => el.tag === "button" && el.textContent === "t0042");
       check(document.activeElement === refreshedTask, "polling lost task button focus");
       check(refreshedTask.attrs["aria-expanded"] === "true" &&
@@ -33492,13 +34495,13 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     document.activeElement = document.body;
     let finish;
     statusGetGate = new Promise(resolve => { finish = resolve; });
-    windowEvents.interval[0](); await flush();
+    await advance(5000); await flush();
     button("releaseYes").focus(); const focused = document.activeElement;
     finish(); await flush(); statusGetGate = null;
     check(document.activeElement === button("releaseYes") && document.activeElement !== focused,
       "in-flight refresh did not redraw and restore the newly focused button");
     document.activeElement = document.body;
-    windowEvents.interval[0](); await flush();
+    await advance(5000); await flush();
     check(input("releaseReason").value === draft("releaseReason"), "draft vanished after focus left Status");
   } else if (ask === "status-draft-cleanup") {
     for (const label of labels) input(label).value = draft(label);
@@ -37701,6 +38704,368 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[
             {"lane": "a", "target": x} for x in ticked])), {"ok": True, "problems": []})
 
+    def settle_watch(self, d, rid):
+        from hansa import release
+        def ended():
+            d.tick()
+            return (release.get(self.desk, rid).get("watch_run") or {}).get("state") in (
+                "passed", "failed", "timed_out")
+        self.soon(ended, timeout=30)
+        return release.get(self.desk, rid)["watch_run"]
+
+    def test_release_watch_passes_and_posts_its_own_result(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "push", "true", "--watch", "echo watching; exit 0")
+        self.tick_targets("push")
+        p, sock = self.session()
+        with self.in_session(p, sock):
+            self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        watch = self.settle_watch(d, 1)
+        self.assertEqual((watch["state"], watch["exit"]), ("passed", 0))
+        self.assertIn("watch passed", self.hansa("release"))
+        [row] = views.status(self.desk)["releases"]
+        self.assertEqual(row["watch"], "echo watching; exit 0")
+        self.assertIn("passed", row["watch_what"])
+        [heard] = notify.items_for(self.desk, self.events("release_watch_ended"), {"key": "k", "session": {
+            "pid": p.pid, "start": notify.proc_start(p.pid)}})
+        self.assertIn("release #1", heard["line"])
+        self.assertIn("watch passed", heard["line"])
+
+    def test_release_without_watch_keeps_its_command_result(self):
+        from hansa import release
+        self.with_targets(push="true")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["exit"]), ("done", 0))
+        self.assertNotIn("watch_run", r)
+        self.assertEqual(d.release_watch_procs, {})
+        self.assertEqual(self.events("release_watch_ended"), [])
+
+    def test_release_watch_failure_redacts_keys_and_limits_last_lines(self):
+        from hansa import release
+        key = "sk-demo-watch-123456"
+        self.desk.write_key("demo", key)
+        os.environ["WATCH_KEY"] = key
+        self.hansa("lane", "target", "a", "push", "true", "--watch",
+                   'i=0; while [ "$i" -lt 30 ]; do echo line-$i; i=$((i+1)); done; echo "$WATCH_KEY"; exit 7')
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        w = self.settle_watch(Dispatcher(self.desk), 1)
+        self.assertEqual((w["state"], w["exit"], len(w["tail"])), ("failed", 7, release.TAIL))
+        self.assertEqual(w["tail"][-1], "[key of demo]")
+        [heard] = notify.items_for(self.desk, self.events("release_watch_ended"), {"key": "k", "session": None})
+        [row] = views.status(self.desk)["releases"]
+        log = (release.log_dir(self.desk) / "1.watch.log").read_text()
+        shown = heard["line"] + self.hansa("release") + json.dumps(row) + log
+        self.assertNotIn(key, shown)
+        self.assertIn("watch failed (exit 7)", heard["line"])
+        self.assertIn("last lines: line-26", heard["line"])
+        self.assertNotIn("line-25", heard["line"])
+        self.assertIn("[key of demo]", shown)
+
+    def test_unsuccessful_void_and_stopped_releases_never_watch(self):
+        from hansa import release
+        out, go = self.tmp / "watched", self.tmp / "release-go"
+        d = Dispatcher(self.desk)
+        for rid, ending in enumerate(("failed", "void", "stopped"), 1):
+            with self.subTest(ending=ending):
+                command = "exit 9" if ending == "failed" else f"while [ ! -f {go} ]; do sleep 0.1; done"
+                self.hansa("lane", "target", "a", "push", command, "--watch", f"echo watched >> {out}")
+                self.tick_targets("push")
+                self.hansa("release", "a", "push")
+                if ending == "void":
+                    self.hansa("lane", "target", "a", "push", "false")
+                    self.tick_targets("push")
+                elif ending == "stopped":
+                    d.tick()
+                    release.stop_release(self.desk, rid, by="page")
+                r = self.settle_release(d, rid)
+                self.assertEqual(r["state"], ending)
+                self.assertNotIn("watch_run", r)
+                self.assertFalse(out.exists())
+        self.assertEqual(self.events("release_watch_ended"), [])
+
+    def test_release_watch_timeout_stops_its_process_group_at_its_own_limit(self):
+        from hansa import release, run
+        child = self.tmp / "watch-child"
+        self.hansa("lane", "target", "a", "push", "true", "--minutes", "1", "--watch",
+                   f"sleep 120 & echo $! > {child}; wait")
+        d = Dispatcher(self.desk)
+        for rid, limit in ((1, 90), (2, 1)):
+            with self.subTest(limit=limit):
+                if rid == 2:
+                    child.unlink()
+                    self.hansa("lane", "target", "a", "push", "--watch-minutes", "1")
+                self.tick_targets("push")
+                self.hansa("release", "a", "push")
+                self.settle_release(d, rid)
+                self.soon(lambda: child.exists() and child.read_text().strip())
+                pid = int(child.read_text())
+                group = release.get(self.desk, rid)["watch_run"]["pid"]
+                # The release's one-minute limit must not govern the watch's default 90 minutes.
+                release._watch_change(self.desk, rid, {"started": time.time() - 61})
+                if limit == 90:
+                    d.tick()
+                    self.assertEqual(release.get(self.desk, rid)["watch_run"]["state"], "running")
+                release._watch_change(self.desk, rid, {"started": time.time() - limit * 60 - 1})
+                w = self.settle_watch(d, rid)
+                self.assertEqual(w["state"], "timed_out")
+                self.assertFalse(run.group_running(group))
+                self.assertTrue(not run.alive(pid) or run._state(pid) == "Z")
+                self.assertIn("watch timed out", self.hansa("release"))
+                [row] = [r for r in views.status(self.desk)["releases"] if r["id"] == rid]
+                self.assertIn("timed out", row["watch_what"])
+        heard = notify.items_for(self.desk, self.events("release_watch_ended"), {"key": "k", "session": None})
+        self.assertEqual(len(heard), 2)
+        self.assertTrue(all("watch timed out" in x["line"] for x in heard))
+        self.assertEqual(self.checkouts(), [])
+
+    def test_release_watches_leave_merges_and_later_releases_free_and_keep_their_own_commits(self):
+        from hansa import release
+        go, seen = self.tmp / "watch-go", self.tmp / "watch-seen"
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.hansa("lane", "target", "a", "push", "true", "--watch",
+                   f'echo "$HANSA_RELEASE:$HANSA_RELEASE_COMMIT:$(git rev-parse HEAD)" >> {seen}; '
+                   f'while [ ! -f {go} ]; do sleep 0.1; done')
+        self.tick_targets("push")
+        try:
+            self.hansa("release", "a", "push")
+            self.settle_release(d, 1)
+            self.soon(lambda: seen.exists() and len(seen.read_text().splitlines()) == 1)
+            self.assertIsNone(release.running_on(self.desk, self.repo))
+            self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+            self.hansa("release", "a", "push")
+            self.assertEqual(self.settle_release(d, 2)["state"], "done")
+            self.soon(lambda: len(seen.read_text().splitlines()) == 2)
+            for rid in (1, 2):
+                r = release.get(self.desk, rid)
+                self.assertEqual(r["watch_run"]["state"], "running")
+                self.assertIn(f"{rid}:{r['commit']}:{r['commit']}", seen.read_text())
+            self.assertNotEqual(release.get(self.desk, 1)["commit"], release.get(self.desk, 2)["commit"])
+        finally:
+            go.touch()
+            for r in release.releases(self.desk):
+                if release.watch_open(r):
+                    self.settle_watch(d, r["id"])
+        heard = notify.items_for(self.desk, self.events("release_watch_ended"), {"key": "k", "session": None})
+        self.assertCountEqual([x["key"] for x in heard], [["release-watch", 1], ["release-watch", 2]])
+        self.assertTrue(all("watch passed" in x["line"] for x in heard))
+        self.assertEqual(self.checkouts(), [])
+
+    def test_release_watch_restarts_once_after_server_restart(self):
+        from hansa import release
+        go, attempts = self.tmp / "watch-go", self.tmp / "attempts"
+        self.hansa("lane", "target", "a", "push", "true", "--watch",
+                   f"echo start >> {attempts}; while [ ! -f {go} ]; do sleep 0.1; done; echo finished")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        old, restarted = Dispatcher(self.desk), Dispatcher(self.desk)
+        try:
+            self.settle_release(old, 1)
+            self.soon(lambda: attempts.exists() and len(attempts.read_text().splitlines()) == 1)
+            proc = old.release_watch_procs[1]
+            # Even an exit file left by the interrupted attempt is not its eventual result.
+            (release.log_dir(self.desk) / "1.watch.exit").write_text("0\n")
+            restarted.tick()
+            self.soon(lambda: len(attempts.read_text().splitlines()) == 2)
+            self.assertIsNotNone(proc.poll())
+            for _ in range(3):
+                restarted.tick()
+            self.assertEqual(len(attempts.read_text().splitlines()), 2)
+        finally:
+            go.touch()
+            self.settle_watch(restarted, 1)
+            for proc in old.release_watch_procs.values():
+                proc.wait(timeout=30)
+        self.assertEqual(len(self.events("release_watch_ended")), 1)
+        self.assertEqual(self.checkouts(), [])
+
+    def test_release_watch_recovers_an_unrecorded_launch_in_the_same_working_folder(self):
+        from hansa import release
+        go, attempts = self.tmp / "watch-go", self.tmp / "attempts"
+        self.fixed_target("push", "echo built > built.txt")
+        self.hansa("lane", "target", "a", "push", "--watch",
+                   f"test -f built.txt || exit 8; echo start >> {attempts}; while [ ! -f {go} ]; do sleep 0.1; done")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        old, restarted = Dispatcher(self.desk), Dispatcher(self.desk)
+        try:
+            self.settle_release(old, 1)
+            self.soon(lambda: attempts.exists() and len(attempts.read_text().splitlines()) == 1)
+            release._watch_change(self.desk, 1, {"state": "starting", "pid": None, "pid_start": ""})
+            restarted.tick()
+            self.soon(lambda: len(attempts.read_text().splitlines()) == 2)
+        finally:
+            go.touch()
+            w = self.settle_watch(restarted, 1)
+            for proc in old.release_watch_procs.values():
+                proc.wait(timeout=30)
+        self.assertEqual(w["state"], "passed")
+        self.assertEqual(len(self.events("release_watch_ended")), 1)
+
+    def test_release_watch_start_failure_does_not_hold_another_release(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "push", "true", "--watch", "true")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(release, "_start_watch", side_effect=OSError("cannot launch watch")):
+            self.assertEqual(self.settle_watch(d, 1)["state"], "failed")
+        self.hansa("release", "a", "push")
+        self.assertEqual(self.settle_watch(d, 2)["state"], "passed")
+        [heard] = notify.items_for(self.desk, self.events("release_watch_ended")[:1], {"key": "k", "session": None})
+        self.assertIn("watch could not start", heard["line"])
+        self.assertEqual(self.checkouts(), [])
+
+    def test_release_watch_logs_use_release_retention_limits(self):
+        from hansa import disk, release
+        at = time.time()
+        big = b"watch output\n" * 60000
+        folder = release.log_dir(self.desk)
+        folder.mkdir()
+        rs = [{"id": rid, "state": "done", "ended": at - 40 * 86400,
+               "watch_run": {"state": state, "ended": at - days * 86400}}
+              for rid, state, days in ((1, "passed", 31), (2, "failed", 31), (3, "timed_out", 31),
+                                       (4, "passed", 29), (5, "running", 31))]
+        release._write(self.desk, rs)
+        for r in rs:
+            (folder / f"{r['id']}.watch.log").write_bytes(big)
+        disk.trim(self.desk, at)
+        for r in rs:
+            data = (folder / f"{r['id']}.watch.log").read_bytes()
+            if r["id"] <= 3:
+                header, tail = data.split(b"\n", 1)
+                self.assertTrue(header.startswith(b"[hansa trimmed"))
+                self.assertLessEqual(len(tail), disk.TRIM_KEEP)
+                self.assertTrue(big.endswith(tail))
+            else:
+                self.assertEqual(data, big)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_release_watch_page_shows_the_approved_command_and_result_in_both_languages(self):
+        from hansa import release, web
+        command = "echo 'CI <&> result'; exit 7"
+        self.hansa("lane", "target", "a", "push", "true", "--watch", command)
+        self.hansa("release", "a", "push")
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for state in ("waiting", "failed"):
+            if state == "failed":
+                r = release.get(self.desk, 1)
+                self.assertTrue(release.answer(self.desk, 1, True, commit=r["commit"], command=r["command"])["ok"])
+                self.settle_watch(Dispatcher(self.desk), 1)
+            given = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk), "/api/events": []}
+            for language in ("en", "zh"):
+                with self.subTest(state=state, language=language):
+                    result = subprocess.run(["node", str(harness), str(web.UI), "release-tick-details", language],
+                                            input=json.dumps(given), capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    page = json.loads(result.stdout)
+                    self.assertIn(command, page["status"])
+                    self.assertIn("--watch: " + command, page["rows"][0]["text"])
+                    if state == "failed":
+                        self.assertIn("watch failed (exit 7)" if language == "en" else "发布监测失败 (exit 7)", page["status"])
+                        self.assertIn("CI <&> result", page["status"])
+
+    def test_documented_github_watch_retries_absent_runs_and_network_errors_for_the_pushed_commit(self):
+        guide = (Path(__file__).resolve().parent.parent / "docs" / "releases.md").read_text()
+        example = guide.split("### Watching CI after a push", 1)[1].split("```sh\n", 1)[1].split("```", 1)[0]
+        args = shlex.split(example)
+        self.assertEqual(args[:6], ["hansa", "lane", "target", "L", "NAME", "--watch"])
+        calls = self.tmp / "gh-calls.json"
+        fake = self.tmp / "bin" / "gh"
+        fake.write_text(f'''#!{sys.executable}
+import json, pathlib, sys
+p = pathlib.Path({str(calls)!r})
+calls = json.loads(p.read_text()) if p.exists() else []
+calls.append(sys.argv[1:])
+p.write_text(json.dumps(calls))
+if sys.argv[1:3] == ["run", "list"]:
+    if len(calls) == 1:
+        print("network unavailable", file=sys.stderr)
+        sys.exit(1)
+    if len(calls) == 2:
+        sys.exit(0)
+    print("42")
+else:
+    sys.exit(7)
+''')
+        fake.chmod(0o755)
+        # Retry immediately in the fixture; the example itself keeps its ten-second poll interval.
+        fake_sleep = self.tmp / "bin" / "sleep"
+        fake_sleep.write_text("#!/bin/sh\nexit 0\n")
+        fake_sleep.chmod(0o755)
+        self.with_targets(push="true")
+        self.hansa("lane", "target", "a", "push", *args[5:])
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        w = self.settle_watch(Dispatcher(self.desk), 1)
+        self.assertEqual((w["state"], w["exit"]), ("failed", 7))
+        from hansa import release
+        sha = release.get(self.desk, 1)["commit"]
+        recorded = json.loads(calls.read_text())
+        self.assertEqual(len(recorded), 4)
+        self.assertTrue(all(c[c.index("--commit") + 1] == sha for c in recorded[:3]))
+        self.assertEqual(recorded[-1], ["run", "watch", "42", "--exit-status"])
+
+    def test_release_watch_changes_void_waiting_releases_and_invalidate_ticks(self):
+        from hansa import release
+        self.with_targets(push="true")
+        for rid, watch in enumerate(("echo first", "echo second", "none"), 1):
+            with self.subTest(watch=watch):
+                self.hansa("release", "a", "push")
+                r = release.get(self.desk, rid)
+                self.assertEqual(r["state"], "waiting")
+                self.tick_targets("push")
+                self.hansa("lane", "target", "a", "push", "--watch", watch)
+                self.assertFalse(release.lane_listed(self.desk.settings(), "a", "push"))
+                [row] = views.status(self.desk)["releases"][:1]
+                self.assertIn("watch command changed", row["moved"])
+                self.assertFalse(release.answer(self.desk, rid, True, commit=r["commit"], command=r["command"])["ok"])
+                self.assertEqual(release.get(self.desk, rid)["state"], "void")
+                self.assertIn("watch command changed", release.get(self.desk, rid)["void"])
+                self.page_save(lambda s: s.update(releases_without_asking=[]))
+        self.assertNotIn("watch", self.desk.settings()["lanes"]["a"]["targets"]["push"])
+
+    def test_release_watch_settings_limits_keys_and_environment(self):
+        from hansa import release
+        env = self.tmp / "watch-env"
+        self.fixed_target("push", 'echo built > built.txt')
+        self.hansa("lane", "target", "a", "push", "--watch", f"test -f built.txt && env > {env}")
+        self.tick_targets("push")
+        self.hansa("lane", "target", "a", "push", "--watch-minutes", "17")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "push"))
+        self.assertIn("watch:", self.hansa("lane", "target", "a"))
+        self.assertIn("17 min", self.hansa("explain", "lane", "a"))
+        key = "sk-watch-settings-123456"
+        self.desk.write_key("demo", key)
+        before = self.desk.settings_path.read_bytes()
+        for args in (("--watch", "echo " + key), ("--watch", " "), ("--watch", "x" * 1001),
+                     ("--watch-minutes", "0"), ("--watch-minutes", "1441"), ("--watch-minutes", "nope")):
+            with self.subTest(args=args):
+                self.assertIn("hansa:", self.refused("lane", "target", "a", "push", *args))
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"LANE_ONLY_VAR": "from-lane"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("release", "a", "push")
+        with unittest.mock.patch.dict(os.environ, {"HANSA_OWN_VAR": "from-hansa", "HANSA_TASK": "t99"}):
+            w = self.settle_watch(Dispatcher(self.desk), 1)
+        self.assertEqual(w["state"], "passed")
+        seen = dict(x.split("=", 1) for x in env.read_text().splitlines() if "=" in x)
+        self.assertEqual(seen["HANSA_OWN_VAR"], "from-hansa")
+        self.assertEqual(seen["HANSA_RELEASE_COMMIT"], release.get(self.desk, 1)["commit"])
+        self.assertNotIn("LANE_ONLY_VAR", seen)
+        self.assertNotIn("HANSA_TASK", seen)
+        self.assertEqual(Path(seen["PWD"]).resolve(), release.checkout_dir(self.desk, 1).resolve())
+        self.assertEqual(self.checkouts(), [])
+
     def test_target_about_changes_only_the_description_and_keeps_the_tick(self):
         from hansa import release
         about = "install on the test server; nothing goes outside"
@@ -37799,12 +39164,12 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 for words in (("Asking you before a release", "Targets that go out without asking you",
                                "Ticked: a release can run without asking you", "Unticked: each one waits for your yes",
                                "Each target is ticked on its own. A tick stops counting once the lane's repository "
-                               "or base branch, the target's command or an outside file it names, the target it must "
+                               "or base branch, the target's command or an outside file it names, its watch command (--watch), the target it must "
                                "follow or the way it runs (fixed) changes: a release asked for by hand then waits "
                                "for your yes, and one that runs by itself after merges waits until you tick it again.",
                                "Rules the lane's workers and verifiers may use directly") if language == "en" else
                               ("发布前要不要问你", "不用问你就执行的发布目标", "勾上：提出发布后可以不用问你就执行", "不勾：每次等你点头",
-                               "每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、"
+                               "每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、监测命令（--watch）、"
                                "它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效："
                                "手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
                                "这条工作线的工作智能体和核验者可以直接用的规则")):
@@ -39672,6 +41037,263 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         with unittest.mock.patch.object(alert, "time", unittest.mock.Mock(wraps=time, time=lambda: t)):
             return self.hansa_out("status")
 
+    def follow_with_refusing_inbox(self, seconds, accepts, at=None, sess=None, resume=None, restart_at=None,
+                                   start=None) -> dict:
+        """A real follower and desk feed, with only its inbox and clock replaced. Sleeps advance the clock and
+        run due desk changes; every post attempt is recorded, including those the inbox refuses."""
+        from hansa import alert
+        sess = sess or dict(self.WATCHED)
+        t0 = float(int(time.time())) if start is None else start
+        clock, todo = [t0], sorted((at or {}).items())
+        got = {"posts": [], "attempts": [], "requests": [], "start": t0, "resume": None}
+
+        def sleep(seconds):
+            clock[0] += seconds
+            while todo and todo[0][0] <= clock[0] - t0:
+                todo.pop(0)[1]()
+
+        def post(sock, text):
+            elapsed = clock[0] - t0
+            got["attempts"].append((elapsed, text))
+            if not accepts(elapsed):
+                raise ConnectionRefusedError("test inbox refuses posts")
+            got["posts"].append((elapsed, text))
+
+        def ask(req):
+            got["requests"].append(json.loads(json.dumps(req)))
+            return notify.handle(self.desk, req)
+
+        def restart(state):
+            raise self.Restarted(state)
+
+        fake = unittest.mock.Mock(wraps=time, time=lambda: clock[0], sleep=sleep)
+        with unittest.mock.patch.object(notify, "time", fake), unittest.mock.patch.object(alert, "time", fake), \
+                unittest.mock.patch.object(notify, "now", lambda: clock[0]), \
+                unittest.mock.patch.object(notify, "gone", lambda _: clock[0] - t0 >= seconds), \
+                unittest.mock.patch.object(notify, "post", post), \
+                unittest.mock.patch.object(notify, "source", lambda _: ask), \
+                unittest.mock.patch.object(notify, "Namer", self.Named), \
+                unittest.mock.patch.object(notify, "code_mark", lambda: "new" if restart_at is not None
+                                           and clock[0] - t0 >= restart_at else "old"), \
+                unittest.mock.patch.object(notify, "CODE_SETTLE", 0), \
+                unittest.mock.patch.object(notify, "_restart", restart), \
+                unittest.mock.patch.object(notify.signal, "signal", lambda *_: None), \
+                unittest.mock.patch.dict(os.environ, {"HANSA_NOTIFY_POLL": "1", "HANSA_NOTIFY_GATHER": "0", **(
+                    {"HANSA_NOTIFY_RESUME": json.dumps(resume)} if resume else {})}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            try:
+                self.assertEqual(notify.follow(self.desk, notify.key_of(sess), sess, "fake-inbox", "nonce",
+                                               name="desk-test"), 0)
+            except self.Restarted as e:
+                got["resume"] = e.args[0]
+        got["end"] = clock[0]
+        return got
+
+    def test_refused_lines_are_retried_with_new_lines_and_the_latest_per_subject(self):
+        self.coordinator_desk("refused", no_session_min=0, window_min=0, review_min=0)
+        tids = []
+
+        def first():
+            tids.append(self.coordinator_task_ended("Refused task"))
+
+        def meanwhile():
+            tids.append(self.coordinator_task_ended("Old title"))
+            self.desk.event("memory_low", floor=4, available=0)
+            aid = self.desk.add_ask("Old provider request")
+            self.desk.event("ask_ready", provider="test-provider", ids=[aid])
+
+        def latest():
+            self.desk.update(tids[1], title="Latest title")
+            self.desk.event("task_finished", task=tids[1], state="done")
+            self.desk.event("memory_ok", floor=4)
+            aid = self.desk.add_ask("Latest provider request")
+            self.desk.event("ask_ready", provider="test-provider", ids=[aid])
+
+        got = self.follow_with_refusing_inbox(90, lambda t: t >= 65, at={1: first, 10: meanwhile, 30: latest})
+        self.assertEqual(len(got["posts"]), 1)
+        text = got["posts"][0][1]
+        self.assertIn(f"{tids[0]} done: Refused task", text)
+        self.assertIn(f"{tids[1]} done: Latest title", text)
+        self.assertEqual(text.count(f"- {tids[1]} "), 1)
+        self.assertNotIn("Old title", text)
+        self.assertIn("available memory is back over the floor", text)
+        self.assertNotIn("available memory is under the floor", text)
+        self.assertEqual(text.count("test-provider is ready now"), 1)
+        self.assertIn("Latest provider request", text)
+        self.assertNotIn("Old provider request", text)
+        tries = [t for t, _ in got["attempts"]]
+        self.assertGreater(tries[-1] - tries[0], notify.POST_WAIT)
+        self.assertTrue(all(b - a >= 2 for a, b in zip(tries, tries[1:])), tries)
+        self.assertEqual(notify.records(self.desk)[0]["pos"], notify.log_end(self.desk))
+
+    def missed_task_for_inbox(self) -> tuple:
+        """An ended follower, followed by a task end its next follower must summarize."""
+        sess = {"pid": 3131, "start": "previous"}
+        key = notify.key_of(sess)
+        notify._write_record(self.desk, key, {"key": key, "session": sess, "uid": os.getuid(),
+                                             "pos": notify.log_end(self.desk), "seen": time.time() - 10,
+                                             "ended": time.time() - 10})
+        return key, self.coordinator_task_ended("Missed task")
+
+    def test_a_refused_startup_summary_is_caught_up_only_after_posting(self):
+        self.coordinator_desk("summary", no_session_min=1, window_min=0, review_min=0)
+        key, tid = self.missed_task_for_inbox()
+        before = []
+
+        def meanwhile():
+            self.desk.update(tid, title="Missed task, updated")
+            self.desk.event("task_finished", task=tid, state="done")
+            self.coordinator_task_ended("New task during summary refusal")
+
+        got = self.follow_with_refusing_inbox(90, lambda t: t >= 65, at={
+            10: meanwhile,
+            64: lambda: before.append(notify.read_json(notify.register_dir(self.desk) / f"{key}.json"))})
+        self.assertEqual(len(got["posts"]), 1)
+        self.assertIn(f"{tid} done: Missed task, updated", got["posts"][0][1])
+        self.assertEqual(got["posts"][0][1].count(f"- {tid} "), 1)
+        self.assertIn("New task during summary refusal", got["posts"][0][1])
+        self.assertNotIn("caught_up", before[0])
+        self.assertTrue(notify.read_json(notify.register_dir(self.desk) / f"{key}.json")["caught_up"])
+        [caught] = [r for r in got["requests"] if r["op"] == "caught_up"]
+        self.assertFalse(caught["me"]["last_post"].get("failed"))
+        [text] = self.coordinator_alerts()
+        self.assertIn("inbox refuses posts", text)
+
+    def test_refused_lines_survive_the_sessions_exit_including_a_startup_summary(self):
+        for summary in (False, True):
+            with self.subTest(summary=summary):
+                self.coordinator_desk(f"exit-{summary}", no_session_min=0, window_min=0, review_min=0)
+                if summary:
+                    key, tid = self.missed_task_for_inbox()
+                    got = self.follow_with_refusing_inbox(70, lambda _: False)
+                    self.assertNotIn("caught_up", notify.read_json(notify.register_dir(self.desk) / f"{key}.json"))
+                else:
+                    tids = []
+                    got = self.follow_with_refusing_inbox(70, lambda _: False, at={
+                        1: lambda: tids.append(self.coordinator_task_ended("Missed task"))})
+                    [tid] = tids
+                self.assertEqual(got["posts"], [])
+                rec = next(r for r in notify.records(self.desk) if r["session"] == self.WATCHED)
+                self.assertTrue(rec["ended"])
+                self.assertLess(rec["pos"], notify.log_end(self.desk))
+                next_ = self.follow_with_refusing_inbox(5, lambda _: True, sess={"pid": 5252, "start": "next"})
+                self.assertEqual(len(next_["posts"]), 1)
+                self.assertIn(f"{tid} done: Missed task", next_["posts"][0][1])
+
+    def test_an_inbox_refusal_alerts_once_and_starts_anew_after_a_success(self):
+        self.coordinator_desk("inbox-alert", no_session_min=2, window_min=0, review_min=0)
+        snapshots = []
+
+        def snapshot():
+            snapshots.append((len(self.coordinator_alerts()), self.hansa_out("status")))
+
+        got = self.follow_with_refusing_inbox(720, lambda t: 330 <= t < 360 or t >= 660, at={
+            1: lambda: self.coordinator_task_ended("First refusal"), 120: snapshot, 210: snapshot,
+            350: snapshot, 360: lambda: self.coordinator_task_ended("Second refusal"),
+            479: snapshot, 610: snapshot, 680: snapshot})
+        self.assertEqual([n for n, _ in snapshots], [0, 1, 1, 1, 2, 2])
+        alerts = self.coordinator_alerts()
+        self.assertEqual(len(alerts), 2)
+        for text in alerts:
+            self.assertIn("pid 4242 (desk-test)", text)
+            self.assertIn("inbox refuses posts", text)
+        self.assertIn("inbox refuses posts", snapshots[1][1])
+        self.assertNotIn("inbox refuses posts", snapshots[2][1])
+        self.assertNotIn("inbox refuses posts", snapshots[-1][1])
+        self.assertEqual(len(got["posts"]), 2)
+
+    def test_inbox_refusal_alerts_are_off_with_zero_minutes_or_no_alert_command(self):
+        for command, minutes in ((True, 0), (False, 1)):
+            with self.subTest(command=command, minutes=minutes):
+                self.coordinator_desk(f"inbox-off-{command}", command=command, no_session_min=minutes,
+                                      window_min=0, review_min=0)
+                self.follow_with_refusing_inbox(240, lambda _: False, at={
+                    1: lambda: self.coordinator_task_ended("Refused task")})
+                self.assertEqual(self.coordinator_alerts(), [])
+                self.assertEqual(self.looked_up(), 0)
+
+    def test_refused_lines_and_their_alert_survive_a_code_restart(self):
+        self.coordinator_desk("inbox-restart", no_session_min=1, window_min=0, review_min=0)
+        got = self.follow_with_refusing_inbox(300, lambda _: False, restart_at=90, at={
+            1: lambda: self.coordinator_task_ended("Refused before restart")})
+        carried = got["resume"]
+        self.assertIsNotNone(carried)
+        self.assertTrue(carried["last_post"]["failed"])
+        self.assertTrue(carried["last_post"]["told"])
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        later = self.follow_with_refusing_inbox(180, lambda t: t >= 65, start=got["end"], resume=carried, at={
+            10: lambda: self.coordinator_task_ended("New after restart")})
+        self.assertEqual(len(later["posts"]), 1)
+        self.assertIn("Refused before restart", later["posts"][0][1])
+        self.assertIn("New after restart", later["posts"][0][1])
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+
+    def test_an_inbox_refusal_does_not_hide_a_window_alert_ready_in_the_same_turn(self):
+        watch = notify.Watch(4242)
+        watch.posted(1, ["Already posted"])
+        watch.thread = unittest.mock.Mock(is_alive=lambda: False)
+        watch.got = (120, {"status": "waiting"}, "")
+        watch.clock.at = 120
+        failed = {"failed": True, "since": 1, "at": 61}
+        cases = watch.tick(120, True, {"no_session": 1, "window": 1, "review": 0}, last_post=failed)
+        self.assertEqual([case for case, _ in cases], ["inbox", "window"])
+        self.assertTrue(failed["told"])
+
+    def test_successful_posts_advance_once_without_an_inbox_alert(self):
+        self.coordinator_desk("inbox-success", no_session_min=1, window_min=0, review_min=0)
+        got = self.follow_with_refusing_inbox(180, lambda _: True, at={
+            1: lambda: self.coordinator_task_ended("First success"),
+            5: lambda: self.coordinator_task_ended("Second success")})
+        self.assertEqual(len(got["attempts"]), 2)
+        self.assertEqual(len(got["posts"]), 2)
+        self.assertIn("First success", got["posts"][0][1])
+        self.assertIn("Second success", got["posts"][1][1])
+        self.assertEqual(self.coordinator_alerts(), [])
+        self.assertEqual(notify.records(self.desk)[0]["pos"], notify.log_end(self.desk))
+
+    def test_an_inbox_refusal_counts_only_from_this_codes_failure_while_lines_wait(self):
+        # restarted onto this code with a failed last post: an older code's has no since (it dropped its lines)
+        for name, ours, refusing in (("older, nothing waits", False, False), ("older, then refused", False, True),
+                                     ("this code's, nothing waits", True, False)):
+            with self.subTest(name):
+                self.coordinator_desk(name.replace(" ", "-").replace(",", ""), no_session_min=3, window_min=0,
+                                      review_min=0)
+                t0, statuses = float(int(time.time())), []
+                failed = {"at": t0 - 200, "text": "could not post: refused", "failed": True,
+                          **({"since": t0 - 260} if ours else {})}
+                carried = {"pos": notify.log_end(self.desk), "since": t0 - 300, "name": "desk-test",
+                           "last_post": failed}
+                at = {120: lambda: statuses.append(self.hansa_out("status"))}
+                if refusing:  # refused from 1 s to 150 s: under the 3 min, counted from this code's own first try
+                    at[1] = lambda: self.coordinator_task_ended("Refused after the restart")
+                got = self.follow_with_refusing_inbox(240, (lambda t: t >= 150) if refusing else (lambda _: True),
+                                                      start=t0, resume=carried, at=at)
+                self.assertEqual(self.coordinator_alerts(), [])
+                self.assertNotIn("inbox refuses posts", statuses[0])
+                self.assertEqual([("Refused after the restart" in text) for _, text in got["posts"]],
+                                 [True] if refusing else [])
+
+    def test_a_follower_stays_live_while_it_tries_a_refused_post(self):
+        self.coordinator_desk("inbox-live", no_session_min=2, window_min=0, review_min=0)
+        lives, statuses = [], []
+
+        def look():
+            rec = next(r for r in notify.records(self.desk) if notify.same(r.get("session"), self.WATCHED))
+            lives.append((notify.is_live(rec), notify.hears(self.desk, self.WATCHED)))
+
+        at = {s: look for s in range(3, 300, 3)}
+        at.update({s: lambda: statuses.append(self.hansa_out("status")) for s in range(140, 300, 20)})
+        at[1] = lambda: self.coordinator_task_ended("Refused while live")
+        got = self.follow_with_refusing_inbox(330, lambda t: t >= 300, at=at)
+        self.assertEqual(lives, [(True, True)] * len(lives))
+        self.assertEqual(len(statuses), 8)
+        for text in statuses:  # alerted after 2 min of refusals; status keeps the line through each minute of tries
+            self.assertIn("inbox refuses posts", text)
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        tries = [t for t, _ in got["attempts"]]
+        self.assertTrue(all(b - a >= 2 for a, b in zip(tries, tries[1:])), tries)
+        self.assertEqual([("Refused while live" in text) for _, text in got["posts"]], [True])
+
     def follow_on_a_clock(self, minutes, at=None, start=None, restart_at=None, resume=None, step=10.0, namer=False,
                           also=()) -> tuple:
         """Run a follower of the stand-in session WATCHED (named desk-4242) in this process, on a clock the test moves
@@ -40270,7 +41892,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 restarts.append(state)
                 raise Restarted
 
-            def deliver(sock, text, sess, me):
+            def deliver(sock, text, sess, me, beat=None):
                 delivered.append(text)
                 return True
             with unittest.mock.patch.object(notify, "source", lambda desk: ask), \

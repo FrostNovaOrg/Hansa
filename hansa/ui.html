@@ -394,6 +394,7 @@ td .task-detail { min-width:200px; }
   <div id="language-menu" class="header-menu" hidden></div>
 </header>
 <main>
+  <p id="status-connection" class="warn" role="status" hidden></p>
   <div id="tab-status"></div>
   <div id="tab-settings" hidden></div>
   <div id="tab-cost" hidden></div>
@@ -579,7 +580,7 @@ const T = ZH ? {
   releaseGone:"现在没有哪条工作线有这个发布目标：取消勾选再保存，就从清单上去掉", releaseGoneWas:"当时的命令：", releaseGoneUnknown:"（保存时没记下它当时的命令）",
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
   releaseStopNote:"叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。发布中途停止可能使服务处于部分更新状态：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
-  releasesWithoutAsking:"每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效：手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
+  releasesWithoutAsking:"每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、监测命令（--watch）、它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效：手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
   releaseForbidden:"不许发出去的字眼（每行一个词、短语或 re:Python 正则表达式，不分大小写；每项最多 200 字符，正则必须能编译且不能匹配空字符串；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
   releaseForbiddenExcept:"按 lane 豁免字眼（从上面的列表选择字眼；lane 用空格或逗号分隔；不影响邮箱规则）",
   forbiddenEntry:"字眼", forbiddenLanes:"豁免的 lane", addForbiddenException:"添加豁免",
@@ -731,7 +732,7 @@ const T = ZH ? {
   releaseGone:"no lane has this release target now: untick it and Save to take it off the list", releaseGoneWas:"its command then: ", releaseGoneUnknown:"(its command then was not recorded)",
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
   releaseStopNote:"Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
-  releasesWithoutAsking:"Each target is ticked on its own. A tick stops counting once the lane's repository or base branch, the target's command or an outside file it names, the target it must follow or the way it runs (fixed) changes: a release asked for by hand then waits for your yes, and one that runs by itself after merges waits until you tick it again.",
+  releasesWithoutAsking:"Each target is ticked on its own. A tick stops counting once the lane's repository or base branch, the target's command or an outside file it names, its watch command (--watch), the target it must follow or the way it runs (fixed) changes: a release asked for by hand then waits for your yes, and one that runs by itself after merges waits until you tick it again.",
   releaseForbidden:"Words, phrases or re:Python patterns no release may send out (one per line, any case; at most 200 characters per entry; patterns must compile and must not match the empty string; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
   releaseForbiddenExcept:"Exceptions by lane (choose an entry from the list above; lanes separated by spaces or commas; the mailbox rule still applies)",
   forbiddenEntry:"Entry", forbiddenLanes:"Excepted lanes", addForbiddenException:"Add exception",
@@ -967,8 +968,13 @@ const emptyState = (title, note, symbol) => h("div", {class:"empty-state"}, icon
 const fmt = n => (n || 0).toLocaleString();
 const money = n => "US$" + n.toFixed(2);
 const when = ts => ts ? new Date(ts * 1000).toLocaleString(language) : "";
+// Poll data stays in this page's memory; no authenticated response enters the HTTP cache.
+const pollReplies = new Map();
 async function api(path, body) {
-  const opt = {credentials:"omit", mode:"same-origin", headers:{Authorization:"Bearer " + pageToken}};
+  const opt = {credentials:"omit", mode:"same-origin", cache:"no-store", headers:{Authorization:"Bearer " + pageToken}};
+  const conditional = body === undefined && (path === "/api/status" || path === "/api/events" || path.startsWith("/api/events?"));
+  const previous = conditional ? pollReplies.get(path) : null;
+  if (previous) opt.headers["If-None-Match"] = previous.etag;
   if (body !== undefined) {
     opt.method = "POST";
     Object.assign(opt.headers, {"Content-Type":"application/json", "X-Hansa":"1"});
@@ -976,8 +982,12 @@ async function api(path, body) {
   }
   const r = await fetch(path, opt);
   if (r.status === 403) throw new Error(T.forbidden);
+  if (r.status === 304 && previous) return previous.reply;
   const reply = await r.json();
   if (reply?.code === "settings_unavailable") throw new Error((reply.problems || []).join("; "));
+  if (r.status >= 400) throw new Error(reply.error || (reply.problems || []).join("; ") || `HTTP ${r.status}`);
+  const etag = conditional && r.headers?.get("ETag");
+  if (etag) pollReplies.set(path, {etag, reply});
   return reply;
 }
 
@@ -985,6 +995,7 @@ async function api(path, body) {
 let current = "status";
 function show(tab) {
   current = tab;
+  clearTimeout(statusPollTimer);
   keepChoice("sessionStorage", "hansa.tab", tab);
   for (const b of document.querySelectorAll("#tabs button")) {
     b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
@@ -1415,7 +1426,34 @@ function keepStatusFocus(root) {
     (root.contains(active) ? active : controls[index] || controls[0])?.focus({preventScroll:true});
   };
 }
-async function loadStatus(force = false) {
+let statusFlight = null, statusPollTimer, statusFailures = 0, statusLastGood = 0;
+function pollNotice(reconnecting) {
+  const notice = $("#status-connection");
+  notice.hidden = !reconnecting;
+  notice.textContent = !reconnecting ? "" : ZH
+    ? `正在重新连接… ${statusLastGood ? "所示数据时间：" + when(statusLastGood) : "尚未收到数据"}`
+    : `Reconnecting… ${statusLastGood ? "Data as of " + when(statusLastGood) : "No data received yet"}`;
+}
+function scheduleStatusPoll() {
+  clearTimeout(statusPollTimer);
+  if (current === "status" && !document.hidden) {
+    const delay = Math.min(60000, 5000 * 2 ** Math.min(4, Math.max(0, statusFailures - 1)));
+    statusPollTimer = setTimeout(() => loadStatus().catch(err), delay);
+  }
+}
+function loadStatus(force = false) {
+  if (statusFlight) return force === true ? statusFlight.catch(() => {}).then(() => loadStatus(true)) : statusFlight;
+  clearTimeout(statusPollTimer);
+  statusFlight = renderStatus(force).then(ok => {
+    statusFailures = ok ? 0 : statusFailures + 1;
+    if (ok) statusLastGood = Date.now() / 1000;
+    pollNotice(!ok);
+  }, e => {
+    statusFailures++; pollNotice(true); throw e;
+  }).finally(() => { statusFlight = null; scheduleStatusPoll(); });
+  return statusFlight;
+}
+async function renderStatus(force) {
   const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
   if (status.status === "rejected") {
     const e = status.reason;
@@ -1454,7 +1492,7 @@ async function loadStatus(force = false) {
   // Leave fields and their selection in place while editing; redraw lists for other controls.
   const root = $("#tab-status"), active = document.activeElement;
   const inStatus = root.contains(active);
-  if (force !== true && inStatus && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return;
+  if (force !== true && inStatus && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return events.status === "fulfilled";
   keepPrincipalDetails(st);
   const restoreFocus = keepStatusFocus(root);
   const t = st.last_24h;
@@ -1509,6 +1547,7 @@ async function loadStatus(force = false) {
       : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(eventRow)) : emptyState(T.noEvents, T.noEventsNote, "status"))
   ]));
   restoreFocus();
+  return events.status === "fulfilled";
 }
 function asksSection(st) {
   if (!st.asks.length) return null;
@@ -1530,7 +1569,7 @@ function releaseBlock(r) {
     h("div", {class:"request-body"}, h("strong", {}, "#" + r.id), h("span", {}, `${T.lane} ${r.lane}${r.target ? ` · ${T.releaseTarget} ${r.target}` : ""}`)),
     h("div", {class:"principal-actions"}, h("button", {class:"primary", "data-status-focus":`release:${r.id}:yes`, onclick: () => answer(true)}, T.releaseYes),
       reason, h("button", {"data-status-focus":`release:${r.id}:no`, onclick: () => answer(false)}, T.releaseNo)),
-    h("div", {class:"muted"}, T.releaseCommand), h("pre", {class:"mono"}, r.command),
+    h("div", {class:"muted"}, T.releaseCommand), h("pre", {class:"mono"}, r.command), releaseWatch(r),
     h("div", {class:"row"}, `${r.base} @ `, h("code", {}, (r.commit || "").slice(0, 10)), h("span", {class:"muted"}, when(r.asked))),
     r.note ? h("div", {}, `${T.releaseNote}: ${r.note}`) : null,
     h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs),
@@ -1546,6 +1585,14 @@ function releaseBlock(r) {
 function principalList(key, label, lines, list = h("div", {class:"mono", style:"max-height:14em;overflow:auto"}, lines)) {
   return lines.length > 5 ? h("details", {class:"principal-details", "data-principal-fold":key, open:principalOpen.has(key)},
     h("summary", {}, label), list) : list;
+}
+function releaseWatch(r) {
+  if (!r.watch) return null;
+  const state = r.watch_run?.state;
+  return h("div", {}, h("div", {class:"mono"}, `--watch: ${r.watch} (${r.watch_timeout_min ?? 90} min)`),
+    h("div", {class: state === "passed" ? "ok" : ["failed", "timed_out"].includes(state) ? "bad" : "muted"},
+      (ZH && r.watch_what_zh) || r.watch_what),
+    state === "failed" && r.watch_run.tail?.length ? h("pre", {class:"mono muted"}, r.watch_run.tail.slice(-5).join("\n")) : null);
 }
 function releaseOutside(r) {
   return h("div", {class:"mono"}, (r.outside || []).map(f => h("div", {class:"warn"}, `${T.releaseOutside}: ${f.path}`,
@@ -1586,7 +1633,7 @@ function releasesSection(rel, scheduled = []) {
     scheduled.map(r => h("div", {class:"muted"}, (ZH && r.what_zh) || r.what)),
     waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
     others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
-      "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs), releaseOutside(r)),
+      "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), releaseWatch(r), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs), releaseOutside(r)),
       h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
         r.state === "forbidden" ? ((ZH && r.what_zh) || r.what || "").split("\n")[0] : (ZH && r.what_zh) || r.what,
         r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
@@ -2048,6 +2095,7 @@ function releaseTicks() {
       h("span", {class:"release-tick-info"}, t ? `${t} · ${lane}` : lane,
         was == null && target.about ? h("div", {}, target.about) : null,
         was == null ? h("div", {class:"mono muted release-tick-command", title:target.command}, target.command) : null,
+        was == null && target.watch ? h("div", {class:"mono muted release-tick-command", title:target.watch}, `--watch: ${target.watch}`) : null,
         was == null ? null : h("span", {class:"warn"}, " — " + T.releaseGone,
           h("div", {class:"muted"}, was ? [T.releaseGoneWas,
             h("div", {class:"mono release-tick-command", title:was}, was)] : T.releaseGoneUnknown))));
@@ -2589,9 +2637,10 @@ const initialTab = tokenAddress ? "status" : keptChoice("sessionStorage", "hansa
 show(initialTab);
 // The shared header and browser title need status even when another tab is restored.
 if (initialTab !== "status") loadStatus().catch(err);
-setInterval(() => {
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(statusPollTimer);
   if (current === "status" && !document.hidden) loadStatus().catch(err);
-}, 5000);
+});
 </script>
 </body>
 </html>

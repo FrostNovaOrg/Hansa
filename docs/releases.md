@@ -6,8 +6,7 @@ from the page. The coordinator's side of it is in [hansa/card.md](../hansa/card.
 ## How a release goes out
 
 Releases are the last step. hansa merges into a lane's base branch and stops
-there; a lane's release command (a push, a wait for CI such as `gh run watch
---exit-status`, a deploy script) is how the base branch goes out. A lane
+there; a lane's release command (a push, a deploy script) is how the base branch goes out. A lane
 that sends it out in more than one way (a push to the public repository, an
 install on a test server, an install on the production server) names its
 release targets, with `hansa lane target L NAME "<command>"
@@ -50,7 +49,7 @@ a commit the other one already sent out, and looked at again before it
 starts. Otherwise the page shows it, with its target, with Release and
 Refuse; a target the principal ticks as released without asking (each one
 on its own) needs no answer while the lane's repository and base branch, the
-target's command, the target it must follow (its `--after`, or none) and
+target's command and watch command, the target it must follow (its `--after`, or none) and
 whether it is `--fixed` are what they were when the list was saved, and while the desk is not paused: a
 change to any of them, `--after` dropped or changed included, unticks it
 until the principal takes it back in (the page's button that takes changed
@@ -117,6 +116,48 @@ shows each target's command and its last release.
 Put a step that cannot be taken back (pushing a tag, publishing a package) last in a target's
 command, after the build it depends on has passed, so that a target that fails halfway has published
 nothing.
+
+### Watching CI after a push
+
+Set `hansa lane target L NAME --watch "<command>"` to check the pushed commit
+after the release command exits 0; `--watch none` removes it. The watch runs
+outside the repository's queue: merges and later releases go ahead, and each
+release keeps its own watch. hansa runs it outside the sandbox, with its own
+environment and `HANSA_RELEASE_COMMIT`, `HANSA_RELEASE_TARGET` and
+`HANSA_RELEASE_REPO`, from that release's checkout of the commit (a fixed target
+keeps its working folder until the watch ends; other targets get a checkout for
+the watch). `--watch-minutes N` sets a separate limit, default 90 minutes
+(1–1440). At the limit hansa stops the watch's process group. A failed, void or
+stopped release starts no watch. An unfinished watch starts again from the
+beginning after hansa serve restarts, so it should be safe to repeat.
+
+hansa posts a line for that release to the coordinator's session: watch passed
+(exit 0), failed (its exit code and last lines, keys removed), or timed out.
+The page's release list and `hansa release` show the state and result; output
+is kept in `.hansa/releases/<id>.watch.log`, with the same last-line and daily
+trimming limits as release output. The page shows the watch command beside
+the target's command before approval. Changing, adding or removing it voids
+a request still waiting for approval and stops the target's tick counting,
+as changing its release command does. Changing only `--watch-minutes` keeps
+the tick.
+
+For GitHub Actions, this example watches the push run of `tests.yml` for the
+exact pushed commit. It retries empty results and network errors for five
+minutes while the run appears, then uses `gh` to wait for its result. Set
+the workflow to the repository's CI workflow; `gh` uses the desk account's login.
+Single quotes keep `$HANSA_RELEASE_COMMIT` for the watch to expand:
+
+```sh
+hansa lane target L NAME --watch '
+end=$(( $(date +%s) + 300 ))
+while :; do
+  run=$(gh run list --workflow tests.yml --event push --commit "$HANSA_RELEASE_COMMIT" --limit 1 --json databaseId --jq ".[0].databaseId // empty") && [ -n "$run" ] && break
+  [ "$(date +%s)" -lt "$end" ] || { echo "No CI run appeared within five minutes"; exit 1; }
+  sleep 10
+done
+gh run watch "$run" --exit-status
+'
+```
 
 ### Collecting changelog lines
 
@@ -493,6 +534,12 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   `hansa serve` sends it once, and again only after a follower has run since, live when it looks or started and
   ended between two of its looks, and the case begins anew.
   A session that starts hearing still first gets what was missed, as before.
+  The same minutes also cover a running session whose inbox refuses posts: its follower alerts once, saying that
+  the inbox refuses posts, and keeps the lines to try again. A successful post ends that stretch; a later stretch
+  counts from its own first refusal. A failed startup summary also waits for a successful post before it counts
+  as caught up. The refusal's wait and whether it was alerted survive a follower's restart on new code. Only
+  refusals while lines wait count; a failed post an older hansa recorded starts none. While its follower tries
+  again, the session still counts as heard, and `hansa status` keeps the line.
 - **The session waits on its window** (10 minutes): `claude agents --json` lists the session as `waiting` (a
   permission dialog or a question is open) that long after something was posted to it. Once per stretch of waiting.
   Only `waiting` counts: `busy`, `idle`, `shell`, a status hansa does not know, or no answer sends nothing, and a

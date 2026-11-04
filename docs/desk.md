@@ -1041,6 +1041,16 @@ L` per lane, then `hansa resume`. Success: `hansa status` and `hansa desks` show
 
 ## Hearing from hansa
 
+When `hansa serve` starts, it repairs a task end saved just before the server stopped without writing
+its event. This includes verifications, task checks and merge checks: the usual follower then posts
+the end, and the event list and review alerts can see it. Recovery keeps the saved end time and
+fields, and leaves existing end events alone, including on a second restart. A queued task's recorded
+cancellation already counts as its end; recovery adds no separate end event. Merge records and their
+events share the saved timestamp; recovery also recognizes older merges' rounded event times. To keep
+startup quick, it checks saved ends from the hour before the newest event in the log, or later; it does not recreate
+missing task-added events or release ends. This repair is needed while saving an end and appending
+its event are separate writes; it can go when both become one durable operation.
+
 hansa posts to the coordinator's Claude Code session through the session's
 inbox (a local socket every interactive session listens on) when something
 needs the coordinator: a task ended (after hansa's own check), failed, was
@@ -1068,6 +1078,12 @@ serve` stop missed meanwhile is told only while the server is still not
 running; when it runs again by then, that line is left out, and a busy or stuck
 server is left to the follower's own checks.
 
+If the session's inbox refuses a post, the follower keeps the lines until a post succeeds. It tries every two
+seconds for up to a minute, then gathers new events and tries again with only the latest line per task or subject.
+A startup summary also waits until posted before it counts as caught up. If the session's process ends first,
+the next follower's catch-up includes what was not posted. While it tries, the follower stays live: `hansa notify`
+and `hansa status` still show the session as heard.
+
 Which session hears what: a task or request goes to the session that made it
 (`hansa add`, `retry`, `verify`, `merge` and `ask` record it) while
 that session has a follower; otherwise to every session hansa posts to, as do
@@ -1094,6 +1110,9 @@ When what hansa posts cannot reach the coordinator, the principal hears of it th
 `coordinator`, see [alerts](releases.md#alerts)): when no session hears from hansa while something waits for the
 coordinator (the session ended, or notifications were turned off), when the session waits on a permission dialog or
 a question with something posted to it, and when a task posted to it waits for review while the session is idle.
+A running session whose inbox keeps refusing posts also alerts, once after the no-session minutes. A successful
+post ends that case; a later stretch of refusals counts from its own start. Only refusals while lines wait count, and
+a failed post an older hansa recorded (it dropped its lines) starts no stretch.
 The minutes before each are the principal's, on the page, and `hansa status` shows a line while one of them holds,
 such as `the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`. For the last two a
 session's follower runs `claude agents --json` only while something posted to it could still go unanswered, and at

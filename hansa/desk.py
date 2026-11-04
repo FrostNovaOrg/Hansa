@@ -95,17 +95,17 @@ HIDDEN_BY = "workers_may_not_read_added"
 ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "release_stopped",
            "ask", "sandbox_held", "disk_low", "provider_credit")
 # What the principal's list of releases without asking records of each lane's release target, as the page saves
-# it: {lane, target, repo, base, command, after, fixed?, outside?} (outside: named outside files and hashes;
+# it: {lane, target, repo, base, command, watch?, after, fixed?, outside?} (outside: named outside files and hashes;
 # after: the target it must follow, "" for none; fixed: "yes"
 # for a target that runs from a fixed checkout, left out for one that runs in the repository); a target goes out without asking only while it still has
 # all of them. An entry saved before targets had names holds {lane, repo, base, release}: the lane's unnamed target
 # and its command; an entry without after or fixed counts only for a target that must follow none and runs in the
 # repository
-LISTED_AS = ("repo", "base", "command", "after", "fixed")
+LISTED_AS = ("repo", "base", "command", "watch", "after", "fixed")
 LISTED_KEYS = ("lane", "target", *LISTED_AS, "release", "outside")
 MAX_TARGETS = 20  # named release targets on one lane
 MAX_RELEASE_FILES = 100  # paths or globs on one lane's release_files
-TARGET_FIELDS = ("command", "timeout_min", "after", "fixed", "after_merge_min", "about")
+TARGET_FIELDS = ("command", "timeout_min", "after", "fixed", "after_merge_min", "about", "watch", "watch_timeout_min")
 # a lane's forms for the messages hansa writes into its repository; unset, hansa's own (task_message, merge_message)
 MESSAGE_FIELDS = ("commit_message", "merge_message")
 MESSAGE_PLACES = "{task}, {title} and {lane}"
@@ -1319,7 +1319,7 @@ def target_problems(ln: dict) -> list:
         if not isinstance(name, str) or not NAME.match(name):
             p.append(f"{at}: use lowercase letters, digits and '-'")
         if not isinstance(t, dict):
-            p.append(f"{at}: must be an object with command, and optionally timeout_min, after, fixed, after_merge_min and about")
+            p.append(f"{at}: must be an object with command, and optionally timeout_min, after, fixed, after_merge_min, about, watch and watch_timeout_min")
             continue
         extra = set(t) - set(TARGET_FIELDS)
         if extra:
@@ -1331,6 +1331,10 @@ def target_problems(ln: dict) -> list:
             p.append(f"{at}: about must be one line of text, up to 120 characters")
         if "timeout_min" in t and not _is_int(t["timeout_min"], 1, 1440):
             p.append(f"{at}: timeout_min must be from 1 to 1440")
+        if "watch" in t and (not isinstance(t["watch"], str) or not t["watch"].strip() or len(t["watch"]) > 1000):
+            p.append(f"{at}: watch must be one shell command line (up to 1000 characters)")
+        if "watch_timeout_min" in t and not _is_int(t["watch_timeout_min"], 1, 1440):
+            p.append(f"{at}: watch_timeout_min must be from 1 to 1440")
         if "after_merge_min" in t and not _is_int(t["after_merge_min"], 1, 1440):
             p.append(f"{at}: after_merge_min must be from 1 to 1440")
         if "after_merge_min" in t and t.get("after"):
@@ -1400,6 +1404,7 @@ def listed_as(ln: dict | None, target: str = "") -> dict:
     files = outside.inspect(t.get("command") or "", ln["repo"])["outside"]
     return {"repo": str(Path(ln["repo"]).expanduser().resolve()), "base": str(ln.get("base") or "main"),
             "command": str(t.get("command") or ""), "after": str(t.get("after") or ""),
+            **({"watch": t["watch"]} if t.get("watch") else {}),
             **({"fixed": "yes"} if t.get("fixed") else {}),
             **({"outside": files} if files else {})}
 
@@ -1472,6 +1477,7 @@ def listed_mismatch(s: dict, entry, zh: bool = False, now_as: dict | None = None
     then = {**entry, "command": entry.get("command", entry.get("release", ""))}
     changed = [what for k, what in (("repo", ("repository", "仓库")), ("base", ("base branch", "基础分支")),
                                     ("command", ("release command", "发布命令")),
+                                    ("watch", ("watch command", "发布监测命令")),
                                     ("after", ("order (the target it must follow)", "顺序（它要跟在哪个发布目标之后）")),
                                     ("fixed", ("way it runs (--fixed)", "运行方式（--fixed）")))
                if then.get(k, "") != now_as.get(k, "")]
@@ -2815,15 +2821,16 @@ class Desk:
                         out.append(f"lanes.{name}: the description of target {target} holds the key of "
                                    f"{', '.join(found)}, and a description is stored and shown as written; "
                                    "remove the key from the description")
-                cmd = t.get("command")
-                if not isinstance(cmd, str) or cmd == (was.get(target) or {}).get("command"):
-                    continue
-                found = self.keys_in(cmd)
-                if found:
-                    out.append(f"lanes.{name}: the release command{' of target ' + target if target else ''} holds "
-                               f"the key of {', '.join(found)}, and a release command is stored and shown as written; "
-                               "have the command read the key from where the tool keeps it (its own login or "
-                               "configuration file, or a file the command reads) instead")
+                for field, label in (("command", "release command"), ("watch", "watch command")):
+                    cmd = t.get(field)
+                    if not isinstance(cmd, str) or cmd == (was.get(target) or {}).get(field):
+                        continue
+                    found = self.keys_in(cmd)
+                    if found:
+                        out.append(f"lanes.{name}: the {label}{' of target ' + target if target else ''} holds "
+                                   f"the key of {', '.join(found)}, and a {label} is stored and shown as written; "
+                                   "have the command read the key from where the tool keeps it (its own login or "
+                                   "configuration file, or a file the command reads) instead")
         return out
 
     def keys_in_alert(self, old: dict, new: dict) -> list:
