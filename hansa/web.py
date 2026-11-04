@@ -20,7 +20,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from . import alert, cost, disk, gaps, notes, release, views
+from . import alert, cost, disk, gaps, goals, notes, release, views
 from .desk import Desk, KeyScrubError, SettingsError, event_record, lane_warnings, public_settings, read_json
 from .run import check_provider
 
@@ -199,6 +199,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     return self._send(404, {"error": "note unavailable"})
             if url.path == "/api/status":
                 return self._send(200, views.status(desk), conditional=True)
+            if url.path == "/api/goals":
+                return self._send(200, goals.page_list(desk), conditional=True)
             if url.path == "/api/timeline":
                 return self._send(200, views.timeline(desk))
             if url.path == "/api/todos":

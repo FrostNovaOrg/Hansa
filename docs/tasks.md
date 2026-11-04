@@ -17,6 +17,9 @@ the coordinator supplies the text, reason and who took the decision. After a cle
 read `hansa goal list` and `hansa goal show G` before going on. `hansa help intent-records` prints
 this section.
 
+The principal's page has a read-only [Goals tab](desk.md#status-work-and-cost-on-the-web-page)
+with the same counts, decisions, evidence and lifetime cost.
+
 | Command | What it records or shows |
 |---|---|
 | `hansa goal add "<title>" [--why "<what the principal asked, in their words>"]` | a new open goal; prints `g1`, `g2`, … |

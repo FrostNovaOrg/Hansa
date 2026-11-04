@@ -61,6 +61,35 @@ prefixed with the number of releases waiting for approval, open to-dos and
 providers resting until a top-up is confirmed when that count is nonzero.
 It updates with each status refresh.
 
+Goals lists the open goals recorded with `hansa goal add`. Each row uses the counts
+from `hansa goal list`: queued/running, waiting for review, merged, failed, open
+to-dos, merged chains missing evidence and released chains, plus its lifetime
+cost. “Show done and dropped goals” includes ended goals with their outcome.
+With no goals, the empty state explains how to record one.
+
+Open a goal to read the principal's reason, current decisions with their reasons,
+author, time and task, and replaced decisions in a closed fold. The work section
+uses `hansa goal show`: the latest task in each retry chain, state, rounds, check,
+verification, merge and releases, plus open to-dos, total cost and rounds.
+Nonempty `missing:` lines are highlighted and keep the command's exact wording;
+an empty missing list says “nothing”. The labels are available in English and
+Chinese; recorded text stays as recorded and displays as plain text. Task numbers
+open the existing task details. Tables scroll within the page at phone widths.
+See [Goals and product decisions](tasks.md#goals-and-product-decisions) for what
+the counts and evidence mean.
+
+The read-only `/api/goals` route requires the usual bearer token. It returns an
+array combining each `goal list --all --json` record (including `counts`) with
+its `goal show G --json` record, including cost. It shares one full events-file
+read across the goals, supports gzip and returns 304 for an unchanged ETag.
+The tab fetches when opened and once a minute while it and the document are
+visible. Failed requests retain the last report with a reconnection notice and
+retry button; consecutive failures increase the interval up to ten minutes.
+Returning to the tab or document requests fresh data immediately. Requests do
+not overlap; the next interval starts after the request finishes. Expanded
+decisions stay open across updates, and a 304 leaves the displayed details in
+place. This tab only reads records; changes are recorded through the commands.
+
 All tasks lists every work task, newest queued first, 50 per page through to the
 oldest. Each line shows its number, title, lane, current state, queued time,
 ended time and latest verification verdict. These come from
@@ -469,7 +498,7 @@ spreadsheet; actual numeric values stay numeric. Both pages share the settings
 page's native CSS and JavaScript controls and reduced-motion support.
 
 The page keeps navigation for the current browser tab in `sessionStorage`:
-`hansa.tab` is written whenever Status, All tasks, To-dos, Gaps, Notes, Settings or Work and cost is shown (including
+`hansa.tab` is written whenever Status, Goals, All tasks, To-dos, Gaps, Notes, Settings or Work and cost is shown (including
 startup), `hansa.settingsSection` whenever a Settings section is shown, and
 `hansa.costPeriod` when the Work and cost range changes. Reloading restores those choices;
 a fresh browser tab starts on Status. An address containing `?t=` (or `&t=`)

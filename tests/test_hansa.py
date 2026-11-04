@@ -29235,6 +29235,118 @@ def save():'''))
                 self.assertTrue(output["lastGood"])
                 self.assertEqual(output["delays"], [5000, 10000, 20000, 40000, 60000, 60000])
 
+    def goals_page(self, rows, scenario="goals", language="en"):
+        from hansa import web
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        harness = self.tmp / "goals-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        replies = {"/api/goals": rows, "/api/status": views.status(self.desk), "/api/events": [],
+                   "/api/task": {"text": "Recorded task report"},
+                   "pagePreferences": {"session": {"hansa.token": "example-page-key"}}}
+        result = subprocess.run(["node", str(harness), str(web.UI), scenario, language],
+                                input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_goals_page_empty_explains_how_to_record_goals_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                self.assertTrue(self.goals_page([], language=language)["ok"])
+
+    def web_goal_records(self):
+        from hansa import goals, release
+        goals.add(self.desk, "Export <b>reports</b>", "The principal needs <i>monthly totals</i>.")
+        goals.add(self.desk, "Search orders")
+        goals.add(self.desk, "Earlier export")
+        goals.end(self.desk, "g3", "done", "Delivered the original format.")
+        missing = self.goal_evidence_task(verdict=None)
+        released = self.goal_evidence_task()
+        write_json(release.releases_file(self.desk), [self.goal_evidence_release([released]),
+                   self.goal_evidence_release([released], rid=2, target="preview", state="failed")])
+        for state in ("queued", "running", "done", "merging", "failed", "cancelled"):
+            if state == "queued":
+                original = self.desk.new_task("Earlier round", goal="g1", lane="a", state="done")
+                self.hansa("retry", original, "Work queued")
+            else:
+                self.desk.new_task("Work " + state, goal="g1", lane="a", state=state)
+        old = goals.decide(self.desk, "Use <b>CSV</b>", "Original reader", gid="g1", by="assumption")
+        goals.decide(self.desk, "Use <i>JSON</i>", "Include nested totals", gid="g1", by="principal",
+                     task=released, replaces=old)
+        self.hansa("ask", "Confirm <em>currency</em>", "--goal", "g1")
+        settings = self.desk.settings()
+        settings["prices"]["goal-model"] = {"in": 10, "out": 20}
+        self.desk.save_settings(settings)
+        self.desk.update(released, finished=time.time(), usage={"goal-model": {"in": 1000, "out": 100},
+                                                               "unpriced-goal-model": {"in": 7}})
+        return missing, released
+
+    def test_web_goals_route_reuses_commands_authenticates_compresses_and_revalidates(self):
+        import gzip
+        from hansa import goals
+        token = self.desk.web_token()
+        for headers, query in (({}, ""), ({}, "?t=" + token), ({"Cookie": "hansa_t=" + token}, ""),
+                               ({"Authorization": "Bearer wrong"}, "")):
+            with unittest.mock.patch.object(goals, "page_list") as reader:
+                self.assertEqual(self.web_request("/api/goals" + query, headers=headers)[0], 403)
+                reader.assert_not_called()
+        auth = {"Authorization": "Bearer " + token}
+        self.assertEqual(self.web_request("/api/goals", headers=auth)[:2], (200, []))
+        self.web_goal_records()
+        expected = [{**g, **json.loads(self.hansa("goal", "show", g["id"], "--json"))}
+                    for g in json.loads(self.hansa("goal", "list", "--all", "--json"))]
+        protected = [*self.desk.state_dir.joinpath("intent").glob("*.json"),
+                     *self.desk.tasks_dir.glob("*/meta.json"), self.desk.events_path]
+        before = {p: p.read_bytes() for p in protected}
+        with unittest.mock.patch.object(goals, "evidence_records", wraps=goals.evidence_records) as evidence:
+            code, body, headers = self.web_request("/api/goals", headers={**auth, "Accept-Encoding": "gzip"}, raw=True)
+            evidence.assert_called_once_with(self.desk)
+        self.assertEqual(code, 200)
+        self.assertEqual(headers["Content-Encoding"], "gzip")
+        self.assertEqual(len(body), int(headers["Content-Length"]))
+        self.assertEqual(json.loads(gzip.decompress(body)), expected)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        tag = headers["ETag"]
+        for encoding in ("", "gzip"):
+            code, body, checked = self.web_request("/api/goals", headers={**auth, "If-None-Match": tag,
+                                                                          "Accept-Encoding": encoding}, raw=True)
+            self.assertEqual((code, body), (304, b""))
+            self.assertNotIn("Content-Length", checked)
+        self.assertEqual(self.web_request("/api/goals", headers={"If-None-Match": tag})[0], 403)
+        self.assertEqual(self.web_request("/api/goals", method="POST", headers={**auth, "X-Hansa": "1"},
+                                         data=b"{}")[0], 404)
+        self.assertEqual({p: p.read_bytes() for p in before}, before)
+        goals.decide(self.desk, "Keep the source currency", "Avoid conversion", gid="g1")
+        code, body, changed = self.web_request("/api/goals", headers={**auth, "If-None-Match": tag})
+        self.assertEqual(code, 200)
+        self.assertNotEqual(changed["ETag"], tag)
+        self.assertEqual(body[0]["decisions"][0]["text"], "Keep the source currency")
+
+    def test_goals_page_counts_outcomes_decisions_evidence_cost_and_phone_styles(self):
+        from hansa import goals
+        self.web_goal_records()
+        rows = goals.page_list(self.desk)
+        self.assertEqual(rows[0]["counts"], {"active": 2, "review": 2, "merged": 2, "failed": 1,
+                                             "todos": 1, "missing": 1, "released": 1})
+        self.assertNotIn("Earlier round", [c["title"] for c in rows[0]["chains"]])
+        self.assertEqual(next(c["rounds"] for c in rows[0]["chains"] if c["state"] == "queued"), 2)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                output = self.goals_page(rows, language=language)
+                self.assertTrue(output["ok"])
+                self.assertIn(rows[0]["chains"][0]["missing"][0], output["example"])
+                self.assertRegex(output["css"], r"\.scroll\s*\{[^}]*overflow-x:auto;[^}]*max-width:100%")
+                self.assertRegex(output["css"], r"@media \(max-width:640px\)[^}]*\} \.grid, \.facts \{ grid-template-columns:minmax\(0, 1fr\)")
+
+    def test_goals_page_minute_polling_backoff_visibility_and_revalidation(self):
+        from hansa import goals
+        self.web_goal_records()
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                output = self.goals_page(goals.page_list(self.desk), scenario="goals-polls", language=language)
+                self.assertEqual(output["delays"], [60000, 120000, 240000, 480000, 600000, 600000])
+                self.assertTrue(output["ok"])
+
     def known_gap_records(self):
         from hansa import gaps
         tid = self.desk.new_task("Closed <b>task</b>", state="cancelled", closed="no further work")
@@ -34480,7 +34592,8 @@ const fetch = async (path, options) => {
   const snapshot = JSON.parse(JSON.stringify(r));
   if (path === "/api/status" && statusGetGate) await statusGetGate;
   if (path === "/api/settings" && settingsGetGate) await settingsGetGate;
-  if (ask === "tunnel-polls" && ["/api/status", "/api/events"].includes(path)) {
+  if ((ask === "tunnel-polls" && ["/api/status", "/api/events"].includes(path)) ||
+      (["goals", "goals-polls"].includes(ask) && path === "/api/goals")) {
     const etag = 'W/"' + require("crypto").createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") + '"';
     const status = options.headers["If-None-Match"] === etag ? 304 : 200;
     pollResponses.push({path, status});
@@ -34529,7 +34642,7 @@ function openPage(search = "") {
     stack.at(-1).append(el); stack.push(el);
   }
   for (const key of Object.keys(windowEvents)) delete windowEvents[key];
-  for (const tab of ["status", "tasks", "todos", "gaps", "notes", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
+  for (const tab of ["status", "goals", "tasks", "todos", "gaps", "notes", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
   const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
   location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
   URLSearchParams, performance:{now:() => timerNow},
@@ -34826,7 +34939,7 @@ else if (ask === "preferences") (async () => {
   const flush = () => new Promise(resolve => setImmediate(resolve));
   const run = code => vm.runInContext(code, ctx);
   const snapshot = () => {
-    const tab = ["status", "tasks", "todos", "gaps", "notes", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
+    const tab = ["status", "goals", "tasks", "todos", "gaps", "notes", "settings", "cost"].find(name => !ids["#tab-" + name].hidden);
     const selected = document.querySelectorAll("#tabs button").find(el => el.attrs["aria-current"] === "page");
     if (selected?.dataset.tab !== tab) throw new Error("tab selection and visibility disagree");
     const group = run("settingsGroup");
@@ -34939,6 +35052,153 @@ else if (ask === "notes") (async () => {
   check(apiRequests.filter(r => r.path.startsWith("/api/note")).every(r => r.headers.Authorization === "Bearer example-page-key"), "note request missing page key");
   check(apiPosts.length === 0, "notes wrote to the desk");
   console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "goals") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const zh = process.argv[4] === "zh";
+  const tab = descendants(ids["#tabs"], "button").find(el => el.dataset.tab === "goals");
+  check(tab?.textContent === (zh ? "目标" : "Goals"), "Goals tab missing or untranslated");
+  check(!apiGets.includes("/api/goals"), "goals fetched before opening the tab");
+  await tab.click();
+  const root = ids["#tab-goals"];
+  check(!root.hidden && descendants(root, "h1")[0]?.textContent === (zh ? "目标" : "Goals"), "Goals heading missing");
+  const data = given["/api/goals"];
+  if (!data.length) {
+    check(root.textContent.includes(zh ? "暂无目标" : "No goals yet"), "empty state missing");
+    check(root.textContent.includes("hansa goal add"), "empty state does not say how to add goals");
+    console.log(JSON.stringify({ok:true})); return;
+  }
+  const rows = () => descendants(root, "tr").slice(1);
+  check(rows().length === 2, "closed goal included by default");
+  const headers = descendants(root, "th").map(el => el.textContent);
+  check(JSON.stringify(headers) === JSON.stringify(zh
+    ? ["目标", "状态", "排队或运行中", "等待审查", "已合并", "失败", "未结待办", "已合并但缺少证据", "已发布", "总成本"]
+    : ["Goals", "State", "Queued/running", "Waiting for review", "Merged", "Failed", "Open to-dos", "Merged missing evidence", "Released", "Total cost"]), "goal columns untranslated");
+  const g = data[0];
+  for (const [i, k] of ["active", "review", "merged", "failed", "todos", "missing", "released"].entries())
+    check(rows()[0].kids[i + 2].textContent === String(g.counts[k]), "count mismatch: " + k);
+  check(rows()[0].kids[9].textContent.includes("US$0.012000") && rows()[0].kids[9].textContent.includes("7"), "cost or unpriced tokens missing");
+  check(!root.textContent.includes("Delivered the original format."), "closed outcome visible by default");
+  const toggle = async checked => { const input = descendants(root, "input")[0];
+    input.checked = checked; await input.on.change({target:input}); };
+  await toggle(true);
+  check(rows().length === 3 && rows()[2].kids[1].textContent.includes(data[2].outcome), "toggle missed done outcome");
+  check(rows()[2].kids[1].textContent.includes(zh ? "已完成" : "Done"), "done untranslated");
+  await toggle(false);
+  await descendants(rows()[0], "button")[0].click();
+  let detail = ids["#goal-selected"];
+  check(detail.textContent.includes(g.why), "principal reason missing");
+  for (const label of ["goalWhy", "goalCreated", "goalSession", "goalDecisions", "goalReplaced", "goalReason", "goalBy", "goalAt",
+    "goalReplaces", "goalReplacedBy", "goalChains", "goalRounds", "goalCheck", "goalVerification", "goalMerge", "goalMissing", "goalCost", "goalTokens",
+    "goalWorth", "goalUnpriced", "goalTodos", "goalVerificationOf", "releases", "lane", "task"])
+    check(detail.textContent.includes(run("T." + label)), "label missing: " + label);
+  const current = g.decisions.find(d => !d.replaced_by), old = g.decisions.find(d => d.replaced_by);
+  const fold = descendants(detail, "details")[0];
+  check(fold && !fold.open && fold.textContent.includes(old.text) && fold.textContent.includes(old.why), "replaced decision not folded");
+  check(detail.textContent.includes(current.text) && detail.textContent.includes(current.why) &&
+    detail.textContent.includes(run("T.goalRoles.principal")) && detail.textContent.includes(run(`when(${current.created})`)) &&
+    detail.textContent.includes(current.task), "current decision attribution missing");
+  check(fold.textContent.includes(run("T.goalRoles.assumption")), "assumption attribution untranslated");
+  for (const text of [g.why, current.text, current.why, old.text]) {
+    const pre = descendants(detail, "pre").find(el => el.textContent === text);
+    check(pre?.kids[0] instanceof Text && !descendants(pre, "b").length && !descendants(pre, "i").length, "recorded markup interpreted");
+  }
+  const missing = descendants(detail, "p").filter(el => el.className.split(" ").includes("goal-missing"));
+  check(missing.length === 1 && missing[0].textContent === run("T.goalMissing") + ": " + g.chains[0].missing.join("; ") &&
+    missing[0].className.includes("warn"), "missing evidence wording or mark lost");
+  check(descendants(detail, "p").some(el => el.textContent === run("T.goalMissing + ': ' + T.goalNothing")), "complete chain marked missing");
+  for (const c of g.chains) {
+    check(detail.textContent.includes(c.id) && detail.textContent.includes(c.title), "latest chain missing");
+    check(detail.textContent.includes(run(`T.goalChecks[${JSON.stringify(c.check)}]`)) &&
+      detail.textContent.includes(run(`T.goalMerges[${JSON.stringify(c.merge)}]`)), "evidence untranslated");
+    for (const r of c.releases) check(detail.textContent.includes(r.target) &&
+      detail.textContent.includes(run(`T.goalReleaseStates[${JSON.stringify(r.state)}]`)), "release missing or untranslated");
+  }
+  check(detail.textContent.includes(g.todos[0].text) && detail.textContent.includes("US$0.012000"), "todo or total cost missing");
+  const total = descendants(detail, "section").at(-1);
+  check(total.textContent.includes(run("T.goalRounds") + ": " + g.rounds), "total rounds missing");
+  fold.open = true; await fold.on.toggle({target:fold});
+  await run("loadGoals()");
+  check(ids["#goal-selected"] === detail, "304 replaced the open detail");
+  const example = detail.textContent;
+  data[2].state = "dropped"; data[2].outcome = "Superseded by the new export.";
+  await run("loadGoals()");
+  check(descendants(ids["#goal-selected"], "details")[0].open, "refresh closed replaced decisions");
+  await toggle(true);
+  check(rows()[2].kids[1].textContent.includes(zh ? "已放弃" : "Dropped") &&
+    rows()[2].kids[1].textContent.includes(data[2].outcome), "dropped goal outcome missing");
+  await descendants(rows()[2], "button")[0].click();
+  check(ids["#goal-selected"].textContent.includes(data[2].outcome) &&
+    ids["#goal-selected"].textContent.includes(run("T.goalEnded")), "ended goal detail missing outcome or time");
+  await descendants(rows()[1], "button")[0].click();
+  check(ids["#goal-selected"].textContent.includes(run("T.goalNone")) &&
+    ids["#goal-selected"].textContent.includes("US$0.000000"), "empty goal detail broken");
+  // Opening and closing the work uses the same task-details part as the other tabs.
+  await descendants(rows()[0], "button")[0].click();
+  const taskButton = descendants(ids["#goal-selected"], "button").find(el => el.textContent === g.chains[0].id);
+  await taskButton.click(); await new Promise(resolve => setImmediate(resolve));
+  const box = ids["#" + taskButton.attrs["aria-controls"]];
+  check(!box.hidden && box.textContent.includes("Recorded task report"), "existing task details did not open");
+  await taskButton.click(); check(box.hidden, "task details did not close");
+  given["/api/goals"] = [data[2]]; await run("loadGoals()"); await toggle(false);
+  check(root.textContent.includes(zh ? "暂无进行中的目标" : "No open goals"), "ended-only empty state missing");
+  await toggle(true); check(rows().length === 1, "ended-only toggle did not reveal goal");
+  check(apiRequests.filter(r => r.path === "/api/goals").every(r => r.headers.Authorization === "Bearer example-page-key"), "goal requests missing token");
+  check(apiRequests.filter(r => r.path === "/api/goals").slice(1).every(r => r.headers["If-None-Match"]), "goal requests missing validator");
+  check(apiPosts.length === 0 && !descendants(root, "textarea").length &&
+    descendants(root, "input").every(el => el.type === "checkbox"), "goals editable on page");
+  console.log(JSON.stringify({ok:true, example, css:page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"))}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "goals-polls") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const count = () => apiGets.filter(p => p === "/api/goals").length;
+  const delay = () => [...timers.values()].find(t => t.delay >= 60000)?.at - timerNow;
+  await run("loadStatus()");
+  check(count() === 0, "status polled goals");
+  await run('show("goals")');
+  check(count() === 1 && delay() === 60000, "initial goals cadence wrong");
+  await advance(59999); check(count() === 1, "goals polled more than once a minute");
+  await advance(1);
+  check(count() === 2 && pollResponses.at(-1).status === 304, "unchanged goals did not revalidate");
+  statusFailPath = "/api/goals"; pollErrorStatus = 503;
+  const shown = ids["#goal-selected"], delays = [];
+  for (let i = 0; i < 6; i++) {
+    await advance(delay()); delays.push(delay());
+    check(ids["#goal-selected"] === shown, "failed poll replaced last report");
+    check(!ids["#goals-connection"].hidden && ids["#goals-connection"].textContent.includes(run("T.goalsReconnecting")), "reconnection notice missing");
+  }
+  const failed = count();
+  document.hidden = true; windowEvents.visibilitychange[0](); await advance(1200000);
+  check(count() === failed, "hidden document polled goals");
+  pollErrorStatus = 0;
+  document.hidden = false; windowEvents.visibilitychange[0](); await flush();
+  check(count() === failed + 1 && delay() === 60000 && ids["#goals-connection"].hidden, "visibility recovery did not reset backoff");
+  await run('show("status")');
+  const away = count(); await advance(120000);
+  check(count() === away, "another tab polled goals");
+  // A slow fetch is shared by timer, visibility and explicit refresh callers.
+  let finish; statusFailPath = "/api/goals";
+  // Gate the fetch itself so no extra network requests can start while it is unresolved.
+  const realFetch = ctx.fetch;
+  ctx.fetch = async (path, options) => { if (path === "/api/goals") await new Promise(resolve => { finish = resolve; }); return realFetch(path, options); };
+  const opening = run('show("goals")');
+  const first = run("loadGoals()"), second = run("loadGoals()");
+  await advance(120000);
+  check(first === second && ![...timers.values()].some(t => t.delay >= 60000), "slow goals fetch overlapped or scheduled a timer");
+  finish(); await Promise.all([opening, first, second]); ctx.fetch = realFetch;
+  check(count() === away + 1 && delay() === 60000, "slow fetch did not schedule from completion");
+  // First-load errors must show an error and retry rather than a permanent loading message.
+  run("goalsRows = null"); pollErrorStatus = 503;
+  await run("loadGoals()");
+  check(ids["#goals-loading"].hidden && ids["#goals-connection"].textContent.includes(run("T.goalsFailed")), "initial failure left loading state");
+  pollErrorStatus = 0;
+  await descendants(ids["#goals-connection"], "button")[0].click();
+  check(ids["#goals-connection"].hidden, "retry did not recover");
+  check(apiPosts.length === 0 && apiRequests.filter(r => r.path === "/api/goals").slice(1).every(r => r.headers["If-None-Match"]), "goal polls wrote or lost validator");
+  console.log(JSON.stringify({ok:true, delays}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "gaps") (async () => {
   const run = code => vm.runInContext(code, ctx);
@@ -37532,7 +37792,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
         replies = {"pagePreferences": preferences, "/api/status": views.status(self.desk),
-                   "/api/settings": public_settings(self.desk), "/api/events": [], "/api/tasks": views.task_list(self.desk), "/api/notes": [], "/api/gaps": [],
+                   "/api/settings": public_settings(self.desk), "/api/events": [], "/api/tasks": views.task_list(self.desk), "/api/notes": [], "/api/gaps": [], "/api/goals": [],
                    "/api/cost": {"total": {"tokens": 0, "usd": 0}, "by": {}, "unpriced_models": []}}
         result = subprocess.run(["node", str(harness), str(page), "preferences", language],
                                 input=json.dumps(replies), capture_output=True, text=True, timeout=60)
@@ -37543,6 +37803,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         output = self.page_preferences(actions=[{"tab": "tasks"}, {"reload": True}])
         self.assertEqual([s["tab"] for s in output["snapshots"]], ["status", "tasks", "tasks"])
         self.assertEqual(output["snapshots"][-1]["session"]["hansa.tab"], "tasks")
+
+    def test_goals_tab_is_restored_on_reload(self):
+        output = self.page_preferences(actions=[{"tab": "goals"}, {"reload": True}])
+        self.assertEqual([s["tab"] for s in output["snapshots"]], ["status", "goals", "goals"])
+        self.assertEqual(output["snapshots"][-1]["session"]["hansa.tab"], "goals")
 
     def test_known_gaps_tab_is_restored_on_reload(self):
         output = self.page_preferences(actions=[{"tab": "gaps"}, {"reload": True}])
