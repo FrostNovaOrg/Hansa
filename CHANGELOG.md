@@ -13,6 +13,8 @@ a web page for the principal (the person directing the work), and task workers. 
 - Queue work on lanes, each with its own git worktree, providers, instructions and limits.
   Several lanes can work at once; the coordinator sets concurrency and decides what to merge.
   Workers change files and report; hansa commits their work and cleans up processes.
+  Leftover processes are also found by their working folder and stopped before the commit and check.
+- When hansa cannot inspect a process, its task keeps running and its lane stays taken.
 - Retry with a note, updating from the base or moving lanes on the same repository and base; findings carry over.
 - Request verification by another worker, optionally on another lane or model. `add --verify`
   and `retry --verify` queue it after a passing check, or with no check, for completed work
@@ -20,6 +22,11 @@ a web page for the principal (the person directing the work), and task workers. 
 - Session notifications bring results to the coordinator. `hansa ask` keeps the principal's to-dos;
   answers happen in conversation and the coordinator records the outcome. `hansa wait` waits
   for tasks only. See [task handling](docs/tasks.md).
+  Lines refused by the coordinator's session are posted once it accepts again.
+  Continued refusals alert the principal.
+  Server startup writes missing events for task ends saved before a stop, so the coordinator hears of them.
+- `hansa goal` and `hansa decide` record the principal's goals and reasons for product choices.
+  Tasks tie to goals. See [goals and decisions](docs/tasks.md#goals-and-product-decisions).
 
 ### The sandbox
 
@@ -58,6 +65,8 @@ a web page for the principal (the person directing the work), and task workers. 
   to commands, inputs or permissions invalidate approval.
 - Release commands run outside the sandbox. Ordinary releases hold their repository; fixed-checkout
   targets let merges continue. Releases can be stopped; results return to the coordinator.
+- After a push, a target's `--watch` command follows CI without holding other work and posts whether it passed.
+  The [CI watch example](docs/releases.md#watching-ci-after-a-push) keeps waiting through network errors until the run ends.
 - The principal sets the alert command. Alerts are grouped and rate-limited; closed to-dos are omitted
   and failures shown. Low disk space holds new work until space recovers, with a floor scaled to
   the volume. See [releases and alerts](docs/releases.md).
@@ -73,6 +82,9 @@ a web page for the principal (the person directing the work), and task workers. 
 - Settings group providers, coordinator, lanes, read restrictions, releases, alerts and prices.
   Lanes are read-only; dispatch controls are in Settings. Drafts survive tab changes and failed saves;
   concurrent settings changes are shown before another save.
+- The page is compressed and cached by the browser when unchanged.
+  Polls stay small and back off on connection loss.
+  Reconnecting keeps the last received status visible.
 - Each tab keeps its token in `sessionStorage` and sends `Authorization: Bearer` on API requests;
   changes also need `X-Hansa: 1`. The token is removed from the address; cookies do not authenticate requests.
   See [the desk guide](docs/desk.md).
@@ -92,15 +104,19 @@ a web page for the principal (the person directing the work), and task workers. 
 - In a terminal, `hansa` or `hansa up` outside a desk opens the desk menu: select desks to start,
   join a coordinator, open the page, pause dispatch or stop a server. `hansa desks` lists desk state;
   `hansa up --all` starts all listed desks, restoring recorded server and coordinator starts.
-- Serving without an explicit port finds a free one and remembers it. A symbolic link to `bin/hansa`
-  on PATH works. [Getting started](docs/getting-started.md) covers local and SSH use.
+- Serving without an explicit port finds a free one and remembers it.
+  Hansa starts no second server when it cannot inspect the one holding the desk.
+  A symbolic link to `bin/hansa` on PATH works. [Getting started](docs/getting-started.md) covers local and SSH use.
 - `hansa doctor` checks tools, login and sandbox operation, with fixes, JSON output and English or Chinese.
+- [SETUP.md](SETUP.md) guides an AI agent through installing and setting up Hansa with you, one question at a time.
 
 ### The Codex adapter
 
 - The optional macOS adapter runs Codex workers inside srt, translates results and live progress
   for hansa, and passes other calls to Claude. [Adapter setup and limits](contrib/codex/README.md)
   covers its own login and configuration, provider errors, login access inside its sandbox and tool-rule limits.
+- The adapter now runs the model set for its provider on the page; `HANSA_CODEX_MODEL` is only a fallback.
+  Existing providers with placeholder model names must now name the Codex model.
 
 ## 0.4.0 — 2026-09-17
 
