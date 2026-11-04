@@ -195,11 +195,10 @@ Replace each `8766` with the actual port. Open the printed URL locally and keep
 the tunnel terminal open; closing it ends page access. Keep the server's default
 `127.0.0.1` binding; open no inbound network ports beyond SSH.
 
-`ServerAliveInterval=30` checks the connection every 30 seconds;
-`ServerAliveCountMax=3` closes it after three unanswered checks.
-`ExitOnForwardFailure=yes` stops SSH if it cannot open the forwarding port.
-For a tunnel that reopens itself after a connection drops, install `autossh`
-locally and run it separately, with the same keepalive options:
+`ServerAliveInterval=30` checks every 30 seconds; `ServerAliveCountMax=3`
+disconnects after three unanswered checks. `ExitOnForwardFailure=yes` exits if
+forwarding fails. Install `autossh` locally and run it separately to reopen
+dropped tunnels automatically:
 
 ```sh
 autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -L 127.0.0.1:8766:127.0.0.1:8766 my-server
