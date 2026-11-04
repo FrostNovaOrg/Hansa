@@ -463,3 +463,5 @@ money goes. A turn's time runs from its first step in the window to its last;
 | `merged` | merged into the lane's base branch |
 | `cancelled` | stopped or closed on request |
 | `replaced` | a follow-up task took its place |
+
+A process hansa cannot look at is not taken as ended: only a lookup that says there is no such process (`ESRCH`), or a start time that reads differently from the one hansa saved, counts as gone. `EPERM`, `EACCES`, `EIO` and other errors leave the run as it is. A task an earlier server left `starting` fails after five minutes if hansa still cannot read the process list, as before; its lane then takes no other task until a look that works finds no process of that run. `hansa status` says why on the lane's line, and a queued task waiting for that lane says the same.

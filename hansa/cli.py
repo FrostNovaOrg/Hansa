@@ -2542,6 +2542,11 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
     if busy:
         raise SystemExit(f"hansa: {what} still has {', '.join(busy)} queued or running; nothing was "
                          f"changed. Wait for them (hansa wait) or cancel them first")
+    # a task that failed while hansa could not look for its worker keeps the lane until that process is known gone
+    waiting = [m["id"] for m in tasks if m.get("lane_wait_since")]
+    if waiting:
+        raise SystemExit(f"hansa: {what} still has {', '.join(waiting)} waiting for its worker's process to be "
+                         f"known gone; nothing was changed. Wait for hansa serve to find it gone")
     # merging a finished task needs its lane's repo and base
     review = [m["id"] for m in tasks if m["state"] == "done" and m.get("kind") != "verify"]
     if review:

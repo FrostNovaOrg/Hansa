@@ -7931,6 +7931,97 @@ def save():'''))
         self.assertIn("could not read the process list for 5 minutes", m["error"])
         self.assertFalse(self.desk.raw_dir(tid).joinpath("run.json").exists())
 
+    def test_a_live_worker_whose_lookup_is_denied_is_not_taken_as_ended(self):
+        from hansa import run
+        token = f"hansa-launch-test-{uuid.uuid4().hex[:8]}"
+        worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", token],
+                                  start_new_session=True)
+        self.addCleanup(lambda: worker.poll() is None and (worker.kill(), worker.wait()))
+        start = run.proc_start(worker.pid)
+        self.assertTrue(start)
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, state="running", phase="", lane="a", provider="claude", started=time.time(),
+                         pid=worker.pid, pid_start=start, launch=token)
+        other = self.desk.new_task("Add second.txt", lane="a")
+        real = os.kill
+
+        def denied(pid, sig):  # the lookup may not be answered, but the worker is there
+            if pid == worker.pid:
+                raise PermissionError(errno.EPERM, "not ours to signal")
+            return real(pid, sig)
+
+        with unittest.mock.patch.object(run.os, "kill", side_effect=denied):
+            Dispatcher(self.desk).tick()
+        m = self.desk.meta(tid)
+        self.assertEqual((m["state"], m["phase"], m["pid"]), ("running", "", worker.pid), m)
+        self.assertIsNone(worker.poll())  # still working: not stopped and taken for an ended run
+        self.assertEqual(self.desk.meta(other)["state"], "queued")  # its lane is still the running task's
+
+    def test_a_lookup_denied_for_another_reason_is_gone_only_by_a_different_start(self):
+        from hansa import run
+        p = self.sleeper()
+        start = run.proc_start(p.pid)
+        self.assertTrue(start)
+        for error in (PermissionError(errno.EPERM, "denied"), PermissionError(errno.EACCES, "denied"),
+                      OSError(errno.EIO, "denied")):
+            with self.subTest(errno=error.errno), unittest.mock.patch.object(run.os, "kill", side_effect=error):
+                self.assertTrue(run.alive(p.pid, start))  # the start saved is the one it has: not gone
+                self.assertFalse(run.alive(p.pid, "1.000000"))  # another start: gone
+                self.assertTrue(run.alive(p.pid, ""))  # no start saved, so none says it is another: not gone
+            with self.subTest(errno=error.errno, start_unreadable=True), \
+                    unittest.mock.patch.object(run.os, "kill", side_effect=error), \
+                    unittest.mock.patch.object(run, "proc_start", return_value=""):
+                self.assertTrue(run.alive(p.pid, start))  # its start cannot be read now: not gone
+        with unittest.mock.patch.object(run.os, "kill",
+                                        side_effect=ProcessLookupError(errno.ESRCH, "no such process")):
+            self.assertFalse(run.alive(p.pid, start))  # ESRCH: gone, as before
+        self.assertIsNone(p.poll())
+
+    def test_a_child_whose_lookup_is_denied_has_not_ended(self):
+        from hansa.run import has_ended
+        p = self.sleeper()
+        real = os.kill
+        for error in (PermissionError(errno.EPERM, "denied"), PermissionError(errno.EACCES, "denied"),
+                      OSError(errno.EIO, "denied")):
+            def denied(pid, sig, error=error):
+                if pid == p.pid:
+                    raise error
+                return real(pid, sig)
+            with self.subTest(errno=error.errno), unittest.mock.patch.object(os, "kill", side_effect=denied):
+                self.assertFalse(has_ended(p))  # the lookup was denied: not a word that it ended
+                self.assertIsNone(p.returncode)  # and it was not reaped
+        os.kill(p.pid, 9)
+        end = time.time() + 10
+        while not has_ended(p) and time.time() < end:
+            time.sleep(0.05)
+        self.assertTrue(has_ended(p))  # ESRCH: gone, as before
+
+    def test_a_lane_waits_after_a_starting_task_fails_until_its_process_is_known_gone(self):
+        from hansa import run
+        tid, orphan = self.orphan_starting(lookup_failing_since=time.time() - run.LOOK_LIMIT - 1)
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run, "pids_with_arg",
+                                        side_effect=run.CannotLook("the process list could not be read")):
+            d.tick()
+        m = self.desk.meta(tid)
+        self.assertEqual((m["state"], m["phase"], m["pid"]), ("failed", "", None), m)
+        self.assertIn("could not read the process list for 5 minutes", m["error"])
+        self.assertTrue(m.get("lane_wait_since"))
+        other = self.desk.new_task("Add second.txt", lane="a")
+        d.tick()  # the look works again, and the orphan is still there: its lane waits
+        self.assertEqual(self.desk.meta(other)["state"], "queued")
+        st = views.status(self.desk)
+        row = next(ln for ln in st["lanes"] if ln["name"] == "a")
+        self.assertEqual((row["task"], bool(row["waiting"])), (tid, True), row)
+        text = views.status_text(st)
+        self.assertIn("not known to be gone", text)
+        self.assertIn(f"lane a is busy: {tid}'s worker's process is not known to be gone", text)
+        orphan.kill()
+        orphan.wait()
+        d.tick()  # seen gone: the lane takes tasks again
+        self.assertIsNone(self.desk.meta(tid).get("lane_wait_since"))
+        self.assertEqual(self.settle(d, other)["state"], "done")
+
     def test_a_process_whose_arguments_cannot_be_read_is_not_taken_for_gone(self):
         from hansa import run
         if not run._ON_MAC:

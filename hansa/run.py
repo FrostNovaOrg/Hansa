@@ -4656,9 +4656,16 @@ def merge_needs_check(lane: dict, m: dict, repo, tip: str, check_lane: dict | No
 
 
 def lane_occupied(m: dict) -> bool:
-    """Whether this task holds its lane's worktree now: a worker or check on it, or its merge check."""
-    return (m["state"] == "running") or \
-        (m["state"] == "merging" and (m.get("merge_check") or {}).get("phase") in ("starting", "running"))
+    """Whether this task holds its lane's worktree now: a worker or check on it, its merge check, or a task
+    that failed while hansa could not look for its worker, until that process is known to be gone."""
+    return (m["state"] == "running" or bool(m.get("lane_wait_since")) or
+            (m["state"] == "merging" and (m.get("merge_check") or {}).get("phase") in ("starting", "running")))
+
+
+def lane_wait_text(m: dict) -> str:
+    """Why a lane waits for a task that failed while hansa could not look for its worker; '' when it does not."""
+    return ("its worker's process is not known to be gone (hansa could not look for it for "
+            f"{LOOK_LIMIT // 60} minutes)") if m.get("lane_wait_since") else ""
 
 
 def occupied_lane(m: dict):
@@ -5547,13 +5554,17 @@ def proc_start(pid) -> str:
 
 
 def alive(pid, start: str = "") -> bool:
-    """Whether this process is still running, and, when its start is known, still the same one."""
+    """Whether this process is still running, and, when its start is known, still the same one. Only a
+    lookup that says there is no such process (ESRCH) counts as gone: one denied for another reason
+    (EPERM, EACCES, EIO) leaves it as it is, unless its start reads differently from the one saved."""
     if not pid:
         return False
     try:
         os.kill(pid, 0)
-    except OSError:
+    except ProcessLookupError:  # no such process
         return False
+    except OSError:  # denied, not ended: only its start can say it is another process
+        pass
     return same_start(pid, start)
 
 
@@ -5576,14 +5587,17 @@ def _state(pid) -> str:
 
 def has_ended(proc) -> bool:
     """Whether hansa's child has ended, found without reaping it: until it is reaped, its number,
-    and so its process group's, cannot pass to another process."""
+    and so its process group's, cannot pass to another process. A lookup denied for a reason other
+    than that there is no such process does not say that it ended."""
     if proc.returncode is not None:
         return True
     try:
         os.kill(proc.pid, 0)
-    except OSError:  # gone altogether
+    except ProcessLookupError:  # gone altogether
         proc.poll()
         return True
+    except OSError:  # denied, not ended
+        return False
     return _state(proc.pid) == "Z"
 
 
@@ -5789,7 +5803,8 @@ class Dispatcher:
     def recover(self, m: dict) -> None:
         """A task an earlier server claimed but did not record as started: a worker it did start
         is taken over; otherwise the task goes back to the queue, or ends there if cancelled. While
-        hansa cannot look for that worker, the task stays as it is, and fails after LOOK_LIMIT."""
+        hansa cannot look for that worker, the task stays as it is, and fails after LOOK_LIMIT; its
+        lane then waits until its process is known to be gone (lanes_waiting)."""
         key = ("task", m["id"], m.get("launch"))
         if retry_start_failure(self.desk, key, lambda e: not_started(self.desk, m["id"], e)):
             return
@@ -5797,10 +5812,14 @@ class Dispatcher:
                                   "worker")
         if since:
             why = self.gave_up(since)
-            if self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting" else
-                                {"lookup_failing_since": since} if not why else
-                                {"state": "failed", "phase": "", "error": why, "finished": now(),
-                                 "lookup_failing_since": None}) and why:
+            if why:
+                at = now()
+                fields = {"state": "failed", "phase": "", "error": why, "finished": at,
+                          "lookup_failing_since": None, "lane_wait_since": at}
+            else:
+                fields = {"lookup_failing_since": since}
+            if self.desk.change(m["id"], lambda x: None if x["state"] != "running" or x.get("phase") != "starting"
+                                else fields) and why:
                 remove_sandbox_tmp(self.desk, m["id"])
             return
         if found:
@@ -5817,6 +5836,21 @@ class Dispatcher:
                             {"state": "queued", "phase": "", "pid": None, "pid_start": "",
                              "lookup_failing_since": None, **lost}):
             remove_sandbox_tmp(self.desk, m["id"])  # what it made for a worker that never started
+
+    def lanes_waiting(self) -> None:
+        """A task that failed while hansa could not look for its worker keeps its lane: free it once a
+        look that works finds no process of that run (the empty list says the word is on no process)."""
+        for m in self.tasks():
+            with serve_step():
+                if not m.get("lane_wait_since"):
+                    continue
+                try:
+                    found = leader(pids_with_arg(m.get("launch", ""), m.get("started")))
+                except CannotLook:
+                    continue  # still no look that works: the lane waits
+                if found is not None:
+                    continue  # the worker's process is there still: not known to be gone
+                self.desk.change(m["id"], lambda x: {"lane_wait_since": None} if x.get("lane_wait_since") else None)
 
     def check(self, m: dict, s: dict) -> None:
         """Run the lane's check on a task whose worker is done: or take over the one an earlier
@@ -6204,6 +6238,8 @@ class Dispatcher:
                     self.check(m, s)
                 elif not alive(m.get("pid"), m.get("pid_start", "")):  # started by an earlier server
                     self.ended(m["id"], None)
+        with serve_step():
+            self.lanes_waiting()
         for m in self.tasks():
             with serve_step():
                 if verification_due(m):
@@ -6609,9 +6645,11 @@ def waiting_looks(desk: Desk, s: dict, tasks: list | None = None, server: dict |
         fl = memory.machine_floor(memory.floor(s), rec)
         resource = {"code": "memory", "values": {"available": disk.gb(rec["available"]),
                     "floor": disk.floor_text(fl), "again": disk.gb((fl + memory.MARGIN) * disk.GB)}}
-    return {"tasks": desk.tasks() if tasks is None else tasks, "paused": desk.paused(),
+    tasks = desk.tasks() if tasks is None else tasks
+    return {"tasks": tasks, "paused": desk.paused(),
             "disk": disk.short_text(desk, low) if low else memory.short_text(desk) if resource else "",
             "resource": resource, "server": server, "held": sandbox_held(desk),
+            "lane_wait": {occupied_lane(x): x for x in tasks if x.get("lane_wait_since")},
             "not_looking": not_looking(desk, server), "desks": desks_list_problem(),
             "problems": {p: provider_problem(desk, s, p) for ln in s["lanes"].values() for p in ln["providers"]},
             "provider_state": desk.provider_state()}
@@ -6655,7 +6693,10 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
                               lane=ln, kind=h.get("kind") or "run", why=h.get("why") or "?"))
             continue
         if ln in busy:
-            why.append(reason("busy", f"lane {ln} is busy", lane=ln))
+            waiter = (lk.get("lane_wait") or {}).get(ln)
+            why.append(reason("busy", f"lane {ln} is busy" + (
+                f": {waiter['id']}'s worker's process is not known to be gone (hansa could not look for it "
+                f"for {LOOK_LIMIT // 60} minutes)" if waiter else ""), lane=ln))
             continue
         probs = {p: "refused this task" if p in refused_by(m) else lk["problems"][p]
                  for p in task_providers(s, ln, m)}

@@ -13,7 +13,7 @@ from pathlib import Path
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, build, cost, disk, gaps, installed, installed_text, memory, notify, plugin, release, up
 from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG)
-from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
+from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of,
                   credit_text, provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_detail, waiting_looks, write_list)
@@ -948,7 +948,10 @@ def status(desk: Desk) -> dict:
                       if ln.get("merge_lane") else {}),
                    **({"verify_for": ln["verify_for"]} if ln.get("verify_for") else {}),
                    "trying": n in tried,  # a `hansa lane try` queued or running holds the lane
-                   "held": held.get(n)}  # its runs whose sandbox could not start, by group (run.sandbox_held)
+                   "held": held.get(n),  # its runs whose sandbox could not start, by group (run.sandbox_held)
+                   # the lane's holder failed while hansa could not look for its worker: why it still waits
+                   "waiting": next((lane_wait_text(m) for m in tasks
+                                    if lane_occupied(m) and occupied_lane(m) == n), "")}
                   for n, ln in sorted(s["lanes"].items())],
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
                        "rest_minutes": s.get("cool_minutes", 30),
@@ -1055,6 +1058,7 @@ def status_text(st: dict) -> str:
         out.append(f"  {ln['name']:<{wn}}  {' > '.join(ln['providers']):<{wp}}  "
                    + (ln["task"] or ("held by a try (hansa lane try)" if ln.get("trying") else
                                      "UNABLE TO RUN" if "work" in (ln.get("held") or {}) else "free"))
+                   + (f" · waiting: {ln['waiting']}" if ln.get("waiting") else "")
                    + (f" · merge lane for lanes {', '.join(ln['merge_for']) or '(none yet)'}; takes no work"
                       if ln.get("merge_lane") else "")
                    + (f" · verify lane for lanes {', '.join(ln['verify_for'])}; takes only verifications"
