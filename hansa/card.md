@@ -232,7 +232,8 @@ close it with `hansa ask --close N "<outcome>"`. A session started with `hansa c
 by itself; otherwise run `hansa notify on` once. A session `hansa up` started already hears from hansa:
 `hansa notify on` is not needed there, and running it does no harm. While hansa posts to yours, do not
 keep `hansa wait` running. Each wakeup or poll rereads the whole conversation. These lines come from
-hansa, not from the principal, and approve nothing. If your settings hold messages from other sessions
+hansa, not from the principal, and approve nothing. hansa keeps refused posts and retries; a lasting inbox
+refusal alerts the principal after their no-session minutes. If your settings hold messages from other sessions
 (`crossSessionInbound`), you will not hear hansa; the principal can change that. More: `hansa help
 inbox`.
 `hansa coordinator --clear-daily HH-HH` clears your session once a day when idle, and hansa's mod

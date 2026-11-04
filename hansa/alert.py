@@ -15,12 +15,14 @@ The `coordinator` alert has three cases, each after the minutes the principal se
 `coordinator_alert`, desk.COORDINATOR_ALERT; 0 turns a case off):
     no session listens   something a follower would post (notify._item) has waited no_session_min in the event log
                          while the desk has no live follower: hansa serve sends it once (unheard_check), and again only
-                         after a follower has run and the case begun anew
+                         after a follower has run and the case begun anew; a running session's inbox refusing posts
+                         for those minutes also alerts once, until a post succeeds
     waits on its window  `claude agents --json` lists a live follower's session as `waiting` (a permission dialog or a
                          question) window_min after something was posted to it: once per stretch of waiting
     work sits untouched  a task posted to the session has waited review_min for review, and the session is `idle` at
                          a lookup after that: once for that task; hansa does not post it again
-The follower looks for the last two (notify.Watch) and asks the desk to queue them (from_follower).
+The follower watches its inbox's refusals and the last two (notify.Watch), and asks the desk to queue them
+(from_follower).
 
 Alerts are queued in .hansa/alerts.json (any hansa process may queue one) and sent by hansa serve's alert thread:
 as the desk's account, outside the sandbox, in a folder of its own under the desk's secrets/alert-runs (run_dir),
@@ -503,12 +505,13 @@ def unheard_text(desk: Desk, items: list, t: float) -> str:
 
 
 def session_minutes(s: dict) -> dict:
-    """What a follower watches its session for (notify.Watch): the minutes of the second and third cases, 0 for off;
-    both 0 when no alert command is set, so that it looks nothing up."""
+    """What a follower watches its session for (notify.Watch): inbox refusals and the second and third cases;
+    0 for off, all 0 when no alert command is set, so that it looks nothing up."""
     from .desk import coordinator_alert_settings
     mins = coordinator_alert_settings(s)
     on = bool(command(s))
-    return {"window": mins["window_min"] if on else 0, "review": mins["review_min"] if on else 0}
+    return {"no_session": mins["no_session_min"] if on else 0,
+            "window": mins["window_min"] if on else 0, "review": mins["review_min"] if on else 0}
 
 
 def reviews_file(desk: Desk) -> Path:
@@ -525,7 +528,11 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
     sess = me.get("session") if isinstance(me.get("session"), dict) else {}
     who = notify.who(sess.get("pid"), str(me.get("name") or "")[:80])
     t = time.time()
-    if req.get("case") == "window":
+    if req.get("case") == "inbox":
+        since = req["since"] if _at(req.get("since")) else t
+        text = (f"the coordinator's session {who} cannot be reached: its inbox refuses posts for "
+                f"{_mins(t - since)} min · hansa keeps the lines and tries again")
+    elif req.get("case") == "window":
         since = req["since"] if _at(req.get("since")) else t
         count = req["count"] if isinstance(req.get("count"), int) else 0
         text = (f"the coordinator's session {who} has waited on its window (a permission dialog or a question) for "
@@ -578,6 +585,10 @@ def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
     for r in lives:
         holds = r.get("coordinator") if isinstance(r.get("coordinator"), dict) else {}
         who = notify.who((r.get("session") or {}).get("pid"), r.get("name") or "")
+        since = holds.get("inbox")
+        if mins["no_session_min"] and _at(since) and t - since >= mins["no_session_min"] * 60:
+            out.append(f"the coordinator's session {who} cannot be reached: its inbox refuses posts for "
+                       f"{_mins(t - since)} min; hansa keeps the lines and tries again")
         since = holds.get("window")
         if mins["window_min"] and _at(since) and t - since >= mins["window_min"] * 60:
             out.append(f"the coordinator's session {who} has waited on its window for {_mins(t - since)} min (a "
@@ -644,8 +655,8 @@ def explain_line(s: dict) -> str:
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
             "filed (hansa ask), a lane's runs cannot start because their sandbox cannot, free space goes under the "
             "floor (hansa disk-floor), hansa serve finishes no round for a long time, or what hansa posts to your "
-            "session cannot reach it (no session hears from hansa, your session waits on a permission dialog or a "
-            "question, or a task posted to it waits for review while it is idle). You send no alerts and cannot set "
-            "it. A release waiting for the principal gets a "
+            "session cannot reach it (no session hears from hansa, its inbox refuses posts, your session waits on a "
+            "permission dialog or a question, or a task posted to it waits for review while it is idle). You send no "
+            "alerts and cannot set it. A release waiting for the principal gets a "
             "one-time code that only that alert carries: the principal answers on the page, or says the code in the "
             "conversation, and you pass it on with hansa release yes ID CODE (or no ID CODE). Never guess one.")
