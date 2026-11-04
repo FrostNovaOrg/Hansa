@@ -1222,7 +1222,7 @@ function verificationParent(st, id) {
 function runningStep(st, m) {
   return verificationParent(st, m.id) ? "verification" : m.checking ? "check" : "worker";
 }
-let statusPicture = null;
+let statusPicture = null, statusShown = false;
 const creditProviders = st => st.providers.filter(p => p.credit_since);
 const principalCount = st => (st.releases || []).filter(r => r.state === "waiting").length + st.asks.length + creditProviders(st).length;
 function pictureError(message) {
@@ -1457,7 +1457,8 @@ async function renderStatus(force) {
   const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
   if (status.status === "rejected") {
     const e = status.reason;
-    pictureError(String(e.message || e)); err(e); throw e;
+    if (!statusShown) pictureError(String(e.message || e));
+    err(e); throw e;
   }
   const st = status.value, ev = events.status === "fulfilled" ? events.value : [];
   const name = st.desk.split("/").filter(Boolean).slice(-2).join("/") || "/";
@@ -1546,6 +1547,7 @@ async function renderStatus(force) {
       ? h("div", {class:"bad", role:"alert"}, String(events.reason.message || events.reason))
       : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(eventRow)) : emptyState(T.noEvents, T.noEventsNote, "status"))
   ]));
+  statusShown = true;
   restoreFocus();
   return events.status === "fulfilled";
 }

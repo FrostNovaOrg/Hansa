@@ -33312,8 +33312,9 @@ const apiGets = [], apiPosts = [], apiRequests = [], blobs = [], downloads = [],
 let costGetError = ask === "cost-interactions" ? "example initial cost failure" : null;
 let costGetGate = null, costRowsError = null, costRowsGate = null;
 let calendarGetError = given.calendarFailure ? "example calendar failure" : null, calendarGetGate = null;
-let statusGetError = ask === "status-picture-initial-error" ? "status connection lost" : null;
-let statusFailPath = "/api/status";
+let statusGetError = ask === "status-picture-initial-error" ? "status connection lost"
+  : ask === "status-picture-events-initial-error" ? "events connection lost" : null;
+let statusFailPath = ask === "status-picture-events-initial-error" ? "/api/events" : "/api/status";
 let statusGetGate = null;
 let pollErrorStatus = 0;
 const pollResponses = [];
@@ -33494,10 +33495,14 @@ if (ask === "tunnel-polls") (async () => {
   pollErrorStatus = 503;
   const delays = [];
   const shownAt = run("statusLastGood");
+  const picture = run("statusPicture"), panels = picture.kids.slice();
+  const shown = ids["#tab-status"].textContent;
   for (const expected of [5000, 10000, 20000, 40000, 60000, 60000]) {
     await advance(delay());
     check(delay() === expected, "wrong retry delay: " + delay() + " expected " + expected);
     delays.push(delay());
+    check(run("statusPicture") === picture && panels.every((panel, i) => picture.kids[i] === panel), "failed poll replaced the last status panels");
+    check(ids["#tab-status"].textContent === shown, "failed poll changed the last status");
     check(run("statusLastGood") === shownAt, "failed poll moved the data timestamp");
     const notice = ids["#status-connection"];
     check(!notice.hidden && notice.textContent.includes(run("ZH ? '重新连接' : 'Reconnecting'")), "missing reconnect notice");
@@ -33508,12 +33513,14 @@ if (ask === "tunnel-polls") (async () => {
     }
   }
   pollErrorStatus = 0;
+  given["/api/events"] = [{ts:1700000060, event:"recovered event"}];
   const hiddenCount = count();
   document.hidden = true; windowEvents.visibilitychange[0](); await advance(120000);
   check(count() === hiddenCount, "hidden document polled");
   document.hidden = false; windowEvents.visibilitychange[0](); await flush();
   check(count() === hiddenCount + 1 && delay() === 5000, "visibility did not fetch immediately and reset backoff");
   check(ids["#status-connection"].hidden, "success left reconnect notice visible");
+  check(run("statusPicture") !== picture && ids["#tab-status"].textContent.includes("recovered event"), "recovery did not refresh the status");
   const afterRecovery = count(); await advance(4999);
   check(count() === afterRecovery, "success retried too early");
   await advance(1); check(count() === afterRecovery + 1, "success did not resume 5-second polling");
@@ -33521,6 +33528,7 @@ if (ask === "tunnel-polls") (async () => {
   statusFailPath = "/api/events"; statusGetError = "events tunnel lost";
   await advance(5000); await advance(5000);
   check(delay() === 10000 && !ids["#status-connection"].hidden, "events-only failure did not back off");
+  check(descendants(ids["#status-picture"], "button").length > 0 && ids["#tab-status"].textContent.includes("events tunnel lost"), "events-only failure changed the status error handling");
   statusGetError = null; await advance(10000);
   check(delay() === 5000 && ids["#status-connection"].hidden, "events recovery did not reset backoff");
   // A write must not inherit a GET's validator, even on the same path.
@@ -33676,15 +33684,22 @@ else if (ask.startsWith("status-picture")) (async () => {
       css:ask === "status-picture-mobile" ? page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>")) : undefined,
       boxes:boxes.map(el => ({step:el.attrs["data-pipeline-step"], count:Number(el.attrs["data-count"]),
       text:el.textContent, tone:el.className})), clicks, tables, first:root.kids[0]?.id,
+      connection:{hidden:ids["#status-connection"].hidden, text:ids["#status-connection"].textContent,
+        lastGood:run("statusLastGood"), time:run("when(statusLastGood)")},
       alerts:descendants(ids["#status-picture"], "div").filter(el => el.attrs.role === "alert").map(el => el.textContent)};
   };
   const snapshots = [await snapshot()];
   if (ask === "status-picture-initial-error") {
     statusGetError = null; await run("loadStatus()"); snapshots.push(await snapshot());
   }
+  if (ask === "status-picture-events-initial-error") {
+    statusFailPath = "/api/status"; statusGetError = "status connection lost";
+    await run("loadStatus()").catch(() => {}); snapshots.push(await snapshot());
+    statusGetError = null; await run("loadStatus()"); snapshots.push(await snapshot());
+  }
   if (ask === "status-picture-errors") {
     given["/api/status"].server_up = false; await run("loadStatus()"); snapshots.push(await snapshot());
-    given["/api/status"].server_up = true; await run("loadStatus()");
+    given["/api/status"].server_up = true; await run("loadStatus()"); snapshots.push(await snapshot());
     statusGetError = "status connection lost";
     await run("loadStatus()").catch(() => {}); snapshots.push(await snapshot());
     statusFailPath = "/api/events";
@@ -36314,32 +36329,53 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             warning = "new tasks will not start" if language == "en" else "新任务不会开始"
             self.assertEqual((page["state"] + page["text"]).count(warning), 1)
 
-    def test_status_picture_fetch_failure_clears_counts_and_recovers(self):
+    def test_status_picture_fetch_failure_keeps_last_status_and_recovers(self):
         st = self.picture_status()
         st["running"] = [self.picture_worker()]
-        for _, pages in self.picture_pages(st, "status-picture-errors"):
-            failed = pages[2]
-            self.assertFalse(failed["boxes"])
-            self.assertFalse(failed["rows"])
-            self.assertEqual(failed["alerts"], ["status connection lost"] * 2)
+        for language, [initial, stopped, shown, failed, events_failed, recovered] in self.picture_pages(st, "status-picture-errors"):
+            self.assertEqual(failed["boxes"], shown["boxes"])
+            self.assertEqual(failed["rows"], shown["rows"])
+            self.assertEqual(failed["text"], shown["text"])
+            self.assertFalse(failed["alerts"])
+            self.assertFalse(failed["connection"]["hidden"])
+            self.assertEqual(failed["connection"]["lastGood"], shown["connection"]["lastGood"])
+            self.assertIn("Reconnecting" if language == "en" else "重新连接", failed["connection"]["text"])
+            self.assertIn(failed["connection"]["time"], failed["connection"]["text"])
             # Stopped dispatch and unavailable events still leave the desk's records available.
-            for page in (pages[1], pages[3], pages[4]):
-                self.assertEqual(pages[0]["boxes"], page["boxes"])
-                for row, original in zip(page["rows"], pages[0]["rows"]):
+            for page in (stopped, events_failed, recovered):
+                self.assertEqual(initial["boxes"], page["boxes"])
+                for row, original in zip(page["rows"], initial["rows"]):
                     self.assertEqual({k: v for k, v in row.items() if k != "start"},
                                      {k: v for k, v in original.items() if k != "start"})
-                self.assertEqual(len(page["rows"]), len(pages[0]["rows"]))
+                self.assertEqual(len(page["rows"]), len(initial["rows"]))
                 self.assertFalse(page["alerts"])
-            self.assertIn("events connection lost", pages[3]["text"])
+            self.assertIn("events connection lost", events_failed["text"])
+            self.assertTrue(recovered["connection"]["hidden"])
 
     def test_status_picture_initial_fetch_failure_recovers(self):
         st = self.picture_status()
-        for _, pages in self.picture_pages(st, "status-picture-initial-error"):
+        for language, pages in self.picture_pages(st, "status-picture-initial-error"):
             self.assertEqual(pages[0]["first"], "status-picture")
             self.assertFalse(pages[0]["boxes"])
             self.assertEqual(pages[0]["alerts"], ["status connection lost"] * 2)
+            self.assertFalse(pages[0]["connection"]["hidden"])
+            self.assertEqual(pages[0]["connection"]["lastGood"], 0)
+            self.assertIn("No data received yet" if language == "en" else "尚未收到数据", pages[0]["connection"]["text"])
             self.assertEqual(len(pages[1]["boxes"]), 7)
             self.assertEqual(len(pages[1]["rows"]), 1)
+            self.assertTrue(pages[1]["connection"]["hidden"])
+
+    def test_status_picture_events_failure_then_status_failure_keeps_last_status(self):
+        st = self.picture_status()
+        st["running"] = [self.picture_worker()]
+        for _, [shown, failed, recovered] in self.picture_pages(st, "status-picture-events-initial-error"):
+            self.assertIn("events connection lost", shown["text"])
+            self.assertEqual(shown["connection"]["lastGood"], 0)
+            self.assertEqual(shown["text"], failed["text"])
+            self.assertEqual(shown["boxes"], failed["boxes"])
+            self.assertEqual(shown["rows"], failed["rows"])
+            self.assertFalse(failed["alerts"])
+            self.assertTrue(recovered["connection"]["hidden"])
 
     def test_status_picture_pipeline_counts_match_the_counted_lists(self):
         st = self.picture_status()
