@@ -37345,6 +37345,368 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[
             {"lane": "a", "target": x} for x in ticked])), {"ok": True, "problems": []})
 
+    def settle_watch(self, d, rid):
+        from hansa import release
+        def ended():
+            d.tick()
+            return (release.get(self.desk, rid).get("watch_run") or {}).get("state") in (
+                "passed", "failed", "timed_out")
+        self.soon(ended, timeout=30)
+        return release.get(self.desk, rid)["watch_run"]
+
+    def test_release_watch_passes_and_posts_its_own_result(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "push", "true", "--watch", "echo watching; exit 0")
+        self.tick_targets("push")
+        p, sock = self.session()
+        with self.in_session(p, sock):
+            self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        watch = self.settle_watch(d, 1)
+        self.assertEqual((watch["state"], watch["exit"]), ("passed", 0))
+        self.assertIn("watch passed", self.hansa("release"))
+        [row] = views.status(self.desk)["releases"]
+        self.assertEqual(row["watch"], "echo watching; exit 0")
+        self.assertIn("passed", row["watch_what"])
+        [heard] = notify.items_for(self.desk, self.events("release_watch_ended"), {"key": "k", "session": {
+            "pid": p.pid, "start": notify.proc_start(p.pid)}})
+        self.assertIn("release #1", heard["line"])
+        self.assertIn("watch passed", heard["line"])
+
+    def test_release_without_watch_keeps_its_command_result(self):
+        from hansa import release
+        self.with_targets(push="true")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        r = self.settle_release(d, 1)
+        self.assertEqual((r["state"], r["exit"]), ("done", 0))
+        self.assertNotIn("watch_run", r)
+        self.assertEqual(d.release_watch_procs, {})
+        self.assertEqual(self.events("release_watch_ended"), [])
+
+    def test_release_watch_failure_redacts_keys_and_limits_last_lines(self):
+        from hansa import release
+        key = "sk-demo-watch-123456"
+        self.desk.write_key("demo", key)
+        os.environ["WATCH_KEY"] = key
+        self.hansa("lane", "target", "a", "push", "true", "--watch",
+                   'i=0; while [ "$i" -lt 30 ]; do echo line-$i; i=$((i+1)); done; echo "$WATCH_KEY"; exit 7')
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        w = self.settle_watch(Dispatcher(self.desk), 1)
+        self.assertEqual((w["state"], w["exit"], len(w["tail"])), ("failed", 7, release.TAIL))
+        self.assertEqual(w["tail"][-1], "[key of demo]")
+        [heard] = notify.items_for(self.desk, self.events("release_watch_ended"), {"key": "k", "session": None})
+        [row] = views.status(self.desk)["releases"]
+        log = (release.log_dir(self.desk) / "1.watch.log").read_text()
+        shown = heard["line"] + self.hansa("release") + json.dumps(row) + log
+        self.assertNotIn(key, shown)
+        self.assertIn("watch failed (exit 7)", heard["line"])
+        self.assertIn("last lines: line-26", heard["line"])
+        self.assertNotIn("line-25", heard["line"])
+        self.assertIn("[key of demo]", shown)
+
+    def test_unsuccessful_void_and_stopped_releases_never_watch(self):
+        from hansa import release
+        out, go = self.tmp / "watched", self.tmp / "release-go"
+        d = Dispatcher(self.desk)
+        for rid, ending in enumerate(("failed", "void", "stopped"), 1):
+            with self.subTest(ending=ending):
+                command = "exit 9" if ending == "failed" else f"while [ ! -f {go} ]; do sleep 0.1; done"
+                self.hansa("lane", "target", "a", "push", command, "--watch", f"echo watched >> {out}")
+                self.tick_targets("push")
+                self.hansa("release", "a", "push")
+                if ending == "void":
+                    self.hansa("lane", "target", "a", "push", "false")
+                    self.tick_targets("push")
+                elif ending == "stopped":
+                    d.tick()
+                    release.stop_release(self.desk, rid, by="page")
+                r = self.settle_release(d, rid)
+                self.assertEqual(r["state"], ending)
+                self.assertNotIn("watch_run", r)
+                self.assertFalse(out.exists())
+        self.assertEqual(self.events("release_watch_ended"), [])
+
+    def test_release_watch_timeout_stops_its_process_group_at_its_own_limit(self):
+        from hansa import release, run
+        child = self.tmp / "watch-child"
+        self.hansa("lane", "target", "a", "push", "true", "--minutes", "1", "--watch",
+                   f"sleep 120 & echo $! > {child}; wait")
+        d = Dispatcher(self.desk)
+        for rid, limit in ((1, 90), (2, 1)):
+            with self.subTest(limit=limit):
+                if rid == 2:
+                    child.unlink()
+                    self.hansa("lane", "target", "a", "push", "--watch-minutes", "1")
+                self.tick_targets("push")
+                self.hansa("release", "a", "push")
+                self.settle_release(d, rid)
+                self.soon(lambda: child.exists() and child.read_text().strip())
+                pid = int(child.read_text())
+                group = release.get(self.desk, rid)["watch_run"]["pid"]
+                # The release's one-minute limit must not govern the watch's default 90 minutes.
+                release._watch_change(self.desk, rid, {"started": time.time() - 61})
+                if limit == 90:
+                    d.tick()
+                    self.assertEqual(release.get(self.desk, rid)["watch_run"]["state"], "running")
+                release._watch_change(self.desk, rid, {"started": time.time() - limit * 60 - 1})
+                w = self.settle_watch(d, rid)
+                self.assertEqual(w["state"], "timed_out")
+                self.assertFalse(run.group_running(group))
+                self.assertTrue(not run.alive(pid) or run._state(pid) == "Z")
+                self.assertIn("watch timed out", self.hansa("release"))
+                [row] = [r for r in views.status(self.desk)["releases"] if r["id"] == rid]
+                self.assertIn("timed out", row["watch_what"])
+        heard = notify.items_for(self.desk, self.events("release_watch_ended"), {"key": "k", "session": None})
+        self.assertEqual(len(heard), 2)
+        self.assertTrue(all("watch timed out" in x["line"] for x in heard))
+        self.assertEqual(self.checkouts(), [])
+
+    def test_release_watches_leave_merges_and_later_releases_free_and_keep_their_own_commits(self):
+        from hansa import release
+        go, seen = self.tmp / "watch-go", self.tmp / "watch-seen"
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.hansa("lane", "target", "a", "push", "true", "--watch",
+                   f'echo "$HANSA_RELEASE:$HANSA_RELEASE_COMMIT:$(git rev-parse HEAD)" >> {seen}; '
+                   f'while [ ! -f {go} ]; do sleep 0.1; done')
+        self.tick_targets("push")
+        try:
+            self.hansa("release", "a", "push")
+            self.settle_release(d, 1)
+            self.soon(lambda: seen.exists() and len(seen.read_text().splitlines()) == 1)
+            self.assertIsNone(release.running_on(self.desk, self.repo))
+            self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+            self.hansa("release", "a", "push")
+            self.assertEqual(self.settle_release(d, 2)["state"], "done")
+            self.soon(lambda: len(seen.read_text().splitlines()) == 2)
+            for rid in (1, 2):
+                r = release.get(self.desk, rid)
+                self.assertEqual(r["watch_run"]["state"], "running")
+                self.assertIn(f"{rid}:{r['commit']}:{r['commit']}", seen.read_text())
+            self.assertNotEqual(release.get(self.desk, 1)["commit"], release.get(self.desk, 2)["commit"])
+        finally:
+            go.touch()
+            for r in release.releases(self.desk):
+                if release.watch_open(r):
+                    self.settle_watch(d, r["id"])
+        heard = notify.items_for(self.desk, self.events("release_watch_ended"), {"key": "k", "session": None})
+        self.assertCountEqual([x["key"] for x in heard], [["release-watch", 1], ["release-watch", 2]])
+        self.assertTrue(all("watch passed" in x["line"] for x in heard))
+        self.assertEqual(self.checkouts(), [])
+
+    def test_release_watch_restarts_once_after_server_restart(self):
+        from hansa import release
+        go, attempts = self.tmp / "watch-go", self.tmp / "attempts"
+        self.hansa("lane", "target", "a", "push", "true", "--watch",
+                   f"echo start >> {attempts}; while [ ! -f {go} ]; do sleep 0.1; done; echo finished")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        old, restarted = Dispatcher(self.desk), Dispatcher(self.desk)
+        try:
+            self.settle_release(old, 1)
+            self.soon(lambda: attempts.exists() and len(attempts.read_text().splitlines()) == 1)
+            proc = old.release_watch_procs[1]
+            # Even an exit file left by the interrupted attempt is not its eventual result.
+            (release.log_dir(self.desk) / "1.watch.exit").write_text("0\n")
+            restarted.tick()
+            self.soon(lambda: len(attempts.read_text().splitlines()) == 2)
+            self.assertIsNotNone(proc.poll())
+            for _ in range(3):
+                restarted.tick()
+            self.assertEqual(len(attempts.read_text().splitlines()), 2)
+        finally:
+            go.touch()
+            self.settle_watch(restarted, 1)
+            for proc in old.release_watch_procs.values():
+                proc.wait(timeout=30)
+        self.assertEqual(len(self.events("release_watch_ended")), 1)
+        self.assertEqual(self.checkouts(), [])
+
+    def test_release_watch_recovers_an_unrecorded_launch_in_the_same_working_folder(self):
+        from hansa import release
+        go, attempts = self.tmp / "watch-go", self.tmp / "attempts"
+        self.fixed_target("push", "echo built > built.txt")
+        self.hansa("lane", "target", "a", "push", "--watch",
+                   f"test -f built.txt || exit 8; echo start >> {attempts}; while [ ! -f {go} ]; do sleep 0.1; done")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        old, restarted = Dispatcher(self.desk), Dispatcher(self.desk)
+        try:
+            self.settle_release(old, 1)
+            self.soon(lambda: attempts.exists() and len(attempts.read_text().splitlines()) == 1)
+            release._watch_change(self.desk, 1, {"state": "starting", "pid": None, "pid_start": ""})
+            restarted.tick()
+            self.soon(lambda: len(attempts.read_text().splitlines()) == 2)
+        finally:
+            go.touch()
+            w = self.settle_watch(restarted, 1)
+            for proc in old.release_watch_procs.values():
+                proc.wait(timeout=30)
+        self.assertEqual(w["state"], "passed")
+        self.assertEqual(len(self.events("release_watch_ended")), 1)
+
+    def test_release_watch_start_failure_does_not_hold_another_release(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "push", "true", "--watch", "true")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(release, "_start_watch", side_effect=OSError("cannot launch watch")):
+            self.assertEqual(self.settle_watch(d, 1)["state"], "failed")
+        self.hansa("release", "a", "push")
+        self.assertEqual(self.settle_watch(d, 2)["state"], "passed")
+        [heard] = notify.items_for(self.desk, self.events("release_watch_ended")[:1], {"key": "k", "session": None})
+        self.assertIn("watch could not start", heard["line"])
+        self.assertEqual(self.checkouts(), [])
+
+    def test_release_watch_logs_use_release_retention_limits(self):
+        from hansa import disk, release
+        at = time.time()
+        big = b"watch output\n" * 60000
+        folder = release.log_dir(self.desk)
+        folder.mkdir()
+        rs = [{"id": rid, "state": "done", "ended": at - 40 * 86400,
+               "watch_run": {"state": state, "ended": at - days * 86400}}
+              for rid, state, days in ((1, "passed", 31), (2, "failed", 31), (3, "timed_out", 31),
+                                       (4, "passed", 29), (5, "running", 31))]
+        release._write(self.desk, rs)
+        for r in rs:
+            (folder / f"{r['id']}.watch.log").write_bytes(big)
+        disk.trim(self.desk, at)
+        for r in rs:
+            data = (folder / f"{r['id']}.watch.log").read_bytes()
+            if r["id"] <= 3:
+                header, tail = data.split(b"\n", 1)
+                self.assertTrue(header.startswith(b"[hansa trimmed"))
+                self.assertLessEqual(len(tail), disk.TRIM_KEEP)
+                self.assertTrue(big.endswith(tail))
+            else:
+                self.assertEqual(data, big)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_release_watch_page_shows_the_approved_command_and_result_in_both_languages(self):
+        from hansa import release, web
+        command = "echo 'CI <&> result'; exit 7"
+        self.hansa("lane", "target", "a", "push", "true", "--watch", command)
+        self.hansa("release", "a", "push")
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for state in ("waiting", "failed"):
+            if state == "failed":
+                r = release.get(self.desk, 1)
+                self.assertTrue(release.answer(self.desk, 1, True, commit=r["commit"], command=r["command"])["ok"])
+                self.settle_watch(Dispatcher(self.desk), 1)
+            given = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk), "/api/events": []}
+            for language in ("en", "zh"):
+                with self.subTest(state=state, language=language):
+                    result = subprocess.run(["node", str(harness), str(web.UI), "release-tick-details", language],
+                                            input=json.dumps(given), capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    page = json.loads(result.stdout)
+                    self.assertIn(command, page["status"])
+                    self.assertIn("--watch: " + command, page["rows"][0]["text"])
+                    if state == "failed":
+                        self.assertIn("watch failed (exit 7)" if language == "en" else "发布监测失败 (exit 7)", page["status"])
+                        self.assertIn("CI <&> result", page["status"])
+
+    def test_documented_github_watch_retries_absent_runs_and_network_errors_for_the_pushed_commit(self):
+        guide = (Path(__file__).resolve().parent.parent / "docs" / "releases.md").read_text()
+        example = guide.split("### Watching CI after a push", 1)[1].split("```sh\n", 1)[1].split("```", 1)[0]
+        args = shlex.split(example)
+        self.assertEqual(args[:6], ["hansa", "lane", "target", "L", "NAME", "--watch"])
+        calls = self.tmp / "gh-calls.json"
+        fake = self.tmp / "bin" / "gh"
+        fake.write_text(f'''#!{sys.executable}
+import json, pathlib, sys
+p = pathlib.Path({str(calls)!r})
+calls = json.loads(p.read_text()) if p.exists() else []
+calls.append(sys.argv[1:])
+p.write_text(json.dumps(calls))
+if sys.argv[1:3] == ["run", "list"]:
+    if len(calls) == 1:
+        print("network unavailable", file=sys.stderr)
+        sys.exit(1)
+    if len(calls) == 2:
+        sys.exit(0)
+    print("42")
+else:
+    sys.exit(7)
+''')
+        fake.chmod(0o755)
+        # Retry immediately in the fixture; the example itself keeps its ten-second poll interval.
+        fake_sleep = self.tmp / "bin" / "sleep"
+        fake_sleep.write_text("#!/bin/sh\nexit 0\n")
+        fake_sleep.chmod(0o755)
+        self.with_targets(push="true")
+        self.hansa("lane", "target", "a", "push", *args[5:])
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        w = self.settle_watch(Dispatcher(self.desk), 1)
+        self.assertEqual((w["state"], w["exit"]), ("failed", 7))
+        from hansa import release
+        sha = release.get(self.desk, 1)["commit"]
+        recorded = json.loads(calls.read_text())
+        self.assertEqual(len(recorded), 4)
+        self.assertTrue(all(c[c.index("--commit") + 1] == sha for c in recorded[:3]))
+        self.assertEqual(recorded[-1], ["run", "watch", "42", "--exit-status"])
+
+    def test_release_watch_changes_void_waiting_releases_and_invalidate_ticks(self):
+        from hansa import release
+        self.with_targets(push="true")
+        for rid, watch in enumerate(("echo first", "echo second", "none"), 1):
+            with self.subTest(watch=watch):
+                self.hansa("release", "a", "push")
+                r = release.get(self.desk, rid)
+                self.assertEqual(r["state"], "waiting")
+                self.tick_targets("push")
+                self.hansa("lane", "target", "a", "push", "--watch", watch)
+                self.assertFalse(release.lane_listed(self.desk.settings(), "a", "push"))
+                [row] = views.status(self.desk)["releases"][:1]
+                self.assertIn("watch command changed", row["moved"])
+                self.assertFalse(release.answer(self.desk, rid, True, commit=r["commit"], command=r["command"])["ok"])
+                self.assertEqual(release.get(self.desk, rid)["state"], "void")
+                self.assertIn("watch command changed", release.get(self.desk, rid)["void"])
+                self.page_save(lambda s: s.update(releases_without_asking=[]))
+        self.assertNotIn("watch", self.desk.settings()["lanes"]["a"]["targets"]["push"])
+
+    def test_release_watch_settings_limits_keys_and_environment(self):
+        from hansa import release
+        env = self.tmp / "watch-env"
+        self.fixed_target("push", 'echo built > built.txt')
+        self.hansa("lane", "target", "a", "push", "--watch", f"test -f built.txt && env > {env}")
+        self.tick_targets("push")
+        self.hansa("lane", "target", "a", "push", "--watch-minutes", "17")
+        self.assertTrue(release.lane_listed(self.desk.settings(), "a", "push"))
+        self.assertIn("watch:", self.hansa("lane", "target", "a"))
+        self.assertIn("17 min", self.hansa("explain", "lane", "a"))
+        key = "sk-watch-settings-123456"
+        self.desk.write_key("demo", key)
+        before = self.desk.settings_path.read_bytes()
+        for args in (("--watch", "echo " + key), ("--watch", " "), ("--watch", "x" * 1001),
+                     ("--watch-minutes", "0"), ("--watch-minutes", "1441"), ("--watch-minutes", "nope")):
+            with self.subTest(args=args):
+                self.assertIn("hansa:", self.refused("lane", "target", "a", "push", *args))
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"LANE_ONLY_VAR": "from-lane"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("release", "a", "push")
+        with unittest.mock.patch.dict(os.environ, {"HANSA_OWN_VAR": "from-hansa", "HANSA_TASK": "t99"}):
+            w = self.settle_watch(Dispatcher(self.desk), 1)
+        self.assertEqual(w["state"], "passed")
+        seen = dict(x.split("=", 1) for x in env.read_text().splitlines() if "=" in x)
+        self.assertEqual(seen["HANSA_OWN_VAR"], "from-hansa")
+        self.assertEqual(seen["HANSA_RELEASE_COMMIT"], release.get(self.desk, 1)["commit"])
+        self.assertNotIn("LANE_ONLY_VAR", seen)
+        self.assertNotIn("HANSA_TASK", seen)
+        self.assertEqual(Path(seen["PWD"]).resolve(), release.checkout_dir(self.desk, 1).resolve())
+        self.assertEqual(self.checkouts(), [])
+
     def test_target_about_changes_only_the_description_and_keeps_the_tick(self):
         from hansa import release
         about = "install on the test server; nothing goes outside"
@@ -37443,12 +37805,12 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 for words in (("Asking you before a release", "Targets that go out without asking you",
                                "Ticked: a release can run without asking you", "Unticked: each one waits for your yes",
                                "Each target is ticked on its own. A tick stops counting once the lane's repository "
-                               "or base branch, the target's command or an outside file it names, the target it must "
+                               "or base branch, the target's command or an outside file it names, its watch command (--watch), the target it must "
                                "follow or the way it runs (fixed) changes: a release asked for by hand then waits "
                                "for your yes, and one that runs by itself after merges waits until you tick it again.",
                                "Rules the lane's workers and verifiers may use directly") if language == "en" else
                               ("发布前要不要问你", "不用问你就执行的发布目标", "勾上：提出发布后可以不用问你就执行", "不勾：每次等你点头",
-                               "每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、"
+                               "每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、监测命令（--watch）、"
                                "它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效："
                                "手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
                                "这条工作线的工作智能体和核验者可以直接用的规则")):

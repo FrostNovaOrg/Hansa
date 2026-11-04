@@ -196,6 +196,7 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   variable is read when it runs: `hansa lane target L NAME
   'git push origin "$HANSA_RELEASE_COMMIT:refs/heads/main"' --fixed`. More: `hansa help release-flow`.
 - A ticked target can run by itself after merges, as a check: `hansa lane target L NAME --after-merge MINUTES`.
+- A target's `--watch` checks the pushed commit afterwards; hansa posts the result without holding merges or releases.
 - A target with `--after` runs only when asked. A passing release's posted `next: hansa release L U`
   names each target that can now be asked. More: `hansa help release-flow`.
 - List release build files run outside the sandbox (`hansa lane set L release_files "pom.xml

@@ -26,6 +26,10 @@ the release's commit made for it under .hansa/release-checkouts/ (removed when i
 swept after a restart), with HANSA_RELEASE_COMMIT, HANSA_RELEASE_TARGET and HANSA_RELEASE_REPO in its
 environment; it holds nothing, so a long install leaves that repository's merges and checks going on.
 
+A target's optional watch runs after exit 0, in the release's own checkout, with the same environment. Its
+watch_run has a separate state and process group: it never holds the repository's queue, and a server restart
+starts an unfinished watch again. hansa posts passed, failed or timed out to the release's coordinator session.
+
 The forbidden-word scan reads each outgoing commit's own change once (a merge's: what it adds beyond its
 parents) and runs without the desk lock; the request is recorded under the lock only if what was scanned is still
 what goes out (scan_key), and hansa serve scans again at the start only when something the scan depends on
@@ -67,6 +71,7 @@ from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group
                   merge_check_lane, merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
 
 OPEN = ("waiting", "approved", "starting", "running")
+WATCH_OPEN = ("waiting", "starting", "running")
 MOST_COMMITS = 200  # of the outgoing commits kept on the request (all are checked for forbidden words)
 MOST_FILES = 500
 MOST_HITS = 20
@@ -855,7 +860,9 @@ def _askable(desk: Desk, s: dict, lane: str, target: str | None) -> dict:
     prev = last_out(desk, lane, repo, base, target)
     since = prev["commit"] if prev and _has_commit(repo, prev["commit"]) else ""
     return {"target": target, "command": command, "repo": repo, "base": base, "commit": commit, "prev": prev,
-            "since": since, "fixed": bool(targets[target].get("fixed"))}
+            "since": since, "fixed": bool(targets[target].get("fixed")),
+            "watch": targets[target].get("watch") or "",
+            "watch_timeout_min": targets[target].get("watch_timeout_min", 90)}
 
 
 def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, target: str | None = None,
@@ -943,6 +950,7 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
     listed = lane_listed(s, lane, target) and not held
     r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "target": target,
          "repo": repo_key(a["repo"]), "base": a["base"], "commit": a["commit"], "command": command,
+         **({"watch": a["watch"], "watch_timeout_min": a["watch_timeout_min"]} if a["watch"] else {}),
          **outside.inspect(command, a["repo"]),
          **({"fixed": True} if a["fixed"] else {}), "note": desk.redact(note.strip()), "asked": now(),
          **({"after_merge": a["after_merge"]} if a.get("after_merge") else {}),
@@ -992,6 +1000,9 @@ def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
     if bool((t or {}).get("fixed")) != bool(r.get("fixed")):
         return (f"how {what(r)} runs (--fixed: from a fixed checkout, or in the repository) changed since it was asked",
                 f"{what_zh(r)} 的运行方式（--fixed，固定检出）在请求之后改了")
+    if ((t or {}).get("watch") or "") != (r.get("watch") or ""):
+        return (f"{what(r)}'s watch command changed since it was asked",
+                f"{what_zh(r)} 的发布监测命令在请求之后改了")
     if repo_key(ln["repo"]) != r.get("repo") or (ln.get("base") or "main") != r.get("base"):
         return (f"lane {r['lane']}'s repository or base branch changed since it was asked",
                 f"工作线 {r['lane']} 的仓库或基础分支在请求之后改了")
@@ -1361,7 +1372,7 @@ def sweep_checkouts(desk: Desk, rs: list | None = None) -> None:
     rs = {str(r.get("id")): r for r in (releases(desk) if rs is None else rs)}
     for x in d.iterdir():
         r = rs.get(x.name) or {}
-        if r.get("state") not in ("starting", "running"):
+        if r.get("state") not in ("starting", "running") and not watch_open(r):
             drop_checkout(desk, x.name, r.get("repo"))
 
 
@@ -1485,18 +1496,23 @@ def _launch(desk: Desk, r: dict, token: str, cwd) -> subprocess.Popen:
     d = log_dir(desk)
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{rid}.exit").unlink(missing_ok=True)
-    env = {**without_session(os.environ), "HANSA_RELEASE": str(rid), "HANSA_RELEASE_COMMIT": r["commit"],
-           "HANSA_RELEASE_TARGET": r.get("target") or "", "HANSA_RELEASE_REPO": r["repo"]}
-    for k in ("HANSA_TASK", "HANSA_MERGING"):
-        env.pop(k, None)
     change(desk, rid, lambda x: oom_begin(x))
     with open(d / f"{rid}.log", "wb") as out:
         proc = subprocess.Popen(["/bin/sh", "-c", SCRIPT, token, r["command"], str(d / f"{rid}.exit")],
-                                cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                cwd=str(cwd), env=command_env(r), stdin=subprocess.DEVNULL, stdout=out,
                                 stderr=subprocess.STDOUT, start_new_session=True)
     with recording_start(desk, ("release", rid, token), proc.pid, proc):
         change(desk, rid, lambda x: {"state": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
     return proc
+
+
+def command_env(r: dict) -> dict:
+    """The desk account's environment for both commands of a release, without an agent's session."""
+    env = {**without_session(os.environ), "HANSA_RELEASE": str(r["id"]), "HANSA_RELEASE_COMMIT": r["commit"],
+           "HANSA_RELEASE_TARGET": r.get("target") or "", "HANSA_RELEASE_REPO": r["repo"]}
+    for k in ("HANSA_TASK", "HANSA_MERGING"):
+        env.pop(k, None)
+    return env
 
 
 def finish(desk: Desk, rid, ran: bool = True) -> dict | None:
@@ -1510,8 +1526,6 @@ def finish(desk: Desk, rid, ran: bool = True) -> dict | None:
     left = stop_recorded(_left(r), SWEEP_GRACE)
     if left:
         desk.event("release_left_running_stopped", id=rid, pids=left)
-    if r.get("fixed"):  # its command ended: its own checkout goes, whatever the ending
-        drop_checkout(desk, rid, r.get("repo"))
     d = log_dir(desk)
     try:
         code = int((d / f"{rid}.exit").read_text().strip())
@@ -1537,8 +1551,11 @@ def finish(desk: Desk, rid, ran: bool = True) -> dict | None:
         return {"state": "stopped" if stopped else "done" if ok else "failed", "exit": code, "ran": ran, **memory,
                 "problem": "" if stopped else problem, "ended": now(), "tail": text.strip().splitlines()[-TAIL:],
                 "seconds": round(now() - (x.get("started") or now())), "pid": None, "pid_start": "",
-                **({"stop_late": x.get("stop_late") or now()} if late else {})}
+                **({"stop_late": x.get("stop_late") or now()} if late else {}),
+                **({"watch_run": {"state": "waiting"}} if ok and not stopped and x.get("watch") else {})}
     r = change(desk, rid, ending)
+    if r and r.get("fixed") and not watch_open(r):
+        drop_checkout(desk, rid, r.get("repo"))
     (d / f"{rid}.exit").unlink(missing_ok=True)
     if r and r["state"] == "stopped":
         desk.event("release_stopped", id=rid, lane=r.get("lane"), target=r.get("target") or "", commit=r.get("commit"),
@@ -1586,6 +1603,107 @@ def _recover(desk: Desk, r: dict) -> None:
                                                  "ran is not known: read its output (hansa release), and ask again if it "
                                                  "has to go out"})
     finish(desk, r["id"])
+
+
+def watch_open(r: dict) -> bool:
+    return (r.get("watch_run") or {}).get("state") in WATCH_OPEN
+
+
+def _watch_change(desk: Desk, rid, fields: dict) -> dict | None:
+    return change(desk, rid, lambda r: {"watch_run": {**r["watch_run"], **fields}} if watch_open(r) else None)
+
+
+def _start_watch(desk: Desk, r: dict) -> subprocess.Popen:
+    """Each watch owns the release's checkout, so a moving base and later releases cannot change its files."""
+    rid = r["id"]
+    token = f"hansa-release-watch-{rid}-{uuid.uuid4().hex[:8]}"
+    change(desk, rid, lambda x: {"watch_run": {"state": "starting", "launch": token, "started": now()}})
+    path = checkout_dir(desk, rid)
+    if not (path / ".git").is_file():
+        drop_checkout(desk, rid, r.get("repo"))  # a crash may have left worktree creation unfinished
+        path.parent.mkdir(parents=True, exist_ok=True)
+        git("worktree", "add", "--detach", str(path), r["commit"], cwd=r["repo"])
+    d = log_dir(desk)
+    (d / f"{rid}.watch.exit").unlink(missing_ok=True)
+    with open(d / f"{rid}.watch.log", "wb") as out:
+        proc = subprocess.Popen(["/bin/sh", "-c", SCRIPT, token, r["watch"], str(d / f"{rid}.watch.exit")],
+                                cwd=str(path), env=command_env(r), stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    with recording_start(desk, ("release-watch", rid, token), proc.pid, proc):
+        _watch_change(desk, rid, {"state": "running", "pid": proc.pid, "pid_start": proc_start(proc.pid)})
+    return proc
+
+
+def _finish_watch(desk: Desk, rid, problem: str = "") -> None:
+    r = get(desk, rid)
+    if not r or not watch_open(r):
+        return
+    w, d = r["watch_run"], log_dir(desk)
+    stop_recorded(_left(w), SWEEP_GRACE)
+    try:
+        code = int((d / f"{rid}.watch.exit").read_text().strip())
+    except (OSError, ValueError):
+        code = None
+    with desk.lock():
+        log = d / f"{rid}.watch.log"
+        text = desk.redact(log.read_text(encoding="utf-8", errors="replace")) if log.exists() else ""
+        if log.exists():
+            write_text(log, text)
+        result = ("timed_out" if w.get("timed_out") else "passed" if code == 0 and not problem else "failed")
+        ended = _watch_change(desk, rid, {"state": result, "exit": code, "ended": now(),
+                                         "tail": text.strip().splitlines()[-TAIL:],
+                                         "problem": desk.redact(problem)[:600], "pid": None, "pid_start": ""})
+    (d / f"{rid}.watch.exit").unlink(missing_ok=True)
+    drop_checkout(desk, rid, r.get("repo"))
+    if ended:
+        desk.failed_starts.pop(("release-watch", rid, w.get("launch")), None)
+        desk.event("release_watch_ended", id=rid, lane=r.get("lane"), target=r.get("target"),
+                   commit=r.get("commit"), state=result, exit=code)
+
+
+def _watch_tick(desk: Desk, rs, procs: dict, starting: bool, pending: dict) -> None:
+    """Watches are separate from the repository queue. An earlier server's unfinished watch starts over;
+    stop its old process group before launching it again, including a launch whose pid was not recorded."""
+    for r in rs():
+        if not watch_open(r):
+            continue
+        with serve_step():
+            rid, w = r["id"], r["watch_run"]
+            proc = procs.get(rid)
+            if proc is None:
+                if w.get("state") in ("starting", "running"):
+                    pid, start = w.get("pid"), w.get("pid_start", "")
+                    if not pid:
+                        pid = leader(pids_with_arg(w.get("launch") or "", w.get("started")))
+                        start = proc_start(pid) if pid else ""
+                    stop(pid, start)
+                    stop_recorded(_left(w), SWEEP_GRACE)
+                    change(desk, rid, lambda x: {"watch_run": {"state": "waiting"}})
+                if starting:
+                    try:
+                        procs[rid] = _start_watch(desk, r)
+                    except Exception as e:  # noqa: BLE001 - a watch failure must not hold later releases
+                        _finish_watch(desk, rid, f"watch could not start: {e}")
+                continue
+            seen = _seen(w)
+            if record_descendants(proc.pid, seen):
+                updated = _watch_change(desk, rid, {"started_procs": {str(p): st for p, st in seen.items()}})
+                w = updated["watch_run"] if updated else w
+            key = ("release-watch", rid)
+            save_stopped(pending, key, w, lambda fields: _watch_change(desk, rid, fields))
+            w = (get(desk, rid) or r)["watch_run"]
+            limit = r.get("watch_timeout_min", 90)
+            if not _is_int(limit, 1, 1440):
+                limit = 90
+            if not has_ended(proc) and (w.get("timed_out") or time.time() - w["started"] > 60 * limit):
+                try:
+                    save_stopped(pending, key, w, lambda fields: _watch_change(desk, rid, fields), {"timed_out": True})
+                finally:
+                    stop(proc.pid, w.get("pid_start", ""), proc)
+            if has_ended(proc):
+                stop(proc.pid, "", proc)
+                _finish_watch(desk, rid)
+                del procs[rid]
 
 
 def merges_text(merges: list, count: int | None = None) -> str:
@@ -1716,7 +1834,7 @@ def _after_merges(desk: Desk, s: dict, tasks, rs) -> None:
                            merges=merges_text(batch["merges"], batch["merges_count"]))
 
 
-def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pending=None) -> None:
+def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pending=None, watch_procs=None) -> None:
     """hansa serve's round for releases: finish those that ended, stop those over their time limit, take
     over or finish those an earlier server left, and start approved ones, one per repository, none where a
     merge check runs (also while dispatch is paused: the principal said yes, and they use no provider). A release
@@ -1726,13 +1844,15 @@ def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pe
     tasks: what gives the desk's tasks as this round read them (Dispatcher.tasks); else they are read here."""
     read = []
     pending = {} if pending is None else pending
+    watch_procs = {} if watch_procs is None else watch_procs
 
     def rs() -> list:  # read once a round, and again only after this process changed a release (Desk.writes)
         if not read or read[0] != desk.writes:
             read[:] = [desk.writes, releases(desk)]
         return read[1]
     _after_merges(desk, s, tasks, rs)
-    if not procs and not any(r.get("state") in ("approved", "starting", "running") for r in rs()):
+    if not procs and not watch_procs and not any(r.get("state") in ("approved", "starting", "running")
+                                               or watch_open(r) for r in rs()):
         sweep_checkouts(desk, rs())  # none open: only what a server that stopped left
         return
     for r in rs():
@@ -1780,6 +1900,7 @@ def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pe
                                      {"timed_out": True, "limit_min": limit, "limit_of": whose})
                 finally:
                     stop(r.get("pid"), r.get("pid_start", ""), proc)
+    _watch_tick(desk, rs, watch_procs, starting, pending)
     with serve_step():
         sweep_checkouts(desk, rs())
     _after_merges(desk, s, tasks, rs)  # a run just ended: merges during it make one more run
@@ -1956,7 +2077,23 @@ def runs_text(t: dict, zh: bool = False) -> str:
 
 def line(desk: Desk, r: dict, s: dict | None = None) -> str:
     return (f"#{r['id']} {what(r)} at {r.get('commit', '')[:10]} ({r.get('base')}): "
-            f"{state_text(desk, r, s)}" + (f"; {oom_text(r)}" if oom_text(r) else ""))
+            f"{state_text(desk, r, s)}" + (f"; {oom_text(r)}" if oom_text(r) else "")
+            + ("; " + watch_text(r) if r.get("watch_run") else ""))
+
+
+def watch_text(r: dict, zh: bool = False) -> str:
+    w = r.get("watch_run") or {}
+    st = w.get("state")
+    if not st:
+        return "发布成功后监测" if zh else "watch after successful release"
+    if st == "timed_out":
+        return "发布监测超时" if zh else "watch timed out"
+    if st == "failed":
+        return (("发布监测失败" if zh else "watch failed")
+                + (f" (exit {w['exit']})" if w.get("exit") is not None else "")
+                + (f": {w['problem']}" if w.get("problem") else ""))
+    return ({"waiting": "发布监测等待运行", "starting": "发布监测正在启动", "running": "发布监测正在运行",
+             "passed": "发布监测通过"}.get(st, st) if zh else "watch " + st)
 
 
 def list_text(desk: Desk) -> str:
@@ -1965,8 +2102,8 @@ def list_text(desk: Desk) -> str:
         return ("no releases yet. A lane's release command is set with hansa lane target L default \"<command>\", or its "
                 "named targets with hansa lane target L NAME \"<command>\"; hansa release L [TARGET] [note] asks for one")
     s = desk.settings()
-    live = [r for r in rs if r.get("state") in OPEN]
-    recent = [r for r in rs if r.get("state") not in OPEN][-10:]
+    live = [r for r in rs if r.get("state") in OPEN or watch_open(r)]
+    recent = [r for r in rs if r.get("state") not in OPEN and not watch_open(r)][-10:]
     out = []
     for title, group in (("open", live), ("recent", list(reversed(recent)))):
         if not group:
@@ -1975,6 +2112,9 @@ def list_text(desk: Desk) -> str:
         for r in group:
             out.append("  " + line(desk, r, s))
             out.append(f"      command: {r.get('command')} ({runs_text(r)})" + (f" · note: {r['note']}" if r.get("note") else ""))
+            if r.get("watch"):
+                out.append(f"      watch: {r['watch']} [{r.get('watch_timeout_min', 90)} min]; {watch_text(r)}")
+                out += [f"      | {x}" for x in (r.get("watch_run") or {}).get("tail", [])[-5:]]
             out.append(f"      {checked_text(r)}")
             out += ["      " + x for x in outside.lines(r)]
             out += ["      " + x for x in direct_lines(r)]
@@ -2020,6 +2160,8 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
                 f"  last release{' of ' + target if target else ''}: " + (line(desk, rs[-1], s) if rs else "none")]
         out += ["    " + x for x in outside.lines(outside.inspect(t.get("command") or "", ln["repo"],
                                                                  fingerprint=False))]
+        if t.get("watch"):
+            out.append(f"    watch: {t['watch']} [{t.get('watch_timeout_min', 90)} min]; after exit 0, holding nothing")
     return out + listed
 
 
@@ -2043,7 +2185,8 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
     """For the page and hansa status: the open releases and the latest ended ones of the past week."""
     rs = releases(desk)
     week = time.time() - 7 * 86400
-    shown = [r for r in rs if r.get("state") in OPEN] + [r for r in rs if r.get("state") not in OPEN
+    shown = [r for r in rs if r.get("state") in OPEN or watch_open(r)] + [r for r in rs if r.get("state") not in OPEN
+                                                           and not watch_open(r)
                                                            and (r.get("ended") or r.get("asked") or 0) >= week][-5:]
     out = []
     for r in shown:
@@ -2053,6 +2196,11 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
                                      "named", "hits", "ended", "without_asking", "since_release", "fixed",
                                      "stop_asked", "stopped_by", "stop_reason", "answered_by", "channel",
                                      "outside", "outside_folders")}
+        if r.get("watch"):
+            row.update(watch=r["watch"], watch_timeout_min=r.get("watch_timeout_min", 90),
+                       watch_run={k: v for k, v in (r.get("watch_run") or {}).items()
+                                  if k in ("state", "exit", "started", "ended", "tail", "problem")},
+                       watch_what=watch_text(r), watch_what_zh=watch_text(r, zh=True))
         row.update({k: r[k] for k in ("direct", "direct_count", "direct_reason", "direct_hold") if k in r})
         c = r.get("code") or {}  # whether a code went out, and when; never the code, nor its hash
         row["code_sent"] = c.get("sent") if code_live(r) else None
