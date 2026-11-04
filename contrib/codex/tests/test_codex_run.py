@@ -53,8 +53,40 @@ class CodexRun(Scratch):
             self.assertIsNone(called["env"][k], k)
         self.assertFalse(os.path.exists(out), "the run's own files are removed")
 
+    def ran_model(self, run):
+        """The model codex was given (-m), and the one the answer's usage is under."""
+        called = self.codex_called()["argv"]
+        self.assertEqual(list(run["modelUsage"]), list(run["usage"]))
+        return called[called.index("-m") + 1], list(run["modelUsage"])
+
+    def test_the_providers_model_runs(self):
+        run, code = self.run_worker("success.jsonl", argv=self.worker_argv(model="gpt-6-astra"))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.ran_model(run), ("gpt-6-astra", ["gpt-6-astra"]))
+        self.assertEqual(list(hansa_run.usage_of(run)), ["gpt-6-astra"])
+
+    def test_the_providers_model_over_the_setting(self):
+        run, _ = self.run_worker("success.jsonl", argv=self.worker_argv(model="gpt-6-astra"),
+                                 HANSA_CODEX_MODEL="gpt-6.1-sol")
+        self.assertEqual(self.ran_model(run), ("gpt-6-astra", ["gpt-6-astra"]))
+
+    def test_the_setting_when_hansa_passes_no_model(self):
+        run, _ = self.run_worker("success.jsonl", argv=self.worker_argv(model=None), HANSA_CODEX_MODEL="gpt-6-astra")
+        self.assertEqual(self.ran_model(run), ("gpt-6-astra", ["gpt-6-astra"]))
+
+    def test_the_default_when_neither(self):
+        run, _ = self.run_worker("success.jsonl", argv=self.worker_argv(model=None))
+        self.assertEqual(self.ran_model(run), (shim.DEFAULT_MODEL, [shim.DEFAULT_MODEL]))
+
+    def test_the_providers_model_not_available(self):
+        run, code = self.run_worker("model_not_found.jsonl", argv=self.worker_argv(model="gpt-6-astra"))
+        self.assertEqual((code, run["subtype"], run["api_error_status"]), (1, "error_during_execution", 404))
+        self.assertIn("model is not available", run["result"])
+        called = self.codex_called()["argv"]
+        self.assertEqual(called[called.index("-m") + 1], "gpt-6-astra")
+
     def test_settings_from_environment_and_effort_from_hansa(self):
-        argv = self.worker_argv(effort="low")
+        argv = self.worker_argv(effort="low", model=None)
         run, _ = self.run_worker("success.jsonl", argv=argv, HANSA_CODEX_MODEL="gpt-x", HANSA_CODEX_EFFORT="medium")
         called = self.codex_called()["argv"]
         self.assertEqual(called[called.index("-m") + 1], "gpt-x")

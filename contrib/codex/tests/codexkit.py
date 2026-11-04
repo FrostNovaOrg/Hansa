@@ -100,10 +100,12 @@ class Scratch(unittest.TestCase):
         env.update(extra)
         return env
 
-    def worker_argv(self, max_turns=300, effort="", box=None):
-        """A worker's command line as hansa's start builds it (run.py), after the program."""
+    def worker_argv(self, max_turns=300, effort="", box=None, model=shim.DEFAULT_MODEL):
+        """A worker's command line as hansa's start builds it (run.py), after the program; `model`, the provider's
+        (None: no --model)."""
         argv = ["-p", "--output-format", "json", "--session-id", self.sid, "--permission-mode", "acceptEdits",
-                "--max-turns", str(max_turns), "--model", "codex", "--append-system-prompt",
+                "--max-turns", str(max_turns), *(("--model", model) if model is not None else ()),
+                "--append-system-prompt",
                 "You are a worker on task t1.\nSay \"done\" when done; C:\\path stays."]
         if effort:
             argv += ["--effort", effort]

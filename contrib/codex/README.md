@@ -40,7 +40,9 @@ boundary, and some of its write denies are globs (below). On Linux srt drops eve
    both, and the default `logs/` here.
 5. **Start the desk with the adapter:** `HANSA_CLAUDE=<checkout>/contrib/codex/bin/claude-or-codex hansa serve`.
 6. **Add a `compatible` provider** (for example `codex`) with base URL `http://codex.invalid`, a key of at least 20
-   random characters, and any model name (the adapter uses `HANSA_CODEX_MODEL`), and put it in a lane's providers.
+   random characters, and as its model the Codex model to run (for example `gpt-6.1-sol`): the adapter gives
+   codex the model hansa passes, so the provider check runs it too and fails, saying the model is not available,
+   when the adapter's login cannot use it. Put the provider in a lane's providers.
    hansa refuses to merge a change that holds a provider's key, checking changed files, images and other binary
    files included: a short or common string can turn up in one by chance.
 
@@ -48,7 +50,7 @@ boundary, and some of its write denies are globs (below). On Linux srt drops eve
 |---|---|---|
 | `HANSA_CODEX_BIN` | the codex program | (required) |
 | `HANSA_CODEX_HOME` | its `CODEX_HOME`, holding the adapter's login | (required) |
-| `HANSA_CODEX_MODEL` | `-m` | `gpt-6.1-sol` |
+| `HANSA_CODEX_MODEL` | `-m` when hansa passes no `--model`; the provider's model, which hansa passes, comes first | `gpt-6.1-sol` |
 | `HANSA_CODEX_EFFORT` | `model_reasoning_effort`; hansa's `--effort` overrides it; either is passed as it is | `high` |
 | `HANSA_CODEX_LOGS` | where each run's `<session-id>.jsonl`, `.err`, `.thread` and `.srt.json` are kept | `logs/` here |
 | `HANSA_CODEX_SRT` | srt | `srt` on the worker's PATH |
