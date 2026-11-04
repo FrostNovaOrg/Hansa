@@ -128,8 +128,8 @@ Check its facts and the names it quotes before you queue it: `hansa help writing
   `srt`): what a check needs from outside is a host on the network list or a folder on the write list
   (`hansa explain lane L` shows both), and a setup that downloads needs its registry on the network
   list. Installing dependencies belongs in the setup, not in the task.
-- A task starts from the base branch as it is at that moment, which can be before you merge the one
-  ahead of it. If a task needs an earlier task's change, queue it after that merge.
+- A task starts from the base as it is then. If it needs an earlier task's change, `hansa add --after T`
+  queues it now and waits for that merge (repeat for several tasks). More: `hansa help queuing`.
 - A task a verification will judge: ask for the use that is needed, give its cases as a table, and
   say for each rare case whether it is refused or accepted as it is; send work back only to narrow
   it. More: `hansa help writing-tasks`.
@@ -373,6 +373,7 @@ loads nothing.
 | `provider-limits` | dropped connections, usage limits |
 | `check-output` | a check's output |
 | `effort` | where a run's effort comes from |
+| `queuing` | queue now and wait for prerequisite merges |
 | `writing-tasks` | a task a verification can judge |
 | `intent-records` | goals, product decisions and reasons; linking tasks and to-dos |
 | `merge-check` | merging, merge checks and lanes, conflicts, sending back |

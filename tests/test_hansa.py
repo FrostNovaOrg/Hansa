@@ -27061,6 +27061,345 @@ def save():'''))
             main(["--desk", str(self.desk.root), "wait", tid, "--timeout", "0.001", "--every", "0.01"])
         self.assertIn(f"no task finished in 0.001 min\n{tid} running 10 min, so far: 2 model replies", out.getvalue())
 
+    def test_add_after_waits_for_queued_running_and_review_without_a_lane(self):
+        from hansa import run
+        self.hansa("lane", "add", "b", "--like", "a")
+        prerequisite = self.desk.new_task("Earlier change", lane="a")
+        tid = self.desk.new_task("Needs earlier change", lane="b", after=[prerequisite])
+        d = Dispatcher(self.desk)
+        for state in ("queued", "running", "done", "merging"):
+            with self.subTest(state=state):
+                self.desk.update(prerequisite, state=state)
+                # Exercise dispatch without launching the prerequisite or recovering the invented run.
+                with unittest.mock.patch.object(d, "recover"), unittest.mock.patch.object(d, "ended"), \
+                        unittest.mock.patch.object(d, "merge_checks"), \
+                        unittest.mock.patch("hansa.run.start", return_value=None) as start:
+                    d.tick()
+                self.assertNotIn(tid, [call.args[1] for call in start.call_args_list])
+                self.assertEqual(self.desk.meta(tid)["state"], "queued")
+                self.assertFalse(run.lane_occupied(self.desk.meta(tid)))
+                row = next(m for m in views.status(self.desk)["queued"] if m["id"] == tid)
+                self.assertIn(prerequisite, row["waiting"])
+                self.assertIn("to be merged", row["waiting"])
+                self.assertIn(row["waiting"], self.hansa("status"))
+                self.assertIn(row["waiting"], self.hansa("show", tid))
+
+    def test_add_after_show_meaning_names_pending_merges(self):
+        first = self.desk.new_task("Earlier change", lane="a")
+        tid = self.hansa("add", "Needs earlier change", "--lane", "a", "--after", first).split()[0]
+        for state in ("queued", "running", "done", "merging"):
+            with self.subTest(state=state):
+                self.desk.update(first, state=state)
+                shown = self.hansa("show", tid)
+                meaning = next(line[len("meaning: "):] for line in shown.splitlines()
+                               if line.startswith("meaning: "))
+                for word in (first, "to be merged", "main"):
+                    self.assertIn(word, meaning)
+                self.assertNotIn("free lane", meaning)
+                self.assertIn(meaning, self.hansa("status"))
+                self.assertIn("waits: " + meaning, shown)
+        self.desk.update(first, state="merged")
+        shown = self.hansa("show", tid)
+        meaning = next(line for line in shown.splitlines() if line.startswith("meaning: "))
+        self.assertIn("free lane", meaning)
+        self.assertNotIn(first, meaning)
+
+    def test_add_after_show_meaning_explains_held_prerequisite(self):
+        for ending in ("closed", "cancelled", "failed"):
+            with self.subTest(ending=ending):
+                first = self.desk.new_task("Earlier change", lane="a")
+                self.desk.update(first, state="failed")
+                latest = self.hansa("retry", first, "Fix").split()[0]
+                tid = self.hansa("add", "Needs fix", "--lane", "a", "--after", first).split()[0]
+                if ending == "closed":
+                    self.desk.update(latest, state="done")
+                    self.hansa("close", latest)
+                elif ending == "cancelled":
+                    self.hansa("cancel", latest)
+                else:
+                    self.desk.update(latest, state="failed")
+                shown = self.hansa("show", tid)
+                meaning = next(line[len("meaning: "):] for line in shown.splitlines()
+                               if line.startswith("meaning: "))
+                for word in ("HELD", first, latest, ending, f"hansa cancel {tid}", f"hansa retry {latest}"):
+                    self.assertIn(word, meaning)
+                self.assertNotIn("free lane", meaning)
+                self.assertIn(meaning, self.hansa("status"))
+                self.assertIn("waits: " + meaning, shown)
+
+    def test_add_after_merge_starts_from_merged_base(self):
+        d = Dispatcher(self.desk)
+        prerequisite = self.desk.new_task("Add hello.txt", lane="a")
+        tid = self.hansa("add", "Build on hello", "--lane", "a", "--after", prerequisite).split()[0]
+        first = self.settle(d, prerequisite)
+        self.assertEqual(first["state"], "done")
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.hansa("merge", prerequisite)
+        merge = self.desk.meta(prerequisite)["merge_commit"]
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "done")
+        self.assertEqual(m["base"], merge)
+        self.assertEqual(self.git_out("show", f"{m['base']}:hello.txt"), f"hello from {prerequisite}")
+
+    def test_add_after_multiple_prerequisites_wait_only_for_unmerged(self):
+        one = self.desk.new_task("First", lane="a")
+        two = self.desk.new_task("Second", lane="a")
+        for tid in (one, two):
+            self.desk.update(tid, state="done")
+        tid = self.hansa("add", "Needs both", "--lane", "a", "--after", one, "--after", two,
+                         "--after", one).split()[0]
+        self.assertEqual(self.desk.meta(tid)["after"], [one, two])
+        self.desk.update(one, state="merged")
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch("hansa.run.start", return_value=None) as start:
+            d.tick()
+            start.assert_not_called()
+            row = next(m for m in views.status(self.desk)["queued"] if m["id"] == tid)
+            self.assertNotIn(one, row["waiting"])
+            self.assertIn(two, row["waiting"])
+            self.desk.update(two, state="merged")
+            d.tick()
+            self.assertEqual([c.args[1] for c in start.call_args_list], [tid])
+
+    def test_add_after_follows_latest_retry_even_across_lanes(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        first = self.desk.new_task("Earlier change", lane="a")
+        self.desk.update(first, state="done")
+        tid = self.hansa("add", "Needs earlier change", "--lane", "a", "--after", first).split()[0]
+        second = self.hansa("retry", first, "Revise", "--lane", "b").split()[0]
+        self.desk.update(second, state="done")
+        latest = self.hansa("retry", second, "Revise again").split()[0]
+        # A verification is a child too, but must not become the prerequisite.
+        self.desk.new_task("Verify", kind="verify", parent=latest, lane="b")
+        why = waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set())
+        self.assertIn(latest, why)
+        self.assertIn(first, why)
+        self.assertNotIn(second, why)
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, latest)["state"], "done")
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.hansa("merge", latest)
+        self.assertEqual(self.settle(d, tid)["base"], self.desk.meta(latest)["merge_commit"])
+
+    def test_add_after_closed_cancelled_and_failed_hold_once_then_recover(self):
+        for ending in ("closed", "cancelled", "failed"):
+            with self.subTest(ending=ending):
+                first = self.desk.new_task("Earlier " + ending, lane="a")
+                tid = self.hansa("add", "Needs " + ending, "--lane", "a", "--after", first).split()[0]
+                if ending == "closed":
+                    self.desk.update(first, state="done")
+                    self.hansa("close", first)
+                elif ending == "cancelled":
+                    self.hansa("cancel", first)
+                else:
+                    self.desk.update(first, state="failed")
+                d = Dispatcher(self.desk)
+                d.tick()
+                Dispatcher(Desk(self.desk.root)).tick()
+                self.assertEqual(self.desk.meta(tid)["state"], "queued")
+                events = [e for e in self.events("task_after_held") if e["task"] == tid]
+                self.assertEqual(len(events), 1)
+                [item] = notify.items_for(self.desk, events, {"key": "k"})
+                for text in (item["line"], self.hansa("status"), self.hansa("show", tid)):
+                    for word in (tid, first, "HELD", ending, f"hansa cancel {tid}", f"hansa retry {first}"):
+                        self.assertIn(word, text)
+                latest = self.hansa("retry", first, "Try again").split()[0]
+                self.assertIn(latest, self.hansa("show", tid))
+                self.assertEqual(notify.items_for(self.desk, events, {"key": "k"}), [])
+                self.assertEqual(self.settle(d, latest)["state"], "done")
+                self.hansa("merge", latest)
+                self.assertEqual(self.settle(d, tid)["state"], "done")
+
+    def test_add_after_latest_retry_failure_names_original_and_latest(self):
+        first = self.desk.new_task("First", lane="a")
+        self.desk.update(first, state="failed")
+        latest = self.hansa("retry", first, "Fix").split()[0]
+        tid = self.hansa("add", "Needs fix", "--after", first).split()[0]
+        self.desk.update(latest, state="failed")
+        Dispatcher(self.desk).tick()
+        [event] = self.events("task_after_held")
+        item = notify._item(self.desk, event)
+        for text in (item[1], self.hansa("status"), self.hansa("show", tid)):
+            for word in (tid, first, latest, "failed", f"hansa retry {latest}"):
+                self.assertIn(word, text)
+
+    def test_add_after_already_merged_and_without_after_dispatch_normally(self):
+        first = self.desk.new_task("Earlier", lane="a")
+        self.desk.update(first, state="merged")
+        for options in (("--after", first), ()):
+            with self.subTest(options=options):
+                tid = self.hansa("add", "Ready", "--lane", "a", *options).split()[0]
+                self.assertNotIn("waiting for " + first, self.hansa("show", tid))
+                self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+                if not options:
+                    self.assertNotIn("after", self.desk.meta(tid))
+
+    def test_add_after_refuses_invalid_tasks_and_targets_without_queueing(self):
+        first = self.desk.new_task("Earlier", lane="a")
+        self.hansa("lane", "add", "b", "--like", "a")
+        unassigned = self.desk.new_task("Unassigned")
+        verification = self.desk.new_task("Verification", kind="verify", lane="a", parent=first)
+        s = self.desk.settings()
+        s["lanes"]["b"]["repo"] = str(self.tmp / "other")
+        self.desk.save_settings(s)
+        for dependency, lane in (("t9999", "a"), ("../a", "a"), (unassigned, "a"),
+                                 (verification, "a"), (first, "b"), (first, "absent")):
+            with self.subTest(dependency=dependency, lane=lane):
+                before = self.desk.tasks()
+                self.assertIn("nothing was queued", self.refused("add", "No", "--lane", lane, "--after", dependency))
+                self.assertEqual(self.desk.tasks(), before)
+        s["lanes"]["b"].update(repo=str(self.repo), base="other")
+        self.desk.save_settings(s)
+        before = self.desk.tasks()
+        self.assertIn("base branch", self.refused("add", "No", "--lane", "b", "--after", first))
+        self.assertIn("nothing was queued", self.refused("add", "No", "--after", first, "--after", "t9999"))
+        for options in (("--after",), ("--after", "")):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.hansa("add", "No", *options)
+        self.assertEqual(self.desk.tasks(), before)
+
+    def test_add_after_cancel_and_retry_keeps_dependencies(self):
+        first = self.desk.new_task("Earlier", lane="a")
+        self.desk.update(first, state="done")
+        tid = self.hansa("add", "Waiting", "--lane", "a", "--after", first).split()[0]
+        self.hansa("cancel", tid)
+        self.assertEqual(self.desk.meta(tid)["state"], "cancelled")
+        latest = self.hansa("retry", tid, "Still needed").split()[0]
+        with unittest.mock.patch("hansa.run.start", return_value=None) as start:
+            Dispatcher(self.desk).tick()
+            start.assert_not_called()
+        self.assertIn(first, self.hansa("show", latest))
+        self.assertEqual(self.desk.meta(latest)["after"], [first])
+
+    def test_add_after_restart_preserves_wait_and_leaves_concurrency_free(self):
+        first = self.desk.new_task("Earlier", lane="a")
+        self.assertEqual(self.settle(Dispatcher(self.desk), first)["state"], "done")
+        tid = self.hansa("add", "Waiting", "--lane", "a", "--after", first).split()[0]
+        Dispatcher(self.desk).tick()
+        self.desk = Desk(self.desk.root)
+        # This is behind the waiting task, on the same lane and the only concurrency slot.
+        free = self.hansa("add", "Independent", "--lane", "a").split()[0]
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, free)["state"], "done")
+        self.assertEqual(self.desk.meta(tid)["after"], [first])
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.hansa("merge", first)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+
+    def test_add_after_auto_lane_uses_only_matching_target(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        first = self.desk.new_task("Earlier", lane="b")
+        self.desk.update(first, state="merged")
+        tid = self.hansa("add", "Waiting", "--after", first).split()[0]
+        s = self.desk.settings()
+        s["lanes"]["a"]["base"] = "other"
+        self.desk.save_settings(s)
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["lane"], "b")
+
+    def test_add_after_unassigned_prerequisites_with_a_known_target(self):
+        first = self.hansa("add", "Earlier").split()[0]
+        second = self.hansa("add", "Needs earlier", "--after", first).split()[0]
+        self.assertEqual(self.desk.meta(second)["after"], [first])
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, first)["state"], "done")
+        self.assertEqual(self.desk.meta(second)["state"], "queued")
+        # Another target makes ordinary unassigned work ambiguous, but second already has its target.
+        self.hansa("lane", "add", "b", "--like", "a")
+        s = self.desk.settings()
+        s["lanes"]["b"]["base"] = "other"
+        self.desk.save_settings(s)
+        third = self.hansa("add", "Needs second", "--after", second).split()[0]
+        self.assertEqual(self.desk.meta(third)["after_target"], self.desk.meta(second)["after_target"])
+        self.hansa("merge", first)
+        self.assertEqual(self.settle(d, second)["state"], "done")
+        self.assertEqual(self.desk.meta(third)["state"], "queued")
+        self.hansa("cancel", third)
+
+    def test_add_after_start_rechecks_latest_retry_before_claiming(self):
+        from hansa import run
+        first = self.desk.new_task("Earlier", lane="a")
+        self.desk.update(first, state="merged")
+        tid = self.hansa("add", "Waiting", "--lane", "a", "--after", first).split()[0]
+        real_start = run.start
+        def start(desk, task, lane, provider):
+            self.hansa("retry", first, "More work")  # between dispatch's read and its claim
+            return real_start(desk, task, lane, provider)
+        with unittest.mock.patch("hansa.run.start", side_effect=start), \
+                unittest.mock.patch("hansa.run.prepare") as prepare:
+            Dispatcher(self.desk).tick()
+            prepare.assert_not_called()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+
+    def test_add_after_saved_target_holds_if_lane_or_merge_target_changes(self):
+        from hansa import run
+        first = self.desk.new_task("Earlier", lane="a")
+        self.desk.update(first, state="merged")
+        tid = self.hansa("add", "Waiting", "--lane", "a", "--after", first).split()[0]
+        s = self.desk.settings()
+        s["lanes"]["a"]["base"] = "other"
+        self.desk.save_settings(s)
+        self.assertIn("dependency repository and base", self.hansa("show", tid))
+        with unittest.mock.patch("hansa.run.prepare") as prepare:
+            self.assertIsNone(run.start(self.desk, tid, "a", "claude"))
+            prepare.assert_not_called()
+        self.hansa("cancel", tid)
+        self.assertIn("dependency repository or base branch changed", self.refused("retry", tid))
+        s["lanes"]["a"]["base"] = "main"
+        self.desk.save_settings(s)
+        tid = self.hansa("retry", tid).split()[0]
+        self.desk.update(first, merge_base="other")
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertIn("merged into another", self.hansa("show", tid))
+
+    def test_add_after_notice_save_failure_does_not_duplicate_after_restart(self):
+        first = self.desk.new_task("Earlier", lane="a")
+        self.desk.update(first, state="failed")
+        tid = self.hansa("add", "Waiting", "--lane", "a", "--after", first).split()[0]
+        with partial_write(self.desk.tasks_dir / tid / "meta.json") as hit, self.assertRaises(OSError):
+            Dispatcher(self.desk).tick()
+        self.assertTrue(hit)
+        self.assertEqual(len(self.events("task_after_held")), 1)
+        Dispatcher(Desk(self.desk.root)).tick()
+        self.assertEqual(len(self.events("task_after_held")), 1)
+        self.assertEqual(self.desk.meta(tid)["after_notified"], [[first, first]])
+
+    def test_add_after_page_wait_and_hold_in_both_languages(self):
+        first = self.desk.new_task("Earlier", lane="a")
+        self.desk.update(first, state="done")
+        tid = self.hansa("add", "Waiting", "--lane", "a", "--after", first).split()[0]
+        latest = self.hansa("retry", first, "Fix").split()[0]
+        for state, error, en, zh in (("queued", "", "to be merged", "合并到"),
+                                     ("failed", "", "failed", "失败"),
+                                     ("cancelled", "", "cancelled", "已取消"),
+                                     ("cancelled", "closed without merging", "closed", "已关闭")):
+            self.desk.update(latest, state=state, error=error)
+            st = views.status(self.desk)
+            for language, [page] in self.picture_pages(st):
+                with self.subTest(state=state, language=language):
+                    text = "".join(page["tables"])
+                    for word in (tid, first, latest):
+                        self.assertIn(word, text)
+                    self.assertIn(en if language == "en" else zh, text)
+                    if state == "queued":
+                        self.assertIn("to be merged" if language == "en" else "合并到", text)
+                    else:
+                        self.assertIn("HELD" if language == "en" else "暂缓", text)
+                        self.assertIn(f"hansa cancel {tid}", text)
+                        self.assertIn(f"hansa retry {latest}", text)
+
+    def test_add_after_help_documents_queuing_and_retries(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as exit:
+            main(["add", "--help"])
+        self.assertEqual(exit.exception.code, 0)
+        for word in ("--after T", "latest retry", "repeat", "repository", "concurrency"):
+            self.assertIn(word, out.getvalue())
+        topic = self.hansa("help", "queuing")
+        for word in ("--after T", "latest follow-up", "restart", "hansa cancel", "hansa retry"):
+            self.assertIn(word, topic)
+
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": ""}

@@ -1386,6 +1386,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         head += f" · {max(0, int(((m.get('finished') or time.time()) - m['started']) // 60))} min"
     if m.get("browser"):
         head += " · with a browser"
+    waiting = {}
+    if m["state"] == "queued":
+        s, states = desk.settings(), desk.provider_state()
+        tasks = desk.tasks()
+        busy = {occupied_lane(t) for t in tasks if lane_occupied(t)} | tried_lanes(desk)
+        waiting = waiting_detail(desk, s, m, busy, waiting_looks(desk, s, tasks))
     verifying = m.get("kind") == "verify"
     meaning = (f"a verification of {m.get('parent')}: a worker ran its change to see whether it holds; never merged"
                if verifying else STATES.get(m["state"], ""))
@@ -1394,6 +1400,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         on = "runs" if m["state"] in ("queued", "running") else "ran"
         meaning += (f"; it {on} on lane {m.get('lane') or 'any'}"
                     + (f", not {m['parent']}'s own lane {own}" if own and own != m.get("lane") else ""))
+    elif waiting.get("waiting_code") == "after":
+        meaning = waiting["waiting"]
     out = [head, f"title: {m['title']}", *task_text_lines(desk, m, full), f"meaning: {meaning}"]
     out += [f"attachment: {a['name']} ({a['size']} bytes)" for a in m.get("attachments", [])]
     if m.get("verify_after"):
@@ -1456,12 +1464,11 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     if limit_wait(desk, m):
         out.append(limit_wait(desk, m))
     if m["state"] == "queued":
-        s, states = desk.settings(), desk.provider_state()
+        out.append("waits: " + waiting["waiting"])
         names = {p for ln in ([m["lane"]] if m.get("lane") else s["lanes"]) if ln in s["lanes"]
                  for p in task_providers(s, ln, m)}
         out += [f"{p}: {provider_problem(desk, s, p)}" for p in sorted(names)
                 if states.get(p, {}).get("shared_rest")]
-        out += [f"waits: {why}"] if (why := desks_list_problem()) else []
     report = report_of(desk, tid)
     if report:
         lines = report.splitlines()

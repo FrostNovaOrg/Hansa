@@ -448,6 +448,14 @@ const T = ZH ? {
   queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", minutes:"分钟",
   waitReasons:{
     paused:() => "派发任务已暂停", no_lanes:() => "设置中没有工作线", no_work_lanes:() => "设置中没有接任务的工作线", slot:() => "等待空位",
+    after:v => v.dependencies.map(d => {
+      const name = d.latest + (d.latest !== d.task ? `（${d.task} 的最新后续任务）` : "");
+      const why = d.why === "closed without merging" ? "已关闭，尚未合并" :
+        ({failed:"失败，尚未合并", cancelled:"已取消，尚未合并", missing:"任务或后续记录缺失", replaced:"后续记录缺失", elsewhere:"合并到了其他仓库或基准分支"}[d.state] || d.why);
+      return d.held ? `暂缓：${name} ${why}；hansa cancel ${v.task}，或 hansa retry ${d.latest}`
+        : `等待 ${name} 合并到 ${v.base}`;
+    }).join("；"),
+    after_lane:v => `工作线 ${v.lane} 不在依赖任务的仓库和基准分支 ${v.base}（${v.repo}）上`,
     disk:v => `磁盘空间低于下限，暂停新任务：${v.volumes.map(x => `${x.mount} 可用 ${x.free}，下限 ${x.floor}，恢复需 ${x.again}`).join("；")}`,
     memory:v => `可用内存 ${v.available} 低于下限 ${v.floor}，暂停新任务，等待恢复到 ${v.again}`,
     ready:v => `工作线 ${v.lane} 和服务商 ${v.provider} 已就绪；` + (v.server === "gone" ? "服务未运行，请运行 hansa up"
@@ -613,6 +621,8 @@ const T = ZH ? {
   queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", minutes:"min",
   waitReasons:{
     paused:() => "dispatch is paused", no_lanes:() => "no lanes in settings", no_work_lanes:() => "no lanes that take work in settings", slot:() => "waiting for a free slot",
+    after:(v, render, text) => text,
+    after_lane:(v, render, text) => text,
     disk:v => `Free disk space is below its floor; new work waits: ${v.volumes.map(x => `${x.mount}: ${x.free} free, floor ${x.floor}, resumes at ${x.again}`).join("; ")}`,
     memory:v => `Available memory ${v.available} is below its floor ${v.floor}; new work waits for ${v.again}`,
     ready:v => `ready for lane ${v.lane} on ${v.provider}; ` + (v.server === "gone" ? "server is not running: run hansa up"
