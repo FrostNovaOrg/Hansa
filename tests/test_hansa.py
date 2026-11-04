@@ -10300,12 +10300,19 @@ def save():'''))
         end = time.time() + 30
         while time.time() < end:
             d.tick()
-            if ready.exists() and pidfile.exists() and pidfile.read_text():
+            if self.desk.meta(work).get("check_started"):
                 break
             time.sleep(0.05)
-        self.assertTrue(ready.exists() and pidfile.exists(), "the new task's check did not become ready")
+        self.assertTrue(self.desk.meta(work).get("check_started"), "the new task's check did not start")
         check_proc = d.procs[work]
         self.addCleanup(lambda: (check_go.touch(), check_proc.wait(timeout=20)))
+        # Let the launcher exit before another tick can record its child through the live parent chain.
+        # The check writes ready after that exit, leaving the unobserved process this test needs.
+        while time.time() < end and not (ready.exists() and pidfile.exists() and pidfile.read_text()):
+            time.sleep(0.05)
+        self.assertTrue(ready.exists() and pidfile.exists() and pidfile.read_text(),
+                        "the new task's check did not become ready")
+        d.record(self.desk.tasks())
         pid, meta = int(pidfile.read_text()), self.desk.meta(work)
         self.assertEqual((meta["state"], meta["phase"]), ("running", "checking"))
         self.assertNotIn(pid, run.run_recorded(meta))
@@ -10320,6 +10327,7 @@ def save():'''))
             d = Dispatcher(Desk(self.desk.root))
         merged = self.settle_merge(d, tid, timeout=30)
         self.assertEqual(merged["state"], "merged", merged)
+        self.assertNotIn(pid, run.run_recorded(merged))
         self.assertEqual(self.desk.meta(work)["state"], "running")
         self.assertEqual((run.alive(pid), [x["pid"] for x in merged.get("left_running") or []],
                           [x["pid"] for x in self.desk.meta(work).get("left_running") or []]), (True, [], []))
