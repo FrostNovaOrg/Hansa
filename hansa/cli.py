@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, alert, build, cost, gaps, goals, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
+from . import account, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
 from .desk import (EFFORTS, Desk, SettingsError, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
@@ -80,6 +80,7 @@ TOPICS = {
     "free-space": ("desk.md", "Free space", "the floor of free space under which hansa serve starts nothing new"),
     "desk-files": ("desk.md", "A desk's files", "where a desk's files are (keys, settings, notes/, PROJECT.md) and "
                    "where they grow"),
+    "settings-changes": ("concepts.md", "Settings history", "who changed each setting, when, and its old and new values"),
     "java": ("java-and-maven.md", None, "Java and Maven in a lane: the proxy, the temporary folder, "
              "mktemp, Maven's 407, Mockito, the lane's settings"),
     "linux-root": ("linux-server.md", "The coordinator as root, the desk as an ordinary account", "on a Linux "
@@ -113,7 +114,7 @@ def answer_lane_refused(name: str) -> str:
             "the principal's answer; nothing was changed")
 
 
-def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> Desk:
+def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "", *, command: str = "hansa init") -> Desk:
     if answer_name(lane):
         raise SystemExit(answer_lane_refused(lane))
     desk = Desk(root)
@@ -144,7 +145,9 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "") -> De
         s["lanes"][lane] = default_lane(repo, base)
         (desk.lanes_dir / lane).mkdir(exist_ok=True)
         write_text(desk.lanes_dir / lane / "brief.md", "")
-    write_json(desk.settings_path, s)
+    with desk.lock():
+        write_json(desk.settings_path, s)
+        history.record(desk, {}, s, "coordinator", command)
     write_text(desk.root / "CLAUDE.md", CARD.read_text(encoding="utf-8"))
     if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; then only hansa notes archive writes it
         write_text(desk.project_path, PROJECT_INTRO)
@@ -1450,6 +1453,14 @@ def cmd_notify_feed(a):
 
 
 def cmd_explain(a):
+    if a.what == "history":
+        if a.all or (a.name and (a.name not in ("lane", "provider") or not a.history_name)) or (
+                a.history_name and not a.name) or (a.last is not None and a.last < 1):
+            raise SystemExit("hansa: hansa explain history [lane L | provider P] [--last N]; N must be at least 1")
+        print(history.text(Desk.find(a.desk), a.name or "", a.history_name or "", a.last))
+        return
+    if a.history_name or a.last is not None:
+        raise SystemExit("hansa: --last and the extra name are for hansa explain history [lane L | provider P]")
     if a.what == "task":
         print(f"hansa explain task {a.name or 'ID'} is now hansa show {a.name or 'ID'}; "
               "this form goes in the next release")
@@ -1986,10 +1997,10 @@ def _save_topic(problem: str) -> str:
     return next((topic for start, topic in SAVE_TOPICS if rest.startswith(start)), "")
 
 
-def _save(desk: Desk, new: dict) -> None:
+def _save(desk: Desk, new: dict, command: str) -> None:
     """Save the coordinator's change, checked as the page's are; on problems print them, with a pointer for each
-    field they are about, and change nothing."""
-    problems = desk.save_settings(new, by="coordinator")
+    field they are about, and change nothing. Callers name their command for settings history."""
+    problems = desk.save_settings(new, by="coordinator", command=command)
     if problems:
         topics = dict.fromkeys(filter(None, map(_save_topic, problems)))
         raise SystemExit("hansa: nothing was changed:\n" + "\n".join(f"  {x}" for x in problems)
@@ -2196,7 +2207,7 @@ def cmd_lane(a):
             elif a.base:
                 lane_base(repo, a.base, "nothing was changed")
             new["lanes"][a.name] = ln
-            _save(desk, new)
+            _save(desk, new, "hansa lane add")
             desk.event("lane_added", lane=a.name, **({"like": a.like} if a.like else {}))
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
             brief = desk.lanes_dir / a.name / "brief.md"
@@ -2209,6 +2220,8 @@ def cmd_lane(a):
                     aside = brief.with_name(f"brief-before-{time.strftime('%Y%m%d-%H%M%S')}.md")
                     write_text(aside, old)
                 write_text(brief, text)
+                history.record(desk, {"lanes": {a.name: {"brief": old}}},
+                               {"lanes": {a.name: {"brief": text}}}, "coordinator", "hansa lane add")
             elif not brief.exists():
                 write_text(brief, "")
             print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
@@ -2276,13 +2289,15 @@ def cmd_lane(a):
             return _lane_target(desk, a, new)
         if a.action == "brief":  # through hansa only: on a server the coordinator's own tools run as root
             brief = desk.lanes_dir / a.name / "brief.md"
+            old = brief.read_text(encoding="utf-8") if brief.is_file() else ""
             if not a.text and not a.file:
-                old = brief.read_text(encoding="utf-8") if brief.is_file() else ""
                 print(old if old.strip() else f"lane {a.name} has no standing instructions")
                 return
             text = _text(a)
             brief.parent.mkdir(parents=True, exist_ok=True)
             write_text(brief, text)
+            history.record(desk, {"lanes": {a.name: {"brief": old}}},
+                           {"lanes": {a.name: {"brief": text}}}, "coordinator", "hansa lane brief")
             desk.event("lane_brief_changed", lane=a.name, new=text)
             print(f"lane {a.name}: standing instructions replaced ({len(text)} characters); "
                   f"every worker in the lane gets them from its next task on")
@@ -2294,7 +2309,7 @@ def cmd_lane(a):
             value = ""
         else:
             new["lanes"][a.name][a.field] = value
-        _save(desk, new)
+        _save(desk, new, "hansa lane set")
         desk.event("lane_set", lane=a.name, field=a.field)
     print(f"lane {a.name} {a.field}: {_shown(old)} -> {_shown(value)}")
     if a.field in OUTSIDE_WORKER and old != value:
@@ -2459,7 +2474,7 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
         del named[a.target]
         if not named:
             ln.pop("targets", None)
-        _save(desk, new)
+        _save(desk, new, "hansa lane target")
         desk.event("lane_set", lane=a.name, field="targets", target=a.target)
         desk.event("lane_command_changed", lane=a.name, field="release", target=a.target, old=old.get("command", ""),
                    new="")
@@ -2522,7 +2537,7 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
             raise SystemExit("hansa: --fixed takes no value (runs from a fixed checkout), or none (runs in the "
                              "repository again). Nothing was changed. " + see_more("release-flow"))
     ln["targets"] = {**named, a.target: t}
-    _save(desk, new)
+    _save(desk, new, "hansa lane target")
     desk.event("lane_set", lane=a.name, field="targets", target=a.target)
     print(f"lane {a.name} release target {a.target}: {_shown(old) if old else 'none'} -> {_shown(t)}")
     if (old or {}).get("command") != t["command"]:
@@ -2633,7 +2648,7 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
                 if not lane["verify_for"]:
                     del lane["verify_for"]
                 verifiers.append(n)
-        _save(desk, new)
+        _save(desk, new, "hansa lane remove")
         print(f"lane {name} removed; its standing instructions stay in {desk.lanes_dir / name}")
         for n in verifiers:
             print(f"lane {name} removed from lane {n}'s verify_for")
@@ -2801,7 +2816,7 @@ def cmd_concurrency(a):
         new = desk.settings()
         old = new["concurrency"]
         new["concurrency"] = a.n
-        _save(desk, new)
+        _save(desk, new, "hansa concurrency")
     print(f"concurrency: {old} -> {a.n}")
 
 
@@ -2844,7 +2859,7 @@ def cmd_disk_floor(a):
         new = desk.settings()
         old = disk.floor(new)
         new["disk_floor"] = gb
-        _save(desk, new)
+        _save(desk, new, "hansa disk-floor")
     print(f"disk floor: {disk.floor_text(old)} -> {disk.floor_text(gb)}"
           + (": hansa serve starts things however little space is free" if not gb else
              f": hansa serve starts nothing new while a volume it writes on has less free, and starts again once each "
@@ -2867,7 +2882,7 @@ def cmd_memory_floor(a):
         new = desk.settings()
         old = memory.floor(new)
         new["memory_floor"] = gb
-        _save(desk, new)
+        _save(desk, new, "hansa memory-floor")
     print(f"memory floor: {disk.floor_text(old)} -> {disk.floor_text(gb)}"
           + (": hansa serve starts things however little memory is available" if not gb else
              f": hansa serve starts nothing new while less memory is available, and starts again at the floor "
@@ -2923,11 +2938,10 @@ def index_text(commands: list, lane_commands: list) -> str:
     """`hansa help` with no word: the commands, a few to a line, then the topics."""
     grouped = [list(names) for _, names in COMMAND_GROUPS]
     grouped[-1] += [x for x in commands if not any(x in g for g in grouped)]
-    shown = {"lane": f"lane ({', '.join(lane_commands)})"}
+    shown = {"lane": f"lane ({', '.join(lane_commands)})", "explain": "explain (history)"}
     return "\n".join([
         "hansa help COMMAND: command help; hansa help TOPIC: one topic; hansa help card: the card; "
         "hansa help topics: all topics.",
-        "Commands:",
         *(f"  {label}: {', '.join(shown.get(x, x) for x in g if x in commands)}"
           for (label, _), g in zip(COMMAND_GROUPS, grouped)),
         topics_text()])
@@ -3304,11 +3318,16 @@ def main(argv=None):
     p.add_argument("--close", type=int, metavar="N", help="close open to-do #N of this desk with its outcome")
     p.epilog = see_more("inbox")
     p = add("explain", cmd_explain, "this desk's current settings and state: lane NAME | provider NAME | "
-            "server | notify")
-    p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "server", "notify"],
-                   metavar="lane | provider | server | notify")
-    p.epilog = "What a task's states mean: hansa help states; hansa help topics lists the other topics."
+            "server | notify; history [lane L | provider P] [--last N] lists settings changes newest first: "
+            "when, who (principal or coordinator's command), path, old → new. Keys and values containing "
+            "known keys are withheld; long values are marked truncated. An empty history says since when "
+            "changes are recorded.")
+    p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "server", "notify", "history"],
+                   metavar="lane | provider | server | notify | history")
+    p.epilog = "More: hansa help settings-changes; task states: hansa help states; other topics: hansa help topics."
     p.add_argument("name", nargs="?")
+    p.add_argument("history_name", nargs="?", metavar="L|P", help="with history lane or history provider: its name")
+    p.add_argument("--last", type=int, metavar="N", help="with history: show the newest N matching changes (default: all)")
     p.add_argument("--all", action="store_true", help="with lane NAME: the whole built-in list of what its workers "
                    "may not read, name by name (without it, how many names it has)")
     p = add("lane", cmd_lane, "list the lanes, or add, change or remove one")

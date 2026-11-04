@@ -4256,6 +4256,351 @@ class LauncherTest(unittest.TestCase):
 
 
 class DeskTest(unittest.TestCase):
+    def history_entries(self):
+        path = self.desk.state_dir / "settings-history.jsonl"
+        self.assertTrue(path.exists(), "settings changes must have a dedicated history")
+        return [e for e in map(json.loads, path.read_text().splitlines()) if "path" in e]
+
+    def test_settings_history_lane_env_cleared(self):
+        self.hansa("lane", "add", "g", "--like", "a")
+        self.hansa("lane", "set", "g", "env", "EXAMPLE=one")
+        before = len(self.history_entries())
+        self.hansa("lane", "set", "g", "env", "none")
+        entries = self.history_entries()[before:]
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["path"], "lanes.g.env")
+        self.assertEqual(entry["old"], {"EXAMPLE": "one"})
+        self.assertEqual(entry["new"], {})
+        self.assertEqual(entry["by"], "coordinator")
+        self.assertEqual(entry["command"], "hansa lane set")
+        self.assertIsInstance(entry["ts"], (int, float))
+
+    def test_settings_history_page_provider_model(self):
+        s = self.desk.settings()
+        old = s["providers"]["claude"]["model"]
+        s["providers"]["claude"]["model"] = "sonnet"
+        before = len(self.history_entries())
+        self.assertTrue(save_from_page(self.desk, {"settings": s, "rev": self.desk.settings_rev()})["ok"])
+        [e] = self.history_entries()[before:]
+        self.assertEqual((e["path"], e["old"], e["new"], e["by"]),
+                         ("providers.claude.model", old, "sonnet", "principal"))
+        self.assertNotIn("command", e)
+
+    def test_settings_history_page_key_changes_never_store_values(self):
+        before = len(self.history_entries())
+        first, second = "sk-history-example-first", "sk-history-example-second"
+        for key in (first, first, second, "", ""):
+            self.desk.write_key("claude", key, by="page")
+        entries = self.history_entries()[before:]
+        self.assertEqual(len(entries), 3)  # add, rotate, remove; identical saves add nothing
+        for e in entries:
+            self.assertEqual((e["path"], e["by"], e["redacted"]), ("providers.claude.key", "principal", True))
+            self.assertNotIn("old", e)
+            self.assertNotIn("new", e)
+        for output in ((self.desk.state_dir / "settings-history.jsonl").read_text(),
+                       self.hansa("explain", "history", "provider", "claude")):
+            self.assertNotIn(first, output)
+            self.assertNotIn(second, output)
+        self.assertIn("changed (values withheld)", output)
+
+    def test_settings_history_check_and_release_commands(self):
+        self.hansa("lane", "set", "a", "check", "python3 old_tests.py")
+        self.hansa("lane", "target", "a", "preview", "sh old_release.sh")
+        before = len(self.history_entries())
+        self.hansa("lane", "set", "a", "check", "python3 new_tests.py")
+        self.hansa("lane", "target", "a", "preview", "sh new_release.sh")
+        check, target = self.history_entries()[before:]
+        self.assertEqual((check["path"], check["old"], check["new"], check["command"]),
+                         ("lanes.a.check", "python3 old_tests.py", "python3 new_tests.py", "hansa lane set"))
+        self.assertEqual((target["path"], target["old"], target["new"], target["command"]),
+                         ("lanes.a.targets.preview.command", "sh old_release.sh", "sh new_release.sh", "hansa lane target"))
+        self.hansa("lane", "target", "a", "preview", "none")
+        e = next(e for e in self.history_entries()[before + 2:] if e["path"].endswith(".command"))
+        self.assertEqual(e["old"], "sh new_release.sh")
+        self.assertTrue(e["new_missing"])
+
+    def test_settings_history_hide_records_the_list(self):
+        before = len(self.history_entries())
+        old = self.desk.settings()["workers_may_not_read"]
+        path = str(self.tmp / "private")
+        self.hansa("hide", path)
+        [e] = self.history_entries()[before:]
+        self.assertEqual((e["path"], e["old"], e["new"], e["command"]),
+                         ("workers_may_not_read", old, old + [path], "hansa hide"))
+        self.hansa("hide", path)
+        self.assertEqual(len(self.history_entries()), before + 1)
+
+    def test_settings_history_noop_refused_and_dry_saves_record_nothing(self):
+        path = self.desk.state_dir / "settings-history.jsonl"
+        before, events = path.read_bytes(), self.desk.events_path.read_bytes()
+        s = self.desk.settings()
+        self.assertTrue(save_from_page(self.desk, {"settings": s})["ok"])
+        self.assertEqual(self.desk.events_path.read_bytes(), events)
+        s["concurrency"] += 1
+        self.assertEqual(self.desk.save_settings(s, dry=True), [])
+        self.assertTrue(self.desk.save_settings(s, rev="stale"))
+        s["concurrency"] = -1
+        self.assertTrue(self.desk.save_settings(s))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_settings_history_known_keys_hide_both_values_before_truncation(self):
+        from hansa.history import VALUE_LIMIT
+        key = "sk-history-hidden-example"
+        self.desk.write_key("claude", key, by="page")
+        before = len(self.history_entries())
+        self.hansa("lane", "set", "a", "env", "EXAMPLE=prefix-" + key + "-suffix")
+        self.hansa("lane", "set", "a", "env", "none")
+        self.hansa("lane", "brief", "a", "x" * (VALUE_LIMIT + 30) + key)
+        token = self.desk.web_token()
+        self.hansa("lane", "set", "a", "env", "EXAMPLE=" + token)
+        for e in self.history_entries()[before:]:
+            self.assertTrue(e["redacted"])
+            self.assertNotIn("old", e)
+            self.assertNotIn("new", e)
+        raw = (self.desk.state_dir / "settings-history.jsonl").read_text()
+        shown = self.hansa("explain", "history")
+        for secret in (key, token):
+            self.assertNotIn(secret, raw)
+            self.assertNotIn(secret, shown)
+
+    def test_settings_history_provider_tokens_and_nested_credentials_are_private(self):
+        from hansa import history
+        before = len(self.history_entries())
+        # Legacy credential fields are refused in new settings, but must remain private in a diff too.
+        with self.desk.lock():
+            history.record(self.desk, {"providers": {"legacy": {"token": "old-token-example"}}},
+                           {"providers": {"legacy": {"token": "new-token-example"}},
+                            "other": ["contains new-token-example"]}, "page")
+            history.record(self.desk, {"list": []}, {"list": [{"api_key": "nested-example"}]}, "page")
+        for e in self.history_entries()[before:]:
+            self.assertTrue(e["redacted"])
+            self.assertNotIn("old", e)
+            self.assertNotIn("new", e)
+
+    def test_settings_history_long_values_are_bounded_and_marked(self):
+        from hansa.history import VALUE_LIMIT
+        before = len(self.history_entries())
+        self.hansa("lane", "brief", "a", "x" * (VALUE_LIMIT + 300))
+        self.hansa("lane", "brief", "a", "short instructions")
+        first, second = self.history_entries()[before:]
+        self.assertEqual(len(first["new"]), VALUE_LIMIT)
+        self.assertTrue(first["new_truncated"])
+        self.assertEqual(second["old"], first["new"])
+        self.assertTrue(second["old_truncated"])
+        self.assertEqual(second["new"], "short instructions")
+        self.assertIn("truncated", self.hansa("explain", "history", "--last", "2"))
+        self.assertEqual(first["command"], "hansa lane brief")
+
+    def test_settings_history_simultaneous_process_changes_both_land(self):
+        before = len(self.history_entries())
+        script = textwrap.dedent("""
+            import sys, time
+            from pathlib import Path
+            from hansa.cli import main
+            import hansa.history
+            hansa.history.now = lambda: 1900000000
+            desk, field, gate = sys.argv[1:]
+            Path(gate + '.' + field).touch()
+            deadline = time.monotonic() + 30
+            while not Path(gate).exists():
+                if time.monotonic() > deadline:
+                    raise RuntimeError('start gate did not open')
+                time.sleep(.01)
+            main(['--desk', desk, 'lane', 'set', 'a', field, 'echo ' + field])
+        """)
+        gate = self.tmp / "go"
+        with contextlib.ExitStack() as stack:
+            processes = [stack.enter_context(subprocess.Popen(
+                [sys.executable, "-c", script, str(self.desk.root), field, str(gate)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)) for field in ("check", "setup")]
+            deadline = time.monotonic() + 30
+            while not all(Path(str(gate) + "." + f).exists() for f in ("check", "setup")):
+                self.assertLess(time.monotonic(), deadline, "both writers must reach the gate")
+                time.sleep(.01)
+            gate.touch()
+            for process in processes:
+                out, err = process.communicate(timeout=40)
+                self.assertEqual(process.returncode, 0, out + err)
+        entries = self.history_entries()[before:]
+        self.assertEqual({e["path"] for e in entries}, {"lanes.a.check", "lanes.a.setup"})
+        self.assertEqual(len(entries), 2)
+        self.assertEqual({e["ts"] for e in entries}, {1900000000})
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["check"], "echo check")
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["setup"], "echo setup")
+
+    def test_settings_history_filters_and_limits_newest_first(self):
+        self.hansa("lane", "add", "g", "--like", "a")
+        self.hansa("lane", "add", "gg", "--like", "a")
+        self.hansa("lane", "set", "g", "check", "echo old")
+        self.hansa("lane", "set", "a", "check", "echo elsewhere")
+        self.hansa("lane", "set", "g", "check", "echo new")
+        self.hansa("lane", "set", "gg", "check", "echo wrong-prefix")
+        shown = self.hansa("explain", "history", "lane", "g", "--last", "2")
+        self.assertEqual(shown.count("lanes.g.check:"), 2)
+        self.assertLess(shown.index('"echo old" → "echo new"'), shown.index('(unset) → "echo old"'))
+        self.assertNotIn("lanes.a.", shown)
+        self.assertNotIn("lanes.gg.", shown)
+        s = self.desk.settings()
+        s["providers"]["claude"]["model"] = "sonnet"
+        self.assertTrue(save_from_page(self.desk, {"settings": s})["ok"])
+        shown = self.hansa("explain", "history", "provider", "claude", "--last", "1")
+        self.assertIn("principal", shown)
+        self.assertIn("providers.claude.model", shown)
+        self.assertNotIn("lanes.", shown)
+
+    def test_settings_history_survives_reopening_and_ignores_event_log(self):
+        from hansa import history
+        self.hansa("concurrency", "2")
+        path = self.desk.state_dir / "settings-history.jsonl"
+        before = path.read_bytes()
+        shown = self.hansa("explain", "history")
+        original_open = Path.open
+        def guard(path, *args, **kwargs):
+            self.assertNotEqual(path, self.desk.events_path, "history must not read the general event log")
+            return original_open(path, *args, **kwargs)
+        with unittest.mock.patch.object(Path, "open", guard):
+            self.assertEqual(history.text(Desk(self.desk.root)), shown.rstrip("\n"))
+        self.hansa("memory-floor", "3")
+        self.assertTrue(path.read_bytes().startswith(before))
+        self.assertIn("hansa concurrency", self.hansa("explain", "history"))
+
+    def test_settings_history_old_desk_records_a_persistent_start(self):
+        from hansa import history
+        root = self.tmp / "old-desk"
+        root.mkdir()
+        desk = Desk(root)
+        write_json(desk.settings_path, self.desk.settings())
+        with unittest.mock.patch("hansa.history.now", return_value=1900000000):
+            shown = history.text(desk)
+        self.assertIn("since 2030-03-17T17:46:40Z", shown)
+        self.assertIn("No settings changes", shown)
+        with unittest.mock.patch("hansa.history.now", return_value=1900000100):
+            self.assertEqual(history.text(Desk(root)), shown)
+        s = desk.settings()
+        s["concurrency"] = 2
+        self.assertEqual(desk.save_settings(s, by="coordinator", command="hansa concurrency"), [])
+        self.assertIn("since 2030-03-17T17:46:40Z", history.text(desk))
+        self.assertIn("concurrency: 1 → 2", history.text(desk))
+
+    def test_settings_history_other_commands_and_lane_lifecycle(self):
+        before = len(self.history_entries())
+        self.hansa("concurrency", "2")
+        self.hansa("disk-floor", "12")
+        self.hansa("memory-floor", "3")
+        for e, field, old, new, command in zip(self.history_entries()[before:],
+                ("concurrency", "disk_floor", "memory_floor"), (1, 10, 2), (2, 12, 3),
+                ("hansa concurrency", "hansa disk-floor", "hansa memory-floor")):
+            self.assertEqual((e["path"], e["old"], e["new"], e["command"]), (field, old, new, command))
+        self.assertEqual(len(self.history_entries()), before + 3)
+        self.hansa("lane", "brief", "a", "Run checks first")
+        before = len(self.history_entries())
+        self.hansa("lane", "add", "g", "--like", "a")
+        added = self.history_entries()[before:]
+        self.assertTrue(all(e["command"] == "hansa lane add" for e in added))
+        self.assertIn("lanes.g.repo", [e["path"] for e in added])
+        self.assertIn("lanes.g.brief", [e["path"] for e in added])
+        before = len(self.history_entries())
+        self.hansa("lane", "remove", "g")
+        removed = self.history_entries()[before:]
+        self.assertTrue(removed)
+        self.assertTrue(all(e["command"] == "hansa lane remove" and e["new_missing"] for e in removed))
+        self.assertIn("lanes.g.repo", [e["path"] for e in removed])
+        self.assertIn("lanes.g.repo", self.hansa("explain", "history", "lane", "g"))
+
+    def test_settings_history_help_and_invalid_arguments(self):
+        with self.assertRaises(SystemExit) as done, contextlib.redirect_stdout(io.StringIO()) as out:
+            main(["explain", "--help"])
+        self.assertEqual(done.exception.code, 0)
+        for word in ("history", "--last", "newest", "principal", "coordinator", "withheld", "truncated", "since"):
+            self.assertIn(word, out.getvalue())
+        for args in (("lane",), ("provider",), ("server",), ("--last", "0"), ("--last", "-1"), ("--all",)):
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                self.hansa("explain", "history", *args)
+        with self.assertRaises(SystemExit):
+            self.hansa("explain", "lane", "a", "--last", "2")
+
+    def test_settings_history_init_and_example_name_the_command(self):
+        self.assertTrue(self.history_entries())
+        self.assertTrue(all(e["command"] == "hansa init" for e in self.history_entries()))
+        from hansa.example import _make_desk
+        desk = _make_desk(self.tmp / "example-desk", self.repo)
+        entries = [e for e in map(json.loads, (desk.state_dir / "settings-history.jsonl").read_text().splitlines())
+                   if "path" in e]
+        self.assertTrue(all(e["command"] == "hansa example" for e in entries))
+        self.assertEqual(entries[-1]["path"], "lanes.a.check")
+
+    def test_settings_history_newly_known_keys_are_hidden_when_listing(self):
+        key = "sk-history-future-example"
+        self.hansa("lane", "brief", "a", "text " + key)
+        path = self.desk.state_dir / "settings-history.jsonl"
+        before = path.read_bytes()
+        self.desk.write_key("claude", key, by="page")
+        self.assertTrue(path.read_bytes().startswith(before))  # existing entries are never rewritten
+        shown = self.hansa("explain", "history", "lane", "a", "--last", "1")
+        self.assertIn("changed (values withheld)", shown)
+        self.assertNotIn(key, shown)
+
+    def test_settings_history_interrupted_append_keeps_later_entries_readable(self):
+        path = self.desk.state_dir / "settings-history.jsonl"
+        with path.open("ab") as out:
+            out.write(b'{"path": "broken\xff')
+        damaged = path.read_bytes()
+        self.hansa("concurrency", "2")
+        self.assertTrue(path.read_bytes().startswith(damaged))
+        shown = self.hansa("explain", "history", "--last", "1")
+        self.assertIn("concurrency: 1 → 2", shown)
+        self.assertNotIn("broken", shown)
+
+    def test_settings_history_interrupted_first_append_keeps_later_entries_readable(self):
+        from hansa import history
+        path = self.desk.state_dir / "settings-history.jsonl"
+        damaged = path.read_bytes().splitlines()[0][:-3]
+        path.write_bytes(damaged)  # first write stopped before even its terminating newline
+        with unittest.mock.patch("hansa.history.now", return_value=1900000000):
+            self.hansa("concurrency", "2")
+        with unittest.mock.patch("hansa.history.now", return_value=1900000100):
+            self.hansa("memory-floor", "3")
+        self.assertTrue(path.read_bytes().startswith(damaged + b"\n"))
+        shown = self.hansa("explain", "history")
+        self.assertIn("since 2030-03-17T17:46:40Z", shown)
+        self.assertIn("coordinator (hansa concurrency)  concurrency: 1 → 2", shown)
+        self.assertIn("coordinator (hansa memory-floor)  memory_floor: 2 → 3", shown)
+        self.assertLess(shown.index("memory_floor:"), shown.index("concurrency:"))
+        self.assertEqual(history.text(Desk(self.desk.root)), shown.rstrip("\n"))
+        limited = self.hansa("explain", "history", "--last", "1")
+        self.assertIn("since 2030-03-17T17:46:40Z", limited)
+        self.assertNotIn("concurrency:", limited)
+
+    def test_settings_history_recording_since_after_entries(self):
+        from hansa.desk import append_event
+        path = self.desk.state_dir / "settings-history.jsonl"
+        path.write_bytes(b'{"recording_since":')
+        with unittest.mock.patch("hansa.history.now", return_value=1900000100):
+            self.hansa("concurrency", "2")
+        append_event(path, json.dumps({"recording_since": 1900000000}))
+        shown = self.hansa("explain", "history")
+        self.assertIn("since 2030-03-17T17:46:40Z", shown)
+        self.assertIn("2030-03-17T17:48:20Z  coordinator (hansa concurrency)", shown)
+        self.assertIn("concurrency: 1 → 2", shown)
+
+    def test_settings_history_only_interrupted_first_append(self):
+        path = self.desk.state_dir / "settings-history.jsonl"
+        path.write_bytes(b'{"recording_since":')
+        with unittest.mock.patch("hansa.history.now", return_value=1900000000):
+            shown = self.hansa("explain", "history")
+        self.assertIn("since 2030-03-17T17:46:40Z", shown)
+        self.assertIn("No settings changes", shown)
+
+    def test_settings_history_preserves_filesystem_bytes_and_unicode(self):
+        command = "sh " + shlex.quote(os.fsdecode(b"publish-\xff.sh"))
+        self.with_release(command)
+        [entry] = [e for e in self.history_entries() if e["path"] == "lanes.a.targets.default.command"]
+        self.assertEqual(entry["new"], command)
+        self.assertIn("publish-\\udcff.sh", self.hansa("explain", "history", "--last", "1"))
+        self.hansa("lane", "brief", "a", "检查完成")
+        self.assertIn("检查完成", self.hansa("explain", "history", "--last", "1"))
+
     def setUp(self):
         started = time.time()
         self.tmp = Path(tempfile.mkdtemp())
@@ -20801,7 +21146,8 @@ def save():'''))
         index = self.hansa_out("help")
         self.assertLessEqual(len(index.splitlines()), 40)
         self.assertNotIn("# The card", index)
-        for name in ("add", "merge", "lane (add, set, target, brief, remove, try)", "disk-floor", "coordinator"):
+        for name in ("add", "merge", "lane (add, set, target, brief, remove, try)", "disk-floor", "coordinator",
+                     "explain (history)"):
             self.assertIn(name, index)
         self.assertNotIn("notify-follow", index)  # the hidden ones stay hidden
         self.assertIn(self.hansa_out("help", "topics"), index)
@@ -33179,7 +33525,7 @@ def save():'''))
                         s = c.desk.settings()
                         s["release_direct"] = "hold"
                         with c.assertRaises(SystemExit) as refused:
-                            cli._save(c.desk, s)
+                            cli._save(c.desk, s, "hansa lane set")
                         c.assertIn("release_direct is the principal's", str(refused.exception))
                         c.assertIn("release_direct is the principal's", " ".join(c.desk.save_settings(s)))
                         c.assertEqual(c.desk.settings_path.read_bytes(), before)

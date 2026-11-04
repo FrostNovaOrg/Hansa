@@ -991,6 +991,8 @@ settings are stored in this file.
 The desk's files are under its directory; see the top of [`hansa/desk.py`](../hansa/desk.py).
 The account's desk list lives outside it, as described [above](#starting-the-server-and-the-coordinator-again).
 A write that fails leaves the previous file, with its permissions, and no temporary file.
+The [settings history](concepts.md#settings-history) is kept separately in
+`.hansa/settings-history.jsonl`; keep it when copying or restoring the desk.
 The event log is only appended to. Readers skip a damaged line, and the next event starts
 on a line of its own. Keys live
 in `secrets/` (mode 600); the OS account running hansa can read them. The worker
@@ -1063,7 +1065,7 @@ with `x` in `hansa menu`, Ctrl-C, or `kill PID`.
 Copy the desk with `cp -a` or `tar -p`: `secrets/` must stay mode 700, its files 600, and hansa does not repair them.
 Copy everything (settings, `tasks/`, `events.jsonl`, `asks.json`, `notes/`, `lanes/`, `PAUSED`, `.claude/`) except
 `worktrees/`, which hansa remakes, and `.hansa/`. From `.hansa/` keep `releases.json`, `releases/`, `attachments/`,
-`alerts.json`, `providers.json` and `claude-*/`; hansa rebuilds the rest.
+`alerts.json`, `providers.json`, `settings-history.jsonl` and `claude-*/`; hansa rebuilds the rest.
 
 On the new machine, install the tools, run `hansa doctor`. Logins are per machine: run `claude auth login`. The
 coordinator's conversation stays behind. Changed paths: `hansa lane set` cannot change `repo`: edit it in

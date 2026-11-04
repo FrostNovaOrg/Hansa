@@ -10,6 +10,7 @@ Layout (everything under one directory):
     notes/               the coordinator's own notes, kept past a cleared session; it writes there without asking
     notes/PROJECT.md     the project's own rules, loaded with the card (it imports them); hansa never writes it after init
     events.jsonl         append-only record of everything that happened
+    .hansa/settings-history.jsonl  append-only settings changes, with keys withheld (hansa explain history)
     asks.json            requests from agents to the principal
     PAUSED               present = no new work starts (holds the reason)
     .hansa/                 runtime state: provider cooling, heartbeat, web token and port, and runs/<id>/
@@ -2686,7 +2687,8 @@ class Desk:
         except OSError:
             return ""
 
-    def save_settings(self, new: dict, by: str = "", rev: str | None = None, dry: bool = False) -> list:
+    def save_settings(self, new: dict, by: str = "", rev: str | None = None, dry: bool = False,
+                      command: str = "") -> list:
         """rev: the settings_rev() the change was made on; a save over newer settings is refused, before any other
         check. dry: only judge it, writing nothing."""
         with self.lock():
@@ -2764,7 +2766,10 @@ class Desk:
                 return problems
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
             write_json(self.settings_path, new)
-        self.event("settings_saved", by=by, changed=changed)
+            from .history import record
+            record(self, old, new, by, command)
+            if changed:
+                self.event("settings_saved", by=by, changed=changed)
         self.ready_news()
         return []
 
@@ -2800,6 +2805,9 @@ class Desk:
                 mailbox_settings(saved)
                 write_json(self.settings_path, {**saved,
                                                 "workers_may_not_read": listed, HIDDEN_BY: hidden})
+                from .history import record
+                record(self, {"workers_may_not_read": s["workers_may_not_read"]},
+                       {"workers_may_not_read": listed}, by, "hansa hide")
         if added:
             self.event("settings_saved", by=by, changed=["workers_may_not_read", HIDDEN_BY])
             self.ready_news()
@@ -2857,12 +2865,16 @@ class Desk:
         return self.key_file(provider).read_text(encoding="utf-8").strip()
 
     def write_key(self, provider: str, value: str, by: str = "") -> None:
+        from .history import record
         f = self.key_file(provider)
         self.secrets_dir.mkdir(mode=0o700, exist_ok=True)
         os.chmod(self.secrets_dir, 0o700)
         if not value.strip():
             with self.lock():
+                old = self.read_key(provider) if f.exists() else ""
                 f.unlink(missing_ok=True)
+                record(self, {"providers": {provider: {"key": old}}},
+                       {"providers": {provider: {"key": ""}}}, by)
             self.event("key_removed", provider=provider, by=by)
             self.ready_news()
             return
@@ -2870,7 +2882,10 @@ class Desk:
         if problem:
             raise ValueError(problem)
         with self.lock():  # a provider check compares and records under the same lock
+            old = self.read_key(provider) if f.exists() else ""
             write_text(f, value.strip() + "\n", mode=0o600, follow_symlinks=False)
+            record(self, {"providers": {provider: {"key": old}}},
+                   {"providers": {provider: {"key": value.strip()}}}, by)
             self.set_provider_state(provider, cool_until=0, credit_since=0, reason="", rest_how="", rest_minutes=None)
             failed = self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)

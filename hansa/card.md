@@ -82,6 +82,7 @@ they show what is merged, missing evidence and released; `show` also gives the g
 | `hansa wait [id ...] [--timeout MIN]` | return when a task ends; with no tasks to watch, return at once |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart new work (running tasks finish) |
 | `hansa explain [lane L [--all] \| provider P \| server \| notify]` | settings and state, and where each comes from |
+| `hansa explain history [lane L \| provider P] [--last N]` | settings changes, newest first; more: `hansa help settings-changes` |
 | `hansa lane` | one line per lane |
 | `hansa lane add L --repo PATH [--check "<cmd>"] [--setup "<cmd>"] [...]` | a new lane on a git checkout |
 | `hansa lane add L --like OTHER [...]` | a copy of lane OTHER: read the setup and check it copied |
@@ -384,6 +385,7 @@ loads nothing.
 | `bringing-up` | starting the server and the coordinator again, the account's desk list |
 | `free-space` | the disk floor |
 | `desk-files` | a desk's files, where they grow |
+| `settings-changes` | who changed each setting, when, and its old and new values |
 | `java` | Java and Maven |
 | `linux-root` | the coordinator as root |
 | `linux-sandbox` | Linux's sandbox for lane commands |
