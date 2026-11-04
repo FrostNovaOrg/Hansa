@@ -10,6 +10,47 @@ home (`.hansa/claude-<provider>` for compatible providers): `{"replies": 3, "las
 `last` is epoch seconds. Missing, unreadable or malformed progress means no reply yet. Notes are redacted and
 cut to 160 characters. Codex counts commands and file changes as replies.
 
+## Goals and product decisions
+
+Record each goal the principal gives and each product decision as said. Hansa keeps the records;
+the coordinator supplies the text, reason and who took the decision. After a clear or compaction,
+read `hansa goal list` and `hansa goal show G` before going on. `hansa help intent-records` prints
+this section.
+
+| Command | What it records or shows |
+|---|---|
+| `hansa goal add "<title>" [--why "<what the principal asked, in their words>"]` | a new open goal; prints `g1`, `g2`, … |
+| `hansa goal list [--all]` | one line per open goal: id, title, task counts and open to-do count; `--all` includes done and dropped goals with their outcome |
+| `hansa goal show G` | the goal, current decisions newest first (reason, who, time, task), replaced decisions naming their replacement, latest task in each retry chain with state and round count, and open to-dos |
+| `hansa goal done G "<outcome>"` | ends an open goal as done, keeping its outcome |
+| `hansa goal drop G "<why>"` | ends an open goal as dropped, keeping the reason |
+| `hansa decide "<decision>" --why "<reason>" [--goal G] [--by principal\|coordinator\|assumption] [--task T] [--replaces D]` | a decision; prints `d1`, `d2`, …; `--by` defaults to `coordinator`; `assumption` means still to be confirmed |
+| `hansa decisions [--goal G] [--grep TEXT] [--all]` | current decisions newest first; `--all` includes replaced ones; `--grep` matches decision or reason, ignoring case |
+| `hansa add "<task>" --goal G` | queues a task tied to the goal; `hansa retry` and `hansa verify`, including automatic verification, keep its goal |
+| `hansa ask "<what>" --goal G` | ties a new principal to-do to the goal; closing it removes it from the goal's open to-dos |
+
+Task counts use the latest task in each retry chain: queued/running, waiting for review (`done`
+or `merging`), merged and failed. Cancelled tasks stay in `show` but do not add to these counts.
+Verifications appear as verifications of their task, without counting the product work twice.
+`hansa status` shows at most five open goals with the same counts and points to `hansa goal list`
+for the rest. With no goals it adds no goal lines. Ended goals remain readable with `show`,
+`list --all` and `decisions --goal G`.
+
+New links require an open goal, including retries and verifications of linked tasks. `--task`
+requires an existing task. `--replaces D` requires a current decision; if it was already replaced,
+the refusal names its replacement. A decision is never edited or deleted: record a change of mind
+as a new decision with `--replaces D`. Pass `--goal G` on the new decision to keep it under that goal.
+These reference checks prevent recording work under a missing or ended goal or overwriting a change
+of mind; they remain needed while these commands accept references.
+
+The append-only entries live under `.hansa/intent/`, separate from `notes/`. Each new goal,
+decision, goal ending and decision replacement is a new entry, published atomically under the desk
+lock; earlier entries are unchanged. Hansa supplies the time and writing session, as for tasks.
+Text holding a known provider key is refused before anything is recorded, to keep keys out of
+the record; this check remains needed while the coordinator can supply text. Goals and decisions
+are internal records and do not undergo the release word scan. No goal page or goal evidence is
+collected here; reports, checks, merges and releases remain on their tasks.
+
 ## Time limits, and work left running in the background
 
 New lanes stop at 200 turns; saved lanes keep their limits (`hansa lane set L max_turns 200` lowers one).
