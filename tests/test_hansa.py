@@ -37615,11 +37615,14 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                         self.assertIn("CI <&> result", page["status"])
 
     def test_documented_github_watch_retries_absent_runs_and_network_errors_for_the_pushed_commit(self):
+        from hansa import release
         guide = (Path(__file__).resolve().parent.parent / "docs" / "releases.md").read_text()
         example = guide.split("### Watching CI after a push", 1)[1].split("```sh\n", 1)[1].split("```", 1)[0]
         args = shlex.split(example)
         self.assertEqual(args[:6], ["hansa", "lane", "target", "L", "NAME", "--watch"])
         calls = self.tmp / "gh-calls.json"
+        scenario = self.tmp / "gh-scenario.json"
+        clock = self.tmp / "gh-clock"
         fake = self.tmp / "bin" / "gh"
         fake.write_text(f'''#!{sys.executable}
 import json, pathlib, sys
@@ -37627,33 +37630,90 @@ p = pathlib.Path({str(calls)!r})
 calls = json.loads(p.read_text()) if p.exists() else []
 calls.append(sys.argv[1:])
 p.write_text(json.dumps(calls))
-if sys.argv[1:3] == ["run", "list"]:
-    if len(calls) == 1:
-        print("network unavailable", file=sys.stderr)
-        sys.exit(1)
-    if len(calls) == 2:
-        sys.exit(0)
+command = " ".join(sys.argv[1:3])
+steps = json.loads(pathlib.Path({str(scenario)!r}).read_text())[command]
+step = steps[min(sum(1 for c in calls if " ".join(c[:2]) == command), len(steps)) - 1]
+if step == "network":
+    print("network unavailable", file=sys.stderr)
+    sys.exit(1)
+if step == "empty":
+    sys.exit(0)
+if step == "42":
     print("42")
+elif command == "run watch":
+    sys.exit(0)  # without --exit-status gh ends 0 once the run ends, whatever its conclusion
 else:
-    sys.exit(7)
+    print("" if step == "running" else step)
 ''')
         fake.chmod(0o755)
         # Retry immediately in the fixture; the example itself keeps its ten-second poll interval.
         fake_sleep = self.tmp / "bin" / "sleep"
-        fake_sleep.write_text("#!/bin/sh\nexit 0\n")
+        fake_sleep.write_text(f"#!/bin/sh\nn=$(cat {shlex.quote(str(clock))} 2>/dev/null || echo 0)\n"
+                              f"echo $(( n + 1 )) > {shlex.quote(str(clock))}\n")
         fake_sleep.chmod(0o755)
+        fake_date = self.tmp / "bin" / "date"  # the five-minute wait passes in the fixture without real waiting
+        fake_date.write_text(f"#!/bin/sh\nn=$(cat {shlex.quote(str(clock))} 2>/dev/null || echo 0)\n"
+                             f"echo $(( 1000000 + n * 10 ))\n")
+        fake_date.chmod(0o755)
         self.with_targets(push="true")
         self.hansa("lane", "target", "a", "push", *args[5:])
         self.tick_targets("push")
-        self.hansa("release", "a", "push")
-        w = self.settle_watch(Dispatcher(self.desk), 1)
-        self.assertEqual((w["state"], w["exit"]), ("failed", 7))
-        from hansa import release
-        sha = release.get(self.desk, 1)["commit"]
-        recorded = json.loads(calls.read_text())
-        self.assertEqual(len(recorded), 4)
-        self.assertTrue(all(c[c.index("--commit") + 1] == sha for c in recorded[:3]))
-        self.assertEqual(recorded[-1], ["run", "watch", "42", "--exit-status"])
+        d = Dispatcher(self.desk)
+
+        def prepare(rid, lists, watches, views):
+            """Have the fake gh do these, in turn, for the next release's run list, watch and view calls."""
+            calls.unlink(missing_ok=True)
+            clock.write_text("0")
+            scenario.write_text(json.dumps({"run list": lists, "run watch": watches, "run view": views}))
+            self.hansa("release", "a", "push")
+            self.assertTrue(release.get(self.desk, rid))
+
+        def log_of(rid):
+            return (release.log_dir(self.desk) / f"{rid}.watch.log").read_text()
+
+        def recorded():
+            return json.loads(calls.read_text()) if calls.exists() else []
+
+        with self.subTest("the run appears at once and ends in success"):
+            prepare(1, ["42"], ["success"], ["success"])
+            w = self.settle_watch(d, 1)
+            self.assertEqual((w["state"], w["exit"]), ("passed", 0))
+
+        with self.subTest("the run ends in failure"):
+            prepare(2, ["42"], ["failure"], ["failure"])
+            w = self.settle_watch(d, 2)
+            self.assertEqual(w["state"], "failed")
+            self.assertNotEqual(w["exit"], 0)
+            self.assertIn("failure", log_of(2))
+
+        with self.subTest("one network error while the run is going, then the run ends in success"):
+            prepare(3, ["42"], ["network", "success"], ["success"])
+            w = self.settle_watch(d, 3)
+            self.assertEqual((w["state"], w["exit"]), ("passed", 0))
+            watched = [c for c in recorded() if c[:2] == ["run", "watch"]]
+            self.assertEqual([c[:3] for c in watched], [["run", "watch", "42"]] * 2)
+
+        with self.subTest("a network error, then nothing, then the run while it appears (as before)"):
+            prepare(4, ["network", "empty", "42"], ["failure"], ["failure"])
+            w = self.settle_watch(d, 4)
+            self.assertEqual(w["state"], "failed")
+            self.assertNotEqual(w["exit"], 0)
+            self.assertIn("failure", log_of(4))
+            sha = release.get(self.desk, 4)["commit"]
+            listed = [c for c in recorded() if c[:2] == ["run", "list"]]
+            self.assertEqual(len(listed), 3)
+            self.assertTrue(all(c[c.index("--commit") + 1] == sha for c in listed))
+            self.assertEqual([c[:3] for c in recorded() if c[:2] == ["run", "watch"]],
+                             [["run", "watch", "42"]])
+
+        with self.subTest("no run within five minutes"):
+            prepare(5, ["empty"], ["success"], ["success"])
+            w = self.settle_watch(d, 5)
+            self.assertEqual((w["state"], w["exit"]), ("failed", 1))
+            self.assertIn("No CI run appeared within five minutes", log_of(5))
+            seen = recorded()
+            self.assertTrue(seen)
+            self.assertTrue(all(c[:2] == ["run", "list"] for c in seen))
 
     def test_release_watch_changes_void_waiting_releases_and_invalidate_ticks(self):
         from hansa import release
