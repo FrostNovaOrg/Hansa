@@ -33497,12 +33497,15 @@ if (ask === "tunnel-polls") (async () => {
   const shownAt = run("statusLastGood");
   const picture = run("statusPicture"), panels = picture.kids.slice();
   const shown = ids["#tab-status"].textContent;
+  const header = () => JSON.stringify(descendants(ids["#state-list"], "li").map(el => ({text:el.textContent, tone:el.className})));
+  const shownHeader = header();
   for (const expected of [5000, 10000, 20000, 40000, 60000, 60000]) {
     await advance(delay());
     check(delay() === expected, "wrong retry delay: " + delay() + " expected " + expected);
     delays.push(delay());
     check(run("statusPicture") === picture && panels.every((panel, i) => picture.kids[i] === panel), "failed poll replaced the last status panels");
     check(ids["#tab-status"].textContent === shown, "failed poll changed the last status");
+    check(header() === shownHeader && ids["#state-text"].className !== "bad", "failed poll replaced the last header status");
     check(run("statusLastGood") === shownAt, "failed poll moved the data timestamp");
     const notice = ids["#status-connection"];
     check(!notice.hidden && notice.textContent.includes(run("ZH ? '重新连接' : 'Reconnecting'")), "missing reconnect notice");
@@ -33675,6 +33678,7 @@ else if (ask.startsWith("status-picture")) (async () => {
     }
     return {rows, lists, laneCount:descendants(ids["#status-lanes"], "span").find(el => el.className === "count-badge")?.textContent,
       text:root.textContent, state:ids["#state-list"].textContent,
+      header:{text:ids["#state-text"].textContent, tone:ids["#state-text"].className},
       warnings:descendants(ids["#state-list"], "li").filter(el => el.className === "warn").map(el => el.textContent),
       events:descendants(root, "div").filter(el => el.className === "event-row").map(el => ({text:el.textContent,
         time:descendants(el, "span").find(n => n.className === "event-time")?.textContent,
@@ -36336,6 +36340,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertEqual(failed["boxes"], shown["boxes"])
             self.assertEqual(failed["rows"], shown["rows"])
             self.assertEqual(failed["text"], shown["text"])
+            self.assertEqual(failed["state"], shown["state"])
+            self.assertEqual(failed["header"], shown["header"])
             self.assertFalse(failed["alerts"])
             self.assertFalse(failed["connection"]["hidden"])
             self.assertEqual(failed["connection"]["lastGood"], shown["connection"]["lastGood"])
@@ -36358,6 +36364,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertEqual(pages[0]["first"], "status-picture")
             self.assertFalse(pages[0]["boxes"])
             self.assertEqual(pages[0]["alerts"], ["status connection lost"] * 2)
+            self.assertEqual(pages[0]["header"], {"text": "status connection lost", "tone": "bad"})
             self.assertFalse(pages[0]["connection"]["hidden"])
             self.assertEqual(pages[0]["connection"]["lastGood"], 0)
             self.assertIn("No data received yet" if language == "en" else "尚未收到数据", pages[0]["connection"]["text"])
@@ -36372,6 +36379,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertIn("events connection lost", shown["text"])
             self.assertEqual(shown["connection"]["lastGood"], 0)
             self.assertEqual(shown["text"], failed["text"])
+            self.assertEqual(shown["state"], failed["state"])
+            self.assertEqual(shown["header"], failed["header"])
             self.assertEqual(shown["boxes"], failed["boxes"])
             self.assertEqual(shown["rows"], failed["rows"])
             self.assertFalse(failed["alerts"])

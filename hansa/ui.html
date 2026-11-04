@@ -1457,8 +1457,12 @@ async function renderStatus(force) {
   const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
   if (status.status === "rejected") {
     const e = status.reason;
-    if (!statusShown) pictureError(String(e.message || e));
-    err(e); throw e;
+    if (!statusShown) {
+      pictureError(String(e.message || e));
+      err(e); throw e;
+    }
+    // Keep callers' error handlers from replacing the last header status too.
+    return false;
   }
   const st = status.value, ev = events.status === "fulfilled" ? events.value : [];
   const name = st.desk.split("/").filter(Boolean).slice(-2).join("/") || "/";

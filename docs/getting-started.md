@@ -195,12 +195,6 @@ Replace each `8766` with the actual port. Open the printed URL locally and keep
 the tunnel terminal open; closing it ends page access. Keep the server's default
 `127.0.0.1` binding; open no inbound network ports beyond SSH.
 
-If the tunnel drops, Status keeps showing the last status it received. The
-reconnect notice gives the time of the last successful update. Before any status
-arrives, the panels show the error and the notice says no data has been received
-yet. The page retries with increasing delays and refreshes when the connection
-returns.
-
 `ServerAliveInterval=30` checks every 30 seconds; `ServerAliveCountMax=3`
 disconnects after three unanswered checks. `ExitOnForwardFailure=yes` exits if
 forwarding fails. Install `autossh` locally and run it separately to reopen
