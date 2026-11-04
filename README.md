@@ -38,6 +38,8 @@ hansa
 
 If your shell cannot find `hansa`, add the `export PATH` line the installer printed.
 
+Or open Claude Code on that machine and ask it to follow [SETUP.md](SETUP.md): it sets Hansa up with you, one question at a time.
+
 `~/shop/repo` is your project's git repository and needs at least one commit; `~/shop/desk` is the new desk, holding your team's settings and tasks. [Getting started](docs/getting-started.md) covers the rest.
 
 ## How it works
