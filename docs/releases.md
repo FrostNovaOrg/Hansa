@@ -143,11 +143,11 @@ the tick.
 
 For GitHub Actions, this example watches the push run of `tests.yml` for the
 exact pushed commit. It retries empty results and network errors for five
-minutes while the run appears, then uses `gh` to wait for its result, trying
-again after a network error until the run ends: it exits 0 when the run
-succeeded and otherwise non-zero, printing the conclusion. Set the workflow to
-the repository's CI workflow; `gh` uses the desk account's login.
-Single quotes keep `$HANSA_RELEASE_COMMIT` for the watch to expand:
+minutes while the run appears, then uses `gh` to wait for its result and read
+its conclusion, trying again after a network error at either step: it exits
+0 when the run succeeded and otherwise non-zero, printing the conclusion.
+Set the workflow to the repository's CI workflow; `gh` uses the desk account's
+login. Single quotes keep `$HANSA_RELEASE_COMMIT` for the watch to expand:
 
 ```sh
 hansa lane target L NAME --watch '
@@ -161,7 +161,10 @@ while :; do
   gh run watch "$run" && break
   sleep 10
 done
-conclusion=$(gh run view "$run" --json conclusion --jq ".conclusion")
+while :; do
+  conclusion=$(gh run view "$run" --json conclusion --jq ".conclusion") && break
+  sleep 10
+done
 [ "$conclusion" = success ] || { echo "CI run $run: $conclusion"; exit 1; }
 '
 ```

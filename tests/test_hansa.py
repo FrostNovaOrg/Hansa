@@ -37715,6 +37715,13 @@ else:
             self.assertTrue(seen)
             self.assertTrue(all(c[:2] == ["run", "list"] for c in seen))
 
+        with self.subTest("a network error reading the conclusion, then it succeeds"):
+            prepare(6, ["42"], ["success"], ["network", "success"])
+            w = self.settle_watch(d, 6)
+            self.assertEqual((w["state"], w["exit"]), ("passed", 0))
+            viewed = [c for c in recorded() if c[:2] == ["run", "view"]]
+            self.assertEqual([c[:3] for c in viewed], [["run", "view", "42"]] * 2)
+
     def test_release_watch_changes_void_waiting_releases_and_invalidate_ticks(self):
         from hansa import release
         self.with_targets(push="true")
