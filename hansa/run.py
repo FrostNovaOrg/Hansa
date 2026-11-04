@@ -6364,14 +6364,9 @@ def lock_held(desk: Desk):
 
 
 def _exists(pid, start: str) -> bool:
-    """alive(), but a process of another account (not ours to signal) counts as there while its start, where it
-    can be read (/proc on Linux, for any process), is the one serve.lock names."""
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        return same_start(pid, start)
-    except OSError:
-        return False
+    """Whether the process serve.lock names still runs, by alive()'s rule: a process of another account (not ours
+    to signal) counts as there while its start, where it can be read (/proc on Linux, for any process), is the one
+    serve.lock names, and a lookup that fails for another reason is not its end."""
     return alive(pid, start)
 
 
