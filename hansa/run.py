@@ -34,7 +34,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import account, build, installed, installed_text, session_vars, without_session
-from .desk import (DENY_AT, HANSA_IDENTITY, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
+from .desk import (DENY_AT, HANSA_IDENTITY, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
                    refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, program_candidates,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
@@ -4958,12 +4958,12 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
                                         else desk.redact(f"merging it into {name} failed ({str(e)[:200]})"),
                                         "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
             return None
-        m = desk.update(tid, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
+        m = desk.update(tid, state="merged", merged=now(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
                         merge_repo=str(Path(repo).resolve()), merge_base=name,
                         merge_check=None, merge_check_result=None, unverified=unverified_note(desk, m) or None,
                         merge_message_note=message_fallback(lane, m["lane"], "merge_message") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
-    desk.event("task_merged", task=tid, into=name, waited=True, onto=tip,
+    desk.event("task_merged", ts=m["merged"], task=tid, into=name, waited=True, onto=tip,
                **({"despite_check": True} if mc.get("despite_check") or unchecked else {}),
                **({"merge_not_checked": True} if unchecked else {}))
     return None
@@ -5219,7 +5219,7 @@ def record_batch_landing(desk: Desk, saved: dict, journal: Path) -> dict:
                         merge_repo=saved["repo"], merge_base=saved["base"], merge_check_result=own,
                         unverified=unverified_note(desk, m) or None, merge_message_note=entry["message_note"] or None)
         close_verification(desk, m, f"closed: {member} was merged")
-        desk.event("task_merged", task=member, into=saved["base"], merge_checked=True, onto=entry["onto"],
+        desk.event("task_merged", ts=m["merged"], task=member, into=saved["base"], merge_checked=True, onto=entry["onto"],
                    command=result["command"], members=result["batch"], check_task=tid,
                    **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     journal.unlink(missing_ok=True)
@@ -5334,12 +5334,12 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
         if why:
             return end_merge_check(desk, tid, {**result, "ok": False, "note": f"its merge passed the check, but {why}; "
                                                                               "nothing was merged"})
-        m = desk.update(tid, state="merged", merged=time.time(), merge_commit=result["commit"], merge_check=None,
+        m = desk.update(tid, state="merged", merged=now(), merge_commit=result["commit"], merge_check=None,
                         merge_repo=str(Path(repo).resolve()), merge_base=name,
                         merge_check_result=result, unverified=unverified_note(desk, m) or None,
                         merge_message_note=result.get("message_note") or mc.get("message_note") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
-    desk.event("task_merged", task=tid, into=name, merge_checked=True, onto=result["onto"],
+    desk.event("task_merged", ts=m["merged"], task=tid, into=name, merge_checked=True, onto=result["onto"],
                **({"command": result["command"]} if result.get("command") else {}),
                **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     return m
@@ -5719,6 +5719,7 @@ class Dispatcher:
         self.held = {}  # (lane, group) whose runs' sandbox could not start: the desk's settings then (sandbox_waits)
         self.sandbox_seen = set()  # runs (by session) with a Bash call that succeeded: nothing more to look for
         self.retried = False  # whether the held lanes' sandbox was tried again as this server started (sandbox_retry)
+        self.ends_recovered = False  # saved task ends whose event an earlier server did not get to write
         self.swept = 0.0  # when it last swept hansa's leftover empty folders in the temporary folder (sweep_tmp)
         self.trimmed = 0.0  # when this server last trimmed what old tasks kept (disk.trim)
         self.look_error = None  # the error of its look of free space while that fails as a whole (disk.look_failed)
@@ -5732,6 +5733,76 @@ class Dispatcher:
         if self.read is None or self.read[0] != self.desk.writes:
             self.read = (self.desk.writes, self.desk.tasks())
         return self.read[1]
+
+    def recover_ends(self) -> None:
+        """Repair the save/event gap once at startup. Only the hour before the log's newest event (and later)
+        needs recovery; read its tail once, rather than the whole history for every ended task. The saved end's
+        time keeps alerts and the page from treating a restart as the time the task ended."""
+        desk = self.desk
+        latest, newest = {}, 0
+        try:
+            source = open(desk.events_path, "rb")
+        except FileNotFoundError:
+            source = None
+        if source:
+            with source:
+                pos, pending, past = source.seek(0, os.SEEK_END), b"", False
+                while pos and not past:
+                    size = min(pos, 65536)
+                    pos -= size
+                    source.seek(pos)
+                    lines = (source.read(size) + pending).split(b"\n")
+                    pending = lines.pop(0) if pos else b""
+                    for line in reversed(lines):
+                        e = event_record(line)
+                        if not e or not isinstance(e.get("ts"), (int, float)) or not math.isfinite(e["ts"]):
+                            continue
+                        newest = max(newest, e["ts"])
+                        if e["ts"] < newest - 3600:
+                            past = True
+                            break
+                        if e.get("event") == "task_finished" and e.get("state") in ("queued", "checking"):
+                            continue  # a run handed to another try or its check has not ended the task
+                        key = (e.get("task"), e.get("event"))
+                        latest[key] = max(latest.get(key, 0), e["ts"])
+
+        def missing(m, kind, at, **fields):
+            if at is None or at < newest - 3600:
+                return
+            kinds = ("task_finished", "task_checked", "task_not_started") \
+                if kind in ("task_finished", "task_checked", "task_not_started") else (kind,)
+            if kind == "task_finished" and m["state"] == "cancelled":
+                kinds += ("task_cancel",)  # a queued cancel already recorded this end without task_finished
+            recorded = max(latest.get((m["id"], k), -1) for k in kinds)
+            # Older merges saved an unrounded clock value; their events used millisecond precision.
+            # Keep accepting those until no such saved end is in the recovery window.
+            if recorded < (round(at, 3) if kind == "task_merged" else at):
+                desk.event(kind, ts=at, task=m["id"], **fields)
+
+        for m in self.tasks():
+            if m["state"] in ("done", "failed", "cancelled"):
+                check = m.get("check") or {}
+                if check:
+                    missing(m, "task_checked", m.get("finished"),
+                            **{k: check.get(k) for k in ("ok", "exit", "note")},
+                            **({"could_not_run": True} if check.get("could_not_run") else {}))
+                elif (m.get("error") or "").startswith("could not start:"):
+                    missing(m, "task_not_started", m.get("finished"), error=m["error"])
+                else:
+                    missing(m, "task_finished", m.get("finished"), state=m["state"],
+                            provider=m.get("provider"), error=m.get("error", ""))
+            result = m.get("merge_check_result") or {}
+            if m["state"] == "done" and not m.get("merge_check") and result:
+                missing(m, "merge_check_ended", result.get("at"), ok=False, note=result.get("note", "cancelled"),
+                        **({"waited": True} if result.get("waited") else {}),
+                        **({"command": result["command"]} if result.get("command") else {}))
+            elif m["state"] == "merged" and result:
+                missing(m, "task_merged", m.get("merged"), into=m.get("merge_base"), merge_checked=True,
+                        onto=result.get("onto", ""),
+                        **({"command": result["command"]} if result.get("command") else {}),
+                        **({"members": result["batch"], "check_task": result.get("output_task")}
+                           if result.get("batch") else {}))
+        self.ends_recovered = True
 
     def sandbox_waits(self, ln: str, s: dict) -> bool:
         """Whether a lane's tasks wait for their sandbox: held by this server (hold)
@@ -6195,6 +6266,9 @@ class Dispatcher:
         with serve_step():
             desk.state_dir.mkdir(exist_ok=True)
             beat(desk)
+        with serve_step():
+            if not self.ends_recovered:
+                self.recover_ends()
         with serve_step():
             self.rests(s)
         with serve_step():
