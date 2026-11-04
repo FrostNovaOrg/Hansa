@@ -13,20 +13,28 @@ a web page for the principal (the person directing the work), and task workers. 
 - Queue work on lanes, each with its own git worktree, providers, instructions and limits.
   Several lanes can work at once; the coordinator sets concurrency and decides what to merge.
   Workers change files and report; hansa commits their work and cleans up processes.
+  Workers try changes as their user would and report what a page or command showed before and after.
+  They leave alone what the task says to leave.
   Leftover processes are also found by their working folder and stopped before the commit and check.
+- `hansa add --after T` queues work that starts only after T is merged into its lane's base.
+  See [queuing after another task](docs/tasks.md#queuing-after-another-task).
 - When hansa cannot inspect a process, its task keeps running and its lane stays taken.
 - Retry with a note, updating from the base or moving lanes on the same repository and base; findings carry over.
 - Request verification by another worker, optionally on another lane or model. `add --verify`
   and `retry --verify` queue it after a passing check, or with no check, for completed work
   with changes. “Holds, with notes” permits merging; saved notes can be tracked as known gaps.
+  `hansa gaps` gives each unmarked note its marking command.
+  Notes under a plain `Notes:` line are split into separate [known gaps](docs/tasks.md#merging-the-merge-check-and-conflicts).
 - Session notifications bring results to the coordinator. `hansa ask` keeps the principal's to-dos;
   answers happen in conversation and the coordinator records the outcome. `hansa wait` waits
   for tasks only. See [task handling](docs/tasks.md).
   Lines refused by the coordinator's session are posted once it accepts again.
   Continued refusals alert the principal.
-  Server startup writes missing events for task ends saved before a stop, so the coordinator hears of them.
+  Server startup writes missing events for saved task ends even after a long stop, without writing any twice.
 - `hansa goal` and `hansa decide` record the principal's goals and reasons for product choices.
-  Tasks tie to goals. See [goals and decisions](docs/tasks.md#goals-and-product-decisions).
+  Tasks tie to goals.
+  `hansa goal show` lists each goal's checks, verdicts, merges, releases and what is missing.
+  `hansa cost --by goal` shows each goal's cost. See [goals and decisions](docs/tasks.md#goals-and-product-decisions).
 
 ### The sandbox
 
@@ -76,6 +84,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 - English and Chinese views show the pipeline, active lanes, waiting decisions and searchable tasks.
   Task details show each step, reports, checks and verification. Notes and known gaps are readable.
+- The Goals tab shows each goal's decisions, its work's checks, merges and releases, what is missing and its cost.
+  See [goals on the page](docs/desk.md#status-work-and-cost-on-the-web-page).
 - Work and cost includes a work calendar, lane timeline, outcomes, token usage and CSV export.
   All attempts count; whole history includes identifiable coordinator and helper sessions, including
   recorded working folders outside the desk. Missing usage and unpriced models are explained.
