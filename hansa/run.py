@@ -4951,12 +4951,12 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
                                         else desk.redact(f"merging it into {name} failed ({str(e)[:200]})"),
                                         "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
             return None
-        m = desk.update(tid, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
+        m = desk.update(tid, state="merged", merged=now(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
                         merge_repo=str(Path(repo).resolve()), merge_base=name,
                         merge_check=None, merge_check_result=None, unverified=unverified_note(desk, m) or None,
                         merge_message_note=message_fallback(lane, m["lane"], "merge_message") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
-    desk.event("task_merged", task=tid, into=name, waited=True, onto=tip,
+    desk.event("task_merged", ts=m["merged"], task=tid, into=name, waited=True, onto=tip,
                **({"despite_check": True} if mc.get("despite_check") or unchecked else {}),
                **({"merge_not_checked": True} if unchecked else {}))
     return None
@@ -5212,7 +5212,7 @@ def record_batch_landing(desk: Desk, saved: dict, journal: Path) -> dict:
                         merge_repo=saved["repo"], merge_base=saved["base"], merge_check_result=own,
                         unverified=unverified_note(desk, m) or None, merge_message_note=entry["message_note"] or None)
         close_verification(desk, m, f"closed: {member} was merged")
-        desk.event("task_merged", task=member, into=saved["base"], merge_checked=True, onto=entry["onto"],
+        desk.event("task_merged", ts=m["merged"], task=member, into=saved["base"], merge_checked=True, onto=entry["onto"],
                    command=result["command"], members=result["batch"], check_task=tid,
                    **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     journal.unlink(missing_ok=True)
@@ -5327,12 +5327,12 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
         if why:
             return end_merge_check(desk, tid, {**result, "ok": False, "note": f"its merge passed the check, but {why}; "
                                                                               "nothing was merged"})
-        m = desk.update(tid, state="merged", merged=time.time(), merge_commit=result["commit"], merge_check=None,
+        m = desk.update(tid, state="merged", merged=now(), merge_commit=result["commit"], merge_check=None,
                         merge_repo=str(Path(repo).resolve()), merge_base=name,
                         merge_check_result=result, unverified=unverified_note(desk, m) or None,
                         merge_message_note=result.get("message_note") or mc.get("message_note") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
-    desk.event("task_merged", task=tid, into=name, merge_checked=True, onto=result["onto"],
+    desk.event("task_merged", ts=m["merged"], task=tid, into=name, merge_checked=True, onto=result["onto"],
                **({"command": result["command"]} if result.get("command") else {}),
                **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     return m
@@ -5756,8 +5756,12 @@ class Dispatcher:
                 return
             kinds = ("task_finished", "task_checked", "task_not_started") \
                 if kind in ("task_finished", "task_checked", "task_not_started") else (kind,)
+            if kind == "task_finished" and m["state"] == "cancelled":
+                kinds += ("task_cancel",)  # a queued cancel already recorded this end without task_finished
             recorded = max(latest.get((m["id"], k), -1) for k in kinds)
-            if recorded < at:
+            # Older merges saved an unrounded clock value; their events used millisecond precision.
+            # Keep accepting those until no such saved end is in the recovery window.
+            if recorded < (round(at, 3) if kind == "task_merged" else at):
                 desk.event(kind, ts=at, task=m["id"], **fields)
 
         for m in self.tasks():

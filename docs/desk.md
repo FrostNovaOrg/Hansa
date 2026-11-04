@@ -1037,8 +1037,10 @@ L` per lane, then `hansa resume`. Success: `hansa status` and `hansa desks` show
 When `hansa serve` starts, it repairs a task end saved just before the server stopped without writing
 its event. This includes verifications, task checks and merge checks: the usual follower then posts
 the end, and the event list and review alerts can see it. Recovery keeps the saved end time and
-fields, and leaves existing end events alone, including on a second restart. To keep startup quick,
-it checks saved ends from the hour before the newest event in the log, or later; it does not recreate
+fields, and leaves existing end events alone, including on a second restart. A queued task's recorded
+cancellation already counts as its end; recovery adds no separate end event. Merge records and their
+events share the saved timestamp; recovery also recognizes older merges' rounded event times. To keep
+startup quick, it checks saved ends from the hour before the newest event in the log, or later; it does not recreate
 missing task-added events or release ends. This repair is needed while saving an end and appending
 its event are separate writes; it can go when both become one durable operation.
 

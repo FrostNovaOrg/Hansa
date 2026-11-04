@@ -711,12 +711,12 @@ def cmd_merge(a):
             raise SystemExit(desk.redact(conflict_advice(a.id, base, places, str(e)[:300])))
         note = unverified_note(desk, m)  # before its verification is closed
         said = message_fallback(lane, m["lane"], "merge_message")
-        desk.update(a.id, state="merged", merged=time.time(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
-                    merge_repo=release.repo_key(repo), merge_base=base,
-                    unverified=note or None, merge_message_note=said or None)
+        m = desk.update(a.id, state="merged", merged=now(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
+                        merge_repo=release.repo_key(repo), merge_base=base,
+                        unverified=note or None, merge_message_note=said or None)
         close_verification(desk, m, f"closed: {a.id} was merged")
     despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
-    desk.event("task_merged", task=a.id, into=base, **({"despite_check": True} if despite else {}),
+    desk.event("task_merged", ts=m["merged"], task=a.id, into=base, **({"despite_check": True} if despite else {}),
                **({"merge_not_checked": True} if unchecked else {}))
     print(f"{a.id} merged into {base} at {repo}" + (f" (without checking it together with what {base} gained "
                                                      f"since it was made)" if why_check == "moved" else

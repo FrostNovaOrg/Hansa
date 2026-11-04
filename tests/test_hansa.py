@@ -15942,6 +15942,102 @@ def save():'''))
         Dispatcher(self.desk).recover_ends()
         self.assertEqual(notify.log_end(self.desk), pos)
 
+    def test_startup_preserves_merge_events_rounded_before_the_saved_time(self):
+        self.desk.pause("hold queued work")
+        at = int(now()) - 60 + 0.0004
+        for checked in (False, True):
+            tid = self.desk.new_task(f"Merged with check: {checked}")
+            self.desk.update(tid, state="merged", merged=at, merge_base="main",
+                             merge_check_result={"ok": checked, "at": at - 1, "onto": "old-tip"})
+            self.desk.event("task_merged", ts=round(at, 3), task=tid, into="main",
+                            **({"merge_checked": True} if checked else {}))
+        before = self.desk.events_path.read_bytes()
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).tick()
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.desk.events_path.read_bytes(), before)
+        feed = notify.handle(self.desk, {"op": "feed", "me": {"key": "5252-0123abcd", "session": None},
+                                         "pos": pos, "done": pos})
+        self.assertEqual(feed["items"], [])
+
+    def test_startup_preserves_a_queued_tasks_cancel_without_posting_an_end(self):
+        owner = {"pid": 4242, "start": "boot:77"}
+        other = {"pid": 4343, "start": "boot:88"}
+        tid = self.desk.new_task("Cancel before it starts", session=owner)
+        with unittest.mock.patch.object(notify, "session_here", return_value=owner):
+            self.hansa("cancel", tid)
+        self.assertEqual(self.desk.meta(tid)["state"], "cancelled")
+        self.assertEqual([e["task"] for e in self.events("task_cancel")], [tid])
+        self.assertEqual(self.events("task_finished"), [])
+        before = self.desk.events_path.read_bytes()
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).tick()
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.desk.events_path.read_bytes(), before)
+        for sess in (owner, other):
+            feed = notify.handle(self.desk, {"op": "feed", "me": {"key": "5252-0123abcd", "session": sess},
+                                             "pos": pos, "done": pos})
+            self.assertEqual(feed["items"], [])
+
+    def test_startup_repairs_cancelled_claims_without_a_current_cancel_event(self):
+        at = now() - 60
+        tids = []
+        for earlier_cancel in (False, True):
+            tid = self.desk.new_task(f"Cancelled claim with older cancel: {earlier_cancel}")
+            tids.append(tid)
+            self.desk.update(tid, state="cancelled", finished=at, error="cancelled before it started")
+            if earlier_cancel:
+                self.desk.event("task_cancel", ts=at - 1, task=tid)
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.events("task_finished"), [
+            {"event": "task_finished", "ts": at, "task": tid, "state": "cancelled", "provider": None,
+             "error": "cancelled before it started"} for tid in tids])
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).tick()
+        self.assertEqual(notify.log_end(self.desk), pos)
+
+    def test_startup_merge_writes_use_the_saved_time_for_the_event(self):
+        from hansa import run
+        for path in ("immediate", "waited", "checked", "batch"):
+            with self.subTest(path=path):
+                _, tid = self.merge_check_lane()
+                m = self.desk.meta(tid)
+                lane = self.desk.settings()["lanes"]["a"]
+                onto = self.git_out("rev-parse", "main")
+                result = {"ok": True, "at": now(), "onto": onto, "commit": m["head"], "command": "true"}
+                if path != "immediate":
+                    self.desk.update(tid, state="merging", merge_check={"phase": "queued", "plain": True})
+                clock = [int(now()) + 0.0004]
+                saved_at = round(clock[0], 3)
+                update = Desk.update
+
+                def save_then_time_passes(desk, *args, **fields):
+                    saved = update(desk, *args, **fields)
+                    if fields.get("state") == "merged":
+                        clock[0] += 0.007  # closing verifications can take time before the event is written
+                    return saved
+
+                with unittest.mock.patch.object(time, "time", side_effect=lambda: clock[0]), \
+                        unittest.mock.patch.object(Desk, "update", autospec=True, side_effect=save_then_time_passes):
+                    if path == "immediate":
+                        self.hansa("merge", tid)
+                    elif path == "waited":
+                        run.plain_merge(self.desk, tid, lane)
+                    elif path == "checked":
+                        run.land_merge(self.desk, tid, result)
+                    else:
+                        result.update(batch=[tid], batch_commits=[{"task": tid, "onto": onto,
+                                                                  "commit": m["head"], "message_note": ""}])
+                        run.record_batch_landing(self.desk, {"result": result, "leader": tid,
+                                                            "repo": lane["repo"], "base": "main"},
+                                                 self.tmp / "landing.json")
+                [event] = [e for e in self.events("task_merged") if e["task"] == tid]
+                self.assertEqual(self.desk.meta(tid)["merged"], saved_at)
+                self.assertEqual(event["ts"], saved_at)
+                pos = notify.log_end(self.desk)
+                Dispatcher(self.desk).recover_ends()
+                self.assertEqual(notify.log_end(self.desk), pos)
+
     def test_startup_repairs_waited_merge_ends_and_retries_a_failed_event_write(self):
         at = now() - 60
         for i in range(2):
