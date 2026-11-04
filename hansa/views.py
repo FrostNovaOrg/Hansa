@@ -2057,7 +2057,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "  now: " + (", ".join(who) if who else "no session"),
             *[f"  {x}" for x in up.card_lines(desk, up.read_coordinator(desk))]])
     return "\n".join([
-        "What you can look up: hansa explain lane <name> | provider <name> | server | notify",
+        "What you can look up: hansa explain lane <name> | provider <name> | server | notify | history",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
         f"coordinator: {s['coordinator']['provider']} ({s['coordinator']['model']})",
         "Providers, models, endpoints, keys, effort defaults and prices belong to the principal (web page). "

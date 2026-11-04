@@ -94,6 +94,48 @@ lists commands and topics, and `hansa help <topic>` prints one from `docs/`.
 | `hansa ask "<what>"` | Record a to-do for the principal; close it with `--close N "<outcome>"` |
 | `hansa cost [--by day\|seat\|lane\|task\|model\|provider]` | Tokens, and what they are worth at the principal's prices |
 | `hansa explain [lane L \| provider P \| server \| notify]` | This desk's current settings and state, and where each comes from |
+| `hansa explain history [lane L \| provider P] [--last N]` | Who changed each setting, when, and its old and new values |
+
+## Settings history
+
+`hansa explain history` lists settings changes newest first, with UTC time,
+who made the change, its path, and old → new. Page saves are attributed to the
+principal; coordinator changes name the command, such as `hansa lane set`.
+`hansa explain history lane g` limits the list to lane g, including its release
+targets and standing instructions. `hansa explain history provider astra`
+limits it to that provider, including key changes. `--last N` shows the newest
+N matching entries; without it, all matching entries are shown. Removed lanes
+and providers can still be looked up.
+
+Each changed setting gets one entry: `lanes.g.env`,
+`providers.astra.model`, or `lanes.g.targets.preview.command`, for example.
+Lists and a lane's environment dictionary are kept as whole values, so
+clearing an environment shows its old variables → `{}`. Added or removed
+settings show `(unset)` on the absent side. A lane's standing instructions
+use `lanes.g.brief`. The provenance kept beside the no-read list is not a
+second setting change. Saves that change nothing, refused saves, and dry
+validation add no history.
+
+All settings writers record changes: the page, `hansa init`, `hansa example`,
+`hansa lane add/set/remove/target/brief`, `hansa hide`, `hansa concurrency`,
+`hansa disk-floor`, and `hansa memory-floor`. This records changes made through
+hansa; edits made directly to files are not observed.
+
+Provider keys and tokens show only `changed (values withheld)`, with neither
+value stored. If either value contains a key hansa knows, both are withheld.
+This check happens before shortening a value, including within lists and
+dictionaries. Other values are kept up to 2,048 characters of their JSON
+spelling; longer values explicitly say `truncated`. Listing also withholds
+values containing a key hansa knows now.
+
+History is appended under the desk lock to `.hansa/settings-history.jsonl`,
+separate from `events.jsonl`, so simultaneous changes both land and listing
+history never reads the activity log. The file survives server restarts;
+keep it when copying or restoring a desk. Its first line records when this
+history began: desk creation, or the first recorded change or history lookup
+after upgrading an older desk. The command always shows that time, including
+when there are no entries yet. Earlier changes cannot be reconstructed from
+the old events.
 
 ## Upgrading and going back
 

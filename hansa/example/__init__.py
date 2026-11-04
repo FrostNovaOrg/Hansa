@@ -99,10 +99,10 @@ def _make_repo(root: Path, repo: Path) -> Path:
 
 def _make_desk(root: Path, repo: Path):
     from ..cli import init_desk
-    desk = init_desk(root, str(repo), "a")
+    desk = init_desk(root, str(repo), "a", command="hansa example")
     settings = desk.settings()
     settings["lanes"]["a"]["check"] = CHECK
-    problems = desk.save_settings(settings, by="coordinator")
+    problems = desk.save_settings(settings, by="coordinator", command="hansa example")
     if problems:
         raise RuntimeError("; ".join(problems))
     shutil.copyfile(SAMPLE / "first-task.md", desk.notes_dir / "first-task.md")
