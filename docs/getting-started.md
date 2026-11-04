@@ -172,7 +172,7 @@ After a restart, open the desk menu from your computer, forwarding the page
 ports you need (here 8765 and 8766):
 
 ```sh
-ssh -t -L 8765:127.0.0.1:8765 -L 8766:127.0.0.1:8766 HOST '"$HOME/.local/bin/hansa"'
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -t -L 8765:127.0.0.1:8765 -L 8766:127.0.0.1:8766 HOST '"$HOME/.local/bin/hansa"'
 ```
 
 Select desks with Space, press `s` to start them, Enter to open a coordinator,
@@ -188,12 +188,22 @@ Find the page's port (initially 8765) through `hansa status`,
 If the actual port is **8766**, run this from your own computer:
 
 ```sh
-ssh -L 127.0.0.1:8766:127.0.0.1:8766 my-server '"$HOME/.local/bin/hansa" --desk "$HOME/shop/desk" web'
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -L 127.0.0.1:8766:127.0.0.1:8766 my-server '"$HOME/.local/bin/hansa" --desk "$HOME/shop/desk" web'
 ```
 
 Replace each `8766` with the actual port. Open the printed URL locally and keep
 the tunnel terminal open; closing it ends page access. Keep the server's default
 `127.0.0.1` binding; open no inbound network ports beyond SSH.
+
+`ServerAliveInterval=30` checks the connection every 30 seconds;
+`ServerAliveCountMax=3` closes it after three unanswered checks.
+`ExitOnForwardFailure=yes` stops SSH if it cannot open the forwarding port.
+For a tunnel that reopens itself after a connection drops, install `autossh`
+locally and run it separately, with the same keepalive options:
+
+```sh
+autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -L 127.0.0.1:8766:127.0.0.1:8766 my-server
+```
 
 ## When something goes wrong
 

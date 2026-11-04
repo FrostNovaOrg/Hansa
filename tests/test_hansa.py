@@ -27162,13 +27162,14 @@ def save():'''))
             self.assertEqual((row["step"], row["bars"][0]["value"]), ("check", "8"))
             self.assertIn("1 min so far (8 min in all)" if language == "en" else "检查已跑 1 分钟（一共 8 分钟）", row["text"])
 
-    def web_request(self, path, *, method="GET", headers=None, data=b""):
+    def web_request(self, path, *, method="GET", headers=None, data=b"", raw=False):
         """Run the real request handler and response writer without opening a socket."""
         from hansa import web
         with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
                 unittest.mock.patch.object(web.threading, "Thread"):
             start_web(self.desk, "127.0.0.1", 0)
         page = object.__new__(server.call_args.args[1])
+        page.command = method
         page.path = path
         page.headers = {"Content-Length": str(len(data)), **(headers or {})}
         page.rfile, page.wfile = io.BytesIO(data), io.BytesIO()
@@ -27177,9 +27178,186 @@ def save():'''))
         code = page.send_response.call_args.args[0]
         outgoing = dict(call.args for call in page.send_header.call_args_list)
         body = page.wfile.getvalue()
-        if outgoing["Content-Type"].startswith("application/json"):
+        if not raw and outgoing.get("Content-Encoding") == "gzip":
+            import gzip
+            body = gzip.decompress(body)
+        if not raw and body and outgoing["Content-Type"].startswith("application/json"):
             body = json.loads(body)
         return code, body, outgoing
+
+    def test_web_gzip_negotiation_and_lengths(self):
+        import gzip
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        for path in ("/", "/api/status", "/api/events", "/api/settings", "/missing"):
+            _, plain, _ = self.web_request(path, headers=auth, raw=True)
+            for accept in ("gzip", "br, GZip; q=0.5", "*;q=1"):
+                with self.subTest(path=path, accept=accept):
+                    _, body, headers = self.web_request(path, headers={**auth, "Accept-Encoding": accept}, raw=True)
+                    self.assertEqual(headers.get("Content-Encoding"), "gzip")
+                    self.assertEqual(int(headers["Content-Length"]), len(body))
+                    self.assertEqual(gzip.decompress(body), plain)
+                    self.assertIn("Accept-Encoding", headers["Vary"])
+            for accept in ("", "br", "gzip;q=0", "gzip;q=0, *;q=1", "gzip;q=invalid"):
+                with self.subTest(path=path, accept=accept):
+                    _, body, headers = self.web_request(path, headers={**auth, "Accept-Encoding": accept}, raw=True)
+                    self.assertNotIn("Content-Encoding", headers)
+                    self.assertEqual(int(headers["Content-Length"]), len(body))
+                    self.assertEqual(body, plain)
+
+    def test_web_page_etag_revalidates_public_shell_and_changes_with_file(self):
+        from hansa import web
+        token = self.desk.web_token()
+        code, body, headers = self.web_request("/?t=" + token, raw=True)
+        self.assertEqual(code, 200)
+        self.assertNotIn(token.encode(), body)
+        self.assertEqual(headers["Cache-Control"], "private, no-cache")
+        for encoding in ("", "gzip"):
+            code, body, checked = self.web_request("/", headers={"If-None-Match": headers["ETag"],
+                                                               "Accept-Encoding": encoding}, raw=True)
+            self.assertEqual((code, body), (304, b""))
+            self.assertEqual(checked["ETag"], headers["ETag"])
+            # A 304 has no body and must not claim its zero-byte body is the representation's length.
+            self.assertNotIn("Content-Length", checked)
+        with unittest.mock.patch.object(web, "UI", unittest.mock.Mock(read_bytes=lambda: b"changed public shell")):
+            code, body, changed = self.web_request("/", headers={"If-None-Match": headers["ETag"]}, raw=True)
+        self.assertEqual((code, body), (200, b"changed public shell"))
+        self.assertNotEqual(changed["ETag"], headers["ETag"])
+
+    def test_web_poll_etags_change_with_data_and_never_bypass_auth(self):
+        from hansa import web
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        status = views.status(self.desk)
+        events = [{"event": "task_added", "task": "t0001"}]
+        for path, target, reply in (("/api/status", "views.status", status),
+                                     ("/api/events", "_events", events)):
+            with unittest.mock.patch("hansa.web." + target, return_value=reply):
+                code, body, headers = self.web_request(path, headers=auth)
+                self.assertEqual((code, body), (200, reply))
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                tag = headers["ETag"]
+                for condition in (tag, tag.removeprefix("W/"), '"other", ' + tag, "*"):
+                    code, body, checked = self.web_request(path, headers={**auth, "If-None-Match": condition}, raw=True)
+                    self.assertEqual((code, body), (304, b""))
+                    self.assertEqual(checked["Cache-Control"], "no-store")
+                for credentials in ({}, {"Authorization": "Bearer wrong"}):
+                    self.assertEqual(self.web_request(path, headers={**credentials, "If-None-Match": tag})[0], 403)
+            changed = {**status, "paused": "changed"} if path.endswith("status") else events + [{"event": "paused"}]
+            with unittest.mock.patch("hansa.web." + target, return_value=changed):
+                code, body, headers = self.web_request(path, headers={**auth, "If-None-Match": tag})
+                self.assertEqual((code, body), (200, changed))
+                self.assertNotEqual(headers["ETag"], tag)
+
+    def test_web_posts_are_no_store_and_never_conditional(self):
+        import gzip
+        from hansa import web
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1",
+                "If-None-Match": "*", "Accept-Encoding": "gzip"}
+        cases = [("/api/pause", {}, None), ("/api/resume", {}, None),
+                 ("/api/settings", {"settings": {}}, "_save_settings"),
+                 ("/api/key", {"provider": "mimo", "key": ""}, "desk.write_key"),
+                 ("/api/provider/top-up", {"provider": "mimo"}, "_top_up_provider"),
+                 ("/api/check", {"provider": "mimo"}, "check_provider"),
+                 ("/api/release/answer", {"id": 1, "yes": True}, "release.answer"),
+                 ("/api/release/stop", {"id": 1}, "release.stop_release"),
+                 ("/api/alert/test", {}, "alert.test"), ("/missing", {}, None)]
+        for path, data, target in cases:
+            patch = (unittest.mock.patch.object(self.desk, "write_key") if target == "desk.write_key" else
+                     unittest.mock.patch("hansa.web." + target, return_value={"ok": True}) if target else
+                     contextlib.nullcontext())
+            with self.subTest(path=path), patch:
+                code, body, headers = self.web_request(path, method="POST", headers=auth,
+                                                     data=json.dumps(data).encode(), raw=True)
+                self.assertEqual(code, 404 if path == "/missing" else 200)
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                self.assertNotIn("ETag", headers)
+                self.assertTrue(json.loads(gzip.decompress(body)))
+                self.assertEqual(len(body), int(headers["Content-Length"]))
+
+    def test_web_http11_reuses_connection_and_frames_responses_without_ports(self):
+        from hansa import web
+        import http.client
+        with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
+                unittest.mock.patch.object(web.threading, "Thread"):
+            start_web(self.desk, "127.0.0.1", 0)
+        handler = server.call_args.args[1]
+        token = self.desk.web_token()
+
+        class Buffer(io.BytesIO):
+            def close(self):
+                pass
+
+        class Wire:
+            def __init__(self, requests):
+                self.input, self.output = Buffer(requests), Buffer()
+
+            def makefile(self, *args):
+                return self.input
+
+            def sendall(self, data):
+                self.output.write(data)
+
+        def exchange(requests):
+            wire = Wire(requests)
+            handler(wire, ("127.0.0.1", 12345), server.return_value)
+            return Wire(wire.output.getvalue())
+
+        request = f"GET /api/events HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n".encode()
+        wire = exchange(request + request)
+        for _ in range(2):
+            response = http.client.HTTPResponse(wire)
+            response.begin()
+            self.assertEqual((response.version, response.status), (11, 200))
+            self.assertFalse(response.will_close)
+            body = response.read()
+            self.assertEqual(len(body), int(response.getheader("Content-Length")))
+            self.assertIsInstance(json.loads(body), list)
+        # A bodyless 304 must also leave the following response at the correct byte.
+        tag = response.getheader("ETag")
+        checked = request.replace(b"\r\n\r\n", ("\r\nIf-None-Match: " + tag + "\r\n\r\n").encode())
+        wire = exchange(checked + request)
+        for code in (304, 200):
+            response = http.client.HTTPResponse(wire)
+            response.begin()
+            self.assertEqual(response.status, code)
+            self.assertEqual(bool(response.read()), code == 200)
+        post = (f"POST /api/pause HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n"
+                "X-Hansa: 1\r\nContent-Length: 2\r\n\r\n{}").encode()
+        wire = exchange(post + request)
+        for _ in range(2):
+            response = http.client.HTTPResponse(wire)
+            response.begin()
+            self.assertEqual(response.status, 200)
+            response.read()
+        self.assertTrue(self.desk.paused())
+        # Refusing a POST before reading its body must close, rather than interpret that body as a request.
+        cases = [("", 403)] + [(f"Authorization: Bearer {token}\r\nX-Hansa: 1\r\n" + framing, 400)
+                              for framing in ("Content-Length: -1\r\n", "Content-Length: invalid\r\n",
+                                              "Transfer-Encoding: chunked\r\n")]
+        for extra, code in cases:
+            wire = exchange(("POST /api/pause HTTP/1.1\r\nHost: localhost\r\n" + extra + "\r\n{}").encode() + request)
+            response = http.client.HTTPResponse(wire)
+            response.begin()
+            self.assertEqual(response.status, code)
+            self.assertEqual(response.getheader("Connection"), "close")
+            response.read()
+            self.assertEqual(wire.input.read(), b"")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_tunnel_polls_back_off_revalidate_and_recover_in_both_languages(self):
+        from hansa import web
+        harness = self.tmp / "tunnel-polls.js"
+        harness.write_text(self.PAGE_HARNESS)
+        replies = {"/api/status": views.status(self.desk), "/api/events": [],
+                   "pagePreferences": {"session": {"hansa.token": "example-page-key"}}}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(web.UI), "tunnel-polls", language],
+                                        input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                output = json.loads(result.stdout)
+                self.assertTrue(output["ok"])
+                self.assertTrue(output["lastGood"])
+                self.assertEqual(output["delays"], [5000, 10000, 20000, 40000, 60000, 60000])
 
     def known_gap_records(self):
         from hansa import gaps
@@ -32352,6 +32530,7 @@ const ids = {};
 const descendants = (root, tag) => !root ? [] : root.kids.flatMap(child => child instanceof El
   ? [...(child.tag === tag ? [child] : []), ...descendants(child, tag)] : []);
 const document = {createElement: t => new El(t), createElementNS: (namespace, t) => new El(t),
+  addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
   createTextNode: s => new Text(s), title: "", body: new El("body"), documentElement: new El("html"),
   hidden: false, activeElement: null, querySelectorAll: s => {
     const match = /^(#[\w-]+) (\w+)$/.exec(s); return match ? descendants(ids[match[1]], match[2]) : []; },
@@ -32369,9 +32548,11 @@ let calendarGetError = given.calendarFailure ? "example calendar failure" : null
 let statusGetError = ask === "status-picture-initial-error" ? "status connection lost" : null;
 let statusFailPath = "/api/status";
 let statusGetGate = null;
+let pollErrorStatus = 0;
+const pollResponses = [];
 let confirmReply = true, dispatchPostError = null, dispatchPostReply = null;
 const fetch = async (path, options) => {
-  apiRequests.push({path, headers:{...options?.headers}, credentials:options?.credentials, mode:options?.mode});
+  apiRequests.push({path, headers:{...options?.headers}, credentials:options?.credentials, mode:options?.mode, cache:options?.cache});
   if (options && options.method === "POST") apiPosts.push({path, body:JSON.parse(options.body)});
   else apiGets.push(path);
   if (options && options.method === "POST" && path === "/api/settings") {
@@ -32416,11 +32597,21 @@ const fetch = async (path, options) => {
   }
   if (path === "/api/settings") { settingsGetCount++; if (settingsGetError) throw new Error(settingsGetError); }
   if (path === statusFailPath && statusGetError) throw new Error(statusGetError);
+  if (path === statusFailPath && pollErrorStatus) return {status:pollErrorStatus, json:async () => ({error:"tunnel unavailable"})};
   const r = reply(path); if (r === null) return new Promise(() => {});
   if (r?.code === "settings_unavailable") return {status:503, json:async () => r};
   const snapshot = JSON.parse(JSON.stringify(r));
   if (path === "/api/status" && statusGetGate) await statusGetGate;
   if (path === "/api/settings" && settingsGetGate) await settingsGetGate;
+  if (ask === "tunnel-polls" && ["/api/status", "/api/events"].includes(path)) {
+    const etag = 'W/"' + require("crypto").createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") + '"';
+    const status = options.headers["If-None-Match"] === etag ? 304 : 200;
+    pollResponses.push({path, status});
+    return {status, headers:{get:name => name === "ETag" ? etag : null}, json:async () => {
+      if (status === 304) throw new Error("304 must not be parsed as JSON");
+      return snapshot;
+    }};
+  }
   return {status: 200, json: async () => JSON.parse(JSON.stringify(snapshot))};
 };
 // Existing scenarios deliberately omit storage. Preference scenarios reuse these stand-ins across page loads.
@@ -32502,7 +32693,78 @@ function openPage(search = "") {
 let ctx = openPage(preferences.search);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 const stateBeforeCost = document.querySelector("#state").textContent;
-if (ask === "header") (async () => {
+if (ask === "tunnel-polls") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const count = () => apiGets.filter(p => p === "/api/status").length;
+  const delay = () => [...timers.values()].find(t => t.delay >= 5000)?.at - timerNow;
+  await run("loadStatus()");
+  check(count() === 1, "initial calls overlapped");
+  check(delay() === 5000, "initial cadence");
+  const lastGood = run("statusLastGood");
+  await advance(5000);
+  check(pollResponses.slice(-2).every(r => r.status === 304), "unchanged polls did not revalidate");
+  given["/api/status"].paused = "updated data";
+  given["/api/events"] = [{ts:1700000000, event:"updated event"}];
+  await advance(5000);
+  check(pollResponses.slice(-2).every(r => r.status === 200), "changed polls were not refreshed");
+  check(ids["#tab-status"].textContent.includes("updated event"), "new data not rendered");
+  const before = count();
+  let finish;
+  statusGetGate = new Promise(resolve => { finish = resolve; });
+  await advance(5000);
+  const first = run("loadStatus()"), second = run("loadStatus()");
+  given["/api/status"].paused = "after forced action";
+  const forced = run("loadStatus(true)");
+  await advance(20000);
+  document.hidden = true; windowEvents.visibilitychange[0]();
+  document.hidden = false; windowEvents.visibilitychange[0](); await flush();
+  check(count() === before + 1, "polls overlapped while waiting for the network");
+  finish(); await Promise.all([first, second, forced]); statusGetGate = null;
+  check(count() === before + 2 && ids["#state-list"].textContent.includes("after forced action"), "forced refresh did not wait for fresh data");
+  check(delay() === 5000, "success did not restart the timer after completion");
+  pollErrorStatus = 503;
+  const delays = [];
+  const shownAt = run("statusLastGood");
+  for (const expected of [5000, 10000, 20000, 40000, 60000, 60000]) {
+    await advance(delay());
+    check(delay() === expected, "wrong retry delay: " + delay() + " expected " + expected);
+    delays.push(delay());
+    check(run("statusLastGood") === shownAt, "failed poll moved the data timestamp");
+    const notice = ids["#status-connection"];
+    check(!notice.hidden && notice.textContent.includes(run("ZH ? '重新连接' : 'Reconnecting'")), "missing reconnect notice");
+    check(notice.textContent.includes(run("when(statusLastGood)")), "missing data timestamp");
+    if (expected === 20000) {
+      const failures = count(); await advance(19999);
+      check(count() === failures, "third failure retried before 20 seconds");
+    }
+  }
+  pollErrorStatus = 0;
+  const hiddenCount = count();
+  document.hidden = true; windowEvents.visibilitychange[0](); await advance(120000);
+  check(count() === hiddenCount, "hidden document polled");
+  document.hidden = false; windowEvents.visibilitychange[0](); await flush();
+  check(count() === hiddenCount + 1 && delay() === 5000, "visibility did not fetch immediately and reset backoff");
+  check(ids["#status-connection"].hidden, "success left reconnect notice visible");
+  const afterRecovery = count(); await advance(4999);
+  check(count() === afterRecovery, "success retried too early");
+  await advance(1); check(count() === afterRecovery + 1, "success did not resume 5-second polling");
+  // An events-only failure also backs off, even when status succeeds and remains useful.
+  statusFailPath = "/api/events"; statusGetError = "events tunnel lost";
+  await advance(5000); await advance(5000);
+  check(delay() === 10000 && !ids["#status-connection"].hidden, "events-only failure did not back off");
+  statusGetError = null; await advance(10000);
+  check(delay() === 5000 && ids["#status-connection"].hidden, "events recovery did not reset backoff");
+  // A write must not inherit a GET's validator, even on the same path.
+  await run('api("/api/status", {})');
+  const post = apiRequests.at(-1);
+  check(!post.headers["If-None-Match"], "POST inherited conditional cache headers");
+  check(apiRequests.every(r => r.cache === "no-store"), "API responses may enter the browser cache");
+  check(apiRequests.filter(r => r.path === "/api/status").slice(1, -1).every(r => r.headers["If-None-Match"]), "poll lost its validator");
+  console.log(JSON.stringify({delays, lastGood:!!lastGood, ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "header") (async () => {
   const run = code => vm.runInContext(code, ctx);
   await run("loadStatus()");
   const text = ids["#state-text"], viewport = ids["#state-window"], caption = ids["#title"].kids[1].kids[1];
@@ -33049,7 +33311,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     // The next background refresh must also run after a mouse click leaves a button focused.
     button(label).focus();
     st.queued[0].title = "Updated after focused " + action;
-    windowEvents.interval[0](); await flush();
+    await advance(5000); await flush();
     check(root.textContent.includes(st.queued[0].title), action + " button focus blocked background lists");
     check(document.activeElement === button(label), action + " button focus was not restored");
   } else if (ask === "status-button-refresh") {
@@ -33062,23 +33324,23 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     st.lanes.push({...st.lanes[0], name:"new-background-lane"});
     given["/api/events"] = [{ts:1700000000, event:"new-background-event"}];
     const previous = document.activeElement;
-    windowEvents.interval[0](); await flush();
+    await advance(5000); await flush();
     check(root.textContent.includes("New queued task") && root.textContent.includes("new-background-lane") &&
       root.textContent.includes("new-background-event"), "focused button blocked lane, task or event updates");
     const approvals = descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"));
     check(document.activeElement === approvals[1] && document.activeElement !== previous, "focus moved to another release after reorder");
     for (const label of ["releaseYes", "releaseNo", "releaseStop", "check"]) {
       button(label).focus();
-      windowEvents.interval[0](); await flush();
+      await advance(5000); await flush();
       check(document.activeElement === button(label), "focus not restored for " + label);
     }
     const pipelineButton = () => find(el => el.attrs["data-pipeline-step"] === "queued");
-    pipelineButton().focus(); windowEvents.interval[0](); await flush();
+    pipelineButton().focus(); await advance(5000); await flush();
     check(document.activeElement === pipelineButton(), "pipeline control lost focus");
     // A vanished action must not move focus to the same action on a different record.
     descendants(root, "button").filter(el => el.textContent === run("T.releaseYes"))[1].focus();
     st.releases = st.releases.filter(r => r.id !== 17);
-    windowEvents.interval[0](); await flush();
+    await advance(5000); await flush();
     check(document.activeElement === document.body, "removed release transferred focus to another record");
   } else if (ask === "status-focus") {
     const answer = input("releaseReason"); answer.value = draft("releaseReason");
@@ -33091,7 +33353,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
       control.focus();
       st.build = "focused-build";
       st.queued[0].title = "Update held while editing";
-      for (let cycle = 0; cycle < 2; cycle++) { windowEvents.interval[0](); await flush(); }
+      for (let cycle = 0; cycle < 2; cycle++) { await advance(5000); await flush(); }
       check(document.activeElement === control && root.contains(control), "polling replaced a focused field");
       check(ids["#state-list"].textContent.includes("focused-build"), "focused interaction blocked header updates");
       check(input("releaseReason") === answer && answer.value === draft("releaseReason"), "polling lost draft or input identity");
@@ -33100,7 +33362,7 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     }
     for (let cycle = 0; cycle < 2; cycle++) {
       const taskButton = find(el => el.tag === "button" && el.textContent === "t0042");
-      taskButton.focus(); windowEvents.interval[0](); await flush();
+      taskButton.focus(); await advance(5000); await flush();
       const refreshedTask = find(el => el.tag === "button" && el.textContent === "t0042");
       check(document.activeElement === refreshedTask, "polling lost task button focus");
       check(refreshedTask.attrs["aria-expanded"] === "true" &&
@@ -33110,13 +33372,13 @@ else if (["status-drafts", "status-focus", "status-draft-cleanup", "status-provi
     document.activeElement = document.body;
     let finish;
     statusGetGate = new Promise(resolve => { finish = resolve; });
-    windowEvents.interval[0](); await flush();
+    await advance(5000); await flush();
     button("releaseYes").focus(); const focused = document.activeElement;
     finish(); await flush(); statusGetGate = null;
     check(document.activeElement === button("releaseYes") && document.activeElement !== focused,
       "in-flight refresh did not redraw and restore the newly focused button");
     document.activeElement = document.body;
-    windowEvents.interval[0](); await flush();
+    await advance(5000); await flush();
     check(input("releaseReason").value === draft("releaseReason"), "draft vanished after focus left Status");
   } else if (ask === "status-draft-cleanup") {
     for (const label of labels) input(label).value = draft(label);

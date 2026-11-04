@@ -394,6 +394,7 @@ td .task-detail { min-width:200px; }
   <div id="language-menu" class="header-menu" hidden></div>
 </header>
 <main>
+  <p id="status-connection" class="warn" role="status" hidden></p>
   <div id="tab-status"></div>
   <div id="tab-settings" hidden></div>
   <div id="tab-cost" hidden></div>
@@ -967,8 +968,13 @@ const emptyState = (title, note, symbol) => h("div", {class:"empty-state"}, icon
 const fmt = n => (n || 0).toLocaleString();
 const money = n => "US$" + n.toFixed(2);
 const when = ts => ts ? new Date(ts * 1000).toLocaleString(language) : "";
+// Poll data stays in this page's memory; no authenticated response enters the HTTP cache.
+const pollReplies = new Map();
 async function api(path, body) {
-  const opt = {credentials:"omit", mode:"same-origin", headers:{Authorization:"Bearer " + pageToken}};
+  const opt = {credentials:"omit", mode:"same-origin", cache:"no-store", headers:{Authorization:"Bearer " + pageToken}};
+  const conditional = body === undefined && (path === "/api/status" || path === "/api/events" || path.startsWith("/api/events?"));
+  const previous = conditional ? pollReplies.get(path) : null;
+  if (previous) opt.headers["If-None-Match"] = previous.etag;
   if (body !== undefined) {
     opt.method = "POST";
     Object.assign(opt.headers, {"Content-Type":"application/json", "X-Hansa":"1"});
@@ -976,8 +982,12 @@ async function api(path, body) {
   }
   const r = await fetch(path, opt);
   if (r.status === 403) throw new Error(T.forbidden);
+  if (r.status === 304 && previous) return previous.reply;
   const reply = await r.json();
   if (reply?.code === "settings_unavailable") throw new Error((reply.problems || []).join("; "));
+  if (r.status >= 400) throw new Error(reply.error || (reply.problems || []).join("; ") || `HTTP ${r.status}`);
+  const etag = conditional && r.headers?.get("ETag");
+  if (etag) pollReplies.set(path, {etag, reply});
   return reply;
 }
 
@@ -985,6 +995,7 @@ async function api(path, body) {
 let current = "status";
 function show(tab) {
   current = tab;
+  clearTimeout(statusPollTimer);
   keepChoice("sessionStorage", "hansa.tab", tab);
   for (const b of document.querySelectorAll("#tabs button")) {
     b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
@@ -1415,7 +1426,34 @@ function keepStatusFocus(root) {
     (root.contains(active) ? active : controls[index] || controls[0])?.focus({preventScroll:true});
   };
 }
-async function loadStatus(force = false) {
+let statusFlight = null, statusPollTimer, statusFailures = 0, statusLastGood = 0;
+function pollNotice(reconnecting) {
+  const notice = $("#status-connection");
+  notice.hidden = !reconnecting;
+  notice.textContent = !reconnecting ? "" : ZH
+    ? `正在重新连接… ${statusLastGood ? "所示数据时间：" + when(statusLastGood) : "尚未收到数据"}`
+    : `Reconnecting… ${statusLastGood ? "Data as of " + when(statusLastGood) : "No data received yet"}`;
+}
+function scheduleStatusPoll() {
+  clearTimeout(statusPollTimer);
+  if (current === "status" && !document.hidden) {
+    const delay = Math.min(60000, 5000 * 2 ** Math.min(4, Math.max(0, statusFailures - 1)));
+    statusPollTimer = setTimeout(() => loadStatus().catch(err), delay);
+  }
+}
+function loadStatus(force = false) {
+  if (statusFlight) return force === true ? statusFlight.catch(() => {}).then(() => loadStatus(true)) : statusFlight;
+  clearTimeout(statusPollTimer);
+  statusFlight = renderStatus(force).then(ok => {
+    statusFailures = ok ? 0 : statusFailures + 1;
+    if (ok) statusLastGood = Date.now() / 1000;
+    pollNotice(!ok);
+  }, e => {
+    statusFailures++; pollNotice(true); throw e;
+  }).finally(() => { statusFlight = null; scheduleStatusPoll(); });
+  return statusFlight;
+}
+async function renderStatus(force) {
   const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
   if (status.status === "rejected") {
     const e = status.reason;
@@ -1454,7 +1492,7 @@ async function loadStatus(force = false) {
   // Leave fields and their selection in place while editing; redraw lists for other controls.
   const root = $("#tab-status"), active = document.activeElement;
   const inStatus = root.contains(active);
-  if (force !== true && inStatus && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return;
+  if (force !== true && inStatus && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return events.status === "fulfilled";
   keepPrincipalDetails(st);
   const restoreFocus = keepStatusFocus(root);
   const t = st.last_24h;
@@ -1509,6 +1547,7 @@ async function loadStatus(force = false) {
       : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(eventRow)) : emptyState(T.noEvents, T.noEventsNote, "status"))
   ]));
   restoreFocus();
+  return events.status === "fulfilled";
 }
 function asksSection(st) {
   if (!st.asks.length) return null;
@@ -2589,9 +2628,10 @@ const initialTab = tokenAddress ? "status" : keptChoice("sessionStorage", "hansa
 show(initialTab);
 // The shared header and browser title need status even when another tab is restored.
 if (initialTab !== "status") loadStatus().catch(err);
-setInterval(() => {
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(statusPollTimer);
   if (current === "status" && !document.hidden) loadStatus().catch(err);
-}, 5000);
+});
 </script>
 </body>
 </html>
