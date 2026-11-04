@@ -3494,8 +3494,11 @@ def main(argv=None):
     p = add("gaps", cmd_gaps, "verification notes: list those not marked, oldest first; --all includes marks and why")
     p.description += ('. hansa gaps show ID prints a whole note, its task and title, when it was kept, and its mark, '
                       'why, who and when. hansa gaps mark ID fixed|later|wontfix "why" replaces its mark; why is '
-                      'required. New "holds, with notes" verifications collect each top-level list item (including '
-                      'sub-items) under the last Notes heading of any level. An absent or empty list keeps one '
+                      'required. Every unmarked note, in the list and in show, ends with the mark command to copy. '
+                      'New "holds, with notes" verifications collect each top-level list item (including '
+                      'sub-items) under the last Notes heading of any level; a plain Notes: line, bold too, starts '
+                      'the notes when no Notes heading follows it, and its list ends at the next heading or non-list '
+                      'line at the left margin, such as VERDICT. An absent or empty list keeps one '
                       'note pointing to the report. Other verdicts and old verifications add nothing. Notes and '
                       'marks stay in tasks/VID/meta.json across server restarts. List previews stop at 160 characters.')
     p.add_argument("words", nargs="*", metavar='show ID | mark ID fixed|later|wontfix "why"')

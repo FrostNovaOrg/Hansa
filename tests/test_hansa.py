@@ -26386,10 +26386,16 @@ def save():'''))
         tid, vid = self.gaps_verification("## Notes\n- Restart during cleanup.\n- Old settings.\n- Failed write.")
         self.assertEqual(self.hansa("gaps").splitlines(), [
             f"{vid}.1  {tid}  - Restart during cleanup.",
-            f"{vid}.2  {tid}  - Old settings.", f"{vid}.3  {tid}  - Failed write."])
+            f'next: hansa gaps mark {vid}.1 fixed|later|wontfix "why"',
+            f"{vid}.2  {tid}  - Old settings.",
+            f'next: hansa gaps mark {vid}.2 fixed|later|wontfix "why"',
+            f"{vid}.3  {tid}  - Failed write.",
+            f'next: hansa gaps mark {vid}.3 fixed|later|wontfix "why"'])
         shown = self.hansa("gaps", "show", f"{vid}.1")
         for word in (f"{vid}.1", tid, "Add hello.txt", "not marked", "why: —", "kept:", "- Restart during cleanup."):
             self.assertIn(word, shown)
+        self.assertEqual(shown.splitlines()[-1],
+                         f'next: hansa gaps mark {vid}.1 fixed|later|wontfix "why"')
         notes = self.desk.meta(vid)["verification_notes"]
         self.assertEqual([(n["id"], n["task"], n["title"]) for n in notes],
                          [(f"{vid}.{i}", tid, "Add hello.txt") for i in (1, 2, 3)])
@@ -26397,13 +26403,63 @@ def save():'''))
         post = notify.task_line(self.desk, self.desk.meta(vid))
         self.assertIn("kept 3 notes (hansa gaps)", post)
 
+    def test_verification_gaps_give_each_unmarked_note_the_mark_command(self):
+        tid, vid = self.gaps_verification("## Notes\n- First gap.\n- Second gap.")
+        self.assertEqual(self.hansa("gaps").splitlines(), [
+            f"{vid}.1  {tid}  - First gap.",
+            f'next: hansa gaps mark {vid}.1 fixed|later|wontfix "why"',
+            f"{vid}.2  {tid}  - Second gap.",
+            f'next: hansa gaps mark {vid}.2 fixed|later|wontfix "why"'])
+        shown = self.hansa("gaps", "show", f"{vid}.2")
+        self.assertEqual(shown.splitlines()[-1],
+                         f'next: hansa gaps mark {vid}.2 fixed|later|wontfix "why"')
+
+    def test_verification_gaps_marked_notes_show_their_mark_and_no_mark_command(self):
+        tid, vid = self.gaps_verification("## Notes\n- A gap.")
+        nid = f"{vid}.1"
+        self.hansa("gaps", "mark", nid, "later", "when that code changes")
+        listed = self.hansa("gaps", "--all")
+        self.assertIn(f"{vid}.1  {tid}  - A gap.  [later] when that code changes", listed)
+        for out in (listed, self.hansa("gaps", "show", nid)):
+            self.assertIn("later", out)
+            self.assertIn("when that code changes", out)
+            self.assertNotIn("next: hansa gaps mark", out)
+        self.assertNotIn(nid, self.hansa("gaps"))
+
+    def test_verification_gaps_split_a_plain_notes_line(self):
+        tid, vid = self.gaps_verification(
+            "Evidence first.\n\nNotes:\n- Restart during cleanup.\n- Old settings.\n- Failed write.")
+        self.assertEqual([n["text"] for n in self.desk.meta(vid)["verification_notes"]],
+                         ["- Restart during cleanup.", "- Old settings.", "- Failed write."])
+        self.assertEqual(len(self.hansa("gaps").splitlines()), 6)
+        self.assertIn(f"{vid}.3  {tid}  - Failed write.", self.hansa("gaps"))
+
+    def test_verification_gaps_split_a_bold_notes_line_and_numbered_items(self):
+        tid, vid = self.gaps_verification(
+            "**Notes:**\n1. Restart during cleanup.\n2. Old settings.\n3. Failed write.")
+        self.assertEqual([n["text"] for n in self.desk.meta(vid)["verification_notes"]],
+                         ["1. Restart during cleanup.", "2. Old settings.", "3. Failed write."])
+
+    def test_verification_gaps_prefer_a_notes_heading_after_a_plain_line(self):
+        tid, vid = self.gaps_verification("Notes:\n- Plain gap.\n\n## Notes\n- Heading gap.")
+        self.assertEqual([n["text"] for n in self.desk.meta(vid)["verification_notes"]], ["- Heading gap."])
+
+    def test_verification_gaps_plain_line_without_a_list_keeps_the_report_pointer(self):
+        tid, vid = self.gaps_verification("Notes:\nJust prose.")
+        notes = self.desk.meta(vid)["verification_notes"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("notes could not be split", self.hansa("gaps", "show", f"{vid}.1"))
+
     def test_verification_gaps_keep_subitems_and_use_the_last_notes_heading(self):
         tid, vid = self.gaps_verification(
             "# Notes\n- Superseded.\n# Evidence\n```md\n## Notes\n- Quoted.\n```\n"
             "###### Notes ######\n- Restart.\n  Continued evidence.\n  - A sub-item.\n    1. More evidence.\n\n"
             "- " + "x" * 180 + "\n# After\n- Not a note.")
         self.assertEqual(self.hansa("gaps").splitlines(),
-                         [f"{vid}.1  {tid}  - Restart.", f"{vid}.2  {tid}  " + ("- " + "x" * 180)[:160]])
+                         [f"{vid}.1  {tid}  - Restart.",
+                          f'next: hansa gaps mark {vid}.1 fixed|later|wontfix "why"',
+                          f"{vid}.2  {tid}  " + ("- " + "x" * 180)[:160],
+                          f'next: hansa gaps mark {vid}.2 fixed|later|wontfix "why"'])
         shown = self.hansa("gaps", "show", f"{vid}.1")
         self.assertIn("- Restart.\n  Continued evidence.\n  - A sub-item.\n    1. More evidence.", shown)
         for word in ("Superseded", "Quoted", "Not a note", "VERDICT:"):
@@ -26439,7 +26495,10 @@ def save():'''))
         tid, first = self.gaps_verification("## Notes\n1. First gap.")
         _, second = self.gaps_verification("Notes\n=====\n* Second gap.", tid=tid)
         self.assertEqual(self.hansa("gaps").splitlines(),
-                         [f"{first}.1  {tid}  1. First gap.", f"{second}.1  {tid}  * Second gap."])
+                         [f"{first}.1  {tid}  1. First gap.",
+                          f'next: hansa gaps mark {first}.1 fixed|later|wontfix "why"',
+                          f"{second}.1  {tid}  * Second gap.",
+                          f'next: hansa gaps mark {second}.1 fixed|later|wontfix "why"'])
         self.assertIn("verification notes: 2 not marked (hansa gaps)", self.hansa("status"))
 
     def test_verification_gaps_marks_replace_and_survive_a_server_restart(self):
