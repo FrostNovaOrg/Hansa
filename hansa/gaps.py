@@ -8,7 +8,13 @@ from .desk import Desk, now
 
 
 def split_notes(report: str) -> list[str]:
-    """Top-level Markdown list items in the last Notes section, with their continuations."""
+    """Top-level Markdown list items in the last Notes section, with their continuations.
+
+    A section starts at a Notes heading of any level or, after the last such heading,
+    at a plain ``Notes:`` line (bold ``**Notes:**`` too).  A plain line's list runs to
+    the next heading or to the next non-list line at the left margin, such as a
+    ``VERDICT:`` line.
+    """
     lines = report.splitlines()
     headings, visible = [], []
     fence = ""
@@ -30,11 +36,25 @@ def split_notes(report: str) -> list[str]:
             headings.append((i, i + 1, len(atx[1]), title))
         elif i and visible[i - 1] and lines[i - 1].strip() and re.fullmatch(r" {0,3}(=+|-+)\s*", line):
             headings.append((i - 1, i + 1, 1 if line.lstrip().startswith("=") else 2, lines[i - 1].strip()))
+    plain = [i for i, line in enumerate(lines) if visible[i]
+             and re.fullmatch(r" {0,3}(?:\*\*|__)?Notes:(?:\*\*|__)?\s*", line, re.I)]
     section = next((h for h in reversed(headings) if h[3].casefold() == "notes"), None)
-    if section is None:
+    heading_lines = {h[0] for h in headings}
+    if plain and (section is None or plain[-1] > section[0]):
+        start, end = plain[-1] + 1, len(lines)
+        for i in range(start, len(lines)):
+            line = lines[i]
+            if not line.strip():
+                continue
+            if i in heading_lines or (len(line) == len(line.lstrip())
+                                      and not re.match(r"^(?:[-+*]|\d+[.)])\s+\S", line)):
+                end = i
+                break
+    elif section is None:
         return []
-    _, start, level, _ = section
-    end = next((h[0] for h in headings if h[0] >= start and h[2] <= level), len(lines))
+    else:
+        _, start, level, _ = section
+        end = next((h[0] for h in headings if h[0] >= start and h[2] <= level), len(lines))
     items = []
     for i in range(start, end):
         match = re.match(r"^( *)(?:[-+*]|\d+[.)])\s+\S", lines[i]) if visible[i] else None
@@ -45,7 +65,6 @@ def split_notes(report: str) -> list[str]:
         return []
     roots = [i for i, n in items if n == indent]
     notes = []
-    heading_lines = {h[0] for h in headings}
     for pos, first in enumerate(roots):
         last = roots[pos + 1] if pos + 1 < len(roots) else end
         for i in range(first + 1, last):
@@ -91,6 +110,11 @@ def _verification(desk: Desk, nid: str) -> dict:
     raise SystemExit(f"hansa: no verification note {nid}; nothing was changed")
 
 
+def _mark_command(nid: str) -> str:
+    """The command that marks this note, for the reader to copy."""
+    return f'next: hansa gaps mark {nid} fixed|later|wontfix "why"'
+
+
 def show(desk: Desk, nid: str) -> str:
     m = _verification(desk, nid)
     n = next(n for n in m["verification_notes"] if n["id"] == nid)
@@ -99,7 +123,7 @@ def show(desk: Desk, nid: str) -> str:
     return (f"{nid} · task {n['task']}: {n['title']}\nkept: {stamp(n['kept'])}\n"
             + f"mark: {mark.get('kind', 'not marked')}\nwhy: {mark.get('why', '—')}\n"
             + (f"by: {mark['by']}\nmarked: {stamp(mark['at'])}\n" if mark else "")
-            + f"\n{n['text']}")
+            + f"\n{n['text']}" + ("" if mark else "\n" + _mark_command(nid)))
 
 
 def list_text(desk: Desk, include_marked=False) -> str:
@@ -112,6 +136,8 @@ def list_text(desk: Desk, include_marked=False) -> str:
         if include_marked:
             line += f"  [{mark.get('kind', 'not marked')}]" + (f" {mark['why']}" if mark else "")
         lines.append(line)
+        if not mark:
+            lines.append(_mark_command(n["id"]))
     return "\n".join(lines) if lines else "no verification notes" + ("" if include_marked else " not marked")
 
 
