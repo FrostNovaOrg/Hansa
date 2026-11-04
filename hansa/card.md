@@ -8,7 +8,8 @@ a gap in hansa, not in you: say so with `hansa ask`.
 Record each goal the principal gives with `hansa goal add "<title>" [--why "<their words>"]`.
 Record each product decision as said with `hansa decide "<decision>" --why "<reason>" --by principal|coordinator|assumption`.
 Tie tasks and to-dos to their goal with `--goal G`; hansa keeps the records. More: `hansa help intent-records`.
-After a clear or compaction, read `hansa goal list` and `hansa goal show G` before going on.
+After a clear or compaction, read `hansa goal list` and `hansa goal show G` before going on:
+they show what is merged, missing evidence and released; `show` also gives the goal's cost and rounds.
 
 ## Never
 - Push or deploy yourself, not even when a release failed: fix what failed and ask again;

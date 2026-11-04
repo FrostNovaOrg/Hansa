@@ -4372,6 +4372,252 @@ class DeskTest(unittest.TestCase):
             time.sleep(0.1)
         self.fail(f"{tid} did not finish: {self.desk.meta(tid)}")
 
+    def goal_evidence_task(self, gid="g1", *, verdict="holds", check=None, **fields):
+        tid = self.desk.new_task("Build the export", goal=gid, lane="a")
+        self.desk.update(tid, state="merged", files=["export.py"], merged=time.time(),
+                         merge_repo=str(self.repo.resolve()), merge_base="main", merge_commit=tid + "-merge",
+                         check={"ok": True} if check is None else check,
+                         merge_check_result={"ok": True}, **fields)
+        if verdict is not None:
+            vid = self.desk.new_task("Verify the export", kind="verify", parent=tid, goal=gid)
+            self.desk.update(vid, state="done", verdict=verdict)
+            self.desk.update(tid, verify=vid)
+        self.desk.event("task_merged", task=tid, merge_checked=True)
+        return tid
+
+    def goal_evidence_release(self, tids, *, rid=1, target="production", state="done", **fields):
+        return {"id": rid, "lane": "a", "repo": str(self.repo.resolve()), "base": "main",
+                "target": target, "state": state, "asked": time.time(),
+                "commits": [{"sha": self.desk.meta(tid)["merge_commit"]} for tid in tids], **fields}
+
+    def test_goal_evidence_checked_verified_merged_and_released(self):
+        from hansa import release
+        self.hansa("goal", "add", "Export reports")
+        tid = self.goal_evidence_task()
+        write_json(release.releases_file(self.desk), [self.goal_evidence_release([tid])])
+        shown = self.hansa("goal", "show", "g1")
+        self.assertIn("check: passed", shown)
+        self.assertIn("verification: holds", shown)
+        self.assertIn("merge: merged after its merge check", shown)
+        self.assertIn("release #1: production · done", shown)
+        self.assertIn("missing: nothing", shown)
+        data = json.loads(self.hansa("goal", "show", "g1", "--json"))
+        self.assertEqual(len(data["chains"]), 1)
+        chain = data["chains"][0]
+        self.assertEqual(chain["id"], tid)
+        self.assertEqual(chain["missing"], [])
+        self.assertEqual(chain["releases"][0]["target"], "production")
+        self.assertEqual(data["rounds"], 1)
+        listed = json.loads(self.hansa("goal", "list", "--json"))[0]
+        self.assertEqual([listed["counts"][k] for k in ("merged", "missing", "released")], [1, 0, 1])
+        self.assertIn("1 merged, 0 merged missing evidence, 1 released", self.hansa("goal", "list"))
+
+    def test_goal_evidence_missing_uses_the_merge_note_and_text_exemption(self):
+        from hansa.run import unverified_note
+        self.hansa("goal", "add", "Export")
+        tid = self.goal_evidence_task(verdict=None)
+        note = unverified_note(self.desk, self.desk.meta(tid))
+        self.assertIn("no verification of it holds", note)
+        self.assertIn("missing: " + note, self.hansa("goal", "show", "g1"))
+        # Once merged, keep exactly what the merge recorded, even if a verdict arrives later.
+        self.desk.update(tid, unverified=note)
+        vid = self.desk.new_task("Verify", goal="g1", kind="verify", parent=tid)
+        self.desk.update(vid, state="done", verdict="holds")
+        self.desk.update(tid, verify=vid)
+        self.assertIn("missing: " + note, self.hansa("goal", "show", "g1"))
+        docs = self.goal_evidence_task(verdict=None)
+        self.desk.update(docs, files=["docs/export.md"], merge_check_result=None)
+        self.desk.event("task_merged", task=docs)
+        data = json.loads(self.hansa("goal", "show", "g1", "--json"))
+        self.assertEqual(data["chains"][1]["missing"], [])
+        self.assertEqual(data["chains"][1]["merge"], "merged without one")
+        self.assertIn("2 merged, 1 merged missing evidence, 0 released", self.hansa("goal", "list"))
+
+    def test_goal_evidence_merge_override_marks_are_missing(self):
+        self.hansa("goal", "add", "Export")
+        for check, verdict, unchecked, want in (
+                ({"ok": False}, "holds", False, "merged despite a failed check or verdict"),
+                ({"ok": True}, "does not hold", False, "merged despite a failed check or verdict"),
+                ({"ok": False, "could_not_run": True}, "holds", False, "merged despite a failed check or verdict"),
+                ({"ok": True}, "holds", True, "merged without one"),
+                ({"ok": False}, "holds", True, "merged despite a failed check or verdict")):
+            with self.subTest(check=check, verdict=verdict, unchecked=unchecked):
+                tid = self.goal_evidence_task(check=check, verdict=verdict)
+                # An earlier merge-check result must not overrule the actual merge event.
+                self.desk.event("task_merged", task=tid, despite_check=True, merge_not_checked=unchecked)
+                chain = json.loads(self.hansa("goal", "show", "g1", "--json"))["chains"][-1]
+                self.assertEqual(chain["merge"], want)
+                self.assertTrue(chain["despite_check"])
+                self.assertEqual(chain["merge_not_checked"], unchecked)
+                self.assertIn("merge not checked" if unchecked else want, chain["missing"])
+        self.assertIn("missing: merged despite a failed check or verdict", self.hansa("goal", "show", "g1"))
+        self.assertIn("5 merged missing evidence", self.hansa("goal", "list"))
+
+    def test_goal_evidence_pending_task_and_all_check_and_verdict_states(self):
+        self.hansa("goal", "add", "Export")
+        tid = self.goal_evidence_task()
+        vid = self.desk.meta(tid)["verify"]
+        self.desk.update(tid, state="done", merge_commit=None)
+        self.desk.update(vid, state="running", verdict="")
+        shown = self.hansa("goal", "show", "g1")
+        self.assertIn(tid + " done · 1 round", shown)
+        self.assertIn("check: passed", shown)
+        self.assertIn("verification: running", shown)
+        self.assertIn("merge: not merged", shown)
+        self.assertNotIn("missing:", shown)
+        for check, expected in ((None, "none"), ({"ok": False}, "failed"),
+                                ({"ok": False, "could_not_run": True}, "could not run"), ({"ok": True}, "passed")):
+            with self.subTest(check=check):
+                self.desk.update(tid, check=check)
+                data = json.loads(self.hansa("goal", "show", "g1", "--json"))
+                self.assertEqual(data["chains"][0]["check"], expected)
+                self.assertIsNone(data["chains"][0]["missing"])
+                self.assertIn("check: " + expected, self.hansa("goal", "show", "g1"))
+        for state, verdict, expected in (("done", "holds", "holds"), ("done", "holds, with notes", "holds, with notes"),
+                                         ("done", "does not hold", "does not hold"), ("done", "unsure", "unsure"),
+                                         ("queued", "", "running"), ("failed", "", "none")):
+            with self.subTest(state=state, verdict=verdict):
+                self.desk.update(vid, state=state, verdict=verdict)
+                chain = json.loads(self.hansa("goal", "show", "g1", "--json"))["chains"][0]
+                self.assertEqual(chain["verification"], expected)
+        self.desk.update(tid, verify="t9999")
+        self.assertIn("verification: none", self.hansa("goal", "show", "g1"))
+
+    def test_goal_evidence_two_retries_use_latest_task_and_three_rounds(self):
+        from hansa.run import unverified_note
+        self.hansa("goal", "add", "Export")
+        first = self.goal_evidence_task()
+        self.desk.update(first, state="done", merge_commit=None)
+        second = self.hansa("retry", first, "Include refunds").split()[0]
+        self.desk.update(second, state="done", check={"ok": False})
+        last = self.hansa("retry", second, "Fix refunds").split()[0]
+        self.desk.update(last, state="merged", files=["refund.py"], check={"ok": True}, merge_check_result={"ok": True})
+        shown = self.hansa("goal", "show", "g1")
+        self.assertIn(last + " merged · 3 rounds", shown)
+        self.assertNotRegex(shown, rf"(?m)^(?:{first}|{second}) ")
+        self.assertIn("check: passed", shown)
+        note = unverified_note(self.desk, self.desk.meta(last))
+        self.assertIn("not this one", note)
+        self.assertIn("missing: " + note, shown)
+        data = json.loads(self.hansa("goal", "show", "g1", "--json"))
+        self.assertEqual(data["rounds"], 3)
+        self.assertEqual([c["id"] for c in data["chains"]], [last])
+        self.assertEqual(data["chains"][0]["rounds"], 3)
+
+    def test_goal_evidence_one_release_carries_two_chains_and_counts_done_only(self):
+        from hansa import release
+        self.hansa("goal", "add", "Export")
+        first, second, pending = [self.goal_evidence_task() for _ in range(3)]
+        records = [self.goal_evidence_release([first, second]),
+                   self.goal_evidence_release([first, second], rid=2, target="preview", state="failed"),
+                   self.goal_evidence_release([pending], rid=3, state="running"),
+                   self.goal_evidence_release([], rid=4, repo=str(self.tmp / "other")),
+                   self.goal_evidence_release([second], rid=5, lane="b", base="stable")]
+        write_json(release.releases_file(self.desk), records)
+        chains = json.loads(self.hansa("goal", "show", "g1", "--json"))["chains"]
+        self.assertEqual([[r["id"] for r in c["releases"]] for c in chains], [[1, 2], [1, 2, 5], [3]])
+        shown = self.hansa("goal", "show", "g1")
+        self.assertEqual(shown.count("release #1: production · done"), 2)
+        self.assertEqual(shown.count("release #2: preview · failed"), 2)
+        self.assertIn("3 merged, 0 merged missing evidence, 2 released", self.hansa("goal", "list"))
+
+    def test_goal_evidence_truncated_release_uses_recorded_range(self):
+        from hansa import release
+        self.hansa("goal", "add", "Export")
+        tid = self.goal_evidence_task()
+        sha = hansa.run.git("rev-parse", "HEAD", cwd=self.repo)
+        self.desk.update(tid, merge_commit=sha)
+        r = self.goal_evidence_release([], commit=sha, count=2)
+        write_json(release.releases_file(self.desk), [r])
+        self.assertIn("release #1", self.hansa("goal", "show", "g1"))
+        write_json(release.releases_file(self.desk), [{**r, "since": sha}])
+        self.assertNotIn("release #1", self.hansa("goal", "show", "g1"))
+        write_json(release.releases_file(self.desk), [{**r, "commit": "missing"}])
+        self.assertNotIn("release #1", self.hansa("goal", "show", "g1"))
+
+    def test_goal_cost_counts_followups_verifications_and_every_run(self):
+        self.hansa("goal", "add", "Export")
+        first = self.goal_evidence_task()
+        vid = self.desk.meta(first)["verify"]
+        self.desk.update(first, state="done", merge_commit=None)
+        last = self.hansa("retry", first, "Include refunds").split()[0]
+        s = self.desk.settings()
+        s["prices"]["goal-model"] = {"in": 10, "out": 20}
+        self.desk.save_settings(s)
+        usage = {"goal-model": {"in": 1000, "out": 100}}
+        for tid in (first, last, vid):
+            self.desk.update(tid, finished=time.time(), usage=usage)
+        self.desk.update(first, attempts=[{"ended": time.time() - 20 * 86400, "usage": usage}],
+                         earlier_runs=[{"ended": time.time(), "usage": usage}])
+        data = json.loads(self.hansa("goal", "show", "g1", "--json"))
+        self.assertEqual([c["id"] for c in data["chains"]], [last])
+        self.assertEqual(data["rounds"], 2)
+        self.assertEqual(data["cost"]["tokens"], 5500)
+        self.assertEqual(data["cost"]["usd"], .06)
+        self.assertEqual(data["cost"]["runs"], 5)
+        self.assertIn("cost: 5,500 tokens · $0.060000 worth", self.hansa("goal", "show", "g1"))
+        recent = json.loads(self.hansa("cost", "--by", "goal", "--days", "7", "--json"))["by"]["goal"]
+        self.assertEqual(recent["g1"]["tokens"], 4400)
+        whole = json.loads(self.hansa("cost", "--by", "goal", "--days", "30", "--json"))["by"]["goal"]
+        self.assertEqual(whole["g1"], data["cost"])
+
+    def test_cost_by_goal_totals_match_with_two_goals_no_goal_and_coordinator(self):
+        for title in ("Export", "Import"):
+            self.hansa("goal", "add", title)
+        for gid in ("g1", "g2", ""):
+            tid = self.desk.new_task("Work", goal=gid)
+            self.desk.update(tid, finished=time.time(), provider="claude",
+                             usage={"claude-x": {"in": 100, "claude_code_usd": .02}, "unpriced-model": {"out": 5}})
+        coordinator = {"rows": [{"day": "2026-11-04", "seat": "coordinator", "lane": "", "task": "",
+                                "model": "claude-x", "provider": "claude", "in": 10, "out": 0,
+                                "cache_read": 0, "cache_write": 0, "usd": .01}], "turns": []}
+        with unittest.mock.patch("hansa.cost.scan", return_value=coordinator):
+            for window in (("--days", "1"), ("--since", "2020-01-01 00:00")):
+                with self.subTest(window=window):
+                    grouped = json.loads(self.hansa("cost", "--by", "goal", "--json", *window))
+                    total = json.loads(self.hansa("cost", "--json", *window))["total"]
+                    rows = grouped["by"]["goal"]
+                    self.assertEqual(set(rows), {"g1", "g2", "(no goal)"})
+                    self.assertEqual(rows["(no goal)"]["tokens"], 115)
+                    self.assertEqual(rows["g1"]["unpriced_tokens"], 5)
+                    for field in ("tokens", "usd", "runs", "turns"):
+                        self.assertAlmostEqual(sum(r[field] for r in rows.values()), total[field])
+                    self.assertIn("(no goal)", self.hansa("cost", "--by", "goal", *window))
+
+    def test_goal_evidence_empty_goal_and_json_and_help(self):
+        self.hansa("goal", "add", "Export")
+        data = json.loads(self.hansa("goal", "show", "g1", "--json"))
+        self.assertEqual(data["chains"], [])
+        self.assertEqual(data["verifications"], [])
+        self.assertEqual(data["rounds"], 0)
+        self.assertEqual(data["cost"]["usd"], 0)
+        self.assertIn("cost: 0 tokens · $0.000000 worth", self.hansa("goal", "show", "g1"))
+        self.assertIn("0 merged, 0 merged missing evidence, 0 released", self.hansa("goal", "list"))
+        self.hansa("goal", "done", "g1", "No work needed")
+        self.assertEqual(json.loads(self.hansa("goal", "list", "--json")), [])
+        self.assertEqual(json.loads(self.hansa("goal", "list", "--all", "--json"))[0]["state"], "done")
+        for command, words in ((["goal", "show"], ("missing", "cost", "rounds", "--json")),
+                               (["goal", "list"], ("missing evidence", "released", "--json")),
+                               (["cost"], ("goal", "(no goal)", "--days", "--since"))):
+            with contextlib.redirect_stdout(out := io.StringIO()), self.assertRaises(SystemExit) as ended:
+                main([*command, "--help"])
+            self.assertEqual(ended.exception.code, 0)
+            for word in words:
+                self.assertIn(word, " ".join(out.getvalue().split()))
+
+    def test_cost_by_goal_without_goals_and_empty_goal_list(self):
+        self.assertEqual(self.hansa("goal", "list"), "\n")
+        self.assertEqual(json.loads(self.hansa("goal", "list", "--json")), [])
+        empty = json.loads(self.hansa("cost", "--by", "goal", "--json"))["by"]["goal"]
+        self.assertEqual(set(empty), {"(no goal)"})
+        self.assertEqual(empty["(no goal)"]["tokens"], 0)
+        tid = self.desk.new_task("Work")
+        self.desk.update(tid, finished=time.time(), usage={"unknown": {"in": 10}})
+        data = json.loads(self.hansa("cost", "--by", "goal", "--json"))
+        self.assertEqual(set(data["by"]["goal"]), {"(no goal)"})
+        self.assertEqual(data["by"]["goal"]["(no goal)"]["tokens"], data["total"]["tokens"])
+        self.assertIn("(no goal)", self.hansa("cost", "--by", "goal"))
+
     def test_goal_add_list_status_and_hansa_supplied_time_and_session(self):
         from hansa import goals
         session = {"pid": 12345, "start": "test-session"}
@@ -4385,7 +4631,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(g["session"], session)
         self.assertEqual(g["why"], "I want my orders")
         summary = "g1 Export reports: 0 queued/running, 0 waiting for review, 0 merged, 0 failed, 0 open to-dos"
-        self.assertEqual(self.hansa("goal", "list"), summary + "\n")
+        self.assertEqual(self.hansa("goal", "list"), summary.replace("0 merged, ",
+                         "0 merged, 0 merged missing evidence, 0 released, ") + "\n")
         self.assertIn(summary, self.hansa("status"))
         self.assertIn("why: I want my orders", self.hansa("goal", "show", "g1"))
         with unittest.mock.patch("hansa.desk.time.time", return_value=1700000000.1236):
@@ -28314,12 +28561,14 @@ def save():'''))
         self.desk.save_settings(s)
         rep = cost.report(self.desk, 1)
         self.assertEqual(rep["total"]["tokens"], 6300 + 110)
-        for key in ("day", "seat", "lane", "task", "model", "provider"):
+        for key in ("day", "seat", "lane", "task", "goal", "model", "provider"):
             rows = rep["by"][key].values()
             self.assertEqual(sum(v["tokens"] for v in rows), rep["total"]["tokens"], key)
             self.assertAlmostEqual(sum(v["usd"] for v in rows), rep["total"]["usd"], places=5, msg=key)
         self.assertEqual({k: v["tokens"] for k, v in rep["by"]["task"].items()}, {tid: 6300, "(coordinator)": 110})
         self.assertEqual(rep["by"]["lane"]["(coordinator)"]["tokens"], 110)
+        self.assertEqual({r["goal"] for r in rep["rows"]}, {""})
+        self.assertEqual(rep["by"]["goal"]["(no goal)"]["tokens"], rep["total"]["tokens"])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             main(["--desk", str(self.desk.root), "cost", "--days", "1", "--by", "task"])
