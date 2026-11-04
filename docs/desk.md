@@ -75,6 +75,7 @@ Nonempty `missing:` lines are highlighted and keep the command's exact wording;
 an empty missing list says “nothing”. The labels are available in English and
 Chinese; recorded text stays as recorded and displays as plain text. Task numbers
 open the existing task details. Tables scroll within the page at phone widths.
+The Chinese labels use the same review, to-do and token price terms as the other tabs.
 See [Goals and product decisions](tasks.md#goals-and-product-decisions) for what
 the counts and evidence mean.
 

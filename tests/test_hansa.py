@@ -34775,7 +34775,8 @@ else if (ask === "header") (async () => {
     statusExpanded:ids["#state-toggle"].attrs["aria-expanded"], languageExpanded:ids["#language"].attrs["aria-expanded"],
     choices:descendants(ids["#language-menu"], "button").map(el =>
       ({text:el.textContent, lang:el.attrs.lang, current:el.attrs["aria-current"] === "true", marked:!!descendants(el, "svg").length})),
-    focus:document.activeElement?.id || document.activeElement?.tag, caption:caption.textContent, hover:caption.attrs.title,
+    focus:document.activeElement?.id || document.activeElement?.dataset.tab || document.activeElement?.tag,
+    caption:caption.textContent, hover:caption.attrs.title,
     brand:ids["#title"].kids[1].kids[0].textContent, labelClass:caption.parentElement.className,
     buttons:["#state-toggle", "#language"].map(id => ({tag:ids[id].tag, ...ids[id].attrs})),
     reloads, localWrites:local.writes.slice(), gets:apiGets.filter(path => path === "/api/status").length});
@@ -35073,12 +35074,13 @@ else if (ask === "goals") (async () => {
   check(rows().length === 2, "closed goal included by default");
   const headers = descendants(root, "th").map(el => el.textContent);
   check(JSON.stringify(headers) === JSON.stringify(zh
-    ? ["目标", "状态", "排队或运行中", "等待审查", "已合并", "失败", "未结待办", "已合并但缺少证据", "已发布", "总成本"]
+    ? ["目标", "状态", "排队或运行中", "做完待审", "已合并", "失败", "未完成待办", "已合并但缺少证据", "已发布", "总成本"]
     : ["Goals", "State", "Queued/running", "Waiting for review", "Merged", "Failed", "Open to-dos", "Merged missing evidence", "Released", "Total cost"]), "goal columns untranslated");
   const g = data[0];
   for (const [i, k] of ["active", "review", "merged", "failed", "todos", "missing", "released"].entries())
     check(rows()[0].kids[i + 2].textContent === String(g.counts[k]), "count mismatch: " + k);
-  check(rows()[0].kids[9].textContent.includes("US$0.012000") && rows()[0].kids[9].textContent.includes("7"), "cost or unpriced tokens missing");
+  check(rows()[0].kids[9].textContent.includes("US$0.012000") &&
+    rows()[0].kids[9].textContent.includes(zh ? "7 没有价目的 token" : "7 unpriced tokens"), "cost or unpriced tokens missing");
   check(!root.textContent.includes("Delivered the original format."), "closed outcome visible by default");
   const toggle = async checked => { const input = descendants(root, "input")[0];
     input.checked = checked; await input.on.change({target:input}); };
@@ -38085,7 +38087,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertEqual([self.header_offset(p) for p in pages[2:]], [10, 60])
 
     def test_header_menus_refresh_switch_dismiss_and_return_focus_in_both_languages(self):
-        actions = [{"key": "Tab"}] * 9 + [
+        tabs = ["status", "goals", "tasks", "todos", "gaps", "notes", "settings", "cost"]
+        actions = [{"key": "Tab"}] * (len(tabs) + 2) + [
             {"click": "#state-toggle:icon"}, {"update": {"paused": "review shop/desk", "build": "new-build"}, "advance": 5000},
             {"click": "#state-list"}, {"click": "#language"}, {"click": "#language"},
             {"click": "#language"}, {"click": "outside"},
@@ -38097,7 +38100,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             with self.subTest(language=language):
                 chosen = "zh-CN" if language == "en" else "en"
                 pages = self.interactive_header(language, actions + [{"choose": chosen}])["snapshots"]
-                self.assertEqual([p["focus"] for p in pages[8:10]], ["state-toggle", "language"])
+                self.assertEqual([p["focus"] for p in pages[1:len(tabs) + 3]],
+                                 tabs + ["state-toggle", "language"])
+                menus = pages[len(tabs) + 3:]
                 for button, name in zip(pages[0]["buttons"], ["全部状态" if language == "zh" else "All status details",
                                                             "语言" if language == "zh" else "Language"]):
                     self.assertEqual(button["tag"], "button")
@@ -38106,14 +38111,14 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 expected = [(True, False)] * 3 + [(False, True), (False, False), (False, True), (False, False),
                             (True, False), (False, False), (False, True), (False, False), (True, False),
                             (False, False), (False, True), (False, False)]
-                self.assertEqual([(p["statusOpen"], p["languageOpen"]) for p in pages[10:]], expected)
+                self.assertEqual([(p["statusOpen"], p["languageOpen"]) for p in menus], expected)
                 for p in pages:
                     self.assertEqual(p["statusExpanded"], str(p["statusOpen"]).lower())
                     self.assertEqual(p["languageExpanded"], str(p["languageOpen"]).lower())
-                self.assertTrue(any("new-build" in p["text"] for p in pages[11]["parts"]))
-                self.assertTrue(any("review shop/desk" in p["text"] and p["warning"] for p in pages[11]["parts"]))
-                self.assertEqual(pages[18]["focus"], "state-toggle")
-                self.assertEqual(pages[20]["focus"], "language")
+                self.assertTrue(any("new-build" in p["text"] for p in menus[1]["parts"]))
+                self.assertTrue(any("review shop/desk" in p["text"] and p["warning"] for p in menus[1]["parts"]))
+                self.assertEqual(menus[8]["focus"], "state-toggle")
+                self.assertEqual(menus[10]["focus"], "language")
                 choices = pages[0]["choices"]
                 self.assertEqual([p["text"] for p in choices], ["中文", "English"])
                 self.assertEqual([p["lang"] for p in choices if p["current"] and p["marked"]],
