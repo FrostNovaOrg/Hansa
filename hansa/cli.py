@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import account, alert, build, cost, gaps, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
+from . import account, alert, build, cost, gaps, goals, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
 from .desk import (EFFORTS, Desk, SettingsError, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
@@ -67,6 +67,7 @@ TOPICS = {
     "effort": ("tasks.md", "Effort", "which effort a run gets, and where it comes from"),
     "writing-tasks": ("tasks.md", "Writing a task a verification can judge", "how to write a task, and its "
                       "verification's text, so that the verification can judge it"),
+    "intent-records": ("tasks.md", "Goals and product decisions", "goals, decisions and their reasons, and linking tasks and to-dos"),
     "merge-check": ("tasks.md", "Merging, the merge check and conflicts", "merging, the merge check and conflicts, "
                     "and sending a task back"),
     "cost-figures": ("tasks.md", "What work costs", "what hansa cost counts, and what the figures mean"),
@@ -92,7 +93,7 @@ TOPICS = {
                          "a process started from a Claude Code session inherits from it, and the page's token"),
 }
 # hansa help: the commands, a few to a line (a command left out of these goes on the last line)
-COMMAND_GROUPS = (("tasks", ("add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
+COMMAND_GROUPS = (("tasks", ("goal", "decide", "decisions", "add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
                   ("watching", ("status", "desks", "wait", "notify", "ask", "explain", "notes", "gaps", "cost")),
                   ("lanes and releases", ("lane", "release", "changelog", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
                   ("the desk", ("doctor", "example", "init", "menu", "up", "serve", "web", "coordinator", "ping",
@@ -456,6 +457,7 @@ def _add(desk: Desk, a, text: str) -> None:
     _title_allowed(desk, s, a.title, text, a.lane)
     tid = desk.new_task(text, lane=a.lane or "", effort=a.effort or "", model=a.model or "",
                         title=a.title or "", max_turns=a.max_turns or 0, attach=a.attach,
+                        goal=a.goal or "",
                         **verification,
                         **notify.recorded(notify.session_here()))
     if a.lane and a.lane not in s["lanes"]:
@@ -1277,6 +1279,8 @@ def cmd_wait(a):
 
 def cmd_ask(a):
     if a.close is not None:
+        if a.goal:
+            raise SystemExit("hansa: --goal links a new to-do; it cannot be used with --close; nothing was changed")
         if os.environ.get("HANSA_TASK"):  # a worker or verification: the requests are the coordinator's
             raise SystemExit("hansa: only the coordinator closes a request; a worker or verification "
                              "cannot. Say in your report that it may be done")
@@ -1284,8 +1288,30 @@ def cmd_ask(a):
         print(f"ask #{a.close} is closed; the principal's page shows it as closed by the coordinator, with the outcome")
         return
     n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"),
-                                  session=notify.session_here(), why=a.why, holds=a.holds)
+                                  session=notify.session_here(), why=a.why, holds=a.holds, goal=a.goal or "")
     print(f"ask #{n} is on the principal's to-do list; they answer in the conversation")
+
+
+def cmd_goal(a):
+    desk = Desk.find(a.desk)
+    if a.action == "add":
+        print(goals.add(desk, a.title, a.why))
+    elif a.action == "list":
+        print("\n".join(goals.summary_text(g) for g in goals.summaries(desk, all_=a.all)))
+    elif a.action == "show":
+        print(goals.show_text(desk, a.id))
+    else:
+        goals.end(desk, a.id, "done" if a.action == "done" else "dropped", a.outcome)
+        print(f"{a.id} {'done' if a.action == 'done' else 'dropped'}")
+
+
+def cmd_decide(a):
+    print(goals.decide(Desk.find(a.desk), a.text, a.why, gid=a.goal or "", by=a.by,
+                       task=a.task or "", replaces=a.replaces or ""))
+
+
+def cmd_decisions(a):
+    print(goals.decisions_text(Desk.find(a.desk), a.goal or "", a.grep or "", all_=a.all))
 
 
 def cmd_changelog(a):
@@ -2896,7 +2922,6 @@ def index_text(commands: list, lane_commands: list) -> str:
     return "\n".join([
         "hansa help COMMAND: that command's help, as hansa COMMAND --help prints it. hansa help TOPIC: one topic.",
         "hansa help card: the whole card (the desk's CLAUDE.md). hansa help topics: the topics alone.",
-        "",
         "Commands:",
         *(f"  {label}: {', '.join(shown.get(x, x) for x in g if x in commands)}"
           for (label, _), g in zip(COMMAND_GROUPS, grouped)),
@@ -2938,9 +2963,11 @@ def cmd_help(a):
         print(index_text(a.visible, list(a.lane_commands)))
     elif len(words) == 2 and words[0] == "lane" and words[1] in a.lane_commands:
         a.lane_commands[words[1]].print_help()  # hansa help lane add: what hansa lane add --help prints
+    elif len(words) == 2 and words[0] == "goal" and words[1] in a.goal_commands:
+        a.goal_commands[words[1]].print_help()
     elif len(words) > 1:
         raise SystemExit("hansa: one command or topic at a time, such as hansa help verify or hansa help effort "
-                         "(lane takes its subcommand too: hansa help lane add)")
+                         "(lane and goal take their subcommand too: hansa help lane add, hansa help goal add)")
     elif words[0] == "card":
         print(CARD.read_text(encoding="utf-8"))
     elif words[0] == "topics":
@@ -2987,6 +3014,12 @@ def _as_desk_account(a, argv: list) -> None:
     account.switch(theirs, argv, desk.root)
 
 
+def _record_reference(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("give the record's id")
+    return value
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="hansa", description="A file-based desk for a team of Claude Code agents. "
                                  "`hansa help` lists the commands and the topics, `hansa help card` prints the "
@@ -3028,6 +3061,7 @@ def main(argv=None):
     p.epilog = "Each command has a 15-second limit. Exit 1 if any row fails; notes do not fail. See docs/getting-started.md."
     p = add("add", cmd_add, "queue a task")
     verify_options(p)
+    p.add_argument("--goal", type=_record_reference, metavar="G", help="tie this task to an open goal; retries and verifications keep it")
     p.add_argument("text", nargs="*")
     p.add_argument("--attach", action="append", default=[], metavar="PATH",
                    help="copy a file into the task when queued (repeatable; at most 20 files, 20 MB in all). "
@@ -3089,6 +3123,7 @@ def main(argv=None):
     p.epilog = see_more("merge-check")
     p = add("retry", cmd_retry, "queue a follow-up task (new id) that continues from this task's last commit with "
             "your note; this task becomes replaced")
+    p.description += ". The follow-up keeps its goal, even when the goal is done or dropped"
     verify_options(p)
     p.add_argument("id")
     p.add_argument("note", nargs="*")
@@ -3114,6 +3149,7 @@ def main(argv=None):
     p.epilog = see_more("effort")
     p = add("verify", cmd_verify, "have a worker run a finished task's change to see whether it holds (never merged)")
     p.description = ("have a worker run a finished task's change to see whether it holds (never merged). "
+                     "The verification keeps its task's goal, even when the goal is done or dropped. "
                      "By default it uses a verify lane listing the task's lane: free first, then fewest queued, "
                      "then lanes' order. Without one it runs on the task's own lane. "
                      "--lane L runs it on lane L instead: a verification by another model is a "
@@ -3212,6 +3248,38 @@ def main(argv=None):
     p.add_argument("--timeout", type=float, default=60, help="minutes (default 60)")
     p.add_argument("--every", type=float, default=5.0, help=argparse.SUPPRESS)
     p.epilog = see_more("inbox")
+    p = add("goal", cmd_goal, "record what the principal wants; list open goals, show their decisions and work, or end a goal")
+    p.epilog = see_more("intent-records")
+    goal_commands = p.add_subparsers(dest="action", required=True)
+    q = goal_commands.add_parser("add", help="record a goal; prints its new gN id",
+                                 description="Record the principal's goal as said; hansa records its time and session. Prints gN.")
+    q.add_argument("title", help="what the principal wants")
+    q.add_argument("--why", default="", help="what the principal asked, in their words")
+    q = goal_commands.add_parser("list", help="open goals, their task counts and open to-dos",
+                                 description="One line per open goal: id, title, queued/running, waiting for review, merged, failed, open to-dos.")
+    q.add_argument("--all", action="store_true", help="also show done and dropped goals with their outcome")
+    q = goal_commands.add_parser("show", help="a goal, current and replaced decisions, latest tasks and open to-dos",
+                                 description="Show current decisions newest first with reason, who, time and task; replaced decisions name their replacement. Each retry chain shows its latest task, state and rounds; verifications name their task.")
+    q.add_argument("id", metavar="G")
+    for action, description in (("done", "end an open goal with its outcome"), ("drop", "drop an open goal with its reason")):
+        q = goal_commands.add_parser(action, help=description, description=description + "; hansa appends an entry and keeps the original.")
+        q.add_argument("id", metavar="G")
+        q.add_argument("outcome", help="what happened" if action == "done" else "why it was dropped")
+    p = add("decide", cmd_decide, "record a product decision with its reason and who took it; prints its new dN id")
+    p.description += ". Decisions are never edited or deleted: --replaces D appends a new decision replacing a current one. Hansa records the time and session; known keys are refused, with no release word scan."
+    p.add_argument("text", help="the product decision, as said")
+    p.add_argument("--why", required=True, help="the reason for the decision")
+    p.add_argument("--goal", type=_record_reference, metavar="G", help="an open goal this decision belongs to")
+    p.add_argument("--by", choices=("principal", "coordinator", "assumption"), default="coordinator",
+                   help="who took it; assumption: still to be confirmed (default: coordinator)")
+    p.add_argument("--task", type=_record_reference, metavar="T", help="an existing task this decision concerns")
+    p.add_argument("--replaces", type=_record_reference, metavar="D", help="a current decision this one replaces; its original text stays on record")
+    p.epilog = see_more("intent-records")
+    p = add("decisions", cmd_decisions, "current decisions, newest first, with their reasons, who, time and task")
+    p.add_argument("--goal", type=_record_reference, metavar="G", help="only decisions for this goal (including an ended goal)")
+    p.add_argument("--grep", metavar="TEXT", help="decision or reason contains TEXT, ignoring case")
+    p.add_argument("--all", action="store_true", help="also show replaced decisions and what replaced them")
+    p.epilog = see_more("intent-records")
     p = add("ask", cmd_ask, "record a to-do for the principal, or close it with its outcome (--close)")
     p.description = ('Record what only the principal can do: hansa ask "<what>" [--why "<why only the principal '
                      'can do it>"] [--holds]. Without --holds, work goes on. The page is read-only; the principal '
@@ -3220,6 +3288,7 @@ def main(argv=None):
                      'Every to-do stays on record.')
     p.add_argument("text", nargs="*", help="what the principal must do; with --close, the outcome")
     p.add_argument("--why", default="", help="why only the principal can do it")
+    p.add_argument("--goal", type=_record_reference, metavar="G", help="tie a new to-do to an open goal (not with --close)")
     p.add_argument("--holds", action="store_true", help="work waits on this to-do (otherwise work goes on)")
     p.add_argument("--close", type=int, metavar="N", help="close open to-do #N of this desk with its outcome")
     p.epilog = see_more("inbox")
@@ -3560,6 +3629,7 @@ def main(argv=None):
         ap.error(f"unrecognized arguments: {' '.join(extra)}")
     a.rest = rest
     a.commands, a.visible, a.lane_commands = sub.choices, visible, lane.choices
+    a.goal_commands = goal_commands.choices
     if a.cmd == "coordinator" and ("--help" in rest or "-h" in rest):  # hansa's help, not claude's
         sub.choices["coordinator"].print_help()
         return 0

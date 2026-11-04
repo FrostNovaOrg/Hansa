@@ -4372,6 +4372,365 @@ class DeskTest(unittest.TestCase):
             time.sleep(0.1)
         self.fail(f"{tid} did not finish: {self.desk.meta(tid)}")
 
+    def test_goal_add_list_status_and_hansa_supplied_time_and_session(self):
+        from hansa import goals
+        session = {"pid": 12345, "start": "test-session"}
+        # The desk clock rounds to milliseconds; raw time.time() bounds can exclude a correct timestamp.
+        # Fix the clock on either side of the rounding boundary rather than relying on command timing.
+        with unittest.mock.patch("hansa.notify.session_here", return_value=session), \
+                unittest.mock.patch("hansa.desk.time.time", return_value=1700000000.1234):
+            self.assertEqual(self.hansa("goal", "add", "Export reports", "--why", "I want my orders"), "g1\n")
+        g = goals.records(self.desk)[0]["g1"]
+        self.assertEqual(g["created"], 1700000000.123)
+        self.assertEqual(g["session"], session)
+        self.assertEqual(g["why"], "I want my orders")
+        summary = "g1 Export reports: 0 queued/running, 0 waiting for review, 0 merged, 0 failed, 0 open to-dos"
+        self.assertEqual(self.hansa("goal", "list"), summary + "\n")
+        self.assertIn(summary, self.hansa("status"))
+        self.assertIn("why: I want my orders", self.hansa("goal", "show", "g1"))
+        with unittest.mock.patch("hansa.desk.time.time", return_value=1700000000.1236):
+            self.assertEqual(self.hansa("goal", "add", "Another goal"), "g2\n")
+        self.assertEqual(goals.records(self.desk)[0]["g2"]["created"], 1700000000.124)
+        self.hansa("goal", "add", "  Keep\nthese words  ")
+        self.assertEqual(goals.records(self.desk)[0]["g3"]["title"], "  Keep\nthese words  ")
+        self.assertEqual(len(self.hansa("goal", "list").splitlines()), 3)
+        self.assertIn("g3 Keep these words:", self.hansa("goal", "list"))
+
+    def test_goal_decision_replacement_is_append_only_and_refuses_second_replacement(self):
+        from hansa import goals
+        self.hansa("goal", "add", "Export reports")
+        self.hansa("add", "Build the export", "--goal", "g1")
+        session = {"pid": 12345, "start": "decision-session"}
+        text = "Only the shop's own orders"
+        with unittest.mock.patch("hansa.notify.session_here", return_value=session):
+            self.assertEqual(self.hansa("decide", text, "--why", "the principal asked", "--by", "principal",
+                                        "--goal", "g1", "--task", "t0001"), "d1\n")
+        shown = self.hansa("goal", "show", "g1")
+        for expected in (text, "why: the principal asked", "by: principal", "UTC", "task: t0001"):
+            self.assertIn(expected, shown)
+        files = {p: p.read_bytes() for p in (self.desk.state_dir / "intent").glob("*.json")}
+        self.assertEqual(self.hansa("decide", "Include the refund column", "--why", "Show refunds",
+                                    "--goal", "g1", "--replaces", "d1"), "d2\n")
+        for p, original in files.items():
+            self.assertEqual(p.read_bytes(), original)
+        d1, d2 = goals.records(self.desk)[1].values()
+        self.assertEqual((d1["text"], d1["replaced_by"], d1["session"]), (text, "d2", session))
+        self.assertEqual(d2["by"], "coordinator")
+        shown = self.hansa("goal", "show", "g1")
+        current, replaced = shown.split("replaced decisions:\n")
+        self.assertIn("d2 Include the refund column", current)
+        self.assertIn("why: Show refunds", current)
+        self.assertIn("by: coordinator", current)
+        self.assertIn("UTC", current)
+        self.assertIn(f"d1 {text} · replaced by d2", replaced)
+        all_decisions = self.hansa("decisions", "--all")
+        self.assertIn("why: the principal asked", all_decisions)
+        self.assertIn("by: principal", all_decisions)
+        self.assertIn("task: t0001", all_decisions)
+        before = goals.entries(self.desk)
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("decide", "Change again", "--why", "A reason", "--replaces", "d1")
+        self.assertIn("d2", str(e.exception))
+        self.assertEqual(goals.entries(self.desk), before)
+
+    def test_goal_decisions_filter_text_reason_case_and_current_newest_first(self):
+        self.hansa("goal", "add", "Export")
+        self.hansa("goal", "add", "Invoices")
+        self.hansa("decide", "Old refund rule", "--why", "Old request", "--goal", "g1")
+        self.hansa("decide", "Include the refund column", "--why", "New request", "--goal", "g1", "--replaces", "d1")
+        self.hansa("decide", "Show tax", "--why", "Refund accounting", "--goal", "g2", "--by", "assumption")
+        self.hansa("decide", "Standalone choice", "--why", "No goal needed")
+        filtered = self.hansa("decisions", "--grep", "REFUND")
+        self.assertIn("d2 Include", filtered)
+        self.assertIn("d3 Show tax", filtered)
+        self.assertIn("by: assumption", filtered)
+        self.assertNotIn("d1 ", filtered)
+        self.assertNotIn("d4 ", filtered)
+        self.assertLess(filtered.index("d3 "), filtered.index("d2 "))
+        self.assertIn("d1 Old refund rule", self.hansa("decisions", "--grep", "refund", "--all"))
+        self.assertNotIn("d3 ", self.hansa("decisions", "--goal", "g1", "--grep", "refund", "--all"))
+        self.assertEqual(self.hansa("decisions", "--grep", "missing"), "\n")
+        self.hansa("decide", "Latest choice", "--why", "A reason", "--goal", "g1")
+        shown = self.hansa("goal", "show", "g1")
+        self.assertLess(shown.index("d5 "), shown.index("d2 "))
+
+    def test_goal_missing_references_refuse_without_recording(self):
+        from hansa import goals
+        self.hansa("goal", "add", "Export")
+        original = goals.entries(self.desk)
+        calls = [("decide", "Choice", "--why", "Reason", flag, missing)
+                 for flag, missing in (("--goal", "g99"), ("--task", "t9999"), ("--replaces", "d99"))]
+        calls += [("add", "Work", "--goal", "g99"), ("ask", "Help", "--goal", "g99"),
+                  ("goal", "done", "g99", "Finished"), ("goal", "drop", "g99", "No longer needed")]
+        for args in calls:
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                self.hansa(*args)
+            self.assertEqual(goals.entries(self.desk), original)
+            self.assertEqual(self.desk.tasks(), [])
+            self.assertEqual(self.desk.asks(), [])
+        for args in (("goal", "show", "g99"), ("decisions", "--goal", "g99")):
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                self.hansa(*args)
+        for args in (("add", "Work", "--goal", ""), ("ask", "Help", "--goal", " "),
+                     ("decide", "Choice", "--why", "Reason", "--goal", ""),
+                     ("decide", "Choice", "--why", "Reason", "--task", ""),
+                     ("decide", "Choice", "--why", "Reason", "--replaces", "")):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.hansa(*args)
+            self.assertEqual(goals.entries(self.desk), original)
+
+    def test_goal_end_done_drop_outcomes_and_closed_references(self):
+        from hansa import goals
+        for gid, action, state in (("g1", "done", "done"), ("g2", "drop", "dropped")):
+            self.hansa("goal", "add", "Export " + gid)
+            self.hansa("decide", "Choice " + gid, "--why", "Reason", "--goal", gid)
+            files = {p: p.read_bytes() for p in (self.desk.state_dir / "intent").glob("*.json")}
+            session = {"pid": 12345, "start": "ending-session"}
+            with unittest.mock.patch("hansa.notify.session_here", return_value=session):
+                self.hansa("goal", action, gid, "shipped" if action == "done" else "Plans changed")
+            for p, original in files.items():
+                self.assertEqual(p.read_bytes(), original)
+            self.assertEqual(goals.entries(self.desk)[-1]["session"], session)
+            self.assertEqual(self.hansa("goal", "list"), "\n")
+            self.assertNotIn(gid + " Export", self.hansa("status"))
+            self.assertIn(state + ": " + ("shipped" if action == "done" else "Plans changed"), self.hansa("goal", "list", "--all"))
+            self.assertIn("[" + state + "]", self.hansa("goal", "show", gid))
+            self.assertIn("Choice " + gid, self.hansa("decisions", "--goal", gid))
+            before = goals.entries(self.desk)
+            for args in (("add", "Work", "--goal", gid), ("ask", "Help", "--goal", gid),
+                         ("decide", "Choice", "--why", "Reason", "--goal", gid), ("goal", action, gid, "Again")):
+                with self.subTest(args=args), self.assertRaises(SystemExit) as e:
+                    self.hansa(*args)
+                self.assertIn(state, str(e.exception))
+                self.assertEqual(goals.entries(self.desk), before)
+
+    def test_goal_retry_and_verification_keep_goal_and_show_latest_round_only(self):
+        self.hansa("goal", "add", "Export")
+        self.hansa("add", "Build the export", "--lane", "a", "--goal", "g1")
+        self.assertIn("t0001 queued", self.hansa("goal", "show", "g1"))
+        self.desk.update("t0001", state="done")
+        self.hansa("retry", "t0001", "Include refunds")
+        self.assertEqual(self.desk.meta("t0002")["goal"], "g1")
+        shown = self.hansa("goal", "show", "g1")
+        self.assertIn("t0002 queued · 2 rounds", shown)
+        self.assertNotRegex(shown, r"(?m)^t0001 ")
+        # Use the real task runner and git branch so verify follows the ordinary command path.
+        self.settle(Dispatcher(self.desk), "t0002")
+        self.hansa("verify", "t0002")
+        verification = self.desk.meta(self.desk.meta("t0002")["verify"])
+        self.assertEqual(verification["goal"], "g1")
+        self.assertIn("verification of t0002", self.hansa("goal", "show", "g1"))
+        self.assertIn("1 waiting for review", self.hansa("goal", "list"))
+        self.assertIn("0 queued/running", self.hansa("goal", "list"))
+
+    def test_goal_automatic_verification_inherits_goal(self):
+        self.hansa("goal", "add", "Export")
+        self.hansa("add", "Add hello.txt", "--lane", "a", "--goal", "g1", "--verify")
+        d = Dispatcher(self.desk)
+        self.settle(d, "t0001")
+        d.tick()
+        verification = self.desk.meta(self.desk.meta("t0001")["verify"])
+        self.assertEqual(verification["goal"], "g1")
+        self.settle(d, verification["id"])
+
+    def test_goal_retry_keeps_ended_goal_and_shows_latest_round_only(self):
+        for action in ("done", "drop"):
+            with self.subTest(action=action):
+                gid = self.hansa("goal", "add", "Export").strip()
+                tid = self.hansa("add", "Build the export", "--lane", "a", "--goal", gid).split()[0]
+                self.desk.update(tid, state="done")
+                self.hansa("goal", action, gid, "Plans settled")
+                retry = self.hansa("retry", tid, "Include refunds").split()[0]
+                m = self.desk.meta(retry)
+                self.assertEqual((m["state"], m["goal"], m["parent"]), ("queued", gid, tid))
+                shown = self.hansa("goal", "show", gid)
+                self.assertIn(f"{retry} queued · 2 rounds", shown)
+                self.assertNotRegex(shown, rf"(?m)^{tid} ")
+
+    def test_goal_manual_verification_keeps_ended_goal(self):
+        d = Dispatcher(self.desk)
+        for action in ("done", "drop"):
+            with self.subTest(action=action):
+                gid = self.hansa("goal", "add", "Export").strip()
+                tid = self.hansa("add", "Add hello.txt", "--lane", "a", "--goal", gid).split()[0]
+                self.assertEqual(self.settle(d, tid)["state"], "done")
+                self.hansa("goal", action, gid, "Plans settled")
+                self.hansa("verify", tid)
+                verification = self.desk.meta(self.desk.meta(tid)["verify"])
+                self.assertEqual((verification["state"], verification["goal"], verification["parent"]),
+                                 ("queued", gid, tid))
+                shown = self.hansa("goal", "show", gid)
+                self.assertIn(f"{verification['id']} queued", shown)
+                self.assertIn(f"verification of {tid}", shown)
+                self.settle(d, verification["id"])
+
+    def test_goal_automatic_verification_keeps_goal_ended_during_check(self):
+        ready, release = self.tmp / "check-ready", self.tmp / "check-release"
+        gate = self.tmp / "check.py"
+        gate.write_text("from pathlib import Path\nimport time\n"
+                        f"Path({str(ready)!r}).touch()\n"
+                        "deadline = time.monotonic() + 90\n"
+                        f"while not Path({str(release)!r}).exists():\n"
+                        "    if time.monotonic() >= deadline: raise SystemExit('check was not released')\n"
+                        "    time.sleep(.05)\n")
+        self.addCleanup(release.touch)
+        s = self.desk.settings()
+        s["lanes"]["a"]["check"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(gate))}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("goal", "add", "Export")
+        self.hansa("add", "Add hello.txt", "--lane", "a", "--goal", "g1", "--verify")
+        d = Dispatcher(self.desk)
+        try:
+            deadline = time.monotonic() + 60
+            while not ready.exists() and time.monotonic() < deadline:
+                d.tick()
+                time.sleep(.05)
+            self.assertTrue(ready.exists(), self.desk.meta("t0001"))
+            self.assertEqual(self.desk.meta("t0001")["phase"], "checking")
+            self.assertNotIn("verify", self.desk.meta("t0001"))
+            self.hansa("goal", "done", "g1", "shipped")
+            self.desk.pause("Keep the verification queued so its state can be checked")
+        finally:
+            release.touch()
+            parent = self.settle(d, "t0001")
+        d.tick()
+        self.assertTrue(parent["check"]["ok"], parent)
+        parent = self.desk.meta("t0001")
+        self.assertNotIn("verify_after_error", parent, parent)
+        verification = self.desk.meta(parent["verify"])
+        self.assertEqual((verification["state"], verification["goal"], verification["parent"]),
+                         ("queued", "g1", "t0001"))
+        self.assertIn("verification of t0001", self.hansa("goal", "show", "g1"))
+
+    def test_goal_ask_open_todos_counts_and_closing(self):
+        self.hansa("goal", "add", "Export")
+        self.hansa("ask", "Which fields?", "--goal", "g1")
+        self.hansa("ask", "Unrelated")
+        self.assertIn("#1 Which fields?", self.hansa("goal", "show", "g1"))
+        self.assertNotIn("Unrelated", self.hansa("goal", "show", "g1"))
+        self.assertIn("1 open to-dos", self.hansa("goal", "list"))
+        self.assertIn("1 open to-dos", self.hansa("status"))
+        with self.assertRaises(SystemExit):
+            self.hansa("ask", "Close", "--close", "1", "--goal", "g1")
+        self.hansa("ask", "Orders and refunds", "--close", "1")
+        self.assertNotIn("Which fields?", self.hansa("goal", "show", "g1"))
+        self.assertIn("0 open to-dos", self.hansa("goal", "list"))
+        self.assertEqual(self.desk.asks()[0]["goal"], "g1")
+
+    def test_goal_counts_states_and_status_limit(self):
+        from hansa import goals
+        for n in range(1, 8):
+            self.hansa("goal", "add", f"Export {n}")
+        for state in ("queued", "running", "done", "merging", "merged", "failed", "cancelled"):
+            tid = self.desk.new_task(state, goal="g1")
+            self.desk.update(tid, state=state)
+        self.desk.new_task("Unrelated", state="failed")
+        self.assertEqual(goals.summaries(self.desk)[0]["counts"],
+                         {"active": 2, "review": 2, "merged": 1, "failed": 1, "todos": 0})
+        # Status's goal rendering is independent of the synthetic running task's process metadata.
+        st = views.status(self.desk)
+        shown = views.status_text(st)
+        for n in range(1, 6):
+            self.assertIn(f"g{n} Export {n}:", shown)
+        self.assertNotIn("g6 Export 6:", shown)
+        self.assertIn("and 2 more: hansa goal list", shown)
+        self.assertEqual(len(self.hansa("goal", "list").splitlines()), 7)
+
+    def test_goal_and_decision_known_keys_refused_and_no_release_word_scan(self):
+        from hansa import goals
+        secret = "sk-fixture-goal-records-000000001"
+        self.desk.write_key("fixture", secret)
+        self.hansa("goal", "add", "Export")
+        original = goals.entries(self.desk)
+        for args in (("goal", "add", secret), ("goal", "add", "Safe", "--why", secret),
+                     ("decide", secret, "--why", "Reason"), ("decide", "Safe", "--why", secret),
+                     ("goal", "done", "g1", secret), ("goal", "drop", "g1", secret)):
+            with self.subTest(args=args), self.assertRaises(SystemExit) as e:
+                self.hansa(*args)
+            self.assertIn("key", str(e.exception))
+            self.assertNotIn(secret, str(e.exception))
+            self.assertEqual(goals.entries(self.desk), original)
+        self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["refund"])), {"ok": True, "problems": []})
+        self.assertEqual(self.hansa("goal", "add", "refund"), "g2\n")
+        self.assertEqual(self.hansa("decide", "refund", "--why", "refund"), "d1\n")
+
+    def test_goal_empty_text_refused_without_entries(self):
+        from hansa import goals
+        self.hansa("goal", "add", "Export")
+        before = goals.entries(self.desk)
+        for args in (("goal", "add", " "), ("decide", " ", "--why", "Reason"),
+                     ("decide", "Choice", "--why", " "), ("goal", "done", "g1", " "),
+                     ("goal", "drop", "g1", " ")):
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                self.hansa(*args)
+            self.assertEqual(goals.entries(self.desk), before)
+        for args in (("decide", "Choice"), ("decide", "Choice", "--why", "Reason", "--by", "worker")):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.hansa(*args)
+            self.assertEqual(goals.entries(self.desk), before)
+
+    def test_goal_simultaneous_decisions_have_distinct_ids_and_keep_both(self):
+        from hansa import goals
+        self.hansa("goal", "add", "Export")
+        argv = [sys.executable, "-m", "hansa", "--desk", str(self.desk.root), "decide"]
+        processes = []
+        with self.desk.lock():
+            for text in ("Include orders", "Include refunds"):
+                processes.append(subprocess.Popen(argv + [text, "--why", "Requested", "--goal", "g1"],
+                                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        try:
+            outputs = [p.communicate(timeout=60) for p in processes]
+        finally:
+            for p in processes:
+                p.wait(timeout=60)
+        self.assertEqual([p.returncode for p in processes], [0, 0], outputs)
+        self.assertEqual({out for out, err in outputs}, {"d1\n", "d2\n"})
+        self.assertEqual({d["text"] for d in goals.records(self.desk)[1].values()}, {"Include orders", "Include refunds"})
+
+    def test_goal_records_survive_server_restart_and_fresh_commands(self):
+        from hansa import goals
+        self.hansa("goal", "add", "Export", "--why", "As the principal said")
+        self.hansa("decide", "Orders", "--why", "First request", "--goal", "g1")
+        self.hansa("decide", "Refunds too", "--why", "Next request", "--goal", "g1", "--replaces", "d1")
+        self.hansa("goal", "done", "g1", "shipped")
+        expected = self.hansa("goal", "show", "g1")
+        files = {p: p.read_bytes() for p in (self.desk.state_dir / "intent").glob("*.json")}
+        self.desk.pause("Keep this persistence test from starting work")
+        Dispatcher(self.desk).tick()
+        restarted = Desk(self.desk.root)
+        Dispatcher(restarted).tick()
+        self.assertEqual(goals.records(self.desk), goals.records(restarted))
+        result = subprocess.run([sys.executable, "-m", "hansa", "--desk", str(self.desk.root), "goal", "show", "g1"],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, expected)
+        for p, original in files.items():
+            self.assertEqual(p.read_bytes(), original)
+        self.assertEqual(self.hansa("goal", "add", "Next"), "g2\n")
+        self.assertEqual(self.hansa("decide", "Next choice", "--why", "Next request"), "d3\n")
+
+    def test_goal_empty_desk_keeps_existing_commands_and_documents_help(self):
+        self.assertEqual(self.hansa("goal", "list"), "\n")
+        self.assertEqual(self.hansa("goal", "list", "--all"), "\n")
+        self.assertEqual(self.hansa("decisions"), "\n")
+        self.assertNotIn("queued/running", self.hansa("status"))
+        self.hansa("add", "Ordinary task")
+        self.desk.update("t0001", state="done")
+        self.hansa("retry", "t0001", "Follow up")
+        self.assertNotIn("goal", self.desk.meta("t0002"))
+        self.hansa("ask", "Ordinary question")
+        self.assertNotIn("goal", self.desk.asks()[0])
+        for args in (("goal",), ("goal", "add"), ("goal", "list"), ("goal", "show"), ("goal", "done"),
+                     ("goal", "drop"), ("decide",), ("decisions",), ("add",), ("ask",)):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+                main([*args, "--help"])
+            self.assertEqual(e.exception.code, 0)
+            self.assertIn("goal", out.getvalue())
+            if args[0] == "goal" and len(args) == 2:
+                self.assertEqual(self.hansa("help", *args), out.getvalue())
+        self.assertIn("Goals and product decisions", self.hansa("help", "intent-records"))
+
     def test_find_skips_inaccessible_parent(self):
         closed = self.tmp.resolve() / "closed"
         child = closed / "child"

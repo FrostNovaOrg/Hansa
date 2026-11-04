@@ -3026,6 +3026,12 @@ class Desk:
         if not text:
             raise ValueError("the task text is empty")
         with self.lock():  # a key saved meanwhile is either known here or scrubbed from the task after
+            from . import goals
+            if opts.get("parent"):
+                parent = read_json(self.tasks_dir / opts["parent"] / "meta.json", {}) or {}
+                opts["goal"] = parent.get("goal", "")
+            elif opts.get("goal"):
+                goals.goal(self, opts["goal"], open_only=True)
             lane = opts.get("lane")
             why = work_lane_problem(self.settings(), lane, verifying=opts.get("kind") == "verify")
             if why:
@@ -3114,17 +3120,21 @@ class Desk:
         ready_news(self)
 
     def add_ask(self, text: str, by: str = "", session: dict | None = None,
-                why: str = "", holds: bool = False) -> int:
+                why: str = "", holds: bool = False, goal: str = "") -> int:
         """session: the Claude Code session that asked, which hears provider readiness news (hansa/notify.py).
         It records the providers ready then; any other name (one not set up yet too) was not, and a to-do
         naming it may be done once it is (views.ask_note)."""
         from .views import ready_now
         ready_then = ready_now(self)
         with self.lock():
+            if goal:
+                from .goals import goal as find_goal
+                find_goal(self, goal, open_only=True)
             asks = self.asks()
             n = max((a["id"] for a in asks), default=0) + 1
             asks.append({"id": n, "text": self.redact(text.strip()), "by": by, "created": now(), "closed": None,
                          "answer": "", "why": self.redact(why.strip()), "holds": holds, "ready_then": ready_then,
+                         **({"goal": goal} if goal else {}),
                          **({"session": session} if session else {})})
             write_json(self.asks_path, asks)
         self.event("ask", id=n, by=by)

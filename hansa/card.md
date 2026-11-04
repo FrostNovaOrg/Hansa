@@ -5,6 +5,11 @@ details are under `hansa help <topic>`, and `hansa help topics` lists them (and 
 You never need to read hansa's code. If a command's output leaves you unsure what to do next, that is
 a gap in hansa, not in you: say so with `hansa ask`.
 
+Record each goal the principal gives with `hansa goal add "<title>" [--why "<their words>"]`.
+Record each product decision as said with `hansa decide "<decision>" --why "<reason>" --by principal|coordinator|assumption`.
+Tie tasks and to-dos to their goal with `--goal G`; hansa keeps the records. More: `hansa help intent-records`.
+After a clear or compaction, read `hansa goal list` and `hansa goal show G` before going on.
+
 ## Never
 - Push or deploy yourself, not even when a release failed: fix what failed and ask again;
   `hansa release` runs the command after the principal's yes. Your settings deny pushing and
@@ -369,6 +374,7 @@ loads nothing.
 | `check-output` | a check's output |
 | `effort` | where a run's effort comes from |
 | `writing-tasks` | a task a verification can judge |
+| `intent-records` | goals, product decisions and reasons; linking tasks and to-dos |
 | `merge-check` | merging, merge checks and lanes, conflicts, sending back |
 | `cost-figures` | what `hansa cost` counts |
 | `states` | a task's states |
