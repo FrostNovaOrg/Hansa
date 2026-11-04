@@ -98,10 +98,12 @@ def latest_tasks(tasks: list, gid: str) -> list:
     return [m for m in linked if m.get("kind") == "verify" or m["id"] not in parents]
 
 
-def summaries(desk: Desk, tasks: list | None = None, *, all_: bool = False, evidence: bool = False) -> list:
+def summaries(desk: Desk, tasks: list | None = None, *, all_: bool = False, evidence: bool = False,
+              context: dict | None = None) -> list:
     tasks = desk.tasks() if tasks is None else tasks
     asks = desk.asks()
-    context = evidence_records(desk) if evidence else None
+    if evidence and context is None:
+        context = evidence_records(desk)
     out = []
     for g in records(desk)[0].values():
         if not all_ and g["state"] != "open":
@@ -232,13 +234,13 @@ def task_evidence(desk: Desk, m: dict, context: dict) -> dict:
             "releases": task_releases(m, context)}
 
 
-def show(desk: Desk, gid: str) -> dict:
+def show(desk: Desk, gid: str, *, tasks: list | None = None, context: dict | None = None) -> dict:
     """The goal's recorded intent, latest chains and lifetime cost; verifications are not extra chains."""
     g = goal(desk, gid)
-    tasks = desk.tasks()
+    tasks = desk.tasks() if tasks is None else tasks
     linked = [m for m in tasks if m.get("goal") == gid]
     latest = latest_tasks(linked, gid)
-    context = evidence_records(desk)
+    context = evidence_records(desk) if context is None else context
     chains = [task_evidence(desk, m, context) for m in latest if m.get("kind") != "verify"]
     totals = cost.grouped(cost.worker_rows(desk, 0, tasks=linked), "goal").get(
         gid, {"tokens": 0, "usd": 0.0, "unpriced_tokens": 0, "turns": 0, "runs": 0})
@@ -247,6 +249,13 @@ def show(desk: Desk, gid: str) -> dict:
                                                 for m in latest if m.get("kind") == "verify"],
             "todos": [a for a in desk.asks() if a.get("goal") == gid and not a.get("closed")],
             "cost": totals, "rounds": sum(c["rounds"] for c in chains)}
+
+
+def page_list(desk: Desk) -> list:
+    """The command reports together, sharing the full event-log read across every goal."""
+    tasks, context = desk.tasks(), evidence_records(desk)
+    return [{**g, **show(desk, g["id"], tasks=tasks, context=context)}
+            for g in summaries(desk, tasks, all_=True, evidence=True, context=context)]
 
 
 def show_text(desk: Desk, gid: str) -> str:

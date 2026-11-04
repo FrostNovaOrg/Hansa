@@ -69,6 +69,11 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .lane { border:1px solid var(--line); border-radius:9px; padding:16px; margin:12px 0; }
 .facts { display:grid; grid-template-columns: minmax(0, 24em) minmax(0, 1fr); gap:8px 16px; align-items:start; }
 .facts > .muted { font-size:12px; }
+.goal-detail { min-width:0; max-width:100%; }
+.goal-detail summary { cursor:pointer; }
+.goal-detail .goal-missing { background:var(--warn-bg); border-color:var(--warn); }
+#tab-goals td:first-child { min-width:200px; }
+#tab-goals td:last-child { min-width:180px; }
 .tick { display:flex; gap:9px; align-items:baseline; margin:2px 0; cursor:pointer; }
 .tick > input { flex:none; margin:0; }
 .tick > span { min-width:0; }
@@ -396,6 +401,7 @@ td .task-detail { min-width:200px; }
 <main>
   <p id="status-connection" class="warn" role="status" hidden></p>
   <div id="tab-status"></div>
+  <div id="tab-goals" hidden></div>
   <div id="tab-settings" hidden></div>
   <div id="tab-cost" hidden></div>
   <div id="tab-tasks" hidden></div>
@@ -426,7 +432,7 @@ if (tokenAddress) {
 } else {
   try { pageToken = sessionStorage.getItem("hansa.token") || ""; } catch (_) {}
 }
-const TABS = ["status", "tasks", "todos", "gaps", "notes", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
+const TABS = ["status", "goals", "tasks", "todos", "gaps", "notes", "settings", "cost"], COST_PERIODS = [1, 7, 30, 90, "all"];
 const language = keptChoice("localStorage", "hansa.language", ["zh-CN", "en"],
   (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en");
 const ZH = language === "zh-CN";
@@ -923,6 +929,37 @@ Object.assign(T, ZH ? {
   gapMarks:{open:"Unmarked and later", all:"All", none:"None yet", later:"Later", wontfix:"Won’t fix", fixed:"Fixed"},
   gapsLoading:"Loading known gaps…", gapsFailed:"Could not load known gaps. Try again."
 });
+Object.assign(T, ZH ? {
+  goals:"目标", goalsIntro:"查看负责人的初衷、沿途的决定和工作证据。此处只读；目标可用 hansa goal add 记录。",
+  goalsRefresh:"仅在此页可见时每分钟更新一次。", goalsAll:"显示已完成和已放弃的目标", noGoals:"暂无目标",
+  noOpenGoals:"暂无进行中的目标", goalsAdd:"用 hansa goal add 记录目标。", goalsLoading:"正在加载目标…",
+  goalsFailed:"目标加载失败，请重试。", goalsReconnecting:"正在重新连接…", goalsAsOf:"所示数据时间：",
+  goalStates:{open:"进行中", done:"已完成", dropped:"已放弃"}, goalCounts:{active:"排队或运行中", review:"做完待审", merged:"已合并", failed:"失败", todos:"未完成待办", missing:"已合并但缺少证据", released:"已发布"},
+  goalWhy:"负责人为何提出", goalOutcome:"结果", goalCreated:"记录时间", goalEnded:"结束时间", goalSession:"会话",
+  goalDecisions:"当前决定", goalReplaced:"被替代的决定", goalReason:"原因", goalBy:"决定者", goalAt:"决定时间",
+  goalReplaces:"替代", goalReplacedBy:"已被替代为", goalChains:"工作（每个重试链的最新任务）", goalRounds:"轮数",
+  goalCheck:"检查", goalVerification:"核验", goalMerge:"合并", goalMissing:"缺少", goalNothing:"无缺项", goalNone:"无",
+  goalTodos:"未完成待办", goalReleases:n => "发布",
+  goalVerificationOf:"核验对象", goalRoles:{principal:"负责人", coordinator:"协调员", assumption:"待确认的假设"},
+  goalChecks:{passed:"通过", failed:"失败", "could not run":"无法运行", none:"无"},
+  goalMerges:{"not merged":"尚未合并", "merged despite a failed check or verdict":"检查或核验未通过仍合并", "merged after its merge check":"合并检查通过后合并", "merged without one":"未做合并检查就合并"},
+  goalReleaseStates:{waiting:"待批准", running:"运行中", done:"已完成", failed:"失败", refused:"已拒绝", stopped:"已停止", cancelled:"已取消", stale:"已变更"}
+} : {
+  goals:"Goals", goalsIntro:"Read the principal’s intent, decisions along the way and evidence for the work. Read only; record goals with hansa goal add.",
+  goalsRefresh:"Updates once a minute while this tab is visible.", goalsAll:"Show done and dropped goals", noGoals:"No goals yet",
+  noOpenGoals:"No open goals", goalsAdd:"Record goals with hansa goal add.", goalsLoading:"Loading goals…",
+  goalsFailed:"Could not load goals. Try again.", goalsReconnecting:"Reconnecting…", goalsAsOf:"Data as of ",
+  goalStates:{open:"Open", done:"Done", dropped:"Dropped"}, goalCounts:{active:"Queued/running", review:"Waiting for review", merged:"Merged", failed:"Failed", todos:"Open to-dos", missing:"Merged missing evidence", released:"Released"},
+  goalWhy:"Why the principal asked", goalOutcome:"Outcome", goalCreated:"Created", goalEnded:"Ended", goalSession:"Session",
+  goalDecisions:"Current decisions", goalReplaced:"Replaced decisions", goalReason:"Reason", goalBy:"Decided by", goalAt:"Decided at",
+  goalReplaces:"Replaces", goalReplacedBy:"Replaced by", goalChains:"Work (latest task in each retry chain)", goalRounds:"Rounds",
+  goalCheck:"check", goalVerification:"verification", goalMerge:"merge", goalMissing:"missing", goalNothing:"nothing", goalNone:"none",
+  goalTodos:"Open to-dos", goalReleases:n => n === 1 ? "Release" : "Releases",
+  goalVerificationOf:"Verification of", goalRoles:{principal:"principal", coordinator:"coordinator", assumption:"assumption"},
+  goalChecks:{passed:"passed", failed:"failed", "could not run":"could not run", none:"none"},
+  goalMerges:{"not merged":"not merged", "merged despite a failed check or verdict":"merged despite a failed check or verdict", "merged after its merge check":"merged after its merge check", "merged without one":"merged without one"},
+  goalReleaseStates:{waiting:"waiting", running:"running", done:"done", failed:"failed", refused:"refused", stopped:"stopped", cancelled:"cancelled", stale:"stale"}
+});
 const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
 const $ = s => document.querySelector(s);
 const mainTabLabels = {};
@@ -945,6 +982,7 @@ function icon(name) {
   const paths = {
     status:["M3 12h4l3-8 4 16 3-8h4"], settings:["M4 7h16M4 17h16M8 4v6m8 4v6"], cost:["M5 20v-7m7 7V4m7 16V9"],
     tasks:["M8 6h12M8 12h12M8 18h12M3 6h1M3 12h1M3 18h1"],
+    goals:["M21 12a9 9 0 1 1-9-9M17 12a5 5 0 1 1-5-5M12 12l9-9m-5 0h5v5"],
     globe:["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18"],
     notes:["M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7"],
     gaps:["M12 3l9 5v8l-9 5-9-5V8zM12 7v6m0 3h.01"],
@@ -982,7 +1020,7 @@ const when = ts => ts ? new Date(ts * 1000).toLocaleString(language) : "";
 const pollReplies = new Map();
 async function api(path, body) {
   const opt = {credentials:"omit", mode:"same-origin", cache:"no-store", headers:{Authorization:"Bearer " + pageToken}};
-  const conditional = body === undefined && (path === "/api/status" || path === "/api/events" || path.startsWith("/api/events?"));
+  const conditional = body === undefined && (path === "/api/status" || path === "/api/goals" || path === "/api/events" || path.startsWith("/api/events?"));
   const previous = conditional ? pollReplies.get(path) : null;
   if (previous) opt.headers["If-None-Match"] = previous.etag;
   if (body !== undefined) {
@@ -1006,12 +1044,13 @@ let current = "status";
 function show(tab) {
   current = tab;
   clearTimeout(statusPollTimer);
+  clearTimeout(goalsPollTimer);
   keepChoice("sessionStorage", "hansa.tab", tab);
   for (const b of document.querySelectorAll("#tabs button")) {
     b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
   }
   for (const t of TABS) $("#tab-" + t).hidden = t !== tab;
-  return ({status:loadStatus, tasks:loadTasks, todos:loadTodos, gaps:loadGaps, notes:loadNotes, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
+  return ({status:loadStatus, goals:loadGoals, tasks:loadTasks, todos:loadTodos, gaps:loadGaps, notes:loadNotes, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
 }
 function err(e) { setStatusParts([{key:"error", text:String(e.message || e), tone:"bad"}]); }
 
@@ -2245,6 +2284,111 @@ function renderSettings(problems = settingsProblems) {
   refreshSettingsState();
 }
 
+/* ---------- goals ---------- */
+let goalsRows = null, goalsAll = false, goalSelected = "", goalsFlight = null, goalsPollTimer;
+let goalsFailures = 0, goalsLastGood = 0;
+const goalFolds = new Map();
+function goalCost(c) {
+  return `${T.totalTokens}: ${fmt(c.tokens)} · ${T.estimatedCost}: ${money(c.usd)}`
+    + (c.unpriced_tokens ? ` · ${T.unpricedTokens}: ${fmt(c.unpriced_tokens)}` : "");
+}
+function goalDecision(d) {
+  return h("div", {class:"lane"}, h("strong", {}, d.id), h("pre", {}, d.text),
+    h("div", {class:"facts"}, h("span", {class:"muted"}, T.goalReason), h("pre", {}, d.why),
+      h("span", {class:"muted"}, T.goalBy), T.goalRoles[d.by] || d.by,
+      h("span", {class:"muted"}, T.goalAt), when(d.created),
+      h("span", {class:"muted"}, T.task), d.task || T.goalNone),
+    d.replaces ? h("p", {class:"muted"}, T.goalReplaces, " ", d.replaces) : null,
+    d.replaced_by ? h("p", {class:"muted"}, T.goalReplacedBy, " ", d.replaced_by) : null);
+}
+function goalDetail(g) {
+  const replaced = g.decisions.filter(d => d.replaced_by), key = g.id + ":replaced";
+  const fold = replaced.length ? h("details", {"data-goal-fold":key, open:goalFolds.get(key),
+    ontoggle:e => goalFolds.set(key, e.target.open)},
+    h("summary", {}, T.goalReplaced, " (", replaced.length, ")"), replaced.map(goalDecision)) : null;
+  return h("div", {class:"goal-detail"}, section(g.id + " · " + g.title,
+    statusPill(T.goalStates[g.state], "muted", "goals"),
+    h("div", {class:"facts"}, h("span", {class:"muted"}, T.goalWhy), h("pre", {}, g.why || T.goalNone),
+      h("span", {class:"muted"}, T.goalCreated), when(g.created),
+      h("span", {class:"muted"}, T.goalSession), g.session || T.goalNone),
+    g.state !== "open" ? h("div", {class:"facts"},
+      h("span", {class:"muted"}, T.goalOutcome), h("pre", {}, g.outcome),
+      h("span", {class:"muted"}, T.goalEnded), when(g.ended)) : null),
+    section(T.goalDecisions, g.decisions.filter(d => !d.replaced_by).map(goalDecision),
+      g.decisions.some(d => !d.replaced_by) ? null : h("p", {class:"muted"}, T.goalNone), fold),
+    section(T.goalChains, g.chains.length ? g.chains.map(c => {
+      const [button, box] = taskLink(c.id);
+      return h("div", {class:"lane"}, h("div", {class:"row"}, button, h("strong", {}, c.title),
+        statusPill(T.taskStates[c.state] || c.state, "muted", "tasks")),
+        h("p", {class:"muted"}, T.lane, ": ", c.lane || T.goalNone, " · ", T.goalRounds, ": ", fmt(c.rounds)),
+        h("p", {}, T.goalCheck, ": ", T.goalChecks[c.check] || c.check),
+        h("p", {}, T.goalVerification, ": ", T["v_" + c.verification] || c.verification,
+          c.verification_task ? ` (${c.verification_task})` : ""),
+        h("p", {}, T.goalMerge, ": ", T.goalMerges[c.merge] || c.merge,
+          c.merge_commit ? " · " + c.merge_commit : ""),
+        c.releases.length ? c.releases.map(r => h("p", {}, T.goalReleases(c.releases.length), " #", r.id, ": ", r.target, " · ",
+          T.goalReleaseStates[r.state] || r.state)) : h("p", {}, T.releases, ": ", T.goalNone),
+        c.missing !== null ? h("p", {class:c.missing.length ? "goal-missing warn notice" : "muted"},
+          T.goalMissing, ": ", c.missing.length ? c.missing.join("; ") : T.goalNothing) : null, box);
+    }) : h("p", {class:"muted"}, T.goalNone),
+    g.verifications.map(v => h("p", {}, v.id, " · ", T.taskStates[v.state] || v.state, " · ", v.title,
+      " · ", T.goalVerificationOf, " ", v.parent, " · ", T["v_" + (v.verdict || "none")] || v.verdict))),
+    section(T.goalTodos, g.todos.length ? g.todos.map(a => h("div", {class:"row"}, "#", a.id, " ", h("pre", {}, a.text)))
+      : h("p", {class:"muted"}, T.goalNone)),
+    section(T.estimatedCost, h("p", {}, goalCost(g.cost)), h("p", {}, T.goalRounds, ": ", fmt(g.rounds))));
+}
+function renderGoals() {
+  const host = $("#tab-goals"), active = document.activeElement;
+  const focus = host.contains(active) ? active.getAttribute("data-goal-focus") : null;
+  for (const fold of document.querySelectorAll("#tab-goals details")) goalFolds.set(fold.getAttribute("data-goal-fold"), fold.open);
+  const rows = (goalsRows || []).filter(g => goalsAll || g.state === "open");
+  const selected = rows.find(g => g.id === goalSelected);
+  const counts = Object.keys(T.goalCounts);
+  host.replaceChildren(pageHeading(T.goals, T.goalsIntro), h("p", {class:"muted"}, T.goalsRefresh),
+    h("label", {class:"tick"}, h("input", {type:"checkbox", checked:goalsAll, "data-goal-focus":"all",
+      onchange:e => { goalsAll = e.target.checked; renderGoals(); }}), T.goalsAll),
+    h("p", {id:"goals-connection", class:"warn", role:"status", hidden:true}),
+    goalsRows === null ? h("p", {id:"goals-loading", role:"status"}, T.goalsLoading) : rows.length ? dashboardPanel(T.goals, "goals", rows.length,
+      table([T.goals, T.taskState, ...Object.values(T.goalCounts), T.estimatedCost], rows.map(g => [
+        h("button", {class:"link", "data-goal-focus":g.id, "aria-expanded":String(g.id === goalSelected),
+          "aria-controls":"goal-selected", onclick:() => { goalSelected = g.id === goalSelected ? "" : g.id; renderGoals(); }}, g.id, " · ", g.title),
+        [T.goalStates[g.state], g.state !== "open" ? h("pre", {}, g.outcome) : null],
+        ...counts.map(k => h("span", {class:k === "missing" && g.counts[k] ? "warn" : ""}, fmt(g.counts[k]))), goalCost(g.cost)])))
+      : emptyState(goalsRows.length ? T.noOpenGoals : T.noGoals, T.goalsAdd, "goals"),
+    h("div", {id:"goal-selected"}, selected ? goalDetail(selected) : null));
+  goalsNotice();
+  if (focus) [...document.querySelectorAll("#tab-goals button"), ...document.querySelectorAll("#tab-goals input")]
+    .find(el => el.getAttribute("data-goal-focus") === focus)?.focus({preventScroll:true});
+}
+function goalsNotice() {
+  const notice = $("#goals-connection");
+  const loading = $("#goals-loading");
+  if (loading) loading.hidden = !!goalsFailures;
+  notice.hidden = !goalsFailures;
+  notice.replaceChildren(...shown(goalsFailures ? [
+    goalsRows === null ? T.goalsFailed : T.goalsReconnecting,
+    goalsLastGood ? " " + T.goalsAsOf + when(goalsLastGood) : null, " ",
+    h("button", {onclick:loadGoals}, T.retry)] : []));
+}
+function loadGoals() {
+  if (goalsFlight) return goalsFlight;
+  clearTimeout(goalsPollTimer);
+  if (goalsRows === null) renderGoals();
+  goalsFlight = api("/api/goals").then(rows => {
+    if (!Array.isArray(rows)) throw new Error("Invalid goals response");
+    const changed = rows !== goalsRows;
+    goalsRows = rows; goalsFailures = 0; goalsLastGood = Date.now() / 1000;
+    if (changed) renderGoals(); else goalsNotice();
+  }).catch(() => { goalsFailures++; goalsNotice(); }).finally(() => {
+    goalsFlight = null;
+    if (current === "goals" && !document.hidden) {
+      const delay = Math.min(600000, 60000 * 2 ** Math.min(4, Math.max(0, goalsFailures - 1)));
+      goalsPollTimer = setTimeout(loadGoals, delay);
+    }
+  });
+  return goalsFlight;
+}
+
 /* ---------- notes ---------- */
 let notesArchived = false, notesEpoch = 0;
 async function loadNotes() {
@@ -2655,7 +2799,9 @@ show(initialTab);
 if (initialTab !== "status") loadStatus().catch(err);
 document.addEventListener("visibilitychange", () => {
   clearTimeout(statusPollTimer);
+  clearTimeout(goalsPollTimer);
   if (current === "status" && !document.hidden) loadStatus().catch(err);
+  if (current === "goals" && !document.hidden) loadGoals();
 });
 </script>
 </body>
