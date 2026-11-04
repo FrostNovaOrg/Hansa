@@ -3292,9 +3292,9 @@ def task_processes(marks: list, folders: list = ()) -> list:
     return [(p, [a.decode(errors="replace") for a in args]) for p, args in found]
 
 
-# A process's parent in its kinfo_proc (e_ppid), on macOS; and its working folder through libproc
-# (PROC_PIDVNODEPATHINFO: a struct proc_vnodepathinfo of 2352 bytes, the folder's path at 152).
-_KP_PPID, _PROC_PIDVNODEPATHINFO, _VNODEPATHINFO_SIZE = 560, 9, 2352
+# A process's parent and controlling terminal in its kinfo_proc (e_ppid, e_tdev), on macOS; its working folder
+# through libproc (PROC_PIDVNODEPATHINFO: a struct proc_vnodepathinfo of 2352 bytes, the folder's path at 152).
+_KP_PPID, _KP_TDEV, _PROC_PIDVNODEPATHINFO, _VNODEPATHINFO_SIZE = 560, 572, 9, 2352
 
 
 def process_table() -> dict:
@@ -3342,11 +3342,12 @@ def record_descendants(top: int, seen: dict, table: dict | None = None) -> bool:
     return added
 
 
-def working_in(folders: list, since: float = 0) -> dict:
-    """This account's orphans (their parent is the system's first process, as for a daemon that forked twice) whose
-    working folder is one of `folders` or inside one, started at `since` or later: {pid: start}. Never this process
-    or its parent, and never one whose parent still runs: a terminal's shell, an editor or a watcher the principal
-    started there."""
+def working_in(folders: list, since: float = 0, table: dict | None = None) -> dict:
+    """This account's processes without a controlling terminal whose working folder is one of `folders` or
+    inside one, started at `since` or later: {pid: start}. Never this process or its parent. A terminal's shell
+    or an editor the principal opened there is left alone, even with its input and output redirected.
+    The caller also excludes hansa's own processes and what it started itself, from the same `table`
+    (process_table() read already) when given."""
     paths = {os.path.normpath(x) for f in folders if f for x in (f, os.path.realpath(f))}
     if not paths:
         return {}
@@ -3359,17 +3360,23 @@ def working_in(folders: list, since: float = 0) -> dict:
         except (ImportError, OSError):
             return {}
     out = {}
-    for pid, (ppid, start, when) in process_table().items():
-        if pid in (os.getpid(), os.getppid()) or ppid != 1 or when < since - 2:  # 2 s for both clocks' rounding
+    for pid, (_, start, when) in (process_table() if table is None else table).items():
+        if pid in (os.getpid(), os.getppid()) or when < since - 2:  # 2 s for both clocks' rounding
             continue
         try:
             if lib is None:
+                fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+                if int(fields[4]) != 0:  # tty_nr: the controlling terminal, regardless of open file descriptors
+                    continue
                 cwd = os.readlink(f"/proc/{pid}/cwd")
-            elif lib.proc_pidinfo(pid, _PROC_PIDVNODEPATHINFO, 0, buf, _VNODEPATHINFO_SIZE) == _VNODEPATHINFO_SIZE:
-                cwd = buf.raw[152:152 + 1024].split(b"\0")[0].decode(errors="replace")
             else:
-                continue
-        except OSError:
+                k = _mac_proc(pid)
+                if k is None or struct.unpack_from("@i", k, _KP_TDEV)[0] != -1:  # NODEV
+                    continue
+                if lib.proc_pidinfo(pid, _PROC_PIDVNODEPATHINFO, 0, buf, _VNODEPATHINFO_SIZE) != _VNODEPATHINFO_SIZE:
+                    continue
+                cwd = buf.raw[152:152 + 1024].split(b"\0")[0].decode(errors="replace")
+        except (OSError, IndexError, ValueError):
             continue
         cwd = os.path.normpath(cwd) if cwd else ""
         if cwd and any(cwd == x or cwd.startswith(x + "/") for x in paths):
@@ -3527,13 +3534,17 @@ def sweep(desk: Desk, tid: str) -> list:
     each run's process group, then each recorded process that still runs and is still the same process (its
     start); then what it finds now by the marker of one of the task's runs (HANSA_RUN, run_marks) in their
     environment, or by one of the task's run folders (worker_tmps, run_folders) in their arguments or TMPDIR: a process
-    started without the marker still names its run's folder, and one started between two recordings is found so. The record is cleared.
+    started without the marker still names its run's folder, and one started between two recordings is found so.
+    Finally processes working in the task's worktree, started since the run, without a controlling terminal:
+    also finds an unmarked process never observed below the run. Hansa's own processes and their descendants
+    are excluded from this last look. The record is cleared.
     What was stopped goes on the task (left_running) and in the event log."""
-    keep = {os.getpid(), os.getppid()}
+    servers = {os.getpid()}
     try:
-        keep.add(int((desk.state_dir / "serve.lock").read_text().split()[0]))
+        servers.add(int((desk.state_dir / "serve.lock").read_text().split()[0]))
     except (OSError, ValueError, IndexError):
         pass
+    keep = servers | {os.getppid()}
 
     def running(p, start):
         return alive(p, start) and _state(p) != "Z"
@@ -3561,6 +3572,13 @@ def sweep(desk: Desk, tid: str) -> list:
     folders = [*(r["path"] for r in m.get("worker_tmps") or [] if r.get("path")), *(m.get("run_folders") or [])]
     found += [(p, args, proc_start(p)) for p, args in task_processes(m.get("run_marks") or [], folders)
               if p not in keep and p not in done | {x[0] for x in found}]
+    if m.get("worktree") and m.get("started"):
+        ours, table = {}, process_table()
+        for pid in servers:
+            record_descendants(pid, ours, table)
+        excluded = keep | set(ours) | done | {x[0] for x in found}
+        found += [(p, _args(p), st) for p, st in working_in([m["worktree"]], since=m["started"], table=table).items()
+                  if p not in excluded]
     found = [(p, args, s) for p, args, s in found if running(p, s)]
     if m.get("started_procs") or m.get("run_groups"):
         desk.change(tid, lambda x: {"started_procs": {}, "run_groups": {}})

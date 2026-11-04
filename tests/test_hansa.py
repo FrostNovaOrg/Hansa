@@ -515,6 +515,11 @@ if os.environ.get("FAKE_LEAVE_HIDDEN"):  # one that drops every marker: env -i, 
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     open(os.environ["FAKE_LEAVE_HIDDEN"], "w").write(str(c.pid))
     time.sleep(float(os.environ.get("FAKE_LEAVE_HIDDEN_WAIT", "1.5")))  # running a while: a round sees it
+if os.environ.get("FAKE_LEAVE_WORKTREE"):  # no markers or observation: only its working folder gives it away
+    code = "import time\nwhile True:\n with open('left-running.txt', 'a') as f: f.write('still writing\\n')\n time.sleep(0.05)"
+    c = subprocess.Popen([sys.executable, "-c", code], env={}, start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    open(os.environ["FAKE_LEAVE_WORKTREE"], "w").write(str(c.pid))
 if os.environ.get("FAKE_LEAVE_IN_TMP"):  # left running without HANSA_RUN, naming folders: its run's, and others
     tmp = os.environ["CLAUDE_CODE_TMPDIR"]
     bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN", "TMPDIR")}
@@ -525,7 +530,7 @@ if os.environ.get("FAKE_LEAVE_IN_TMP"):  # left running without HANSA_RUN, namin
                             ("tmpdir", sleep, {**bare, "TMPDIR": os.path.join(tmp, "claude-501")}),
                             ("near", sleep + [near + "/load.sh"], {**bare, "TMPDIR": near}),
                             ("other", sleep + [other + "/load.sh"], {**bare, "TMPDIR": other + "/claude-501"})):
-        c = subprocess.Popen(argv, env=env, start_new_session=True,
+        c = subprocess.Popen(argv, cwd="/", env=env, start_new_session=True,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         open(os.path.join(os.environ["FAKE_LEAVE_IN_TMP"], name + ".pid"), "w").write(str(c.pid))
 if os.environ.get("FAKE_SANDBOX_LEFT"):  # what a sandbox on Linux leaves in the worktree: empty placeholders
@@ -9447,6 +9452,205 @@ def save():'''))
         self.assertEqual(m["state"], "done", m)
         self.assertFalse(alive(child))
         self.assertIn(child, [x["pid"] for x in m["left_running"]])
+
+    def finish_with_unobserved_worktree_process(self, restart=False):
+        """A worker ends between observations, leaving an unmarked writer; observe the commit and the check."""
+        from hansa import run
+        pidfile = self.tmp / "worktree-child.pid"
+        s = self.desk.settings()
+        s["lanes"]["a"].update(env={"FAKE_LEAVE_WORKTREE": str(pidfile)}, check="test -f hello.txt")
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.addCleanup(lambda: pidfile.exists() and run.alive(int(pidfile.read_text())) and
+                        os.kill(int(pidfile.read_text()), signal.SIGKILL))
+        tid, d = self.desk.new_task("Add hello.txt"), Dispatcher(self.desk)
+        with unittest.mock.patch.object(Dispatcher, "record"):  # never observe the worker's descendants
+            d.tick()
+            d.procs[tid].wait(timeout=20)
+            child = int(pidfile.read_text())
+            meta = self.desk.meta(tid)
+            wt = Path(meta["worktree"])
+            end = time.time() + 10
+            while not (wt / "left-running.txt").exists() and time.time() < end:
+                time.sleep(0.05)
+            self.assertTrue((wt / "left-running.txt").exists(), "the detached writer did not start")
+            self.assertTrue(run.alive(child))
+            self.assertFalse(meta.get("started_procs") or meta.get("run_groups"))
+            folders = [x["path"] for x in meta.get("worker_tmps") or []] + (meta.get("run_folders") or [])
+            self.assertNotIn(child, [p for p, _ in run.task_processes(meta.get("run_marks") or [], folders)])
+            self.assertIn(child, run.working_in([str(wt)], since=meta["started"]))
+            observed, commit, check = [], run.commit_work, run.start_check
+
+            def before(what, call, *args, **kw):
+                observed.append((what, run.alive(child),
+                                 child in [x["pid"] for x in self.desk.meta(tid).get("left_running") or []]))
+                return call(*args, **kw)
+            if restart:
+                d = Dispatcher(Desk(self.desk.root))  # no Popen or observations survive the server
+            with unittest.mock.patch.object(run, "commit_work", lambda *a, **k: before("commit", commit, *a, **k)), \
+                    unittest.mock.patch.object(run, "start_check", lambda *a, **k: before("check", check, *a, **k)):
+                m = self.settle(d, tid, timeout=30)
+        self.assertEqual(observed, [("commit", False, True), ("check", False, True)])
+        self.assertEqual(m["state"], "done", m)
+        self.assertTrue(m["check"]["ok"], m)
+        self.assertFalse(run.alive(child))
+        self.assertEqual([x["pid"] for x in m["left_running"]], [child])
+        self.assertIn(f"pid {child}: ", views.show_text(self.desk, tid))
+        [event] = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                   if e["event"] == "left_running_stopped" and e["task"] == tid]
+        self.assertEqual(len(event["processes"]), 1)
+        self.assertEqual(run.sweep(self.desk, tid), [])  # no second listing when the check ends
+
+    def test_an_unobserved_worktree_process_is_stopped_and_listed_before_commit_and_check(self):
+        self.finish_with_unobserved_worktree_process()
+
+    def test_an_unobserved_worktree_process_is_swept_before_commit_after_server_restart(self):
+        self.finish_with_unobserved_worktree_process(restart=True)
+
+    def unmarked_worktree_process(self, folder, *, terminal=None, child=False, mark=""):
+        """An unobserved process, reparented when its launcher ends; optionally with a terminal or a child."""
+        from hansa import run
+        ready = self.tmp / f"process-{uuid.uuid4().hex}.json"
+        code = "import json, os, subprocess, sys, time\n"
+        if terminal is not None:
+            code += (f"import fcntl, termios\nfcntl.ioctl({terminal}, termios.TIOCSCTTY, 0)\n"
+                     f"os.close({terminal})\n")  # even its terminal descriptor and all standard I/O are closed
+        code += "pids = [os.getpid()]\n"
+        if child:
+            code += ("p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+                     "env={}, start_new_session=True)\npids.append(p.pid)\n")
+        code += f"with open({str(ready)!r}, 'w') as f: json.dump(pids, f)\ntime.sleep(60)\n"
+        fds = () if terminal is None else (terminal,)
+        launcher = ("import subprocess, sys\n"
+                    f"subprocess.Popen([sys.executable, '-c', {code!r}], "
+                    f"env={({'HANSA_RUN': mark} if mark else {})!r}, start_new_session=True, "
+                    f"pass_fds={fds!r}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n")
+        # The launcher does not wait for the process. All processes this helper starts are stopped by its cleanup.
+        subprocess.run([sys.executable, "-c", launcher], cwd=folder, env={}, pass_fds=fds, check=True, timeout=10)
+
+        def cleanup():
+            if ready.exists() and ready.read_text():
+                run.stop_recorded({p: run.proc_start(p) for p in json.loads(ready.read_text())}, grace=0.1)
+        self.addCleanup(cleanup)
+        end = time.time() + 10
+        while time.time() < end:
+            try:
+                pids = json.loads(ready.read_text())
+                if all(run.alive(p) for p in pids):
+                    return pids
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.05)
+        self.fail("the unobserved process did not become ready")
+
+    def test_worktree_sweep_leaves_processes_outside_the_worktree_and_older_than_the_run(self):
+        from hansa import run
+        wt, near = self.tmp / "worktree", self.tmp / "worktree2"
+        wt.mkdir()
+        near.mkdir()
+        for kind in ("outside", "older", "no run start"):
+            with self.subTest(kind=kind):
+                [pid] = self.unmarked_worktree_process(near if kind == "outside" else wt)
+                when = run.process_table()[pid][2]
+                tid = self.desk.new_task("Add hello.txt")
+                self.desk.update(tid, worktree=str(wt),
+                                 started=None if kind == "no run start" else when + 10 if kind == "older" else when - 10)
+                self.assertEqual(run.sweep(self.desk, tid), [])
+                self.assertTrue(run.alive(pid))
+                self.assertFalse(self.desk.meta(tid).get("left_running"))
+
+    def test_worktree_sweep_leaves_a_process_with_a_controlling_terminal(self):
+        from hansa import run
+        try:
+            master, slave = os.openpty()
+        except PermissionError as e:
+            skip_in_sandbox(self, f"cannot open a pseudo-terminal here: {e}")
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        started = time.time()
+        [pid] = self.unmarked_worktree_process(self.repo, terminal=slave)
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, worktree=str(self.repo), started=started)
+        self.assertNotIn(pid, run.working_in([str(self.repo)], since=started))
+        self.assertEqual(run.sweep(self.desk, tid), [])
+        self.assertTrue(run.alive(pid))
+
+    def test_working_in_checks_the_controlling_terminal_and_skips_unreadable_processes(self):
+        import ctypes
+        from hansa import run
+        folder = str(self.repo)
+        table = {p: (1, f"start-{p}", 200) for p in (8101, 8102, 8103)}
+
+        def linux_stat(path):
+            pid = int(path.parent.name)
+            if pid == 8103:
+                raise PermissionError("unreadable terminal")
+            return f"{pid} (a name with ) in it) S 1 {pid} {pid} {0 if pid == 8101 else 123}"
+
+        def mac_proc(pid):
+            if pid == 8103:
+                return None
+            rec = bytearray(run._KINFO_PROC_SIZE)
+            struct.pack_into("@i", rec, 572, -1 if pid == 8101 else 123)  # e_tdev in Darwin's kinfo_proc
+            return bytes(rec)
+
+        def cwd(pid, kind, arg, buf, size):
+            buf.raw = (b"\0" * 152 + folder.encode() + b"\0").ljust(size, b"\0")
+            return size
+        for system in ("linux", "macos"):
+            with self.subTest(system=system), \
+                    unittest.mock.patch.object(run, "process_table", return_value=table) as listing, \
+                    unittest.mock.patch.object(Path, "is_dir", return_value=system == "linux"), \
+                    unittest.mock.patch.object(Path, "read_text", linux_stat), \
+                    unittest.mock.patch.object(os, "readlink", return_value=folder), \
+                    unittest.mock.patch.object(run, "_mac_proc", side_effect=mac_proc), \
+                    unittest.mock.patch.object(ctypes, "CDLL", return_value=types.SimpleNamespace(proc_pidinfo=cwd)):
+                self.assertEqual(run.working_in([folder], since=100), {8101: "start-8101"})
+                listing.return_value = {}  # a supplied snapshot also keeps hansa's exclusions consistent with the scan
+                self.assertEqual(run.working_in([folder], since=100, table=table), {8101: "start-8101"})
+
+    def test_worktree_sweep_finds_an_unobserved_process_with_a_live_parent_in_a_subfolder(self):
+        from hansa import run
+        folder = self.repo / "nested"
+        folder.mkdir()
+        started = time.time()
+        pids = self.unmarked_worktree_process(folder, child=True)
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, worktree=str(self.repo), started=started)
+        self.assertCountEqual(run.working_in([str(self.repo)], since=started), pids)
+        self.assertCountEqual([x["pid"] for x in run.sweep(self.desk, tid)], pids)
+        self.assertFalse(any(run.alive(p) for p in pids))
+
+    def test_worktree_sweep_leaves_the_server_and_its_descendants_and_the_commands_children(self):
+        from hansa import run
+        started = time.time()
+        pids = self.unmarked_worktree_process(self.repo, child=True)
+        # The server may be another process: hansa's command reads its pid from the desk's lock.
+        (self.desk.state_dir / "serve.lock").write_text(f"{pids[0]}\n")
+        own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=self.repo,
+                               env={}, start_new_session=True)
+        self.addCleanup(lambda: (own.kill(), own.wait()))
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, worktree=str(self.repo), started=started)
+        self.assertCountEqual(run.working_in([str(self.repo)], since=started), [*pids, own.pid])
+        self.assertEqual(run.sweep(self.desk, tid), [])
+        self.assertTrue(all(run.alive(p) for p in [*pids, own.pid]))
+
+    def test_a_leftover_also_found_by_worktree_is_listed_once(self):
+        from hansa import run
+        for source in ("recorded", "group", "marker"):
+            with self.subTest(source=source):
+                started, mark = time.time(), uuid.uuid4().hex
+                [pid] = self.unmarked_worktree_process(self.repo, mark=mark if source == "marker" else "")
+                tid = self.desk.new_task("Add hello.txt")
+                start = run.proc_start(pid)
+                self.desk.update(tid, worktree=str(self.repo), started=started,
+                                 started_procs={str(pid): start} if source != "marker" else {},
+                                 run_groups={str(pid): start} if source == "group" else {},
+                                 run_marks=[mark] if source == "marker" else [])
+                self.assertIn(pid, run.working_in([str(self.repo)], since=started))
+                self.assertEqual([x["pid"] for x in run.sweep(self.desk, tid)], [pid])
+                self.assertEqual([x["pid"] for x in self.desk.meta(tid)["left_running"]], [pid])
+                self.assertFalse(run.alive(pid))
 
     def test_a_recorded_process_whose_number_went_to_another_is_not_stopped(self):
         from hansa import run
