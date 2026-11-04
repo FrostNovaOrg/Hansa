@@ -491,8 +491,8 @@ would close `a1/desk/secrets` and leave the real folder open. `hansa init`, `han
 
 ## What hansa stops when a run ends
 
-What hansa stops when a run ends (a worker, a verifier, or
-the lane's check after one): the run's process group; then each process
+What hansa stops when a run ends (a worker, a verifier,
+the lane's check after one, or a merge check): the run's process group; then each process
 `hansa serve` recorded below the run while it ran, whatever its group,
 environment or working folder (on each of its rounds, every few seconds, on
 the task, so a restarted server still has the record), if it still runs and
@@ -505,8 +505,14 @@ that number later, and its group, are never taken for the run's; then each proce
 desk and one account may run several desks), or one of the run's temporary folders
 (the worker's; a setup's or check's, and its own folder on disk on Linux, kept on
 the task as `run_folders`) in its arguments or as its TMPDIR. Finally, hansa
-finds processes working in the task's worktree or a folder inside it that
-started since the run began and have no controlling terminal. This folder
+finds processes working in the worktree where the run that just ended ran,
+or a folder inside it, that started since that run began and have no controlling
+terminal. A lane check uses its own start time; a merge check uses its recorded
+worktree and start time, including after a server restart. With a merge lane,
+this is the merge lane's worktree, so the scan leaves alone a new task running
+in the original task's lane. Without a merge lane, it is the task lane's
+worktree. If the ended run's worktree or start time is missing, there is no
+folder scan; hansa still uses the records and markers above. This folder
 scan catches an unmarked process that detached between observations or while
 the server was down; it is needed while runs can detach without being recorded.
 It leaves alone a shell or editor with a controlling terminal, even with its

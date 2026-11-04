@@ -9802,6 +9802,175 @@ def save():'''))
         self.merge_lane_for_checks(command, **fields)
         return d, tid
 
+    def detached_worktree_command(self, pidfile):
+        """A check command leaving an unmarked process with no parent chain back to hansa serve."""
+        from hansa import run
+        script = pidfile.with_suffix(".py")
+        child = ("import os, time\nfrom pathlib import Path\n"
+                 f"Path({str(pidfile)!r}).write_text(str(os.getpid()))\ntime.sleep(120)\n")
+        script.write_text("import subprocess, sys\n"
+                          f"subprocess.Popen([sys.executable, '-c', {child!r}], env={{}}, start_new_session=True, "
+                          "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n")
+        self.addCleanup(lambda: pidfile.exists() and run.stop_recorded(
+            {int(pidfile.read_text()): run.proc_start(int(pidfile.read_text()))}, grace=0.1))
+        return shlex.join([sys.executable, str(script)])
+
+    def merge_lane_sweep_with_new_work(self, restart=False):
+        from hansa import run
+        merge_go, check_go, ready = (self.tmp / name for name in ("merge-go", "check-go", "check-ready"))
+        self.addCleanup(merge_go.touch)
+        self.addCleanup(check_go.touch)
+        d, tid = self.merge_lane_task(f"while ! test -f {shlex.quote(str(merge_go))}; do sleep 0.05; done")
+        self.hansa("merge", tid)
+        d.tick()
+        merge_proc = d.merge_procs[tid]
+        self.addCleanup(lambda: (merge_go.touch(), merge_proc.wait(timeout=20)))
+        pidfile = self.tmp / "new-work.pid"
+        command = (self.detached_worktree_command(pidfile) + f"; touch {shlex.quote(str(ready))}; "
+                   f"while ! test -f {shlex.quote(str(check_go))}; do sleep 0.05; done")
+        self.hansa("lane", "set", "a", "check", command)
+        self.hansa("lane", "set", "a", "env", "FAKE_HELLO=new-work.txt")
+        work = self.desk.new_task("New work in the task lane", lane="a")
+        end = time.time() + 30
+        while time.time() < end:
+            d.tick()
+            if ready.exists() and pidfile.exists() and pidfile.read_text():
+                break
+            time.sleep(0.05)
+        self.assertTrue(ready.exists() and pidfile.exists(), "the new task's check did not become ready")
+        check_proc = d.procs[work]
+        self.addCleanup(lambda: (check_go.touch(), check_proc.wait(timeout=20)))
+        pid, meta = int(pidfile.read_text()), self.desk.meta(work)
+        self.assertEqual((meta["state"], meta["phase"]), ("running", "checking"))
+        self.assertNotIn(pid, run.run_recorded(meta))
+        self.assertNotIn(pid, [p for p, _ in run.task_processes(meta.get("run_marks") or [], meta.get("run_folders") or [])])
+        ours = {}
+        run.record_descendants(os.getpid(), ours)
+        self.assertNotIn(pid, ours)
+        self.assertIn(pid, run.working_in([meta["worktree"]], since=meta["check_started"]))
+        merge_go.touch()
+        merge_proc.wait(timeout=20)
+        if restart:
+            d = Dispatcher(Desk(self.desk.root))
+        merged = self.settle_merge(d, tid, timeout=30)
+        self.assertEqual(merged["state"], "merged", merged)
+        self.assertEqual(self.desk.meta(work)["state"], "running")
+        self.assertEqual((run.alive(pid), [x["pid"] for x in merged.get("left_running") or []],
+                          [x["pid"] for x in self.desk.meta(work).get("left_running") or []]), (True, [], []))
+        run.stop_recorded({pid: run.proc_start(pid)}, grace=0.1)
+        check_go.touch()
+        check_proc.wait(timeout=20)
+        self.assertEqual(self.settle(d, work, timeout=30)["state"], "done")
+
+    def test_a_merge_lane_sweep_leaves_a_new_tasks_detached_worktree_process_alone(self):
+        self.merge_lane_sweep_with_new_work()
+
+    def test_a_restarted_merge_lane_sweep_leaves_a_new_tasks_detached_worktree_process_alone(self):
+        self.merge_lane_sweep_with_new_work(restart=True)
+
+    def merge_check_sweeps_its_worktree(self, merge_lane=False):
+        from hansa import run
+        d, tid = self.merge_check_lane(check="true")
+        pidfile, go = self.tmp / "merge-leftover.pid", self.tmp / "merge-go"
+        command = (self.detached_worktree_command(pidfile) +
+                   f"; while ! test -f {shlex.quote(str(go))}; do sleep 0.05; done")
+        self.addCleanup(go.touch)
+        if merge_lane:
+            self.merge_lane_for_checks(command)
+        else:
+            self.hansa("lane", "set", "a", "merge_check", command)
+        self.hansa("merge", tid)
+        d.tick()
+        proc = d.merge_procs[tid]
+        self.addCleanup(lambda: (go.touch(), proc.wait(timeout=20)))
+        end = time.time() + 20
+        while not (pidfile.exists() and pidfile.read_text()) and time.time() < end:
+            time.sleep(0.05)
+        self.assertTrue(pidfile.exists(), "the merge check's detached process did not start")
+        pid, mc = int(pidfile.read_text()), self.desk.meta(tid)["merge_check"]
+        self.assertEqual(mc["worktree"], str(self.desk.worktrees_dir / ("m" if merge_lane else "a")))
+        self.assertIn(pid, run.working_in([mc["worktree"]], since=mc["started"]))
+        go.touch()
+        proc.wait(timeout=20)
+        before_land, land = [], run.land_merge
+
+        def landing(*args, **kwargs):
+            before_land.append((run.alive(pid), [x["pid"] for x in self.desk.meta(tid).get("left_running") or []]))
+            return land(*args, **kwargs)
+        with unittest.mock.patch.object(run, "land_merge", side_effect=landing):
+            merged = self.settle_merge(Dispatcher(Desk(self.desk.root)), tid, timeout=30)
+        self.assertEqual(merged["state"], "merged", merged)
+        self.assertEqual(before_land, [(False, [pid])])
+        self.assertEqual([x["pid"] for x in merged["left_running"]], [pid])
+
+    def test_a_merge_check_sweeps_its_detached_process_in_the_task_worktree(self):
+        self.merge_check_sweeps_its_worktree()
+
+    def test_a_merge_check_sweeps_its_detached_process_in_the_merge_worktree(self):
+        self.merge_check_sweeps_its_worktree(merge_lane=True)
+
+    def test_a_merge_check_folder_scan_never_uses_the_workers_folder_or_start_as_a_fallback(self):
+        from hansa import run
+        for scope in ("older than merge check", "no merge check start", "no merge check worktree"):
+            with self.subTest(scope=scope):
+                [pid] = self.unmarked_worktree_process(self.repo)
+                when = run.process_table()[pid][2]
+                tid = self.desk.new_task("A finished merge check", lane="a")
+                mc = {"phase": "running", "worktree": str(self.repo), "started": when + 10, "command": "false"}
+                if scope == "no merge check start":
+                    mc.pop("started")
+                elif scope == "no merge check worktree":
+                    mc.pop("worktree")
+                    mc["started"] = when - 10
+                self.desk.update(tid, state="merging", worktree=str(self.repo), started=when - 20, merge_check=mc)
+                (self.desk.raw_dir(tid) / "merge-check.exit").write_text("1\n")
+                m = run.finish_merge_check(self.desk, tid)
+                self.assertEqual(m["state"], "done")
+                self.assertTrue(run.alive(pid))
+                self.assertFalse(m.get("left_running"))
+
+    def test_check_sweeps_use_the_checks_start_including_before_retry_and_when_it_never_started(self):
+        from hansa import run
+        for ending in ("finished", "retry", "failed start", "sandbox unavailable", "cancelled before start"):
+            with self.subTest(ending=ending):
+                [pid] = self.unmarked_worktree_process(self.repo)
+                when = run.process_table()[pid][2]
+                tid = self.desk.new_task("A finished check", lane="a")
+                m = self.desk.update(tid, state="running", phase="checking", worktree=str(self.repo),
+                                     started=when - 20, check_started=when + 10 if ending in ("finished", "retry") else None)
+                raw = self.desk.raw_dir(tid)
+                if ending in ("finished", "retry"):
+                    (raw / "check.exit").write_text("137\n" if ending == "retry" else "0\n")
+                    with unittest.mock.patch.object(run, "check_killed", return_value=ending == "retry"):
+                        run.finish_check(self.desk, tid)
+                    if ending == "retry":
+                        self.assertIsNone(self.desk.meta(tid)["check_started"])
+                        self.assertTrue(self.desk.meta(tid)["check_retry"])
+                elif ending == "failed start":
+                    run.check_not_started(self.desk, tid, RuntimeError("could not launch"))
+                else:
+                    with unittest.mock.patch.object(run, "start_check", return_value=None,
+                                                    side_effect=run.SrtCannotRun("unavailable")
+                                                    if ending == "sandbox unavailable" else None):
+                        Dispatcher(self.desk).check(m, self.desk.settings())
+                self.assertTrue(run.alive(pid))
+                self.assertFalse(self.desk.meta(tid).get("left_running"))
+
+    def test_a_check_retry_sweeps_its_detached_process_after_clearing_the_checks_start(self):
+        from hansa import run
+        [pid] = self.unmarked_worktree_process(self.repo)
+        when = run.process_table()[pid][2]
+        tid = self.desk.new_task("A killed check", lane="a")
+        self.desk.update(tid, state="running", phase="checking", worktree=str(self.repo),
+                         started=when - 20, check_started=when - 10)
+        (self.desk.raw_dir(tid) / "check.exit").write_text("137\n")
+        with unittest.mock.patch.object(run, "check_killed", return_value=True):
+            m = run.finish_check(self.desk, tid)
+        self.assertIsNone(m["check_started"])
+        self.assertTrue(m["check_retry"])
+        self.assertFalse(run.alive(pid))
+        self.assertEqual([x["pid"] for x in m["left_running"]], [pid])
+
     def batch_queue(self, count=3, *, limit=None, conflict=False, fail=False, start=True):
         """Queue finished branches behind a gated running check, then start the next batch."""
         from hansa import run
