@@ -4375,19 +4375,22 @@ class DeskTest(unittest.TestCase):
     def test_goal_add_list_status_and_hansa_supplied_time_and_session(self):
         from hansa import goals
         session = {"pid": 12345, "start": "test-session"}
-        before = time.time()
-        with unittest.mock.patch("hansa.notify.session_here", return_value=session):
+        # The desk clock rounds to milliseconds; raw time.time() bounds can exclude a correct timestamp.
+        # Fix the clock on either side of the rounding boundary rather than relying on command timing.
+        with unittest.mock.patch("hansa.notify.session_here", return_value=session), \
+                unittest.mock.patch("hansa.desk.time.time", return_value=1700000000.1234):
             self.assertEqual(self.hansa("goal", "add", "Export reports", "--why", "I want my orders"), "g1\n")
         g = goals.records(self.desk)[0]["g1"]
-        self.assertLessEqual(before, g["created"])
-        self.assertLessEqual(g["created"], time.time())
+        self.assertEqual(g["created"], 1700000000.123)
         self.assertEqual(g["session"], session)
         self.assertEqual(g["why"], "I want my orders")
         summary = "g1 Export reports: 0 queued/running, 0 waiting for review, 0 merged, 0 failed, 0 open to-dos"
         self.assertEqual(self.hansa("goal", "list"), summary + "\n")
         self.assertIn(summary, self.hansa("status"))
         self.assertIn("why: I want my orders", self.hansa("goal", "show", "g1"))
-        self.assertEqual(self.hansa("goal", "add", "Another goal"), "g2\n")
+        with unittest.mock.patch("hansa.desk.time.time", return_value=1700000000.1236):
+            self.assertEqual(self.hansa("goal", "add", "Another goal"), "g2\n")
+        self.assertEqual(goals.records(self.desk)[0]["g2"]["created"], 1700000000.124)
         self.hansa("goal", "add", "  Keep\nthese words  ")
         self.assertEqual(goals.records(self.desk)[0]["g3"]["title"], "  Keep\nthese words  ")
         self.assertEqual(len(self.hansa("goal", "list").splitlines()), 3)
