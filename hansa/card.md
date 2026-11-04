@@ -223,6 +223,8 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   for review; when they mention it, run `hansa status`. More: `hansa help alerts`.
 
 ## Hearing from hansa
+hansa serve repairs recent saved task ends missing from the event log when it starts, so their usual
+end notices still reach you. More: `hansa help inbox`.
 hansa posts to your session when something needs you: a task, verification, merge
 check or release ended or failed, the principal answered a release, the server stopped or got stuck, free space
 went under the floor. Each message is a `[hansa]` header with the desk, then a bullet line per event,

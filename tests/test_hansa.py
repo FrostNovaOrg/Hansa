@@ -15694,6 +15694,262 @@ def save():'''))
             time.sleep(0.1)
         self.fail(f"not within {timeout} s: {what()!r}")
 
+    def stop_before_end_event(self, tid, kind, ending):
+        """Really lose the process after its metadata write; no exception unwinding or mocked recovery."""
+        script = textwrap.dedent('''\
+            import os, sys
+            from hansa import run
+            from hansa.desk import Desk
+            desk = Desk(sys.argv[1])
+            original = Desk.event
+            def event(self, kind, **fields):
+                if kind == sys.argv[3]:
+                    os._exit(91)
+                return original(self, kind, **fields)
+            Desk.event = event
+            tid = sys.argv[2]
+            ''') + ending
+        result = subprocess.run([sys.executable, "-c", script, str(self.desk.root), tid, kind],
+                                cwd=Path(hansa.__file__).resolve().parent.parent,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 91, result.stderr)
+
+    def test_startup_repairs_an_end_lost_by_process_exit_and_a_follower_posts_it(self):
+        from hansa import run
+        p, sock = self.session()
+        sess = {"pid": p.pid, "start": notify.proc_start(p.pid)}
+        with self.in_session(p, sock):
+            self.hansa_out("notify", "on")
+            self.hansa_out("add", "Add hello.txt")
+        tid = "t0001"
+        proc = run.start(self.desk, tid, "a", "claude")
+        self.assertIsNotNone(proc)
+        self.assertEqual(proc.wait(timeout=30), 0)
+        pos = notify.log_end(self.desk)
+        self.stop_before_end_event(tid, "task_finished", "run.finish(desk, tid, 0)\n")
+        saved = self.desk.meta(tid)
+        self.assertEqual(saved["state"], "done")
+        self.assertEqual(self.events("task_finished"), [])
+        d = Dispatcher(self.desk)
+        d.tick()
+        feed = notify.handle(self.desk, {"op": "feed", "me": {"key": "5252-0123abcd", "session": sess},
+                                         "pos": pos, "done": pos})
+        self.assertEqual([x["key"] for x in feed["items"]], [["task", tid]])
+        self.assertEqual(feed["items"][0]["review"], tid)
+        first = self.soon(lambda: [x for x in self.posts(sock) if f"{tid} done" in x], timeout=30)
+        self.assertEqual(len(first), 1)
+        [event] = self.events("task_finished")
+        self.assertEqual(event, {"ts": saved["finished"], "event": "task_finished", "task": tid,
+                                 "state": "done", "provider": saved["provider"], "error": saved["error"]})
+        end = notify.log_end(self.desk)
+        d.tick()
+        Dispatcher(self.desk).tick()
+        self.assertEqual(len(self.events("task_finished")), 1)
+        self.assertEqual(notify.items_for(self.desk, notify.read_log(self.desk, end)[0],
+                                        {"key": "probe", "session": sess}), [])
+
+    def test_startup_repairs_saved_terminal_states_and_verifications_once(self):
+        self.desk.pause("hold queued work")
+        sess = {"pid": os.getpid(), "start": notify.proc_start(os.getpid())}
+        expected = {}
+        at = now() - 60
+        for kind in ("task", "verify"):
+            for state, error in (("done", ""), ("failed", "worker failed"), ("cancelled", "cancelled"),
+                                 ("failed", "stopped at the ceiling of 200 turns"),
+                                 ("failed", "stopped at the ceiling of 30 minutes"),
+                                 ("failed", "could not start: missing executable")):
+                tid = self.desk.new_task(f"{kind}: {error or state}", kind=kind, session=sess)
+                self.desk.update(tid, state=state, finished=at, error=error, provider="claude",
+                                 verdict="holds" if kind == "verify" and state == "done" else "")
+                event = "task_not_started" if error.startswith("could not start:") else "task_finished"
+                expected[tid] = {"ts": at, "event": event, "task": tid, "error": error,
+                                 **({"state": state, "provider": "claude"} if event == "task_finished" else {})}
+                # An earlier try or the hand-off to a check must not hide a missing terminal event.
+                self.desk.event("task_finished", ts=at, task=tid, state="queued")
+                self.desk.event("task_finished", ts=at, task=tid, state="checking")
+        pos = notify.log_end(self.desk)
+        d = Dispatcher(self.desk)
+        d.tick()
+        events, end = notify.read_log(self.desk, pos)
+        repaired = [e for e in events if e.get("task") in expected]
+        self.assertEqual({e["task"]: e for e in repaired}, expected)
+        self.assertEqual(len(repaired), len(expected))
+        items = notify.items_for(self.desk, repaired, {"key": "probe", "session": sess})
+        self.assertEqual({x["key"][1] for x in items}, set(expected))
+        for x in items:
+            self.assertIn(x["key"][1], x["line"])
+        d.tick()
+        Dispatcher(self.desk).tick()
+        self.assertEqual(notify.read_log(self.desk, end)[0], [])
+
+    def test_startup_repairs_a_verification_lost_by_process_exit(self):
+        from hansa import run
+        tid = self.desk.new_task("Verify the change", kind="verify", lane="a")
+        self.desk.update(tid, state="running", provider="claude")
+        write_json(self.desk.raw_dir(tid) / "run.json",
+                   {"subtype": "success", "result": "VERDICT: holds"})
+        self.stop_before_end_event(tid, "task_finished", "run.finish(desk, tid, 0)\n")
+        self.assertEqual((self.desk.meta(tid)["state"], self.desk.meta(tid)["verdict"]), ("done", "holds"))
+        Dispatcher(self.desk).tick()
+        [event] = self.events("task_finished")
+        [item] = notify.items_for(self.desk, [event], {"key": "probe", "session": None})
+        self.assertIn(tid, item["line"])
+        self.assertIn("holds", item["line"])
+        self.assertEqual(event["ts"], self.desk.meta(tid)["finished"])
+
+    def test_startup_repairs_a_merge_check_lost_by_process_exit(self):
+        tid = self.desk.new_task("Check the merge", lane="a")
+        self.desk.update(tid, state="merging", finished=now() - 120, error="",
+                         merge_check={"phase": "running", "command": "false", "started": now() - 30})
+        # The worker's end was already delivered; this repair is the merge check's own end.
+        self.desk.event("task_finished", task=tid, state="done")
+        (self.desk.raw_dir(tid) / "merge-check.exit").write_text("1\n")
+        self.stop_before_end_event(tid, "merge_check_ended", "run.finish_merge_check(desk, tid)\n")
+        saved = self.desk.meta(tid)
+        self.assertEqual(saved["state"], "done")
+        self.assertEqual(self.events("merge_check_ended"), [])
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).tick()
+        [event] = self.events("merge_check_ended")
+        self.assertEqual(event, {"event": "merge_check_ended", "ts": saved["merge_check_result"]["at"],
+                                 "task": tid, "ok": False, "note": "", "command": "false"})
+        [item] = notify.items_for(self.desk, notify.read_log(self.desk, pos)[0],
+                                 {"key": "probe", "session": None})
+        self.assertEqual(item["key"], ["merge", tid])
+        self.assertIn("merge check ended", item["line"])
+        self.assertIn("false", item["line"])
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.events("merge_check_ended"), [event])
+
+    def test_startup_repairs_a_saved_check_and_successful_merge(self):
+        self.desk.pause("hold queued work")
+        at = now() - 60
+        checked = self.desk.new_task("Worker check")
+        self.desk.update(checked, state="done", finished=at,
+                         check={"ok": None, "exit": None, "note": "could not run", "could_not_run": True})
+        self.desk.event("task_finished", task=checked, state="checking")
+        merged = self.desk.new_task("Merge passed")
+        self.desk.update(merged, state="merged", merged=at, merge_base="main",
+                         merge_check_result={"ok": True, "at": at - 1, "onto": "old-tip", "command": "true",
+                                             "batch": [merged, "t9999"], "output_task": merged})
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).tick()
+        events, end = notify.read_log(self.desk, pos)
+        self.assertEqual(events, [
+            {"event": "task_checked", "ts": at, "task": checked, "ok": None, "exit": None,
+             "note": "could not run", "could_not_run": True},
+            {"event": "task_merged", "ts": at, "task": merged, "into": "main", "merge_checked": True,
+             "onto": "old-tip", "command": "true", "members": [merged, "t9999"], "check_task": merged}])
+        items = notify.items_for(self.desk, events, {"key": "probe", "session": None})
+        self.assertEqual([x["key"] for x in items], [["task", checked], ["merge", merged]])
+        Dispatcher(self.desk).tick()
+        self.assertEqual(notify.read_log(self.desk, end)[0], [])
+
+    def test_startup_leaves_present_ends_active_tasks_and_missing_adds_alone(self):
+        self.desk.pause("hold queued work")
+        at = now()
+        ended = self.desk.new_task("Already ended")
+        self.desk.update(ended, state="done", finished=at, error="")
+        self.desk.event("task_finished", ts=at, task=ended, state="done")
+        self.desk.events_path.write_bytes(self.desk.events_path.read_bytes().replace(
+            next(line for line in self.desk.events_path.read_bytes().splitlines(keepends=True)
+                 if b'"task_added"' in line), b""))
+        for state, phase in (("queued", ""), ("running", ""), ("running", "checking"), ("merging", "running")):
+            tid = self.desk.new_task(f"Active {state} {phase}")
+            self.desk.update(tid, state=state, phase=phase, finished=at,
+                             merge_check={"phase": phase}, merge_check_result={"at": at, "note": "older try"})
+        pos = notify.log_end(self.desk)
+        d = Dispatcher(self.desk)
+        # Only startup recovery: the ordinary rounds would correctly finish these stand-in running processes.
+        d.recover_ends()
+        Dispatcher(self.desk).recover_ends()
+        self.assertEqual(notify.log_end(self.desk), pos)
+        self.assertEqual([e["task"] for e in self.events("task_added")],
+                         [m["id"] for m in self.desk.tasks() if m["id"] != ended])
+
+    def test_startup_recovery_reads_only_the_recent_log_tail_and_uses_its_time(self):
+        from hansa import run
+        at = 200000  # a desk stopped long ago still repairs ends near its last event, not near today's clock
+        old = self.desk.new_task("Old saved end")
+        edge = self.desk.new_task("Exactly one hour before")
+        later = self.desk.new_task("After the last event")
+        for tid, finished in ((old, at - 3601), (edge, at - 3600), (later, at + 1)):
+            self.desk.update(tid, state="done", finished=finished)
+        self.desk.events_path.write_bytes(
+            (b'{"ts":1,"event":"old_note"}\n' * 100000)
+            + b'{"ts":199999,"event":"note","text":"' + ("中é" * 40000).encode() + b'"}\n'
+            + json.dumps({"ts": at, "event": "note"}).encode() + b'\n\xff\n[]\n{"ts":"bad"}\nbroken\n')
+        with unittest.mock.patch.object(run, "event_record", wraps=run.event_record) as read:
+            Dispatcher(self.desk).recover_ends()
+        self.assertLess(read.call_count, 20)  # the large old history was neither read nor parsed
+        self.assertEqual({e["task"]: e["ts"] for e in notify.read_log(self.desk, 0, 10 ** 7)[0]
+                          if e.get("event") == "task_finished"},
+                         {edge: at - 3600, later: at + 1})
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).recover_ends()
+        self.assertEqual(notify.log_end(self.desk), pos)
+
+    def test_startup_repairs_ends_when_the_event_log_is_missing(self):
+        tid = self.desk.new_task("Saved without a log")
+        at = now() - 7200
+        self.desk.update(tid, state="failed", finished=at, error="failed")
+        self.desk.events_path.unlink()
+        Dispatcher(self.desk).recover_ends()
+        [event] = self.events("task_finished")
+        self.assertEqual((event["task"], event["ts"], event["state"]), (tid, at, "failed"))
+        self.assertEqual(self.events("task_added"), [])
+
+    def test_startup_repaired_end_is_in_a_new_followers_catch_up(self):
+        key, me = self.missed_a_server_stop()
+        tid = self.desk.new_task("Ended while the session was away", session={"pid": 4242, "start": "boot:77"})
+        self.desk.update(tid, state="done", finished=now(), error="")
+        Dispatcher(self.desk).tick()
+        caught = self.starts_again(me, {"state": "up", "pid": 123, "quiet": 0, "answers": True})
+        self.assertEqual(len(caught["summary"]), 1)
+        self.assertIn(f"{tid} done", caught["summary"][0])
+        self.assertEqual(caught["missed"]["key"], key)
+
+    def test_startup_preserves_existing_check_and_merge_end_events(self):
+        at = now() - 60
+        for kind in ("task_not_started", "task_checked", "merge_check_ended", "task_merged"):
+            tid = self.desk.new_task(kind)
+            state = "merged" if kind == "task_merged" else "failed" if kind == "task_not_started" else "done"
+            self.desk.update(tid, state=state, finished=at, merged=at, merge_base="main",
+                             error="could not start: no worker" if kind == "task_not_started" else "",
+                             check={"ok": True, "exit": 0, "note": ""} if kind == "task_checked" else None,
+                             merge_check_result={"at": at, "note": "failed", "ok": False}
+                             if kind in ("merge_check_ended", "task_merged") else None)
+            if kind == "merge_check_ended":
+                self.desk.event("task_finished", ts=at, task=tid, state="done")
+            self.desk.event(kind, ts=at + 1, task=tid)
+        pos = notify.log_end(self.desk)
+        Dispatcher(self.desk).recover_ends()
+        self.assertEqual(notify.log_end(self.desk), pos)
+
+    def test_startup_repairs_waited_merge_ends_and_retries_a_failed_event_write(self):
+        at = now() - 60
+        for i in range(2):
+            tid = self.desk.new_task(f"Waited merge {i}")
+            self.desk.update(tid, state="done", finished=at - 60,
+                             merge_check_result={"at": at, "note": "base moved", "waited": True})
+            self.desk.event("task_finished", ts=at - 60, task=tid, state="done")
+        original = self.desk.event
+        d = Dispatcher(self.desk)
+        calls = []
+        def fail_second(kind, **fields):
+            calls.append(fields["task"])
+            if len(calls) == 2:
+                raise OSError(errno.ENOSPC, "event log full")
+            original(kind, **fields)
+        with unittest.mock.patch.object(self.desk, "event", side_effect=fail_second), self.assertRaises(OSError):
+            d.recover_ends()
+        self.assertFalse(d.ends_recovered)
+        d.recover_ends()
+        self.assertTrue(d.ends_recovered)
+        self.assertEqual(self.events("merge_check_ended"), [
+            {"event": "merge_check_ended", "ts": at, "task": tid, "ok": False, "note": "base moved", "waited": True}
+            for tid in calls])
+
     def test_a_task_that_ends_after_its_check_is_posted_once_to_its_session(self):
         s = self.desk.settings()
         s["lanes"]["a"]["check"] = "true"
