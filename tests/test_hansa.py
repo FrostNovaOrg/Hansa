@@ -27076,6 +27076,49 @@ def save():'''))
                 self.assertIn(row["waiting"], self.hansa("status"))
                 self.assertIn(row["waiting"], self.hansa("show", tid))
 
+    def test_add_after_show_meaning_names_pending_merges(self):
+        first = self.desk.new_task("Earlier change", lane="a")
+        tid = self.hansa("add", "Needs earlier change", "--lane", "a", "--after", first).split()[0]
+        for state in ("queued", "running", "done", "merging"):
+            with self.subTest(state=state):
+                self.desk.update(first, state=state)
+                shown = self.hansa("show", tid)
+                meaning = next(line[len("meaning: "):] for line in shown.splitlines()
+                               if line.startswith("meaning: "))
+                for word in (first, "to be merged", "main"):
+                    self.assertIn(word, meaning)
+                self.assertNotIn("free lane", meaning)
+                self.assertIn(meaning, self.hansa("status"))
+                self.assertIn("waits: " + meaning, shown)
+        self.desk.update(first, state="merged")
+        shown = self.hansa("show", tid)
+        meaning = next(line for line in shown.splitlines() if line.startswith("meaning: "))
+        self.assertIn("free lane", meaning)
+        self.assertNotIn(first, meaning)
+
+    def test_add_after_show_meaning_explains_held_prerequisite(self):
+        for ending in ("closed", "cancelled", "failed"):
+            with self.subTest(ending=ending):
+                first = self.desk.new_task("Earlier change", lane="a")
+                self.desk.update(first, state="failed")
+                latest = self.hansa("retry", first, "Fix").split()[0]
+                tid = self.hansa("add", "Needs fix", "--lane", "a", "--after", first).split()[0]
+                if ending == "closed":
+                    self.desk.update(latest, state="done")
+                    self.hansa("close", latest)
+                elif ending == "cancelled":
+                    self.hansa("cancel", latest)
+                else:
+                    self.desk.update(latest, state="failed")
+                shown = self.hansa("show", tid)
+                meaning = next(line[len("meaning: "):] for line in shown.splitlines()
+                               if line.startswith("meaning: "))
+                for word in ("HELD", first, latest, ending, f"hansa cancel {tid}", f"hansa retry {latest}"):
+                    self.assertIn(word, meaning)
+                self.assertNotIn("free lane", meaning)
+                self.assertIn(meaning, self.hansa("status"))
+                self.assertIn("waits: " + meaning, shown)
+
     def test_add_after_merge_starts_from_merged_base(self):
         d = Dispatcher(self.desk)
         prerequisite = self.desk.new_task("Add hello.txt", lane="a")

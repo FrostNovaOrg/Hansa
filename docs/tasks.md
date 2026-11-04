@@ -232,7 +232,9 @@ passes it on, but some such endpoints do not act on it.
 the new task's lane's base branch. Repeat `--after T` for several prerequisites; every one must
 be merged. A prerequisite already merged adds no wait. While waiting, the task takes no lane
 or concurrency slot, and unrelated queued work can start. `hansa status`, `hansa show ID` and
-the page name only the prerequisites still outstanding. `hansa help queuing` gives these rules.
+the page name only the prerequisites still outstanding. For these tasks, `hansa show ID` uses
+the same waiting or held reason as `hansa status` in its `meaning:` line.
+`hansa help queuing` gives these rules.
 
 Each T must already exist and have a lane on the same repository and base branch as the new
 task's lane. Without `--lane`, hansa may choose any work lane on the prerequisites' repository
