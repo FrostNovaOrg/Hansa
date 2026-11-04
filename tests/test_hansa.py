@@ -8648,6 +8648,7 @@ def save():'''))
         s["concurrency"] = 8
         s["lanes"]["c"] = {**s["lanes"]["a"]}
         self.assertEqual(self.desk.save_settings(s), [])
+        pending_recovery = None
         for step in steps:
             for sustained in (None, False, True):  # None: room on disk, including the base's record order
                 with self.subTest(step=step, sustained=sustained), contextlib.ExitStack() as patches:
@@ -8753,6 +8754,9 @@ def save():'''))
                     patches.enter_context(unittest.mock.patch.object(d, "look", return_value=(None, None)))
                     fired, available = [], [True] if sustained is None else []
                     before_events = len(self.desk.events_path.read_text().splitlines())
+                    if pending_recovery:
+                        self.assertEqual([e for e in self.events("task_finished")
+                                          if e["task"] == pending_recovery["task"]], [])
 
                     def refuse(selected=False):
                         if not available and (selected and not fired or sustained and fired):
@@ -8795,11 +8799,17 @@ def save():'''))
                         self.failed_round(d)
                         if sustained is None:
                             self.assertFalse(fired)
-                            recorded = [json.loads(line)["event"] for line in
+                            recorded = [json.loads(line) for line in
                                         self.desk.events_path.read_text().splitlines()[before_events:]]
-                            self.assertEqual(recorded, ["task_finished", "task_finished", "task_checked", "lane_tried",
-                                                        "lane_tried", "release_ended", "release_ended", "merge_checked",
-                                                        "merge_check_ended"])
+                            # The previous case saved a cancelled claim without an end event. A fresh
+                            # Dispatcher repairs that gap before this case's ordinary round events.
+                            repaired = [pending_recovery] if pending_recovery else []
+                            self.assertEqual(recorded[:len(repaired)], repaired)
+                            self.assertEqual([e["event"] for e in recorded],
+                                             ["task_finished"] * len(repaired)
+                                             + ["task_finished", "task_finished", "task_checked", "lane_tried",
+                                                "lane_tried", "release_ended", "release_ended", "merge_checked",
+                                                "merge_check_ended"])
                         else:
                             self.assertTrue(fired, "the selected write was never attempted")
                         # Actual base order, including releases before merge checks.
@@ -8815,6 +8825,9 @@ def save():'''))
                         available.append(True)
                         for _ in range(4):
                             d.tick()
+                    if pending_recovery:
+                        self.assertEqual([e for e in self.events("task_finished")
+                                          if e["task"] == pending_recovery["task"]], [pending_recovery])
                     for tid, code in ((worker, 7), (other_worker, 8)):
                         m = self.desk.meta(tid)
                         self.assertEqual((m["exit"], m.get("timed_out", False)), (code, False))
@@ -8838,6 +8851,9 @@ def save():'''))
                     else:
                         self.assertEqual(starts, [new])
                         self.assertEqual(self.desk.meta(new)["exit"], 6)
+                    m = self.desk.meta(recoveries[0])
+                    pending_recovery = {"ts": m["finished"], "event": "task_finished", "task": m["id"],
+                                        "state": "cancelled", "provider": m.get("provider"), "error": m["error"]}
 
     @contextlib.contextmanager
     def serve_full_disk(self):
