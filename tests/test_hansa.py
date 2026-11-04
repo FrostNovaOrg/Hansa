@@ -4552,6 +4552,46 @@ class DeskTest(unittest.TestCase):
         self.assertIn("concurrency: 1 → 2", shown)
         self.assertNotIn("broken", shown)
 
+    def test_settings_history_interrupted_first_append_keeps_later_entries_readable(self):
+        from hansa import history
+        path = self.desk.state_dir / "settings-history.jsonl"
+        damaged = path.read_bytes().splitlines()[0][:-3]
+        path.write_bytes(damaged)  # first write stopped before even its terminating newline
+        with unittest.mock.patch("hansa.history.now", return_value=1900000000):
+            self.hansa("concurrency", "2")
+        with unittest.mock.patch("hansa.history.now", return_value=1900000100):
+            self.hansa("memory-floor", "3")
+        self.assertTrue(path.read_bytes().startswith(damaged + b"\n"))
+        shown = self.hansa("explain", "history")
+        self.assertIn("since 2030-03-17T17:46:40Z", shown)
+        self.assertIn("coordinator (hansa concurrency)  concurrency: 1 → 2", shown)
+        self.assertIn("coordinator (hansa memory-floor)  memory_floor: 2 → 3", shown)
+        self.assertLess(shown.index("memory_floor:"), shown.index("concurrency:"))
+        self.assertEqual(history.text(Desk(self.desk.root)), shown.rstrip("\n"))
+        limited = self.hansa("explain", "history", "--last", "1")
+        self.assertIn("since 2030-03-17T17:46:40Z", limited)
+        self.assertNotIn("concurrency:", limited)
+
+    def test_settings_history_recording_since_after_entries(self):
+        from hansa.desk import append_event
+        path = self.desk.state_dir / "settings-history.jsonl"
+        path.write_bytes(b'{"recording_since":')
+        with unittest.mock.patch("hansa.history.now", return_value=1900000100):
+            self.hansa("concurrency", "2")
+        append_event(path, json.dumps({"recording_since": 1900000000}))
+        shown = self.hansa("explain", "history")
+        self.assertIn("since 2030-03-17T17:46:40Z", shown)
+        self.assertIn("2030-03-17T17:48:20Z  coordinator (hansa concurrency)", shown)
+        self.assertIn("concurrency: 1 → 2", shown)
+
+    def test_settings_history_only_interrupted_first_append(self):
+        path = self.desk.state_dir / "settings-history.jsonl"
+        path.write_bytes(b'{"recording_since":')
+        with unittest.mock.patch("hansa.history.now", return_value=1900000000):
+            shown = self.hansa("explain", "history")
+        self.assertIn("since 2030-03-17T17:46:40Z", shown)
+        self.assertIn("No settings changes", shown)
+
     def test_settings_history_preserves_filesystem_bytes_and_unicode(self):
         command = "sh " + shlex.quote(os.fsdecode(b"publish-\xff.sh"))
         self.with_release(command)

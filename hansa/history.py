@@ -133,7 +133,10 @@ def text(desk, kind: str = "", name: str = "", last: int | None = None) -> str:
         with path.open("rb") as source:
             records = [e for line in source if (e := event_record(line))]
         keys = _keys(desk)
-    since = records[0]["recording_since"]
+    # The first append may itself be interrupted; use the surviving start or earliest entry.
+    since = next((e["recording_since"] for e in records if "recording_since" in e), None)
+    if since is None:
+        since = min((e["ts"] for e in records if "ts" in e), default=now())
     prefix = f"{'lanes' if kind == 'lane' else 'providers'}.{name}." if kind else ""
     entries = [e for e in reversed(records) if "path" in e and (not prefix or e["path"].startswith(prefix))]
     if last is not None:
