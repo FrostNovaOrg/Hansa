@@ -226,6 +226,31 @@ started with another model or effort names its own. On a provider whose endpoint
 `compatible`: any endpoint that speaks the Anthropic API) they add that the endpoint may ignore effort: hansa
 passes it on, but some such endpoints do not act on it.
 
+## Queuing after another task
+
+`hansa add "<task>" --after T` queues work now and starts it only when T has been merged into
+the new task's lane's base branch. Repeat `--after T` for several prerequisites; every one must
+be merged. A prerequisite already merged adds no wait. While waiting, the task takes no lane
+or concurrency slot, and unrelated queued work can start. `hansa status`, `hansa show ID` and
+the page name only the prerequisites still outstanding. `hansa help queuing` gives these rules.
+
+Each T must already exist and have a lane on the same repository and base branch as the new
+task's lane. Without `--lane`, hansa may choose any work lane on the prerequisites' repository
+and base. An unassigned prerequisite is accepted when its eligible lanes all have the same
+repository and base (or an earlier `--after` already fixed its target). A missing task, a
+verification, an ambiguous target, or a different repository or base is refused before anything
+is queued. This check prevents starting work without the changes it needs; it remains necessary
+while `--after` accepts task references. The target is saved with the task, so changing a lane
+cannot silently send it to another repository or base.
+
+When T is sent back with `hansa retry`, the task waits for its latest follow-up, through any
+number of retries. If that task is closed, cancelled or fails without being sent back, the
+dependent task stays queued but held. Hansa posts the reason to its coordinator once for that
+dependency and attempt, naming both tasks and the choices: `hansa cancel ID` to drop the waiting
+task, or `hansa retry T` (the latest follow-up when there is one). A later retry and merge clears
+the hold automatically. Dependencies and notice records survive a server restart. Cancelling
+the waiting task works as for any queued task; a retry of it keeps its dependencies.
+
 ## Task text and options
 
 Give text inline or with `--file PATH`. Text files, including a regular file redirected to `--file -`,

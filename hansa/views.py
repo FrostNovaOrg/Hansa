@@ -1457,11 +1457,13 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(limit_wait(desk, m))
     if m["state"] == "queued":
         s, states = desk.settings(), desk.provider_state()
+        tasks = desk.tasks()
+        busy = {occupied_lane(t) for t in tasks if lane_occupied(t)} | tried_lanes(desk)
+        out.append("waits: " + waiting_detail(desk, s, m, busy, waiting_looks(desk, s, tasks))["waiting"])
         names = {p for ln in ([m["lane"]] if m.get("lane") else s["lanes"]) if ln in s["lanes"]
                  for p in task_providers(s, ln, m)}
         out += [f"{p}: {provider_problem(desk, s, p)}" for p in sorted(names)
                 if states.get(p, {}).get("shared_rest")]
-        out += [f"waits: {why}"] if (why := desks_list_problem()) else []
     report = report_of(desk, tid)
     if report:
         lines = report.splitlines()

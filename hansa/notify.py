@@ -227,6 +227,18 @@ def _item(desk: Desk, e: dict):
     """What one event tells the coordinator: (key, line, recorded session, desk-wide, the session not to tell),
     or None. The session that cancelled a task with hansa cancel does not hear that it was cancelled."""
     kind, tid = e.get("event"), e.get("task")
+    if kind == "task_after_held":
+        from . import after
+        try:
+            m = desk.meta(tid)
+        except SystemExit:
+            return None
+        held = [d for d in after.pending(m, desk.tasks()) if d["held"]
+                and (d["task"], d["latest"]) == (e.get("after"), e.get("latest"))]
+        if m["state"] != "queued" or not held:
+            return None
+        return (("after", tid, e["after"], e["latest"]),
+                f"{tid}: {m['title']} · {after.waiting(m, held)}", m.get("session"), False, None)
     if kind in ("task_finished", "task_checked", "task_not_started", "merge_check_ended", "task_merged"):
         if kind == "merge_check_ended" and e.get("note") == "cancelled":  # the coordinator cancelled it
             return None

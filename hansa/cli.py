@@ -27,7 +27,7 @@ from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
-                  quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_reason, words_in_merge, words_text, write_try,
+                  quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_detail, words_in_merge, words_text, write_try,
                   is_local, mac_loopback_listeners)
 
 CARD = Path(__file__).with_name("card.md")
@@ -65,6 +65,7 @@ TOPICS = {
     "check-output": ("tasks.md", "A check's output", "where a check's and a merge check's output is kept, and "
                      "how to read it"),
     "effort": ("tasks.md", "Effort", "which effort a run gets, and where it comes from"),
+    "queuing": ("tasks.md", "Queuing after another task", "dependencies: queue now, start after their merges"),
     "writing-tasks": ("tasks.md", "Writing a task a verification can judge", "how to write a task, and its "
                       "verification's text, so that the verification can judge it"),
     "intent-records": ("tasks.md", "Goals and product decisions", "goals, decisions and their reasons, and linking tasks and to-dos"),
@@ -415,11 +416,11 @@ def _runs_when(desk: Desk, tid: str, base: str) -> str:
 
 
 def _waits(desk: Desk, tid: str) -> str:
-    """The line for a task just queued that no provider of its lane can start now, in hansa status's words;
-    '' when one can."""
+    """A just-queued task's dependency or provider wait, in hansa status's words."""
     m = desk.meta(tid)
-    why = waiting_reason(desk, desk.settings(), m, set())
-    return f"\n{tid} waits: {why}" if "no provider ready" in why else ""
+    detail = waiting_detail(desk, desk.settings(), m, set())
+    why = detail["waiting"]
+    return f"\n{tid} waits: {why}" if detail["waiting_code"] == "after" or "no provider ready" in why else ""
 
 
 def _title_allowed(desk: Desk, s: dict, title: str | None, text: str, lane: str) -> None:
@@ -457,7 +458,7 @@ def _add(desk: Desk, a, text: str) -> None:
     _title_allowed(desk, s, a.title, text, a.lane)
     tid = desk.new_task(text, lane=a.lane or "", effort=a.effort or "", model=a.model or "",
                         title=a.title or "", max_turns=a.max_turns or 0, attach=a.attach,
-                        goal=a.goal or "",
+                        goal=a.goal or "", **({"after": a.after} if a.after else {}),
                         **verification,
                         **notify.recorded(notify.session_here()))
     if a.lane and a.lane not in s["lanes"]:
@@ -907,6 +908,8 @@ def _retry(desk: Desk, a) -> None:
             "parent": a.id, "title": f"{own_title(m['title'])} (retry of {a.id})",
             **_verify_request(desk, a, {**m, "lane": lane}),
             **notify.recorded(notify.session_here())}
+    if m.get("after"):
+        opts.update(after=m["after"], after_target=m["after_target"])
     base = (own or {}).get("base") or "main"
     if a.update:  # the base's tip when it starts is merged into its branch then (run.prepare)
         opts.update(start_from=m["head"], update=True)
@@ -2920,8 +2923,8 @@ def index_text(commands: list, lane_commands: list) -> str:
     grouped[-1] += [x for x in commands if not any(x in g for g in grouped)]
     shown = {"lane": f"lane ({', '.join(lane_commands)})"}
     return "\n".join([
-        "hansa help COMMAND: that command's help, as hansa COMMAND --help prints it. hansa help TOPIC: one topic.",
-        "hansa help card: the whole card (the desk's CLAUDE.md). hansa help topics: the topics alone.",
+        "hansa help COMMAND: command help; hansa help TOPIC: one topic; hansa help card: the card; "
+        "hansa help topics: all topics.",
         "Commands:",
         *(f"  {label}: {', '.join(shown.get(x, x) for x in g if x in commands)}"
           for (label, _), g in zip(COMMAND_GROUPS, grouped)),
@@ -3061,6 +3064,10 @@ def main(argv=None):
     p.epilog = "Each command has a 15-second limit. Exit 1 if any row fails; notes do not fail. See docs/getting-started.md."
     p = add("add", cmd_add, "queue a task")
     verify_options(p)
+    p.add_argument("--after", action="append", default=[], metavar="T", type=_record_reference,
+                   help="start only after task T (or its latest retry) is merged into this lane's base; "
+                   "repeat for several tasks, all on the same repository and base. Waiting takes no lane "
+                   "or concurrency slot; a dependency ending without a merge holds the task and posts why")
     p.add_argument("--goal", type=_record_reference, metavar="G", help="tie this task to an open goal; retries and verifications keep it")
     p.add_argument("text", nargs="*")
     p.add_argument("--attach", action="append", default=[], metavar="PATH",
@@ -3077,7 +3084,7 @@ def main(argv=None):
     p.add_argument("--title")
     p.add_argument("--max-turns", type=int, metavar="N", help="this one task's ceiling of turns, instead of its "
                    "lane's max_turns")
-    p.epilog = see_more("effort")
+    p.epilog = see_more("queuing", "effort")
     p = add("status", cmd_status, "what is running, queued, waiting for review, and why")
     p.add_argument("--json", action="store_true")
     p = add("desks", cmd_desks, "this account's listed desks: servers, page addresses without keys, and counts")

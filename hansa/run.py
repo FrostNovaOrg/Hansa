@@ -33,7 +33,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from . import account, build, installed, installed_text, session_vars, without_session
+from . import account, after, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
                    refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, program_candidates,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems)
@@ -3830,6 +3830,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     cancelled while hansa prepared it."""
     with desk.lock():  # lane roles may have changed since dispatch chose it
         queued = desk.meta(tid)
+        if queued.get("after") and (not after.lane_matches(desk.settings(), queued, lane_name)
+                                    or after.pending(queued, desk.tasks())):
+            return None
         if work_lane_problem(desk.settings(), lane_name,
                              verifying=queued.get("kind") == "verify" and bool(queued.get("lane"))):
             return None
@@ -6342,6 +6345,9 @@ class Dispatcher:
             with serve_step():
                 if verification_due(m):
                     self.verify_after(m["id"])
+                if m["state"] == "queued" and any(dep["held"] and [dep["task"], dep["latest"]]
+                        not in (m.get("after_notified") or []) for dep in after.pending(m, self.tasks())):
+                    after.announce(desk, m["id"])
         for m in self.tasks():
             with serve_step():
                 if m["state"] != "running":
@@ -6383,8 +6389,10 @@ class Dispatcher:
                     break
                 if m["state"] != "queued":
                     continue
+                if after.pending(m, self.tasks()):
+                    continue
                 for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
-                    if (ln in busy or ln not in s["lanes"] or work_lane_problem(s, ln,
+                    if (ln in busy or ln not in s["lanes"] or not after.lane_matches(s, m, ln) or work_lane_problem(s, ln,
                             verifying=m.get("kind") == "verify" and bool(m.get("lane"))) or self.sandbox_waits(ln, s)):
                         continue
                     pname = next((p for p in task_providers(s, ln, m)
@@ -6760,6 +6768,10 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
     def result(code, text, **values):
         return {"waiting": text, "waiting_code": code, "waiting_values": values}
 
+    dependencies = after.pending(m, lk["tasks"])
+    if dependencies:
+        return result("after", after.waiting(m, dependencies), task=m["id"],
+                      base=m["after_target"]["base"], dependencies=dependencies)
     if lk["paused"]:
         return result("paused", "dispatch is paused")
     if lk.get("desks"):
@@ -6776,6 +6788,11 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
     for ln in lanes:
         if ln not in s["lanes"]:
             why.append(reason("missing_lane", f"lane {ln} is not in settings", lane=ln))
+            continue
+        if not after.lane_matches(s, m, ln):
+            target = m["after_target"]
+            why.append(reason("after_lane", f"lane {ln} is not on the dependency repository and base "
+                              f"{target['base']} ({target['repo']})", lane=ln, **target))
             continue
         problem = work_lane_problem(s, ln, verifying=m.get("kind") == "verify" and bool(m.get("lane")))
         if problem:

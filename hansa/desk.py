@@ -3026,7 +3026,8 @@ class Desk:
         if not text:
             raise ValueError("the task text is empty")
         with self.lock():  # a key saved meanwhile is either known here or scrubbed from the task after
-            from . import goals
+            from . import after, goals
+            after.validate(self, opts)
             if opts.get("parent"):
                 parent = read_json(self.tasks_dir / opts["parent"] / "meta.json", {}) or {}
                 opts["goal"] = parent.get("goal", "")
