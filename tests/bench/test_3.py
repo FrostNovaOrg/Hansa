@@ -112,7 +112,7 @@ class BenchArchiveTest(unittest.TestCase):
         safe_open = a.safe_open
         def opening(directory, name, *args):
             return safe_open(directory, "bad" if name == bad else name, *args)
-        def entries(directory):
+        def entries(directory, skip):
             yield directory, bad, bad, False
             yield directory, "good", "good", False
         with patch.object(a, "_walk", entries), patch.object(a, "safe_open", opening):
@@ -122,6 +122,23 @@ class BenchArchiveTest(unittest.TestCase):
         self.assertEqual({n: (self.worker / p).read_bytes() for n, p in result["artifacts"].items()}, {"good": b"evidence"})
         with self.assertRaisesRegex(ValueError, "unsafe archive path"):
             a._name("artifacts/" + bad)
+
+    def test_unsupported_directory_skips_only_its_subtree(self):
+        (self.out / "good").write_bytes(b"evidence")
+        bad = os.fsdecode(b"dir-\xff")  # Faked as above: macOS refuses to create the name.
+        def entries(directory, skip=()):
+            yield directory, bad, bad, True
+            if bad not in skip:  # As _walk: descend unless collect pruned the directory.
+                yield directory, "inner", bad + "/inner", False
+            yield directory, "good", "good", False
+        with patch.object(a, "_walk", entries):
+            result = self.returned()
+        self.assertTrue(result["result"]["rejected"])
+        self.assertEqual({n: (self.worker / p).read_bytes() for n, p in result["artifacts"].items()}, {"good": b"evidence"})
+        (self.out / "pruned").mkdir()
+        (self.out / "pruned/inner").write_bytes(b"x")
+        self.assertNotIn("pruned/inner", [e[2] for e in a._walk(self.fd, {"pruned"})])
+        self.assertIn("pruned/inner", [e[2] for e in a._walk(self.fd, set())])
 
     def test_delivery_never_follows_links(self):
         (self.out / "file").write_bytes(b"data")

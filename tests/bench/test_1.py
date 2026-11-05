@@ -86,6 +86,17 @@ class BenchChannelTest(unittest.TestCase):
             c._read(self.queue.directory, "large.request")
         self.assertTrue(stream.closed)
 
+    def test_growth_after_size_check_refused(self):
+        path = self.tmp / "grow.request"
+        path.write_bytes(b"{}")
+        stats, fstat = [], os.fstat
+        def stale(fd):  # Grow after the size check; report the first stat, as a coarse clock might.
+            stats.append(fstat(fd))
+            path.write_bytes(b" " * (c.LIMIT + 1) + b"{}")
+            return stats[0]
+        with patch.object(c.os, "fstat", stale), self.assertRaisesRegex(ValueError, "size limit"):
+            c._read(self.queue.directory, path.name)
+
     def test_script_read_is_bounded(self):
         script = self.root / "large.sh"
         script.write_bytes(b"x" * (c.LIMIT + 2))
