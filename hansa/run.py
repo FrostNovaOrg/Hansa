@@ -5769,8 +5769,8 @@ class WorkerBench:
     """
     def __init__(self, desk):
         from .bench.broker import Broker
-        from .bench.vm import VM
-        self.desk, self.broker = desk, Broker(desk, VM(desk.state_dir / "bench"))
+        from .bench.manage import managed_vm
+        self.desk, self.broker = desk, Broker(desk, managed_vm(desk, desk.state_dir / "bench"))
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.workers, self.revoking, self.pending = {}, {}, None
         desk._bench_removing = set()

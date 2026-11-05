@@ -15,7 +15,8 @@ stops. Temporary management lock contention delays the broker until a later poll
 `on` and serve require complete passing acceptance for the current recipe and generation.
 An upgrade that changes the bench's code needs a rebuild and a new selftest;
 the recipe covers guest files and the host broker, channel, snapshot, VM, probes and selftest.
-Serve treats stale or incomplete acceptance as off and reports the reason once. The
+Serve treats stale or incomplete acceptance as off and reports the reason once;
+`status` also reports why an enabled bench is not in use. The
 shipped acceptance fixtures cover sandbox capabilities, account restrictions,
 the UID-first edge and detached descendants after completion, timeout, disconnect
 and gateway death. Missing evidence is incomplete; these isolation gates remain
@@ -83,6 +84,7 @@ admission. The VM stops after 60 idle seconds to return its memory.
 
 Snapshots are limited to 256 MiB and 50,000 entries. Combined output is capped at
 1 MiB; artifacts at 16 MiB each, 64 MiB per run and per worker, and 1,000 entries.
+`/work`, `/out`, `/tmp` and `/dev/shm` share a 4 GiB disk limit, including the snapshot and filesystem overhead.
 Read script exit status, timeout, truncation, rejected-artifact and infrastructure
 notices separately. Partial transfers cannot report success.
 Once delivery and its report are complete, the reply retains that report even if

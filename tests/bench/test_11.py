@@ -242,7 +242,6 @@ class BenchSelftestTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'selftest'): self.command('on')
 
     def test_controlled_listeners_are_bound_tested_and_forwarded(self):
-        self.fail = unittest.TestCase.fail.__get__(self)  # Preserve assertion diagnostics from the shared fixture.
         def runner(machine):
             from unittest.mock import MagicMock
             host, lan, connection = MagicMock(), MagicMock(), MagicMock()

@@ -77,7 +77,6 @@ class BenchManagementTest(unittest.TestCase):
             self.assertTrue(any("bench" in p for p in validate({**settings, "bench": value})))
 
     def test_limactl_failure_messages_are_redacted(self):
-        self.fail_action = unittest.TestCase.fail.__get__(self)  # Restore assertions; this test injects its own failures.
         key = 'fixture-private-"provider\\key'
         self.desk.secrets_dir.mkdir()
         self.desk.key_file("fixture").write_text(key)
@@ -130,24 +129,66 @@ class BenchManagementTest(unittest.TestCase):
             self.command("build")
         self.assertEqual((now[0], self.desk.settings()["bench"]["build"]), (1200, "ready"))
 
-    def test_redaction_precedes_stderr_cut_on_failure_and_timeout(self):
+    def check_redaction_precedes_stderr_cut(self, action, error):
         key = "fixture-secret-" + "k" * 15
-        self.desk.secrets_dir.mkdir()
+        self.desk.secrets_dir.mkdir(exist_ok=True)
         self.desk.key_file("fixture").write_text(key)
+        if action in ("selftest", "off"):
+            self.command("build")
+        fail_action = dict(build="sh", rebuild="sh", selftest="--version", off="stop")[action]
         run = self.run_command
         def fail(command, **options):
-            if "sh" in command:
+            if fail_action in command:
                 options["stderr"].write(("prefix " + key + "x" * 4074 + "\nended").encode())
                 raise error(command, options["timeout"]) if error is subprocess.TimeoutExpired else error(1, command)
             return run(command, **options)
+        with patch.object(self, "run_command", side_effect=fail):
+            if action == "selftest":
+                shown = self.command(action, "--json")
+                self.assertIn("[key of fixture]", json.loads(shown)["acceptance"]["error"])
+            else:
+                with self.assertRaises(SystemExit) as caught:
+                    self.command(action)
+                shown = str(caught.exception)
+        failure = self.desk.settings()["bench"]["failure"]
+        self.assertIn("[key of fixture]", failure)
+        self.assertTrue(failure.endswith("ended"))
+        self.assertNotIn(key[-15:], shown + json.dumps(self.desk.settings()) +
+                         (self.desk.state_dir / "settings-history.jsonl").read_text())
+
+    def test_redaction_precedes_stderr_cut_on_failure_and_timeout(self):
         for action, error in (("build", subprocess.CalledProcessError), ("rebuild", subprocess.TimeoutExpired)):
-            with patch.object(self, "run_command", side_effect=fail), self.assertRaises(SystemExit) as caught:
-                self.command(action)
-            failure = self.desk.settings()["bench"]["failure"]
-            self.assertIn("[key of fixture]", failure)
-            self.assertTrue(failure.endswith("ended"))
-            self.assertNotIn(key[-15:], failure + str(caught.exception) +
-                             (self.desk.state_dir / "settings-history.jsonl").read_text())
+            self.check_redaction_precedes_stderr_cut(action, error)
+
+    def test_selftest_redaction_precedes_stderr_cut(self):
+        self.check_redaction_precedes_stderr_cut("selftest", subprocess.CalledProcessError)
+
+    def test_off_redaction_precedes_stderr_cut(self):
+        self.check_redaction_precedes_stderr_cut("off", subprocess.TimeoutExpired)
+
+    def test_serve_broker_redacts_lima_errors_before_cut(self):
+        from hansa.run import WorkerBench
+        key = "fixture-secret-" + "k" * 15
+        self.desk.secrets_dir.mkdir()
+        self.desk.key_file("fixture").write_text(key)
+        self.desk.state_dir.mkdir()
+        with patch.object(vm.sys, "platform", "darwin"):
+            bench = WorkerBench(self.desk)
+        self.addCleanup(bench.close)
+        for error in (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            for padding in ("", "x" * 4074):
+                def fail(command, **options):
+                    options["stderr"].write(("prefix " + key + padding + "\nended").encode())
+                    raise error(command, options["timeout"]) if error is subprocess.TimeoutExpired else error(1, command)
+                with self.subTest(error=error.__name__, cut=bool(padding)), \
+                        patch.object(bench.broker.vm, "run", side_effect=fail):
+                    with self.assertRaises(error) as caught:
+                        bench.broker.vm.stop(bench.broker.vm.clock() + 30)
+                    shown = str(caught.exception)
+                    self.assertIn("[key of fixture]", shown)
+                    self.assertTrue(shown.endswith("ended"))
+                    self.assertNotIn(key, shown)
+                    self.assertNotIn(key[-15:], shown)
 
     def test_build_failure_recorded(self):
         self.fail_action = "sh"
@@ -187,7 +228,6 @@ class BenchManagementTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(settings), [])
         with patch("hansa.bench.manage.recipe_hash", return_value="changed"), self.assertRaisesRegex(SystemExit, "selftest"):
             self.command("on")
-        self.fail = unittest.TestCase.fail.__get__(self)  # Restore assertion reporting for the refusal checks.
         read = Path.read_bytes
         for name in ("broker.py", "channel.py", "snapshot.py", "vm.py", "probes.py", "selftest.py"):
             with self.subTest(changed=name), patch.object(Path, "read_bytes",
