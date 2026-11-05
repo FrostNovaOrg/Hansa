@@ -107,7 +107,9 @@ class BenchManagementTest(unittest.TestCase):
             self.assertEqual(self.desk.save_settings(settings), [])
             with self.assertRaisesRegex(SystemExit, "selftest"):
                 self.command("on")
-        settings["bench"]["acceptance"] = dict(generation=1, status="passed")
+        from hansa.bench.selftest import mandatory
+        settings["bench"]["acceptance"] = dict(generation=1, status="passed", results={
+            n: dict(status="passed", checks=dict.fromkeys(fields, "passed")) for n, fields in mandatory().items()})
         self.assertEqual(self.desk.save_settings(settings), [])
         with patch("hansa.bench.manage.recipe_hash", return_value="changed"), self.assertRaisesRegex(SystemExit, "selftest"):
             self.command("on")

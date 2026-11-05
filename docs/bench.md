@@ -8,14 +8,17 @@ and epoch if resumed after it is turned on, but its pinned system prompt still h
 no bench instructions. Codex's macOS-only sandbox guard still applies.
 
 Coordinator commands accept global `--desk`: `hansa bench build`, `rebuild`,
-`on`, `off`, and `status [--json]`. Build and rebuild require exclusive access
-while disabled; rebuilding changes the generation and invalidates acceptance.
+`on`, `off`, `status [--json]`, and `selftest [--json]`. Build, rebuild and selftest
+require exclusive access while disabled; rebuilding changes the generation and invalidates acceptance.
 `on` requires passing acceptance for the current recipe and generation. The
 shipped acceptance fixtures cover sandbox capabilities, account restrictions,
 the UID-first edge and detached descendants after completion, timeout, disconnect
 and gateway death. Missing evidence is incomplete; these isolation gates remain
-mandatory while guest execution is supported. The `selftest` runner is forthcoming;
-fixtures alone do not enable a build. Do not manufacture an acceptance record.
+mandatory while guest execution is supported. Selftest runs shipped code while disabled,
+records every probe and timing across two boots, and requires confirmed VM stop.
+Missing facilities leave acceptance incomplete; `on` checks every required result.
+Memory return is checked by the exit of the VM's observed host processes after idle stop.
+Do not manufacture an acceptance record.
 
 Use the enabled bench for Linux server, browser or terminal checks. Write one
 shell script that starts everything, waits for readiness, exercises it, and

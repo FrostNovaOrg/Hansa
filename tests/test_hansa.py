@@ -45115,6 +45115,7 @@ from tests.bench.test_8 import BenchBrokerTest  # noqa: E402 - broker with fake 
 from tests.bench.test_8 import BenchRecoveryTest  # noqa: E402 - timeout delivery and recovery with fakes
 from tests.bench.test_9 import BenchIntegrationTest  # noqa: E402 - worker boundaries with fakes
 from tests.bench.test_10 import BenchProbesTest  # noqa: E402 - shipped acceptance fixtures, no VM
+from tests.bench.test_11 import BenchSelftestTest  # noqa: E402 - exclusive selftest with fake Lima/SSH
 
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 
