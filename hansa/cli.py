@@ -3063,8 +3063,13 @@ def main(argv=None):
         p.add_argument("--verify-note", metavar="TEXT", help="what the verification should look at in particular; "
                        "implies --verify. These options apply only to this task, never to a follow-up")
 
-    p = sub.add_parser("bench")  # worker queue; management and public help arrive with the broker
-    p = p.add_subparsers(dest="bench_command", required=True).add_parser("run")
+    p = sub.add_parser("bench")  # public topic/help arrives with worker integration
+    bench_commands = p.add_subparsers(dest="bench_command", required=True)
+    for name in ("on", "off", "build", "rebuild", "status"):
+        p = bench_commands.add_parser(name)
+        if name == "status":
+            p.add_argument("--json", action="store_true")
+    p = bench_commands.add_parser("run")
     p.add_argument("--script", required=True)
     p.add_argument("--cwd", default=".")
     p.add_argument("--timeout", type=int, default=300)
@@ -3675,9 +3680,12 @@ def main(argv=None):
     if a.cmd == "coordinator" and ("--help" in rest or "-h" in rest):  # hansa's help, not claude's
         sub.choices["coordinator"].print_help()
         return 0
-    if a.cmd == "bench":
+    if a.cmd == "bench" and a.bench_command == "run":
         from .bench.channel import command
         return command(a) or 0  # workers cannot discover/read a desk, including session accounting
+    if a.cmd == "bench":
+        from .bench.manage import command
+        a.fn = command
     if not getattr(a, "fn", None):
         from . import menu
         if a.cmd is None and menu.available():
