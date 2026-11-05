@@ -32,7 +32,7 @@ def safe_open(directory, name, flags=os.O_RDONLY):
 
 def _name(name):
     if (any(p in ("", ".", "..") for p in name.split("/")) or "\\" in name
-            or any(ord(c) < 32 or ord(c) == 127 for c in name)
+            or any(ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in name)
             or len(name.encode("utf-8")) > MAX_NAME or name.count("/") > 64):
         raise ValueError("unsafe archive path")
     return name

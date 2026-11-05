@@ -57,6 +57,9 @@ Snapshots are limited to 256 MiB and 50,000 entries. Combined output is capped a
 1 MiB; artifacts at 16 MiB each, 64 MiB per run and per worker, and 1,000 entries.
 Read script exit status, timeout, truncation, rejected-artifact and infrastructure
 notices separately. Partial transfers cannot report success.
+Artifact names must be valid UTF-8. Unsupported names set the rejected-artifact
+flag; output and supported artifacts still return. Keep this validation while
+guest filenames cross the archive boundary.
 
 Serve supervises the broker without waiting on VM operations in its polling loop.
 An error in the bench step leaves it off for that round so task handling continues;
