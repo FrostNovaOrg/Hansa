@@ -288,15 +288,15 @@ class BenchBrokerTest(unittest.TestCase):
         self.assertIn("report", self.result(stale, fresh))
 
     def test_queue_deadline_is_checked_again_when_execution_starts(self):
-        from hansa.bench.manage import exclusive
         worker = self.add_worker()
         rid = channel.submit(worker.directory, worker.epoch, "true")
-        self.b.ready = True  # no stop in this poll, so the held bench lock still starts the job
-        with exclusive(self.b.desk):
-            self.b.poll(self.workers, enabled=True)
-            job = self.b.active
-            self.assertIsNotNone(job)
-            self.now = 100  # past the request's 60 s queue wait, well inside its 300 s run limit
+        def stop(deadline):
+            self.vm.port = None
+            self.now = 100  # the poll's own stop outlasts the request's 60 s queue wait
+        self.vm.stop.side_effect = stop  # ready stays False: this poll stops before it starts the job
+        self.b.poll(self.workers, enabled=True)
+        job = self.b.active
+        self.assertIsNotNone(job)
         job.thread.join(10)
         self.assertFalse(job.thread.is_alive())
         result = self.result(worker, rid)
