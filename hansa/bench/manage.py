@@ -105,7 +105,10 @@ def command(a):
                         raise ValueError("selftest requires a disabled, current ready build")
                     bench["acceptance"] = dict(generation=bench["generation"], status="incomplete")
                     save(desk, bench, action)  # Invalidate any earlier pass before touching the VM.
-                    bench["acceptance"].update(run(VM(private)))
+                    report = run(VM(private))
+                    for result in (report, *report.get("results", {}).values()):
+                        if "error" in result: result["error"] = desk.redact(result["error"])
+                    bench["acceptance"].update(report)
                 elif action == "on":
                     from .selftest import complete
                     accepted = bench["acceptance"] or {}

@@ -135,6 +135,7 @@ def malformed():
 
 def firewall(text, uid):
     """Inspect the live chain, including nft's counters/handles and numeric UID form."""
+    if not isinstance(text, str) or type(uid) is not int: return False
     normalize = lambda s: re.sub(r'\{ ([^{}]+) \}', lambda m: '{ ' + ', '.join(sorted(m[1].split(', '))) + ' }', s)
     lines = [re.sub(r'\s+# handle \d+$', '', s.strip()) for s in text.splitlines()]
     rules = [s for s in lines if s and s != '}' and not s.startswith(('table ', 'chain ', 'type '))]
@@ -165,12 +166,16 @@ def checks(name, evidence, artifacts=None):
     caps evidence is result metadata plus combined output byte count; artifacts maps names to bytes.
     Descendants need host-recorded started=True and post-teardown inspect evidence.
     """
-    if name.startswith('descendant-'):
+    if not isinstance(name, str) or not isinstance(evidence, dict):
+        return {'evidence': 'failed'}
+    if name in ('descendant-normal', 'descendant-timeout', 'descendant-disconnect', 'descendant-gateway-death'):
         expected = dict(survivors=[], started=True)
-    elif name.startswith('caps-'):
+    elif name.startswith('caps-') and name[5:] in CAPS:
         expected = dict(truncated=name == 'caps-output', rejected=name != 'caps-output')
-    else:
+    elif name in EXPECTED:
         expected = EXPECTED[name]
+    else:
+        return {'evidence': 'failed'}
     result = {k: 'incomplete' if evidence.get(k) is None else 'passed' if type(evidence[k]) is type(v) and evidence[k] == v else 'failed' for k, v in expected.items()}
     if name == 'root-edge':
         result['firewall'] = 'incomplete' if any(evidence.get(k) is None for k in ('firewall', 'uid')) else 'passed' if firewall(evidence['firewall'], evidence['uid']) else 'failed'
@@ -179,7 +184,7 @@ def checks(name, evidence, artifacts=None):
         if artifacts is not None and name == 'sandbox':
             png = artifacts.get('browser.png', b'')
             valid = isinstance(png, bytes) and len(png) >= 45 and png[:16] == b'\x89PNG\r\n\x1a\n\0\0\0\rIHDR' and all(struct.unpack('>II', png[16:24])) and png[-12:] == b'\0\0\0\0IEND\xaeB`\x82'
-            result['artifacts'] = 'passed' if valid and artifacts.get('evidence.txt') == b'bench artifact\n' else 'failed'
+            result['artifacts'] = 'passed' if valid and set(artifacts) == {'browser.png', 'evidence.txt'} and artifacts.get('evidence.txt') == b'bench artifact\n' else 'failed'
         elif artifacts is not None:
             sizes = sorted(map(len, artifacts.values()))
             valid = sizes == {'caps-total': [16 * 1024**2] * 4, 'caps-count': [1] * 1000}.get(name, [])

@@ -81,3 +81,37 @@ class BenchProbesTest(unittest.TestCase):
                 self.assertEqual(p.checks(name, dict(evidence, **{key: None}))[key], 'incomplete')
         self.assertEqual(set(p.checks('caps-output', dict(truncated=True, rejected=False, output=1024**2), {}).values()), {'passed'})
         self.assertEqual(p.checks('caps-count', dict(truncated=False, rejected=True), {})['artifacts'], 'failed')
+
+    def test_guest_shapes_fail_closed(self):
+        live = 'table inet' + (Path(__file__).resolve().parents[2] / 'contrib/bench/edge.nft').read_text().split('table inet', 1)[1]
+        for name, evidence in ((None, {}), ('unknown', {}), ('caps-unknown', {}), ('descendant-unknown', {}),
+                               ('inspect', []), ('inspect', None), ('inspect', 'passed'),
+                               ('root-edge', dict(firewall=[], uid=1234)),
+                               ('root-edge', dict(firewall=live, uid='1234'))):
+            with self.subTest(name=name, evidence=evidence):
+                self.assertIn('failed', p.checks(name, evidence).values())
+
+    def test_png_end_dimensions_and_extra_artifacts(self):
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')
+        artifacts = {'browser.png': png, 'evidence.txt': b'bench artifact\n'}
+        self.assertGreaterEqual(len(png[:-12]), 45)
+        for bad in (png[:-12], png[:16] + bytes(4) + png[20:], png[:20] + bytes(4) + png[24:]):
+            with self.subTest(png=bad):
+                self.assertEqual(p.checks('sandbox', p.EXPECTED['sandbox'],
+                                         dict(artifacts, **{'browser.png': bad}))['artifacts'], 'failed')
+        self.assertEqual(p.checks('sandbox', p.EXPECTED['sandbox'], dict(artifacts, extra=b'x'))['artifacts'], 'failed')
+
+    def test_each_cap_rejects_wrong_evidence(self):
+        block = bytes(16 * 1024**2)
+        for cap in p.CAPS:
+            name = 'caps-' + cap
+            evidence = dict(truncated=cap == 'output', rejected=cap != 'output', output=1024**2)
+            artifacts = ({str(n): block for n in range(4)} if cap == 'total' else
+                         {str(n): b'x' for n in range(1000)} if cap == 'count' else {})
+            self.assertEqual(set(p.checks(name, evidence, artifacts).values()), {'passed'})
+            for field in ('truncated', 'rejected') + (('output',) if cap == 'output' else ()):
+                with self.subTest(cap=cap, field=field):
+                    wrong = 0 if field == 'output' else not evidence[field]
+                    self.assertEqual(p.checks(name, dict(evidence, **{field: wrong}), artifacts)[field], 'failed')
+            with self.subTest(cap=cap, field='artifacts'):
+                self.assertEqual(p.checks(name, evidence, dict(artifacts, extra=b'x'))['artifacts'], 'failed')
