@@ -313,6 +313,8 @@ or ask `scout` when reading is enough; say what you need back.
   settle it with the principal. More: `hansa help who-changes-what`.
 
 ## Facts you can rely on
+- The optional Linux VM bench is off by default. When enabled, newly started Claude Code and Codex
+  workers can submit offline server, browser and terminal checks. More: `hansa help test-bench`.
 - A provider at its usage limit rests (until the reset time the error gives, else
   the desk's `cool_minutes`), and the task moves to the lane's next
   provider without using a try (5 times); one that refuses a task (its content filter) does not
@@ -360,6 +362,7 @@ loads nothing.
 |---|---|
 | `principles` | how a desk is run: rules, enforcement and what they guard against |
 | `workers-sandbox` | what workers may read, write and reach |
+| `test-bench` | the optional Linux VM bench, worker commands, limits and management |
 | `git-folders` | git's folders: what runs may write, hansa's checks |
 | `sandbox-probe` | the sandbox probe before a run |
 | `write-env` | write list and env: caches, refused names, locale |

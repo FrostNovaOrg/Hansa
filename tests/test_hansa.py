@@ -21145,7 +21145,7 @@ def save():'''))
         self.assertIn("no command or topic nosuch; hansa help topics lists the topics", str(e.exception.code))
         # alone: an index, not the card: every command, then every topic with what it holds
         index = self.hansa_out("help")
-        self.assertLessEqual(len(index.splitlines()), 40)
+        self.assertLessEqual(len(index.splitlines()), 41)  # includes the test-bench topic
         self.assertNotIn("# The card", index)
         for name in ("add", "merge", "lane (add, set, target, brief, remove, try)", "disk-floor", "coordinator",
                      "explain (history)"):
@@ -45112,6 +45112,7 @@ from tests.bench.test_5 import BenchRecipeTest  # noqa: E402 - provisioning with
 from tests.bench.test_6 import BenchVMTest  # noqa: E402 - private SSH and VM lifecycle, no VM
 from tests.bench.test_7 import BenchManagementTest  # noqa: E402 - coordinator commands with fake Lima
 from tests.bench.test_8 import BenchBrokerTest  # noqa: E402 - broker with fake VM and local pipes
+from tests.bench.test_9 import BenchIntegrationTest  # noqa: E402 - worker boundaries with fakes
 
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 
