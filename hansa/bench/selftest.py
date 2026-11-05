@@ -191,7 +191,7 @@ def run(machine):
             status = 'failed' if 'failed' in checks.values() else 'passed' if checks and set(checks.values()) == {'passed'} else 'incomplete'
             results[name] = dict(status=status, checks=checks)
         except Exception as error:
-            results[name] = dict(status='incomplete', error=type(error).__name__)
+            results[name] = dict(status='incomplete', error=f'{type(error).__name__}: {error}')
         results[name]['seconds'] = machine.clock() - before
     try:
         with ExitStack() as stack:
@@ -223,7 +223,7 @@ def run(machine):
             record('boots', lambda: dict(ports='passed' if ports[0] != ports[1] else 'incomplete', keys='passed' if keys[0] == keys[1] and keys[0] else 'failed'))
             record('lifecycle', lambda: lifecycle(machine))
     except Exception as error:
-        report['error'] = type(error).__name__
+        report['error'] = f'{type(error).__name__}: {error}'
     finally:
         def stopped():
             machine.stop(machine.clock() + 30)

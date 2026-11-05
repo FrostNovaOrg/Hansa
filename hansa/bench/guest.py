@@ -161,6 +161,7 @@ def main(source=0, target=1, root=SLOT_ROOT, clock=time.monotonic):
             with archive.collect(out, dict(result, id=request["id"]), stdout, stderr) as returned:
                 shutil.rmtree(slot)
                 slot = None
+                os.sync()
                 header = json.dumps(dict(version=1, id=request["id"], length=returned.seek(0, 2))).encode()
                 returned.seek(0)
                 with os.fdopen(os.dup(target), "wb") as outgoing:
@@ -176,6 +177,7 @@ def main(source=0, target=1, root=SLOT_ROOT, clock=time.monotonic):
         try:
             if slot is not None and not uncertain:
                 shutil.rmtree(slot)
+                os.sync()
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous)

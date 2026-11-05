@@ -71,3 +71,4 @@ Match all
 SSHD
 sshd -t
 systemctl reload ssh.service
+sync

@@ -83,7 +83,7 @@ class BenchRecipeTest(unittest.TestCase):
         fake.write_text("#!" + sys.executable + "\n" + FAKE)
         fake.chmod(0o755)
         for name in ("id dirname apt-get python3 useradd usermod passwd install cat chown chmod "
-                     "dpkg-query sha256sum sysctl nft systemctl sshd").split():
+                     "dpkg-query sha256sum sysctl nft systemctl sshd sync").split():
             (binary / name).symlink_to(fake)
         (root / "log").touch()
         env = dict(PATH=str(binary), FAKE_LOG=str(root / "log"), FAKE_FAIL=fail,
@@ -92,6 +92,12 @@ class BenchRecipeTest(unittest.TestCase):
                                 capture_output=True, text=True, timeout=30)
         calls = [json.loads(line) for line in (root / "log").read_text().splitlines()]
         return root, calls, result
+
+    def test_provision_syncs_last(self):
+        _, calls, result = self.provision()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[-1], ["sync"])
+        self.assertEqual((RECIPE / "provision.sh").read_text().splitlines()[-1], "sync")
 
     def test_submission_key_required_before_install(self):
         for key in (None, ""):

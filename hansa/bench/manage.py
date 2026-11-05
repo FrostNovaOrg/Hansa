@@ -91,12 +91,12 @@ def command(a):
                         build(machine, deadline)
                         bench["build"] = "ready"
                     except BaseException as error:
-                        bench.update(build="failed", failure=type(error).__name__)
+                        bench.update(build="failed", failure=desk.redact(f"{type(error).__name__}: {error}"))
                         if machine is not None:
                             try:
                                 machine.stop(machine.clock() + 30)
                             except BaseException as cleanup:
-                                bench["failure"] += "; stop: " + type(cleanup).__name__
+                                bench["failure"] += "; stop: " + desk.redact(f"{type(cleanup).__name__}: {cleanup}")
                         save(desk, bench, action)
                         raise
                 elif action == "selftest":
@@ -105,7 +105,12 @@ def command(a):
                         raise ValueError("selftest requires a disabled, current ready build")
                     bench["acceptance"] = dict(generation=bench["generation"], status="incomplete")
                     save(desk, bench, action)  # Invalidate any earlier pass before touching the VM.
-                    bench["acceptance"].update(run(VM(private)))
+                    report = run(VM(private))
+                    errors = [r for r in [report, *report["results"].values()] if "error" in r]
+                    for result in errors:
+                        result["error"] = desk.redact(result["error"])
+                    bench["acceptance"].update(report)
+                    bench["failure"] = "; ".join(r["error"] for r in errors)
                 elif action == "on":
                     from .selftest import complete
                     accepted = bench["acceptance"] or {}
@@ -124,7 +129,7 @@ def command(a):
                         try:
                             machine.stop(machine.clock() + 30)
                         except Exception as error:
-                            bench.update(build="failed", acceptance=None, failure=type(error).__name__)
+                            bench.update(build="failed", acceptance=None, failure=desk.redact(f"{type(error).__name__}: {error}"))
                             save(desk, bench, action)
                             raise
                 save(desk, bench, action)
@@ -132,4 +137,4 @@ def command(a):
         print(json.dumps(bench, sort_keys=True) if getattr(a, "json", False) else
               "bench: " + ("on" if bench["enabled"] else "off") + "; " + json.dumps(bench, sort_keys=True))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-        raise SystemExit("hansa bench: " + str(error)) from None
+        raise SystemExit("hansa bench: " + desk.redact(str(error))) from None
