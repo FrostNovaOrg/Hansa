@@ -1,0 +1,17 @@
+#!/usr/sbin/nft -f
+# Dedicated VM only. Keep the UID wall before every accept while bench is untrusted.
+flush ruleset
+table inet bench_edge {
+    chain out {
+        type filter hook output priority 0; policy accept;
+        meta skuid "bench" counter drop
+        oifname "lo" accept
+        ct state established,related accept
+        ip daddr 192.168.5.2 udp dport 53 accept
+        ip daddr 192.168.5.2 tcp dport 53 accept
+        udp sport 68 udp dport 67 accept
+        ip daddr 192.168.5.2 drop
+        ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } drop
+        meta nfproto ipv6 drop
+    }
+}
