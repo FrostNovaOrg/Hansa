@@ -28,6 +28,7 @@ class BenchGuestTest(unittest.TestCase):
         self.addCleanup(lambda: os.close(self.writer) if self.writer is not None else None)
         self.code, self.events, self.info = "print('done')", [], True
         for mock in (patch.object(g.subprocess, "Popen", self.spawn),
+                     patch.object(g.os, "sync"),
                      patch.dict(os.environ, SSH_ORIGINAL_COMMAND="bench-v1")):
             mock.start()
             self.addCleanup(mock.stop)
@@ -40,6 +41,24 @@ class BenchGuestTest(unittest.TestCase):
 
     def box(self, **kwargs):
         return g.run_box(self.root, self.request, self.source, time.monotonic() + 20, **kwargs)
+
+    def test_slot_deletion_syncs_before_unlock(self):
+        def synced():
+            self.assertEqual([p.name for p in self.root.iterdir()], ["lock"])
+            with (self.root / "lock").open("rb") as lock, self.assertRaises(BlockingIOError):
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for failed in (False, True):
+            header = json.dumps(self.request).encode()
+            os.write(self.writer, len(header).to_bytes(4, "big") + header + bytes(1024))
+            with tempfile.TemporaryFile() as target, patch.object(g.os, "sync", side_effect=synced) as sync, \
+                    patch.object(g, "run_box", return_value=(dict(status="ok"), b"", b"")):
+                if failed:
+                    with patch.object(g.archive, "collect", side_effect=ValueError("collect failed")), \
+                            self.assertRaisesRegex(ValueError, "collect failed"):
+                        g.main(self.source, target.fileno(), self.root)
+                else:
+                    g.main(self.source, target.fileno(), self.root)
+                sync.assert_called_once_with()
 
     def test_original_command_not_evaluated(self):
         touch = "touch " + shlex.quote(str(self.root / "sentinel"))

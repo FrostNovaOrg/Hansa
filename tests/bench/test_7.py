@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -74,6 +75,37 @@ class BenchManagementTest(unittest.TestCase):
         self.assertEqual(self.desk.settings()["bench"], bench)
         for value in (None, {**bench, "enabled": 1}, {**bench, "generation": -1}, {**bench, "acceptance": True}):
             self.assertTrue(any("bench" in p for p in validate({**settings, "bench": value})))
+
+    def test_limactl_failure_messages_are_redacted(self):
+        self.fail = unittest.TestCase.fail.__get__(self)  # Restore assertions; this test injects its own failures.
+        key = 'fixture-private-"provider\\key'
+        self.desk.secrets_dir.mkdir()
+        self.desk.key_file("fixture").write_text(key)
+        run = self.run_command
+        def fail(command, **options):
+            if command[0] == "limactl" and ("sh" in command or "--version" in command or
+                                           (action in ("build", "selftest") and command[1] == "stop")):
+                return subprocess.run([sys.executable, "-c", "import sys; sys.stderr.write(" +
+                                       repr("Lima refused " + key) + "); sys.exit(1)"], **options)
+            return run(command, **options)
+        for action in ("build", "rebuild", "selftest"):
+            if action == "selftest":
+                self.command("rebuild")
+            with patch.object(self, "run_command", side_effect=fail):
+                if action == "selftest":
+                    shown = self.command(action, "--json")
+                    self.assertIn("Lima refused", json.loads(shown)["acceptance"]["results"]["stopped"]["error"])
+                else:
+                    with self.assertRaises(SystemExit) as caught:
+                        self.command(action)
+                    shown = str(caught.exception)
+            failure = self.desk.settings()["bench"]["failure"]
+            self.assertIn("Lima refused [key of fixture]", failure)
+            self.assertIn("Lima refused [key of fixture]", shown)
+            if action == "build":
+                self.assertIn("Lima refused [key of fixture]", failure.split("; stop: ")[1])
+            self.assertNotIn(key, shown + json.dumps(self.desk.settings()) +
+                             (self.desk.state_dir / "settings-history.jsonl").read_text())
 
     def test_build_failure_recorded(self):
         self.fail = "sh"

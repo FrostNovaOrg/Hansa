@@ -54,7 +54,7 @@ class BenchVMTest(unittest.TestCase):
             outside = self.root / "sentinel"
             outside.write_text("keep")
             (guest / "link").symlink_to(outside)
-            with patch("shutil.chown") as owner:
+            with patch("shutil.chown") as owner, patch("os.sync"):
                 exec(command[-1].replace(repr("/var/lib/hansa-bench"), repr(str(guest))))
             owner.assert_called_once_with(str(guest), "bench", "bench")
             self.assertEqual(list(guest.iterdir()), [])
@@ -79,6 +79,30 @@ class BenchVMTest(unittest.TestCase):
                                    self.module.INSTANCE + " " + self.key + "\n",
                                    str(self.root / "pid") if self.timeout else ""], **options)
         return subprocess.CompletedProcess(command, 0, output)
+
+    def test_purge_missing_directory_and_sync(self):
+        guest = self.root / "purge-slots"
+        for existing in (False, True):
+            if existing:
+                (guest / "dirty").write_text("discard")
+            with patch("shutil.chown") as owner, patch("os.sync") as sync:
+                def synced():
+                    owner.assert_called_once_with(str(guest), "bench", "bench")
+                    self.assertEqual(list(guest.iterdir()), [])
+                    self.assertEqual(guest.stat().st_mode & 0o777, 0o700)
+                sync.side_effect = synced
+                exec(self.module.PURGE.replace(repr("/var/lib/hansa-bench"), repr(str(guest))))
+                sync.assert_called_once_with()
+
+    def test_limactl_error_tail(self):
+        data = b"discarded\n" + b"x" * 4096 + b"\xff\nLima failed"
+        self.vm.run = lambda command, **options: subprocess.run(
+            [sys.executable, "-c", "import os; os.write(2, " + repr(data) + "); raise SystemExit(7)"], **options)
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.vm._call(["limactl", "start"], 100)
+        self.assertEqual(caught.exception.stderr, data[-4096:])
+        self.assertIn("\ufffd\nLima failed", str(caught.exception))
+        self.assertNotIn("discarded", str(caught.exception))
 
     def connect(self, deadline=100):
         reader, writer = os.pipe()

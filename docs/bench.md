@@ -23,6 +23,11 @@ Malformed probe evidence and unexpected sandbox artifacts fail acceptance.
 Memory return is checked by the exit of the VM's observed host processes after idle stop.
 Do not manufacture an acceptance record.
 
+Provisioning, reset's purge and each gateway slot deletion sync guest writes before
+the VM can be force-stopped. Reset still force-stops first to kill hand-in survivors.
+Build, rebuild and selftest save and print failure messages with stored provider keys
+redacted; failed Lima commands include the last 4 KiB of stderr.
+
 Use the enabled bench for Linux server, browser or terminal checks. Write one
 shell script that starts everything, waits for readiness, exercises it, and
 saves evidence in `/out`. Submit it with:

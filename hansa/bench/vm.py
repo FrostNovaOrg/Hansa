@@ -13,11 +13,18 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 INSTANCE = "hansa-bench"
-PURGE = ("import os, shutil; p='/var/lib/hansa-bench'; shutil.rmtree(p); "
-         "os.mkdir(p, 0o700); shutil.chown(p, 'bench', 'bench')")
+PURGE = ("import os, shutil; p='/var/lib/hansa-bench'; "
+         "shutil.rmtree(p) if os.path.exists(p) else None; "
+         "os.mkdir(p, 0o700); shutil.chown(p, 'bench', 'bench'); os.sync()")
+
+
+class LimaCalledProcessError(subprocess.CalledProcessError):
+    def __str__(self):
+        return super().__str__() + "\n" + self.stderr.decode("utf-8", errors="replace")
 
 
 def _private(path, directory=False):
@@ -47,9 +54,17 @@ class VM:
         remaining = deadline - self.clock()
         if not math.isfinite(remaining) or remaining <= 0:
             raise TimeoutError("bench deadline")
-        return self.run(command, check=True, timeout=min(remaining, 900), env=self.env,
-                        **dict(dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL), **streams))
+        with tempfile.TemporaryFile() as errors:
+            try:
+                return self.run(command, check=True, timeout=min(remaining, 900), env=self.env,
+                                **dict(dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                            stderr=errors if command[0] == "limactl" else subprocess.DEVNULL), **streams))
+            except subprocess.CalledProcessError as error:
+                if command[0] != "limactl":
+                    raise
+                errors.seek(0, os.SEEK_END)
+                errors.seek(max(0, errors.tell() - 4096))
+                raise LimaCalledProcessError(error.returncode, command, error.output, errors.read()) from error
 
     def prepare(self, deadline):
         if not os.path.lexists(self.identity):
