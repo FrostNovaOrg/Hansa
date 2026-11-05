@@ -20,7 +20,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from . import alert, cost, disk, gaps, goals, notes, release, views
+from . import alert, cost, disk, gaps, goals, history, notes, release, views
 from .desk import Desk, KeyScrubError, SettingsError, event_record, lane_warnings, public_settings, read_json
 from .run import check_provider
 
@@ -201,6 +201,17 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 return self._send(200, views.status(desk), conditional=True)
             if url.path == "/api/goals":
                 return self._send(200, goals.page_list(desk), conditional=True)
+            if url.path == "/api/history":
+                try:
+                    last = int(q.get("last", ["50"])[0])
+                except ValueError:
+                    last = 0
+                if last < 1:
+                    return self._bad_request("invalid_query", "last", "last must be at least 1")
+                kind, name = q.get("kind", [""])[0], q.get("name", [""])[0]
+                if kind not in ("", "lane", "provider") or bool(kind) != bool(name):
+                    return self._bad_request("invalid_query", "kind", "use lane or provider with a name, or neither")
+                return self._send(200, history.read(desk, kind, name, last), conditional=True)
             if url.path == "/api/timeline":
                 return self._send(200, views.timeline(desk))
             if url.path == "/api/todos":

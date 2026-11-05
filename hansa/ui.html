@@ -1020,7 +1020,7 @@ const when = ts => ts ? new Date(ts * 1000).toLocaleString(language) : "";
 const pollReplies = new Map();
 async function api(path, body) {
   const opt = {credentials:"omit", mode:"same-origin", cache:"no-store", headers:{Authorization:"Bearer " + pageToken}};
-  const conditional = body === undefined && (path === "/api/status" || path === "/api/goals" || path === "/api/events" || path.startsWith("/api/events?"));
+  const conditional = body === undefined && (path === "/api/status" || path === "/api/goals" || path.startsWith("/api/history?") || path === "/api/events" || path.startsWith("/api/events?"));
   const previous = conditional ? pollReplies.get(path) : null;
   if (previous) opt.headers["If-None-Match"] = previous.etag;
   if (body !== undefined) {
@@ -1050,6 +1050,7 @@ function show(tab) {
     b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-current", b.dataset.tab === tab ? "page" : "false");
   }
   for (const t of TABS) $("#tab-" + t).hidden = t !== tab;
+  loadHistory();
   return ({status:loadStatus, goals:loadGoals, tasks:loadTasks, todos:loadTodos, gaps:loadGaps, notes:loadNotes, settings:ensureSettings, cost:loadCost})[tab]().catch(err);
 }
 function err(e) { setStatusParts([{key:"error", text:String(e.message || e), tone:"bad"}]); }
@@ -2278,10 +2279,61 @@ function renderSettings(problems = settingsProblems) {
       h("ul", {}, settingsProblems.map(p => h("li", {class:"bad"}, problemTarget(p) ? h("button", {type:"button", onclick:() => focusProblem(p), title:T.jumpToField}, p) : p)))) : null,
     NO_READ_STOP ? section(T.noReadStop, h("p", {class:"bad"}, NO_READ_STOP)) : null,
     h("div", {class:"settings-layout"}, nav, h("div", {class:"settings-content"}, settingsForm,
-      h("div", {class:"settings-footer"}, settingsSaveState, settingsDiscardButton, settingsSaveButton)))
+      h("div", {class:"settings-footer"}, settingsSaveState, settingsDiscardButton, settingsSaveButton))),
+    settingsHistory()
   ]));
   showSettingsGroup(settingsGroup);
   refreshSettingsState();
+}
+
+/* ---------- settings changes: independent of the status poll ---------- */
+Object.assign(T, ZH ? {
+  historyAt:"修改时间", historyBy:"修改者",
+  historyIntro:"只读；展开时每分钟更新。旧记录中的密钥仍不显示。", historyAll:"全部设置", historyName:"工作线或服务商名称",
+  historyEmpty:"没有匹配的设置改动。", historyMore:"再显示 50 条", historyFailed:"改动记录加载失败。", historyPath:"设置路径"
+} : {
+  historyAt:"Changed at", historyBy:"Changed by",
+  historyIntro:"Read only; refreshes every minute while open. Recorded keys remain withheld.", historyAll:"All settings", historyName:"Lane or provider name",
+  historyEmpty:"No matching settings changes.", historyMore:"Show 50 more", historyFailed:"Could not load changes.", historyPath:"Setting path"
+});
+let historyFold, historyBody, historyMore, historyTimer, historyFlight;
+let historyKind = "", historyName = "", historyLast = 50, historyDue = 0;
+const historyPath = () => "/api/history?" + new URLSearchParams({kind:historyKind, name:historyName, last:historyLast});
+function settingsHistory() {
+  if (historyFold) return historyFold;
+  const kind = h("select", {"aria-label":T.applyFilters},
+    [["", T.historyAll], ["lane", T.lane], ["provider", T.provider]].map(([value, label]) => h("option", {value}, label)));
+  const name = h("input", {"aria-label":T.historyName, placeholder:T.historyName});
+  historyBody = h("div", {role:"status"});
+  historyMore = h("button", {hidden:true, onclick:() => { historyLast += 50; historyDue = 0; return loadHistory(); }}, T.historyMore);
+  historyFold = h("details", {id:"settings-history", class:"section", ontoggle:loadHistory}, h("summary", {}, T.changes),
+    h("p", {}, T.historyIntro), h("form", {onsubmit:e => {
+      e.preventDefault(); historyKind = kind.value; historyName = historyKind ? name.value.trim() : "";
+      historyLast = 50; historyDue = 0; loadHistory();
+    }}, kind, name, h("button", {type:"submit"}, T.applyFilters)), historyBody, historyMore);
+  return historyFold;
+}
+function loadHistory() {
+  clearTimeout(historyTimer);
+  if (!historyFold?.open || current !== "settings" || document.hidden) return;
+  if (historyFlight) return historyFlight;
+  const delay = historyDue - performance.now();
+  if (delay > 0) { historyTimer = setTimeout(loadHistory, delay); return; }
+  const path = historyPath();
+  historyFlight = api(path).then(data => {
+    if (path !== historyPath()) return;
+    historyBody.replaceChildren(data.entries.length ? table([T.historyAt, T.historyBy, T.historyPath, T.changes], data.entries.map(e => [
+      when(e.ts), e.by + (e.command ? ` (${e.command})` : ""), e.path, e.change
+    ])) : h("p", {}, T.historyEmpty));
+    historyMore.hidden = data.entries.length < historyLast;
+  }).catch(() => {
+    if (path === historyPath()) historyBody.replaceChildren(h("p", {class:"bad"}, T.historyFailed));
+  }).finally(() => {
+    historyFlight = null;
+    historyDue = path === historyPath() ? performance.now() + 60000 : 0;
+    loadHistory();
+  });
+  return historyFlight;
 }
 
 /* ---------- goals ---------- */
@@ -2798,6 +2850,7 @@ show(initialTab);
 // The shared header and browser title need status even when another tab is restored.
 if (initialTab !== "status") loadStatus().catch(err);
 document.addEventListener("visibilitychange", () => {
+  loadHistory();
   clearTimeout(statusPollTimer);
   clearTimeout(goalsPollTimer);
   if (current === "status" && !document.hidden) loadStatus().catch(err);

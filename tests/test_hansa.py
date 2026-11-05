@@ -29427,6 +29427,103 @@ def save():'''))
                     self.assertEqual(int(headers["Content-Length"]), len(body))
                     self.assertEqual(body, plain)
 
+    def test_web_history_matches_command_order_filters_and_limit(self):
+        from hansa import history
+        self.hansa("lane", "set", "a", "check", "echo first")
+        self.hansa("concurrency", "2")
+        self.hansa("lane", "set", "a", "check", "echo latest")
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        before = (self.desk.state_dir / "settings-history.jsonl").read_bytes()
+        for kind, name in (("", ""), ("lane", "a"), ("provider", "claude")):
+            with self.subTest(kind=kind):
+                query = urllib.parse.urlencode({"kind": kind, "name": name, "last": 2})
+                code, data, _ = self.web_request("/api/history?" + query, headers=auth)
+                self.assertEqual(code, 200)
+                self.assertEqual(data, history.read(self.desk, kind, name, 2))
+                args = (kind, name) if kind else ()
+                lines = self.hansa("explain", "history", *args, "--last", "2").splitlines()[1:]
+                self.assertEqual([line.split("  ", 2)[2] for line in lines],
+                                 [e["path"] + ": " + e["change"] for e in data["entries"]])
+                expected = [e for e in reversed(self.history_entries()) if not kind or
+                            e["path"].startswith(("lanes" if kind == "lane" else "providers") + "." + name + ".")][:2]
+                self.assertEqual([{k: v for k, v in e.items() if k != "change"} for e in data["entries"]], expected)
+        self.assertEqual((self.desk.state_dir / "settings-history.jsonl").read_bytes(), before)
+
+    def test_web_history_withholds_recorded_and_newly_known_keys(self):
+        recorded, later = "example-recorded-credential", "example-later-credential"
+        self.hansa("lane", "brief", "a", "text " + later)
+        self.desk.write_key("claude", later, by="page")
+        self.desk.write_key("claude", recorded, by="page")
+        self.desk.key_file("other").write_text(later + "\n")
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        code, data, _ = self.web_request("/api/history", headers=auth)
+        self.assertEqual(code, 200)
+        raw = json.dumps(data)
+        for key in (recorded, later):
+            self.assertNotIn(key, raw)
+        for e in data["entries"][:3]:
+            self.assertTrue(e["redacted"])
+            self.assertEqual(e["change"], "changed (values withheld)")
+            self.assertNotIn("old", e)
+            self.assertNotIn("new", e)
+
+    def test_web_history_newly_known_key_in_actor_command_and_path(self):
+        from hansa import history
+        key = "futurecredentialpartA-futurecredentialpartB"
+        history.record(self.desk, {}, {"lanes": {"a": {key: "after"}}},
+                       by="actor " + key, command="hansa example " + key)
+        recorded = self.history_entries()[-1]
+        for field in ("by", "command", "path"):
+            self.assertIn(key, recorded[field])  # not known when recorded
+        self.desk.key_file("other").write_text(key + "\n")
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        code, body, _ = self.web_request("/api/history", headers=auth, raw=True)
+        self.assertEqual(code, 200)
+        shown = self.hansa("explain", "history")
+        for source, output in (("command", shown), ("page", body.decode())):
+            with self.subTest(source=source):
+                for part in (key, *key.split("-")):
+                    self.assertNotIn(part, output)
+                self.assertIn("actor [key]", output)
+                self.assertIn("hansa example [key]", output)
+                self.assertIn("lanes.a.[key]", output)
+
+    def test_web_history_compression_revalidation_and_token(self):
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "Accept-Encoding": "gzip"}
+        code, _, headers = self.web_request("/api/history", headers=auth)
+        self.assertEqual(code, 200)
+        self.assertEqual(headers["Content-Encoding"], "gzip")
+        condition = {"If-None-Match": headers["ETag"]}
+        self.assertEqual(self.web_request("/api/history", headers={**auth, **condition})[:2], (304, b""))
+        for credentials in ({}, {"Authorization": "Bearer wrong"}):
+            self.assertEqual(self.web_request("/api/history", headers={**credentials, **condition})[0], 403)
+        self.hansa("concurrency", "2")
+        self.assertEqual(self.web_request("/api/history", headers={**auth, **condition})[0], 200)
+        for query in ("last=0", "last=no", "kind=other&name=a", "kind=lane", "name=a"):
+            self.assertEqual(self.web_request("/api/history?" + query, headers=auth)[0], 400)
+
+    def test_web_history_does_not_create_a_missing_history(self):
+        path = self.desk.state_dir / "settings-history.jsonl"
+        path.unlink()
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        code, data, headers = self.web_request("/api/history", headers=auth)
+        self.assertEqual((code, data), (200, {"recording_since": None, "entries": []}))
+        self.assertEqual(self.web_request("/api/history", headers={**auth, "If-None-Match": headers["ETag"]})[0], 304)
+        self.assertFalse(path.exists())
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_web_history_page_lazy_filters_more_and_minute_poll(self):
+        from hansa import web
+        replies = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk),
+                   "/api/events": [], "pagePreferences": {"session": {"hansa.token": "example-page-key"}}}
+        harness = self.tmp / "history-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            r = subprocess.run(["node", str(harness), str(web.UI), "history", language],
+                               input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout), {"ok": True})
+
     def test_web_page_etag_revalidates_public_shell_and_changes_with_file(self):
         from hansa import web
         token = self.desk.web_token()
@@ -34950,13 +35047,17 @@ const fetch = async (path, options) => {
   if (path === "/api/settings") { settingsGetCount++; if (settingsGetError) throw new Error(settingsGetError); }
   if (path === statusFailPath && statusGetError) throw new Error(statusGetError);
   if (path === statusFailPath && pollErrorStatus) return {status:pollErrorStatus, json:async () => ({error:"tunnel unavailable"})};
-  const r = reply(path); if (r === null) return new Promise(() => {});
+  const r = ask === "history" && path.startsWith("/api/history?") ? {
+    entries:Array.from({length:Math.min(101, Number(new URLSearchParams(path.split("?")[1]).get("last")))}, (_, i) =>
+      ({ts:1900000000-i, by:"principal", command:"example command", path:"lanes.a.check",
+        change:i ? '<b>old</b> → "new"' : "changed (values withheld)"}))
+  } : reply(path); if (r === null) return new Promise(() => {});
   if (r?.code === "settings_unavailable") return {status:503, json:async () => r};
   const snapshot = JSON.parse(JSON.stringify(r));
   if (path === "/api/status" && statusGetGate) await statusGetGate;
   if (path === "/api/settings" && settingsGetGate) await settingsGetGate;
   if ((ask === "tunnel-polls" && ["/api/status", "/api/events"].includes(path)) ||
-      (["goals", "goals-polls"].includes(ask) && path === "/api/goals")) {
+      (["goals", "goals-polls"].includes(ask) && path === "/api/goals") || (ask === "history" && path.startsWith("/api/history?"))) {
     const etag = 'W/"' + require("crypto").createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") + '"';
     const status = options.headers["If-None-Match"] === etag ? 304 : 200;
     pollResponses.push({path, status});
@@ -35046,7 +35147,43 @@ function openPage(search = "") {
 let ctx = openPage(preferences.search);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 const stateBeforeCost = document.querySelector("#state").textContent;
-if (ask === "tunnel-polls") (async () => {
+if (ask === "history") (async () => {
+  const run = code => vm.runInContext(code, ctx), flush = () => new Promise(resolve => setImmediate(resolve));
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const count = () => apiGets.filter(p => p.startsWith("/api/history?")).length;
+  await run('show("settings")');
+  const fold = ids["#settings-history"];
+  check(!fold.open && count() === 0, "history must start folded and unfetched");
+  check(descendants(fold, "summary")[0].textContent === (process.argv[4] === "zh" ? "改动" : "Changes"), "section title");
+  fold.open = true; await fold.on.toggle();
+  check(count() === 1 && descendants(fold, "tr").length === 51, "first 50 changes missing");
+  const labels = descendants(fold, "th").slice(0, 2).map(el => el.textContent);
+  check(JSON.stringify(labels) === JSON.stringify(process.argv[4] === "zh" ? ["修改时间", "修改者"] : ["Changed at", "Changed by"]), "history column labels");
+  check(fold.textContent.includes("principal (example command)") && fold.textContent.includes("changed (values withheld)"), "actor or withholding missing");
+  check(fold.textContent.includes("<b>old</b>") && !descendants(fold, "b").length, "history must be plain text");
+  await advance(59999); check(count() === 1, "history polled before a minute");
+  await advance(1); check(count() === 2 && pollResponses.at(-1).status === 304, "minute revalidation missing");
+  await descendants(fold, "button").at(-1).click();
+  check(descendants(fold, "tr").length === 101, "show more did not add 50");
+  const form = descendants(fold, "form")[0], kind = descendants(form, "select")[0], name = descendants(form, "input")[0];
+  for (const value of ["lane", "provider"]) {
+    kind.value = value; name.value = "retired"; form.on.submit({preventDefault() {}}); await flush();
+    const query = new URLSearchParams(apiGets.at(-1).split("?")[1]);
+    check(query.get("kind") === value && query.get("name") === "retired" && query.get("last") === "50", "filter did not reset to 50");
+  }
+  fold.open = false; fold.on.toggle(); const closed = count();
+  await advance(120000); check(count() === closed, "closed section polled");
+  fold.open = true; await fold.on.toggle(); const opened = count();
+  document.hidden = true; windowEvents.visibilitychange.forEach(f => f());
+  await advance(120000); check(count() === opened, "hidden page polled");
+  document.hidden = false; windowEvents.visibilitychange.forEach(f => f()); await flush();
+  check(count() === opened + 1, "visible open section did not resume");
+  await run('show("status")'); const away = count();
+  await advance(65000); check(count() === away, "status poll fetched history");
+  check(apiRequests.filter(r => r.path.startsWith("/api/history?")).every(r => r.headers.Authorization === "Bearer example-page-key"), "page token missing");
+  console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "tunnel-polls") (async () => {
   const run = code => vm.runInContext(code, ctx);
   const check = (ok, why) => { if (!ok) throw new Error(why); };
   const flush = () => new Promise(resolve => setImmediate(resolve));

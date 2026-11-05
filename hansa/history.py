@@ -126,28 +126,46 @@ def _time(ts):
     return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def text(desk, kind: str = "", name: str = "", last: int | None = None) -> str:
+def read(desk, kind: str = "", name: str = "", last: int | None = None) -> dict:
+    """Newest matching entries, safe for either the command or the page; never write history."""
     with desk.lock():
-        path = _start(desk)
+        path = desk.state_dir / "settings-history.jsonl"
         # The general event log is never opened. Ignore an interrupted append, as event readers do.
-        with path.open("rb") as source:
-            records = [e for line in source if (e := event_record(line))]
+        records = []
+        if path.exists():
+            with path.open("rb") as source:
+                records = [e for line in source if (e := event_record(line))]
         keys = _keys(desk)
     # The first append may itself be interrupted; use the surviving start or earliest entry.
     since = next((e["recording_since"] for e in records if "recording_since" in e), None)
     if since is None:
-        since = min((e["ts"] for e in records if "ts" in e), default=now())
+        since = min((e["ts"] for e in records if "ts" in e), default=None)
     prefix = f"{'lanes' if kind == 'lane' else 'providers'}.{name}." if kind else ""
     entries = [e for e in reversed(records) if "path" in e and (not prefix or e["path"].startswith(prefix))]
     if last is not None:
         entries = entries[:last]
-    lines = [f"Settings changes recorded since {_time(since)}; earlier changes are unavailable."]
+    for entry in entries:
+        if entry.get("redacted") or _private(entry.get("old"), keys) or _private(entry.get("new"), keys):
+            entry["redacted"] = True
+            for side in ("old", "new"):
+                entry.pop(side, None)
+        for field in ("by", "command", "path"):
+            if field in entry:
+                entry[field] = _clean(entry[field], keys)
+        entry["change"] = ("changed (values withheld)" if entry.get("redacted")
+                           else f"{_value(entry, 'old')} → {_value(entry, 'new')}")
+    return {"recording_since": since, "entries": entries}
+
+
+def text(desk, kind: str = "", name: str = "", last: int | None = None) -> str:
+    with desk.lock():
+        _start(desk)  # preserve the command's persistent start on an older desk
+        data = read(desk, kind, name, last)
+    lines = [f"Settings changes recorded since {_time(data['recording_since'] or now())}; earlier changes are unavailable."]
+    entries = data["entries"]
     for entry in entries:
         who = entry["by"] + (f" ({entry['command']})" if entry.get("command") else "")
-        change = ("changed (values withheld)" if entry.get("redacted")
-                  or _private(entry.get("old"), keys) or _private(entry.get("new"), keys)
-                  else f"{_value(entry, 'old')} → {_value(entry, 'new')}")
-        lines.append(f"{_time(entry['ts'])}  {who}  {entry['path']}: {change}")
+        lines.append(f"{_time(entry['ts'])}  {who}  {entry['path']}: {entry['change']}")
     if not entries:
         lines.append("No settings changes recorded" + (f" for {kind} {name}" if kind else "") + ".")
-    return _clean("\n".join(lines), keys)
+    return "\n".join(lines)
