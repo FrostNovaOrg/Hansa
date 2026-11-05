@@ -47,13 +47,14 @@ def _stderr_tail():
         grace = 65536
         while not done.is_set() or grace > 0:
             if not select.select([reader], [], [], 0.05)[0]:
-                if done.is_set(): break
+                if done.is_set() and not select.select([reader], [], [], 0)[0]: break
                 continue
+            after_done = done.is_set()  # A read may let the writer finish.
             data = os.read(reader, 8192)
             if not data: break
             tail.extend(data)
             del tail[:-65536]
-            if done.is_set(): grace -= len(data)
+            if after_done: grace -= len(data)
     with os.fdopen(writer, "wb", buffering=0) as errors:
         thread = threading.Thread(target=drain)
         thread.start()
