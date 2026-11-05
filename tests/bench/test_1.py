@@ -27,6 +27,22 @@ class BenchChannelTest(unittest.TestCase):
         self.addCleanup(queue.close)
         return queue
 
+    def test_other_commands_need_no_channel(self):
+        real_import = __import__
+        for failure in (ModuleNotFoundError, SyntaxError):
+            def importing(name, *args, **kwargs):
+                if name.endswith("bench.channel"):
+                    raise failure("unavailable channel")
+                return real_import(name, *args, **kwargs)
+            with self.subTest(failure=failure), patch("builtins.__import__", side_effect=importing), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                with self.assertRaises(SystemExit) as ended:
+                    cli.main(["--help"])
+                self.assertEqual(ended.exception.code, 0)
+                self.assertIn("usage: hansa", out.getvalue())
+                with self.assertRaises(failure):
+                    cli.main(["bench", "run", "--script", "unused"])
+
     def test_worker_needs_no_desk(self):
         script = self.root / "run.sh"
         script.write_text("echo bench\n")

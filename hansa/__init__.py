@@ -85,6 +85,8 @@ def shipped(rel: Path) -> bool:
         return False
     if len(rel.parts) == 1:
         return rel.suffix == ".py" or rel.name in SHIPPED
+    if rel.parts[0] == "bench":
+        return len(rel.parts) == 2 and rel.suffix == ".py"
     if rel.parts[0] == "example":  # the sample `hansa example` copies into a new folder
         return len(rel.parts) == 2 and rel.suffix in (".py", ".md", ".txt")
     if rel.parts[0] == "mod":  # not what Claude Code writes there as it loads it (its types, a tsconfig.json)

@@ -3063,10 +3063,8 @@ def main(argv=None):
         p.add_argument("--verify-note", metavar="TEXT", help="what the verification should look at in particular; "
                        "implies --verify. These options apply only to this task, never to a follow-up")
 
-    from .bench.channel import command as bench_command
     p = sub.add_parser("bench")  # worker queue; management and public help arrive with the broker
     p = p.add_subparsers(dest="bench_command", required=True).add_parser("run")
-    p.set_defaults(fn=bench_command)
     p.add_argument("--script", required=True)
     p.add_argument("--cwd", default=".")
     p.add_argument("--timeout", type=int, default=300)
@@ -3677,6 +3675,9 @@ def main(argv=None):
     if a.cmd == "coordinator" and ("--help" in rest or "-h" in rest):  # hansa's help, not claude's
         sub.choices["coordinator"].print_help()
         return 0
+    if a.cmd == "bench":
+        from .bench.channel import command
+        return command(a) or 0  # workers cannot discover/read a desk, including session accounting
     if not getattr(a, "fn", None):
         from . import menu
         if a.cmd is None and menu.available():
@@ -3688,8 +3689,6 @@ def main(argv=None):
     if a.cmd == "ask" and not a.text:
         ap.error("ask needs what the principal must do" if a.close is None else
                  "ask --close needs the outcome: hansa ask --close N \"<outcome>\"")
-    if a.cmd == "bench":
-        return a.fn(a) or 0  # workers cannot discover/read a desk, including session accounting
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
     if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks", "menu", "doctor", "example"):
         _as_desk_account(a, argv)
