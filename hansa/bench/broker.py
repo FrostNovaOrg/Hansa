@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import uuid
 
 from . import archive, channel, snapshot
-from .manage import exclusive
+from .manage import Busy, exclusive
 
 
 RETURN_ALLOWANCE = 30  # SSH startup, guest teardown (5 s) and return (10 s).
@@ -59,8 +59,11 @@ class Broker:
             self.revoke()
             self.ready, self.closed, self.vm.clean, self.failure = False, False, False, ""
             if self.vm.port is not None:
-                with exclusive(self.desk):
-                    self.vm.stop(self.clock() + 30)
+                try:
+                    with exclusive(self.desk):
+                        self.vm.stop(self.clock() + 30)
+                except Busy:
+                    pass  # Management owns stopping; retry on the next off poll.
         for job in list(self.waiting):
             if self.closed or self.clock() >= min(job.deadline, job.until):
                 self.reply(job, {"status": "infrastructure", "error": self.failure} if self.closed else {"status": "timeout"})
@@ -75,7 +78,9 @@ class Broker:
                         continue
                     try:
                         request = channel.claim(worker, rid)
-                    except (OSError, ValueError):
+                    except (OSError, ValueError, RecursionError):
+                        worker.claimed.add(rid)  # Consume even unreadable requests in this epoch.
+                        self.reply(SimpleNamespace(channel=worker, request={"id": rid}), {"status": "refused"})
                         continue
                     job = SimpleNamespace(channel=worker, request=request, cancel=threading.Event(),
                                           deadline=min(deadline, self.clock() + request["timeout"]),
@@ -100,6 +105,8 @@ class Broker:
                 with exclusive(self.desk):
                     self.vm.stop(self.clock() + 30)
                 self.ready = True
+            except Busy:
+                return  # A management operation is temporary; retain queued requests.
             except Exception as error:
                 self.closed, self.failure = True, "bench closed: " + str(error)
                 for job in self.waiting:
@@ -201,7 +208,6 @@ class Broker:
                 name = "bench-" + uuid.uuid4().hex + ".json"
                 with os.fdopen(channel.safe_open(job.channel.directory, name, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "w") as report:
                     json.dump(result, report)
-                check()
                 job.result = {"status": summary["status"], "report": name}
         except Exception as error:
             self.ready, self.failure = False, "bench closed: " + str(error)

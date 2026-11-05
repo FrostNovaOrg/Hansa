@@ -10,6 +10,8 @@ no bench instructions. Codex's macOS-only sandbox guard still applies.
 Coordinator commands accept global `--desk`: `hansa bench build`, `rebuild`,
 `on`, `off`, `status [--json]`, and `selftest [--json]`. Build, rebuild and selftest
 require exclusive access while disabled; rebuilding changes the generation and invalidates acceptance.
+`off` records disabled settings even during a hand-in; the broker then cancels and
+stops. Temporary management lock contention delays the broker until a later poll.
 `on` requires passing acceptance for the current recipe and generation. The
 shipped acceptance fixtures cover sandbox capabilities, account restrictions,
 the UID-first edge and detached descendants after completion, timeout, disconnect
@@ -56,6 +58,8 @@ One request runs, four wait, and each worker may have one outstanding request;
 excess requests receive `busy`. Total time defaults to 300 seconds (maximum 900),
 queue wait to 60 (maximum 300), bounded by the worker's remaining allowance.
 New requests while the bench is off receive `timeout` with a reason saying it is off.
+Malformed or unreadable requests receive one `refused` reply and are consumed for
+the epoch, so they cannot interrupt polling or repeatedly delay other workers.
 The guest gets the request's timeout minus a 30-second allowance for SSH startup,
 teardown and return, so a timeout must be longer than the allowance.
 Queue, startup and transfer consume the deadline. Existing resource holds prevent
@@ -65,6 +69,8 @@ Snapshots are limited to 256 MiB and 50,000 entries. Combined output is capped a
 1 MiB; artifacts at 16 MiB each, 64 MiB per run and per worker, and 1,000 entries.
 Read script exit status, timeout, truncation, rejected-artifact and infrastructure
 notices separately. Partial transfers cannot report success.
+Once delivery and its report are complete, the reply retains that report even if
+the deadline passed during delivery; this does not invalidate the bench.
 Artifact names must be valid UTF-8. Unsupported names set the rejected-artifact
 flag; output and supported artifacts still return. Keep this validation while
 guest filenames cross the archive boundary.
@@ -73,7 +79,9 @@ Serve supervises the broker without waiting on VM operations in its polling loop
 An error in the bench step leaves it off for that round so task handling continues;
 serve prints each new reason once. This keeps an optional bench failure from idling the desk.
 Worker completion, cancellation and temporary-folder cleanup revoke access before
-commit. A serve restart discards bench work; new submissions use a fresh epoch and
+commit. Pending folder cleanup is retried after revoke completes, without waiting
+under the desk lock; the task cannot start again until its earlier cleanup finishes.
+A serve restart discards bench work; new submissions use a fresh epoch and
 must cross the stop-and-purge barrier. Uncertain cleanup closes the bench. A killed
 serve has no watchdog; restart it to recover. Security review and real-VM acceptance
 remain required before `hansa bench on`; a disabled build may be prepared first.
