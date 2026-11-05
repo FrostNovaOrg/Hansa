@@ -1,11 +1,14 @@
 """Execute the recipe with fake system tools and redirected guest paths; no VM/network."""
+import errno
 import json
+import os
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 REPO = Path(__file__).resolve().parents[2]
@@ -43,6 +46,19 @@ elif name == "dpkg-query":
 elif name == "sha256sum":
     for p in a: print(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() + "  " + p)
 '''
+
+
+def run(command, **options):
+    """Run a script this process just wrote. A thread forking meanwhile hands its child our
+    write descriptor until that child execs (O_CLOEXEC), so our exec briefly fails with
+    ETXTBSY. Retry it: once one exec succeeds no writer remains, and none reopens the file."""
+    for attempt in range(100):
+        try:
+            return subprocess.run(command, capture_output=True, text=True, timeout=300, **options)
+        except OSError as error:
+            if error.errno != errno.ETXTBSY or attempt == 99:
+                raise
+            time.sleep(0.05)
 
 
 class BenchRecipeTest(unittest.TestCase):
@@ -89,6 +105,7 @@ class BenchRecipeTest(unittest.TestCase):
         fake = binary / "fake"
         fake.write_text("#!" + sys.executable + "\n" + FAKE)
         fake.chmod(0o755)
+        run([str(fake)], env=dict(FAKE_LOG=os.devnull))  # One exec succeeds: provision.sh's cannot be busy.
         for name in ("id dirname apt-get python3 useradd usermod passwd install cat chown chmod "
                      "dpkg-query sha256sum sysctl nft systemctl sshd sync truncate mkfs.ext4 grep mountpoint mount rmdir").split():
             (binary / name).symlink_to(fake)
@@ -96,8 +113,7 @@ class BenchRecipeTest(unittest.TestCase):
         env = dict(PATH=str(binary), FAKE_LOG=str(root / "log"), FAKE_FAIL=fail,
                    BENCH_EXISTS="1" if exists else "", PY_MINOR=str(minor), FAKE_UID=str(uid))
         for _ in range(runs):
-            result = subprocess.run(["/bin/sh", str(bundle / "provision.sh"), *args], env=env,
-                                    capture_output=True, text=True, timeout=30)
+            result = run(["/bin/sh", str(bundle / "provision.sh"), *args], env=env)
         calls = [json.loads(line) for line in (root / "log").read_text().splitlines()]
         return root, calls, result
 
@@ -157,10 +173,8 @@ class BenchRecipeTest(unittest.TestCase):
         launcher = Path(options["ForceCommand"])
         # Exercise the installed gateway and shared module, including Python's isolated imports.
         launcher.write_text(launcher.read_text().replace("/usr/bin/python3", shlex.quote(sys.executable)))
-        # A concurrent fork can inherit the writer until exec, causing ETXTBSY on Linux.
-        # Reading the rewritten launcher through sh avoids executing a busy inode.
-        refused = subprocess.run(["/bin/sh", str(launcher)], env=dict(SSH_ORIGINAL_COMMAND="echo forbidden"),
-                                 capture_output=True, text=True, timeout=30)
+        # Execute it as sshd does, so its #! line is checked too.
+        refused = run([str(launcher)], env=dict(SSH_ORIGINAL_COMMAND="echo forbidden"))
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("gateway infrastructure failure", refused.stderr)
         for path, mode in (("etc/ssh/bench/authorized_keys", "0644"), ("var/lib/hansa-bench", "0700")):

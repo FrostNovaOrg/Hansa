@@ -108,16 +108,17 @@ def unpack(source, length, destination):
             archive.extract(member, destination, filter="data")
 
 
-def _walk(directory, prefix=""):
+def _walk(directory, skip, prefix=""):
+    """Yield entries depth-first; the consumer adds a directory's name to skip to prune it."""
     with os.scandir(directory) as entries:
         for entry in entries:
             name = prefix + entry.name
             directory_entry = entry.is_dir(follow_symlinks=False)
             yield directory, entry.name, name, directory_entry
-            if directory_entry:
+            if directory_entry and name not in skip:
                 child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
                 try:
-                    yield from _walk(child, name + "/")
+                    yield from _walk(child, skip, name + "/")
                 finally:
                     os.close(child)
 
@@ -133,10 +134,10 @@ def collect(directory, result, stdout=b"", stderr=b""):
     """After namespace teardown, yield a temporary result tar from an /out fd.
     Directory entries also consume the traversal budget; rejected is a flag.
     """
-    total, rejected = 0, False
+    total, rejected, skipped = 0, False, set()
     with tempfile.TemporaryFile() as stream:
         with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT) as archive:
-            with closing(_walk(directory)) as entries:
+            with closing(_walk(directory, skipped)) as entries:
                 for count, (fd, base, name, is_directory) in enumerate(entries):
                     if count >= ARTIFACT_ENTRIES:
                         rejected = True
@@ -149,7 +150,7 @@ def collect(directory, result, stdout=b"", stderr=b""):
                     except (OSError, ValueError):
                         rejected = True
                         if is_directory:
-                            break  # Do not descend into an unsupported path.
+                            skipped.add(name)  # Prune its subtree; later artifacts still return.
                         continue
                     with source:
                         before = os.fstat(source.fileno())
