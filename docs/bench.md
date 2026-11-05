@@ -3,8 +3,9 @@
 The bench is off by default. It requires macOS and Lima 2.2.1. Its fixed Debian 13
 VM uses VZ, 2 CPUs, 2 GiB RAM and a 20 GiB disk, without host shares or application
 forwarding. Claude Code and Codex workers receive access and instructions when
-started while it is enabled; an existing worker does not acquire access later.
-Codex's macOS-only sandbox guard still applies.
+started while it is enabled. A worker started while it is off gets the bench folder
+and epoch if resumed after it is turned on, but its pinned system prompt still has
+no bench instructions. Codex's macOS-only sandbox guard still applies.
 
 Coordinator commands accept global `--desk`: `hansa bench build`, `rebuild`,
 `on`, `off`, and `status [--json]`. Build and rebuild require exclusive access
@@ -37,6 +38,7 @@ is deleted after every run. Chromium keeps its own sandbox; do not disable it.
 One request runs, four wait, and each worker may have one outstanding request;
 excess requests receive `busy`. Total time defaults to 300 seconds (maximum 900),
 queue wait to 60 (maximum 300), bounded by the worker's remaining allowance.
+New requests while the bench is off receive `timeout` with a reason saying it is off.
 The guest gets the request's timeout minus a 30-second allowance for SSH startup,
 teardown and return, so a timeout must be longer than the allowance.
 Queue, startup and transfer consume the deadline. Existing resource holds prevent
@@ -48,6 +50,8 @@ Read script exit status, timeout, truncation, rejected-artifact and infrastructu
 notices separately. Partial transfers cannot report success.
 
 Serve supervises the broker without waiting on VM operations in its polling loop.
+An error in the bench step leaves it off for that round so task handling continues;
+serve prints each new reason once. This keeps an optional bench failure from idling the desk.
 Worker completion, cancellation and temporary-folder cleanup revoke access before
 commit. A serve restart discards bench work; new submissions use a fresh epoch and
 must cross the stop-and-purge barrier. Uncertain cleanup closes the bench. A killed
