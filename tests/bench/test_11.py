@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import itertools
+import os
 import sys
 import subprocess
 import tarfile
@@ -19,7 +20,7 @@ class BenchSelftestTest(unittest.TestCase):
     run_command = test_7.BenchManagementTest.run_command
 
     def acceptance(self, missing=False, running=False):
-        machine = Mock(clock=lambda: 0, private=self.desk.state_dir / 'bench')
+        machine = Mock(clock=lambda: 0, private=self.desk.state_dir / 'bench', redact=self.desk.redact)
         machine.start.side_effect = iter(range(2200, 2220))
         machine._info.return_value = dict(status='Running' if running else 'Stopped')
         def call(command, **kwargs):
@@ -35,7 +36,7 @@ class BenchSelftestTest(unittest.TestCase):
         listener.getsockname.return_value = ('192.0.2.1', 12345)
         shipped = probes.fixtures()
         if missing: shipped.pop('account')
-        def submission(machine, name, source, deadline):
+        def submission(machine, name, source, deadline, observed=None):
             self.assertEqual(source, '' if name in probes.malformed() else shipped[name][1])
             return dict.fromkeys(selftest.mandatory()['1/' + name], 'passed')
         with patch.object(selftest.socket, 'socket', return_value=listener), patch.object(selftest.socket, 'create_connection', return_value=listener), patch.object(selftest.socket, 'gethostbyname', return_value='192.0.2.1'), patch.object(probes, 'fixtures', return_value=shipped), patch.object(selftest, 'submission', side_effect=submission), patch.object(selftest, 'lifecycle', return_value=dict.fromkeys(selftest.mandatory()['lifecycle'], 'passed')):
@@ -92,6 +93,7 @@ class BenchSelftestTest(unittest.TestCase):
         with patch.object(selftest, 'run', side_effect=lambda _: self.acceptance(running=True)):
             report = json.loads(self.command('selftest', '--json'))['acceptance']
         self.assertEqual(report['results']['stopped']['status'], 'failed')
+        self.assertEqual(json.loads(report['results']['stopped']['evidence'])['status'], 'Running')
         self.assertEqual(report['status'], 'failed')
         with self.assertRaisesRegex(SystemExit, 'selftest'): self.command('on')
         now = [0]
@@ -193,8 +195,9 @@ class BenchSelftestTest(unittest.TestCase):
                 machine.port = None
                 machine._call.side_effect = lambda *a, **k: Mock(stdout=(parent + child if machine.port else remaining).encode())
                 with patch.object(selftest.time, 'sleep', side_effect=lambda _: now.__setitem__(0, now[0] + 30)):
-                    checked = selftest.lifecycle(machine)
+                    observed = {}; checked = selftest.lifecycle(machine, observed)
                 self.assertEqual(checked, dict(queue='passed', restart='passed', idle='passed', memory='failed'))
+                self.assertEqual((observed['owned'], observed['remaining']), ([1, 2], [int(remaining.split()[0])]))
 
     def test_boot_ports_and_keys_use_each_boot(self):
         with self.observations():
@@ -209,6 +212,7 @@ class BenchSelftestTest(unittest.TestCase):
             with self.subTest(ports=ports, keys=keys), self.observations(ports, keys):
                 report = self.acceptance()
                 self.assertEqual(report['results']['boots']['checks'][field], 'failed')
+                self.assertEqual(json.loads(report['results']['boots']['evidence']), dict(ports=list(ports), keys=[k.decode().split() for k in keys]))
                 self.assertEqual(report['status'], 'failed')
 
     def test_dhcp_dispatch_versions_and_probe_seconds(self):
@@ -218,10 +222,64 @@ class BenchSelftestTest(unittest.TestCase):
         for boot in (1, 2):
             self.assertEqual(report['results'][str(boot) + '/dhcp']['checks'], dict(renewed='failed'))
             self.assertEqual(report['results'][str(boot) + '/dhcp']['status'], 'failed')
+            self.assertEqual(json.loads(report['results'][str(boot) + '/dhcp']['evidence']), dict(probe=dict(renewed='failed')))
         for name, result in report['results'].items():
             with self.subTest(probe=name):
                 self.assertEqual(result['seconds'], 7.5 if name == 'stopped' else 2.5)
         self.assertEqual(report['status'], 'failed')
+
+    def test_dhcp_reconfigures_every_lease(self):
+        folder = self.desk.root / 'leases'; folder.mkdir()
+        leases = [folder / n for n in ('2', '3')]
+        for fault in ('', 'stale', 'address'):
+            for lease in leases: lease.write_text('ADDRESS=192.0.2.15\n'); os.utime(lease, ns=(1, 1))
+            def networkctl(command, **kwargs):
+                self.assertEqual(command[2:], [p.name for p in folder.iterdir()])
+                if command[:2] == ['networkctl', 'reconfigure']:
+                    for lease in leases:
+                        if fault == 'stale' and lease == leases[-1]: continue
+                        lease.write_text('SERVER=192.0.2.1' if fault == 'address' else 'ADDRESS=192.0.2.15')
+                        os.utime(lease, ns=(1000000001, 1000000001))
+            with self.subTest(fault=fault), patch('pathlib.Path', return_value=folder), \
+                    patch('subprocess.run', side_effect=networkctl), patch('time.monotonic', side_effect=range(0, 150, 30)), \
+                    patch('time.sleep'), contextlib.redirect_stdout(io.StringIO()) as output:
+                if fault:
+                    with self.assertRaises(TimeoutError): exec(selftest.DHCP, {})
+                else:
+                    exec(selftest.DHCP, {})
+                    self.assertEqual(json.loads(output.getvalue()), dict(renewed='passed'))
+
+    def test_failed_and_incomplete_results_keep_bounded_redacted_evidence(self):
+        self.command('build')
+        secret = 'fixture-private-"provider-key'
+        self.desk.secrets_dir.mkdir(exist_ok=True); self.desk.key_file('fixture').write_text(secret)
+        observation = dict(note=secret, survivors=[dict(pid=42, command=secret)], padding='')
+        observation['padding'] = 'x' * (4083 - len(json.dumps(dict(probe=observation)))) + secret + 'z' * 4096
+        submit = selftest.submission
+        def runner(machine):
+            call, fake = machine._call.side_effect, selftest.submission
+            machine._call.side_effect = lambda command, *a, **kw: Mock(stdout=json.dumps(observation).encode()) if probes.fixtures()['account'][1] in command else call(command, *a, **kw)
+            def submission(machine, name, source, deadline, observed=None):
+                if name != 'caps-file': return fake(machine, name, source, deadline, observed)
+                response = self.response(dict(rejected=True, truncated=False), {secret: b'artifact bytes stay out'})
+                def connect(incoming, returned, deadline):
+                    incoming.read(int.from_bytes(incoming.read(4), 'big') + 1024); returned.write(response)
+                return submit(Mock(connect=connect), name, source, deadline, observed)
+            with patch.object(selftest, 'submission', side_effect=submission): return BenchSelftestTest.runner(machine)
+        with patch.object(self, 'runner', side_effect=runner), patch.object(selftest, 'run', side_effect=lambda _: self.acceptance()):
+            report = json.loads(self.command('selftest', '--json'))['acceptance']
+        for boot in (1, 2):
+            account, caps = (report['results'][str(boot) + '/' + n] for n in ('account', 'caps-file'))
+            self.assertEqual((account['status'], caps['status']), ('incomplete', 'failed'), caps)
+            self.assertLessEqual(len(account['evidence'].encode()), 4096)
+            self.assertEqual(account['evidence'].count('[key of fixture]'), 3)
+            self.assertNotIn('fixture-private', account['evidence'])
+            self.assertEqual(json.loads(caps['evidence'])['artifacts'], {'[key of fixture]': 23})
+            self.assertNotIn('artifact bytes', caps['evidence'])
+        self.assertFalse(selftest.complete(report))
+        self.assertNotIn('evidence', report['results']['1/root-edge'])
+        self.assertEqual(self.desk.settings()['bench']['acceptance'], report)
+        with self.assertRaisesRegex(SystemExit, 'selftest'): self.command('on')
 
     def test_complete_rejects_error_despite_all_passes(self):
         report = self.acceptance()

@@ -96,7 +96,7 @@ try:
     with opener.open('https://deb.debian.org/debian/', timeout=10) as response: e['internet'] = response.status == 200
 except OSError: e['internet'] = False
 if os.getuid() == 0:
-    e['firewall'] = run('nft', '-a', '-n', 'list', 'chain', 'inet', 'bench_edge', 'out')
+    e['firewall'] = run('nft', '-a', 'list', 'chain', 'inet', 'bench_edge', 'out')
     e['uid'] = pwd.getpwnam('bench').pw_uid
     e['persistent'] = run('systemctl', 'is-enabled', 'nftables.service').strip() == 'enabled'
     e['ipv6'] = [Path('/proc/sys/net/ipv6/conf/' + n + '/disable_ipv6').read_text().strip() for n in ('all', 'default')]
@@ -114,7 +114,7 @@ survivors = []
 for p in Path('/proc').iterdir():
     if not p.name.isdigit(): continue
     try:
-        if p.stat().st_uid == uid: survivors.append(int(p.name))
+        if p.stat().st_uid == uid: survivors.append(dict(pid=int(p.name), command=p.joinpath('comm').read_text().strip()))
     except FileNotFoundError: pass
 slots = sorted(p.name for p in Path('/var/lib/hansa-bench').iterdir() if p.name != 'lock')
 ready = any(Path('/var/lib/hansa-bench', s, 'out/descendant.ready').is_file() for s in slots)
@@ -181,7 +181,7 @@ def firewall(text, uid):
     expected = ['oifname "lo" accept', 'ct state established,related accept',
                 'ip daddr 192.168.5.2 udp dport 53 accept', 'ip daddr 192.168.5.2 tcp dport 53 accept',
                 'udp sport 68 udp dport 67 accept', 'ip daddr 192.168.5.2 drop',
-                'ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } drop', 'meta nfproto ipv6 drop']
+                'ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 224.0.0.0/3 } drop', 'meta nfproto ipv6 drop']
     return ('type filter hook output priority filter; policy accept;' in lines or
             'type filter hook output priority 0; policy accept;' in lines) and len(rules) == 9 and bool(re.fullmatch(first, rules[0])) and list(map(normalize, rules[1:])) == list(map(normalize, expected))
 
@@ -224,7 +224,7 @@ def checks(name, evidence, artifacts=None):
         if artifacts is not None and name == 'sandbox':
             png = artifacts.get('browser.png', b'')
             valid = isinstance(png, bytes) and len(png) >= 45 and png[:16] == b'\x89PNG\r\n\x1a\n\0\0\0\rIHDR' and all(struct.unpack('>II', png[16:24])) and png[-12:] == b'\0\0\0\0IEND\xaeB`\x82'
-            result['artifacts'] = 'passed' if valid and set(artifacts) == {'browser.png', 'evidence.txt'} and artifacts.get('evidence.txt') == b'bench artifact\n' else 'failed'
+            result['artifacts'] = 'passed' if valid and set(artifacts) == {'browser.png', 'evidence.txt', 'bench-leftover'} and artifacts.get('evidence.txt') == b'bench artifact\n' and artifacts.get('bench-leftover') == b'leftover' else 'failed'
         elif artifacts is not None:
             sizes = sorted(map(len, artifacts.values()))
             valid = sizes == {'caps-total': [16 * 1024**2] * 4, 'caps-count': [1] * 1000}.get(name, [])
