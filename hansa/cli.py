@@ -3063,6 +3063,13 @@ def main(argv=None):
         p.add_argument("--verify-note", metavar="TEXT", help="what the verification should look at in particular; "
                        "implies --verify. These options apply only to this task, never to a follow-up")
 
+    p = sub.add_parser("bench")  # worker queue; management and public help arrive with the broker
+    p = p.add_subparsers(dest="bench_command", required=True).add_parser("run")
+    p.add_argument("--script", required=True)
+    p.add_argument("--cwd", default=".")
+    p.add_argument("--timeout", type=int, default=300)
+    p.add_argument("--wait", type=int, default=60)
+
     p = add("example", cmd_example, "set up a small sample project, desk and first task to try hansa on; it starts "
             "nothing and calls no model")
     p.add_argument("dir", nargs="?", help="folder to create (default: ~/hansa-example); it must be new or empty")
@@ -3668,6 +3675,9 @@ def main(argv=None):
     if a.cmd == "coordinator" and ("--help" in rest or "-h" in rest):  # hansa's help, not claude's
         sub.choices["coordinator"].print_help()
         return 0
+    if a.cmd == "bench":
+        from .bench.channel import command
+        return command(a) or 0  # workers cannot discover/read a desk, including session accounting
     if not getattr(a, "fn", None):
         from . import menu
         if a.cmd is None and menu.available():

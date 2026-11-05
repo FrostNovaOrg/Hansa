@@ -19836,6 +19836,7 @@ def save():'''))
                 (top / "hansa" / f.relative_to(code / "hansa")).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, top / "hansa" / f.relative_to(code / "hansa"))
         shutil.copytree(code / "bin", top / "bin")
+        self.assertTrue((top / "hansa/bench/channel.py").is_file())
         mod = top / "hansa" / "mod"
         for rel in (".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.js", "tests/register.test.ts"):
             self.assertTrue((mod / rel).is_file(), rel)
@@ -43337,8 +43338,11 @@ else:
         for f in own.split():  # every file the repository has under hansa/
             self.assertTrue(hansa.shipped(Path(f).relative_to("hansa")), f)
         for f in (".DS_Store", "agents/.DS_Store", "run.py~", "__pycache__/run.cpython-312.pyc", "x/y.py",
+                  "bench/channel.py~", "bench/__pycache__/channel.pyc", "bench/._channel.py", "bench/data.json",
                   "._cli.py", "._card.md", "agents/._worker.md"):  # macOS's AppleDouble files, left by a copy
             self.assertFalse(hansa.shipped(Path(f)), f)
+        for f in ("bench/__init__.py", "bench/channel.py", "bench/snapshot.py"):
+            self.assertTrue(hansa.shipped(Path(f)), f)
         for f in ("mod/.claude-plugin/plugin.json", "mod/hooks/hooks.json", "mod/hooks/register.js",
                   "mod/tests/register.test.ts"):  # the coordinator's mod: what its session loads, and its tests
             self.assertTrue(hansa.shipped(Path(f)), f)
@@ -44963,6 +44967,7 @@ class ParallelRunnerTest(unittest.TestCase):
 from tests.test_menu import MenuTest  # noqa: E402 - included in the lane's existing test entry point
 from tests.test_doctor import DoctorTest  # noqa: E402 - installation checks in the lane's test entry point
 from tests.test_install import InstallTest  # noqa: E402 - account installer, using local git repositories
+from tests.bench.test_1 import BenchChannelTest  # noqa: E402 - local bench queue, no VM
 
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 
