@@ -44963,6 +44963,7 @@ class ParallelRunnerTest(unittest.TestCase):
 from tests.test_menu import MenuTest  # noqa: E402 - included in the lane's existing test entry point
 from tests.test_doctor import DoctorTest  # noqa: E402 - installation checks in the lane's test entry point
 from tests.test_install import InstallTest  # noqa: E402 - account installer, using local git repositories
+from tests.bench.test_1 import BenchChannelTest  # noqa: E402 - local bench queue, no VM
 
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 
