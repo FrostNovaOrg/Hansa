@@ -45114,6 +45114,7 @@ from tests.bench.test_7 import BenchManagementTest  # noqa: E402 - coordinator c
 from tests.bench.test_8 import BenchBrokerTest  # noqa: E402 - broker with fake VM and local pipes
 from tests.bench.test_8 import BenchRecoveryTest  # noqa: E402 - timeout delivery and recovery with fakes
 from tests.bench.test_9 import BenchIntegrationTest  # noqa: E402 - worker boundaries with fakes
+from tests.bench.test_10 import BenchProbesTest  # noqa: E402 - shipped acceptance fixtures, no VM
 
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 
