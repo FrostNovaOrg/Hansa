@@ -25,8 +25,11 @@ Do not manufacture an acceptance record.
 
 Provisioning, reset's purge and each gateway slot deletion sync guest writes before
 the VM can be force-stopped. Reset still force-stops first to kill hand-in survivors.
+Build and rebuild allow one hour, including the first cloud-image download; their
+initial Lima start may use that hour. Other calls retain their 900-second cap.
 Build, rebuild and selftest save and print failure messages with stored provider keys
-redacted; failed Lima commands include the last 4 KiB of stderr.
+redacted before the final 4 KiB stderr cut, including on timeout. Lima stderr is
+continuously drained into a 64 KiB memory tail so floods cannot fill temporary storage.
 
 Use the enabled bench for Linux server, browser or terminal checks. Write one
 shell script that starts everything, waits for readiness, exercises it, and

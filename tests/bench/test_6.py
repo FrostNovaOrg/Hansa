@@ -21,7 +21,7 @@ class BenchVMTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name) / "private state"
         self.calls, self.status, self.port, self.now = [], "Stopped", 2200, 0
-        self.fail, self.key, self.timeout = "", KEY, False
+        self.fail_action, self.key, self.timeout = "", KEY, False
         with patch.object(vm.sys, "platform", "darwin"):
             self.vm = vm.VM(self.root, run=self.run_command, clock=lambda: self.now)
         self.vm.prepare(100)
@@ -33,7 +33,7 @@ class BenchVMTest(unittest.TestCase):
         self.assertEqual(options["env"]["LIMA_HOME"], str(self.root / "lima"))
         self.assertEqual(set(options["env"]), {"HOME", "PATH", "LC_ALL", "LIMA_HOME"})
         action = command[1] if command[0] == "limactl" else command[0]
-        if action == self.fail:
+        if action == self.fail_action:
             raise subprocess.CalledProcessError(1, command)
         output = b""
         if action == "ssh-keygen":
@@ -104,6 +104,74 @@ class BenchVMTest(unittest.TestCase):
         self.assertIn("\ufffd\nLima failed", str(caught.exception))
         self.assertNotIn("discarded", str(caught.exception))
 
+    def test_other_calls_keep_900_second_cap(self):
+        def run(command, **options):
+            self.assertEqual(options["timeout"], 900)
+            return subprocess.CompletedProcess(command, 0)
+        self.vm.run = run
+        for command in (["limactl", action] for action in ("start", "stop", "list", "shell", "delete")):
+            self.vm._call(command, 3600)
+        for command in (["ssh"], ["ssh-keygen"]):
+            self.vm._call(command, 3600)
+
+    def test_status_size_name_running_and_port_checks(self):
+        info = dict(name=self.module.INSTANCE, status="Running", sshLocalPort=2200)
+        encoded = json.dumps(info).encode()
+        for data in (encoded + b" " * (65537 - len(encoded)),
+                     json.dumps({**info, "name": "another-instance"}).encode()):
+            with patch.object(self.vm, "_call", return_value=subprocess.CompletedProcess([], 0, data)), \
+                    self.assertRaises(ValueError):
+                self.vm._info(100)
+        for change in ({"status": "Stopped"}, *({"sshLocalPort": p} for p in (0, 65536, True, "2200"))):
+            with self.subTest(change=change), patch.object(self.vm, "_info", return_value={**info, **change}), \
+                    self.assertRaisesRegex(ValueError, "not ready"):
+                self.vm._boot(100)
+
+    def test_platform_purge_stop_and_ssh_options(self):
+        with patch.object(self.module.sys, "platform", "linux"), self.assertRaisesRegex(RuntimeError, "macOS"):
+            self.module.VM(self.root)
+        mask = os.umask(0o022)  # A restrictive inherited umask must not hide a missing purge mode.
+        try:
+            self.vm.reset(100)
+        finally:
+            os.umask(mask)
+        self.assertEqual((self.root / "slots").stat().st_mode & 0o777, 0o700)
+        self.assertEqual([c for c in self.calls if c[:2] == ["limactl", "stop"]],
+                         [["limactl", "stop", "--force", self.module.INSTANCE]] * 2)
+        self.vm.start(100)
+        with patch.object(self.vm, "_call") as call:
+            self.vm.connect(None, None, 100)
+        ssh = call.call_args[0][0]
+        for option in ("ControlPath=none", "HostKeyAlgorithms=ssh-ed25519", "ConnectTimeout=10", "CheckHostIP=no"):
+            self.assertIn(option, [ssh[i + 1] for i, arg in enumerate(ssh[:-1]) if arg == "-o"])
+
+    def test_timeout_keeps_stderr(self):
+        def run(command, **options):
+            options["stderr"].write(b"download stalled")
+            raise subprocess.TimeoutExpired(command, options["timeout"])
+        self.vm.run = run
+        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            self.vm._call(["limactl", "start"], 100)
+        self.assertEqual(caught.exception.stderr, b"download stalled")
+        self.assertIn("download stalled", str(caught.exception))
+
+    def test_stderr_flood_never_grows_a_disk_spool(self):
+        def redact(text):
+            self.assertLessEqual(len(text), 65536)
+            return text
+        self.vm.redact = redact
+        def run(command, **options):
+            for _ in range(128):
+                options["stderr"].write(b"x" * 8192)
+                self.assertLessEqual(os.fstat(options["stderr"].fileno()).st_size, 65536)
+            options["stderr"].write(b"final diagnostic")
+            raise subprocess.CalledProcessError(7, command)
+        self.vm.run = run
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.vm._call(["limactl", "start"], 100)
+        self.assertEqual(len(caught.exception.stderr), 4096)
+        self.assertTrue(caught.exception.stderr.endswith(b"final diagnostic"))
+
     def connect(self, deadline=100):
         reader, writer = os.pipe()
         with os.fdopen(reader, "rb") as source, os.fdopen(writer, "wb", buffering=0) as sender, \
@@ -151,16 +219,16 @@ class BenchVMTest(unittest.TestCase):
     def test_reset_failure_keeps_closed(self):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             self.vm.start(100)
-        for self.fail in ("stop", "start", "shell", "list"):
+        for self.fail_action in ("stop", "start", "shell", "list"):
             self.calls.clear()
             with self.assertRaises(subprocess.CalledProcessError):
                 self.vm.reset(100)
             self.assertFalse(self.vm.clean)
             with self.assertRaisesRegex(RuntimeError, "closed"):
                 self.connect()
-            if self.fail == "stop":
+            if self.fail_action == "stop":
                 self.assertFalse(any(c[1] in ("start", "shell") for c in self.calls))
-        self.fail = ""
+        self.fail_action = ""
         self.calls.clear()
         self.vm.reset(100)
         self.assertEqual([c[1] for c in self.calls], ["stop", "list", "start", "list", "shell", "stop", "list"])
