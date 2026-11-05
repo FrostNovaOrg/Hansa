@@ -5,22 +5,9 @@ import json
 import os
 from pathlib import Path
 import re
-import stat
 import uuid
 
-LIMIT = 64 * 1024
-
-
-def safe_open(directory, name, flags=os.O_RDONLY):
-    """Open one regular, single-link file relative to an already trusted descriptor."""
-    if not name or name in (".", "..") or "/" in name or "\\" in name:
-        raise ValueError("unsafe channel filename")
-    fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid():
-        os.close(fd)
-        raise ValueError("channel file must be an owned, single-link regular file")
-    return fd
+from .archive import HEADER_BYTES as LIMIT, safe_open
 
 
 def _pairs(pairs):

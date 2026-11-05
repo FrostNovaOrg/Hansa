@@ -10,11 +10,8 @@ import tempfile
 from .. import attach, run
 from ..desk import home_secrets
 from .channel import safe_open
+from .archive import MAX_BYTES, MAX_ENTRIES, MAX_ARCHIVE, MAX_NAME
 
-MAX_BYTES = 256 * 1024 * 1024
-MAX_ENTRIES = 50_000
-MAX_ARCHIVE = MAX_BYTES + 32 * 1024 * 1024
-MAX_NAME = 4096
 EXCLUDED = {n.split("/")[0].casefold() for n in home_secrets()} | {
     ".git", ".hansa", ".claude", "claude.md", "claude.local.md", "agents.md", ".mcp.json",
     ".env", ".cache", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".venv",
