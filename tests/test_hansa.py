@@ -45108,6 +45108,7 @@ from tests.bench.test_1 import BenchChannelTest  # noqa: E402 - local bench queu
 from tests.bench.test_2 import BenchSnapshotTest  # noqa: E402 - local admission snapshots, no VM
 from tests.bench.test_3 import BenchArchiveTest  # noqa: E402 - local tar and delivery boundaries, no VM
 from tests.bench.test_4 import BenchGuestTest  # noqa: E402 - disposable gateway with a local fake bwrap
+from tests.bench.test_5 import BenchRecipeTest  # noqa: E402 - provisioning with fake system tools, no VM
 
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 
