@@ -2288,9 +2288,11 @@ function renderSettings(problems = settingsProblems) {
 
 /* ---------- settings changes: independent of the status poll ---------- */
 Object.assign(T, ZH ? {
+  historyAt:"修改时间", historyBy:"修改者",
   historyIntro:"只读；展开时每分钟更新。旧记录中的密钥仍不显示。", historyAll:"全部设置", historyName:"工作线或服务商名称",
   historyEmpty:"没有匹配的设置改动。", historyMore:"再显示 50 条", historyFailed:"改动记录加载失败。", historyPath:"设置路径"
 } : {
+  historyAt:"Changed at", historyBy:"Changed by",
   historyIntro:"Read only; refreshes every minute while open. Recorded keys remain withheld.", historyAll:"All settings", historyName:"Lane or provider name",
   historyEmpty:"No matching settings changes.", historyMore:"Show 50 more", historyFailed:"Could not load changes.", historyPath:"Setting path"
 });
@@ -2320,7 +2322,7 @@ function loadHistory() {
   const path = historyPath();
   historyFlight = api(path).then(data => {
     if (path !== historyPath()) return;
-    historyBody.replaceChildren(data.entries.length ? table([T.goalAt, T.goalBy, T.historyPath, T.changes], data.entries.map(e => [
+    historyBody.replaceChildren(data.entries.length ? table([T.historyAt, T.historyBy, T.historyPath, T.changes], data.entries.map(e => [
       when(e.ts), e.by + (e.command ? ` (${e.command})` : ""), e.path, e.change
     ])) : h("p", {}, T.historyEmpty));
     historyMore.hidden = data.entries.length < historyLast;

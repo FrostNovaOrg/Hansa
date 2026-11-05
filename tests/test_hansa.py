@@ -29467,6 +29467,27 @@ def save():'''))
             self.assertNotIn("old", e)
             self.assertNotIn("new", e)
 
+    def test_web_history_newly_known_key_in_actor_command_and_path(self):
+        from hansa import history
+        key = "futurecredentialpartA-futurecredentialpartB"
+        history.record(self.desk, {}, {"lanes": {"a": {key: "after"}}},
+                       by="actor " + key, command="hansa example " + key)
+        recorded = self.history_entries()[-1]
+        for field in ("by", "command", "path"):
+            self.assertIn(key, recorded[field])  # not known when recorded
+        self.desk.key_file("other").write_text(key + "\n")
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        code, body, _ = self.web_request("/api/history", headers=auth, raw=True)
+        self.assertEqual(code, 200)
+        shown = self.hansa("explain", "history")
+        for source, output in (("command", shown), ("page", body.decode())):
+            with self.subTest(source=source):
+                for part in (key, *key.split("-")):
+                    self.assertNotIn(part, output)
+                self.assertIn("actor [key]", output)
+                self.assertIn("hansa example [key]", output)
+                self.assertIn("lanes.a.[key]", output)
+
     def test_web_history_compression_revalidation_and_token(self):
         auth = {"Authorization": "Bearer " + self.desk.web_token(), "Accept-Encoding": "gzip"}
         code, _, headers = self.web_request("/api/history", headers=auth)
@@ -35136,6 +35157,8 @@ if (ask === "history") (async () => {
   check(descendants(fold, "summary")[0].textContent === (process.argv[4] === "zh" ? "改动" : "Changes"), "section title");
   fold.open = true; await fold.on.toggle();
   check(count() === 1 && descendants(fold, "tr").length === 51, "first 50 changes missing");
+  const labels = descendants(fold, "th").slice(0, 2).map(el => el.textContent);
+  check(JSON.stringify(labels) === JSON.stringify(process.argv[4] === "zh" ? ["修改时间", "修改者"] : ["Changed at", "Changed by"]), "history column labels");
   check(fold.textContent.includes("principal (example command)") && fold.textContent.includes("changed (values withheld)"), "actor or withholding missing");
   check(fold.textContent.includes("<b>old</b>") && !descendants(fold, "b").length, "history must be plain text");
   await advance(59999); check(count() === 1, "history polled before a minute");
