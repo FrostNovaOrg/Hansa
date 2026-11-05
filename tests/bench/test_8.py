@@ -84,7 +84,7 @@ class BenchBrokerTest(unittest.TestCase):
         self.complete(self.add_worker())
         self.assertEqual(self.export.call_count, 1)
         self.assertEqual([c[0] for c in self.vm.mock_calls][:3], ["stop", "reset", "start"])
-        self.assertEqual(len(stale.claimed), 0)
+        self.assertEqual(len(stale.claimed), 2)  # Stale requests are refused and consumed too.
 
     def test_idle_stops(self):
         worker = self.add_worker(deadline=50)
@@ -115,6 +115,96 @@ class BenchBrokerTest(unittest.TestCase):
             self.assertIn("bench is off", result["error"])
         self.assertEqual(self.vm.mock_calls, [])
         self.export.assert_not_called()
+
+    def test_malformed_requests_are_refused_once_without_blocking_workers(self):
+        for data in (b"[" * 4000 + b"]" * 4000, b"\xff", b"{}", b'{"id":0,"id":1}'):
+            with self.subTest(data=data[:8]):
+                worker = self.add_worker()
+                rid = "a" * 32
+                (worker.directories[0][0] / (rid + ".request")).write_bytes(data)
+                other = self.add_worker()
+                fresh = channel.submit(other.directory, other.epoch, "true")
+                workers = {worker: 1000, other: 1000}
+                self.b.poll(workers, enabled=True)
+                self.b.active.thread.join(10)
+                self.assertFalse(self.b.active.thread.is_alive())
+                self.assertIn("report", self.result(other, fresh))
+                self.assertEqual(self.result(worker, rid)["status"], "refused")
+                with patch.object(channel, "claim", wraps=channel.claim) as claim, \
+                        patch.object(channel, "reply", wraps=channel.reply) as reply:
+                    self.b.poll(workers, enabled=True)
+                    claim.assert_not_called()
+                    reply.assert_not_called()
+
+    def test_unreadable_request_is_refused_and_consumed(self):
+        worker = self.add_worker()
+        rid = channel.submit(worker.directory, worker.epoch, "true")
+        with patch.object(channel, "_read", side_effect=OSError("unreadable")) as read:
+            for _ in range(2):
+                self.b.poll(self.workers, enabled=True)
+            read.assert_called_once()
+        self.assertEqual(self.result(worker, rid)["status"], "refused")
+        self.assertIn("report", self.complete(self.add_worker()))
+
+    def test_management_lock_only_defers_broker(self):
+        from hansa.bench.manage import exclusive
+        worker = self.add_worker()
+        rid = channel.submit(worker.directory, worker.epoch, "true")
+        with exclusive(self.b.desk):
+            self.b.poll(self.workers, enabled=True)
+            self.assertFalse(self.b.closed)
+            self.assertIsNone(self.b.active)
+        self.b.poll(self.workers, enabled=True)
+        self.b.active.thread.join(10)
+        self.assertFalse(self.b.active.thread.is_alive())
+        self.assertIn("report", self.result(worker, rid))
+        with exclusive(self.b.desk):
+            self.b.poll({}, enabled=False)
+        self.b.poll({}, enabled=False)
+        self.assertIsNone(self.vm.port)
+
+    def test_off_during_hand_in_cancels_and_stops(self):
+        from tests.bench.test_7 import BenchManagementTest
+        from hansa.bench.vm import INSTANCE
+        from hansa.desk import Desk
+        self.desk = Desk(self.root)
+        (self.desk.state_dir / "bench/lima" / INSTANCE).mkdir(parents=True)
+        self.b.desk = self.desk
+        settings = self.desk.settings()
+        settings["bench"]["enabled"] = True
+        self.assertEqual(self.desk.save_settings(settings), [])
+        def connect(source, target, deadline):
+            self.entered.set()
+            while source.read(archive.HEADER_BYTES):
+                pass
+        worker = self.add_worker()
+        rid = channel.submit(worker.directory, worker.epoch, "true")
+        with patch.object(self.vm, "connect", side_effect=connect):
+            self.b.poll(self.workers, enabled=True)
+            self.assertTrue(self.entered.wait(10))
+            self.assertIn("bench: off", BenchManagementTest.command(self, "off"))
+            self.assertFalse(self.desk.settings()["bench"]["enabled"])
+            self.b.poll(self.workers, enabled=False)
+        self.assertIsNone(self.b.active)
+        self.assertEqual(self.result(worker, rid)["status"], "cancelled")
+        self.vm.stop.assert_called()
+        self.assertIsNone(self.vm.port)
+
+    def test_deadline_during_delivery_keeps_report_and_bench_ready(self):
+        deliver = archive.deliver
+        def delivered(*args):
+            result = deliver(*args)
+            self.now = 301
+            return result
+        worker = self.add_worker()
+        with patch.object(archive, "deliver", side_effect=delivered):
+            result = self.complete(worker)
+        self.assertEqual(result["status"], "failed")
+        report = json.loads((worker.directories[0][0] / result["report"]).read_text())
+        self.assertEqual(report["stdout"], self.output.decode())
+        self.assertTrue(self.b.ready and self.vm.clean)
+        self.assertFalse(self.b.closed)
+        self.assertIsNotNone(self.vm.port)
 
     def test_results_arrive_automatically(self):
         worker = self.add_worker()
