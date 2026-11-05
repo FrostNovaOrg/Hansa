@@ -5854,7 +5854,7 @@ class Dispatcher:
         self.trimmed = 0.0  # when this server last trimmed what old tasks kept (disk.trim)
         self.look_error = None  # the error of its look of free space while that fails as a whole (disk.look_failed)
         self.memory_error = None  # a failed available-memory reading, recorded once per change
-        self.bench_errors = set()  # optional bench failures must never hold back the rest of a round
+        self.bench_error = None  # the latest failed bench poll, reported once per change
         self.read = None  # (desk.writes, the tasks) as this round last read them; None at the start of a round
 
     def tasks(self) -> list:
@@ -6429,10 +6429,11 @@ class Dispatcher:
                 if getattr(desk, "_bench", None):
                     desk._bench.poll(s["bench"]["enabled"], low or desk.paused())
                 desk._bench_off = not s["bench"]["enabled"]
+                self.bench_error = None
             except Exception as e:  # the optional bench must not stop recording, reaping or starting work
                 reason = desk.redact(f"{type(e).__name__}: {e}")
-                if reason not in self.bench_errors:
-                    self.bench_errors.add(reason)
+                if reason != self.bench_error:
+                    self.bench_error = reason
                     print(f"hansa serve: bench is off for this round: {reason}", file=sys.stderr, flush=True)
         with serve_step():
             self.record(self.tasks())
