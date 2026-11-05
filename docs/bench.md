@@ -10,8 +10,11 @@ Coordinator commands accept global `--desk`: `hansa bench build`, `rebuild`,
 `on`, `off`, and `status [--json]`. Build and rebuild require exclusive access
 while disabled; rebuilding changes the generation and invalidates acceptance.
 `on` requires passing acceptance for the current recipe and generation. The
-shipped probes and `selftest` command are forthcoming; this integration alone
-does not enable a new build. Do not manufacture an acceptance record.
+shipped acceptance fixtures cover sandbox capabilities, account restrictions,
+the UID-first edge and detached descendants after completion, timeout, disconnect
+and gateway death. Missing evidence is incomplete; these isolation gates remain
+mandatory while guest execution is supported. The `selftest` runner is forthcoming;
+fixtures alone do not enable a build. Do not manufacture an acceptance record.
 
 Use the enabled bench for Linux server, browser or terminal checks. Write one
 shell script that starts everything, waits for readiness, exercises it, and
