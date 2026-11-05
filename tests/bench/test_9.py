@@ -1,6 +1,7 @@
 """Worker integration through fake model commands and VM; no network or VM."""
 import contextlib
 import io
+import json
 from pathlib import Path
 import sys
 import threading
@@ -25,6 +26,20 @@ class BenchIntegrationTest(unittest.TestCase):
             generation=1, status="passed", results={n: dict(status="passed", checks=dict.fromkeys(f, "passed"))
                                                   for n, f in selftest.mandatory().items()}))
         write_json(self.desk.settings_path, settings)
+
+    def test_status_reports_enabled_bench_with_stale_recipe(self):
+        from hansa.bench.manage import acceptance_problem
+        settings = self.desk.settings()
+        settings["bench"].update(enabled=True, recipe="stale")
+        write_json(self.desk.settings_path, settings)
+        for args in ([], ["--json"]):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                cli.main(["--desk", str(self.desk.root), "bench", "status", *args])
+            if args:
+                self.assertEqual(json.loads(out.getvalue()), settings["bench"])
+            else:
+                self.assertEqual(out.getvalue().split("; ", 1)[0],
+                                 "bench: on, not in use: " + acceptance_problem(settings["bench"]))
 
     def test_serve_rechecks_acceptance_and_reports_once(self):
         import copy
@@ -55,13 +70,13 @@ class BenchIntegrationTest(unittest.TestCase):
         self.assertTrue(self.desk._bench.poll.call_args.args[0])
 
     def enable(self):
-        with patch("hansa.bench.vm.VM") as machine:
+        with patch("hansa.bench.manage.VM") as machine:
             self.dispatch.tick()
             machine.assert_not_called()  # default off must not touch Lima, even during serve startup.
         settings = self.desk.settings()
         settings["bench"]["enabled"] = True
         write_json(self.desk.settings_path, settings)
-        with patch("hansa.bench.vm.VM", return_value=Mock(port=None)):
+        with patch("hansa.bench.manage.VM", return_value=Mock(port=None)):
             self.dispatch.tick()
         self.bench = self.desk._bench
         self.addCleanup(self.bench.close)
@@ -283,7 +298,7 @@ class BenchIntegrationTest(unittest.TestCase):
         import hansa.web as web
         machine = Mock(port=None, clean=False)
         machine.stop.side_effect = lambda deadline: setattr(machine, "port", None)
-        with patch("hansa.bench.vm.VM", return_value=machine):
+        with patch("hansa.bench.manage.VM", return_value=machine):
             bench = run.WorkerBench(self.desk)
         self.addCleanup(bench.pool.shutdown, wait=False)
         tid = self.desk.new_task("a guest at shutdown", lane="a")

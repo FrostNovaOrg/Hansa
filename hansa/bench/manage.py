@@ -156,7 +156,11 @@ def command(a):
                             raise
                 save(desk, bench, action)
         bench = desk.settings()["bench"]
+        problem = ""
+        if action == "status" and not getattr(a, "json", False) and bench["enabled"]:
+            problem = acceptance_problem(bench)
         print(json.dumps(bench, sort_keys=True) if getattr(a, "json", False) else
-              "bench: " + ("on" if bench["enabled"] else "off") + "; " + json.dumps(bench, sort_keys=True))
+              "bench: " + ("on" if bench["enabled"] else "off") +
+              (", not in use: " + problem if problem else "") + "; " + json.dumps(bench, sort_keys=True))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         raise SystemExit("hansa bench: " + desk.redact(str(error))) from None
