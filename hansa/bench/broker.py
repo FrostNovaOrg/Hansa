@@ -61,7 +61,6 @@ class Broker:
             if self.vm.port is not None:
                 with exclusive(self.desk):
                     self.vm.stop(self.clock() + 30)
-            return
         for job in list(self.waiting):
             if self.closed or self.clock() >= min(job.deadline, job.until):
                 self.reply(job, {"status": "infrastructure", "error": self.failure} if self.closed else {"status": "timeout"})
@@ -82,7 +81,9 @@ class Broker:
                                           deadline=min(deadline, self.clock() + request["timeout"]),
                                           until=self.clock() + request["wait"])
                     outstanding = self.waiting + ([self.active] if self.active else [])
-                    if self.closed:
+                    if not enabled:
+                        self.reply(job, {"status": "timeout", "error": "bench is off"})
+                    elif self.closed:
                         self.reply(job, {"status": "infrastructure", "error": self.failure})
                     elif (any(j.channel.run == worker.run for j in outstanding)
                             or len(self.waiting) >= 4 + int(self.active is None and not held)):
@@ -91,6 +92,8 @@ class Broker:
                         self.reply(job, {"status": "timeout"})
                     else:
                         self.waiting.append(job)
+        if not enabled:
+            return
         if not self.closed and (not self.ready or (
                 self.active is None and self.vm.port is not None and self.clock() - self.idle >= 60)):
             try:

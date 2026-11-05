@@ -32,6 +32,40 @@ class BenchIntegrationTest(unittest.TestCase):
         self.addCleanup(self.bench.close)
         self.bench.pending.result(timeout=10)
 
+    def bench_failure_starts(self, block):
+        settings = self.desk.settings()
+        settings["bench"] = block
+        write_json(self.desk.settings_path, settings)
+        with contextlib.redirect_stderr(io.StringIO()) as out:
+            for _ in range(2):
+                tid = self.desk.new_task("keep serving", lane="a")
+                self.dispatch.tick()
+                self.assertEqual(self.desk.meta(tid)["state"], "running")
+                self.assertNotIn("Use the enabled bench", (self.desk.raw_dir(tid) / run.RESUME_ARGV).read_text())
+                self.assertEqual(self.dispatch.procs[tid].wait(timeout=30), 0)
+            self.dispatch.tick()
+        self.assertEqual(len(out.getvalue().splitlines()), 1)
+        self.assertIn("bench", out.getvalue())
+        return out.getvalue()
+
+    def test_malformed_bench_keeps_queue_moving(self):
+        self.assertIn("KeyError", self.bench_failure_starts({}))
+
+    def test_non_macos_bench_keeps_queue_moving(self):
+        settings = self.desk.settings()["bench"]
+        settings["enabled"] = True
+        with patch("hansa.bench.vm.sys.platform", "linux"):
+            self.assertIn("macOS", self.bench_failure_starts(settings))
+        self.bench_failure_starts({})  # A different reason on the same server must also be reported.
+
+    def test_poll_failure_keeps_queue_moving(self):
+        self.desk._bench = Mock()
+        self.desk._bench.poll.side_effect = ValueError("poll failed")
+        settings = self.desk.settings()["bench"]
+        settings["enabled"] = True
+        self.assertIn("poll failed", self.bench_failure_starts(settings))
+        self.desk._bench.register.assert_not_called()
+
     def test_both_workers_submit(self):
         from contrib.codex.tests.codexkit import WRAPPER, FAKES, shim
         self.enable()

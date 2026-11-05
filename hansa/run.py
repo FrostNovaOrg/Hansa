@@ -3866,7 +3866,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp),
                                                                  long=long)
     system += around_note(desk, lane, meta, lane_name, tmp)
-    if getattr(desk, "_bench", None) and s["bench"]["enabled"]:
+    if getattr(desk, "_bench", None) and not getattr(desk, "_bench_off", False) and s["bench"]["enabled"]:
         system += BENCH_NOTE
     if meta.get("attachments"):
         folder = str(Path(tmp) / "attach")
@@ -3947,7 +3947,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
 
 def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: dict, tmp: str, wt=None) -> dict:
     """The environment of a task or verification worker's Claude Code, for its start and its one resume."""
-    bench = getattr(desk, "_bench", None)
+    bench = None if getattr(desk, "_bench_off", False) else getattr(desk, "_bench", None)
     extra = bench.register(tid, lane, tmp, wt) if bench and desk.settings()["bench"]["enabled"] else {}
     return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), **extra, "HANSA_TASK": tid,
             "HANSA_RUN": tmp_mark(desk, tid, tmp), "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
@@ -5843,6 +5843,7 @@ class Dispatcher:
         self.trimmed = 0.0  # when this server last trimmed what old tasks kept (disk.trim)
         self.look_error = None  # the error of its look of free space while that fails as a whole (disk.look_failed)
         self.memory_error = None  # a failed available-memory reading, recorded once per change
+        self.bench_errors = set()  # optional bench failures must never hold back the rest of a round
         self.read = None  # (desk.writes, the tasks) as this round last read them; None at the start of a round
 
     def tasks(self) -> list:
@@ -6410,10 +6411,18 @@ class Dispatcher:
             memory_low = self.memory(s)
         low = bool(low or memory_low or desks_list_problem())  # an unreadable list of desks holds new runs too
         with serve_step():
-            if s["bench"]["enabled"] and not getattr(desk, "_bench", None):
-                desk._bench = WorkerBench(desk)
-            if getattr(desk, "_bench", None):
-                desk._bench.poll(s["bench"]["enabled"], low or desk.paused())
+            desk._bench_off = True
+            try:
+                if s["bench"]["enabled"] and not getattr(desk, "_bench", None):
+                    desk._bench = WorkerBench(desk)
+                if getattr(desk, "_bench", None):
+                    desk._bench.poll(s["bench"]["enabled"], low or desk.paused())
+                desk._bench_off = not s["bench"]["enabled"]
+            except Exception as e:  # the optional bench must not stop recording, reaping or starting work
+                reason = desk.redact(f"{type(e).__name__}: {e}")
+                if reason not in self.bench_errors:
+                    self.bench_errors.add(reason)
+                    print(f"hansa serve: bench is off for this round: {reason}", file=sys.stderr, flush=True)
         with serve_step():
             self.record(self.tasks())
         for tid, proc in list(self.procs.items()):

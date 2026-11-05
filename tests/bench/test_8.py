@@ -102,6 +102,20 @@ class BenchBrokerTest(unittest.TestCase):
             self.b.poll(self.workers, enabled=True)
             self.assertEqual(self.vm.port, port)
 
+    def test_request_after_switch_off_gets_reply(self):
+        self.b.poll(self.workers, enabled=True, held=True)
+        worker = self.add_worker()
+        self.b.poll(self.workers, enabled=False)
+        self.vm.reset_mock()
+        for _ in range(2):
+            rid = channel.submit(worker.directory, worker.epoch, "true")
+            self.b.poll(self.workers, enabled=False)
+            result = self.result(worker, rid)
+            self.assertEqual(result["status"], "timeout")
+            self.assertIn("bench is off", result["error"])
+        self.assertEqual(self.vm.mock_calls, [])
+        self.export.assert_not_called()
+
     def test_results_arrive_automatically(self):
         worker = self.add_worker()
         result = self.complete(worker)
