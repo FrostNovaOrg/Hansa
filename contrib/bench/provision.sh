@@ -12,7 +12,7 @@ if [ ! -s submission.pub ]; then
     exit 1
 fi
 export DEBIAN_FRONTEND=noninteractive
-packages='bubblewrap nftables tmux chromium fonts-dejavu-core git python3 openssh-server'
+packages='bubblewrap nftables tmux chromium fonts-dejavu-core git python3 openssh-server e2fsprogs'
 apt-get update
 apt-get install -y --no-install-recommends $packages
 python3 -I -c 'import sys; sys.exit(sys.version_info[:2] != (3, 13))'
@@ -31,7 +31,20 @@ exec /usr/bin/python3 -I -c 'import sys, runpy; sys.path.insert(0, "/usr/local/l
 GATEWAY
 chown root:root /usr/local/libexec/hansa-bench
 chmod 0755 /usr/local/libexec/hansa-bench
-# Disk-backed slots; the gateway makes private work/out/tmp/shm directories per call.
+# One bounded filesystem for every writable bind; discard returns deleted blocks.
+slots=/var/lib/hansa-bench
+disk=/var/lib/hansa-bench.img
+install -d -o root -g root -m 0700 "$slots"
+if [ ! -e "$disk" ]; then
+    install -o root -g root -m 0600 /dev/null "$disk"
+    truncate -s 4G "$disk"
+    mkfs.ext4 -F -m 0 "$disk"
+fi
+entry="$disk $slots ext4 loop,discard,nosuid,nodev 0 0"
+grep -qxF "$entry" /etc/fstab || echo "$entry" >> /etc/fstab
+mountpoint -q "$slots" || mount "$slots"
+# The dirty-slot barrier permits only its lock file, including after provisioning.
+if [ -d "$slots/lost+found" ]; then rmdir "$slots/lost+found"; fi
 install -d -o bench -g bench -m 0700 /var/lib/hansa-bench
 install -d -o root -g root -m 0700 /var/lib/hansa-bench-build
 dpkg-query -W -f='${binary:Package}\t${Version}\n' $packages > /var/lib/hansa-bench-build/packages.tsv

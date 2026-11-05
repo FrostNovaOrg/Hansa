@@ -63,17 +63,19 @@ class BenchSelftestTest(unittest.TestCase):
         from hansa.bench.guest import _header
         def connect(source, target, deadline):
             request = _header(source)
-            self.assertEqual(request['script'], 'python3 -I -c ' + selftest.shlex.quote(probes.fixtures()['caps-output'][1]))
+            self.assertEqual(request['script'], 'python3 -I -c ' + selftest.shlex.quote(probes.fixtures()[name][1]))
             self.assertEqual(source.read(request['length']), bytes(1024))
-            with archive.collect(fd, dict(id=request['id'], status='ok', exit=0), b'x' * (archive.OUTPUT_BYTES + 1)) as returned:
+            with archive.collect(fd, dict(id=request['id'], status='ok', exit=0), stdout) as returned:
                 data = returned.read()
             header = json.dumps(dict(version=1, id=request['id'], length=len(data))).encode()
             target.write(len(header).to_bytes(4, 'big') + header + data)
         with contextlib.ExitStack() as stack:
             import os
             fd = os.open(self.desk.root, os.O_RDONLY); stack.callback(os.close, fd)
-            checked = selftest.submission(Mock(connect=connect), 'caps-output', probes.fixtures()['caps-output'][1], 300)
-        self.assertEqual(set(checked.values()), {'passed'})
+            for name, stdout in (('caps-output', b'x' * (archive.OUTPUT_BYTES + 1)),
+                                 ('disk_limit', b'{"shared": true, "enospc": true}')):
+                checked = selftest.submission(Mock(connect=connect), name, probes.fixtures()[name][1], 300)
+                self.assertEqual(set(checked.values()), {'passed'})
         compile(selftest.SUPERVISE, '<admin>', 'exec'); compile(selftest.DHCP, '<dhcp>', 'exec')
         for mode in ('normal', 'timeout', 'disconnect', 'gateway-death'):
             child = Mock(stdin=io.BytesIO(), returncode=0); child.poll.return_value = 0

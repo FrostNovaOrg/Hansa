@@ -1,16 +1,40 @@
 """Shipped acceptance checks with fake admin observations; no sockets or VM."""
 import base64
 import contextlib
+import errno
 import io
 import json
 from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import Mock, patch
-from hansa.bench import archive, guest, probes as p
+from hansa.bench import archive, guest, probes as p, selftest
 
 
 class BenchProbesTest(unittest.TestCase):
+    def test_disk_limit_requires_real_enospc(self):
+        for error, shared, late in ((errno.ENOSPC, True, False), (errno.EACCES, True, False),
+                                    (None, True, False), (errno.ENOSPC, False, False), (errno.ENOSPC, True, True)):
+            writes = []
+            def write(data):
+                writes.append(len(data))
+                if len(writes) == 257 and error and not late: raise OSError(error, 'fixture')
+                return len(data)
+            def sync(fd):
+                if len(writes) == 257 and late: raise OSError(error, 'fixture')
+            opened = Mock(side_effect=lambda *a, **kw: contextlib.nullcontext(NS(write=write, fileno=lambda: 1)))
+            stat = lambda path: NS(st_dev=1 if path == '/etc' or not shared else 2)
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                exec(p.DISK_LIMIT, dict(os=NS(stat=stat, fsync=sync), open=opened, json=json))
+            self.assertEqual(writes, [16 * 1024**2] * 257)
+            self.assertEqual([c.args[0] for c in opened.call_args_list],
+                             ['/work/fill', '/out/fill', '/tmp/fill', '/dev/shm/fill'])
+            checked = p.checks('disk_limit', json.loads(output.getvalue()))
+            self.assertEqual(set(checked.values()) == {'passed'}, error == errno.ENOSPC and shared and not late)
+        self.assertEqual(p.fixtures()['disk_limit'][0], 'submission')
+        for boot in (1, 2):
+            self.assertEqual(set(selftest.mandatory()[str(boot) + '/disk_limit']), {'shared', 'enospc', 'execution'})
+
     def test_detached_survivor_fails(self):
         process = NS(name='42', stat=lambda: NS(st_uid=1234))
         paths = lambda name, *args: NS(iterdir=lambda: [process] if name == '/proc' else [])

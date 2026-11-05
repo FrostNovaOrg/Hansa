@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from . import archive, probes
 from .vm import INSTANCE
 
-NAMES = ('sandbox', 'sandbox-again', 'account', 'root-edge', 'bench-edge', 'inspect', 'dhcp',
+NAMES = ('disk_limit', 'sandbox', 'sandbox-again', 'account', 'root-edge', 'bench-edge', 'inspect', 'dhcp',
          'descendant-normal', 'descendant-timeout', 'descendant-disconnect', 'descendant-gateway-death',
          'caps-output', 'caps-file', 'caps-total', 'caps-count', 'caps-links', 'header-cap', 'unknown-field', 'tar-cap', 'inspect-final')
 
@@ -27,7 +27,7 @@ def mandatory():
         fixture = {'sandbox-again': 'sandbox', 'inspect-final': 'inspect'}.get(name, name)
         fields = (dict(renewed='') if name == 'dhcp' else dict(rejected='', survivors='', slots='')
                   if name in probes.malformed() else probes.checks(fixture, {}))
-        if fixture == 'sandbox' or name.startswith('caps-') or name in ('descendant-normal', 'descendant-timeout'):
+        if fixture in ('sandbox', 'disk_limit') or name.startswith('caps-') or name in ('descendant-normal', 'descendant-timeout'):
             fields['execution'] = ''
         required.update({str(boot) + '/' + name: tuple(fields) for boot in (1, 2)})
     return required
@@ -133,7 +133,7 @@ def submission(machine, name, source, deadline):
         stdout, stderr = data.pop('stdout'), data.pop('stderr')
         artifacts = {n[len('artifacts/'):]: v for n, v in data.items() if n.startswith('artifacts/')}
         evidence.update(result, output=len(stdout) + len(stderr))
-        if name == 'sandbox': evidence.update(json.loads(stdout))
+        if name in ('sandbox', 'disk_limit'): evidence.update(json.loads(stdout))
         if name == 'descendant-normal': evidence['started'] = artifacts.get('descendant.ready') == b'ready'
         checked = probes.checks(name, evidence, artifacts)
         checked['execution'] = 'passed' if result.get('id') == 'a' * 32 and result.get('status') == ('timeout' if name == 'descendant-timeout' else 'ok') and (name == 'descendant-timeout' or result.get('exit') == 0) else 'failed'
