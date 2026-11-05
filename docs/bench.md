@@ -27,6 +27,8 @@ Do not manufacture an acceptance record.
 
 Provisioning, reset's purge and each gateway slot deletion sync guest writes before
 the VM can be force-stopped. Reset still force-stops first to kill hand-in survivors.
+Build and rebuild allow one hour, including the first cloud-image download; their
+initial Lima start may use that hour. Other calls retain their 900-second cap.
 `/work`, `/out`, `/tmp` and `/dev/shm` share a 4 GiB disk limit, including the
 snapshot and filesystem overhead. Further writes fail with "No space left on device".
 A separate fixed-size ext4 image bounds peak disk growth while leaving the VM root
@@ -36,7 +38,8 @@ the underlying directory is root-only. Selftest fills all four paths past the sh
 limit on both boots and requires ENOSPC evidence returned through the gateway.
 Keep this bound while hand-ins are untrusted; rebuild existing benches to install it.
 Build, rebuild and selftest save and print failure messages with stored provider keys
-redacted; failed Lima commands include the last 4 KiB of stderr.
+redacted before the final 4 KiB stderr cut, including on timeout. Lima stderr is
+continuously drained into a 64 KiB memory tail so floods cannot fill temporary storage.
 
 Use the enabled bench for Linux server, browser or terminal checks. Write one
 shell script that starts everything, waits for readiness, exercises it, and
