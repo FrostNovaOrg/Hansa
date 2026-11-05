@@ -187,6 +187,12 @@ class BenchManagementTest(unittest.TestCase):
         self.assertEqual(self.desk.save_settings(settings), [])
         with patch("hansa.bench.manage.recipe_hash", return_value="changed"), self.assertRaisesRegex(SystemExit, "selftest"):
             self.command("on")
+        self.fail = unittest.TestCase.fail.__get__(self)  # Restore assertion reporting for the refusal checks.
+        read = Path.read_bytes
+        for name in ("broker.py", "channel.py", "snapshot.py", "vm.py", "probes.py", "selftest.py"):
+            with self.subTest(changed=name), patch.object(Path, "read_bytes",
+                    new=lambda p: read(p) + (b"\n# upgrade\n" if p.name == name else b"")):
+                with self.assertRaisesRegex(SystemExit, "selftest"): self.command("on")
         self.assertIn("bench: on", self.command("on"))
         for action in ("build", "rebuild"):
             with self.assertRaisesRegex(SystemExit, "off"):

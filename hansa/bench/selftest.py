@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from . import archive, probes
 from .vm import INSTANCE
 
-NAMES = ('disk_limit', 'sandbox', 'sandbox-again', 'account', 'root-edge', 'bench-edge', 'inspect', 'dhcp',
+NAMES = ('disk_limit', 'sandbox', 'sandbox-again', 'account', 'edge-control', 'root-edge', 'bench-edge', 'inspect', 'dhcp',
          'descendant-normal', 'descendant-timeout', 'descendant-disconnect', 'descendant-gateway-death',
          'caps-output', 'caps-file', 'caps-total', 'caps-count', 'caps-links', 'header-cap', 'unknown-field', 'tar-cap', 'inspect-final')
 
@@ -217,6 +217,8 @@ def run(machine):
                         evidence = json.loads(admin(machine, source, deadline, json.dumps(targets), account=scope, stdout=subprocess.PIPE).stdout)
                         return probes.checks(fixture, evidence)
                     record(str(boot) + '/' + name, probe)
+                    if name == 'edge-control' and results[str(boot) + '/' + name]['status'] != 'passed':
+                        raise RuntimeError('edge positive control failed; stopping VM')
                     if name == 'descendant-gateway-death':
                         machine.reset(machine.clock() + 120); machine.start(machine.clock() + 120)
                 machine.stop(machine.clock() + 30)

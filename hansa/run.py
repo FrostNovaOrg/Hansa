@@ -6424,11 +6424,16 @@ class Dispatcher:
         with serve_step():
             desk._bench_off = True
             try:
-                if s["bench"]["enabled"] and not getattr(desk, "_bench", None):
+                from .bench.manage import acceptance_problem
+                problem = acceptance_problem(s["bench"]) if s["bench"]["enabled"] else ""
+                enabled = s["bench"]["enabled"] and not problem
+                if enabled and not getattr(desk, "_bench", None):
                     desk._bench = WorkerBench(desk)
                 if getattr(desk, "_bench", None):
-                    desk._bench.poll(s["bench"]["enabled"], low or desk.paused())
-                desk._bench_off = not s["bench"]["enabled"]
+                    desk._bench.poll(enabled, low or desk.paused())
+                if problem:
+                    raise ValueError(problem)
+                desk._bench_off = not enabled
                 self.bench_error = None
             except Exception as e:  # the optional bench must not stop recording, reaping or starting work
                 reason = desk.redact(f"{type(e).__name__}: {e}")
