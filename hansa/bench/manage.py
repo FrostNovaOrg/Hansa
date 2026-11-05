@@ -1,7 +1,7 @@
 """Coordinator management. Keep exclusive builds and generation-bound acceptance
 while guest execution is supported; a new recipe always needs fresh acceptance.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
 import hashlib
 import json
@@ -23,6 +23,10 @@ def recipe_hash():
     return hashlib.sha256(b"".join(p.name.encode() + b"\0" + p.read_bytes() for p in FILES)).hexdigest()
 
 
+class Busy(ValueError):
+    """Temporary contention for VM ownership, rather than a VM failure."""
+
+
 @contextmanager
 def exclusive(desk):
     """Shared with the broker/selftest; never hold the desk lock during VM calls."""
@@ -31,7 +35,7 @@ def exclusive(desk):
         try:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise ValueError("bench busy") from None
+            raise Busy("bench busy") from None
         yield
 
 
@@ -67,7 +71,7 @@ def command(a):
     desk, action = Desk.find(a.desk), a.bench_command
     try:
         if action != "status":
-            with exclusive(desk):
+            with (nullcontext() if action == "off" else exclusive(desk)):
                 bench = desk.settings()["bench"]
                 private = desk.state_dir / "bench"
                 if action in ("build", "rebuild"):
@@ -124,9 +128,12 @@ def command(a):
                     bench["enabled"] = False
                     save(desk, bench, action)  # Close admission even if stopping fails.
                     if (private / "lima" / INSTANCE).exists():
-                        machine = VM(private)
                         try:
-                            machine.stop(machine.clock() + 30)
+                            with exclusive(desk):
+                                machine = VM(private)
+                                machine.stop(machine.clock() + 30)
+                        except Busy:
+                            pass  # The broker sees disabled settings and cancels its hand-in.
                         except Exception as error:
                             bench.update(build="failed", acceptance=None, failure=desk.redact(f"{type(error).__name__}: {error}"))
                             save(desk, bench, action)

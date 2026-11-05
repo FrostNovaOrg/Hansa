@@ -2718,7 +2718,9 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
 def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
     """The srt settings of a task's setup and check, once they have ended, the lane's env file, and their temporary folders
     still there (one stopped midway leaves its own), and the worker's own temporary folder (worker_tmp)."""
-    bench_revoke(desk, tid, wait=True)
+    if not bench_revoke(desk, tid):
+        desk._bench_removing.add(tid)
+        return  # Serve retries cleanup after teardown, without waiting under the desk lock.
     for name in ("setup", "check"):
         (desk.state_dir / "runs" / tid / f"{name}-sandbox.json").unlink(missing_ok=True)
     (desk.state_dir / "runs" / tid / "lane-env.sh").unlink(missing_ok=True)  # the ended worker's (env_file)
@@ -2728,6 +2730,8 @@ def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
     gone = {t: not os.path.lexists(t) for t in [m.get("worker_tmp")] if t}
     desk.change(tid, lambda x: {"sandbox_tmp": [], "worker_tmp": "", "worker_tmps": [
         {**r, "removed": gone[r["path"]]} if r.get("path") in gone else r for r in x.get("worker_tmps") or []]})
+    if getattr(desk, "_bench_removing", None):
+        desk._bench_removing.discard(tid)
 
 
 def make_worker_tmp(desk: Desk, tid: str) -> str:
@@ -3837,6 +3841,8 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: st
 def start(desk: Desk, tid: str, lane_name: str, pname: str):
     """Claim a queued task and start its worker. None when the task was no longer queued, or was
     cancelled while hansa prepared it."""
+    if tid in getattr(desk, "_bench_removing", ()):
+        return None  # Finish the earlier run's folder cleanup before reusing the task.
     with desk.lock():  # lane roles may have changed since dispatch chose it
         queued = desk.meta(tid)
         if queued.get("after") and (not after.lane_matches(desk.settings(), queued, lane_name)
@@ -5767,6 +5773,7 @@ class WorkerBench:
         self.desk, self.broker = desk, Broker(desk, VM(desk.state_dir / "bench"))
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.workers, self.revoking, self.pending = {}, {}, None
+        desk._bench_removing = set()
 
     def register(self, tid, lane, tmp, wt):
         from .bench.channel import Channel
@@ -5782,6 +5789,8 @@ class WorkerBench:
         return {"HANSA_BENCH_DIR": str(worker.directories[0][0]), "HANSA_BENCH_EPOCH": worker.epoch}
 
     def poll(self, enabled, held):
+        for tid in list(self.desk._bench_removing):
+            remove_sandbox_tmp(self.desk, tid)
         if self.pending and not self.pending.done():
             return
         previous, self.pending = self.pending, None
@@ -5808,6 +5817,8 @@ class WorkerBench:
         try:
             for tid in list(self.workers) + list(self.revoking):
                 self.revoke(tid, wait=True)
+            for tid in list(self.desk._bench_removing):
+                remove_sandbox_tmp(self.desk, tid)
             self.pool.submit(self.broker.poll, {}, enabled=False).result()
         finally:
             self.pool.shutdown(wait=True)

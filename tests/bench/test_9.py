@@ -135,6 +135,40 @@ class BenchIntegrationTest(unittest.TestCase):
             commit.assert_called_once()
         self.assertFalse(self.bench.workers)
 
+    def test_cancel_before_start_defers_cleanup_without_bench_wait(self):
+        self.enable()
+        tid = self.desk.new_task("cancel while preparing", lane="a")
+        entered, released = threading.Event(), threading.Event()
+        self.addCleanup(released.set)
+        def revoke(worker):
+            entered.set()
+            self.assertTrue(released.wait(15))
+        def cancel(*args):
+            self.desk.update(tid, cancel=True)
+            return []
+        real_revoke = run.bench_revoke
+        def nonblocking(desk, task, wait=False):
+            self.assertFalse(wait, "serve must not wait for bench teardown")
+            return real_revoke(desk, task, wait=wait)
+        with patch.object(self.bench.broker, "revoke", side_effect=revoke), \
+                patch.object(run, "bench_revoke", side_effect=nonblocking), \
+                patch.object(run, "with_setup", side_effect=cancel):
+            self.dispatch.tick()
+            self.assertTrue(entered.wait(10))
+            folder = Path(self.desk.meta(tid)["worker_tmp"])
+            self.assertTrue(folder.is_dir())
+            with self.desk.lock():
+                self.dispatch.tick()  # pending cleanup must also avoid waiting under the desk lock.
+            self.desk.update(tid, state="queued", cancel=False)
+            self.assertIsNone(run.start(self.desk, tid, "a", "claude"))
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")
+            self.desk.update(tid, state="cancelled", cancel=True)
+            released.set()
+            self.bench.revoking[tid].result(timeout=10)
+            self.dispatch.tick()
+        self.assertFalse(folder.exists())
+        self.assertEqual(self.desk.meta(tid)["state"], "cancelled")
+
     def test_bench_help(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             cli.main(["help", "test-bench"])
