@@ -271,6 +271,93 @@ class BenchBrokerTest(unittest.TestCase):
         self.b.poll(self.workers, enabled=True)
         self.assertIn("stop failed", self.result(worker, rid)["error"])
 
+    def test_stale_epoch_worker_is_not_read(self):
+        stale = self.add_worker(epoch="0" * 32)
+        rid = channel.submit(stale.directory, stale.epoch, "true")
+        self.b.poll(self.workers, enabled=True)
+        self.assertIsNone(self.b.active)
+        self.assertEqual((self.b.waiting, stale.claimed), ([], set()))
+        self.assertFalse((stale.directories[0][0] / (rid + ".reply")).exists())
+        self.export.assert_not_called()
+        (stale.directories[0][0] / (rid + ".request")).unlink()
+        stale.epoch = self.b.epoch  # the same worker, once its run holds this broker's epoch
+        fresh = channel.submit(stale.directory, stale.epoch, "true")
+        self.b.poll(self.workers, enabled=True)
+        self.b.active.thread.join(10)
+        self.assertFalse(self.b.active.thread.is_alive())
+        self.assertIn("report", self.result(stale, fresh))
+
+    def test_queue_deadline_is_checked_again_when_execution_starts(self):
+        worker = self.add_worker()
+        rid = channel.submit(worker.directory, worker.epoch, "true")
+        def stop(deadline):
+            self.vm.port = None
+            self.now = 100  # the poll's own stop outlasts the request's 60 s queue wait
+        self.vm.stop.side_effect = stop  # ready stays False: this poll stops before it starts the job
+        self.b.poll(self.workers, enabled=True)
+        job = self.b.active
+        self.assertIsNotNone(job)
+        job.thread.join(10)
+        self.assertFalse(job.thread.is_alive())
+        result = self.result(worker, rid)
+        self.assertEqual(result["status"], "timeout")
+        self.assertIn("queue deadline", result["error"])
+        self.export.assert_not_called()
+        self.vm.start.assert_not_called()
+
+    def test_return_header_length_must_match_the_bytes_that_follow(self):
+        worker = self.add_worker()
+        request_id = []
+        def connect(source, target, deadline):
+            request = _header(source)
+            request_id.append(request["id"])
+            self.assertEqual(source.read(request["length"]), b"source")
+            with archive.collect(self.fd, dict(id=request["id"], status="failed", exit=7), b"") as tar:
+                data = tar.read()
+            header = json.dumps(dict(version=1, id=request["id"], length=len(data) + 1)).encode()
+            target.write(len(header).to_bytes(4, "big") + header + data)
+        self.vm.connect = Mock(side_effect=connect)
+        def deliver(returned, length, worker, used):
+            return {"used": 0, "result": dict(id=request_id[0], status="failed", exit=7, truncated=False,
+                                              rejected=False), "stdout": b"", "stderr": b""}
+        delivered = Mock(side_effect=deliver)
+        with patch.object(archive, "deliver", delivered):
+            result = self.complete(worker)
+        self.assertEqual(result["status"], "infrastructure")
+        self.assertIn("return identity or length", result["error"])
+        delivered.assert_not_called()
+
+    def test_guest_timeout_uses_the_deadline_that_remains(self):
+        seen = []
+        def connect(source, target, deadline):
+            request = _header(source)
+            seen.append((request["timeout"], deadline))
+            self.assertEqual(source.read(request["length"]), b"source")
+            with archive.collect(self.fd, dict(id=request["id"], status="failed", exit=7), b"") as tar:
+                data = tar.read()
+            header = json.dumps(dict(version=1, id=request["id"], length=len(data))).encode()
+            target.write(len(header).to_bytes(4, "big") + header + data)
+        self.vm.connect = Mock(side_effect=connect)
+        worker = self.add_worker(deadline=200)  # shorter than the request's own 300 s timeout
+        self.assertEqual(self.complete(worker)["status"], "failed")
+        self.assertEqual(seen, [(170, 200)])
+
+    def test_cancel_while_the_reset_fails_keeps_the_bench_closed(self):
+        worker = self.add_worker()
+        rid = channel.submit(worker.directory, worker.epoch, "true")
+        def reset(deadline):
+            self.b.active.cancel.set()
+            raise RuntimeError("reset failed")
+        self.vm.reset.side_effect = reset
+        self.b.poll(self.workers, enabled=True)
+        job = self.b.active
+        job.thread.join(10)
+        self.assertFalse(job.thread.is_alive())
+        result = self.result(worker, rid)
+        self.assertEqual(result["status"], "infrastructure")  # not cancelled: the guest slots are uncertain
+        self.assertIn("reset failed", result["error"])
+        self.assertTrue(self.b.closed)
+
     def test_worker_allowance_rejects_without_closing(self):
         worker = self.add_worker()
         self.b.used[worker.run] = archive.RUN_BYTES
