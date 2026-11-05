@@ -54,7 +54,7 @@ class BenchVMTest(unittest.TestCase):
             outside = self.root / "sentinel"
             outside.write_text("keep")
             (guest / "link").symlink_to(outside)
-            with patch("shutil.chown") as owner, patch("os.sync"):
+            with patch("shutil.chown") as owner, patch("os.sync"), patch("os.path.ismount", return_value=True):
                 exec(command[-1].replace(repr("/var/lib/hansa-bench"), repr(str(guest))))
             owner.assert_called_once_with(str(guest), "bench", "bench")
             self.assertEqual(list(guest.iterdir()), [])
@@ -80,18 +80,24 @@ class BenchVMTest(unittest.TestCase):
                                    str(self.root / "pid") if self.timeout else ""], **options)
         return subprocess.CompletedProcess(command, 0, output)
 
-    def test_purge_missing_directory_and_sync(self):
+    def test_purge_preserves_mount_and_sync(self):
         guest = self.root / "purge-slots"
-        for existing in (False, True):
-            if existing:
-                (guest / "dirty").write_text("discard")
-            with patch("shutil.chown") as owner, patch("os.sync") as sync:
+        code = self.module.PURGE.replace(repr("/var/lib/hansa-bench"), repr(str(guest)))
+        with patch("os.path.ismount", return_value=False), patch("shutil.chown"), patch("os.sync"), \
+                self.assertRaisesRegex(RuntimeError, "not mounted"):
+            exec(code)
+        self.assertFalse(guest.exists())
+        guest.mkdir()
+        for _ in range(2):
+            (guest / "dirty").write_text("discard")
+            with patch("shutil.chown") as owner, patch("os.sync") as sync, \
+                    patch("os.path.ismount", return_value=True), patch("os.rmdir", side_effect=AssertionError("mount removed")):
                 def synced():
                     owner.assert_called_once_with(str(guest), "bench", "bench")
                     self.assertEqual(list(guest.iterdir()), [])
                     self.assertEqual(guest.stat().st_mode & 0o777, 0o700)
                 sync.side_effect = synced
-                exec(self.module.PURGE.replace(repr("/var/lib/hansa-bench"), repr(str(guest))))
+                exec(code)
                 sync.assert_called_once_with()
 
     def test_limactl_error_tail(self):
@@ -127,15 +133,10 @@ class BenchVMTest(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, "not ready"):
                 self.vm._boot(100)
 
-    def test_platform_purge_stop_and_ssh_options(self):
+    def test_platform_stop_and_ssh_options(self):
         with patch.object(self.module.sys, "platform", "linux"), self.assertRaisesRegex(RuntimeError, "macOS"):
             self.module.VM(self.root)
-        mask = os.umask(0o022)  # A restrictive inherited umask must not hide a missing purge mode.
-        try:
-            self.vm.reset(100)
-        finally:
-            os.umask(mask)
-        self.assertEqual((self.root / "slots").stat().st_mode & 0o777, 0o700)
+        self.vm.reset(100)
         self.assertEqual([c for c in self.calls if c[:2] == ["limactl", "stop"]],
                          [["limactl", "stop", "--force", self.module.INSTANCE]] * 2)
         self.vm.start(100)

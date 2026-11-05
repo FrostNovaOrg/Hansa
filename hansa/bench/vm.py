@@ -18,9 +18,14 @@ import threading
 import time
 
 INSTANCE = "hansa-bench"
-PURGE = ("import os, shutil; p='/var/lib/hansa-bench'; "
-         "shutil.rmtree(p) if os.path.exists(p) else None; "
-         "os.mkdir(p, 0o700); shutil.chown(p, 'bench', 'bench'); os.sync()")
+PURGE = """import os, shutil
+p='/var/lib/hansa-bench'
+if not os.path.ismount(p): raise RuntimeError('bench storage is not mounted')
+for entry in os.scandir(p):
+    if entry.is_dir(follow_symlinks=False): shutil.rmtree(entry.path)
+    else: os.unlink(entry.path)
+os.chmod(p, 0o700); shutil.chown(p, 'bench', 'bench'); os.sync()
+"""
 
 
 class LimaCalledProcessError(subprocess.CalledProcessError):

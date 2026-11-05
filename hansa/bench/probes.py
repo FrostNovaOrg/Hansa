@@ -104,6 +104,27 @@ slots = sorted(p.name for p in Path('/var/lib/hansa-bench').iterdir() if p.name 
 ready = any(Path('/var/lib/hansa-bench', s, 'out/descendant.ready').is_file() for s in slots)
 print(json.dumps(dict(survivors=survivors, slots=slots, ready=ready)))
 '''
+DISK_LIMIT = '''import errno
+from contextlib import ExitStack
+paths = ('/work', '/out', '/tmp', '/dev/shm')
+devices = {os.stat(p).st_dev for p in paths}
+e = dict(shared=len(devices) == 1 and os.stat('/etc').st_dev not in devices, enospc=False)
+with ExitStack() as stack:
+    files = [stack.enter_context(open(p + '/fill', 'wb', buffering=0)) for p in paths]
+    block = b'x' * (16 * 1024**2)
+    written = 0
+    try:
+        for n in range(257):  # Attempt 4 GiB plus one block, spread across all four binds.
+            f = files[n % 4]
+            remaining = memoryview(block)
+            while remaining:
+                size = f.write(remaining); written += size; remaining = remaining[size:]
+            os.fsync(f.fileno())
+    except OSError as error:
+        e['enospc'] = error.errno == errno.ENOSPC and written <= 4 * 1024**3
+# Leave it full: collecting and returning the result must still work.
+print(json.dumps(e))
+'''
 CAPS = {
     'output': "os.write(1, b'x' * (1024 * 1024 + 1))",
     'file': "with open('/out/large', 'wb') as f: f.truncate(16 * 1024 * 1024 + 1)",
@@ -115,7 +136,7 @@ CAPS = {
 
 def fixtures():
     """Runner wraps source in python3 -I; admin scopes use limactl shell, never SSH."""
-    table = dict(sandbox=('submission', SANDBOX), account=('root', ACCOUNT),
+    table = dict(sandbox=('submission', SANDBOX), account=('root', ACCOUNT), disk_limit=('submission', DISK_LIMIT),
                  inspect=('root', INSPECT), **{n + '-edge': (n, EDGE) for n in ('root', 'bench')})
     table.update({'descendant-' + mode: ('submission', DESCENDANT + ('' if mode == 'normal' else 'signal.pause()\n'))
                   for mode in ('normal', 'timeout', 'disconnect', 'gateway-death')})
@@ -149,6 +170,7 @@ def firewall(text, uid):
 
 
 EXPECTED = {
+    'disk_limit': dict(shared=True, enospc=True),
     'sandbox': dict(fresh=True, http=200, browser=0, pty=True, tmux=True, interfaces=['lo'],
                     readonly=True, credentials=True, nproc=[256, 256], dns=False, external=False),
     'account': dict.fromkeys(('permittty allowtcpforwarding allowstreamlocalforwarding allowagentforwarding '
