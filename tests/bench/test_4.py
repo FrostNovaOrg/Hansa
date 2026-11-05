@@ -80,6 +80,25 @@ class BenchGuestTest(unittest.TestCase):
         self.info, self.code = False, "pass"
         self.assertEqual(self.box()[0]["status"], "infrastructure")
 
+    def test_complete_sandbox_arguments(self):
+        self.request["cwd"] = "nested/project"
+        self.assertEqual(self.box()[0]["status"], "ok")
+        self.assertEqual(self.command, [
+            "/usr/bin/bwrap", "--info-fd", str(self.options["pass_fds"][0]),
+            "--unshare-all", "--die-with-parent", "--new-session", "--clearenv", "--cap-drop", "ALL",
+            "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/sbin", "/sbin",
+            "--symlink", "usr/lib", "/lib", "--ro-bind", "/etc", "/etc", "--proc", "/proc", "--dev", "/dev",
+            "--bind", str(self.root / "work"), "/work", "--bind", str(self.root / "out"), "/out",
+            "--bind", str(self.root / "tmp"), "/tmp", "--bind", str(self.root / "shm"), "/dev/shm",
+            "--ro-bind", str(self.root / "run.sh"), "/run.sh", "--setenv", "HOME", "/tmp",
+            "--setenv", "PATH", "/usr/bin:/bin", "--chdir", "/work/nested/project", "/bin/sh", "/run.sh"])
+
+    def test_header_cap_with_complete_bytes(self):
+        data = json.dumps(self.request).encode()
+        data += b" " * (64 * 1024 + 1 - len(data))
+        with self.assertRaisesRegex(ValueError, "header limit"):
+            g._header(io.BytesIO(len(data).to_bytes(4, "big") + data))
+
     def test_kill_and_cleanup_before_unlock(self):
         def locked():
             with (self.root / "lock").open("rb") as lock, self.assertRaises(BlockingIOError):

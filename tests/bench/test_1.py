@@ -1,12 +1,14 @@
 """Queue tests use local files only; no VM, network or worker lifecycle."""
 import contextlib
+import errno
 import io
 import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from hansa import cli
 from hansa.bench import channel as c
@@ -26,6 +28,145 @@ class BenchChannelTest(unittest.TestCase):
         queue = c.Channel(self.tmp, "recorded-run", self.wt, epoch)
         self.addCleanup(queue.close)
         return queue
+
+    def assert_closed(self, *descriptors):
+        for fd in descriptors:
+            with self.assertRaises(OSError) as ended:
+                os.fstat(fd)
+            self.assertEqual(ended.exception.errno, errno.EBADF)
+
+    def test_owner_check_closes_rejected_file(self):
+        path = self.tmp / "foreign"
+        path.write_text("{}")
+        opened, real_open = [], os.open
+        def opening(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+        with patch.object(c.os, "open", opening), patch.object(c.os, "getuid", return_value=path.stat().st_uid + 1), \
+                self.assertRaisesRegex(ValueError, "owned"):
+            c._read(self.queue.directory, path.name)
+        self.assert_closed(*opened)
+
+    def test_filename_guard_precedes_open(self):
+        for name in ("", ".", "..", "/absolute", "nested/file", "back\\slash"):
+            with self.subTest(name=name), patch.object(c.os, "open", side_effect=AssertionError("opened unsafe name")), \
+                    self.assertRaisesRegex(ValueError, "filename"):
+                c.safe_open(self.queue.directory, name)
+
+    def test_request_version_and_tokens(self):
+        request = dict(version=1, id="a" * 32, epoch=self.queue.epoch, script="true", cwd=".", timeout=30, wait=10)
+        for key, values in (("version", (0, 2, True, 1.0, "1")),
+                            ("id", (None, 1, "A" * 32, "a" * 31, "a" * 33, "g" * 32, "a" * 32 + "\n")),
+                            ("epoch", (None, 1, "A" * 32, "a" * 31, "a" * 33, "g" * 32))):
+            for value in values:
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, "version|identity"):
+                    c._validate(dict(request, **{key: value}))
+        for value in (None, 1, "A" * 32, "../escape", "a" * 31):
+            with self.subTest(id=value), patch.object(c, "_read", side_effect=AssertionError("read invalid id")), \
+                    self.assertRaisesRegex(ValueError, "request id"):
+                c.claim(self.queue, value)
+
+    def test_second_reply_refused_after_worker_unlinks_first(self):
+        rid = c.submit(self.queue.directory, self.queue.epoch, "true")
+        c.claim(self.queue, rid)
+        c.reply(self.queue, rid, {"status": "ok"})
+        (self.tmp / (rid + ".reply")).unlink()
+        with self.assertRaisesRegex(ValueError, "awaiting"):
+            c.reply(self.queue, rid, {"status": "failed"})
+        self.assertFalse((self.tmp / (rid + ".reply")).exists())
+
+    def test_size_checked_before_read(self):
+        stream = io.BytesIO(b"{}")
+        with patch.object(c, "safe_open", return_value=123), patch.object(c.os, "fdopen", return_value=stream), \
+                patch.object(stream, "fileno", return_value=123), \
+                patch.object(c.os, "fstat", return_value=SimpleNamespace(st_size=c.LIMIT + 1)), \
+                patch.object(stream, "read", side_effect=AssertionError("read oversized file")), \
+                self.assertRaisesRegex(ValueError, "size limit"):
+            c._read(self.queue.directory, "large.request")
+        self.assertTrue(stream.closed)
+
+    def test_script_read_is_bounded(self):
+        script = self.root / "large.sh"
+        script.write_bytes(b"x" * (c.LIMIT + 2))
+        streams, fdopen = [], os.fdopen
+        def opening(*args, **kwargs):
+            stream = fdopen(*args, **kwargs)
+            stream.read = Mock(wraps=stream.read)
+            streams.append(stream)
+            return stream
+        with patch.dict(os.environ, HANSA_BENCH_DIR=str(self.tmp), HANSA_BENCH_EPOCH=self.queue.epoch), \
+                patch.object(c.os, "fdopen", opening), self.assertRaisesRegex(SystemExit, "refused"):
+            c.command(SimpleNamespace(script=script, cwd=".", timeout=30, wait=10))
+        streams[0].read.assert_called_once_with(c.LIMIT + 1)
+        self.assertTrue(streams[0].closed)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_command_closes_descriptors_on_success_and_errors(self):
+        script, real_open, fdopen = self.root / "run.sh", os.open, os.fdopen
+        for mode in ("ok", "parent", "script", "read", "decode", "submit", "write", "flush", "publish"):
+            opened, streams = [], []
+            def opening(*args, **kwargs):
+                fd = real_open(*args, **kwargs)
+                opened.append(fd)
+                return fd
+            def streaming(*args, **kwargs):
+                stream = fdopen(*args, **kwargs)
+                streams.append(stream)  # Keep it alive: finalizers must not hide a missing close.
+                if mode in ("read", "write", "flush"):
+                    setattr(stream, mode, Mock(side_effect=OSError("refused")))
+                return stream
+            script.write_bytes(b"\xff" if mode == "decode" else b"true")
+            path = {"parent": self.root / "missing/run.sh", "script": script.with_name("missing.sh")}.get(mode, script)
+            with self.subTest(mode=mode), contextlib.ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, HANSA_BENCH_DIR=str(self.tmp), HANSA_BENCH_EPOCH=self.queue.epoch))
+                stack.enter_context(patch.object(c.os, "open", opening))
+                stack.enter_context(patch.object(c.os, "fdopen", streaming))
+                output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                if mode == "submit":
+                    stack.enter_context(patch.object(c, "submit", side_effect=ValueError("refused")))
+                if mode == "publish":
+                    stack.enter_context(patch.object(c.os, "link", side_effect=OSError("refused")))
+                args = SimpleNamespace(script=path, cwd=".", timeout=30, wait=10)
+                if mode == "ok":
+                    c.command(args)
+                    rid = output.getvalue().strip()
+                    c.claim(self.queue, rid)
+                    c.reply(self.queue, rid, {})
+                else:
+                    with self.assertRaisesRegex(SystemExit, "refused"):
+                        c.command(args)
+                self.assertTrue(all(stream.closed for stream in streams))
+                self.assert_closed(*opened)
+
+    def test_read_error_closes_descriptor(self):
+        path = self.tmp / "bad.request"
+        for data in (b"{}", b"not json", b" " * (c.LIMIT + 1), b"read error"):
+            path.write_bytes(data)
+            fd = c.safe_open(self.queue.directory, path.name)
+            stream = os.fdopen(fd, "rb")
+            if data == b"read error":
+                stream.read = Mock(side_effect=OSError("refused"))
+            with self.subTest(size=len(data)), patch.object(c, "safe_open", return_value=fd), \
+                    patch.object(c.os, "fdopen", return_value=stream):
+                if data == b"{}":
+                    self.assertEqual(c._read(self.queue.directory, path.name), {})
+                else:
+                    with self.assertRaises((ValueError, OSError)):
+                        c._read(self.queue.directory, path.name)
+                self.assertTrue(stream.closed)
+                self.assert_closed(fd)
+
+    def test_directory_descriptors_close_on_partial_init_and_teardown(self):
+        fd = os.open(self.tmp, os.O_RDONLY | os.O_DIRECTORY)
+        with patch.object(c.os, "open", side_effect=[fd, OSError("second directory refused")]), self.assertRaises(OSError):
+            self.register()
+        self.assert_closed(fd)
+        queue = self.register()
+        descriptors = [entry[1] for entry in queue.directories]
+        queue.close()
+        self.assert_closed(*descriptors)
+        queue.close()
 
     def test_other_commands_need_no_channel(self):
         real_import = __import__

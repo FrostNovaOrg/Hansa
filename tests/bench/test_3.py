@@ -104,6 +104,25 @@ class BenchArchiveTest(unittest.TestCase):
         self.assertEqual((rejected["used"], rejected["artifacts"]), (a.RUN_BYTES, {}))
         self.assertEqual(set(self.worker.iterdir()), before)
 
+    def test_non_utf8_artifact_keeps_result_output_and_other_files(self):
+        (self.out / "good").write_bytes(b"evidence")
+        (self.out / "bad").write_bytes(b"rejected")
+        # Fake the byte name returned by a Linux filesystem: macOS refuses to create it.
+        bad = os.fsdecode(b"bad-\xff")
+        safe_open = a.safe_open
+        def opening(directory, name, *args):
+            return safe_open(directory, "bad" if name == bad else name, *args)
+        def entries(directory):
+            yield directory, bad, bad, False
+            yield directory, "good", "good", False
+        with patch.object(a, "_walk", entries), patch.object(a, "safe_open", opening):
+            result = self.returned(stdout=b"output", stderr=b"diagnostic")
+        self.assertEqual(result["result"], dict(status="failed", exit=7, rejected=True, truncated=False))
+        self.assertEqual((result["stdout"], result["stderr"]), (b"output", b"diagnostic"))
+        self.assertEqual({n: (self.worker / p).read_bytes() for n, p in result["artifacts"].items()}, {"good": b"evidence"})
+        with self.assertRaisesRegex(ValueError, "unsafe archive path"):
+            a._name("artifacts/" + bad)
+
     def test_delivery_never_follows_links(self):
         (self.out / "file").write_bytes(b"data")
         outside = self.root / "outside"

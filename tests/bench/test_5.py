@@ -123,7 +123,9 @@ class BenchRecipeTest(unittest.TestCase):
         launcher = Path(options["ForceCommand"])
         # Exercise the installed gateway and shared module, including Python's isolated imports.
         launcher.write_text(launcher.read_text().replace("/usr/bin/python3", shlex.quote(sys.executable)))
-        refused = subprocess.run([str(launcher)], env=dict(SSH_ORIGINAL_COMMAND="echo forbidden"),
+        # A concurrent fork can inherit the writer until exec, causing ETXTBSY on Linux.
+        # Reading the rewritten launcher through sh avoids executing a busy inode.
+        refused = subprocess.run(["/bin/sh", str(launcher)], env=dict(SSH_ORIGINAL_COMMAND="echo forbidden"),
                                  capture_output=True, text=True, timeout=30)
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("gateway infrastructure failure", refused.stderr)
