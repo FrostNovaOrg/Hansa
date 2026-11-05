@@ -35,6 +35,7 @@ DOCS = Path(__file__).resolve().parent.parent / "docs"  # where hansa help TOPIC
 # hansa help TOPIC: the topic's file under docs/, its heading (None: the whole file), and what it holds. No name
 # equals a command, a lane subcommand or an explain target, a plural of one or a prefix of one (a test holds it)
 TOPICS = {
+    "test-bench": ("bench.md", None, "the optional Linux VM bench: worker commands, limits and management"),
     "principles": ("principles.md", None, "how a desk is run: its rules, what enforces them and what they guard against"),
     "workers-sandbox": ("sandbox.md", "What workers and verifiers may touch",
                         "what workers and verifiers may read, write and reach"),
@@ -98,7 +99,7 @@ TOPICS = {
 COMMAND_GROUPS = (("tasks", ("goal", "decide", "decisions", "add", "show", "diff", "git", "merge", "retry", "verify", "cancel", "close")),
                   ("watching", ("status", "desks", "wait", "notify", "ask", "explain", "notes", "gaps", "cost")),
                   ("lanes and releases", ("lane", "release", "changelog", "hide", "concurrency", "disk-floor", "memory-floor", "pause", "resume")),
-                  ("the desk", ("doctor", "example", "init", "menu", "up", "serve", "web", "coordinator", "ping",
+                  ("the desk", ("doctor", "example", "init", "menu", "up", "serve", "web", "coordinator", "ping", "bench",
                                 "help")))
 HELPERS = Path(__file__).with_name("agents")  # the coordinator's helpers: scout, reviewer, operator
 NO_SIGNATURE = Path(__file__).resolve().with_name("no-signature")  # hansa git's gpg: checks no signature
@@ -1607,6 +1608,8 @@ def cmd_serve(a):
     except KeyboardInterrupt:
         desk.event("server_stopped")
     finally:
+        if getattr(desk, "_bench", None):
+            desk._bench.close()
         alert.sweep_runs(desk)
 
 
@@ -3063,17 +3066,17 @@ def main(argv=None):
         p.add_argument("--verify-note", metavar="TEXT", help="what the verification should look at in particular; "
                        "implies --verify. These options apply only to this task, never to a follow-up")
 
-    p = sub.add_parser("bench")  # public topic/help arrives with worker integration
+    p = add("bench", None, "optional Linux VM test bench; see hansa help test-bench")
     bench_commands = p.add_subparsers(dest="bench_command", required=True)
     for name in ("on", "off", "build", "rebuild", "status"):
         p = bench_commands.add_parser(name)
         if name == "status":
             p.add_argument("--json", action="store_true")
     p = bench_commands.add_parser("run")
-    p.add_argument("--script", required=True)
-    p.add_argument("--cwd", default=".")
-    p.add_argument("--timeout", type=int, default=300)
-    p.add_argument("--wait", type=int, default=60)
+    p.add_argument("--script", required=True, help="local shell script; submit and print its request ID")
+    p.add_argument("--cwd", default=".", help="relative directory in the snapshot (default: .)")
+    p.add_argument("--timeout", type=int, default=300, help="total seconds, including queue/start/transfer (default: 300; max: 900)")
+    p.add_argument("--wait", type=int, default=60, help="queue seconds (default: 60; max: 300)")
 
     p = add("example", cmd_example, "set up a small sample project, desk and first task to try hansa on; it starts "
             "nothing and calls no model")

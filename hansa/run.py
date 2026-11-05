@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -2717,6 +2718,7 @@ def in_srt(desk: Desk, tid: str, name: str, lane: dict, pname: str, p: dict, wt:
 def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
     """The srt settings of a task's setup and check, once they have ended, the lane's env file, and their temporary folders
     still there (one stopped midway leaves its own), and the worker's own temporary folder (worker_tmp)."""
+    bench_revoke(desk, tid, wait=True)
     for name in ("setup", "check"):
         (desk.state_dir / "runs" / tid / f"{name}-sandbox.json").unlink(missing_ok=True)
     (desk.state_dir / "runs" / tid / "lane-env.sh").unlink(missing_ok=True)  # the ended worker's (env_file)
@@ -3864,6 +3866,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp),
                                                                  long=long)
     system += around_note(desk, lane, meta, lane_name, tmp)
+    if getattr(desk, "_bench", None) and s["bench"]["enabled"]:
+        system += BENCH_NOTE
     if meta.get("attachments"):
         folder = str(Path(tmp) / "attach")
         names = ", ".join(json.dumps(a["name"], ensure_ascii=False) for a in meta["attachments"])
@@ -3913,7 +3917,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     unsplit = argv_rules_problem(argv)
     if unsplit:  # a deny rule Claude Code would split leaves its folder open: no worker starts with one
         raise RuntimeError(f"hansa started no {'verifier' if verifying else 'worker'}: {unsplit}")
-    env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
+    env = worker_env(desk, tid, lane_name, lane, pname, p, tmp, wt)
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
     # No key in it: keys are in env only; a resume reuses this command.
     write_text(raw / RESUME_ARGV, json.dumps(argv))
@@ -3941,9 +3945,11 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     return proc
 
 
-def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: dict, tmp: str) -> dict:
+def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: dict, tmp: str, wt=None) -> dict:
     """The environment of a task or verification worker's Claude Code, for its start and its one resume."""
-    return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), "HANSA_TASK": tid,
+    bench = getattr(desk, "_bench", None)
+    extra = bench.register(tid, lane, tmp, wt) if bench and desk.settings()["bench"]["enabled"] else {}
+    return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), **extra, "HANSA_TASK": tid,
             "HANSA_RUN": tmp_mark(desk, tid, tmp), "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
             "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
             "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
@@ -3991,7 +3997,7 @@ def resume(desk: Desk, tid: str):
         return None
     sweep(desk, tid)  # what the first run left out of its process group: it is run again, not met halfway
     note = RESUME_NOTE.format(left="; ".join(left), bash_ms=60000 * bash_minutes(lane), bash_min=bash_minutes(lane))
-    env = worker_env(desk, tid, lane_name, lane, pname, p, tmp)
+    env = worker_env(desk, tid, lane_name, lane, pname, p, tmp, wt)
     with desk.lock():  # a cancel or another end lands before this (no resume, its logs as they are) or after it
         now_meta = desk.meta(tid)
         if now_meta.get("cancel") or now_meta.get("resumed") or now_meta.get("timed_out") \
@@ -5738,6 +5744,80 @@ def run_running(run: dict, proc=None) -> bool:
 END_RECOVERY_BYTES = 1 << 20
 
 
+BENCH_NOTE = """
+Use the enabled bench for Linux server, browser or terminal checks. Write one script
+that starts everything, waits for readiness, exercises it and saves evidence in /out.
+Run `hansa bench run --script FILE --timeout 300`. Wait without editing source;
+copying happens when admitted. Each hand-in starts fresh with only its own loopback.
+Downloads and host dependencies are unavailable. Read the result, exit status and
+truncation notices. Artifacts appear automatically under broker-chosen names in your
+temporary folder. Edit source on the Mac and report Linux-specific limits. Guest
+state is deleted after every run. The command prints a request ID; wait for its
+ID.reply in HANSA_BENCH_DIR, then read the report it names there.
+"""
+
+
+class WorkerBench:
+    """Serialize broker control outside serve; retain teardown barriers until joined.
+    Keep these barriers while the bench can deliver files into a worker's folder.
+    """
+    def __init__(self, desk):
+        from .bench.broker import Broker
+        from .bench.vm import VM
+        self.desk, self.broker = desk, Broker(desk, VM(desk.state_dir / "bench"))
+        self.pool = ThreadPoolExecutor(max_workers=1)
+        self.workers, self.revoking, self.pending = {}, {}, None
+
+    def register(self, tid, lane, tmp, wt):
+        from .bench.channel import Channel
+        if tid not in self.workers:
+            self.revoke(tid, wait=True)
+            folder = Path(commands_tmp(tmp))
+            folder.mkdir(mode=0o700, exist_ok=True)
+            m = self.desk.meta(tid)
+            worker = Channel(folder, tmp_mark(self.desk, tid, tmp), wt, self.broker.epoch)
+            deadline = time.monotonic() + max(0, m["started"] + 60 * lane.get("timeout_min", 240) - time.time())
+            self.workers[tid] = (worker, deadline)
+        worker = self.workers[tid][0]
+        return {"HANSA_BENCH_DIR": str(worker.directories[0][0]), "HANSA_BENCH_EPOCH": worker.epoch}
+
+    def poll(self, enabled, held):
+        if self.pending and not self.pending.done():
+            return
+        previous, self.pending = self.pending, None
+        if previous:
+            previous.result()  # serve records failures; never hide a broken supervisor.
+        self.pending = self.pool.submit(self.broker.poll, dict(self.workers.values()), enabled=enabled, held=held)
+
+    def revoke(self, tid, wait=False):
+        if tid in self.workers:
+            worker, _ = self.workers.pop(tid)  # no later poll may admit this worker.
+            def end():
+                self.broker.revoke(worker)
+                worker.close()
+            self.revoking[tid] = self.pool.submit(end)
+        future = self.revoking.get(tid)
+        if future and not wait and not future.done():
+            return False
+        if future:
+            future.result()
+            del self.revoking[tid]
+        return True
+
+    def close(self):
+        try:
+            for tid in list(self.workers) + list(self.revoking):
+                self.revoke(tid, wait=True)
+            self.pool.submit(self.broker.poll, {}, enabled=False).result()
+        finally:
+            self.pool.shutdown(wait=True)
+
+
+def bench_revoke(desk, tid, wait=False):
+    bench = getattr(desk, "_bench", None)
+    return bench.revoke(tid, wait=wait) if bench else True
+
+
 class Dispatcher:
     """Starts queued tasks while lanes are free, and finishes the ones that ended."""
 
@@ -6330,12 +6410,19 @@ class Dispatcher:
             memory_low = self.memory(s)
         low = bool(low or memory_low or desks_list_problem())  # an unreadable list of desks holds new runs too
         with serve_step():
+            if s["bench"]["enabled"] and not getattr(desk, "_bench", None):
+                desk._bench = WorkerBench(desk)
+            if getattr(desk, "_bench", None):
+                desk._bench.poll(s["bench"]["enabled"], low or desk.paused())
+        with serve_step():
             self.record(self.tasks())
         for tid, proc in list(self.procs.items()):
             with serve_step():
                 if has_ended(proc):
                     if desk.meta(tid).get("pid") != proc.pid:  # its end was saved before a later write failed
                         del self.procs[tid]
+                        continue
+                    if not bench_revoke(desk, tid):
                         continue
                     stop(proc.pid, "", proc)  # what it left running in its group (a server, say) ends with it
                     self.ended(tid, proc.returncode)
@@ -6351,7 +6438,8 @@ class Dispatcher:
                 elif m.get("phase") == "checking" and not m.get("pid"):
                     self.check(m, s)
                 elif not alive(m.get("pid"), m.get("pid_start", "")):  # started by an earlier server
-                    self.ended(m["id"], None)
+                    if bench_revoke(desk, m["id"]):
+                        self.ended(m["id"], None)
         with serve_step():
             self.lanes_waiting()
         for m in self.tasks():
@@ -6370,6 +6458,7 @@ class Dispatcher:
                          else m.get("started", time.time()))
                 over = time.time() - began > limit
                 if m.get("cancel") or over:
+                    bench_revoke(desk, m["id"])  # cancel the guest while the existing worker stop proceeds.
                     proc = self.procs.get(m["id"])
                     if not run_running(m, proc):
                         continue  # an end whose record failed, or one just before this observation

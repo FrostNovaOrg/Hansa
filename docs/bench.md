@@ -1,0 +1,53 @@
+# The Linux test bench
+
+The bench is off by default. It requires macOS and Lima 2.2.1. Its fixed Debian 13
+VM uses VZ, 2 CPUs, 2 GiB RAM and a 20 GiB disk, without host shares or application
+forwarding. Claude Code and Codex workers receive access and instructions when
+started while it is enabled; an existing worker does not acquire access later.
+Codex's macOS-only sandbox guard still applies.
+
+Coordinator commands accept global `--desk`: `hansa bench build`, `rebuild`,
+`on`, `off`, and `status [--json]`. Build and rebuild require exclusive access
+while disabled; rebuilding changes the generation and invalidates acceptance.
+`on` requires passing acceptance for the current recipe and generation. The
+shipped probes and `selftest` command are forthcoming; this integration alone
+does not enable a new build. Do not manufacture an acceptance record.
+
+Use the enabled bench for Linux server, browser or terminal checks. Write one
+shell script that starts everything, waits for readiness, exercises it, and
+saves evidence in `/out`. Submit it with:
+
+```sh
+hansa bench run --script run.sh --cwd . --timeout 300 --wait 60
+```
+
+The command prints a request ID. Wait for `ID.reply` in `HANSA_BENCH_DIR`, without
+editing source: copying happens when admitted. Read the reply's `result`; when
+it includes `report`, read that JSON file in the same folder. It holds the guest
+result, stdout, stderr and an artifact-name mapping. Artifacts appear there
+automatically under broker-chosen names. There is no fetch command. These files
+last only for the worker run; include findings in the report before ending.
+
+Each hand-in starts fresh with only its own loopback. Downloads, host dependencies,
+host environment and caches are unavailable. Git data, credentials and agent
+configuration are excluded. Links, special files and files changing while copied
+are refused. Edit source on the Mac and report Linux-specific limits. Guest state
+is deleted after every run. Chromium keeps its own sandbox; do not disable it.
+
+One request runs, four wait, and each worker may have one outstanding request;
+excess requests receive `busy`. Total time defaults to 300 seconds (maximum 900),
+queue wait to 60 (maximum 300), bounded by the worker's remaining allowance.
+Queue, startup and transfer consume the deadline. Existing resource holds prevent
+admission. The VM stops after 60 idle seconds to return its memory.
+
+Snapshots are limited to 256 MiB and 50,000 entries. Combined output is capped at
+1 MiB; artifacts at 16 MiB each, 64 MiB per run and per worker, and 1,000 entries.
+Read script exit status, timeout, truncation, rejected-artifact and infrastructure
+notices separately. Partial transfers cannot report success.
+
+Serve supervises the broker without waiting on VM operations in its polling loop.
+Worker completion, cancellation and temporary-folder cleanup revoke access before
+commit. A serve restart discards bench work; new submissions use a fresh epoch and
+must cross the stop-and-purge barrier. Uncertain cleanup closes the bench. A killed
+serve has no watchdog; restart it to recover. Security review and real-VM acceptance
+remain required before deployment; unit tests use fakes and cannot establish isolation.
