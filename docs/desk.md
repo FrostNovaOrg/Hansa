@@ -551,6 +551,16 @@ validation cover the whole file even when its preview is cut.
 
 ## Settings on the web page
 
+The read-only **Changes** section starts folded. Opening it shows the newest 50
+settings changes: time, actor or command, setting path, and old → new values.
+**Show 50 more** extends the list; filter by a lane or provider name, including a
+removed one. Withheld values stay withheld, and long values retain their recorded
+truncation markers. History loads only when opened and refreshes at most once a
+minute while visible and open, separately from Status. `GET /api/history` uses
+the page token, gzip and ETags, with `last` (default 50) and optional `kind`
+(`lane` or `provider`) plus `name`; invalid filters or limits return HTTP 400.
+It returns `recording_since` and `entries`, shared with `hansa explain history`.
+
 Settings are grouped into Providers, Coordinator, Lanes, What workers
 may not read, Releases, Alerts and Prices. Select a group in the directory; full
 explanations and other read-only lane fields expand in place. Network, write and
