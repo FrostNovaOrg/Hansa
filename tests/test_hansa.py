@@ -45111,6 +45111,7 @@ from tests.bench.test_4 import BenchGuestTest  # noqa: E402 - disposable gateway
 from tests.bench.test_5 import BenchRecipeTest  # noqa: E402 - provisioning with fake system tools, no VM
 from tests.bench.test_6 import BenchVMTest  # noqa: E402 - private SSH and VM lifecycle, no VM
 from tests.bench.test_7 import BenchManagementTest  # noqa: E402 - coordinator commands with fake Lima
+from tests.bench.test_8 import BenchBrokerTest  # noqa: E402 - broker with fake VM and local pipes
 
 ONLY_UNSANDBOXED = "HANSA_TESTS_ONLY_UNSANDBOXED=1 runs only the tests a sandboxed run cannot"
 

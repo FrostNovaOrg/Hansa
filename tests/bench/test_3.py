@@ -99,8 +99,9 @@ class BenchArchiveTest(unittest.TestCase):
         filled = self.returned(used=a.RUN_BYTES - 4)
         self.assertEqual(filled["used"], a.RUN_BYTES)
         before = set(self.worker.iterdir())
-        with self.assertRaisesRegex(ValueError, "allowance"):
-            self.returned(used=filled["used"])
+        rejected = self.returned(used=filled["used"])
+        self.assertTrue(rejected["result"]["rejected"])
+        self.assertEqual((rejected["used"], rejected["artifacts"]), (a.RUN_BYTES, {}))
         self.assertEqual(set(self.worker.iterdir()), before)
 
     def test_delivery_never_follows_links(self):
