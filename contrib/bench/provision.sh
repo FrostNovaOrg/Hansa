@@ -7,6 +7,10 @@ umask 022
 [ "$#" -eq 0 ]
 [ "$(id -u)" -eq 0 ]
 cd -- "$(dirname -- "$0")"
+if [ ! -s submission.pub ]; then
+    echo 'bench: submission.pub is missing or empty; provide a public key before provisioning' >&2
+    exit 1
+fi
 export DEBIAN_FRONTEND=noninteractive
 packages='bubblewrap nftables tmux chromium fonts-dejavu-core git python3 openssh-server'
 apt-get update

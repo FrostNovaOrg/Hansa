@@ -1,11 +1,13 @@
 # Lima 2.2.1. JSON-compatible YAML keeps the offline contract tests stdlib-only.
-# Image selection is blocked pending an authenticated Debian 13 image checksum.
-# Keep images empty (Lima cannot boot) until a versioned URL and digest are verified.
 {
   "minimumLimaVersion": "2.2.1",
   "vmType": "vz", "os": "Linux", "arch": "aarch64",
   "cpus": 2, "memory": "2GiB", "disk": "20GiB",
-  "images": [],
+  "images": [{
+    "location": "https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-genericcloud-arm64-20261001-2618.qcow2",
+    "arch": "aarch64",
+    "digest": "sha512:d8470b8c6c38fead046c794b5800a5a7b96672d5bcf543cc230ceb0c4b8ace05ed341a0c8928045422243fde26b2f1f2f58e99244c65709ffda2e3d4b674dd5a"
+  }],
   "plain": true,
   "mounts": [],
   "containerd": {"system": false, "user": false},
