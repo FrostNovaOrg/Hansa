@@ -23,6 +23,7 @@ class Broker:
         self.epoch = uuid.uuid4().hex
         self.waiting, self.active, self.used = [], None, {}
         self.ready, self.closed, self.idle, self.vm.clean = False, False, clock(), False
+        self.failure = ""
 
     def reply(self, job, result):
         try:
@@ -51,15 +52,15 @@ class Broker:
         if job and not job.thread.is_alive():
             job.thread.join()
             self.active = None
-        if not enabled or self.closed:
+        if not enabled:
             self.revoke()
             if self.vm.port is not None:
                 with exclusive(self.desk):
                     self.vm.stop(self.clock() + 30)
             return
         for job in list(self.waiting):
-            if self.clock() >= min(job.deadline, job.until):
-                self.reply(job, {"status": "timeout"})
+            if self.closed or self.clock() >= min(job.deadline, job.until):
+                self.reply(job, {"status": "infrastructure", "error": self.failure} if self.closed else {"status": "timeout"})
                 self.waiting.remove(job)
         for worker, deadline in workers.items():
             if worker.epoch != self.epoch:
@@ -77,19 +78,27 @@ class Broker:
                                           deadline=min(deadline, self.clock() + request["timeout"]),
                                           until=self.clock() + request["wait"])
                     outstanding = self.waiting + ([self.active] if self.active else [])
-                    if (any(j.channel.run == worker.run for j in outstanding)
+                    if self.closed:
+                        self.reply(job, {"status": "infrastructure", "error": self.failure})
+                    elif (any(j.channel.run == worker.run for j in outstanding)
                             or len(self.waiting) >= 4 + int(self.active is None and not held)):
                         self.reply(job, {"status": "busy"})
                     elif self.clock() >= job.deadline:
                         self.reply(job, {"status": "timeout"})
                     else:
                         self.waiting.append(job)
-        if not self.ready or (self.active is None and self.vm.port is not None and self.clock() - self.idle >= 60):
-            self.closed = True
-            with exclusive(self.desk):
-                self.vm.stop(self.clock() + 30)
-            self.ready, self.closed = True, False
-        if self.waiting and self.active is None and not held:
+        if not self.closed and (not self.ready or (
+                self.active is None and self.vm.port is not None and self.clock() - self.idle >= 60)):
+            try:
+                with exclusive(self.desk):
+                    self.vm.stop(self.clock() + 30)
+                self.ready = True
+            except Exception as error:
+                self.closed, self.failure = True, "bench closed: " + str(error)
+                for job in self.waiting:
+                    self.reply(job, {"status": "infrastructure", "error": self.failure})
+                self.waiting.clear()
+        if self.waiting and self.active is None and not held and not self.closed:
             self.active = self.waiting.pop(0)
             self.active.thread = threading.Thread(target=self.execute, args=(self.active,))
             self.active.thread.start()
@@ -181,17 +190,23 @@ class Broker:
                 check()
                 job.result = {"status": summary["status"], "report": name}
         except Exception as error:
-            self.closed = True  # No further admission after uncertain execution/cleanup.
+            self.closed, self.failure = True, "bench closed: " + str(error)
+            self.vm.clean = False  # Uncertain guest slots require stop-and-purge before reuse.
             job.result = {"status": "cancelled" if job.cancel.is_set() else
                           "timeout" if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)) else "infrastructure"}
             try:
                 if owned:
                     self.vm.stop(self.clock() + 30)
-            except Exception:
+            except Exception as error:
+                self.closed, self.failure = True, "bench closed: " + str(error)
                 job.result = {"status": "infrastructure"}
             finally:
                 if connection is not None:
                     connection.join()
+            if job.result["status"] == "cancelled":
+                self.ready, self.closed = False, False
+            else:
+                job.result["error"] = self.failure
         finally:
             ownership.close()
         self.idle = self.clock()

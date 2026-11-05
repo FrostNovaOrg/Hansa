@@ -181,7 +181,7 @@ def deliver(source, length, channel, used):
     """
     if type(used) is not int or not 0 <= used <= RUN_BYTES:
         raise ValueError("worker artifact allowance")
-    created, files = [], {}
+    created, files, total = [], {}, 0
     channel.check()
     try:
         with _load(source, length, RUN_BYTES + OUTPUT_BYTES + HEADER_BYTES, ARTIFACT_ENTRIES + 3,
@@ -199,9 +199,12 @@ def deliver(source, length, channel, used):
             for member in members.values():
                 if member.name in ("result.json", "stdout", "stderr"):
                     continue
-                if (not member.name.startswith("artifacts/") or member.size > FILE_BYTES
-                        or used + member.size > RUN_BYTES):
-                    raise ValueError("artifact path or worker allowance")
+                total += member.size
+                if not member.name.startswith("artifacts/") or member.size > FILE_BYTES or total > RUN_BYTES:
+                    raise ValueError("artifact path or run allowance")
+                if used + member.size > RUN_BYTES:
+                    result["rejected"] = True
+                    continue
                 target = "bench-" + uuid.uuid4().hex
                 with os.fdopen(safe_open(channel.directory, target, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "wb") as out:
                     created.append(target)

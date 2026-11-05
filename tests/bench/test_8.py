@@ -115,3 +115,68 @@ class BenchBrokerTest(unittest.TestCase):
         self.assertEqual(self.complete(worker)["status"], "infrastructure")
         self.assertTrue(self.b.closed)
         self.assertIsNone(self.vm.port)
+
+    def cancel_active(self):
+        worker = self.add_worker()
+        rid = channel.submit(worker.directory, worker.epoch, "true")
+        self.release.clear()
+        def connect(source, target, deadline):
+            self.entered.set()
+            while source.read(archive.HEADER_BYTES):
+                pass  # Cancellation must close stdin and join this connection.
+            self.release.set()
+        with patch.object(self.vm, "connect", side_effect=connect):
+            self.b.poll(self.workers, enabled=True)
+            job = self.b.active
+            self.addCleanup(job.thread.join, 10)
+            self.addCleanup(job.cancel.set)
+            self.assertTrue(self.entered.wait(10))
+            self.b.revoke(worker)
+        self.assertFalse(job.thread.is_alive())
+        self.assertTrue(self.release.is_set())
+        self.assertEqual(self.result(worker, rid)["status"], "cancelled")
+        return worker
+
+    def test_cancelled_run_recovers(self):
+        worker = self.cancel_active()
+        folder = worker.directories[0][0]
+        before = {p.name: p.read_bytes() for p in folder.iterdir()}
+        self.vm.reset_mock()
+        self.vm.connect = Mock(side_effect=self.connect)
+        self.assertEqual(self.complete(self.add_worker())["status"], "failed")
+        self.assertEqual([c[0] for c in self.vm.mock_calls], ["stop", "reset", "start", "connect"])
+        self.assertEqual({p.name: p.read_bytes() for p in folder.iterdir()}, before)
+        self.assertFalse(self.b.closed)
+
+    def test_cancel_reset_failure_replies_closed(self):
+        self.cancel_active()
+        self.vm.reset.side_effect = RuntimeError("reset failed")
+        self.assertEqual(self.complete(self.add_worker())["status"], "infrastructure")
+        for _ in range(2):
+            worker = self.add_worker()
+            rid = channel.submit(worker.directory, worker.epoch, "true")
+            self.b.poll(self.workers, enabled=True)
+            result = self.result(worker, rid)
+            self.assertEqual(result["status"], "infrastructure")
+            self.assertIn("closed", result["error"])
+            self.assertIn("reset failed", result["error"])
+        self.b = broker.Broker(self.b.desk, self.vm, clock=lambda: self.now)
+        self.vm.stop.side_effect = RuntimeError("stop failed")
+        worker = self.add_worker()
+        rid = channel.submit(worker.directory, worker.epoch, "true")
+        self.b.poll(self.workers, enabled=True)
+        self.assertIn("stop failed", self.result(worker, rid)["error"])
+
+    def test_worker_allowance_rejects_without_closing(self):
+        worker = self.add_worker()
+        self.b.used[worker.run] = archive.RUN_BYTES
+        result = self.complete(worker)
+        self.assertEqual(result["status"], "failed")
+        folder = worker.directories[0][0]
+        report = json.loads((folder / result["report"]).read_text())
+        self.assertTrue(report["result"]["rejected"])
+        self.assertEqual(report["artifacts"], {})
+        self.assertEqual(list(folder.glob("bench-*")), [folder / result["report"]])
+        self.assertEqual(self.b.used[worker.run], archive.RUN_BYTES)
+        self.assertFalse(self.b.closed)
+        self.assertEqual(self.complete(self.add_worker())["status"], "failed")
