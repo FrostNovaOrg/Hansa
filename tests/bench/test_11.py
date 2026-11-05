@@ -242,6 +242,7 @@ class BenchSelftestTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'selftest'): self.command('on')
 
     def test_controlled_listeners_are_bound_tested_and_forwarded(self):
+        self.fail = unittest.TestCase.fail.__get__(self)  # Preserve assertion diagnostics from the shared fixture.
         def runner(machine):
             from unittest.mock import MagicMock
             host, lan, connection = MagicMock(), MagicMock(), MagicMock()
@@ -259,6 +260,12 @@ class BenchSelftestTest(unittest.TestCase):
             self.assertEqual(len(edges), 4)
             for command in edges:
                 self.assertEqual(json.loads(command[-1]), dict(host=['192.168.5.2', 12001], lan=['192.0.2.1', 12002]))
+            controls = probes.fixtures()['edge-control'][1]
+            sequence = [c.args[0] for c in machine._call.call_args_list if controls in c.args[0] or c.args[0] in edges]
+            self.assertEqual([c[c.index('-c') + 1] for c in sequence], [controls, edges[0][-2], edges[0][-2]] * 2)
+            for command in sequence[::3]:
+                self.assertEqual(command[command.index('-u') + 1], 'root')
+                self.assertEqual(command[-1], edges[0][-1])
             return report
         with patch.object(self, 'runner', side_effect=runner): self.assertEqual(self.acceptance()['status'], 'passed')
         with patch.object(selftest.socket, 'gethostname', side_effect=selftest.socket.gaierror('listener lookup failed')):
@@ -274,7 +281,7 @@ class BenchSelftestTest(unittest.TestCase):
             with self.subTest(target=target), patch.object(owner, target, side_effect=selftest.socket.gaierror('lookup failed ' + secret)), \
                     patch.object(selftest, 'run', side_effect=lambda _: self.acceptance()):
                 report = json.loads(self.command('selftest', '--json'))['acceptance']
-            error = report['error'] if target == 'gethostname' else report['results']['1/dhcp']['error']
+            error = report['error'] if target == 'gethostname' else report['results']['1/edge-control']['error']
             self.assertIn('gaierror', error); self.assertIn('lookup failed', error)
             self.assertIn('[key of fixture]', error); self.assertNotIn(secret, json.dumps(report))
             self.assertEqual(self.desk.settings()['bench']['acceptance'], report)
@@ -293,3 +300,22 @@ class BenchSelftestTest(unittest.TestCase):
                 self.assertEqual(report['status'], 'incomplete')
                 self.assertIn('listener', report['error'])
                 self.assertFalse(selftest.complete(report))
+
+    def test_failed_edge_control_aborts_and_stops(self):
+        for evidence in (dict(host=False, lan=True), dict(host=True, lan=False), {}, RuntimeError('cleanup failed')):
+            def runner(machine):
+                original = selftest.admin
+                def admin(machine, source, *args, **kwargs):
+                    if source == probes.fixtures()['edge-control'][1]:
+                        if isinstance(evidence, Exception): raise evidence
+                        return Mock(stdout=json.dumps(evidence).encode())
+                    return original(machine, source, *args, **kwargs)
+                with patch.object(selftest, 'admin', side_effect=admin): report = selftest.run(machine)
+                machine.stop.assert_called_once()
+                machine._info.assert_called_once()
+                return report
+            with self.subTest(evidence=evidence), patch.object(self, 'runner', side_effect=runner):
+                report = self.acceptance()
+                self.assertFalse(selftest.complete(report))
+                self.assertIn('control', report['error'])
+                self.assertEqual(report['results']['1/root-edge']['status'], 'incomplete')

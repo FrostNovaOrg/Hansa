@@ -20,7 +20,21 @@ FILES += [Path(__file__).with_name(n) for n in ("guest.py", "archive.py")]
 
 
 def recipe_hash():
-    return hashlib.sha256(b"".join(p.name.encode() + b"\0" + p.read_bytes() for p in FILES)).hexdigest()
+    files = FILES + [Path(__file__).with_name(n) for n in
+                    ("broker.py", "channel.py", "snapshot.py", "vm.py", "probes.py", "selftest.py")]
+    return hashlib.sha256(b"".join(p.name.encode() + b"\0" + p.read_bytes() for p in files)).hexdigest()
+
+
+def acceptance_problem(bench):
+    """CLI and serve share the gate; an upgrade cannot reuse stale isolation evidence."""
+    from .selftest import complete
+    accepted = bench["acceptance"] or {}
+    if (bench["build"] != "ready" or bench["generation"] < 1
+            or accepted.get("status") != "passed" or not complete(accepted)
+            or accepted.get("generation") != bench["generation"]
+            or bench["recipe"] != recipe_hash()):
+        return "bench needs a passing selftest for the current build"
+    return ""
 
 
 class Busy(ValueError):
@@ -115,13 +129,9 @@ def command(a):
                     bench["acceptance"].update(report)
                     bench["failure"] = "; ".join(r["error"] for r in (report, *report.get("results", {}).values()) if "error" in r)
                 elif action == "on":
-                    from .selftest import complete
-                    accepted = bench["acceptance"] or {}
-                    if (bench["build"] != "ready" or bench["generation"] < 1
-                            or accepted.get("status") != "passed" or not complete(accepted)
-                            or accepted.get("generation") != bench["generation"]
-                            or bench["recipe"] != recipe_hash()):
-                        raise ValueError("bench needs a passing selftest for the current build")
+                    problem = acceptance_problem(bench)
+                    if problem:
+                        raise ValueError(problem)
                     VM(private)  # Platform and private-state checks also apply to enablement.
                     bench["enabled"] = True
                 elif action == "off":

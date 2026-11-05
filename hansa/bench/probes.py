@@ -71,6 +71,22 @@ e['owned'] = all(p.lstat().st_uid == 0 and p.is_file() and not p.is_symlink() an
 e['sudo'] = subprocess.run(['runuser', '-u', 'bench', '--', 'sudo', '-n', 'true'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0
 print(json.dumps(e))
 '''
+EDGE_CONTROL = '''targets = json.loads(sys.argv[1])
+def controls():
+    rules = json.loads(run('nft', '-a', '-j', 'list', 'chain', 'inet', 'bench_edge', 'out'))['nftables']
+    return [r['rule']['handle'] for r in rules if r.get('rule', {}).get('comment') == 'bench-selftest']
+e = {}
+for name, (address, port) in targets.items():
+    try:
+        run('nft', 'insert', 'rule', 'inet', 'bench_edge', 'out', 'meta', 'skuid', '0',
+            'ip', 'daddr', address, 'tcp', 'dport', str(port), 'accept', 'comment', '"bench-selftest"')
+        e[name] = connected((address, port))
+    finally:
+        for handle in controls():
+            run('nft', 'delete', 'rule', 'inet', 'bench_edge', 'out', 'handle', str(handle))
+        if controls(): raise RuntimeError('edge control rule remains')
+print(json.dumps(e))
+'''
 EDGE = '''import urllib.request
 targets = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
 e = {name: connected(targets[name]) if name in targets else None for name in ('host', 'lan')}
@@ -137,6 +153,7 @@ CAPS = {
 def fixtures():
     """Runner wraps source in python3 -I; admin scopes use limactl shell, never SSH."""
     table = dict(sandbox=('submission', SANDBOX), account=('root', ACCOUNT), disk_limit=('submission', DISK_LIMIT),
+                 **{'edge-control': ('root', EDGE_CONTROL)},
                  inspect=('root', INSPECT), **{n + '-edge': (n, EDGE) for n in ('root', 'bench')})
     table.update({'descendant-' + mode: ('submission', DESCENDANT + ('' if mode == 'normal' else 'signal.pause()\n'))
                   for mode in ('normal', 'timeout', 'disconnect', 'gateway-death')})
@@ -170,6 +187,7 @@ def firewall(text, uid):
 
 
 EXPECTED = {
+    'edge-control': dict(host=True, lan=True),
     'disk_limit': dict(shared=True, enospc=True),
     'sandbox': dict(fresh=True, http=200, browser=0, pty=True, tmux=True, interfaces=['lo'],
                     readonly=True, credentials=True, nproc=[256, 256], dns=False, external=False),

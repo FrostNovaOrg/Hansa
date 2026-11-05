@@ -12,6 +12,40 @@ from hansa.bench import archive, guest, probes as p, selftest
 
 
 class BenchProbesTest(unittest.TestCase):
+    def test_edge_positive_control_is_narrow_and_cleans_up(self):
+        targets = dict(host=['192.168.5.2', 12001], lan=['192.0.2.1', 12002])
+        self.assertEqual(p.fixtures()['edge-control'][0], 'root')
+        for failure in ('', 'unreachable', 'connect', 'insert', 'delete', 'retained'):
+            rules, reached = [], []
+            def run(*args):
+                if args[1] == 'insert':
+                    self.assertIn(list(args[11:12]) + [int(args[14])], list(targets.values()))
+                    self.assertEqual(args[2:11], ('rule', 'inet', 'bench_edge', 'out', 'meta', 'skuid', '0', 'ip', 'daddr'))
+                    self.assertEqual(args[12:14] + args[15:], ('tcp', 'dport', 'accept', 'comment', '"bench-selftest"'))
+                    rules.append(dict(rule=dict(handle=42, comment='bench-selftest')))
+                    if failure == 'insert': raise RuntimeError('insert')
+                elif args[1] == 'delete':
+                    self.assertEqual(args[2:], ('rule', 'inet', 'bench_edge', 'out', 'handle', '42'))
+                    if failure == 'delete': raise RuntimeError('delete')
+                    if failure != 'retained': rules.clear()
+                else:
+                    self.assertEqual(args[1:], ('-a', '-j', 'list', 'chain', 'inet', 'bench_edge', 'out'))
+                    return json.dumps(dict(nftables=rules))
+            def connected(target):
+                self.assertTrue(rules); reached.append(list(target))
+                if failure == 'connect': raise RuntimeError('connect')
+                return failure != 'unreachable'
+            with self.subTest(failure=failure), contextlib.redirect_stdout(io.StringIO()) as output:
+                environment = dict(json=json, sys=NS(argv=['probe', json.dumps(targets)]), run=run, connected=connected)
+                if failure in ('connect', 'insert', 'delete', 'retained'):
+                    with self.assertRaises(RuntimeError): exec(p.EDGE_CONTROL, environment)
+                else:
+                    exec(p.EDGE_CONTROL, environment)
+                    self.assertEqual(reached, list(targets.values()))
+                    self.assertEqual(set(p.checks('edge-control', json.loads(output.getvalue())).values()),
+                                     {'failed'} if failure else {'passed'})
+                self.assertEqual(bool(rules), failure in ('delete', 'retained'))
+
     def test_disk_limit_requires_real_enospc(self):
         for error, shared, late in ((errno.ENOSPC, True, False), (errno.EACCES, True, False),
                                     (None, True, False), (errno.ENOSPC, False, False), (errno.ENOSPC, True, True)):

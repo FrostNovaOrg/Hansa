@@ -18,6 +18,40 @@ class BenchIntegrationTest(unittest.TestCase):
         self.addCleanup(self.c.doCleanups)
         self.c.setUp()
         self.desk, self.dispatch = self.c.desk, run.Dispatcher(self.c.desk)
+        from hansa.bench import manage, selftest
+        settings = self.desk.settings()
+        settings["bench"].update(build="ready", generation=1, recipe=manage.recipe_hash(), acceptance=dict(
+            generation=1, status="passed", results={n: dict(status="passed", checks=dict.fromkeys(f, "passed"))
+                                                  for n, f in selftest.mandatory().items()}))
+        write_json(self.desk.settings_path, settings)
+
+    def test_serve_rechecks_acceptance_and_reports_once(self):
+        import copy
+        good = self.desk.settings()["bench"]
+        good["enabled"] = True
+        bad = [dict(good, **change) for change in (dict(build="failed"), dict(generation=0),
+               dict(generation=2), dict(recipe="stale"), dict(acceptance=None))]
+        for change in (dict(status="failed"), dict(status="incomplete"), dict(results={}), dict(error="uncertain")):
+            bad.append(dict(good, acceptance=dict(good["acceptance"], **change)))
+        missing = copy.deepcopy(good); missing["acceptance"]["results"]["1/root-edge"]["checks"].pop("host")
+        bad.append(missing)
+        for block in bad:
+            for existing in (False, True):
+                with self.subTest(block=block, existing=existing), patch.object(run, "WorkerBench") as factory, \
+                        contextlib.redirect_stderr(io.StringIO()) as out:
+                    self.dispatch.bench_errors.clear()
+                    self.desk._bench = Mock() if existing else None
+                    settings = self.desk.settings(); settings["bench"] = block
+                    write_json(self.desk.settings_path, settings)
+                    self.dispatch.tick(); self.dispatch.tick()
+                    factory.assert_not_called()
+                    self.assertTrue(self.desk._bench_off)
+                    if existing: self.assertEqual([c.args[0] for c in self.desk._bench.poll.call_args_list], [False, False])
+                    self.assertEqual(out.getvalue().count("selftest"), 1)
+        settings["bench"] = good; write_json(self.desk.settings_path, settings)
+        self.dispatch.tick()
+        self.assertFalse(self.desk._bench_off)
+        self.assertTrue(self.desk._bench.poll.call_args.args[0])
 
     def enable(self):
         with patch("hansa.bench.vm.VM") as machine:

@@ -12,7 +12,10 @@ Coordinator commands accept global `--desk`: `hansa bench build`, `rebuild`,
 require exclusive access while disabled; rebuilding changes the generation and invalidates acceptance.
 `off` records disabled settings even during a hand-in; the broker then cancels and
 stops. Temporary management lock contention delays the broker until a later poll.
-`on` requires passing acceptance for the current recipe and generation. The
+`on` and serve require complete passing acceptance for the current recipe and generation.
+An upgrade that changes the bench's code needs a rebuild and a new selftest;
+the recipe covers guest files and the host broker, channel, snapshot, VM, probes and selftest.
+Serve treats stale or incomplete acceptance as off and reports the reason once. The
 shipped acceptance fixtures cover sandbox capabilities, account restrictions,
 the UID-first edge and detached descendants after completion, timeout, disconnect
 and gateway death. Missing evidence is incomplete; these isolation gates remain
@@ -20,6 +23,11 @@ mandatory while guest execution is supported. Selftest runs shipped code while d
 records every probe and timing across two boots, and requires confirmed VM stop.
 Saved errors include their class and message, with provider keys redacted. Each
 boot must connect and retain its host key; reusing an SSH port is allowed.
+Before each boot's Mac/LAN denial probes, root must reach both controlled listeners
+through temporary rules limited to root and each listener's address and TCP port.
+Each rule is removed in `finally` and its absence checked before denial probes run.
+Any control or cleanup failure aborts selftest and stops the VM; rules are never persisted.
+Keep these controls while denial probes must distinguish blocking from an unreachable path.
 Missing facilities leave acceptance incomplete; `on` checks every required result.
 Malformed probe evidence and unexpected sandbox artifacts fail acceptance.
 Memory return is checked by the exit of the VM's observed host processes after idle stop.
