@@ -16,7 +16,10 @@ the UID-first edge and detached descendants after completion, timeout, disconnec
 and gateway death. Missing evidence is incomplete; these isolation gates remain
 mandatory while guest execution is supported. Selftest runs shipped code while disabled,
 records every probe and timing across two boots, and requires confirmed VM stop.
+Saved errors include their class and message, with provider keys redacted. Each
+boot must connect and retain its host key; reusing an SSH port is allowed.
 Missing facilities leave acceptance incomplete; `on` checks every required result.
+Malformed probe evidence and unexpected sandbox artifacts fail acceptance.
 Memory return is checked by the exit of the VM's observed host processes after idle stop.
 Do not manufacture an acceptance record.
 
@@ -62,4 +65,5 @@ Worker completion, cancellation and temporary-folder cleanup revoke access befor
 commit. A serve restart discards bench work; new submissions use a fresh epoch and
 must cross the stop-and-purge barrier. Uncertain cleanup closes the bench. A killed
 serve has no watchdog; restart it to recover. Security review and real-VM acceptance
-remain required before deployment; unit tests use fakes and cannot establish isolation.
+remain required before `hansa bench on`; a disabled build may be prepared first.
+Unit tests use fakes and cannot establish isolation.
