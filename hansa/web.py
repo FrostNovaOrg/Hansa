@@ -92,7 +92,7 @@ def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
 
 
 # The coordinator sets these (hansa lane, hansa concurrency, hansa disk-floor, hansa memory-floor).
-NOT_FROM_PAGE = ("lanes", "concurrency", "disk_floor", "memory_floor")
+NOT_FROM_PAGE = ("lanes", "concurrency", "disk_floor", "memory_floor", "bench")
 
 
 def _save_settings(desk: Desk, body: dict) -> dict:

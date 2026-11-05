@@ -265,6 +265,8 @@ def default_settings() -> dict:
         # (hansa disk-floor), as concurrency is
         "disk_floor": 10,
         "memory_floor": 2,  # GB available to new work; coordinator's (hansa memory-floor); 0: off
+        "bench": {"enabled": False, "generation": 0, "build": "absent", "recipe": "",
+                  "acceptance": None, "failure": ""},
         "cool_minutes": 30,
         "coordinator": {"provider": "claude", "model": "opus", "effort": "max"},
         # When the coordinator's session compacts (COMPACT_DEFAULTS). The principal's, on the page
@@ -630,8 +632,18 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     known = {"version", "concurrency", "disk_floor", "memory_floor", "cool_minutes", "coordinator", "providers", "lanes", "prices",
              "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
              "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "release_direct", "alert", "coordinator_compact",
-             "coordinator_alert"}
+             "coordinator_alert", "bench"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
+    bench = s.get("bench", default_settings()["bench"])
+    if (not isinstance(bench, dict) or set(bench) != set(default_settings()["bench"])
+            or type(bench["enabled"]) is not bool or type(bench["generation"]) is not int
+            or bench["generation"] < 0 or bench["build"] not in ("absent", "building", "ready", "failed")
+            or not all(isinstance(bench[k], str) for k in ("recipe", "failure"))
+            or (bench["acceptance"] is not None and (not isinstance(bench["acceptance"], dict)
+                or type(bench["acceptance"].get("generation")) is not int
+                or bench["acceptance"]["generation"] < 1
+                or bench["acceptance"].get("status") not in ("passed", "failed", "incomplete")))):
+        p.append("bench must contain enabled, generation, build, recipe, acceptance and failure records")
     by = s.get(HIDDEN_BY, {})
     if not isinstance(by, dict) or not all(isinstance(v, dict) and isinstance(v.get("by"), str)
                                            and isinstance(v.get("at"), (int, float)) for v in by.values()):
@@ -2702,6 +2714,8 @@ class Desk:
             mailbox_key = ""
             if isinstance(new, dict):
                 new = current_settings(new)
+                if by == "page":
+                    new["bench"] = old["bench"]
                 mailbox_key = mailbox_settings(new)
                 if by == "page" and isinstance(new.get("release_forbidden_except"), list):
                     new["release_forbidden_except"] = [x for x in new["release_forbidden_except"]
