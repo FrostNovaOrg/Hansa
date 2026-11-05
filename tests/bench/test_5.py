@@ -32,6 +32,12 @@ elif name == "install":
             dest = pathlib.Path(paths[-1]); dest = dest / pathlib.Path(p).name if dest.is_dir() else dest
             shutil.copyfile(p, dest); os.chmod(dest, mode)
 elif name == "chmod": os.chmod(a[1], int(a[0], 8))
+elif name == "grep": sys.exit(a[-2] not in pathlib.Path(a[-1]).read_text().splitlines())
+elif name == "mountpoint": sys.exit(not pathlib.Path(os.environ["FAKE_LOG"] + ".mounted").exists())
+elif name == "mount":
+    pathlib.Path(a[-1], "lost+found").mkdir()
+    pathlib.Path(os.environ["FAKE_LOG"] + ".mounted").touch()
+elif name == "rmdir": pathlib.Path(a[-1]).rmdir()
 elif name == "dpkg-query":
     for p in a[2:]: print(p + "\\tfixture-version")
 elif name == "sha256sum":
@@ -62,7 +68,7 @@ class BenchRecipeTest(unittest.TestCase):
                                                      proto="any", ignore=True)])
 
     def provision(self, fail="", exists=False, minor=13, uid=0, args=(),
-                  key="ssh-ed25519 fixture-public-key\n"):
+                  key="ssh-ed25519 fixture-public-key\n", runs=1):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -70,6 +76,7 @@ class BenchRecipeTest(unittest.TestCase):
         shutil.copytree(RECIPE, bundle)
         binary.mkdir()
         (root / "etc/ssh").mkdir(parents=True)
+        (root / "etc/fstab").write_text("# guest filesystems\n")
         (root / "etc/ssh/sshd_config").write_text("# existing Lima admin configuration\n")
         for name in ("guest.py", "archive.py"):
             shutil.copyfile(REPO / "hansa/bench" / name, bundle / name)
@@ -83,15 +90,36 @@ class BenchRecipeTest(unittest.TestCase):
         fake.write_text("#!" + sys.executable + "\n" + FAKE)
         fake.chmod(0o755)
         for name in ("id dirname apt-get python3 useradd usermod passwd install cat chown chmod "
-                     "dpkg-query sha256sum sysctl nft systemctl sshd sync").split():
+                     "dpkg-query sha256sum sysctl nft systemctl sshd sync truncate mkfs.ext4 grep mountpoint mount rmdir").split():
             (binary / name).symlink_to(fake)
         (root / "log").touch()
         env = dict(PATH=str(binary), FAKE_LOG=str(root / "log"), FAKE_FAIL=fail,
                    BENCH_EXISTS="1" if exists else "", PY_MINOR=str(minor), FAKE_UID=str(uid))
-        result = subprocess.run(["/bin/sh", str(bundle / "provision.sh"), *args], env=env,
-                                capture_output=True, text=True, timeout=30)
+        for _ in range(runs):
+            result = subprocess.run(["/bin/sh", str(bundle / "provision.sh"), *args], env=env,
+                                    capture_output=True, text=True, timeout=30)
         calls = [json.loads(line) for line in (root / "log").read_text().splitlines()]
         return root, calls, result
+
+    def test_shared_disk_limit(self):
+        root, calls, result = self.provision(runs=2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        disk, slots = str(root / "var/lib/hansa-bench.img"), str(root / "var/lib/hansa-bench")
+        order = [["install", "-d", "-o", "root", "-g", "root", "-m", "0700", slots],
+                 ["truncate", "-s", "4G", disk], ["mkfs.ext4", "-F", "-m", "0", disk], ["mount", slots],
+                 ["rmdir", slots + "/lost+found"],
+                 ["install", "-d", "-o", "bench", "-g", "bench", "-m", "0700", slots]]
+        self.assertEqual(sorted(calls.index(c) for c in order), [calls.index(c) for c in order])
+        for c in order[1:5]: self.assertEqual(calls.count(c), 1)
+        self.assertEqual(Path(disk).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(Path(slots).iterdir()), [])
+        self.assertEqual((root / "etc/fstab").read_text().splitlines(),
+                         ["# guest filesystems", disk + " " + slots + " ext4 loop,discard,nosuid,nodev 0 0"])
+        for failure in ("truncate", "mkfs.ext4", "mount"):
+            _, stopped, result = self.provision(fail=failure)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(any(c[0] == "install" and "bench" in c for c in stopped))
+            self.assertNotIn(["systemctl", "reload", "ssh.service"], stopped)
 
     def test_provision_syncs_last(self):
         _, calls, result = self.provision()
@@ -117,7 +145,7 @@ class BenchRecipeTest(unittest.TestCase):
         self.assertIn(["passwd", "-l", "bench"], calls)
         self.assertEqual((root / "etc/ssh/sshd_config").read_text(), "# existing Lima admin configuration\n")
         self.assertIn(["apt-get", "install", "-y", "--no-install-recommends", "bubblewrap", "nftables", "tmux",
-                       "chromium", "fonts-dejavu-core", "git", "python3", "openssh-server"], calls)
+                       "chromium", "fonts-dejavu-core", "git", "python3", "openssh-server", "e2fsprogs"], calls)
         match = (root / "etc/ssh/sshd_config.d/50-bench.conf").read_text().splitlines()
         self.assertEqual((match[0], match[-1]), ("Match User bench", "Match all"))
         options = dict(line.strip().split(" ", 1) for line in match[1:-1])
@@ -140,9 +168,9 @@ class BenchRecipeTest(unittest.TestCase):
             self.assertTrue(any(c[0] == "install" and mode in c and str(root / path) in c for c in calls))
         for call in (c for c in calls if c[0] == "install"):
             self.assertEqual(int(call[call.index("-m") + 1], 8) & 0o022, 0, call)
-            owner = "bench" if str(root / "var/lib/hansa-bench") in call else "root"
-            self.assertEqual(call[call.index("-o") + 1], owner)
-            self.assertEqual(call[call.index("-g") + 1], owner)
+            if str(root / "var/lib/hansa-bench") not in call:
+                self.assertEqual(call[call.index("-o") + 1], "root")
+                self.assertEqual(call[call.index("-g") + 1], "root")
         self.assertIn(["chown", "root:root", str(launcher)], calls)
         self.assertIn(["chmod", "0755", str(launcher)], calls)
         self.assertIn("ssh_deletekeys: false", (root / "etc/cloud/cloud.cfg.d/99-bench-keep-host-keys.cfg").read_text())

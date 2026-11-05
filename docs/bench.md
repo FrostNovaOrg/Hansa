@@ -25,6 +25,14 @@ Do not manufacture an acceptance record.
 
 Provisioning, reset's purge and each gateway slot deletion sync guest writes before
 the VM can be force-stopped. Reset still force-stops first to kill hand-in survivors.
+`/work`, `/out`, `/tmp` and `/dev/shm` share a 4 GiB disk limit, including the
+snapshot and filesystem overhead. Further writes fail with "No space left on device".
+A separate fixed-size ext4 image bounds peak disk growth while leaving the VM root
+and gateway's result spool usable. Its `discard` mount releases backing-file blocks
+when slots are deleted. Purge preserves the mount and refuses an unmounted store;
+the underlying directory is root-only. Selftest fills all four paths past the shared
+limit on both boots and requires ENOSPC evidence returned through the gateway.
+Keep this bound while hand-ins are untrusted; rebuild existing benches to install it.
 Build, rebuild and selftest save and print failure messages with stored provider keys
 redacted; failed Lima commands include the last 4 KiB of stderr.
 
