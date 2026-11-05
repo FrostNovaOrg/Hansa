@@ -51,7 +51,7 @@ class BenchBrokerTest(unittest.TestCase):
 
     def connect(self, source, target, deadline):
         request = _header(source)
-        self.assertEqual(request["timeout"], int(deadline - self.now))
+        self.assertEqual(request["timeout"], int(deadline - self.now - broker.RETURN_ALLOWANCE))
         self.assertEqual(source.read(request["length"]), b"source")
         self.assertFalse(select.select([source], [], [], 0)[0])  # EOF would cancel the guest.
         self.entered.set()
@@ -113,7 +113,7 @@ class BenchBrokerTest(unittest.TestCase):
         self.assertEqual(self.b.used[worker.run], 8)
         self.bad = True
         self.assertEqual(self.complete(worker)["status"], "infrastructure")
-        self.assertTrue(self.b.closed)
+        self.assertFalse(self.b.closed)
         self.assertIsNone(self.vm.port)
 
     def cancel_active(self):
