@@ -106,11 +106,10 @@ def command(a):
                     bench["acceptance"] = dict(generation=bench["generation"], status="incomplete")
                     save(desk, bench, action)  # Invalidate any earlier pass before touching the VM.
                     report = run(VM(private))
-                    errors = [r for r in [report, *report["results"].values()] if "error" in r]
-                    for result in errors:
-                        result["error"] = desk.redact(result["error"])
+                    for result in (report, *report.get("results", {}).values()):
+                        if "error" in result: result["error"] = desk.redact(result["error"])
                     bench["acceptance"].update(report)
-                    bench["failure"] = "; ".join(r["error"] for r in errors)
+                    bench["failure"] = "; ".join(r["error"] for r in (report, *report.get("results", {}).values()) if "error" in r)
                 elif action == "on":
                     from .selftest import complete
                     accepted = bench["acceptance"] or {}
