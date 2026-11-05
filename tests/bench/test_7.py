@@ -21,12 +21,12 @@ class BenchManagementTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.desk = Desk(temporary.name)
-        self.calls, self.fail, self.status = [], "", "Stopped"
+        self.calls, self.fail_action, self.status = [], "", "Stopped"
 
     def run_command(self, command, **options):
         self.calls.append(command)
-        self.assertTrue(0 < options["timeout"] <= 900)
-        if self.fail and self.fail in command:
+        self.assertTrue(0 < options["timeout"] <= (3600 if "--name=" + vm.INSTANCE in command else 900))
+        if self.fail_action and self.fail_action in command:
             raise subprocess.CalledProcessError(1, command)
         private = Path(options["env"]["HOME"])
         output = b""
@@ -77,7 +77,7 @@ class BenchManagementTest(unittest.TestCase):
             self.assertTrue(any("bench" in p for p in validate({**settings, "bench": value})))
 
     def test_limactl_failure_messages_are_redacted(self):
-        self.fail = unittest.TestCase.fail.__get__(self)  # Restore assertions; this test injects its own failures.
+        self.fail_action = unittest.TestCase.fail.__get__(self)  # Restore assertions; this test injects its own failures.
         key = 'fixture-private-"provider\\key'
         self.desk.secrets_dir.mkdir()
         self.desk.key_file("fixture").write_text(key)
@@ -107,8 +107,50 @@ class BenchManagementTest(unittest.TestCase):
             self.assertNotIn(key, shown + json.dumps(self.desk.settings()) +
                              (self.desk.state_dir / "settings-history.jsonl").read_text())
 
+    def test_page_bench_guard_independent_of_desk_guard(self):
+        settings, save = self.desk.settings(), self.desk.save_settings
+        changed = {**settings["bench"], "generation": 7}
+        # Isolate the web guard: Desk also independently preserves bench for by="page".
+        with patch.object(self.desk, "save_settings", side_effect=lambda new, **kw: save(new)):
+            self.assertTrue(web._save_settings(self.desk, {"settings": {**settings, "bench": changed}})["ok"])
+        self.assertEqual(self.desk.settings()["bench"], settings["bench"])
+
+    def test_first_build_allows_twenty_minute_download(self):
+        now, call, run = [0], vm.VM._call, self.run_command
+        def timed(machine, *args, **kwargs):
+            machine.clock = lambda: now[0]
+            return call(machine, *args, **kwargs)
+        def download(command, **options):
+            if "--name=" + vm.INSTANCE in command:
+                if options["timeout"] < 1200:
+                    raise subprocess.TimeoutExpired(command, options["timeout"])
+                now[0] += 1200
+            return run(command, **options)
+        with patch.object(vm.VM, "_call", timed), patch.object(self, "run_command", side_effect=download):
+            self.command("build")
+        self.assertEqual((now[0], self.desk.settings()["bench"]["build"]), (1200, "ready"))
+
+    def test_redaction_precedes_stderr_cut_on_failure_and_timeout(self):
+        key = "fixture-secret-" + "k" * 15
+        self.desk.secrets_dir.mkdir()
+        self.desk.key_file("fixture").write_text(key)
+        run = self.run_command
+        def fail(command, **options):
+            if "sh" in command:
+                options["stderr"].write(("prefix " + key + "x" * 4074 + "\nended").encode())
+                raise error(command, options["timeout"]) if error is subprocess.TimeoutExpired else error(1, command)
+            return run(command, **options)
+        for action, error in (("build", subprocess.CalledProcessError), ("rebuild", subprocess.TimeoutExpired)):
+            with patch.object(self, "run_command", side_effect=fail), self.assertRaises(SystemExit) as caught:
+                self.command(action)
+            failure = self.desk.settings()["bench"]["failure"]
+            self.assertIn("[key of fixture]", failure)
+            self.assertTrue(failure.endswith("ended"))
+            self.assertNotIn(key[-15:], failure + str(caught.exception) +
+                             (self.desk.state_dir / "settings-history.jsonl").read_text())
+
     def test_build_failure_recorded(self):
-        self.fail = "sh"
+        self.fail_action = "sh"
         with self.assertRaises(SystemExit):
             self.command("build")
         bench = self.desk.settings()["bench"]
@@ -119,7 +161,7 @@ class BenchManagementTest(unittest.TestCase):
         history = (self.desk.state_dir / "settings-history.jsonl").read_text()
         self.assertIn('"bench.build"', history)
         self.assertIn('"failed"', history)
-        self.fail = ""
+        self.fail_action = ""
         self.command("rebuild")
         self.assertEqual(self.desk.settings()["bench"]["generation"], 2)
         self.assertEqual(sum(c[0] == "ssh-keygen" for c in self.calls), 2)
@@ -156,12 +198,12 @@ class BenchManagementTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "off"):
                 self.command(action)
         self.assertTrue(json.loads(self.command("status", "--json"))["enabled"])
-        self.fail = "stop"
+        self.fail_action = "stop"
         with self.assertRaises(SystemExit):
             self.command("off")
         self.assertFalse(self.desk.settings()["bench"]["enabled"])
         self.assertIsNone(self.desk.settings()["bench"]["acceptance"])
-        self.fail = ""
+        self.fail_action = ""
         self.assertIn("bench: off", self.command("off"))
         self.command("rebuild")
         with self.assertRaisesRegex(SystemExit, "selftest"):

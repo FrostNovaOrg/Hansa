@@ -10,10 +10,11 @@ import json
 import math
 import os
 from pathlib import Path
+import select
 import stat
 import subprocess
 import sys
-import tempfile
+import threading
 import time
 
 INSTANCE = "hansa-bench"
@@ -30,6 +31,39 @@ os.chmod(p, 0o700); shutil.chown(p, 'bench', 'bench'); os.sync()
 class LimaCalledProcessError(subprocess.CalledProcessError):
     def __str__(self):
         return super().__str__() + "\n" + self.stderr.decode("utf-8", errors="replace")
+
+
+class LimaTimeoutExpired(subprocess.TimeoutExpired):
+    def __str__(self):
+        return super().__str__() + "\n" + self.stderr.decode("utf-8", errors="replace")
+
+
+@contextmanager
+def _stderr_tail():
+    """Drain continuously into bounded memory, never an unbounded disk spool."""
+    reader, writer = os.pipe()
+    tail, done = bytearray(), threading.Event()
+    def drain():
+        grace = 65536
+        while not done.is_set() or grace > 0:
+            if not select.select([reader], [], [], 0.05)[0]:
+                if done.is_set(): break
+                continue
+            data = os.read(reader, 8192)
+            if not data: break
+            tail.extend(data)
+            del tail[:-65536]
+            if done.is_set(): grace -= len(data)
+    with os.fdopen(writer, "wb", buffering=0) as errors:
+        thread = threading.Thread(target=drain)
+        thread.start()
+        try:
+            yield errors, tail
+        finally:
+            errors.close()
+            done.set()
+            thread.join()
+            os.close(reader)
 
 
 def _private(path, directory=False):
@@ -49,27 +83,31 @@ class VM:
             raise RuntimeError("bench requires macOS and Lima")
         self.private, self.run, self.clock = Path(private).absolute(), run, clock
         self.clean, self.port = False, None
+        self.redact = None
         _private(self.private, True)
         _private(self.private / "lima", True)
         self.identity, self.known_hosts = self.private / "submission", self.private / "known_hosts"
         self.env = dict(HOME=str(self.private), LIMA_HOME=str(self.private / "lima"),
                         PATH=os.environ.get("PATH", os.defpath), LC_ALL="C")
 
-    def _call(self, command, deadline, **streams):
+    def _call(self, command, deadline, *, limit=900, **streams):
         remaining = deadline - self.clock()
         if not math.isfinite(remaining) or remaining <= 0:
             raise TimeoutError("bench deadline")
-        with tempfile.TemporaryFile() as errors:
-            try:
-                return self.run(command, check=True, timeout=min(remaining, 900), env=self.env,
-                                **dict(dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                            stderr=errors if command[0] == "limactl" else subprocess.DEVNULL), **streams))
-            except subprocess.CalledProcessError as error:
-                if command[0] != "limactl":
-                    raise
-                errors.seek(0, os.SEEK_END)
-                errors.seek(max(0, errors.tell() - 4096))
-                raise LimaCalledProcessError(error.returncode, command, error.output, errors.read()) from error
+        options = dict(check=True, timeout=min(remaining, limit), env=self.env,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if command[0] != "limactl":
+            return self.run(command, **dict(options, **streams))
+        try:
+            with _stderr_tail() as (errors, tail):
+                return self.run(command, **dict(dict(options, stderr=errors), **streams))
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            data = bytes(tail)
+            if self.redact is not None:
+                data = self.redact(data.decode("utf-8", errors="replace")).encode("utf-8")
+            if isinstance(error, subprocess.TimeoutExpired):
+                raise LimaTimeoutExpired(command, error.timeout, error.output, data[-4096:]) from error
+            raise LimaCalledProcessError(error.returncode, command, error.output, data[-4096:]) from error
 
     def prepare(self, deadline):
         if not os.path.lexists(self.identity):

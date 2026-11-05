@@ -61,10 +61,16 @@ def save(desk, bench, action):
             raise ValueError("; ".join(problems))
 
 
+def managed_vm(desk, private):
+    machine = VM(private)
+    machine.redact = desk.redact  # Redact the bounded Lima tail before its final 4 KiB cut.
+    return machine
+
+
 def build(machine, deadline):
     """Upload only shipped files and the public submission key through Lima admin."""
     machine.prepare(deadline)
-    machine._call(["limactl", "start", "--tty=false", "--name=" + INSTANCE, str(RECIPE / "lima.yaml")], deadline)
+    machine._call(["limactl", "start", "--tty=false", "--name=" + INSTANCE, str(RECIPE / "lima.yaml")], deadline, limit=3600)
     admin = ["limactl", "shell", INSTANCE, "sudo", "-n", "--"]
     bundle = "/var/lib/hansa-bench-bundle"
     machine._call(admin + ["install", "-d", "-m", "0700", bundle], deadline)
@@ -98,13 +104,13 @@ def command(a):
                     save(desk, bench, action)
                     machine = None
                     try:
-                        machine = VM(private)
-                        deadline = machine.clock() + 900
+                        machine = managed_vm(desk, private)
+                        deadline = machine.clock() + 3600
                         if (private / "lima" / INSTANCE).exists():
                             machine.stop(deadline)
                             machine._call(["limactl", "delete", "--force", INSTANCE], deadline)
                         shutil.rmtree(private)
-                        machine = VM(private)
+                        machine = managed_vm(desk, private)
                         bench["recipe"] = recipe_hash()
                         build(machine, deadline)
                         bench["build"] = "ready"
@@ -123,7 +129,7 @@ def command(a):
                         raise ValueError("selftest requires a disabled, current ready build")
                     bench["acceptance"] = dict(generation=bench["generation"], status="incomplete")
                     save(desk, bench, action)  # Invalidate any earlier pass before touching the VM.
-                    report = run(VM(private))
+                    report = run(managed_vm(desk, private))
                     for result in (report, *report.get("results", {}).values()):
                         if "error" in result: result["error"] = desk.redact(result["error"])
                     bench["acceptance"].update(report)
@@ -132,7 +138,7 @@ def command(a):
                     problem = acceptance_problem(bench)
                     if problem:
                         raise ValueError(problem)
-                    VM(private)  # Platform and private-state checks also apply to enablement.
+                    managed_vm(desk, private)  # Platform and private-state checks also apply to enablement.
                     bench["enabled"] = True
                 elif action == "off":
                     bench["enabled"] = False
@@ -140,7 +146,7 @@ def command(a):
                     if (private / "lima" / INSTANCE).exists():
                         try:
                             with exclusive(desk):
-                                machine = VM(private)
+                                machine = managed_vm(desk, private)
                                 machine.stop(machine.clock() + 30)
                         except Busy:
                             pass  # The broker sees disabled settings and cancels its hand-in.

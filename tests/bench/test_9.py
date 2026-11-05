@@ -4,6 +4,7 @@ import io
 from pathlib import Path
 import sys
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -39,7 +40,7 @@ class BenchIntegrationTest(unittest.TestCase):
             for existing in (False, True):
                 with self.subTest(block=block, existing=existing), patch.object(run, "WorkerBench") as factory, \
                         contextlib.redirect_stderr(io.StringIO()) as out:
-                    self.dispatch.bench_errors.clear()
+                    self.dispatch.bench_error = None
                     self.desk._bench = Mock() if existing else None
                     settings = self.desk.settings(); settings["bench"] = block
                     write_json(self.desk.settings_path, settings)
@@ -202,6 +203,121 @@ class BenchIntegrationTest(unittest.TestCase):
             self.dispatch.tick()
         self.assertFalse(folder.exists())
         self.assertEqual(self.desk.meta(tid)["state"], "cancelled")
+
+    def test_bench_failure_keeps_only_the_latest_reason(self):
+        self.desk._bench = Mock()
+        self.desk._bench.poll.side_effect = [ValueError("worker one"), ValueError("worker two"),
+                                             ValueError("worker one")]
+        settings = self.desk.settings()["bench"]
+        settings["enabled"] = True
+        write_json(self.desk.settings_path, settings)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(3):
+                self.dispatch.tick()
+        lines = [x for x in err.getvalue().splitlines() if "bench is off for this round" in x]
+        self.assertEqual([x.split("for this round: ", 1)[-1] for x in lines],
+                         ["ValueError: worker one", "ValueError: worker two", "ValueError: worker one"], err.getvalue())
+        self.assertEqual(self.dispatch.bench_error, "ValueError: worker one")  # only the latest is kept
+
+    def test_bench_failure_reason_withholds_keys(self):
+        key = "sk-bench-test-secret"
+        self.desk.write_key("claude", key, by="test")
+        self.desk._bench = Mock()
+        self.desk._bench.poll.side_effect = ValueError(f"cannot reach the worker with {key}")
+        settings = self.desk.settings()["bench"]
+        settings["enabled"] = True
+        out = self.bench_failure_starts(settings)
+        self.assertNotIn(key, out)
+        self.assertIn("[key of claude]", out)
+
+    def test_remove_sandbox_tmp_revokes_a_worker_serve_never_reaped(self):
+        self.enable()
+        tid = self.desk.new_task("leave a worker behind", lane="a")
+        self.desk.update(tid, started=time.time())
+        tmp = run.make_worker_tmp(self.desk, tid)
+        self.bench.register(tid, {}, tmp, str(self.c.repo))
+        worker = self.bench.workers[tid][0]
+        entered, released = threading.Event(), threading.Event()
+        def revoke(w):
+            entered.set()
+            self.assertTrue(released.wait(15))
+        self.addCleanup(released.set)
+        with patch.object(self.bench.broker, "revoke", side_effect=revoke):
+            run.remove_sandbox_tmp(self.desk, tid)  # teardown waits, then serve retries the cleanup
+            self.assertTrue(entered.wait(10))
+            self.assertIn(tid, self.desk._bench_removing)
+            self.assertNotIn(tid, self.bench.workers)
+            self.assertTrue(Path(tmp).is_dir())
+            released.set()
+            self.bench.revoking[tid].result(timeout=10)
+            run.remove_sandbox_tmp(self.desk, tid)
+        self.assertEqual(worker.directories, [])
+        self.assertNotIn(tid, self.desk._bench_removing)
+        self.assertFalse(Path(tmp).exists())
+
+    def test_cancel_revokes_the_bench_guest(self):
+        self.enable()
+        tid = self.desk.new_task("cancel the guest", lane="a")
+        proc = run.start(self.desk, tid, "a", "claude")
+        self.assertEqual(proc.wait(timeout=30), 0)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        self.assertIn(tid, self.bench.workers)
+        self.desk.update(tid, cancel=True)
+        self.dispatch.procs[tid] = proc  # reaped only after the guest is revoked, so the earlier branch skips it
+        entered, released = threading.Event(), threading.Event()
+        def revoke(w):
+            entered.set()
+            self.assertTrue(released.wait(15))
+        self.addCleanup(released.set)
+        with patch.object(self.bench.broker, "revoke", side_effect=revoke), \
+                patch.object(run, "has_ended", return_value=False), \
+                patch.object(run, "run_running", return_value=False):
+            self.dispatch.tick()  # only the cancellation branch reaches this run's guest
+            self.assertTrue(entered.wait(10))
+            self.assertNotIn(tid, self.bench.workers)
+            released.set()
+            self.bench.revoking[tid].result(timeout=10)
+
+    def test_serve_shutdown_closes_the_bench(self):
+        import hansa.web as web
+        machine = Mock(port=None, clean=False)
+        machine.stop.side_effect = lambda deadline: setattr(machine, "port", None)
+        with patch("hansa.bench.vm.VM", return_value=machine):
+            bench = run.WorkerBench(self.desk)
+        self.addCleanup(bench.pool.shutdown, wait=False)
+        tid = self.desk.new_task("a guest at shutdown", lane="a")
+        self.desk.update(tid, started=time.time())
+        tmp = run.make_worker_tmp(self.desk, tid)
+        self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+        bench.register(tid, {}, tmp, str(self.c.repo))
+        worker = bench.workers[tid][0]
+        machine.port = 2200
+        class Once:  # one round, then Ctrl+C, as cmd_serve's shutdown path sees it
+            def __init__(self, desk):
+                desk._bench = bench
+
+            def tick(self):
+                raise KeyboardInterrupt
+        with patch.object(web, "start_web", return_value=Mock(server_address=("h", 1))), \
+                patch.object(cli, "Dispatcher", Once), patch.object(cli, "try_srt_at_start", return_value={}), \
+                patch.object(cli.alert, "start_thread"), patch.object(cli.signal, "signal"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["--desk", str(self.desk.root), "serve", "--port", "0"])
+        self.assertNotIn(tid, bench.workers)
+        self.assertEqual(worker.directories, [])  # closed after the guest was revoked
+        machine.stop.assert_called_once()  # the off poll that close runs stops the VM
+        self.assertIsNone(machine.port)
+
+    def test_bench_is_a_registered_command(self):
+        with patch("hansa.bench.manage.command") as manage:
+            self.assertEqual(cli.main(["--desk", str(self.desk.root), "bench", "status", "--json"]), 0)
+        args, = manage.call_args.args
+        self.assertEqual((args.cmd, args.bench_command, args.json), ("bench", "status", True))
+        with patch("hansa.bench.channel.command", return_value=0) as channel_command:
+            self.assertEqual(cli.main(["--desk", str(self.desk.root), "bench", "run", "--script", "check.sh"]), 0)
+        args, = channel_command.call_args.args
+        self.assertEqual((args.bench_command, args.script), ("run", "check.sh"))
 
     def test_bench_help(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
