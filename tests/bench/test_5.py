@@ -18,8 +18,9 @@ name, a = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as log: log.write(json.dumps([name, *a]) + "\\n")
 if name == os.environ.get("FAKE_FAIL"): sys.exit(1)
 if name == "id":
-    if a == ["-u", "bench"] and not os.environ.get("BENCH_EXISTS"): sys.exit(1)
-    print(os.environ["FAKE_UID"])
+    if a == ["-u", "bench"] and not (os.environ.get("BENCH_EXISTS") or pathlib.Path(os.environ["FAKE_LOG"] + ".account").exists()): sys.exit(1)
+    print(1234 if a == ["-u", "bench"] else os.environ["FAKE_UID"])
+elif name == "useradd": pathlib.Path(os.environ["FAKE_LOG"] + ".account").touch()
 elif name == "dirname": print(pathlib.Path(a[-1]).parent)
 elif name == "cat": sys.stdout.write(sys.stdin.read())
 elif name == "python3":
@@ -159,6 +160,8 @@ class BenchRecipeTest(unittest.TestCase):
         self.assertIn(["useradd", "-m", "-s", "/bin/sh", "bench"], calls)
         self.assertIn(["usermod", "-G", "", "-s", "/bin/sh", "bench"], calls)
         self.assertIn(["passwd", "-l", "bench"], calls)
+        mask = ["systemctl", "mask", "user@1234.service"]
+        self.assertLess(calls.index(["useradd", "-m", "-s", "/bin/sh", "bench"]), calls.index(mask))
         self.assertEqual((root / "etc/ssh/sshd_config").read_text(), "# existing Lima admin configuration\n")
         self.assertIn(["apt-get", "install", "-y", "--no-install-recommends", "bubblewrap", "nftables", "tmux",
                        "chromium", "fonts-dejavu-core", "git", "python3", "openssh-server", "e2fsprogs"], calls)
@@ -195,6 +198,7 @@ class BenchRecipeTest(unittest.TestCase):
         _, again, result = self.provision(exists=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(any(c[0] == "useradd" for c in again))
+        self.assertIn(mask, again)
         _, stopped, result = self.provision(minor=12)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(any(c[0] == "useradd" for c in stopped))
@@ -217,7 +221,7 @@ class BenchRecipeTest(unittest.TestCase):
                                     'ip daddr 192.168.5.2 tcp dport 53 accept', 'udp sport 68 udp dport 67 accept',
                                     'ip daddr 192.168.5.2 drop'])
         for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
-                     "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4"):
+                     "169.254.0.0/16", "224.0.0.0/3"):
             self.assertIn(cidr, rules[7])
         self.assertEqual(rules[-1], "meta nfproto ipv6 drop")
         self.assertNotIn("198.18", edge)

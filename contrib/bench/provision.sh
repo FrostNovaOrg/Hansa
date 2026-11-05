@@ -19,6 +19,7 @@ python3 -I -c 'import sys; sys.exit(sys.version_info[:2] != (3, 13))'
 apt-get clean
 
 id -u bench >/dev/null 2>&1 || useradd -m -s /bin/sh bench
+systemctl mask "user@$(id -u bench).service"
 # A rerun must not retain supplementary privileges; never alter Lima's admin.
 usermod -G '' -s /bin/sh bench
 passwd -l bench

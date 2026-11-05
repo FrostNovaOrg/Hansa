@@ -70,11 +70,12 @@ class BenchProbesTest(unittest.TestCase):
             self.assertEqual(set(selftest.mandatory()[str(boot) + '/disk_limit']), {'shared', 'enospc', 'execution'})
 
     def test_detached_survivor_fails(self):
-        process = NS(name='42', stat=lambda: NS(st_uid=1234))
+        process = NS(name='42', stat=lambda: NS(st_uid=1234), joinpath=lambda _: NS(read_text=lambda: 'systemd\n'))
         paths = lambda name, *args: NS(iterdir=lambda: [process] if name == '/proc' else [])
         with contextlib.redirect_stdout(io.StringIO()) as output:
             exec(p.INSPECT, dict(Path=paths, pwd=NS(getpwnam=lambda _: NS(pw_uid=1234)), json=json))
         evidence = dict(json.loads(output.getvalue()), started=True)
+        self.assertEqual(evidence['survivors'], [dict(pid=42, command='systemd')])
         for mode in ('normal', 'timeout', 'disconnect', 'gateway-death'):
             name = 'descendant-' + mode
             self.assertEqual(p.checks(name, evidence)['survivors'], 'failed')
@@ -91,8 +92,11 @@ class BenchProbesTest(unittest.TestCase):
     def test_missing_browser_evidence_fails(self):
         png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')
         evidence = dict(p.EXPECTED['sandbox'])
-        artifacts = {'browser.png': png, 'evidence.txt': b'bench artifact\n'}
+        artifacts = {'browser.png': png, 'evidence.txt': b'bench artifact\n', 'bench-leftover': b'leftover'}
         self.assertEqual(set(p.checks('sandbox', evidence, artifacts).values()), {'passed'})
+        for bad in (b'', b'changed'):
+            self.assertEqual(p.checks('sandbox', evidence, dict(artifacts, **{'bench-leftover': bad}))['artifacts'], 'failed')
+        self.assertEqual(p.checks('sandbox', evidence, {k: v for k, v in artifacts.items() if k != 'bench-leftover'})['artifacts'], 'failed')
         for bad in (b'', png[:24], b'not a screenshot'):
             self.assertEqual(p.checks('sandbox', evidence, dict(artifacts, **{'browser.png': bad}))['artifacts'], 'failed')
         self.assertEqual(p.checks('sandbox', evidence, {})['artifacts'], 'failed')
@@ -124,6 +128,33 @@ class BenchProbesTest(unittest.TestCase):
         self.assertEqual(checked['firewall'], 'passed')
         self.assertEqual(checked['host'], 'incomplete')  # No controlled listener supplied.
 
+    def test_measured_nft_output(self):
+        live = '''table inet bench_edge {
+ chain out { # handle 1
+  type filter hook output priority filter; policy accept;
+  meta skuid 1000 counter packets 0 bytes 0 drop # handle 2
+  oifname "lo" accept # handle 3
+  ct state established,related accept # handle 4
+  ip daddr 192.168.5.2 udp dport 53 accept # handle 5
+  ip daddr 192.168.5.2 tcp dport 53 accept # handle 6
+  udp sport 68 udp dport 67 accept # handle 7
+  ip daddr 192.168.5.2 drop # handle 8
+  ip daddr { 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 } drop # handle 10
+  meta nfproto ipv6 drop # handle 11
+ }
+}'''
+        numeric = live.replace('priority filter', 'priority 0').replace('established,related', '0x2,0x4').replace('nfproto ipv6', 'nfproto 10')
+        run = Mock(side_effect=lambda *args: numeric if '-n' in args else live)
+        environment = dict(json=json, sys=NS(argv=['probe']), os=NS(getuid=lambda: 0), dns=lambda: True,
+                           pwd=NS(getpwnam=lambda _: NS(pw_uid=1000)), connected=lambda _: True,
+                           Path=lambda _: NS(read_text=lambda: '1'), run=run)
+        with patch('urllib.request.build_opener'), contextlib.redirect_stdout(io.StringIO()) as output:
+            exec(p.EDGE, environment)
+        self.assertEqual(p.checks('root-edge', json.loads(output.getvalue()))['firewall'], 'passed')
+        for rule in live.splitlines()[3:-2]:
+            for changed in (live.replace(rule, ''), live.replace(rule, rule.replace('accept', 'drop') if 'accept' in rule else rule.replace('drop', 'accept')), live.replace(rule, rule + '\n' + rule)):
+                self.assertFalse(p.firewall(changed, 1000))
+
     def test_fixture_contract(self):
         for name, (scope, source) in p.fixtures().items():
             compile(source, name, 'exec')
@@ -151,7 +182,7 @@ class BenchProbesTest(unittest.TestCase):
 
     def test_png_end_dimensions_and_extra_artifacts(self):
         png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')
-        artifacts = {'browser.png': png, 'evidence.txt': b'bench artifact\n'}
+        artifacts = {'browser.png': png, 'evidence.txt': b'bench artifact\n', 'bench-leftover': b'leftover'}
         self.assertGreaterEqual(len(png[:-12]), 45)
         for bad in (png[:-12], png[:16] + bytes(4) + png[20:], png[:20] + bytes(4) + png[24:]):
             with self.subTest(png=bad):

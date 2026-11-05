@@ -22,6 +22,9 @@ the UID-first edge and detached descendants after completion, timeout, disconnec
 and gateway death. Missing evidence is incomplete; these isolation gates remain
 mandatory while guest execution is supported. Selftest runs shipped code while disabled,
 records every probe and timing across two boots, and requires confirmed VM stop.
+Failed or incomplete results keep up to 4 KiB of evidence, with stored provider keys
+redacted before the cut; artifacts retain names and sizes, never bytes. Survivor
+evidence includes each process's PID and command name.
 Saved errors include their class and message, with provider keys redacted. Each
 boot must connect and retain its host key; reusing an SSH port is allowed.
 Before each boot's Mac/LAN denial probes, root must reach both controlled listeners
@@ -36,6 +39,8 @@ Do not manufacture an acceptance record.
 
 Provisioning, reset's purge and each gateway slot deletion sync guest writes before
 the VM can be force-stopped. Reset still force-stops first to kill hand-in survivors.
+Provisioning masks `user@<bench uid>.service`: the bench needs no systemd user
+manager, whose delayed shutdown would otherwise leave processes after SSH logout.
 Build and rebuild allow one hour, including the first cloud-image download; their
 initial Lima start may use that hour. Other calls retain their 900-second cap.
 `/work`, `/out`, `/tmp` and `/dev/shm` share a 4 GiB disk limit, including the

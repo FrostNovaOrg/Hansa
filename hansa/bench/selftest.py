@@ -78,7 +78,7 @@ DHCP = '''import json, subprocess, time
 from pathlib import Path
 leases = {p: p.stat().st_mtime_ns for p in Path('/run/systemd/netif/leases').iterdir()}
 if not leases: raise RuntimeError('no DHCP lease')
-subprocess.run(['networkctl', 'renew', *[p.name for p in leases]], check=True, timeout=30)
+subprocess.run(['networkctl', 'reconfigure', *[p.name for p in leases]], check=True, timeout=30)
 deadline = time.monotonic() + 60
 while not all(p.stat().st_mtime_ns != stamp and 'ADDRESS=' in p.read_text() for p, stamp in leases.items()):
     if time.monotonic() >= deadline: raise TimeoutError('DHCP renewal')
@@ -92,7 +92,7 @@ def admin(machine, source, deadline, *args, account='root', **streams):
                           '--', 'python3', '-I', '-c', source, *args], deadline, **streams)
 
 
-def submission(machine, name, source, deadline):
+def submission(machine, name, source, deadline, observed=None):
     malformed = name in probes.malformed()
     header = json.dumps(dict(version=1, id='a' * 32, cwd='.', length=1024,
         timeout=30 if name == 'descendant-timeout' else 180,
@@ -116,8 +116,10 @@ def submission(machine, name, source, deadline):
                 finally: incoming.close(); sender.join()
                 if errors: raise errors[0]
             returned.seek(0)
+        if observed is not None: observed['probe'] = evidence
         if malformed:
-            return dict(rejected='passed' if evidence['gateway_exit'] != 0 and not returned.read(1) else 'failed',
+            evidence['response'] = bool(returned.read(1))
+            return dict(rejected='passed' if evidence['gateway_exit'] != 0 and not evidence['response'] else 'failed',
                         **probes.checks('inspect', evidence))
         if name in ('descendant-disconnect', 'descendant-gateway-death'):
             return probes.checks(name, evidence)
@@ -132,6 +134,7 @@ def submission(machine, name, source, deadline):
         result = json.loads(data.pop('result.json'))
         stdout, stderr = data.pop('stdout'), data.pop('stderr')
         artifacts = {n[len('artifacts/'):]: v for n, v in data.items() if n.startswith('artifacts/')}
+        if observed is not None: observed['artifacts'] = {n: len(v) for n, v in artifacts.items()}
         evidence.update(result, output=len(stdout) + len(stderr))
         if name in ('sandbox', 'disk_limit'): evidence.update(json.loads(stdout))
         if name == 'descendant-normal': evidence['started'] = artifacts.get('descendant.ready') == b'ready'
@@ -140,7 +143,7 @@ def submission(machine, name, source, deadline):
         return checked
 
 
-def lifecycle(machine):
+def lifecycle(machine, observed=None):
     from .broker import Broker
     from .channel import Channel, submit, _read
     with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
@@ -173,25 +176,35 @@ def lifecycle(machine):
         while machine.port is not None:
             if machine.clock() >= deadline: raise TimeoutError('idle stop')
             restarted.poll({}, enabled=True); time.sleep(.1)
-        checked = {n: 'passed' if ok else 'failed' for n, ok in dict(queue=busy and cancelled, restart=discarded, idle=machine._info(machine.clock() + 10)['status'] == 'Stopped').items()}
-        checked['memory'] = 'incomplete' if not owned else 'failed' if owned & processes().keys() else 'passed'
+        status = machine._info(machine.clock() + 10)['status']
+        remaining = owned & processes().keys() if owned else set()
+        if observed is not None: observed.update(busy=busy, cancelled=cancelled, discarded=discarded, status=status, owned=sorted(owned), remaining=sorted(remaining))
+        checked = {n: 'passed' if ok else 'failed' for n, ok in dict(queue=busy and cancelled, restart=discarded, idle=status == 'Stopped').items()}
+        checked['memory'] = 'incomplete' if not owned else 'failed' if remaining else 'passed'
         return checked
 
 
 def run(machine):
     """Caller holds manage.exclusive and has persisted incomplete acceptance."""
     fixtures = probes.fixtures()
-    results = {n: dict(status='incomplete', checks=dict.fromkeys(fields, 'incomplete')) for n, fields in mandatory().items()}
+    results = {n: dict(status='incomplete', checks=dict.fromkeys(fields, 'incomplete'), evidence='{}') for n, fields in mandatory().items()}
     report = dict(status='incomplete', results=results, versions={})
     started, ports, keys = machine.clock(), [], []
     def record(name, action):
         before = machine.clock()
+        observed = {}
         try:
-            checks = action()
+            checks = action(observed)
             status = 'failed' if 'failed' in checks.values() else 'passed' if checks and set(checks.values()) == {'passed'} else 'incomplete'
             results[name] = dict(status=status, checks=checks)
         except Exception as error:
             results[name] = dict(status='incomplete', error=type(error).__name__ + ': ' + str(error))
+        if results[name]['status'] != 'passed':
+            def clean(value):
+                if isinstance(value, dict): return {clean(k): clean(v) for k, v in value.items()}
+                if isinstance(value, (list, tuple)): return [clean(v) for v in value]
+                return machine.redact(value) if isinstance(value, str) and machine.redact else value
+            results[name]['evidence'] = json.dumps(clean(observed), ensure_ascii=False).encode()[:4096].decode('utf-8', errors='ignore')
         results[name]['seconds'] = machine.clock() - before
     try:
         with ExitStack() as stack:
@@ -209,12 +222,15 @@ def run(machine):
                 keys.append(machine._call(['limactl', 'shell', INSTANCE, 'sudo', '-n', 'cat', '/etc/ssh/ssh_host_ed25519_key.pub'], deadline, stdout=subprocess.PIPE).stdout.split()[:2])
                 report['versions'][str(boot)] = machine._call(['limactl', 'shell', INSTANCE, 'sudo', '-n', 'cat', '/var/lib/hansa-bench-build/packages.tsv'], deadline, stdout=subprocess.PIPE).stdout.decode()
                 for name in NAMES:
-                    def probe():
-                        if name == 'dhcp': return json.loads(admin(machine, DHCP, deadline, stdout=subprocess.PIPE).stdout)
+                    def probe(observed):
+                        if name == 'dhcp':
+                            observed['probe'] = json.loads(admin(machine, DHCP, deadline, stdout=subprocess.PIPE).stdout)
+                            return observed['probe']
                         fixture = {'sandbox-again': 'sandbox', 'inspect-final': 'inspect'}.get(name, name)
                         scope, source = ('submission', '') if fixture in probes.malformed() else fixtures[fixture]
-                        if scope == 'submission': return submission(machine, fixture, source, deadline)
+                        if scope == 'submission': return submission(machine, fixture, source, deadline, observed)
                         evidence = json.loads(admin(machine, source, deadline, json.dumps(targets), account=scope, stdout=subprocess.PIPE).stdout)
+                        observed['probe'] = evidence
                         return probes.checks(fixture, evidence)
                     record(str(boot) + '/' + name, probe)
                     if name == 'edge-control' and results[str(boot) + '/' + name]['status'] != 'passed':
@@ -222,14 +238,18 @@ def run(machine):
                     if name == 'descendant-gateway-death':
                         machine.reset(machine.clock() + 120); machine.start(machine.clock() + 120)
                 machine.stop(machine.clock() + 30)
-            record('boots', lambda: dict(ports='passed' if all(type(p) is int and 1 <= p <= 65535 for p in ports) else 'failed', keys='passed' if keys[0] == keys[1] and keys[0] else 'failed'))
-            record('lifecycle', lambda: lifecycle(machine))
+            def boots(observed):
+                observed.update(ports=ports, keys=[[k.decode(errors='replace') for k in key] for key in keys])
+                return dict(ports='passed' if all(type(p) is int and 1 <= p <= 65535 for p in ports) else 'failed', keys='passed' if keys[0] == keys[1] and keys[0] else 'failed')
+            record('boots', boots)
+            record('lifecycle', lambda observed: lifecycle(machine, observed))
     except Exception as error:
         report['error'] = type(error).__name__ + ': ' + str(error)
     finally:
-        def stopped():
+        def stopped(observed):
             machine.stop(machine.clock() + 30)
-            return {'confirmed': 'passed' if machine._info(machine.clock() + 10).get('status') == 'Stopped' else 'failed'}
+            observed.update(machine._info(machine.clock() + 10))
+            return {'confirmed': 'passed' if observed.get('status') == 'Stopped' else 'failed'}
         record('stopped', stopped)
     states = [r['status'] for r in results.values()]
     report.update(status='failed' if 'failed' in states else 'passed' if complete(report) else 'incomplete', seconds=machine.clock() - started)
