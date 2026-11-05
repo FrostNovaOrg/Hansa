@@ -98,6 +98,40 @@ class BenchSnapshotTest(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, "changed"):
                 self.contents()
 
+    def test_tracked_file_under_directory_link_refused(self):
+        folder = self.wt / "inner"
+        folder.mkdir()
+        tracked = folder / "leak.txt"
+        tracked.write_text("committed inside the worktree")
+        self.git("-C", str(self.wt), "add", "inner/leak.txt")
+        self.git("-C", str(self.wt), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                 "commit", "-qm", "nested tracked file")
+
+        # Ignore the replacement link itself so the final-file guard cannot mask
+        # a missing directory guard. The tracked child remains in Git's list.
+        (self.wt / ".gitignore").write_text("/inner\n")
+        outside = self.root / "outside"
+        outside.mkdir()
+        secret = b"outside-directory-secret-must-not-enter-the-snapshot"
+        (outside / "leak.txt").write_bytes(secret)
+        tracked.unlink()
+        folder.rmdir()
+        folder.symlink_to(outside, target_is_directory=True)
+
+        # Git still lists inner/leak.txt; its parent now leads outside the worktree.
+        # Refusing the export or omitting the path are both safe outcomes.
+        try:
+            stream = self.s.export(self.desk, self.queue)
+        except (OSError, ValueError):
+            return
+
+        with stream:
+            data = stream.read()
+            self.assertFalse(secret in data, "outside file contents entered the snapshot")
+            stream.seek(0)
+            with tarfile.open(fileobj=stream) as archive:
+                self.assertNotIn("inner/leak.txt", archive.getnames())
+
     def test_nested_paths_and_partial_cleanup(self):
         folder = self.wt / "nested"
         folder.mkdir()
