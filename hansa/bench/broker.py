@@ -17,6 +17,9 @@ from . import archive, channel, snapshot
 from .manage import exclusive
 
 
+RETURN_ALLOWANCE = 30  # SSH startup, guest teardown (5 s) and return (10 s).
+
+
 class Broker:
     def __init__(self, desk, machine, *, clock=time.monotonic):
         self.desk, self.vm, self.clock = desk, machine, clock
@@ -54,6 +57,7 @@ class Broker:
             self.active = None
         if not enabled:
             self.revoke()
+            self.ready, self.closed, self.vm.clean, self.failure = False, False, False, ""
             if self.vm.port is not None:
                 with exclusive(self.desk):
                     self.vm.stop(self.clock() + 30)
@@ -106,10 +110,13 @@ class Broker:
     def execute(self, job):
         """One executor; SSH runs in a joined thread while pipes are pumped/capped."""
         connection, errors, ownership, owned = None, [], ExitStack(), False
+        job.result = {"status": "timeout", "error": "bench time limit too short"}
         def check():
             if job.cancel.is_set() or self.clock() >= job.deadline:
                 raise TimeoutError("bench cancelled or deadline")
         try:
+            if job.deadline - self.clock() < RETURN_ALLOWANCE + 1:
+                return
             ownership.enter_context(exclusive(self.desk))
             owned = True
             with ExitStack() as stack:
@@ -117,16 +124,20 @@ class Broker:
                     raise TimeoutError("queue deadline")
                 check()
                 if not self.vm.clean:
-                    self.vm.reset(job.deadline)
+                    try:
+                        self.vm.reset(job.deadline)
+                    except Exception:
+                        self.closed = True
+                        raise
                 source = stack.enter_context(snapshot.export(self.desk, job.channel))
                 check()
                 if self.vm.port is None:
                     self.vm.start(job.deadline)
                 check()
                 header = {k: job.request[k] for k in ("version", "id", "script", "cwd")}
-                header.update(timeout=int(job.deadline - self.clock()), length=source.seek(0, 2))
+                header.update(timeout=int(job.deadline - self.clock() - RETURN_ALLOWANCE), length=source.seek(0, 2))
                 if header["timeout"] < 1:
-                    raise TimeoutError("bench deadline")
+                    return
                 data = json.dumps(header).encode()
                 if len(data) > archive.HEADER_BYTES:
                     raise ValueError("header limit")
@@ -190,9 +201,9 @@ class Broker:
                 check()
                 job.result = {"status": summary["status"], "report": name}
         except Exception as error:
-            self.closed, self.failure = True, "bench closed: " + str(error)
+            self.ready, self.failure = False, "bench closed: " + str(error)
             self.vm.clean = False  # Uncertain guest slots require stop-and-purge before reuse.
-            job.result = {"status": "cancelled" if job.cancel.is_set() else
+            job.result = {"status": "cancelled" if job.cancel.is_set() and not self.closed else
                           "timeout" if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)) else "infrastructure"}
             try:
                 if owned:
@@ -203,11 +214,9 @@ class Broker:
             finally:
                 if connection is not None:
                     connection.join()
-            if job.result["status"] == "cancelled":
-                self.ready, self.closed = False, False
-            else:
+            if job.result["status"] != "cancelled":
                 job.result["error"] = self.failure
         finally:
             ownership.close()
-        self.idle = self.clock()
-        self.reply(job, job.result)
+            self.idle = self.clock()
+            self.reply(job, job.result)

@@ -37,6 +37,8 @@ is deleted after every run. Chromium keeps its own sandbox; do not disable it.
 One request runs, four wait, and each worker may have one outstanding request;
 excess requests receive `busy`. Total time defaults to 300 seconds (maximum 900),
 queue wait to 60 (maximum 300), bounded by the worker's remaining allowance.
+The guest gets the request's timeout minus a 30-second allowance for SSH startup,
+teardown and return, so a timeout must be longer than the allowance.
 Queue, startup and transfer consume the deadline. Existing resource holds prevent
 admission. The VM stops after 60 idle seconds to return its memory.
 
