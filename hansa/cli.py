@@ -3068,9 +3068,9 @@ def main(argv=None):
 
     p = add("bench", None, "optional Linux VM test bench; see hansa help test-bench")
     bench_commands = p.add_subparsers(dest="bench_command", required=True)
-    for name in ("on", "off", "build", "rebuild", "status"):
+    for name in ("on", "off", "build", "rebuild", "status", "selftest"):
         p = bench_commands.add_parser(name)
-        if name == "status":
+        if name in ("status", "selftest"):
             p.add_argument("--json", action="store_true")
     p = bench_commands.add_parser("run")
     p.add_argument("--script", required=True, help="local shell script; submit and print its request ID")

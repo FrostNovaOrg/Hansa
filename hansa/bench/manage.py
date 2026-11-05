@@ -99,10 +99,18 @@ def command(a):
                                 bench["failure"] += "; stop: " + type(cleanup).__name__
                         save(desk, bench, action)
                         raise
+                elif action == "selftest":
+                    from .selftest import run
+                    if bench["enabled"] or bench["build"] != "ready" or bench["recipe"] != recipe_hash():
+                        raise ValueError("selftest requires a disabled, current ready build")
+                    bench["acceptance"] = dict(generation=bench["generation"], status="incomplete")
+                    save(desk, bench, action)  # Invalidate any earlier pass before touching the VM.
+                    bench["acceptance"].update(run(VM(private)))
                 elif action == "on":
+                    from .selftest import complete
                     accepted = bench["acceptance"] or {}
                     if (bench["build"] != "ready" or bench["generation"] < 1
-                            or accepted.get("status") != "passed"
+                            or accepted.get("status") != "passed" or not complete(accepted)
                             or accepted.get("generation") != bench["generation"]
                             or bench["recipe"] != recipe_hash()):
                         raise ValueError("bench needs a passing selftest for the current build")
