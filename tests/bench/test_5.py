@@ -46,7 +46,13 @@ class BenchRecipeTest(unittest.TestCase):
         self.assertEqual(config["minimumLimaVersion"], "2.2.1")
         self.assertEqual([config[k] for k in ("vmType", "os", "arch", "cpus", "memory", "disk")],
                          ["vz", "Linux", "aarch64", 2, "2GiB", "20GiB"])
-        self.assertEqual(config["images"], [])  # Explicitly unbootable until a verified pin is available.
+        self.assertEqual(config["images"], [{
+            "location": "https://cloud.debian.org/images/cloud/trixie/20261001-2618/"
+                        "debian-13-genericcloud-arm64-20261001-2618.qcow2",
+            "arch": "aarch64",
+            "digest": "sha512:d8470b8c6c38fead046c794b5800a5a7b96672d5bcf543cc230ceb0c4b8ace05ed"
+                      "341a0c8928045422243fde26b2f1f2f58e99244c65709ffda2e3d4b674dd5a",
+        }])
         self.assertTrue(config["plain"])
         self.assertEqual(config["mounts"], [])
         self.assertFalse(any(config["ssh"].values()))
@@ -55,7 +61,8 @@ class BenchRecipeTest(unittest.TestCase):
         self.assertEqual(config["portForwards"], [dict(guestIP="0.0.0.0", guestPortRange=[1, 65535],
                                                      proto="any", ignore=True)])
 
-    def provision(self, fail="", exists=False, minor=13, uid=0, args=()):
+    def provision(self, fail="", exists=False, minor=13, uid=0, args=(),
+                  key="ssh-ed25519 fixture-public-key\n"):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -66,7 +73,8 @@ class BenchRecipeTest(unittest.TestCase):
         (root / "etc/ssh/sshd_config").write_text("# existing Lima admin configuration\n")
         for name in ("guest.py", "archive.py"):
             shutil.copyfile(REPO / "hansa/bench" / name, bundle / name)
-        (bundle / "submission.pub").write_text("ssh-ed25519 fixture-public-key\n")
+        if key is not None:
+            (bundle / "submission.pub").write_text(key)
         script = (bundle / "provision.sh").read_text()
         for prefix in ("/etc/", "/usr/local/", "/var/lib/"):
             script = script.replace(prefix, str(root) + prefix)
@@ -84,6 +92,16 @@ class BenchRecipeTest(unittest.TestCase):
                                 capture_output=True, text=True, timeout=30)
         calls = [json.loads(line) for line in (root / "log").read_text().splitlines()]
         return root, calls, result
+
+    def test_submission_key_required_before_install(self):
+        for key in (None, ""):
+            with self.subTest(key=key):
+                root, calls, result = self.provision(key=key)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("submission.pub", result.stderr)
+                self.assertIn("missing or empty", result.stderr)
+                self.assertFalse(any(c[0] in ("apt-get", "install") for c in calls))
+                self.assertFalse((root / "usr/local").exists())
 
     def test_forced_account_keeps_admin(self):
         root, calls, result = self.provision()
@@ -113,9 +131,12 @@ class BenchRecipeTest(unittest.TestCase):
             self.assertEqual((root / path).stat().st_mode & 0o777, int(mode, 8))
             self.assertTrue(any(c[0] == "install" and mode in c and str(root / path) in c for c in calls))
         for call in (c for c in calls if c[0] == "install"):
+            self.assertEqual(int(call[call.index("-m") + 1], 8) & 0o022, 0, call)
             owner = "bench" if str(root / "var/lib/hansa-bench") in call else "root"
             self.assertEqual(call[call.index("-o") + 1], owner)
             self.assertEqual(call[call.index("-g") + 1], owner)
+        self.assertIn(["chown", "root:root", str(launcher)], calls)
+        self.assertIn(["chmod", "0755", str(launcher)], calls)
         self.assertIn("ssh_deletekeys: false", (root / "etc/cloud/cloud.cfg.d/99-bench-keep-host-keys.cfg").read_text())
         self.assertIn("ssh_genkeytypes: []", (root / "etc/cloud/cloud.cfg.d/99-bench-keep-host-keys.cfg").read_text())
         self.assertIn("bubblewrap\tfixture-version", (root / "var/lib/hansa-bench-build/packages.tsv").read_text())
@@ -137,6 +158,7 @@ class BenchRecipeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         edge = (root / "etc/nftables.conf").read_text()
         self.assertIn("table inet bench_edge", edge)
+        self.assertLess(edge.index("flush ruleset"), edge.index("table inet bench_edge"))
         self.assertIn("type filter hook output priority 0; policy accept;", edge)
         rules = [line.strip() for line in edge.splitlines() if line.strip().endswith(("drop", "accept"))]
         self.assertEqual(rules[:3], ['meta skuid "bench" counter drop', 'oifname "lo" accept',
