@@ -247,14 +247,16 @@ COMPACT_MOST = {"idle_at": (100_000, 1_000_000), "working_at": (100_000, 1_000_0
 # The principal's `coordinator` alert (hansa/alert.py): the minutes before it goes out, 0 for off, up to
 # COORDINATOR_ALERT_MOST, for each case: no session hears from hansa while something it would post waits; the
 # coordinator's session waits on its window (a permission dialog or a question) with something posted to it; a task
-# posted to it waits for review while it is idle
-COORDINATOR_ALERT = {"no_session_min": 10, "window_min": 10, "review_min": 120}
+# posted to it waits for review while it is idle; API errors keep ending its turns (notify.Turns)
+COORDINATOR_ALERT = {"no_session_min": 10, "window_min": 10, "review_min": 120, "turn_min": 30}
 COORDINATOR_ALERT_MOST = 1440
 COORDINATOR_ALERT_WHAT = {"no_session_min": "the minutes before an alert that no session hears from hansa",
                           "window_min": "the minutes before an alert that the coordinator's session waits on its "
                                         "window",
                           "review_min": "the minutes before an alert that a task waits for review while the "
-                                        "coordinator's session is idle"}
+                                        "coordinator's session is idle",
+                          "turn_min": "the minutes before an alert that API errors keep ending the coordinator's "
+                                      "turns"}
 
 
 def default_settings() -> dict:

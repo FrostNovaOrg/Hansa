@@ -26,8 +26,11 @@ The `coordinator` alert has three cases, each after the minutes the principal se
                          question) window_min after something was posted to it: once per stretch of waiting
     work sits untouched  a task posted to the session has waited review_min for review, and the session is `idle` at
                          a lookup after that: once for that task; hansa does not post it again
-The follower watches its inbox's refusals and the last two (notify.Watch), and asks the desk to queue them
-(from_follower).
+    its turns fail       API errors keep ending the session's turns (its Stop and StopFailure hooks' record): after
+                         turn_min, or at once for one only the principal can cure (case `turn`, urgent); once a turn
+                         ends normally after that alert, case `turn_ok` (passive)
+The follower watches its inbox's refusals and the last three (notify.Watch, notify.Turns), and asks the desk to queue
+them (from_follower).
 
 Alerts are queued in .hansa/alerts.json (any hansa process may queue one) and sent by hansa serve's alert thread:
 as the desk's account, outside the sandbox, in a folder of its own under the desk's secrets/alert-runs (run_dir),
@@ -627,7 +630,8 @@ def session_minutes(s: dict) -> dict:
     mins = coordinator_alert_settings(s)
     on = bool(command(s))
     return {"no_session": mins["no_session_min"] if on else 0,
-            "window": mins["window_min"] if on else 0, "review": mins["review_min"] if on else 0}
+            "window": mins["window_min"] if on else 0, "review": mins["review_min"] if on else 0,
+            "turn": mins["turn_min"] if on else 0}
 
 
 def reviews_file(desk: Desk) -> Path:
@@ -688,9 +692,42 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
             desk.state_dir.mkdir(exist_ok=True)
             write_json(reviews_file(desk), told)
         return "queued" if queued else ""
+    elif req.get("case") == "turn":
+        text, text_zh = turn_text(req, who, who_zh, t)
+    elif req.get("case") == "turn_ok":
+        since = req["since"] if _at(req.get("since")) else t
+        at = req["at"] if _at(req.get("at")) else t
+        text = (f"the coordinator's session {who} works again: a turn ended normally at "
+                f"{time.strftime('%H:%M', time.localtime(at))}, after API errors since "
+                f"{time.strftime('%H:%M', time.localtime(since))}")
+        text_zh = (f"协调员的会话 {who_zh} 恢复工作：{time.strftime('%H:%M', time.localtime(at))} 有一轮正常结束，"
+                   f"此前自 {time.strftime('%H:%M', time.localtime(since))} 起 API 一直出错")
+        return "queued" if add(desk, "coordinator", text, zh=text_zh, level="passive") else ""
     else:
         return ""
     return "queued" if add(desk, "coordinator", text, zh=text_zh) else ""
+
+
+TURN_ADVICE = {  # what the principal may do, by the error (up.TURN_ERRORS) that keeps ending the coordinator's turns
+    "rate_limit": ("a usage limit may only reset hours later", "用量上限可能要几个小时后才重置"),
+    "invalid_request": ("the session's context may have gone wrong: /compact or /clear in that session may cure it",
+                        "会话的上下文可能出了问题：在那个会话里 /compact 或 /clear 也许能解决"),
+    "authentication_failed": ("log in again in that session", "请在那个会话里重新登录"),
+}
+
+
+def turn_text(req: dict, who: str, who_zh: str, t: float) -> tuple:
+    """The `turn` case's alert (notify.Turns), (English, Chinese): the error, since when, how many things wait."""
+    since = req["since"] if _at(req.get("since")) else t
+    count = req["count"] if isinstance(req.get("count"), int) and not isinstance(req.get("count"), bool) else 0
+    error = str(req.get("error") or "unknown")[:40]
+    at = time.strftime("%H:%M", time.localtime(since))
+    en, zh = TURN_ADVICE.get(error, ("", ""))
+    text = (f"the coordinator's session {who} cannot work: its turns end with an API error ({error}) since {at} "
+            f"({_mins(t - since)} min) · {count} thing(s) hansa posted to it wait unhandled" + (f" · {en}" if en else ""))
+    text_zh = (f"协调员的会话 {who_zh} 无法工作：自 {at} 起（{_mins(t - since)} 分钟）轮次一直以 API 错误（{error}）结束 · "
+               f"hansa 发去的 {count} 件事尚未处理" + (f" · {zh}" if zh else ""))
+    return text, text_zh
 
 
 def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
