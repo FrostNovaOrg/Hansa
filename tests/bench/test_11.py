@@ -249,6 +249,18 @@ class BenchSelftestTest(unittest.TestCase):
                     exec(selftest.DHCP, {})
                     self.assertEqual(json.loads(output.getvalue()), dict(renewed='passed'))
 
+    def test_dhcp_waits_for_a_removed_lease(self):
+        folder = self.desk.root / 'leases'; folder.mkdir()
+        lease = folder / '2'; lease.write_text('ADDRESS=192.0.2.15'); os.utime(lease, ns=(1, 1))
+        def networkctl(command, **kwargs):
+            self.assertEqual(command, ['networkctl', 'reconfigure', '2'])
+            lease.unlink()
+        with patch('pathlib.Path', return_value=folder), patch('subprocess.run', side_effect=networkctl), \
+                patch('time.sleep', side_effect=lambda _: lease.write_text('ADDRESS=192.0.2.15')), \
+                patch('time.monotonic', side_effect=range(0, 150, 30)), contextlib.redirect_stdout(io.StringIO()) as output:
+            exec(selftest.DHCP, {})
+        self.assertEqual(json.loads(output.getvalue()), dict(renewed='passed'))
+
     def test_failed_and_incomplete_results_keep_bounded_redacted_evidence(self):
         self.command('build')
         secret = 'fixture-private-"provider-key'
