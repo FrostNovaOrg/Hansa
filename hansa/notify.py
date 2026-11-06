@@ -575,7 +575,7 @@ def handle(desk: Desk, req: dict) -> dict:
         out = {"pos": pos, "items": items, **_server(desk), "srt_ran": _srt_ran(desk)}
         if req.get("minutes"):  # what the follower watches its session for (Watch, Turns); it asks once a minute
             from .alert import chinese, session_minutes
-            out["coordinator_alert"] = session_minutes(desk.settings())
+            out["coordinator_alert"] = session_minutes(desk)
             out["turns"], out["alert_zh"] = turns_of(desk, (me.get("session") or {}).get("pid")), chinese(desk)
         if isinstance(req.get("review"), list):  # of the tasks it posted waiting for review, those that still do
             out["review"] = [x for x in req["review"] if waits_review(desk, x)]
@@ -1231,7 +1231,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                     r = ask({"op": "alert", "me": me, "case": case, **fields})
                     _say(f"the principal's coordinator alert ({case}) " + (
                         "is queued" if r.get("queued") else "went already: another follower alerted of this task"
-                        if r.get("told") else "was not queued: no alert command is set"))
+                        if r.get("told") else "was not queued: no alert channel is set up"))
                 except Exception as e:  # noqa: BLE001 - told is told: no retry, as for any alert
                     _say(f"could not queue the principal's coordinator alert ({case}): {e}")
             me["coordinator"] = watch.holds(time.time(), minutes, me["last_post"], bool(pending or summary))

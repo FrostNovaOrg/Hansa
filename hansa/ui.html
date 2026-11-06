@@ -611,11 +611,11 @@ const T = ZH ? {
   releaseMailboxes:"新增行中的邮箱必须使用保留示例域名或列入允许名单（合并和发布时检查；默认关闭）",
   releaseMailboxAllow:"邮箱允许名单（每行一项，忽略大小写）：完整邮箱地址允许该地址；@域名允许该域名及其子域名",
   f_release:"发布命令",
-  alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调员叫停了发布、协调员向你提了请求、hansa serve 很久没跑完一轮、hansa 发给协调员会话的消息到不了它）由 hansa 运行，以这台机器的账号在沙箱外、在工作台 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，级别在 HANSA_ALERT_LEVEL，正文（按保存的提醒语言，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；20 秒内产生的提醒合并处理，只运行一次提醒命令（空＝不提醒）。协调员不能设置它，也不发提醒",
+  alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调员叫停了发布、协调员向你提了请求、hansa serve 很久没跑完一轮、hansa 发给协调员会话的消息到不了它）由 hansa 运行，以这台机器的账号在沙箱外、在工作台 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，级别在 HANSA_ALERT_LEVEL，正文（按保存的提醒语言，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；20 秒内产生的提醒合并处理，只运行一次提醒命令（空＝不运行提醒命令）。协调员不能设置它，也不发提醒",
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
   alertKeep:"提醒命令不要把提醒的文字留在协调员能读到的地方（文件、日志或聊天记录）：其中的一次性码能批准发布。",
   alertOutside:"这个文件在工作台的 secrets/ 外，协调员可以修改它，一次性发布码会经过它；请把它放在 secrets/ 下。",
-  alertCoordinatorNote:"种类 coordinator：hansa 发给协调员会话的消息到不了它时提醒你：没有会话接收 hansa 消息，要发的消息等了这么久（hansa serve 提醒一次，有会话再次接收后才会再提醒）；会话停在权限对话框或问题上，发给它的消息未得到处理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，hansa 不再发给它）。0 到 1440 的整数分钟，0＝不提醒这一种；没有提醒命令时一种也不提醒。协调员不能改",
+  alertCoordinatorNote:"种类 coordinator：hansa 发给协调员会话的消息到不了它时提醒你：没有会话接收 hansa 消息，要发的消息等了这么久（hansa serve 提醒一次，有会话再次接收后才会再提醒）；会话停在权限对话框或问题上，发给它的消息未得到处理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，hansa 不再发给它）。0 到 1440 的整数分钟，0＝不提醒这一种；没有可用的提醒渠道时一种也不提醒。协调员不能改",
   laneTargets:"发布目标：基础分支发出去的各种方式，每个发布目标有自己的命令、时限（分钟）和必须先发布的发布目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 发布目标会在该提交的独立副本中运行，不占用仓库",
   laneMergeCheck:"合并检查所用的命令：合并前由 hansa 在把这件任务并上基础分支后跑，代替检查；每件改了东西的任务合并前都跑，任务做完后不跑（空＝合并检查运行工作线检查）", mergeTimeout:"合并检查最长分钟数（空＝同每件任务最长分钟数）", f_merge_check:"合并检查"
 } : {
@@ -766,11 +766,11 @@ const T = ZH ? {
   releaseMailboxes:"Require reserved example domains or allowlisted mailboxes in added lines (checked at merges and releases; off by default)",
   releaseMailboxAllow:"Mailbox allowlist (one entry per line, ignoring case): a full address allows that address; @domain allows the domain and its subdomains",
   f_release:"release",
-  alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time, what hansa posts to the coordinator's session cannot reach it), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND and its level in HANSA_ALERT_LEVEL, the text (in the saved alert language, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
+  alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time, what hansa posts to the coordinator's session cannot reach it), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND and its level in HANSA_ALERT_LEVEL, the text (in the saved alert language, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alert command). The coordinator cannot set it and sends no alerts",
   alertSavedAt:t => `saved on this page ${t}`, alertTest:"Send a test alert", alertTesting:"sending…", alertTestOk:"test alert sent", alertTestBad:"test alert failed: ",
   alertKeep:"Your alert command must not keep the alert's text anywhere the coordinator can read it (a file, a log, a chat history): the one-time code in it approves a release.",
   alertOutside:"This file is outside the desk's secrets/: the coordinator can change it, and one-time release codes pass through it; keep it under secrets/.",
-  alertCoordinatorNote:"Alerts of kind coordinator, when what hansa posts to the coordinator's session cannot reach it: no session hears from hansa while what it would post waits this long (hansa serve alerts once, and again only after a session has heard from hansa since); the session waits on a permission dialog or a question with what was posted to it unanswered (once per stretch of waiting); a task posted to it has waited for review this long while the session is idle (once per task; hansa does not post it again). Whole minutes from 0 to 1440; 0 turns that one off; with no alert command, none goes out. The coordinator cannot change them",
+  alertCoordinatorNote:"Alerts of kind coordinator, when what hansa posts to the coordinator's session cannot reach it: no session hears from hansa while what it would post waits this long (hansa serve alerts once, and again only after a session has heard from hansa since); the session waits on a permission dialog or a question with what was posted to it unanswered (once per stretch of waiting); a task posted to it has waited for review this long while the session is idle (once per task; hansa does not post it again). Whole minutes from 0 to 1440; 0 turns that one off; with no alert channel set up, none goes out. The coordinator cannot change them",
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
@@ -797,7 +797,7 @@ Object.assign(T, ZH ? {
   directPolicy:"直接提交的点头规则", contentRules:"发布内容检查", forbiddenWords:"禁止发布的字眼",
   forbiddenHint:"每行一个词、短语或 re:Python 正则表达式，每项最多 200 字符；只在一行之内匹配，只查 UTF-8 文字。", exceptionsTitle:"按工作线豁免", mailboxTitle:"检查新增行中的邮箱",
   mailboxAllowTitle:"邮箱允许名单", mailboxHint:"每行一个完整邮箱地址，或 @域名。", alertCommandTitle:"提醒命令", alertLanguage:"提醒语言",
-  alertCommandHint:"留空时不发送提醒。测试按钮使用已保存的命令。", alertTiming:"何时提醒你",
+  alertCommandHint:"留空时不运行提醒命令。测试按钮用已保存的设置，经每个已设置的渠道（提醒命令、Bark）发送。", alertTiming:"何时提醒你",
   barkTitle:"Bark（iPhone 推送）", barkOn:"打开 Bark", barkServer:"服务器",
   barkServerHint:"留空＝https://api.day.app（Bark 的公共服务器）。自己的服务器须以 https:// 开头。",
   barkKey:"设备密钥", barkKeySaved:"已保存", barkKeyNone:"未保存", barkKeyPlaceholder:"粘贴 Bark 里的密钥",
@@ -807,12 +807,12 @@ Object.assign(T, ZH ? {
   barkTest:"发一条测试推送", barkTesting:"发送中…", barkSent:"已发出", barkTestBad:"测试推送没有发出：",
   barkTestHint:"测试使用已保存的密钥和服务器：先保存设置，再按测试。",
   barkLast:(what, t) => `上次推送：${what}（${t}）`, barkLastNone:"还没有推送过。",
-  barkLater:"hansa 目前还不会自动把提醒推送到 Bark，只有“测试”会发送；提醒仍由上面的提醒命令发出。",
+  barkLater:"Bark 打开并保存了密钥后，hansa 会把每条提醒推送到 Bark，同时也交给上面的提醒命令（如果设置了）。",
   barkHelpTitle:"如何设置 Bark",
   barkSteps:["在 iPhone 的 App Store 安装 Bark，然后打开它。",
     "Bark 会显示一个示例地址，例如 https://api.day.app/AbCd1234Ef/推送内容。复制其中的密钥：紧跟在服务器地址后面的那一段（这里是 AbCd1234Ef），不要带斜杠。",
     "粘贴到这里的“设备密钥”，打开 Bark，保存设置，然后按“发一条测试推送”。"],
-  barkPrivacy:"发到公共服务器的推送，那台服务器能读到内容（苹果的推送服务也能）。介意的话，请用自己的 Bark 服务器。",
+  barkPrivacy:"发到公共服务器的推送（工作台名称和提醒正文），那台服务器能读到内容（苹果的推送服务也能）。介意的话，请用自己的 Bark 服务器。",
   barkNoCodes:"发布码从不发到 Bark：发布要在这个网页上回答。",
   barkWhy:{off:"Bark 已关闭", no_key:"没有保存设备密钥", empty:"没有要发送的内容",
     refused_url:"服务器地址不被允许（须为 https://，不带路径）", too_big:"推送太大，没有发送",
@@ -844,7 +844,7 @@ Object.assign(T, ZH ? {
   directPolicy:"Approval for direct commits", contentRules:"Release content checks", forbiddenWords:"Forbidden words",
   forbiddenHint:"One word, phrase or re:Python pattern per line, at most 200 characters per entry. Matches within one line, in UTF-8 text only.", exceptionsTitle:"Exceptions by lane", mailboxTitle:"Check mailboxes in added lines",
   mailboxAllowTitle:"Mailbox allowlist", mailboxHint:"One full mailbox or @domain per line.", alertCommandTitle:"Alert command", alertLanguage:"Alert language",
-  alertCommandHint:"Blank means no alerts. The test uses the saved command.", alertTiming:"When to alert",
+  alertCommandHint:"Blank means no alert command runs. The test sends through every channel set up (the alert command, Bark), with what is saved.", alertTiming:"When to alert",
   barkTitle:"Bark (iPhone push)", barkOn:"Bark on", barkServer:"Server",
   barkServerHint:"Blank = https://api.day.app (Bark's public server). A server of your own must start with https://.",
   barkKey:"Device key", barkKeySaved:"saved", barkKeyNone:"not saved", barkKeyPlaceholder:"paste the key from Bark",
@@ -854,12 +854,12 @@ Object.assign(T, ZH ? {
   barkTest:"Send a test push", barkTesting:"sending…", barkSent:"sent", barkTestBad:"the test push was not sent: ",
   barkTestHint:"The test uses the saved key and server: save settings first, then press Test.",
   barkLast:(what, t) => `Last push: ${what} (${t})`, barkLastNone:"No push yet.",
-  barkLater:"hansa does not yet send alerts to Bark by itself: only Test sends. Alerts still go out through the alert command above.",
+  barkLater:"While Bark is on with a saved key, hansa sends every alert to Bark, as well as to the alert command above when one is set.",
   barkHelpTitle:"How to set up Bark",
   barkSteps:["Install Bark from the App Store on your iPhone, and open it.",
     "Bark shows an example address, such as https://api.day.app/AbCd1234Ef/your-text. Copy the key: the part right after the server's address (here AbCd1234Ef), without the slashes.",
     "Paste it here under Device key, switch Bark on, save settings, then press Send a test push."],
-  barkPrivacy:"A push sent to the public server can be read by that server (and by Apple's push service). If that matters, use a Bark server of your own.",
+  barkPrivacy:"A push sent to the public server (the desk name and the alert's text) can be read by that server (and by Apple's push service). If that matters, use a Bark server of your own.",
   barkNoCodes:"Release codes never go to Bark: releases are answered on this page.",
   barkWhy:{off:"Bark is off", no_key:"no device key is saved", empty:"there was nothing to send",
     refused_url:"the server address is not allowed (it must be https://, with no path)", too_big:"the push was too big to send",
@@ -1823,7 +1823,7 @@ function settingsDirty() {
     || Object.values(KEY_DRAFTS).some(value => value !== "") || !!newProviderName || !!newPriceName || barkDraftDirty());
 }
 function refreshSettingsState() {
-  const dirty = settingsDirty(), pendingKeys = Object.values(KEY_DRAFTS).some(Boolean);
+  const dirty = settingsDirty(), pendingKeys = Object.values(KEY_DRAFTS).some(Boolean) || barkDraftDirty();
   const pending = settingsPending === "reload" ? T.reloading : settingsPending === "key" ? T.keySaving : T.saving;
   const tone = settingsSaving ? "pending" : settingsProblems.length ? "error" : dirty ? "dirty" : settingsMessage ? "success" : "idle";
   const symbol = {pending:"pending", error:"error", dirty:"edit", success:"check", idle:"check"}[tone];
@@ -2179,7 +2179,7 @@ function alertSection() {
   const test = h("button", {onclick: async () => { test.disabled = true; said.textContent = T.alertTesting; said.className = "muted";
     try { const r = await api("/api/alert/test", {});
       said.textContent = r.ok ? T.alertTestOk : T.alertTestBad + ((r.problems || []).join("; ")
-        || (r.timed_out ? "timeout" : `exit ${r.exit}`) + ((r.tail || []).length ? ": " + r.tail.join(" | ") : r.withheld ? ": " + r.withheld : ""));
+        || (r.why || (r.timed_out ? "timeout" : `exit ${r.exit}`)) + ((r.tail || []).length ? ": " + r.tail.join(" | ") : r.withheld ? ": " + r.withheld : ""));
       said.className = r.ok ? "ok" : "bad"; } catch (e) { err(e); }
     test.disabled = false; }}, T.alertTest);
   S.coordinator_alert = S.coordinator_alert || {};

@@ -219,7 +219,7 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   asking. While the desk is paused only a release they said yes to runs.
 - They answer on the page, or in the conversation with the one-time code their alert carries (6
   characters, right after the desk's name: `release #1 (lane a, target staging) · code K7P3QX: ...`).
-  hansa makes it only when the alert runs, while that request still waits; queued alerts hold no code.
+  hansa makes it only when the alert command gets the batch, while that request still waits; queued alerts hold no code.
   A plain yes does not count: ask for the code or page. Pass it with `hansa
   release yes ID CODE` (or `no ID CODE [reason]`). The code is one word (dashes allowed, no spaces):
   pass `K7P 3QX` as `K7P3QX`: that is not guessing. A yes with a word too many is refused, and
@@ -228,11 +228,11 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
 - If the base branch, the command, or a file the command runs outside the repository changed since
   the principal saw it, the release is void and says why: ask again. hansa tells you their answer
   and its end; `hansa release` lists them.
-- hansa runs the principal's alert command; the coordinator does not send alerts. `coordinator`
+- hansa sends each gathered batch to the principal's alert command and/or Bark, side by side when both are set up;
+  the coordinator does not send alerts. Bark never receives release codes. `coordinator`
   alerts say your session has not heard hansa, waits on a dialog, or leaves a finished task waiting
   for review; when they mention it, run `hansa status`. Bark's settings and key are also the
-  principal's, set and tested on the page (Settings, Alerts); hansa does not yet send alerts to
-  Bark automatically. More: `hansa help alerts`.
+  principal's, set and tested on the page (Settings, Alerts). More: `hansa help alerts`.
 
 ## Hearing from hansa
 hansa serve repairs recent saved task ends missing from the event log when it starts, even after a
@@ -377,7 +377,7 @@ loads nothing.
 | `release-flow` | targets, ticks, codes, `--fixed`, stopping |
 | `forbidden-words` | the word scan |
 | `release-files` | files a release runs unsandboxed |
-| `alerts` | the principal's alert command |
+| `alerts` | the principal's alert command and Bark |
 | `time-limits` | a run's limits, its report, background work |
 | `provider-limits` | dropped connections, usage limits |
 | `check-output` | a check's output |

@@ -3247,6 +3247,7 @@ def release_last(desk: Desk) -> dict:
 def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
     from .run import credit_text
+    from . import alert_bark
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
     mailbox_key = ""

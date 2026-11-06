@@ -58,7 +58,7 @@ TOPICS = {
                         "forbidden words, at a release, a merge and a title"),
     "release-files": ("releases.md", "Files a release runs outside the sandbox", "release_files: the files a "
                       "release runs outside the sandbox, and the verification a change to one needs"),
-    "alerts": ("releases.md", "Alerts", "the principal's alert command: what it is told, and when"),
+    "alerts": ("releases.md", "Alerts", "the principal's alert command and Bark: what they receive, and when"),
     "time-limits": ("tasks.md", "Time limits, and work left running in the background", "a task's limits of turns "
                     "and minutes, and work a worker leaves running in the background"),
     "provider-limits": ("tasks.md", "Dropped connections and usage limits", "retries after a dropped connection, "
@@ -1630,7 +1630,7 @@ def cmd_serve(a):
     write_text(desk.state_dir / "web-host", a.host)  # with it, where hansa status says the page is
     beat(desk)  # its rounds count from now, not from the last server's
     pulse(desk)
-    alert.start_thread(desk)  # the principal's alert command, run from here only (hansa/alert.py)
+    alert.start_thread(desk)  # the principal's alert channels, sent from here only (hansa/alert.py)
     desk.event("server_started", port=port)
     print(f"hansa serve: desk {desk.root}; web page on {a.host}:{port}{port_note} "
           "(run `hansa web` for the address)", flush=True)
