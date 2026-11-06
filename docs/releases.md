@@ -96,7 +96,7 @@ recorded as the principal's answer given through the coordinator (channel
 `code`); three wrong codes void it, and it lapses when the release is
 answered, stopped or no longer what was asked, after 24 hours, or when a new
 alert for the release brings a new one. With no alert command there is no
-code, even with Bark on: the page alone answers. The principal's alert command must not keep the alert's
+code, even with push addresses on: the page alone answers. The principal's alert command must not keep the alert's
 text anywhere the coordinator can read it (a file, a log, a chat history):
 the code in it approves a release. No lane may be named `yes` or `no`, as
 those words begin the answer. hansa serve runs the
@@ -499,25 +499,27 @@ saving is still allowed.
 
 ## Alerts
 
-Alerts reach the principal away from the page through Bark on an iPhone, an
-alert command, or both. To set up Bark, open **Settings → Alerts → Bark** on the
-page. Copy the device key from the Bark app (the part of its example address
-right after the server's address), paste it into **Device key**, switch **Bark on**,
-keep the default `https://api.day.app` or enter your own HTTPS server, then
-**Save settings** (the key is saved with them) and press **Send a test push**.
-Left blank, the key field keeps the saved key; **Remove key** removes it and
-switches Bark off at the next save. The page shows only whether a key is saved.
-Only the principal can save the settings and key, which stays under `secrets/`.
-The desk's name and alert texts leave this machine for the Bark server and
-Apple's push service; both can read them. One-time release codes never go to
-Bark. Answer its waiting releases on the page; only an alert command receives
-codes, and Bark alone makes no code.
+Alerts reach phones and chats through push addresses, alongside the principal's
+alert command. Set them up on the page, Settings, Alerts. Bark is the first
+service: paste the whole address on the Bark app's home screen. Hansa retains
+its server and device key and drops example text after the key. A bare key uses
+`https://api.day.app`; choose Bark explicitly for a self-hosted server because
+other services' addresses look alike. Only the principal changes addresses.
+Each address (and an extra signing secret or access token when needed) is kept
+in a separate 0600 secret file under the desk's 0700 `secrets/` folder. Metadata
+alone enters settings; history records changes without credentials. The page
+and status show secret parts hidden.
 
-Each gathered batch goes to every channel that is set up. Bark needs its switch
-on and a saved key; a command needs a nonblank command line. With both, the sends
-run side by side with independent deadlines and results. A slow or failed
-channel does not delay the other's send, change its result, or send it a failure
-notice. With neither, nothing is queued.
+The desk's name and alert texts leave this machine for each address's service
+and, for phone apps, on to Apple's or Google's push service. Those services can
+read them. One-time release codes never go to push addresses. Answer their
+waiting releases on the page; only the alert command receives codes, and with
+only push addresses no code is made.
+
+Each gathered batch goes to every enabled entry with an address. A command
+needs a nonblank command line. Sends run side by side with independent deadlines
+and results. A slow or failed entry does not delay another's send, change its
+result, or send it a failure notice. With neither, nothing is queued.
 
 The principal may also set one
 alert command line on the page (Settings, Alerts), such as a script that
@@ -590,13 +592,12 @@ run when the hour frees a run, with a line saying how many were held back
 code and last lines (none for an alert that held a release's one-time code:
 then only how it ended is kept); the command is never retried: the next alert tries again.
 Bark has a separate 30-second deadline including its transport's at most three
-tries; the batch never retries it. `hansa status` also shows Bark's last result,
+tries; the batch never retries it. `hansa status` shows each push entry's last result,
 `sent` or the reason it could not send. A failed push records `alert_failed` with
-`channel: "bark"` and its reason. Neither channel carries the other's failure.
+`channel: "push"`, the entry's `id`, `service` and reason, never its address. Neither channel carries the other's failure.
 The page has a button that sends a test alert through every channel that is set
 up; no coordinator command sends one.
-`hansa explain` says which channels are set up: the alert command (and what it is) and Bark (on, with a key or
-not).
+`hansa explain` says which channels are set up: the alert command (and what it is) and each named push address (service, hidden address and on/off).
 
 The `coordinator` alert says that what hansa posts to the coordinator's session (see [hearing from
 hansa](desk.md#hearing-from-hansa)) cannot reach it. Its text names the desk, the session (its pid, and its name
@@ -625,7 +626,7 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   hansa does not post it again.
 - **Its turns fail** (30 minutes, `turn_min`): API errors keep ending the session's turns (case `turn`).
   Errors only the principal can fix alert at once. After an alert, a normal turn
-  sends one quiet recovery notice (case `turn_ok`, passive). This also works with Bark alone.
+  sends one quiet recovery notice (case `turn_ok`, passive). This also works with push addresses alone.
   Before that, hansa tries to get the session going again: when an API error ends a turn hansa started, the
   follower posts again what it posted to the session that a normal turn has not handled yet, headed `Your last
   turn ended with an API error (ERROR) at HH:MM`, once the session is seen idle after the failure. At most three
@@ -655,90 +656,82 @@ third. It looks nothing up in an idle round with nothing waiting, nor while no a
 alerted stays alerted when it restarts on new code. `hansa status` shows a line while a case holds, such as
 `the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`.
 
-### Bark channel
+### Push addresses and services
 
-`hansa.alert_bark` supplies a built-in channel for the principal's Bark iPhone
-app. `hansa serve` delivers each gathered batch to it while Bark is on with a
-key, beside the alert command, which alone still gets release codes. No
-coordinator command sets or tests Bark.
+`alert_push` is a list of at most ten `{id, service, on, name?}` entries.
+IDs are stable, unique lowercase letters/digits, hyphens or underscores (up to
+64 characters). Addresses are stored atomically in
+`secrets/alert-push-ID.address`; an optional extra secret goes in
+`secrets/alert-push-ID.secret`, both mode 0600 under 0700 `secrets/`.
+`Desk.keys` includes whole addresses and service-defined secret parts for
+redaction and refusal of a task's change that contains them. Saving scrubs them
+from files covered by `Desk.scrub`; the append-only event log is not rewritten.
+Settings history records secret changes with values withheld.
 
-#### On the page
+On first access an old `alert_bark` setting and
+`secrets/alert-bark.device-key` become the first Bark entry, preserving its
+server, key and on/off choice. Its previous last result moves too. The old
+setting, key file and result file are removed; settings history says that hansa
+moved them. Without a key, no entry is created. This is the sole automatic
+address change; otherwise only the principal's save changes addresses.
 
-Settings, Alerts has a Bark block below the alert command: a switch, the server
-(blank means `https://api.day.app`), the device key in a password field, Send a
-test push, and the last push's result and time. Its help, in English and Chinese,
-says to install Bark from the App Store, copy the key from the example address
-Bark shows (the part right after the server's address), paste it, switch Bark
-on, save and test; that the public server can read what is pushed through it;
-and that release codes never go to Bark, since releases are answered on the page.
+The page interface, for use on the page, Settings, Alerts:
 
-- The page shows only whether a key is saved (`alert_bark_key_set` in
-  `GET /api/settings`, with `alert_bark_last`), never the key.
-- The key typed there goes with the ordinary settings save, `POST /api/settings`,
-  beside the settings as `alert_bark_key`; Remove key sends
-  `alert_bark_key_remove: true` and switches Bark off. Left blank, the saved key
-  is kept. The save is judged whole first (a stale page, any settings problem,
-  a key that does not look like one) and only then writes the settings and gives
-  the key to `save_key`/`remove_key`, so a refused save changes neither. No reply
-  holds the key.
-- Switching Bark on while no key is saved, and none comes with the save, is
-  refused with a plain message; nothing changes. The page refuses it before
-  posting, in its own language. A switch already on is not refused by an
-  unrelated save, even if the key file went missing.
-- Test (`POST /api/alert/bark-test`) calls `alert_bark.test` once with what is
-  saved and replies `{ok, why, last}`; the page puts `why` in plain words.
+- `GET /api/settings` returns metadata in `settings.alert_push`, and the public
+  entries in top-level `alert_push`: `id`, `service`, `name`, `on`, `address`
+  (hidden), `address_set`, `secret_set`, `last` (`{at, ok, why}` or null).
+  `alert_push_services` lists `{id, name: {en, zh}, hint: {en, zh}, extra_secret}`.
+- `POST /api/settings` accepts `settings`, `rev` and optional top-level
+  `alert_push_changes`, a list of edits. An add has `address`, optional
+  `service` (`"recognize"` by default), `name` and `on` (true by default).
+  An edit names an existing `id` and supplies `address` to replace it, `on`
+  to switch it, `name` to rename it, or `remove: true` to delete it and its
+  secrets and last result. `secret` replaces the optional extra secret;
+  omission preserves it, and an empty value removes it. Changing service
+  requires an address and clears the previous extra secret. The whole save
+  is validated before writing, including the revision and the ten-entry cap.
+  No reply includes submitted credentials.
+- `POST /api/alert/push-test` with `{id}` sends exactly one saved entry a test
+  batch now, even while off, without touching the queue. It returns
+  `{ok, why, last}`. No coordinator command saves or tests an address.
+- The current page uses a compatibility view of the first Bark entry:
+  `settings.alert_bark: {on, server}`, `alert_bark_key_set`, `alert_bark_last`,
+  and the save's top-level `alert_bark_key` / `alert_bark_key_remove`.
+  A key or whole Bark address is accepted. A blank key preserves the address;
+  removal deletes the entry.
+  `POST /api/alert/bark-test` tests that first Bark entry. These fields are
+  projections; the old setting and key file are never written again.
 
-Desk settings hold `alert_bark: {"on": false, "server": "https://api.day.app"}`.
-Only the principal (`Desk.save_settings(..., by="page")`) changes these. An older
-page that omits the setting preserves it; an omitted server uses the default.
-A private Bark server may replace the
-default; it must be HTTPS, without userinfo, query, fragment or a path except
-an optional `/`. Invalid saves write nothing. This prevents a pasted device URL
-or credential from becoming a stored destination; retain this rule while the
-principal can set a server address. Sending adds `/push`.
+`hansa.alert_services.SERVICES` holds service definitions. A definition supplies
+its id, English/Chinese names and paste hints, whether it takes an extra secret,
+address recognition and normalization, secret-part extraction and masking,
+byte limit, level mapping, deadline, and a builder of HTTPS requests for a
+code-free batch. Adding a service means adding its definition to the registry
+and its tests. Requests pass through `alert_http.send`; response-body checks
+are left to a later transport change. Other services are not implemented yet.
 
-The channel functions are:
+Bark recognizes `api.day.app` and bare device keys automatically. A different
+host requires the explicit `bark` service. Its HTTPS address must have a key as
+the first path component; later example text is discarded. HTTP, userinfo,
+queries, fragments, backslashes, spaces and controls are refused before saving
+or sending. Keep these checks while principals can paste addresses: URL parsers
+can silently discard controls or redirect credentials to a different host.
 
-- `save_key(desk, value, by="page")`: create or replace the device key; an empty
-  value removes it. `remove_key(desk, by="page")` removes it explicitly. Other
-  callers are refused before writing. Both record only that the key changed in
-  settings history. They expose no key reader.
-- `has_key(desk)`: key presence without returning its value. The key is in
-  `secrets/alert-bark.device-key`, atomically replaced with mode 0600 under the
-  0700 `secrets/` folder. Its distinct filename cannot collide with a provider's
-  key. It is included in `Desk.redact()` and the shared secret checks.
-- `send(desk, items, held=0)`: send one gathered queue batch, before the command
-  adds codes. It uses the saved alert language and queued code-free wording;
-  releases ask for an answer on the page. Even a batch already given codes uses
-  its queued translations, falling back to a code-free page instruction when
-  those are absent. This safeguard must remain while command batches can hold
-  release credentials.
-- `test(desk)`: send a test in the saved alert language using the saved key and
-  server, even while the channel is off; leave the alert queue alone.
-- `last_result(desk)`: the last attempt's `{at, ok, why}`, or `None` before any
-  attempt, stored in `.hansa/alert-bark-last.json`.
+Bark sends one JSON POST to the origin's `/push` with `device_key`. The title
+and group are the desk name and the body is alert text without the command's
+header or codes. Passive maps to `passive`, active to `active`, urgent to
+`timeSensitive`; `critical` is never sent. The command formatter's character
+cap applies, then the entire UTF-8 JSON is limited to 3,500 bytes including
+escapes and the key. Only the body may be shortened, at a character boundary
+with `…`. Fixed fields that cannot fit give `too_big` without a request.
+Keep this bound while Bark and Apple's push service add their own envelope.
+Bark does not implement encryption against its server or Apple's service.
 
-One batch makes one JSON POST: the title and group are the desk name from the
-alert header, and the body is the alert text with that header removed. The highest
-level maps passive to `passive`, active to `active`, urgent to `timeSensitive`;
-`critical` is never sent. The existing alert formatter's character cap applies,
-then a byte limit counts the entire JSON encoding, including the key and JSON
-escapes. If necessary the body is cut at a character boundary and ends in `…`,
-so the full UTF-8 JSON stays at most 3,500 bytes. Fixed fields are never cut; if
-they cannot fit, the result is `too_big` without a request. Retain this bound
-while Bark and Apple's push service add their own envelope.
-
-Send and test use `alert_http.send(..., deadline_s=30)` and return only a category.
-Each attempt records `alert_channel` with `channel: "bark"`, `ok` and `why`, and
-updates the last result. Failure also records `alert_failed` with that channel
-and reason. Local outcomes are `off`, `no_key`, `empty`,
-`refused_url` and `too_big`; otherwise the category is the transport's result.
-`hansa status` and its JSON/page API expose `alert_bark: {on, key_set, last}`;
-the command shows key presence and the last category, without the key or server.
-Keys never enter settings, history values, status, events or page replies.
-
-A Bark key addresses one device. This channel does not implement Bark encryption:
-the configured Bark server and Apple's push service can read the push text.
+Each entry has `.hansa/alert-push-ID-last.json` with `{at, ok, why}`.
+Each attempt records `alert_channel` with `channel: "push"`, `id`, `service`,
+`ok`, `why`; failure also records `alert_failed` with the id, service and
+reason. No address, request or exception text is logged. `hansa status` shows
+one line per entry with service, hidden address, on/off and last result.
 
 ### HTTPS transport
 

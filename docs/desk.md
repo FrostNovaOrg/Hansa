@@ -589,27 +589,35 @@ saved, it stays unset and the page still prefills it from its own language. This
 keeps an older page or a request for another setting from changing alert language.
 A saved language change also applies to alerts still gathering.
 
-To receive alerts on an iPhone, install Bark and copy its device key (not the
-whole device URL). On this page, in **Settings → Alerts → Bark**, paste it into
-**Device key**, switch **Bark on**, keep `https://api.day.app` or enter your own
-HTTPS Bark server, then **Save settings**: the key goes with that save, and
-**Send a test push** sends one push through Bark alone and shows its result.
-Left blank, the key field keeps the saved key; **Remove key** removes it and
-switches Bark off at the next save. Switching Bark on with no key is refused.
-The page shows only whether a key is saved; its value stays in the desk's
-`secrets/`. Only the principal can change these settings or the key.
-The test-alert button sends through every channel that is set up.
+Push addresses send alerts to phones and chats through push apps such as Bark.
+Set them up on the page, Settings, Alerts. There may be up to ten entries, each
+with a service, an on/off switch and an optional name. For Bark, paste the whole
+address on the app's home screen, such as `https://api.day.app/KEY/示例文字`:
+hansa keeps the server and key and drops the example text. A bare key uses
+`https://api.day.app`; a self-hosted address needs Bark chosen explicitly,
+since other services' addresses can look alike. Only Bark is available today.
 
-Bark works with the alert command left blank. With both set up, each gathered
-batch goes to both at the same time, with separate results and 30-second limits.
-A slow or failed channel does not delay the other's send or send a failure notice
-through it. Gathering for 20 seconds, one run at a time and at most 20 runs an
-hour apply to the batch. `hansa status` shows Bark's last result beside the alert
-command's failure, if any. One-time release codes go only to the alert command,
-never to Bark; answer Bark's waiting releases on the page.
-The desk's name and the alert texts leave this machine for the Bark server and
-Apple's push service. Both can read them; this channel does not encrypt the text
-against those services.
+Only the principal's page save adds, changes or removes push addresses. Settings
+(`alert_push`) keep metadata; each address is a secret in a separate 0600 file
+under the desk's 0700 `secrets/` folder. Services needing an extra signing secret
+or access token get the same protection. Credentials never enter settings,
+history values, events, status or replies. Status and the page show a hidden
+address and each entry's last result. A saved secret is scrubbed from files hansa
+already wrote and participates in redaction and the merge check for leaked keys.
+An existing Bark setting and key move automatically to the first push entry,
+keeping the old on/off choice; the old setting and key file are removed, and
+settings history records the move. Without a saved Bark key, no entry is added.
+
+Every enabled entry with an address receives each gathered batch, even with the
+alert command blank. Sends run side by side with the command and each other,
+with separate results and deadlines (30 seconds for Bark). A slow or failed
+entry does not delay another's send or send a failure notice through it.
+Gathering for 20 seconds, one run at a time and at most 20 runs an hour apply
+to the batch. One-time release codes go only to the alert command, never to
+push addresses; answer their waiting releases on the page.
+The desk's name and alert texts leave this machine for each address's service
+and, for phone apps, on to Apple's or Google's push service. Those services
+can read them; this does not encrypt the text against those services.
 
 Sandbox alerts explain which runs are held and how they resume in the selected
 language, and keep the sandbox's raw diagnostic alongside that explanation.
@@ -1254,7 +1262,7 @@ These lines come from hansa, not from the principal, and approve nothing. A
 session whose Claude Code settings hold or refuse messages from other sessions
 (`crossSessionInbound`) does not get them; only the principal can change that.
 
-When what hansa posts cannot reach the coordinator, the principal hears of it through their alert command or Bark (kind
+When what hansa posts cannot reach the coordinator, the principal hears of it through their alert command or push addresses (kind
 `coordinator`, see [alerts](releases.md#alerts)): when no session hears from hansa while something waits for the
 coordinator (the session ended, or notifications were turned off), when the session waits on a permission dialog or
 a question with something posted to it, when a task posted to it waits for review while the session is idle, and

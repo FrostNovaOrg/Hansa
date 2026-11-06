@@ -228,10 +228,10 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
 - If the base branch, the command, or a file the command runs outside the repository changed since
   the principal saw it, the release is void and says why: ask again. hansa tells you their answer
   and its end; `hansa release` lists them.
-- hansa sends each gathered batch to the principal's alert command and/or Bark, side by side when both are set up;
-  the coordinator does not send alerts. Bark never receives release codes. `coordinator`
+- hansa sends each gathered batch to the principal's alert command and/or push addresses, side by side when set up;
+  the coordinator does not send alerts. Push addresses never receive release codes. `coordinator`
   alerts say your session has not heard hansa, waits on a dialog, or leaves a finished task waiting
-  for review; when they mention it, run `hansa status`. Bark's settings and key are also the
+  for review; when they mention it, run `hansa status`. Push addresses and their secrets are also the
   principal's, set and tested on the page (Settings, Alerts). More: `hansa help alerts`.
 
 ## Hearing from hansa
@@ -378,7 +378,7 @@ loads nothing.
 | `release-flow` | targets, ticks, codes, `--fixed`, stopping |
 | `forbidden-words` | the word scan |
 | `release-files` | files a release runs unsandboxed |
-| `alerts` | the principal's alert command and Bark |
+| `alerts` | the principal's alert command and push addresses |
 | `time-limits` | a run's limits, its report, background work |
 | `provider-limits` | dropped connections, usage limits |
 | `check-output` | a check's output |
