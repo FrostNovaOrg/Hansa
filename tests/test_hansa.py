@@ -35843,7 +35843,8 @@ else if (ask === "preferences") (async () => {
     }
     if (action.draft) {
       let input;
-      walk(ids["#tab-settings"], el => { if (el.tag === "input" && el.type === "number" && Number(el.value) === run("S.cool_minutes")) input = el; });
+      // the first: turn_min's default is the same number, further down
+      walk(ids["#tab-settings"], el => { if (!input && el.tag === "input" && el.type === "number" && Number(el.value) === run("S.cool_minutes")) input = el; });
       if (!input) throw new Error("settings field missing");
       input.value = String(action.draft); input.on.input({target:input});
     }
@@ -36911,8 +36912,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     console.log(JSON.stringify({before, options, dirty, group, posted})); return;
   }
   if (ask === "bark") {
-    // given.barkSteps, in order: {key}, {on}, {server} typed or ticked; {remove}, {save}, {test} pressed; {reply}: what
-    // the next settings save is told. Prints the Bark block's text and controls, what was posted and the page's labels.
+    // given.barkSteps, in order: {key}, {on}, {server}, {turn_min} typed or ticked; {remove}, {save}, {test} pressed;
+    // {reply}: what the next settings save is told. Prints the Bark block's text and controls, the save bar's note, the
+    // coordinator alert's turns field, what was posted and the page's labels.
     const run = code => vm.runInContext(code, ctx);
     const find = pred => { let found = null; walk(ids["#tab-settings"], el => { if (!found && pred(el)) found = el; }); return found; };
     const block = () => find(el => el.tag === "section" && el.kids[0]?.textContent === run("T.barkTitle"));
@@ -36926,8 +36928,12 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         last:inBlock(el => "data-bark-last" in el.attrs).textContent,
         help:inBlock(el => "data-bark-help" in el.attrs).textContent,
         alertsIndex:ids["#tab-settings"].textContent.indexOf(run("T.alertCommandTitle")) <
-          ids["#tab-settings"].textContent.indexOf(run("T.barkTitle"))};
+          ids["#tab-settings"].textContent.indexOf(run("T.barkTitle")),
+        saveState:run("settingsSaveState ? settingsSaveState.textContent : null"),
+        turnLabel:turnLabel()?.textContent ?? null, turnMin:turnInput()?.value ?? null};
     };
+    const turnLabel = () => find(el => el.tag === "label" && el.textContent === run("T.turnShort"));
+    const turnInput = () => turnLabel() && ids["#" + turnLabel().attrs.for];
     const before = shown();
     for (const step of given.barkSteps || []) {
       if ("reply" in step) settingsPostReply = step.reply;
@@ -36935,6 +36941,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       if ("server" in step) { const el = inBlock(el => el.tag === "input" && el.attrs.placeholder === "https://api.day.app");
         el.value = step.server; el.on.input({target:el}); }
       if ("on" in step) { const el = inBlock(el => el.attrs.id === "alert-bark-on"); el.checked = step.on; el.on.change({target:el}); }
+      if ("turn_min" in step) { const el = turnInput(); el.value = step.turn_min; el.on.input({target:el}); }
       if (step.remove) inBlock(el => "data-bark-remove" in el.attrs).on.click();
       if (step.save) await run("saveSettings()");
       if (step.test) await inBlock(el => "data-bark-test" in el.attrs).on.click();
@@ -44837,6 +44844,67 @@ else:
         self.assertIn("works again: a turn ended normally at ", alerts[1])
         self.assertEqual([x["level"] for x in alert.queued(self.desk)], ["urgent", "passive"])
 
+    def test_turns_a_failure_needing_the_principal_stops_reposts_until_an_ok_turn_with_alerts_off(self):
+        for error in notify.TURN_PRINCIPAL:
+            with self.subTest(error=error):
+                turns = self.turns_after_a_post()
+                rec = self.turn(self.T0, error=error, last_ok=self.T0 - 200)
+                self.assertEqual(self.at_minutes(turns, rec, [0.1, 1], turn_min=0), [])
+                self.assertFalse(turns.told, "turn_min 0: no alert, so only the rule stops the reposts")
+                # posted after that failure, then a failure waiting may cure, in the same stretch: still no repost
+                turns.posted_lines(self.T0 + 150, [("n", "t0002 done: Add b")])
+                rec = self.turn(self.T0 + 200, since=self.T0, fails=2)
+                self.assertEqual(self.at_minutes(turns, rec, [4, 10, 11, 30, 31, 60], turn_min=0), [])
+                self.assertEqual(turns.reposts, 0)
+                # an ok turn ends the stretch: a new one's failure waiting may cure is posted again
+                self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 3650, ok=True), [61], turn_min=0), [])
+                turns.posted_lines(self.T0 + 3660, [("m", "t0003 done: Add c")])
+                rec = self.turn(self.T0 + 3700, last_ok=self.T0 + 3650)
+                self.assertEqual(self.at_minutes(turns, rec, [62, 64], turn_min=0), [(64, "wait", [])])
+
+    def test_status_says_while_the_coordinators_turns_keep_failing_and_not_after_an_ok_turn(self):
+        from hansa import alert
+        self.coordinator_desk("turn-status", no_session_min=0, window_min=0, review_min=0, turn_min=30)
+        self.agents_say({"4242": "idle"})
+        t0 = float(int(time.time()))
+        record = self.desk.state_dir / "coordinator-turns" / "4242.json"
+        seen = {}
+
+        def write(rec):
+            record.parent.mkdir(exist_ok=True)
+            write_json(record, rec)
+
+        def look(at):
+            return lambda: seen.__setitem__(at, [x for x in alert.coordinator_lines(self.desk, self.desk.settings())
+                                                 if "API error" in x])
+        self.follow_on_a_clock(9, start=t0, at={
+            0.2: lambda: self.coordinator_task_ended("Add a"), 1: lambda: write(self.turn(t0 + 60, last_ok=t0 - 100)),
+            1.5: look("before"), 4: look("during"), 6: lambda: write(self.turn(t0 + 350, ok=True)), 8: look("after")})
+        since = time.strftime("%H:%M", time.localtime(t0 + 60))
+        [line] = seen["during"]
+        self.assertIn(f"the coordinator's session pid 4242 (desk-4242): its turns end with an API error (overloaded) "
+                      f"since {since}", line)
+        self.assertIn("hansa posted again what waits 1 time(s)", line)
+        self.assertIn("the principal is not alerted yet", line)
+        self.assertEqual(len(seen["before"]), 1)
+        self.assertIn("0 time(s)", seen["before"][0])
+        self.assertEqual(seen["after"], [], "a turn ended normally: no such line")
+        # as hansa status shows it, with the alert told, or off
+        rec = {"session": dict(self.WATCHED), "name": "desk-4242",
+               "coordinator": {"turn": {"error": "billing_error", "since": t0, "reposts": 0, "told": t0 + 5}}}
+        with unittest.mock.patch.object(notify, "live_records", return_value=[rec]):
+            text = views.status_text(views.status(self.desk))
+            self.assertIn("its turns end with an API error (billing_error) since "
+                          f"{time.strftime('%H:%M', time.localtime(t0))}", text)
+            self.assertIn("the principal was alerted at " + time.strftime("%H:%M", time.localtime(t0 + 5)), text)
+            self.assertEqual(self.page_save(lambda s: s["coordinator_alert"].update(turn_min=0)),
+                             {"ok": True, "problems": []})
+            rec["coordinator"]["turn"]["told"] = 0.0
+            self.assertIn("the principal is not alerted: turn alerts are off",
+                          views.status_text(views.status(self.desk)))
+            rec["coordinator"] = {}
+            self.assertNotIn("API error", views.status_text(views.status(self.desk)))
+
     def test_show_full_gives_claude_codes_reason_for_a_refused_call_whole(self):
         tid = self.desk.new_task("Build it")
         why = "This command reads outside the folders allowed: " + "x" * 300 + " (the end of the reason)"
@@ -46503,6 +46571,127 @@ class AlertBarkPageTest(unittest.TestCase):
         self.assertNotRegex(script, r"width:\s*\d{3,}px")
         self.assertEqual(script.count(', "", "", true)') + script.count('T.barkServerHint, "", true)')
                          + script.count('T.barkKeyHint, "", true)'), 3, "every Bark field spans the row")
+
+    def test_page_turn_min_field_saves_reloads_and_refuses_out_of_range_in_both_languages(self):
+        from hansa import alert
+        from hansa import history
+        for language, label in (("en", "Coordinator's turns failing (minutes)"), ("zh", "协调员轮次接连出错（分钟）")):
+            with self.subTest(language=language):
+                shown = self.page([{"turn_min": "45"}, {"save": True}], language)
+                self.assertEqual(shown["before"]["turnLabel"], label)
+                self.assertEqual(shown["posted"]["settings"]["coordinator_alert"]["turn_min"], 45)
+                self.assertEqual(save_from_page(self.desk, shown["posted"]), {"ok": True, "problems": []})
+                self.assertEqual(self.desk.settings()["coordinator_alert"]["turn_min"], 45)
+                self.assertEqual(alert.session_minutes(self.desk)["turn"], 0, "no alert channel set up: none")
+                self.assertEqual(str(self.page(language=language)["before"]["turnMin"]), "45")
+        hist = json.dumps(history.read(self.desk))
+        self.assertIn("turn_min", hist, "history records the page's save")
+        self.assertIn("45", hist)
+        # 0: no turn alerts, even with a channel set up (the reposts are Turns', which go on: see the Turns tests)
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "true"}))["ok"])
+        self.assertEqual(alert.session_minutes(self.desk)["turn"], 45)
+        shown = self.page([{"turn_min": "0"}, {"save": True}])
+        self.assertEqual(save_from_page(self.desk, shown["posted"]), {"ok": True, "problems": []})
+        self.assertEqual(alert.session_minutes(self.desk)["turn"], 0)
+        self.assertEqual(str(self.page()["before"]["turnMin"]), "0")
+        # out of range or not whole: refused as the other minutes are, and nothing changes
+        for bad in ("1441", "-1", "2.5"):
+            with self.subTest(bad=bad):
+                shown = self.page([{"turn_min": bad}, {"save": True}])
+                told = save_from_page(self.desk, shown["posted"])
+                self.assertFalse(told["ok"])
+                self.assertTrue(any("(turn_min) must be a whole number from 0 (off) to 1440" in p
+                                    for p in told["problems"]), told)
+                self.assertEqual(self.desk.settings()["coordinator_alert"]["turn_min"], 0)
+                other = self.page([{"save": True}])["posted"]
+                other["settings"]["coordinator_alert"]["review_min"] = float(bad) if "." in bad else int(bad)
+                self.assertTrue(any("(review_min) must be a whole number from 0 (off) to 1440" in p
+                                    for p in save_from_page(self.desk, other)["problems"]))
+
+    def test_bark_page_a_bark_key_draft_says_save_settings_saves_it_not_providers(self):
+        providers = {"en": "Save them separately under Providers", "zh": "请在模型服务商中单独保存"}
+        ordinary = {"en": "Save settings saves it", "zh": "点“保存设置”即可保存"}
+        alert_bark.save_key(self.desk, self.KEY, by="page")
+        for language in ("en", "zh"):
+            for step in ({"key": "anotherBarkKey987"}, {"remove": True}):
+                with self.subTest(language=language, step=list(step)):
+                    shown = self.page([step], language)
+                    self.assertTrue(shown["dirty"])
+                    self.assertNotIn(providers[language], shown["after"]["saveState"])
+                    self.assertIn(ordinary[language], shown["after"]["saveState"])
+        # with no draft, no note of keys at all
+        for language in ("en", "zh"):
+            got = self.page([], language)
+            self.assertNotIn(providers[language], got["before"]["saveState"])
+
+    def test_bark_page_shows_the_last_push_from_the_settings_reply(self):
+        write_json(self.desk.state_dir / "alert-bark-last.json", {"at": time.time() - 60, "ok": False,
+                                                                   "why": "timeout"})
+        code, reply, _ = self.web_request("/api/settings", headers={"Authorization": "Bearer " + self.desk.web_token()})
+        self.assertEqual(code, 200)
+        self.assertEqual(reply["alert_bark_last"]["why"], "timeout")
+        for language, words in (("en", "Last push"), ("zh", "上次推送")):
+            with self.subTest(language=language):
+                shown = self.page(language=language, extra={"/api/settings": reply})
+                self.assertIn(words, shown["before"]["last"])
+                self.assertIn(shown["labels"]["barkWhy"]["timeout"], shown["before"]["last"])
+
+    def test_saving_the_bark_key_scrubs_it_from_files_hansa_wrote(self):
+        self.desk.add_ask(f"the principal's Bark key is {self.KEY}")
+        log = self.desk.lanes_dir / "x" / "try.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(f"pasted {self.KEY} here\n")
+        loaded = public_settings(self.desk)
+        told = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"],
+                                          "alert_bark_key": self.KEY})
+        self.assertEqual(told, {"ok": True, "problems": []})
+        self.assertEqual(self.key_file().read_text().strip(), self.KEY)
+        for path in (self.desk.asks_path, log):
+            text = path.read_text()
+            self.assertNotIn(self.KEY, text)
+            self.assertIn("[key of Bark]", text)
+        self.assertIn("the principal's Bark key is [key of Bark]", json.dumps(self.desk.asks()))
+
+    def test_explain_says_which_alert_channels_are_set_up(self):
+        def explained():
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                main(["--desk", str(self.desk.root), "explain"])
+            return next(x for x in out.getvalue().splitlines() if x.startswith("Alerts:"))
+        self.assertIn("Bark is not set up", explained())
+        alert_bark.save_key(self.desk, self.KEY, by="page")
+        self.assertIn("Bark has a device key but is off", explained())
+        self.assertTrue(self.page_save(lambda s: s.update(alert_bark={"on": True, "server": "https://api.day.app"}))["ok"])
+        line = explained()
+        self.assertIn("no alert command is set", line)
+        self.assertIn("Bark is set up: alerts reach the principal's phone", line)
+        self.assertNotIn(self.KEY, line)
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "echo hi"}))["ok"])
+        line = explained()
+        self.assertIn("the principal's alert command is 'echo hi'", line)
+        self.assertIn("Bark is set up", line)
+
+    def test_alert_bark_settings_that_are_not_a_dict_read_as_bark_not_set_up(self):
+        from hansa import alert
+        out = self.tmp / "said.txt"
+        self.assertTrue(self.page_save(lambda s: s.update(
+            alert={"command": f"cat > {shlex.quote(str(out))}"}))["ok"])
+        alert_bark.save_key(self.desk, self.KEY, by="page")
+        for bad in ("on", None, ["on"], True):
+            with self.subTest(bad=bad):
+                s = json.loads(self.desk.settings_path.read_text())
+                s["alert_bark"] = bad
+                self.desk.settings_path.write_text(json.dumps(s))
+                self.assertFalse(alert.bark_ready(self.desk, self.desk.settings()))
+                self.assertTrue(alert.configured(self.desk))  # the command still is
+                self.assertIn("alert_bark", views.status(self.desk))
+                self.assertFalse(views.status(self.desk)["alert_bark"]["on"])
+                out.unlink(missing_ok=True)
+                alert.add(self.desk, "ask", f"a to-do {bad!r}")
+                result = alert.send_due(self.desk, gather=0, most_wait=0, wait=True, capped=False)
+                self.assertTrue(result and result.get("ok"), result)
+                self.assertIn(f"a to-do {bad!r}", out.read_text())
+                self.http.assert_not_called()
 
 class AlertHTTPTest(unittest.TestCase):
     """Push transport rules with fake openers, including fakes inside a real isolated child."""

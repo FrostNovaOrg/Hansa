@@ -615,7 +615,7 @@ const T = ZH ? {
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
   alertKeep:"提醒命令不要把提醒的文字留在协调员能读到的地方（文件、日志或聊天记录）：其中的一次性码能批准发布。",
   alertOutside:"这个文件在工作台的 secrets/ 外，协调员可以修改它，一次性发布码会经过它；请把它放在 secrets/ 下。",
-  alertCoordinatorNote:"种类 coordinator：hansa 发给协调员会话的消息到不了它时提醒你：没有会话接收 hansa 消息，要发的消息等了这么久（hansa serve 提醒一次，有会话再次接收后才会再提醒）；会话停在权限对话框或问题上，发给它的消息未得到处理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，hansa 不再发给它）。0 到 1440 的整数分钟，0＝不提醒这一种；没有可用的提醒渠道时一种也不提醒。协调员不能改",
+  alertCoordinatorNote:"种类 coordinator：hansa 发给协调员会话的消息到不了它时提醒你：没有会话接收 hansa 消息，要发的消息等了这么久（hansa serve 提醒一次，有会话再次接收后才会再提醒）；会话停在权限对话框或问题上，发给它的消息未得到处理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，hansa 不再发给它）；会话的轮次接连因 API 错误结束这么久（每段一次；只有你能解决的错误，如额度或账号问题，立即提醒；正常结束一轮后再提醒“恢复工作”）。设为 0 时这种情况不提醒，但 hansa 仍会把未处理的消息重发给会话（等待可能消除的错误在 2、10、30 分钟重发）。0 到 1440 的整数分钟，0＝不提醒这一种；没有可用的提醒渠道时一种也不提醒。协调员不能改",
   laneTargets:"发布目标：基础分支发出去的各种方式，每个发布目标有自己的命令、时限（分钟）和必须先发布的发布目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 发布目标会在该提交的独立副本中运行，不占用仓库",
   laneMergeCheck:"合并检查所用的命令：合并前由 hansa 在把这件任务并上基础分支后跑，代替检查；每件改了东西的任务合并前都跑，任务做完后不跑（空＝合并检查运行工作线检查）", mergeTimeout:"合并检查最长分钟数（空＝同每件任务最长分钟数）", f_merge_check:"合并检查"
 } : {
@@ -770,7 +770,7 @@ const T = ZH ? {
   alertSavedAt:t => `saved on this page ${t}`, alertTest:"Send a test alert", alertTesting:"sending…", alertTestOk:"test alert sent", alertTestBad:"test alert failed: ",
   alertKeep:"Your alert command must not keep the alert's text anywhere the coordinator can read it (a file, a log, a chat history): the one-time code in it approves a release.",
   alertOutside:"This file is outside the desk's secrets/: the coordinator can change it, and one-time release codes pass through it; keep it under secrets/.",
-  alertCoordinatorNote:"Alerts of kind coordinator, when what hansa posts to the coordinator's session cannot reach it: no session hears from hansa while what it would post waits this long (hansa serve alerts once, and again only after a session has heard from hansa since); the session waits on a permission dialog or a question with what was posted to it unanswered (once per stretch of waiting); a task posted to it has waited for review this long while the session is idle (once per task; hansa does not post it again). Whole minutes from 0 to 1440; 0 turns that one off; with no alert channel set up, none goes out. The coordinator cannot change them",
+  alertCoordinatorNote:"Alerts of kind coordinator, when what hansa posts to the coordinator's session cannot reach it: no session hears from hansa while what it would post waits this long (hansa serve alerts once, and again only after a session has heard from hansa since); the session waits on a permission dialog or a question with what was posted to it unanswered (once per stretch of waiting); a task posted to it has waited for review this long while the session is idle (once per task; hansa does not post it again); API errors keep ending the session's turns this long (once per stretch; at once for an error only you can cure, such as billing or the account, and again once a turn ends normally). At 0 that case sends no alert, but hansa still posts again what waits unhandled to the session (at 2, 10 and 30 minutes for errors that waiting may cure). Whole minutes from 0 to 1440; 0 turns that one off; with no alert channel set up, none goes out. The coordinator cannot change them",
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
@@ -788,7 +788,7 @@ Object.assign(T, ZH ? {
   alertsIntro:"设置提醒命令，以及需要通知你的等待时长。", pricesGroup:"价目",
   pricesIntro:"设置 token 单价，用于成本页估算。金额单位为美元／百万 token。",
   readOnly:"只读", learnMore:"查看完整说明", advanced:"其余各项（只读）", connection:"连接信息",
-  keySeparate:"密钥单独保存，不随“保存设置”提交。", keyPending:"有密钥尚未保存，请在模型服务商中单独保存。", keySaved:"密钥已保存。", keyCleared:"密钥已清除。",
+  keySeparate:"密钥单独保存，不随“保存设置”提交。", keyPending:"有密钥尚未保存，请在模型服务商中单独保存。", barkKeyPending:"Bark 设备密钥的修改尚未保存，点“保存设置”即可保存。", keySaved:"密钥已保存。", keyCleared:"密钥已清除。",
   invalidName:"名称只能包含小写字母、数字和连字符，且不能重复。", invalidModel:"模型名称不能为空或重复。",
   providerName:"服务商名称", priceName:"模型名称", baseModel:"模型（空＝用服务商的）",
   cooldown:"额度用完后休息（分钟）", contextTitle:"上下文压缩", compactHint:"范围 100,000–1,000,000 token。详细生效方式见说明。",
@@ -819,7 +819,7 @@ Object.assign(T, ZH ? {
     redirect:"服务器要求转到别的地址，hansa 不跟随", timeout:"服务器没有及时回应", deadline:"服务器 30 秒内没有回应",
     network:"连不上服务器", tls:"与服务器的安全连接（TLS）失败", http_429:"服务器说推送太多，请稍后再试",
     http_4xx:"服务器拒绝了推送：请检查设备密钥", http_5xx:"服务器出错，请稍后再试"},
-  noSessionShort:"没有会话接收消息（分钟）", windowShort:"协调员等待操作（分钟）", reviewShort:"任务等待审核（分钟）",
+  noSessionShort:"没有会话接收消息（分钟）", windowShort:"协调员等待操作（分钟）", reviewShort:"任务等待审核（分钟）", turnShort:"协调员轮次接连出错（分钟）",
   compactTitle:"协调员模型"
 } : {
   protectedStop:"While the list holds an entry containing ()[]{}*?\\, hansa starts no worker, verifier or coordinator until it is changed here.",
@@ -835,7 +835,7 @@ Object.assign(T, ZH ? {
   alertsIntro:"Set the alert command and when a wait needs your attention.", pricesGroup:"Prices",
   pricesIntro:"Token rates for the Cost page. All rates are USD per million tokens.",
   readOnly:"Read only", learnMore:"Full explanation", advanced:"Other fields (read only)", connection:"Connection",
-  keySeparate:"Keys are saved separately from Save settings.", keyPending:"Some keys are unsaved. Save them separately under Providers.", keySaved:"Key saved.", keyCleared:"Key cleared.",
+  keySeparate:"Keys are saved separately from Save settings.", keyPending:"Some keys are unsaved. Save them separately under Providers.", barkKeyPending:"The Bark device key change is not saved yet: Save settings saves it.", keySaved:"Key saved.", keyCleared:"Key cleared.",
   invalidName:"Use a unique name with lowercase letters, digits and hyphens.", invalidModel:"Enter a unique, non-empty model name.",
   providerName:"Provider name", priceName:"Model name", baseModel:"Model (blank = the provider's)",
   cooldown:"Rest after a usage limit (minutes)", contextTitle:"Context management", compactHint:"100,000–1,000,000 tokens. See the explanation for when each applies.",
@@ -867,7 +867,7 @@ Object.assign(T, ZH ? {
     deadline:"the server did not answer within 30 seconds", network:"the server could not be reached",
     tls:"the secure connection (TLS) to the server failed", http_429:"the server says too many pushes; try again later",
     http_4xx:"the server refused the push: check the device key", http_5xx:"the server had an error; try again later"},
-  noSessionShort:"No listening session (minutes)", windowShort:"Coordinator waiting for input (minutes)", reviewShort:"Task waiting for review (minutes)",
+  noSessionShort:"No listening session (minutes)", windowShort:"Coordinator waiting for input (minutes)", reviewShort:"Task waiting for review (minutes)", turnShort:"Coordinator's turns failing (minutes)",
   compactTitle:"Coordinator model"
 });
 Object.assign(T, ZH ? {
@@ -1823,7 +1823,8 @@ function settingsDirty() {
     || Object.values(KEY_DRAFTS).some(value => value !== "") || !!newProviderName || !!newPriceName || barkDraftDirty());
 }
 function refreshSettingsState() {
-  const dirty = settingsDirty(), pendingKeys = Object.values(KEY_DRAFTS).some(Boolean) || barkDraftDirty();
+  // Providers' keys are saved on their own; the Bark key goes with Save settings, so its draft is an ordinary change
+  const dirty = settingsDirty(), pendingKeys = Object.values(KEY_DRAFTS).some(Boolean);
   const pending = settingsPending === "reload" ? T.reloading : settingsPending === "key" ? T.keySaving : T.saving;
   const tone = settingsSaving ? "pending" : settingsProblems.length ? "error" : dirty ? "dirty" : settingsMessage ? "success" : "idle";
   const symbol = {pending:"pending", error:"error", dirty:"edit", success:"check", idle:"check"}[tone];
@@ -1839,7 +1840,8 @@ function refreshSettingsState() {
   }
   if (settingsSaveState) {
     const text = settingsSaving ? pending : tone === "error" ? ({reload:T.loadFailed, key:T.keySaveFailed, save:T.saveFailed, stale:T.staleReloadFailed, savedReload:T.savedReloadFailed}[settingsFailure] || T.needsAttention)
-      : pendingKeys ? [settingsMessage, T.keyPending].filter(Boolean).join(" ") : dirty ? T.draftNote : settingsMessage || T.allSaved;
+      : pendingKeys ? [settingsMessage, T.keyPending].filter(Boolean).join(" ") : barkDraftDirty() ? T.barkKeyPending
+      : dirty ? T.draftNote : settingsMessage || T.allSaved;
     settingsSaveState.replaceChildren(icon(symbol), h("span", {}, text));
     settingsSaveState.className = "save-state"; settingsSaveState.setAttribute("data-tone", tone);
   }
@@ -2172,7 +2174,7 @@ function pick(obj, key, options, labels) {
   return select;
 }
 /* The principal's alert command; who saved it and when are recorded by hansa as the page saves it. With it, the minutes
-   of the coordinator alert's three cases (blank: the default) */
+   of the coordinator alert's four cases (blank: the default): no listening session, its window, a review, its turns failing */
 function alertSection() {
   S.alert = S.alert || {command:""};
   const said = h("span", {});
@@ -2195,7 +2197,8 @@ function alertSection() {
     section(T.alertTiming, fields(
       field(T.noSessionShort, bind(S.coordinator_alert, "no_session_min", "number")),
       field(T.windowShort, bind(S.coordinator_alert, "window_min", "number")),
-      field(T.reviewShort, bind(S.coordinator_alert, "review_min", "number"))), help(T.alertCoordinatorNote))];
+      field(T.reviewShort, bind(S.coordinator_alert, "review_min", "number")),
+      field(T.turnShort, bind(S.coordinator_alert, "turn_min", "number"))), help(T.alertCoordinatorNote))];
 }
 /* The Bark channel: its switch and server are settings; its device key is shown only as saved or not, and goes with
    the settings save to the channel's key functions. Test pushes once with what is saved. */

@@ -39,10 +39,29 @@ The `coordinator` alert has four cases, each after the minutes the principal set
     work sits untouched  a task posted to the session has waited review_min for review, and the session is `idle` at
                          a lookup after that: once for that task; hansa does not post it again
     its turns fail       API errors keep ending the session's turns (its Stop and StopFailure hooks' record): after
-                         turn_min, or at once for one only the principal can cure (case `turn`, urgent); once a turn
-                         ends normally after that alert, case `turn_ok` (passive)
+                         turn_min (default 30), or at once for one only the principal can cure (case `turn`, urgent);
+                         once a turn ends normally after that alert, case `turn_ok` (passive)
 The follower watches its inbox's refusals and the last three (notify.Watch, notify.Turns), and asks the desk to queue
 them (from_follower).
+
+When an API error ends a turn hansa started (something was posted between the turn before's end and the failure),
+the follower first posts again what was posted to the session and not yet handled (a turn that ended normally
+handled what came before it), headed "Your last turn ended with an API error (ERROR) at HH:MM", and only while the
+session is seen idle after the failure: at most three reposts in a stretch of failures, one per failed turn, none
+once the principal was alerted. By the error:
+    rate_limit, overloaded, server_error, unknown: waiting may cure them; reposts at 2, 10 and 30 minutes after the
+        stretch began, and the alert after turn_min; for rate_limit it says a usage limit may only reset hours later
+    billing_error, oauth_org_not_allowed, account_on_hold, verification_required, model_not_found,
+    cloud_credential_error, invalid_request: only the principal can cure them; the alert goes at once, and no repost
+        until a turn ends normally (also with turn_min 0, which only stops the alert); for invalid_request it says
+        /compact or /clear in that session may cure it
+    authentication_failed (perhaps a short login refresh): one repost after 2 minutes, and the alert if the turn
+        after it fails too, or after 2 minutes when nothing waits; it says to log in again in that session
+    max_output_tokens: one repost at once, ending "go on"; the alert if the next failure is that too
+A turn the principal started is never posted again; it alerts after turn_min. The alert names the error, since when,
+and how many things posted to the session wait unhandled. turn_min 0 turns the `turn` and `turn_ok` alerts off;
+the reposts still go. hansa status shows a line while a stretch holds for a session hansa posts to: the error, since
+when, how many reposts went and whether the principal was alerted; none once a turn ended normally.
 
 Alerts are queued only while a channel is set up, in .hansa/alerts.json (any hansa process may queue one), and sent
 by hansa serve's alert thread. Gathering, one run at a time and the hourly limit apply to the whole batch.
@@ -149,9 +168,15 @@ def command(s: dict) -> str:
     return a["command"].strip() if isinstance(a, dict) and isinstance(a.get("command"), str) else ""
 
 
+def bark_settings(s: dict) -> dict:
+    """The Bark channel's settings; {} (not set up) when the desk's are not a dict, say a hand-edited "on"."""
+    b = s.get("alert_bark") if isinstance(s, dict) else None
+    return b if isinstance(b, dict) else {}
+
+
 def bark_ready(desk: Desk, s: dict) -> bool:
     from . import alert_bark
-    return bool(s.get("alert_bark", {}).get("on") and alert_bark.has_key(desk))
+    return bool(bark_settings(s).get("on") is True and alert_bark.has_key(desk))
 
 
 def configured(desk: Desk, s: dict | None = None) -> bool:
@@ -795,12 +820,14 @@ def turn_text(req: dict, who: str, who_zh: str, t: float) -> tuple:
 
 def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
     """For hansa status: one line for each case of the `coordinator` alert that holds now, alerted or not (the second
-    and third as the followers last recorded them; they look only while an alert channel is set up)."""
+    and third as the followers last recorded them; they look only while an alert channel is set up), and one for
+    each session whose turns keep ending in API errors (notify.Turns), alert or no alert."""
     from . import notify
     from .desk import coordinator_alert_settings
     t = time.time() if t is None else t
     mins = coordinator_alert_settings(s)
     lives, out = notify.live_records(desk), []
+    turn_on = bool(mins["turn_min"]) and configured(desk, s)
     items = _waiting(_unheard(desk)) if not lives and mins["no_session_min"] else []
     if items and t - items[0]["at"] >= mins["no_session_min"] * 60:
         out.append(f"no session hears from hansa, so the coordinator's session cannot be reached: {len(items)} "
@@ -820,7 +847,27 @@ def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
         shown = [f"{tid} for {_mins(t - at)} min" for tid, at in sorted(tasks.items()) if _at(at)]
         if mins["review_min"] and shown:
             out.append(f"waiting for review while the coordinator's session {who} is idle: {', '.join(shown)}")
+        if line := turn_line(holds.get("turn"), who, t, turn_on):
+            out.append(line)
     return out
+
+
+def turn_line(turn, who: str, t: float, on: bool) -> str:
+    """For hansa status: the stretch of failed turns a follower last recorded for its session (notify.Turns.holds),
+    or '' when none holds. on: whether a turn alert can go (an alert channel set up, and turn_min not 0)."""
+    turn = turn if isinstance(turn, dict) else {}
+    since = turn.get("since")
+    if not _at(since) or not since:
+        return ""
+    reposts = turn["reposts"] if isinstance(turn.get("reposts"), int) and not isinstance(turn["reposts"], bool) else 0
+    told = turn.get("told")
+    told = ("the principal was alerted at " + time.strftime("%H:%M", time.localtime(told)) if _at(told) and told
+            else "the principal is not alerted yet" if on
+            else "the principal is not alerted: turn alerts are off (no alert channel, or turn_min 0)")
+    error = str(turn.get("error") or "unknown")[:40]
+    return (f"the coordinator's session {who}: its turns end with an API error ({error})"
+            f" since {time.strftime('%H:%M', time.localtime(since))} ({_mins(t - since)} min) · hansa posted again "
+            f"what waits {reposts} time(s) · {told}")
 
 
 def start_thread(desk: Desk, every: float = EVERY) -> threading.Thread:
@@ -866,20 +913,28 @@ def failure_line(desk: Desk) -> str:
             + " · the principal's, on the page")
 
 
-def explain_line(s: dict) -> str:
-    """For hansa explain: whether the principal set an alert command, and what it is."""
+def explain_line(s: dict, desk: Desk | None = None) -> str:
+    """For hansa explain: which channels the principal set up (the alert command, Bark), and what the command is."""
     cmd = command(s)
+    from . import alert_bark
+    bark_on, bark_key = bark_settings(s).get("on") is True, desk is not None and alert_bark.has_key(desk)
+    bark = ("Bark is set up: alerts reach the principal's phone through it" if bark_on and bark_key
+            else "Bark is on but has no device key, so it sends nothing" if bark_on
+            else "Bark has a device key but is off, so it sends nothing" if bark_key else "Bark is not set up")
     a = s.get("alert") if isinstance(s.get("alert"), dict) else {}
     if not cmd:
-        return ("Alerts: no alert command is set. The principal may set one on the page, which hansa runs when a "
-                "release waits for the principal or ends, or a request is filed; you send no alerts and cannot set it. "
-                "With none, no release gets a one-time code: the principal approves releases on the page only.")
+        return (f"Alerts: no alert command is set. {bark}. The principal sets both channels up on the page; hansa "
+                "alerts through those set up when a release waits for the principal or ends, a request is filed, and "
+                "the rest hansa help alerts lists; you send no alerts and cannot set them up. With no alert command, "
+                "no release gets a one-time code (Bark never carries one): the principal approves releases on the page "
+                "only.")
     return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
             "filed (hansa ask), a lane's runs cannot start because their sandbox cannot, free space goes under the "
             "floor (hansa disk-floor), hansa serve finishes no round for a long time, or what hansa posts to your "
             "session cannot reach it (no session hears from hansa, its inbox refuses posts, your session waits on a "
             "permission dialog or a question, or a task posted to it waits for review while it is idle). You send no "
-            "alerts and cannot set it. A release waiting for the principal gets a "
-            "one-time code that only that alert carries: the principal answers on the page, or says the code in the "
-            "conversation, and you pass it on with hansa release yes ID CODE (or no ID CODE). Never guess one.")
+            f"alerts and cannot set it. {bark} (set up on the page; it never carries a code). A release waiting for "
+            "the principal gets a one-time code that only that alert carries: the principal answers on the page, or "
+            "says the code in the conversation, and you pass it on with hansa release yes ID CODE (or no ID CODE). "
+            "Never guess one.")

@@ -137,7 +137,7 @@ You do not need to read hansa's code to use it.
 | [Who changes what](docs/who-changes-what.md) | Settings for you on the page and for the coordinator with `hansa`: lanes, commit messages and identity, and what stays closed to the coordinator |
 | [Workers and the sandbox](docs/sandbox.md) | What workers and verifiers may touch; git's folders; the sandbox probe; write lists and env; the allow list and its web tools; paths hansa refuses; what hansa stops when a run ends |
 | [How a task runs](docs/tasks.md) | Time limits and resuming work, retries after a dropped connection, providers' usage limits |
-| [Releases and alerts](docs/releases.md) | Release targets, answers by one-time code, files a release runs, stopping a release, your alert command |
+| [Releases and alerts](docs/releases.md) | Release targets, answers by one-time code, files a release runs, stopping a release, your alert command, and alerts to a phone through Bark (set up on the page) |
 | [On a Linux server](docs/linux-server.md) | The coordinator as root, the desk as an ordinary account; how a lane's commands behave in Linux's sandbox |
 | [Java and Maven in a lane](docs/java-and-maven.md) | Maven and Java sandbox setup, effects on build scripts (`mktemp` on macOS too), and project and lane requirements |
 | [The desk: files, keys and notes](docs/desk.md) | Keys, the coordinator's permission rules and notes, the project's own rules, what the coordinator's session leaves out, minimum free space, which desk files grow |

@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import alert, alert_http
-from .desk import Desk, key_problem, now, read_json, write_json, write_text
+from .desk import Desk, KeyScrubError, key_problem, now, read_json, write_json, write_text
 
 DEFAULT_SERVER = "https://api.day.app"
 MAX_BYTES = 3500
@@ -59,6 +59,9 @@ def save_key(desk: Desk, value: str, *, by: str = "") -> None:
 
     Like settings, only by='page' is the principal's save. History records just
     that it changed, including replacements, without reading the previous key.
+    A saved key is taken out of what hansa already wrote (Desk.scrub, as for a
+    provider's key), so one pasted somewhere before does not stay there; files
+    that could not be scrubbed raise KeyScrubError after the key is saved.
     """
     if by != "page":
         raise ValueError("the Bark key is the principal's, set only on the web page (Settings); ask with hansa ask")
@@ -68,6 +71,7 @@ def save_key(desk: Desk, value: str, *, by: str = "") -> None:
     if value and (problem := key_problem(value)):
         raise ValueError(problem)
     from .history import record
+    failed = []
     with desk.lock():
         path = _key_file(desk)
         if value:
@@ -80,6 +84,12 @@ def save_key(desk: Desk, value: str, *, by: str = "") -> None:
             path.unlink()
         record(desk, {}, {"alert_bark": {"key": "changed"}}, by)
         desk.event("key_set" if value else "key_removed", channel="bark", by=by)
+        if value:
+            failed = desk.scrub(value, "Bark")
+    if failed:
+        paths = ", ".join(str(f.relative_to(desk.root)) for f in failed)
+        raise KeyScrubError(desk.redact(f"The Bark key was saved, but these files still hold it: {paths}. "
+                                        "Fix them and save the key again to scrub them again."))
 
 
 def remove_key(desk: Desk, *, by: str = "") -> None:

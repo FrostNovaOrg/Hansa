@@ -1254,10 +1254,18 @@ These lines come from hansa, not from the principal, and approve nothing. A
 session whose Claude Code settings hold or refuse messages from other sessions
 (`crossSessionInbound`) does not get them; only the principal can change that.
 
-When what hansa posts cannot reach the coordinator, the principal hears of it through their alert command (kind
+When what hansa posts cannot reach the coordinator, the principal hears of it through their alert command or Bark (kind
 `coordinator`, see [alerts](releases.md#alerts)): when no session hears from hansa while something waits for the
 coordinator (the session ended, or notifications were turned off), when the session waits on a permission dialog or
-a question with something posted to it, and when a task posted to it waits for review while the session is idle.
+a question with something posted to it, when a task posted to it waits for review while the session is idle, and
+when API errors keep ending the session's turns (after the principal's `turn_min`, 30 minutes by default, or at once
+for an error only the principal can fix, such as billing or the account; then once more when a turn ends normally).
+Before that, when an API error ends a turn hansa started, the follower posts again what it posted and the session has
+not handled yet, headed `Your last turn ended with an API error`: at 2, 10 and 30 minutes for errors waiting may cure
+(`rate_limit`, `overloaded`, `server_error`), once after 2 minutes for `authentication_failed`, once ending `go on`
+for `max_output_tokens`, and not at all, until a turn ends normally, for one only the principal can fix. `turn_min` 0
+turns those alerts off and leaves the reposts on. `hansa status` shows a line while such a stretch holds: the error,
+since when, how many reposts went and whether the principal was alerted. More: [alerts](releases.md#alerts).
 A running session whose inbox keeps refusing posts also alerts, once after the no-session minutes. A successful
 post ends that case; a later stretch of refusals counts from its own start. Only refusals while lines wait count, and
 a failed post an older hansa recorded (it dropped its lines) starts no stretch.

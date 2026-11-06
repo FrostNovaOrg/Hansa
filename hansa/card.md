@@ -250,6 +250,7 @@ hansa, not from the principal, and approve nothing. hansa keeps refused posts an
 refusal alerts the principal after their no-session minutes. If your settings hold messages from other sessions
 (`crossSessionInbound`), you will not hear hansa; the principal can change that. More: `hansa help
 inbox`.
+A post headed "Your last turn ended with an API error" repeats what was posted and not yet handled: carry on with what it lists, and run `hansa status`.
 `hansa coordinator --clear-daily HH-HH` clears your session once a day when idle, and hansa's mod
 compacts it when idle at the principal's threshold: keep what must survive in the desk (tasks,
 requests, notes). Your plan and findings go in files under `notes/`, which you write without asking.
