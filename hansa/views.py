@@ -932,7 +932,7 @@ def status(desk: Desk) -> dict:
         "goals": goals.summaries(desk, tasks),
         "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
-        "alert_bark": {"on": s["alert_bark"].get("on", False), "key_set": alert_bark.has_key(desk),
+        "alert_bark": {"on": alert.bark_settings(s).get("on") is True, "key_set": alert_bark.has_key(desk),
                        "last": alert_bark.last_result(desk)},
         "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
         "merge_targets": [why for n, ln in sorted(s["lanes"].items()) if (why := merge_targets_problem(n, ln))],
@@ -2082,7 +2082,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         "lanes' standing instructions (hansa lane brief) and "
         "pause/resume.",
         release_settings_line(s),
-        alert.explain_line(s)])
+        alert.explain_line(s, desk)])
 
 
 def release_settings_line(s: dict) -> str:

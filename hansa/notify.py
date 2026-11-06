@@ -951,6 +951,13 @@ class Turns:
             self.unhandled.pop(next(iter(self.unhandled)))
         self.posted = t
 
+    def holds(self) -> dict:
+        """For hansa status: the stretch of failed turns that holds now, {error, since, reposts, told (when the
+        principal was alerted, 0 if not)}; {} when there is none (no failure seen, or a turn ended ok since)."""
+        if not self.since:
+            return {}
+        return {"error": self.error or "unknown", "since": self.since, "reposts": self.reposts, "told": self.told}
+
     def wants(self) -> bool:
         """Whether the session's status is worth looking up for this: a stretch of failures goes on, not yet alerted."""
         return bool(self.since) and not self.told
@@ -1235,6 +1242,8 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 except Exception as e:  # noqa: BLE001 - told is told: no retry, as for any alert
                     _say(f"could not queue the principal's coordinator alert ({case}): {e}")
             me["coordinator"] = watch.holds(time.time(), minutes, me["last_post"], bool(pending or summary))
+            if stretch := turns.holds():  # failed turns go on: hansa status says so
+                me["coordinator"]["turn"] = stretch
             time.sleep(poll)
     finally:
         try:

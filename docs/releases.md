@@ -595,7 +595,8 @@ tries; the batch never retries it. `hansa status` also shows Bark's last result,
 `channel: "bark"` and its reason. Neither channel carries the other's failure.
 The page has a button that sends a test alert through every channel that is set
 up; no coordinator command sends one.
-`hansa explain` says whether a command is set and what it is.
+`hansa explain` says which channels are set up: the alert command (and what it is) and Bark (on, with a key or
+not).
 
 The `coordinator` alert says that what hansa posts to the coordinator's session (see [hearing from
 hansa](desk.md#hearing-from-hansa)) cannot reach it. Its text names the desk, the session (its pid, and its name
@@ -622,9 +623,30 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   (done, not merged or closed), and the session is `idle` at a lookup after that. Once per task across the desk,
   however many followers watch it (a task that records no session goes to each); its next round may alert again.
   hansa does not post it again.
-- **Its turns fail** (30 minutes): API errors keep ending the session's turns.
+- **Its turns fail** (30 minutes, `turn_min`): API errors keep ending the session's turns (case `turn`).
   Errors only the principal can fix alert at once. After an alert, a normal turn
-  sends one quiet recovery notice. This also works with Bark alone.
+  sends one quiet recovery notice (case `turn_ok`, passive). This also works with Bark alone.
+  Before that, hansa tries to get the session going again: when an API error ends a turn hansa started, the
+  follower posts again what it posted to the session that a normal turn has not handled yet, headed `Your last
+  turn ended with an API error (ERROR) at HH:MM`, once the session is seen idle after the failure. At most three
+  reposts in a stretch of failures, one per failed turn, none once the principal was alerted, and none for a
+  turn the principal started (that one alerts after the minutes). By the error:
+  - `rate_limit`, `overloaded`, `server_error`, `unknown` (waiting may cure them): reposts 2, 10 and 30 minutes
+    after the stretch began; the alert after the minutes. For `rate_limit` it adds that a usage limit may only
+    reset hours later.
+  - `billing_error`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `model_not_found`,
+    `cloud_credential_error`, `invalid_request` (only the principal can fix them): the alert at once, and no
+    repost until a turn ends normally. For `invalid_request` it adds that `/compact` or `/clear` in that session
+    may cure it.
+  - `authentication_failed` (perhaps a short login refresh): one repost after 2 minutes; the alert if the turn
+    after it fails too, or after 2 minutes when nothing waits. It says to log in again in that session.
+  - `max_output_tokens`: one repost at once, ending `go on`; the alert if the next failure is that too.
+
+  The alert names the session, the error, since when and how many things posted to it wait unhandled. 0 turns the
+  `turn` and `turn_ok` alerts off; the reposts still go. While a stretch holds, `hansa status` shows one line for
+  the session, such as `the coordinator's session pid 4242 (desk-b4): its turns end with an API error (overloaded)
+  since 14:02 (12 min) · hansa posted again what waits 2 time(s) · the principal is not alerted yet`; none once a
+  turn ends normally.
 
 The session's follower looks the last two up, at most once a minute counting its lookup of the session's name (one
 run of `claude agents --json` serves both), and only while one could hold: something was
