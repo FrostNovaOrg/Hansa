@@ -593,8 +593,11 @@ group and reaps it. Completed results survive; unfinished requests return
 Only HTTPS URLs without userinfo, fragments or control characters are accepted;
 header names and values containing CR or LF are refused before a connection.
 JSON bodies larger than 64 KiB are also refused before sending (`too_big`, zero
-tries). These checks prevent request splitting and accidental disclosure to a
-different destination; keep them when adding channels. TLS always uses Python's
+tries). Requests that cannot be serialized as UTF-8 JSON, including byte values,
+circular objects and lone surrogates, return `refused_url` with zero tries;
+other requests in the batch still run. These checks prevent request splitting
+and accidental disclosure to a different destination; keep them when adding
+channels. TLS always uses Python's
 verified default context. urllib keeps its default proxy handlers, including
 environment and macOS system settings and `no_proxy`; there is no independent
 DNS lookup or address-range restriction, so proxy setups using 198.18.x.x work.

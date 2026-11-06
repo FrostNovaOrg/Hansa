@@ -2,6 +2,7 @@
 import contextlib
 import ast
 import csv
+import email.message
 import errno
 import fcntl
 import functools
@@ -44702,9 +44703,10 @@ class AlertHTTPTest(unittest.TestCase):
                 self.assertEqual(len(opener.calls), 1)
         # Exercise urllib's real redirect/error handlers, with only the socket-facing handler replaced.
         def response(handler, request):
+            headers = email.message.Message()
+            headers["Location"] = "https://elsewhere.test/location-secret"
             reply = urllib.response.addinfourl(io.BytesIO(b"response-body-secret"),
-                                              {"Location": "https://elsewhere.test/location-secret"},
-                                              request.full_url, 302)
+                                              headers, request.full_url, 302)
             reply.msg = "fixture"
             return reply
         with unittest.mock.patch.object(urllib.request.HTTPSHandler, "https_open", autospec=True,
@@ -44952,6 +44954,37 @@ class AlertHTTPTest(unittest.TestCase):
             self.assertEqual(alert_http.send([self.request], deadline_s=0), [self.result("deadline", tries=0)])
             popen.assert_not_called()
 
+    def test_public_send_refuses_unserializable_requests_without_blocking_valid_requests(self):
+        circular = {}
+        circular["self"] = circular
+        bodies = [{"t": b"bytes"}, {"t": "a\ud800b"}, {"t": {"set"}}, circular, {"t": float("nan")}]
+        requests = [self.request] + [dict(self.request, json=body) for body in bodies] + [self.request]
+        with tempfile.TemporaryDirectory() as folder:
+            source = '''
+                class Reply:
+                    code, headers = 204, {}
+                    def read(self, size): return b"response-body-secret"
+                    def close(self): pass
+                class Opener:
+                    def open(self, request, timeout):
+                        assert json.loads(request.data) == {"text": "body-secret 中文"}
+                        assert request.get_header("Authorization") == "header-secret"
+                        return Reply()
+                transport._make_opener = Opener
+                transport._main()
+            '''
+            output, errors = io.StringIO(), io.StringIO()
+            with self.child_helper(folder, source), contextlib.redirect_stdout(output), \
+                    contextlib.redirect_stderr(errors), unittest.mock.patch("logging.Logger._log") as logging:
+                results = alert_http.send(requests)
+                logging.assert_not_called()
+            self.assertEqual(results, [self.result("sent", 204)] +
+                             [self.result("refused_url", tries=0)] * len(bodies) + [self.result("sent", 204)])
+            self.assertEqual(output.getvalue() + errors.getvalue(), "")
+        with unittest.mock.patch.object(alert_http.subprocess, "Popen", side_effect=OSError("exception-secret")):
+            self.assertEqual(alert_http.send([requests[1], self.request]),
+                             [self.result("refused_url", tries=0), self.result("network", tries=0)])
+
     def test_public_send_sanitizes_child_protocol_and_discards_child_stderr(self):
         with tempfile.TemporaryDirectory() as folder:
             source = '''
@@ -44968,8 +45001,10 @@ class AlertHTTPTest(unittest.TestCase):
                 print('{"index": 1', end='', flush=True)
             '''
             output, errors = io.StringIO(), io.StringIO()
-            with self.child_helper(folder, source), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            with self.child_helper(folder, source), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors), \
+                    unittest.mock.patch.object(alert_http.subprocess, "Popen", wraps=subprocess.Popen) as popen:
                 results = alert_http.send([self.request, self.request])
+            self.assertEqual(popen.call_args.kwargs["stderr"], subprocess.DEVNULL)
             self.assertEqual(results, [self.result("sent", 200), self.result("deadline", tries=0)])
             self.assertEqual(output.getvalue() + errors.getvalue(), "")
         with unittest.mock.patch.object(alert_http.subprocess, "Popen", side_effect=OSError("exception-secret")):

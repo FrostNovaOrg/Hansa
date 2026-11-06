@@ -206,12 +206,22 @@ def send(requests: list[dict], deadline_s: float = 30) -> list[dict]:
     results = [_result("deadline") for _ in requests]
     if not requests or deadline_s <= 0 or not math.isfinite(deadline_s):
         return results
-    payload = json.dumps({"requests": requests, "deadline": deadline}, ensure_ascii=False).encode("utf-8")
+    encoded = []
+    for index, request in enumerate(requests):
+        try:
+            encoded.append(json.dumps(request, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            # Refuse this entry without losing the rest of the batch. A null
+            # placeholder keeps child indices aligned and cannot open a URL.
+            results[index] = _result("refused_url")
+            encoded.append(b"null")
+    payload = (b'{"requests": [' + b", ".join(encoded) + b'], "deadline": ' +
+               json.dumps(deadline).encode("ascii") + b"}")
     try:
         proc = subprocess.Popen([sys.executable, "-I", str(_HELPER)], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError:
-        return [_result("network") for _ in requests]
+        return [result if result["why"] == "refused_url" else _result("network") for result in results]
     output = b""
     try:
         output, _ = proc.communicate(payload, timeout=max(0, deadline - time.monotonic()))
