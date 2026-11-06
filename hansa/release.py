@@ -862,7 +862,8 @@ def _askable(desk: Desk, s: dict, lane: str, target: str | None) -> dict:
                          "ends. Nothing was asked")
     prev = last_out(desk, lane, repo, base, target)
     since = prev["commit"] if prev and _has_commit(repo, prev["commit"]) else ""
-    return {"target": target, "command": command, "repo": repo, "base": base, "commit": commit, "prev": prev,
+    return {"target": target, "about": targets[target].get("about") or "", "command": command,
+            "repo": repo, "base": base, "commit": commit, "prev": prev,
             "since": since, "fixed": bool(targets[target].get("fixed")),
             "watch": targets[target].get("watch") or "",
             "watch_timeout_min": targets[target].get("watch_timeout_min", 90)}
@@ -952,6 +953,7 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
     rs = releases(desk)
     listed = lane_listed(s, lane, target) and not held
     r = {"id": max((x.get("id", 0) for x in rs), default=0) + 1, "lane": lane, "target": target,
+         "about": desk.redact(a["about"]),
          "repo": repo_key(a["repo"]), "base": a["base"], "commit": a["commit"], "command": command,
          **({"watch": a["watch"], "watch_timeout_min": a["watch_timeout_min"]} if a["watch"] else {}),
          **outside.inspect(command, a["repo"]),

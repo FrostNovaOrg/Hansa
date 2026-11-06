@@ -579,6 +579,19 @@ The dispatch state loads when Settings opens and after either action. A failed
 press shows its error and keeps the displayed state and reason box. The header
 still reports when the desk is paused.
 The save bar applies to all editable settings groups.
+In Alerts, beside the alert command, **Alert language** (`alert_language`) selects
+English (`en`, the default) or Chinese (`zh`). Before it has been saved, the select
+prefills from the page's language; alerts stay English until the principal saves
+the choice. Only the principal can save it, and settings history records it.
+Other values are refused on save; an invalid value in `settings.json` reads as
+`en`. A saved language change also applies to alerts still gathering.
+The command receives `HANSA_ALERT_KIND` and `HANSA_ALERT_LEVEL`: `passive` for a
+successful release, `active` for a waiting release, a to-do, a failed, void,
+forbidden or stopped release and the test, and `urgent` for `server_stuck`,
+`coordinator`, `sandbox`, `disk` and `credit`. A batch takes the highest level;
+nothing else uses it yet. Release alerts start with the target description kept
+when the release was asked, even if the description changes later. See
+[alerts](releases.md#alerts) for command timing and one-time codes.
 Prices must be finite numbers, zero or more; zero and decimals are accepted.
 NaN, infinity and numbers too large for floating-point calculations are refused;
 use a smaller price. A saved file containing such prices also requires repair

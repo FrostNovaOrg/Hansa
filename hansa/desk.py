@@ -88,7 +88,7 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow",
-                  "release_direct", "alert", "coordinator_compact", "coordinator_alert")
+                  "release_direct", "alert", "alert_language", "coordinator_compact", "coordinator_alert")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -632,7 +632,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     known = {"version", "concurrency", "disk_floor", "memory_floor", "cool_minutes", "coordinator", "providers", "lanes", "prices",
              "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
              "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "release_direct", "alert", "coordinator_compact",
-             "coordinator_alert", "bench"}
+             "coordinator_alert", "alert_language", "bench"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     bench = s.get("bench", default_settings()["bench"])
     if (not isinstance(bench, dict) or set(bench) != set(default_settings()["bench"])
@@ -708,6 +708,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                  "names no entry in release_forbidden"
                  for i, x in enumerate(exceptions, 1) if x["entry"] not in words)
     al = s.get("alert", {"command": ""})
+    if s.get("alert_language", "en") not in ("en", "zh"):
+        p.append('alert_language must be "en" or "zh"')
     if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
             or len(al.get("command", "")) > 1000 or _has_control(al.get("command", ""))):
         p.append("the alert command must be one shell command line (up to 1000 characters)")
@@ -2695,6 +2697,8 @@ class Desk:
         loaded = self._saved_settings()
         mailbox_settings(loaded)
         s.update(loaded)
+        # Only a page save records this choice; an absent or hand-edited value sends English.
+        s["alert_language"] = loaded.get("alert_language") if loaded.get("alert_language") in ("en", "zh") else "en"
         s = current_settings(s)
         migrate_releases(s)
         for ln in (s["lanes"].values() if isinstance(s.get("lanes"), dict) else []):
@@ -2720,11 +2724,13 @@ class Desk:
                         "press Reload, then make the change again"]
             try:
                 old = self.settings()
+                language_saved = "alert_language" in self._saved_settings()
             except SettingsError as e:
                 return [str(e)]
             mailbox_key = ""
             if isinstance(new, dict):
                 new = current_settings(new)
+                new.setdefault("alert_language", "en")
                 if by == "page":
                     new["bench"] = old["bench"]
                 mailbox_key = mailbox_settings(new)
@@ -2789,6 +2795,10 @@ class Desk:
                                         "or running there; a verify lane takes only verifications")
             if problems or dry:
                 return problems
+            # A coordinator's unrelated save must not turn the default into the principal's saved choice.
+            if not language_saved and by != "page":
+                old = {k: v for k, v in old.items() if k != "alert_language"}
+                new = {k: v for k, v in new.items() if k != "alert_language"}
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
             write_json(self.settings_path, new)
             from .history import record
@@ -3243,7 +3253,8 @@ def public_settings(desk: Desk) -> dict:
                  for x in listed if isinstance(x, (str, dict)) for lane, target in [listed_key(x)]
                  for observed in [listed_as(s.get("lanes", {}).get(lane), target)]
                  for why in [listed_mismatch(s, x, now_as=observed)] if why]
-    return {"settings": s, "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
+    return {"settings": s, "alert_language_saved": "alert_language" in desk._saved_settings(),
+            "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),

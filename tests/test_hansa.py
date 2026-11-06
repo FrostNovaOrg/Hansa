@@ -36637,6 +36637,16 @@ else if (ask === "settings-unavailable") vm.runInContext('show("settings")', ctx
   console.log(JSON.stringify(ids["#state"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {
+  if (ask === "alert-language") {
+    let select = null;
+    walk(ids["#tab-settings"], el => { if (el.tag === "select" && el._settingMeta?.matches('alert_language must be "en" or "zh"')) select = el; });
+    if (!select) throw new Error("alert language select missing");
+    const before = vm.runInContext("S.alert_language", ctx), options = select.kids.map(o => o.value);
+    select.value = before === "en" ? "zh" : "en"; select.on.change({target:select});
+    const dirty = vm.runInContext("settingsDirty()", ctx), group = select._settingMeta.group;
+    await vm.runInContext("saveSettings()", ctx);
+    console.log(JSON.stringify({before, options, dirty, group, posted})); return;
+  }
   if (ask === "credit") {
     const before = ids["#tab-settings"].textContent;
     let button = null;
@@ -41901,7 +41911,7 @@ else:
     ALERT_FAKE = ("import json, os, sys\n"
                   "text = sys.stdin.buffer.read().decode('utf-8')\n"
                   "open(sys.argv[1], 'a', encoding='utf-8').write(json.dumps({'kind': os.environ.get('HANSA_ALERT_KIND'),"
-                  " 'text': text, 'cwd': os.getcwd(),"
+                  " 'level': os.environ.get('HANSA_ALERT_LEVEL'), 'text': text, 'cwd': os.getcwd(),"
                   " 'task': os.environ.get('HANSA_TASK'), 'mine': os.environ.get('ALERT_TEST_MINE')}) + '\\n')\n")
 
     def alert_fake(self, echo: str = "") -> Path:
@@ -41914,6 +41924,208 @@ else:
 
     def alerted(self, out) -> list:
         return [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines()] if out.exists() else []
+
+    def test_alert_language_is_validated_recorded_and_principal_only(self):
+        self.assertEqual(self.desk.settings()["alert_language"], "en")
+        self.assertFalse(public_settings(self.desk)["alert_language_saved"])
+        self.hansa("concurrency", "2")
+        self.assertFalse(public_settings(self.desk)["alert_language_saved"])
+        for language in ("zh", "en"):
+            self.assertEqual(self.page_save(lambda s: s.update(alert_language=language)), {"ok": True, "problems": []})
+            entry = [e for e in self.history_entries() if e["path"] == "alert_language"][-1]
+            self.assertEqual((entry["by"], entry["new"]), ("principal", language))
+            self.assertTrue(public_settings(self.desk)["alert_language_saved"])
+        for bad in ("fr", "zh-CN", "", None, False, 1, [], {}):
+            with self.subTest(bad=bad):
+                rev = self.desk.settings_rev()
+                said = self.page_save(lambda s: s.update(alert_language=bad))
+                self.assertFalse(said["ok"])
+                self.assertIn('alert_language must be "en" or "zh"', said["problems"])
+                self.assertEqual(self.desk.settings_rev(), rev)
+                s = self.desk.settings()
+                s["alert_language"] = bad
+                write_json(self.desk.settings_path, s)
+                self.assertEqual(self.desk.settings()["alert_language"], "en")
+        self.assertEqual(self.page_save(lambda s: s.update(alert_language="zh")), {"ok": True, "problems": []})
+        s = self.desk.settings()
+        s["alert_language"] = "en"
+        self.assertEqual(self.desk.save_settings(s, by="coordinator"), [
+            "alert_language is the principal's, set only on the web page (Settings); ask with hansa ask"])
+        self.hansa("concurrency", "3")
+        self.assertEqual(self.desk.settings()["alert_language"], "zh")
+        helped = self.hansa_out("help", "alerts")
+        for word in ("alert_language", "HANSA_ALERT_LEVEL", "passive", "active", "urgent"):
+            self.assertIn(word, helped)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_alert_language_select_prefills_from_the_page_and_saves_its_choice(self):
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for browser, saved, prefill in (("en", None, "en"), ("zh-CN", None, "zh"),
+                                        ("zh-CN", "en", "en"), ("en", "zh", "zh")):
+            with self.subTest(browser=browser, saved=saved):
+                given = public_settings(self.desk)
+                given["alert_language_saved"] = saved is not None
+                if saved is not None:
+                    given["settings"]["alert_language"] = saved
+                r = subprocess.run(["node", str(harness), str(page), "alert-language", browser],
+                                   input=json.dumps({"/api/settings": given}), capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                out = json.loads(r.stdout)
+                self.assertEqual(out["before"], prefill)
+                self.assertEqual(out["options"], ["en", "zh"])
+                self.assertEqual(out["group"], "alerts")
+                self.assertEqual(out["posted"]["settings"]["alert_language"], "zh" if prefill == "en" else "en")
+                self.assertTrue(out["dirty"])
+
+    def test_alert_kinds_and_cases_in_both_languages_with_levels(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        self.hansa("lane", "target", "a", "default", "true")
+        self.hansa("release", "a", "备注")
+        alert.send_due(self.desk, gather=0)
+        base = release.get(self.desk, 1)
+        tid = self.desk.new_task("待审内容")
+        self.desk.change(tid, lambda m: m.update(state="done", finished=100))
+        me = {"session": {"pid": 4242}, "name": "desk-session"}
+        seen = set()
+
+        def check(kind, action, en, zh, level, language):
+            action()
+            items = alert.queued(self.desk)
+            self.assertEqual([x["level"] for x in items], [level])
+            self.assertTrue(alert.send_due(self.desk, gather=0, capped=False)["ok"])
+            sent = self.alerted(out)[-1]
+            self.assertEqual((sent["kind"], sent["level"]), (kind, level))
+            self.assertIn(zh if language == "zh" else en, sent["text"])
+            self.assertIn(f"{'工作台' if language == 'zh' else 'desk'} {self.desk.root.parent.name}/{self.desk.root.name}",
+                          sent["text"])
+            self.assertLessEqual(len(sent["text"]), 1000)
+            seen.add(kind)
+
+        for language in ("en", "zh"):
+            self.assertTrue(self.page_save(lambda s: s.update(alert_language=language))["ok"])
+            rows = [
+                ("release_waiting", "release_waits", {"state": "waiting", "direct_count": 1},
+                 "1 direct commit(s)", "直接提交：1 个", "active"),
+                ("release_waiting", "release_waits", {"state": "void"},
+                 "waits for your yes on the page", "等你在网页上点头", "active"),
+                ("release_ended", "release_ended", {"state": "done", "ended": 100, "seconds": 2},
+                 "(exit 0, 2 s)", "完成（退出码 0，2 秒）", "passive"),
+                ("release_ended", "release_ended", {"state": "done", "ended": 100, "seconds": 2,
+                 "stop_late": True, "stop_asked": 99, "stopped_by": "coordinator"},
+                 "came after its command had ended", "它的命令已经结束了", "passive"),
+                ("release_ended", "release_ended", {"state": "failed", "ended": 100, "exit": 4, "problem": "problem"},
+                 "(exit 4): problem", "失败（退出码 4）：problem", "active"),
+                ("release_ended", "release_ended", {"state": "failed", "ended": 100},
+                 "FAILED", "失败", "active"),
+                ("release_ended", "release_void", {"state": "void", "void": "changed", "void_zh": "已改动"},
+                 "void: changed; nothing was run", "作废：已改动；什么都没运行", "active"),
+                ("release_ended", "release_forbidden", {"state": "forbidden", "hits": [{"kind": "word"}]},
+                 "what goes out holds words", "要发出去的内容里有你不许发出去的字眼", "active"),
+                ("release_ended", "release_forbidden", {"state": "forbidden", "hits": [{"kind": "pattern_limit"}]},
+                 "1 line(s) could not be checked", "1 行无法用正则检查", "active"),
+                ("release_ended", "release_forbidden", {"state": "forbidden", "hits": [{"kind": "mailbox", "commit": "abc",
+                 "where": "mail.txt", "word": "a@unreserved.hansa", "line": "a@unreserved.hansa"}]},
+                 "mailbox", "邮箱未使用保留的示例域名", "active"),
+                ("release_stopped", "release_stopped", {"state": "stopped", "ended": 100, "stopped_by": "coordinator", "ran": True},
+                 "its command had run", "命令已运行", "active"),
+                ("release_stopped", "release_stopped", {"state": "stopped", "ended": 100, "stopped_by": "coordinator", "ran": False},
+                 "nothing was run", "什么都没运行", "active"),
+            ]
+            for kind, event, changes, en, zh, level in rows:
+                with self.subTest(language=language, kind=kind, changes=changes):
+                    release.change(self.desk, 1, lambda r: {**base, **changes})
+                    check(kind, lambda: self.desk.event(event, id=1, by="coordinator"), en, zh, level, language)
+                    sent = self.alerted(out)[-1]["text"]
+                    for name in ("a", "default", base["base"], base["commit"][:10]):
+                        self.assertIn(name, sent)
+                    if kind == "release_waiting" and changes["state"] == "waiting":
+                        match = re.search(r"(?:code|一次性码) ([A-Z2-9]{6})", sent)
+                        self.assertIsNotNone(match, sent)
+                        for path in (alert.queue_file(self.desk), release.releases_file(self.desk)):
+                            self.assertNotIn(match[1], path.read_text())
+            for kind, fields, en, zh in (
+                ("ask", {"id": 99}, "to-do #99 for you:", "你的待办 #99"),
+                ("provider_credit", {"provider": "demo", "since": 100, "text": "provider demo: credit balance too low"},
+                 "provider demo: credit balance too low", "服务商 demo：余额不足"),
+                ("sandbox_held", {"lane": "a", "alert": True, "run": "worker", "why": "reason", "task": tid},
+                 f"task {tid} is held, not failed", f"任务 {tid} 暂缓，没有失败"),
+                ("sandbox_held", {"lane": "a", "alert": True, "run": "check", "why": "reason"},
+                 "its tasks are held, not failed", "其任务暂缓，没有失败"),
+                ("disk_low", {"floor": 10, "volumes": ["/volume"]}, "free space is under the floor (10 GB)", "磁盘空间低于下限（10 GB）"),
+            ):
+                alert_kind = {"provider_credit": "credit", "sandbox_held": "sandbox", "disk_low": "disk"}.get(kind, kind)
+                with self.subTest(language=language, event=kind, fields=fields):
+                    check(alert_kind, lambda: self.desk.event(kind, **fields), en, zh,
+                          "active" if alert_kind == "ask" else "urgent", language)
+            write_json(self.desk.state_dir / "heartbeat", time.time() - alert.STUCK_ALERT - 60)
+            check("server_stuck", lambda: alert.stuck_check(self.desk, 0), "hansa serve has finished no round",
+                  "分钟没跑完一轮", "urgent", language)
+            for case, en, zh in (("inbox", "its inbox refuses posts", "收件箱已拒收"),
+                                 ("window", "has waited on its window", "已在窗口上等了"),
+                                 ("review", "has waited for review", "分钟待审")):
+                with self.subTest(language=language, coordinator=case):
+                    write_json(alert.reviews_file(self.desk), {})
+                    check("coordinator", lambda: alert.from_follower(self.desk, me, {
+                        "case": case, "since": time.time() - 120, "posted": time.time() - 120,
+                        "count": 1, "oldest": tid, "task": tid}), en, zh, "urgent", language)
+            items = [{"at": time.time() - 120, "line": tid}]
+            for records, gone, en, zh in (([], False, "none has on this desk yet", "这个工作台还没有会话接收过"),
+                ([{**me, "seen": 100}], True, "its session ended", "会话已结束"),
+                ([{**me, "seen": 100}], False, "its session runs, but notifications were turned off", "会话仍在运行，但提醒已关闭")):
+                with self.subTest(language=language, last_session=records, gone=gone), \
+                        unittest.mock.patch.object(notify, "records", return_value=records), \
+                        unittest.mock.patch.object(notify, "gone", return_value=gone):
+                    check("coordinator", lambda: alert.add(self.desk, "coordinator", alert.unheard_text(self.desk, items, time.time()),
+                          zh=alert.unheard_text(self.desk, items, time.time(), zh=True)), en, zh, "urgent", language)
+            self.assertTrue(alert.test(self.desk)["ok"])
+            self.assertEqual(self.alerted(out)[-1]["level"], "active")
+            self.assertIn("测试提醒" if language == "zh" else "a test alert from the page", self.alerted(out)[-1]["text"])
+            seen.add("test")
+        self.assertEqual(seen, set(alert.KINDS))
+
+    def test_release_alert_description_is_kept_from_the_asking(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        for language in ("en", "zh"):
+            self.assertTrue(self.page_save(lambda s: s.update(alert_language=language))["ok"])
+            self.hansa("lane", "target", "a", "default", "true", "--about", "Original description")
+            self.hansa("release", "a")
+            rid = release.releases(self.desk)[-1]["id"]
+            self.hansa("lane", "target", "a", "default", "--about", "Changed description")
+            self.assertEqual(release.get(self.desk, rid)["about"], "Original description")
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+            text = self.alerted(out)[-1]["text"]
+            self.assertIn(": Original description · " + ("发布" if language == "zh" else "release"), text)
+            self.assertNotIn("Changed description", text)
+            release.void(self.desk, rid, "finished")
+            alert.send_due(self.desk, gather=0)
+            self.assertIn("Original description · ", self.alerted(out)[-1]["text"])
+
+    def test_alert_batch_uses_the_highest_level_and_current_language(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        write_json(alert.queue_file(self.desk), [])
+        release.change(self.desk, 1, lambda r: {"state": "done", "ended": 100, "seconds": 1})
+        self.desk.event("release_ended", id=1)
+        self.desk.event("disk_low", floor=10, volumes=[])
+        self.assertEqual([x["level"] for x in alert.queued(self.desk)], ["passive", "urgent"])
+        self.assertTrue(self.page_save(lambda s: s.update(alert_language="zh"))["ok"])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        sent = self.alerted(out)[-1]
+        self.assertEqual((sent["kind"], sent["level"]), ("release_ended,disk", "urgent"))
+        self.assertIn("2 条提醒", sent["text"])
+        self.assertIn("完成（退出码 0", sent["text"])
+        self.assertIn("磁盘空间低于下限", sent["text"])
+        text = alert.text_of(self.desk, [{"text": "长" * 1100, "release": 1, "code": "AB3DE9"},
+                                         {"text": "另一条"}], held=2)
+        self.assertIn("#1 一次性码 AB3DE9", text.splitlines()[0])
+        self.assertIn("每小时最多 20 次，2 条提醒因此暂缓", text)
+        self.assertEqual((len(text), text[-1]), (1000, "…"))
 
     def test_the_alert_command_is_the_principals_alone(self):
         from hansa import alert

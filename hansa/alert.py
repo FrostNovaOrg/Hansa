@@ -1,7 +1,11 @@
 """Alerts: the principal's own command, which hansa runs when something waits for the principal.
 
 The principal sets one command line on the page (settings `alert`, which only the page saves: desk.PRINCIPAL_ONLY);
-the page records that it saved it, and when. hansa runs it when a release starts waiting for the principal's yes,
+the page records that it saved it, and when. Beside it, `alert_language` selects "en" (the default) or "zh".
+Before that choice has been saved, the page prefills it from its own language; only saving applies it to alerts.
+Only the principal may save it, and the settings history records the change. Other values are refused on save;
+an invalid value in settings.json reads as "en". A saved change also applies to alerts still gathering.
+hansa runs the command when a release starts waiting for the principal's yes,
 when a release ends (done, failed, void or forbidden), when the coordinator stops one (release_stopped; the principal's
 own Stop on the page sends none), when a to-do for the principal is recorded (hansa ask), when a lane's runs cannot
 start because a provider ran out of credit (once per rest: run.rest_provider), when a lane's runs cannot
@@ -27,9 +31,13 @@ The follower watches its inbox's refusals and the last two (notify.Watch), and a
 Alerts are queued in .hansa/alerts.json (any hansa process may queue one) and sent by hansa serve's alert thread:
 as the desk's account, outside the sandbox, in a folder of its own under the desk's secrets/alert-runs (run_dir),
 with hansa's own environment (not a lane's env),
-the kinds in HANSA_ALERT_KIND (comma-separated when several go out together) and the text on standard input (UTF-8,
+the kinds in HANSA_ALERT_KIND (comma-separated when several go out together), the level in HANSA_ALERT_LEVEL,
+and the text on standard input (UTF-8,
 keys removed, cut at MOST_TEXT characters), stopped after TIMEOUT seconds. Alerts that come within GATHER seconds
 of each other go out in one run (none waits more than MOST_WAIT); to-dos closed before that run are left out.
+Each queued alert has a level: passive for a release that finished successfully; active for release_waiting, ask,
+a failed, void or forbidden release, release_stopped and test; urgent for server_stuck, coordinator, sandbox, disk
+and credit. A batch takes the highest (passive < active < urgent). Nothing else uses the level yet.
 One run at a time (.hansa/alert.lock), and at
 most MOST_RUNS in an hour: beyond that, what comes waits and goes out in one run when the hour frees a run, with a
 line saying how many were held back. An entry of the queue that cannot be read is dropped, and recorded once
@@ -47,8 +55,9 @@ in the conversation (this release only, once, 24 hours; send it nowhere else), o
 · #2 code M4R8TW", then one line each, those holding a code first.
 That folder is removed when the command ends, and what a stopped
 or killed hansa serve left there is swept when it starts (sweep_runs): secrets/ is closed to the coordinator, workers,
-verifiers, so a leftover that holds the alert's text is never theirs to read. The text is in English: the page has no language setting (it
-follows the browser's language, which hansa does not know when it sends).
+verifiers, so a leftover that holds the alert's text is never theirs to read. Text is in the saved alert_language;
+English wording is unchanged when there is no target description. A release alert starts with its target's
+description, if any, kept in the request as it was when asked, followed by the usual release text.
 """
 from __future__ import annotations
 
@@ -70,6 +79,8 @@ from .desk import Desk, now, read_json, write_json
 
 KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "disk", "coordinator", "credit",
          "test")
+LEVELS = ("passive", "active", "urgent")  # increasing attention; a batch takes the highest
+URGENT = ("server_stuck", "coordinator", "sandbox", "disk", "credit")
 GATHER = 20  # seconds: alerts that come within this of each other go out in one run
 MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
 TIMEOUT = 30  # seconds a run may take
@@ -116,6 +127,14 @@ def command(s: dict) -> str:
     return a["command"].strip() if isinstance(a, dict) and isinstance(a.get("command"), str) else ""
 
 
+def chinese(desk: Desk) -> bool:
+    return desk.settings().get("alert_language") == "zh"
+
+
+def level_of(kind: str) -> str:
+    return "urgent" if kind in URGENT else "active"
+
+
 def _good(x) -> bool:
     at = x.get("at") if isinstance(x, dict) else None
     return (isinstance(at, (int, float)) and not isinstance(at, bool) and math.isfinite(at)
@@ -149,6 +168,9 @@ def _clean(desk: Desk) -> list:
     good, bad = _read(desk)
     migrated = False
     for x in good:
+        if x.get("level") not in LEVELS:
+            x["level"] = level_of(x["kind"])
+            migrated = True
         if "code" not in x:
             continue
         # Older queues stored the credential and its text. Remove both, even during a rate-limit hold;
@@ -160,6 +182,7 @@ def _clean(desk: Desk) -> list:
         r = release.get(desk, rid) or {}
         x["asked"] = r.get("asked")
         x["text"] = desk.redact(_release_text(desk, rid, True) or f"release #{rid} waits for your yes on the page")
+        x.pop("translations", None)
         migrated = True
     if bad or migrated:
         write_json(queue_file(desk), good)
@@ -168,17 +191,22 @@ def _clean(desk: Desk) -> list:
     return good
 
 
-def add(desk: Desk, kind: str, text: str, release=None, asked=None, ask=None) -> bool:
+def add(desk: Desk, kind: str, text: str, release=None, asked=None, ask=None, *, zh: str | None = None,
+        level: str | None = None) -> bool:
     """Queue code-free text for the next run; False when no alert command is set. release and asked identify
     the waiting request whose text is rebuilt with a code at send time. ask: the to-do's ID, so a closed
-    to-do can be left out when the gathered alerts go out."""
+    to-do can be left out when the gathered alerts go out. Keep both code-free wordings, so a saved language
+    change also applies to alerts still gathering; only _with_codes adds a credential, in memory."""
     if not command(desk.settings()):
         return False
     with desk.lock():
         q = _clean(desk)
         if release is not None:
             q = [x for x in q if x.get("release") != release]
-        q.append({"kind": kind, "text": desk.redact(text), "at": time.time(),
+        translations = {"en": desk.redact(text), "zh": desk.redact(zh)} if zh is not None else {}
+        q.append({"kind": kind, "text": translations.get("zh" if chinese(desk) else "en", desk.redact(text)),
+                  "level": level if level in LEVELS else level_of(kind), "at": time.time(),
+                  **({"translations": translations} if translations else {}),
                   **({"release": release, "asked": asked} if release is not None else {}),
                   **({"ask": ask} if ask is not None else {})})
         desk.state_dir.mkdir(exist_ok=True)
@@ -187,12 +215,26 @@ def add(desk: Desk, kind: str, text: str, release=None, asked=None, ask=None) ->
 
 
 # -- what is alerted -------------------------------------------------------------------------------------------------
-def _release_text(desk: Desk, rid, waiting: bool, code: str = "") -> str:
+def _release_text(desk: Desk, rid, waiting: bool, code: str = "", zh: bool = False) -> str:
     from . import release
     r = release.get(desk, rid)
     if not r:
         return ""
+    about = (r["about"] + " · ") if r.get("about") else ""
     target = r.get("target") or ""  # "": the lane's one unnamed target, its release command
+    if zh:
+        at = f"{r.get('base')} 的 {str(r.get('commit') or '')[:10]}"
+        rest = (f"{r.get('count', 0)} 个提交，命令：{r.get('command')}"
+                + (f"；说明：{r['note']}" if r.get("note") else ""))
+        if waiting and r.get("direct_count"):
+            rest = f"直接提交：{r['direct_count']} 个，" + rest
+        if waiting and code:
+            return (about + f"发布 #{r['id']}（工作线 {r.get('lane')}，发布目标 {target or '（未命名）'}）· 一次性码 {code}："
+                    f"要发布，请在对话里把这个码告诉协调员（仅限这次发布，只能用一次，{release.CODE_LIFE // 3600} 小时内有效；"
+                    f"不要发到别处），或在网页上点头 · {at}，{rest}")
+        head = about + f"工作线 {r.get('lane')} 的发布 #{r['id']}，发布目标 {target or '（未命名）'}（{at}）"
+        return (f"{head} 等你在网页上点头：{rest}" if waiting else
+                f"{head}：{release.state_text(desk, r, zh=True)}")
     at = f"{r.get('base')} at {str(r.get('commit') or '')[:10]}"
     rest = (f"{r.get('count', 0)} commit(s), command: {r.get('command')}"
             + (f"; note: {r['note']}" if r.get("note") else ""))
@@ -200,10 +242,10 @@ def _release_text(desk: Desk, rid, waiting: bool, code: str = "") -> str:
         rest = f"{r['direct_count']} direct commit(s), " + rest
     if waiting and code:  # the code and what to do with it first: a phone shows the first hundred characters or so,
         # and no cut of a long text takes it
-        return (f"release #{r['id']} (lane {r.get('lane')}, target {target or '(unnamed)'}) · code {code}: to release "
+        return (about + f"release #{r['id']} (lane {r.get('lane')}, target {target or '(unnamed)'}) · code {code}: to release "
                 f"it, give this code to the coordinator in the conversation (this release only, once, "
                 f"{release.CODE_LIFE // 3600} hours; send it nowhere else), or answer on the page · {at}, {rest}")
-    head = f"release #{r['id']} of lane {r.get('lane')}, target {target or '(unnamed)'} ({at})"
+    head = about + f"release #{r['id']} of lane {r.get('lane')}, target {target or '(unnamed)'} ({at})"
     if waiting:
         return f"{head} waits for your yes on the page: {rest}"
     return f"{head}: {release.state_text(desk, r)}"
@@ -223,26 +265,38 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
             return
         with desk.lock():
             r = release.get(desk, rid) or {}
-            add(desk, "release_waiting", _release_text(desk, rid, True), release=rid, asked=r.get("asked"))
+            add(desk, "release_waiting", _release_text(desk, rid, True), release=rid, asked=r.get("asked"),
+                zh=_release_text(desk, rid, True, zh=True))
     elif kind in ("release_ended", "release_void", "release_forbidden"):
-        add(desk, "release_ended", _release_text(desk, fields.get("id"), False))
+        add(desk, "release_ended", _release_text(desk, fields.get("id"), False),
+            zh=_release_text(desk, fields.get("id"), False, zh=True),
+            level="passive" if r.get("state") == "done" else "active")
     elif kind == "release_stopped" and fields.get("by") != "page":  # the principal knows of their own Stop
-        add(desk, "release_stopped", _release_text(desk, fields.get("id"), False))
+        add(desk, "release_stopped", _release_text(desk, fields.get("id"), False),
+            zh=_release_text(desk, fields.get("id"), False, zh=True))
     elif kind == "ask":
         a = next((x for x in desk.asks() if x.get("id") == fields.get("id")), {})
-        add(desk, "ask", f"to-do #{fields.get('id')} for you: {a.get('text', '')}", ask=fields.get("id"))
+        add(desk, "ask", f"to-do #{fields.get('id')} for you: {a.get('text', '')}", ask=fields.get("id"),
+            zh=f"你的待办 #{fields.get('id')}：{a.get('text', '')}")
     elif kind == "provider_credit":
-        add(desk, "credit", fields["text"])
+        at = time.strftime('%H:%M', time.localtime(fields.get("since") or time.time()))
+        add(desk, "credit", fields["text"],
+            zh=f"服务商 {fields.get('provider')}：余额不足，自 {at} 起休息，等负责人在网页上确认充值")
     elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason (run.hold)
         from .run import sandbox_held_text
         why = sandbox_held_text({**fields, "kind": fields.get("run")})
         add(desk, "sandbox", f"lane {fields.get('lane')} cannot run: {why}; "
                              + (f"task {fields['task']} is held" if fields.get("task") else "its tasks are held")
-                             + ", not failed")
+                             + ", not failed",
+            zh=f"工作线 {fields.get('lane')} 因沙箱暂缓：{fields.get('why') or '?'}；"
+               "沙箱试跑通过后会自动恢复（修复后重启 hansa serve；hansa explain server）；"
+               + (f"任务 {fields['task']} 暂缓" if fields.get("task") else "其任务暂缓") + "，没有失败")
     elif kind == "disk_low":  # once each time it goes under (disk.look)
         add(desk, "disk", f"free space is under the floor ({fields.get('floor') or 0:g} GB): "
                           + "; ".join(fields.get("volumes") or []) + ": hansa serve starts no new task or release "
-                          "until there is space again; what runs goes on")
+                          "until there is space again; what runs goes on",
+            zh=f"磁盘空间低于下限（{fields.get('floor') or 0:g} GB）：" + "；".join(fields.get("volumes") or [])
+               + "：hansa serve 暂停新任务和发布，等待空间恢复；正在运行的继续")
 
 
 # -- sending -----------------------------------------------------------------------------------------------------------
@@ -252,25 +306,28 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
     items = sorted(items, key=lambda x: not x.get("code"))  # those holding a code first: no cut takes it
     lines = [" ".join(str(x.get("text") or "").split()) for x in items]
     codes = [x for x in items if x.get("code")]
+    zh = chinese(desk)
     name = "/".join(str(desk.root).split("/")[-2:]).lstrip("/") or "/"
-    head = f"[hansa] desk {name}"
-    held_text = f" ({held} held back by the limit of {MOST_RUNS} runs an hour)" if held else ""
+    head = f"[hansa] 工作台 {name}" if zh else f"[hansa] desk {name}"
+    held_text = ((f"（每小时最多 {MOST_RUNS} 次，{held} 条提醒因此暂缓）" if zh else
+                  f" ({held} held back by the limit of {MOST_RUNS} runs an hour)") if held else "")
     if len(lines) == 1:  # a code stays early: what was held back is said after it
         text = f"{head}: {lines[0]}{held_text}" if codes else f"{head}{held_text}: {lines[0]}"
     else:  # the first line gives each waiting release's number and code, before what was held back
-        text = (f"{head}: {len(lines)} alerts" + "".join(f" · #{x.get('release')} code {x['code']}" for x in codes)
+        text = ((f"{head}: {len(lines)} 条提醒" if zh else f"{head}: {len(lines)} alerts")
+                + "".join(f" · #{x.get('release')} {'一次性码' if zh else 'code'} {x['code']}" for x in codes)
                 + held_text + "\n" + "\n".join(f"- {x}" for x in lines))
     text = desk.redact(text)
     return text if len(text) <= MOST_TEXT else text[:MOST_TEXT - 1] + "…"
 
 
-def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT, codes=()) -> dict:
+def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT, codes=(), level: str = "active") -> dict:
     """Run the alert command once: {ok, exit, timed_out, limit, tail, at}. It runs in a folder of its own under
     runs_dir, removed after however the command ends (what a killed server left, sweep_runs removes), so that what it
     writes to a relative path lands nowhere hansa keeps or anyone but the principal reads. codes: the one-time codes the text holds;
     then none of what the command printed is kept (tail is empty, withheld says why), as it may echo a code in any
     form."""
-    env = {**without_session(os.environ), "HANSA_ALERT_KIND": kinds}
+    env = {**without_session(os.environ), "HANSA_ALERT_KIND": kinds, "HANSA_ALERT_LEVEL": level}
     for k in ("HANSA_TASK", "HANSA_MERGING"):
         env.pop(k, None)
     timed_out, code, out = False, None, b""
@@ -387,9 +444,15 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             return None
         held = len(q) if held_since else 0
         kinds = ",".join(dict.fromkeys(x["kind"] for x in q))
+        level = max((x["level"] for x in q), key=LEVELS.index)
+        lang = "zh" if chinese(desk) else "en"
+        for x in q:
+            translations = x.get("translations")
+            if isinstance(translations, dict) and isinstance(translations.get(lang), str):
+                x["text"] = translations[lang]
         codes = _with_codes(desk, q)
         text = text_of(desk, q, held)
-        result = run(desk, cmd, kinds, text, timeout, codes=[x["code"] for x in codes])
+        result = run(desk, cmd, kinds, text, timeout, codes=[x["code"] for x in codes], level=level)
         _codes_went(desk, codes, text, result["ok"])
         _record(desk, result, len(q), t)
         return result
@@ -413,7 +476,7 @@ def _with_codes(desk: Desk, items: list) -> list:
             code = release.new_code(desk, rid)
             if code:
                 seen.add(rid)
-                x.update(code=code, text=_release_text(desk, rid, True, code))
+                x.update(code=code, text=_release_text(desk, rid, True, code, zh=chinese(desk)))
                 codes.append(x)
     return codes
 
@@ -433,7 +496,7 @@ def test(desk: Desk, timeout: float = TIMEOUT) -> dict:
     """The page's test button: a test alert sent now, with anything already queued."""
     if not command(desk.settings()):
         return {"ok": False, "problems": ["no alert command is set; save one first"]}
-    add(desk, "test", "a test alert from the page: the alert command works")
+    add(desk, "test", "a test alert from the page: the alert command works", zh="来自网页的测试提醒：提醒命令正常")
     result = send_due(desk, gather=0, timeout=timeout, wait=True, capped=False)  # the principal's own press
     return result or {"ok": False, "problems": ["the test alert was not sent"]}
 
@@ -448,7 +511,9 @@ def stuck_check(desk: Desk, told: float) -> float:
         return 0.0
     if not told:
         add(desk, "server_stuck", f"hansa serve has finished no round for {int(quiet // 60)} minutes: no task starts "
-                                  "or ends, and no release runs; see hansa explain server")
+                                  "or ends, and no release runs; see hansa explain server",
+            zh=f"后台（hansa serve）已 {int(quiet // 60)} 分钟没跑完一轮：在忙或卡住了；"
+               "任务无法开始或结束，发布也无法运行；请查看 hansa explain server")
         return time.time()
     return told
 
@@ -522,7 +587,7 @@ def unheard_check(desk: Desk, t: float | None = None) -> dict:
         new = {"pos": pos, "waits": waits, **({"told": rec["told"]} if _at(rec.get("told")) else {})}
         items = _waiting(new)
         if items and "told" not in new and t - items[0]["at"] >= mins * 60 and command(s) \
-                and add(desk, "coordinator", unheard_text(desk, items, t)):
+                and add(desk, "coordinator", unheard_text(desk, items, t), zh=unheard_text(desk, items, t, zh=True)):
             new["told"] = t
     if new != stored:
         desk.state_dir.mkdir(exist_ok=True)
@@ -530,18 +595,26 @@ def unheard_check(desk: Desk, t: float | None = None) -> dict:
     return new
 
 
-def unheard_text(desk: Desk, items: list, t: float) -> str:
+def unheard_text(desk: Desk, items: list, t: float, zh: bool = False) -> str:
     """The first case's alert: the case, the session that last heard from hansa, and what waits."""
     from . import notify
     last = max(notify.records(desk), key=lambda r: r.get("seen") or 0, default=None)
     if last:
         sess = last.get("session") or {}
-        how = ("its session ended" if notify.gone(sess) else
-               "its session runs, but notifications were turned off or its follower stopped")
-        who = (f"the last was session {notify.who(sess.get('pid'), str(last.get('name') or ''))}, until "
-               f"{_when(last.get('ended') or last.get('seen'))}: {how}")
+        if zh:
+            how = "会话已结束" if notify.gone(sess) else "会话仍在运行，但提醒已关闭或跟随进程已停止"
+            who = (f"上次是会话 {notify.who(sess.get('pid'), str(last.get('name') or '尚未命名'))}，"
+                   f"直到 {_when(last.get('ended') or last.get('seen'))}：{how}")
+        else:
+            how = ("its session ended" if notify.gone(sess) else
+                   "its session runs, but notifications were turned off or its follower stopped")
+            who = (f"the last was session {notify.who(sess.get('pid'), str(last.get('name') or ''))}, until "
+                   f"{_when(last.get('ended') or last.get('seen'))}: {how}")
     else:
-        who = "none has on this desk yet"
+        who = "这个工作台还没有会话接收过" if zh else "none has on this desk yet"
+    if zh:
+        return (f"协调员未收到：没有会话接收 hansa 的消息（{who}）· {len(items)} 件事在等协调员，"
+                f"最早的已等 {_mins(t - items[0]['at'])} 分钟：{items[0]['line']}")
     return (f"the coordinator's session cannot be reached: no session hears from hansa ({who}) · {len(items)} "
             f"thing(s) wait for the coordinator, the oldest for {_mins(t - items[0]['at'])} min: {items[0]['line']}")
 
@@ -569,11 +642,13 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
     from . import notify
     sess = me.get("session") if isinstance(me.get("session"), dict) else {}
     who = notify.who(sess.get("pid"), str(me.get("name") or "")[:80])
+    who_zh = notify.who(sess.get("pid"), str(me.get("name") or "尚未命名")[:80])
     t = time.time()
     if req.get("case") == "inbox":
         since = req["since"] if _at(req.get("since")) else t
         text = (f"the coordinator's session {who} cannot be reached: its inbox refuses posts for "
                 f"{_mins(t - since)} min · hansa keeps the lines and tries again")
+        text_zh = (f"协调员未收到：会话 {who_zh} 的收件箱已拒收 {_mins(t - since)} 分钟 · hansa 保留消息并重试")
     elif req.get("case") == "window":
         since = req["since"] if _at(req.get("since")) else t
         count = req["count"] if isinstance(req.get("count"), int) else 0
@@ -581,6 +656,9 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
                 f"{_mins(t - since)} min, so it cannot act on what hansa posted to it: {count} thing(s) since "
                 f"{time.strftime('%H:%M', time.localtime(since))}, the oldest: {_short(req.get('oldest') or '')} · "
                 "answer it in that session")
+        text_zh = (f"协调员的会话 {who_zh} 已在窗口上等了 {_mins(t - since)} 分钟（权限对话框或提问），"
+                   f"无法处理 hansa 发来的消息：从 {time.strftime('%H:%M', time.localtime(since))} 起共 {count} 件，"
+                   f"最早的是：{_short(req.get('oldest') or '')} · 请在那个会话里回答")
     elif req.get("case") == "review" and notify.TASK_ID.match(str(req.get("task") or "")):
         tid = req["task"]
         try:
@@ -591,6 +669,8 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
         posted = req["posted"] if _at(req.get("posted")) else t
         text = (f"the coordinator's session {who} is idle while {tid} has waited for review for {_mins(t - posted)} "
                 f"min since hansa posted it there: {title} · hansa does not post it again")
+        text_zh = (f"协调员的会话 {who_zh} 空闲，但 {tid} 自 hansa 发到那里后已等了 {_mins(t - posted)} 分钟待审："
+                   f"{title} · hansa 不会重复发送")
         with desk.lock():
             try:
                 told = read_json(reviews_file(desk), {})
@@ -601,7 +681,7 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
             round_ = m.get("finished")
             if tid in told and told[tid] == round_:
                 return "told"
-            queued = add(desk, "coordinator", text)
+            queued = add(desk, "coordinator", text, zh=text_zh)
             if queued:
                 told[tid] = round_
             desk.state_dir.mkdir(exist_ok=True)
@@ -609,7 +689,7 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
         return "queued" if queued else ""
     else:
         return ""
-    return "queued" if add(desk, "coordinator", text) else ""
+    return "queued" if add(desk, "coordinator", text, zh=text_zh) else ""
 
 
 def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:

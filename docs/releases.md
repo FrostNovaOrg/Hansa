@@ -518,8 +518,11 @@ coordinator, workers and verifiers; removed when the command ends, and what a st
 the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
 `release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `coordinator`, `credit`, `test`; comma-separated when several go
 out together)
-and the text on standard input: UTF-8, in English, keys removed, cut at 1,000
-characters; a release's text names its lane and target. Alerts name the desk by
+and the level in `HANSA_ALERT_LEVEL` (the highest in a batch; see
+[alert settings](desk.md#settings-on-the-web-page)), and the text on standard input: UTF-8, in the saved
+`alert_language` (`en` by default, or `zh`; set only by the principal beside the command), keys removed, cut at 1,000
+characters; a release's text names its lane and target, preceded by its description
+as kept when the release was asked, if any. Alerts name the desk by
 the last two folders of its path, as the page title does: `[hansa] desk shop/desk: ...`
 for `/work/shop/desk`, or `[hansa] desk desk: ...` for `/desk`. Spaces and
 non-ASCII letters stay as they are. Desks with the same last two folders have
@@ -527,6 +530,21 @@ the same alert name. A new to-do reads `to-do #N for you: <text>`; the principal
 answers in the conversation. When the gathered alerts go out, to-dos already
 closed are left out. If nothing remains, no alert command runs. Closing a to-do
 after its alert went out sends nothing more.
+
+The page prefills an unsaved `alert_language` from its own language; alerts stay
+English until the principal saves that choice. Settings history records changes.
+Other values are refused on save; an invalid file value reads as `en`.
+A saved choice also applies to alerts still gathering. Each queued alert has a
+level, and `HANSA_ALERT_LEVEL` takes the highest in a batch:
+
+| Level | Alerts |
+| --- | --- |
+| `passive` | A release that finished successfully |
+| `active` | A waiting release, a to-do, a failed, void, forbidden or stopped release, and the test |
+| `urgent` | `server_stuck`, `coordinator`, `sandbox`, `disk`, `credit` |
+
+Nothing else uses the level yet.
+
 For a release refused by the word scan, the alert gives only counts of hits
 and lines that could not be checked against patterns; the entries, lines and
 reasons stay in the page's release list and `hansa release`, so refused

@@ -308,7 +308,7 @@ or ask `scout` when reading is enough; say what you need back.
 - Java or Maven: `hansa help java`. Lane commands on Linux: `hansa help linux-sandbox`.
 - The principal's, on the page: providers, models, keys, effort defaults, when your session compacts,
   prices, what workers may not read, which targets
-  go out without their yes, the forbidden words, the alert command. An entry workers may not read
+  go out without their yes, the forbidden words, the alert command and its language. An entry workers may not read
   that cannot be applied stops every run (`hansa status`: `STOPPED:`) until the principal changes it,
   and so does an account's list of desks that is there but cannot be read as a JSON list (`STOPPED:` names the file);
   one that came to close a lane's repository, a worktree or a `PATH` folder is left out of runs:
