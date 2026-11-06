@@ -41957,6 +41957,96 @@ else:
         for word in ("alert_language", "HANSA_ALERT_LEVEL", "passive", "active", "urgent"):
             self.assertIn(word, helped)
 
+    def test_settings_saves_that_omit_alert_language_keep_the_principals_choice(self):
+        def omit_language(s):
+            s.pop("alert_language")
+            provider = s["providers"]["claude"]
+            provider["model"] = "sonnet" if provider["model"] != "sonnet" else "haiku"
+
+        for language in ("zh", "en"):
+            for by in ("page", "coordinator"):
+                with self.subTest(language=language, by=by):
+                    self.assertTrue(self.page_save(lambda s: s.update(alert_language=language))["ok"])
+                    before = len(self.history_entries())
+                    previous = self.desk.settings()["providers"]["claude"]["model"]
+                    if by == "page":
+                        self.assertTrue(self.page_save(omit_language)["ok"])
+                    else:
+                        s = self.desk.settings()
+                        omit_language(s)
+                        self.assertEqual(self.desk.save_settings(s, by=by), [])
+                    self.assertEqual(self.desk.settings()["alert_language"], language)
+                    self.assertEqual(json.loads(self.desk.settings_path.read_text())["alert_language"], language)
+                    self.assertNotEqual(self.desk.settings()["providers"]["claude"]["model"], previous)
+                    entries = self.history_entries()[before:]
+                    self.assertEqual([e["path"] for e in entries], ["providers.claude.model"])
+                    self.assertEqual(entries[0]["by"], "principal" if by == "page" else "coordinator")
+        # Naming the field still changes it and records the principal's choice.
+        self.assertTrue(self.page_save(lambda s: s.update(alert_language="zh"))["ok"])
+        entry = [e for e in self.history_entries() if e["path"] == "alert_language"][-1]
+        self.assertEqual((entry["old"], entry["new"], entry["by"]), ("en", "zh", "principal"))
+
+    def test_settings_save_omitting_unsaved_alert_language_does_not_record_a_choice(self):
+        self.assertTrue(self.page_save(lambda s: s.pop("alert_language"))["ok"])
+        self.assertFalse(public_settings(self.desk)["alert_language_saved"])
+        self.assertEqual(self.desk.settings()["alert_language"], "en")
+        self.assertNotIn("alert_language", json.loads(self.desk.settings_path.read_text()))
+        self.assertFalse([e for e in self.history_entries() if e["path"] == "alert_language"])
+
+    def test_chinese_sandbox_alert_names_the_held_runs_and_keeps_the_reason(self):
+        from hansa import alert
+        out = self.alert_fake()
+        self.assertTrue(self.page_save(lambda s: s.update(alert_language="zh"))["ok"])
+        for kind, why, task, who, problem in (
+            ("worker", "the sandbox could not start: sandbox_apply: Invalid argument", "t123",
+             "工作智能体", "沙箱无法启动"),
+            ("verifier", "the sandbox could not start: bwrap: permission denied", "",
+             "核验者", "沙箱无法启动"),
+            ("check", "reason", "t124", "检查", "沙箱无法启动"),
+            (None, None, "", "运行", "沙箱无法启动"),
+            ("worker", "the sandbox starts, but the deny-read list keeps nothing", "t125",
+             "工作智能体", "沙箱已启动，但未通过检查"),
+        ):
+            with self.subTest(kind=kind, why=why, task=task):
+                self.desk.event("sandbox_held", lane="a", run=kind, why=why, task=task, alert=True)
+                self.assertTrue(alert.send_due(self.desk, gather=0, capped=False)["ok"])
+                sent = self.alerted(out)[-1]
+                self.assertEqual((sent["kind"], sent["level"]), ("sandbox", "urgent"))
+                for words in ("工作线 a", f"其{who}的{problem}", why or "?", "其工作智能体和核验者",
+                              "沙箱试跑通过后会自动恢复", "修复后重启 hansa serve", "hansa explain server",
+                              f"任务 {task} 暂缓" if task else "其任务暂缓", "没有失败"):
+                    self.assertIn(words, sent["text"])
+
+    def test_chinese_release_void_alert_keeps_both_execution_modes(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        self.assertTrue(self.page_save(lambda s: s.update(alert_language="zh"))["ok"])
+        self.hansa("lane", "target", "a", "default", "true")
+        r = release.ask(self.desk, "a", target="default")
+        alert.send_due(self.desk, gather=0)
+        self.hansa("lane", "target", "a", "default", "--fixed")
+        answered = release.answer(self.desk, r["id"], True, commit=r["commit"])
+        self.assertIn("from a fixed checkout, or in the repository", answered["void"])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        sent = self.alerted(out)[-1]
+        self.assertEqual((sent["kind"], sent["level"]), ("release_ended", "active"))
+        for words in ("作废", "工作线 a", "发布目标 default", "--fixed", "固定检出", "或在仓库里运行", "什么都没运行"):
+            self.assertIn(words, sent["text"])
+
+    def test_chinese_credit_alert_addresses_the_principal_as_you(self):
+        from hansa import alert, run
+        out = self.alert_fake()
+        self.assertTrue(self.page_save(lambda s: s.update(alert_language="zh"))["ok"])
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "credit", "balance too low")
+        since = self.desk.provider_state()["claude"]["credit_since"]
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        sent = self.alerted(out)[-1]
+        self.assertEqual((sent["kind"], sent["level"]), ("credit", "urgent"))
+        for words in ("服务商 claude", "余额不足", time.strftime("%H:%M", time.localtime(since)),
+                      "休息", "等你在网页上确认充值"):
+            self.assertIn(words, sent["text"])
+        self.assertNotIn("负责人", sent["text"])
+
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_alert_language_select_prefills_from_the_page_and_saves_its_choice(self):
         harness = self.tmp / "page.js"

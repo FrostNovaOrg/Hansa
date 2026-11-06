@@ -2727,10 +2727,12 @@ class Desk:
                 language_saved = "alert_language" in self._saved_settings()
             except SettingsError as e:
                 return [str(e)]
+            language_given = isinstance(new, dict) and "alert_language" in new
             mailbox_key = ""
             if isinstance(new, dict):
                 new = current_settings(new)
-                new.setdefault("alert_language", "en")
+                # Older pages omit this field: an unrelated save must keep the principal's choice.
+                new.setdefault("alert_language", old["alert_language"])
                 if by == "page":
                     new["bench"] = old["bench"]
                 mailbox_key = mailbox_settings(new)
@@ -2795,8 +2797,8 @@ class Desk:
                                         "or running there; a verify lane takes only verifications")
             if problems or dry:
                 return problems
-            # A coordinator's unrelated save must not turn the default into the principal's saved choice.
-            if not language_saved and by != "page":
+            # Only a page that names the field records a first choice, never an older page or a coordinator.
+            if not language_saved and (by != "page" or not language_given):
                 old = {k: v for k, v in old.items() if k != "alert_language"}
                 new = {k: v for k, v in new.items() if k != "alert_language"}
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))

@@ -584,7 +584,12 @@ English (`en`, the default) or Chinese (`zh`). Before it has been saved, the sel
 prefills from the page's language; alerts stay English until the principal saves
 the choice. Only the principal can save it, and settings history records it.
 Other values are refused on save; an invalid value in `settings.json` reads as
-`en`. A saved language change also applies to alerts still gathering.
+`en`. A save that omits `alert_language` keeps the saved choice; if it was never
+saved, it stays unset and the page still prefills it from its own language. This
+keeps an older page or a request for another setting from changing alert language.
+A saved language change also applies to alerts still gathering.
+Sandbox alerts explain which runs are held and how they resume in the selected
+language, and keep the sandbox's raw diagnostic alongside that explanation.
 The command receives `HANSA_ALERT_KIND` and `HANSA_ALERT_LEVEL`: `passive` for a
 successful release, `active` for a waiting release, a to-do, a failed, void,
 forbidden or stopped release and the test, and `urgent` for `server_stuck`,

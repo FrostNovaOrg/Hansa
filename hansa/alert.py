@@ -5,6 +5,7 @@ the page records that it saved it, and when. Beside it, `alert_language` selects
 Before that choice has been saved, the page prefills it from its own language; only saving applies it to alerts.
 Only the principal may save it, and the settings history records the change. Other values are refused on save;
 an invalid value in settings.json reads as "en". A saved change also applies to alerts still gathering.
+A settings save that omits alert_language keeps the saved choice; if none was saved, it stays unset.
 hansa runs the command when a release starts waiting for the principal's yes,
 when a release ends (done, failed, void or forbidden), when the coordinator stops one (release_stopped; the principal's
 own Stop on the page sends none), when a to-do for the principal is recorded (hansa ask), when a lane's runs cannot
@@ -281,15 +282,15 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
     elif kind == "provider_credit":
         at = time.strftime('%H:%M', time.localtime(fields.get("since") or time.time()))
         add(desk, "credit", fields["text"],
-            zh=f"服务商 {fields.get('provider')}：余额不足，自 {at} 起休息，等负责人在网页上确认充值")
+            zh=f"服务商 {fields.get('provider')}：余额不足，自 {at} 起休息，等你在网页上确认充值")
     elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason (run.hold)
         from .run import sandbox_held_text
-        why = sandbox_held_text({**fields, "kind": fields.get("run")})
+        held = {**fields, "kind": fields.get("run")}
+        why = sandbox_held_text(held)
         add(desk, "sandbox", f"lane {fields.get('lane')} cannot run: {why}; "
                              + (f"task {fields['task']} is held" if fields.get("task") else "its tasks are held")
                              + ", not failed",
-            zh=f"工作线 {fields.get('lane')} 因沙箱暂缓：{fields.get('why') or '?'}；"
-               "沙箱试跑通过后会自动恢复（修复后重启 hansa serve；hansa explain server）；"
+            zh=f"工作线 {fields.get('lane')} 因沙箱暂缓：{sandbox_held_text(held, zh=True)}；"
                + (f"任务 {fields['task']} 暂缓" if fields.get("task") else "其任务暂缓") + "，没有失败")
     elif kind == "disk_low":  # once each time it goes under (disk.look)
         add(desk, "disk", f"free space is under the floor ({fields.get('floor') or 0:g} GB): "

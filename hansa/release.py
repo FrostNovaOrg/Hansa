@@ -1004,7 +1004,7 @@ def stale_both(desk: Desk, s: dict, r: dict) -> tuple:
                 f"{what_zh(r)} 的发布命令在请求之后改了：现在是 {now_zh!r}，不是 {then!r}")
     if bool((t or {}).get("fixed")) != bool(r.get("fixed")):
         return (f"how {what(r)} runs (--fixed: from a fixed checkout, or in the repository) changed since it was asked",
-                f"{what_zh(r)} 的运行方式（--fixed，固定检出）在请求之后改了")
+                f"{what_zh(r)} 的运行方式（--fixed：在固定检出里运行，或在仓库里运行）在请求之后改了")
     if ((t or {}).get("watch") or "") != (r.get("watch") or ""):
         return (f"{what(r)}'s watch command changed since it was asked",
                 f"{what_zh(r)} 的发布监测命令在请求之后改了")

@@ -807,10 +807,15 @@ def sandbox_held(desk: Desk) -> dict:
     return out
 
 
-def sandbox_held_text(h: dict) -> str:
+def sandbox_held_text(h: dict, zh: bool = False) -> str:
     """Why a lane's runs are held (an entry of sandbox_held), which of them, and what starts them again, in a
-    clause."""
+    clause. zh: in Chinese for the alert, keeping the raw diagnostic in either language."""
     why = str(h.get("why") or "?")
+    if zh:
+        kind = {"worker": "工作智能体", "verifier": "核验者", "check": "检查"}.get(h.get("kind"), "运行")
+        problem = "沙箱已启动，但未通过检查" if why.startswith("the sandbox starts, but ") else "沙箱无法启动"
+        return (f"其{kind}的{problem}：{why}；这会暂缓其工作智能体和核验者，"
+                "沙箱试跑通过后会自动恢复（修复后重启 hansa serve；hansa explain server）")
     return (f"its {h.get('kind') or 'run'}'s "
             + (why.removeprefix("the ") if why.startswith("the sandbox starts, but ") else
                "sandbox could not start: " + why.removeprefix("the sandbox could not start: "))
