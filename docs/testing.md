@@ -30,3 +30,58 @@ reporting order (errors, then failures). It lists at most ten names, followed
 by `and N more` for any remaining entries. Skipped tests do not count, and a
 run without failures or errors has no such line. This keeps failing test names
 visible in the last lines shown by lane checks and release reports.
+
+## Bench test clocks and connections
+
+The lifecycle tests replace `selftest.time`, rather than `selftest.time.sleep`:
+the latter changes the shared Python `time` module for every thread. An unrelated
+thread calling `time.sleep` could advance the test clock beyond the lifecycle's
+90 second idle-stop deadline. `test_lifecycle_clock_ignores_unrelated_sleeps`
+keeps unrelated clock calls in another thread while exercising both lifecycle
+fixtures. Keep it while those fixtures advance a fake clock through sleep calls.
+
+The DHCP tests run the shipped source with imports supplied through that exec's
+own builtins. They still exercise lease renewal, stale/missing addresses and a
+removed lease, but no longer replace shared `time`, `subprocess` or `pathlib`
+attributes. Both DHCP fixtures make unrelated clock calls on another thread:
+under the old patches these consumed the finite monotonic sequence and raised
+`StopIteration`. Keep that interference while the probes use a finite fake clock.
+
+The broker cancellation fixture duplicates the input descriptor, just as the
+real SSH child inherits its own descriptor. It waits for the full request before
+allowing cancellation, then deliberately waits until VM stop, after the broker
+has closed its original file object, before checking EOF. Reading the original
+file object in a loop could instead raise `ValueError` between reads and never
+signal connection completion. The fixture retains the cancelled reply, thread
+join, stop/reset/start recovery and unchanged cancelled-run files checks. Events
+and joins wait for those conditions; 60 second bounds only guard against hangs.
+
+### Other shared patches audited
+
+Patching an attribute on an imported module, or on a class, affects other threads
+using that same object. Besides the four clock patch sites above, these are the
+shared standard-library targets in `tests/bench/` (grouped by file):
+
+| File | Targets |
+| --- | --- |
+| `test_1.py` | `os.open`, `os.getuid`, `os.fdopen`, `os.fstat`, `os.link`, `builtins.__import__` |
+| `test_2.py` | `tarfile.TarFile.addfile`, `tempfile.TemporaryFile` |
+| `test_3.py` | `tarfile.TarFile.extract`, `uuid.uuid4` |
+| `test_4.py` | `subprocess.Popen`, `os.sync`, `shutil.rmtree` |
+| `test_6.py` | `shutil.chown`, `os.sync`, `os.path.ismount`, `os.rmdir`, `select.select`, `os.read`, `threading.Thread.join` |
+| `test_7.py` | `pathlib.Path.read_bytes` |
+| `test_10.py` | `urllib.request.build_opener` |
+| `test_11.py` | `socket.socket`, `socket.create_connection`, `socket.getaddrinfo`, `socket.gethostname`, `pwd.getpwnam`, `subprocess.Popen` |
+
+Also shared are environment patches in `test_1.py`, `test_2.py` and `test_4.py`,
+`sys.platform` patches in `test_6.py`, `test_7.py` and `test_9.py`, and `sys.argv`
+and stdout redirection in `test_11.py`. Hansa module functions and classes patched
+by these tests are visible to other callers of those same Hansa objects too;
+notably `test_8.py` patches snapshot export, channel claim/read/reply and archive
+delivery while running broker threads. Instance patches, such as a particular
+fake VM's `connect`, affect only callers using that instance.
+
+The remaining targets are unchanged: no equivalent clock-consumption or closed
+input race was established for them. In particular, the `test_6.py` stderr test
+intentionally intercepts its drain thread's select/read/join operations; that is
+a separate fixture from the lifecycle and DHCP clocks.
