@@ -54,6 +54,8 @@ DEFAULT_DISABLE = ("apps", "plugins", "browser_use", "computer_use", "image_gene
 # session files; an unknown -c key fails at start. Auth still comes from CODEX_HOME.
 ISOLATION_FLAGS = ("--ignore-user-config", "--ignore-rules", "--ephemeral", "--strict-config")
 FIXED_CONFIG = ("analytics.enabled=false", 'approval_policy="never"', 'approvals_reviewer="user"')
+# Never carry memory between runs sharing CODEX_HOME, whatever HANSA_CODEX_DISABLE says.
+FIXED_DISABLE = ("memories", "external_agent_memory_import")
 # In the Codex home, what Codex reads on every run whatever the flags, or what the flags above leave unread: a run
 # may not write it (srt's denyWrite), and Codex never writes it during exec
 HOME_DENY = ("AGENTS.md", "AGENTS.override.md", "config.toml", "environments.toml", "hooks.json", "rules")
@@ -478,7 +480,7 @@ def codex_argv(codex: str, wt: str, model: str, effort: str, system: str, last: 
             *(x for c in FIXED_CONFIG for x in ("-c", c)),
             "-c", "check_for_update_on_startup=false",
             "-c", f"web_search={toml_string(web_search)}",
-            *(x for f in disable for x in ("--disable", f)),
+            *(x for f in (*disable, *FIXED_DISABLE) for x in ("--disable", f)),
             "-s", "danger-full-access", "-o", last, "-"]
 
 
