@@ -38718,6 +38718,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 phone = css.split("@media (max-width:860px)")[1].split("@media (max-width:640px)")[0]
                 self.assertIn("grid-template-columns:minmax(0,1fr) auto", phone)
                 self.assertRegex(phone, r"#state\s*\{[^}]*grid-column:1 / -1;[^}]*grid-row:3;")
+                # Narrow pages wrap the tabs onto more rows, so none is cut off behind a sideways scroll.
+                self.assertRegex(phone, r"#tabs\s*\{[^}]*flex-wrap:wrap")
+                self.assertNotIn("flex-wrap", re.search(r"#tabs\s*\{([^}]+)\}", css)[1])  # wide pages keep one row
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_page_title_and_caption_name_the_desk_and_its_parent(self):
@@ -39191,6 +39194,17 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             self.assertFalse(any("data-principal-request" in n["attrs"] for n in self.page_nodes(page["root"])))
             self.assertIn("#17", children[4]["text"])
             self.assertNotIn("Closed request", children[4]["text"])
+
+    def test_status_heading_stacks_its_auto_updates_note_under_the_tagline_on_a_phone(self):
+        for page in self.principal_layout_page():
+            head = next(n for n in page["root"]["kids"] if n["className"] == "page-head")
+            intro, aside = head["kids"]
+            self.assertEqual(intro["kids"][1]["tag"], "h1")
+            self.assertTrue(any((n.get("className") or "").startswith("status-pill") for n in self.page_nodes(aside)))
+            # The harness has no layout engine: the phone block's rule puts the aside below the intro,
+            # while the wider page keeps the two side by side.
+            self.assertRegex(page["css"], r"\.page-head\s*\{\s*display:flex;\s*justify-content:space-between;")
+            self.assertRegex(page["css"], r"@media \(max-width:640px\)\s*\{[^@]*?\.page-head\s*\{[^}]*flex-direction:column")
 
     def test_principal_requests_without_a_release_still_come_first(self):
         for page in self.principal_layout_page(asks=[{"id": 7, "text": "Review account"}]):
