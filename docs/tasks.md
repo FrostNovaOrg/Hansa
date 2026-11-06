@@ -327,6 +327,9 @@ that text. What holds up:
   guesses about what another program did.
 - When you ask for a test, say which failure a user would meet that it catches. Tests of test helpers
   or fixtures are not needed.
+- When a task changes behaviour that existing tests pin, say which tests may change with it, or allow
+  assertions of the old behaviour to change. Ask the worker to report each test it changed. Saying
+  "keep every existing test" alone leaves it to fail its check or bend the change around an old test.
 - In what a change stores or shows, ask for what happened, not a forecast: something coming in
   between makes a forecast wrong.
 - Write the verification's text from the task's: the same rows, nothing stricter, and the list of
