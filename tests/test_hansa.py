@@ -17007,7 +17007,8 @@ def save():'''))
         (self.repo / ".claude").mkdir(exist_ok=True)
         (self.repo / ".claude" / "settings.json").write_text(json.dumps({"autoMemoryEnabled": True}))
         subprocess.run(["git", "add", ".claude/settings.json"], cwd=self.repo, check=True)
-        subprocess.run(["git", "commit", "-qm", "memory on"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "memory on"],
+                       cwd=self.repo, check=True)  # a host with no git identity (the Linux run) refuses a bare commit
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
         s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "holds"}
