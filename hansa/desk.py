@@ -3212,6 +3212,14 @@ class Desk:
             return token
 
 
+def release_last(desk: Desk) -> dict:
+    """Each target's last release that ran to an end, for the page's list of releases without asking:
+    {"lane/target": {"state": done|failed|stopped, "ended": time}}; a target never released is absent."""
+    from .release import releases
+    return {f"{r.get('lane')}/{r['target']}": {"state": r["state"], "ended": r.get("ended") or r.get("asked")}
+            for r in releases(desk) if r.get("state") in ("done", "failed", "stopped")}
+
+
 def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
     from .run import credit_text
@@ -3239,7 +3247,7 @@ def public_settings(desk: Desk) -> dict:
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
-            "release_unmatched": unmatched, "lane_warnings": lane_warnings(s),
+            "release_unmatched": unmatched, "lane_warnings": lane_warnings(s), "release_last": release_last(desk),
             "alert_outside": outside.inspect((s.get("alert") if isinstance(s.get("alert"), dict) else {}).get("command") or "",
                                              desk.root / "secrets", fingerprint=False,
                                              directory=desk.root / "secrets" / "alert-runs" / "run")["outside"]}

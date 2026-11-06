@@ -2558,6 +2558,9 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
     _save(desk, new, "hansa lane target")
     desk.event("lane_set", lane=a.name, field="targets", target=a.target)
     print(f"lane {a.name} release target {a.target}: {_shown(old) if old else 'none'} -> {_shown(t)}")
+    if not t.get("about"):
+        print(f"It has no description: the principal sees only the command. Add one in their language, saying what it "
+              f"does and whether it sends anything outside: hansa lane target {a.name} {a.target} --about \"<text>\"")
     if (old or {}).get("command") != t["command"]:
         desk.event("lane_command_changed", lane=a.name, field="release", target=a.target,
                    old=(old or {}).get("command", ""), new=t["command"])

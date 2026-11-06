@@ -592,6 +592,7 @@ const T = ZH ? {
   releaseDirectReason:"直接提交的原因", releaseDirectWait:"这些直接提交须等你点头，即使发布目标已勾选",
   releaseDirect:"基础分支上的直接提交（只由你在此保存）", releaseDirectRecord:"record：记录，按发布目标的勾选发布（默认）", releaseDirectHold:'hold：须用 --direct "原因" 请求，即使发布目标已勾选也等你点头',
   releaseGone:"现在没有哪条工作线有这个发布目标：取消勾选再保存，就从清单上去掉", releaseGoneWas:"当时的命令：", releaseGoneUnknown:"（保存时没记下它当时的命令）",
+  releaseNoAbout:(l, t) => `还没有说明：协调员可以用 hansa lane target ${l} ${t} --about 加上`, releaseLast:(at, st) => `上次发布：${at}，${st}`, releaseNever:"还没发布过",
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
   releaseStopNote:"叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。发布中途停止可能使服务处于部分更新状态：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
   releasesWithoutAsking:"每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、监测命令（--watch）、它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效：手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
@@ -746,6 +747,7 @@ const T = ZH ? {
   releaseDirectReason:"reason for direct commits", releaseDirectWait:"Direct commits require your yes even when the target is ticked",
   releaseDirect:"Direct commits on the base branch (saved here by you only)", releaseDirectRecord:"record: record them and follow the target's tick (default)", releaseDirectHold:'hold: require --direct "<why>" and your yes even for a ticked target',
   releaseGone:"no lane has this release target now: untick it and Save to take it off the list", releaseGoneWas:"its command then: ", releaseGoneUnknown:"(its command then was not recorded)",
+  releaseNoAbout:(l, t) => `No description yet: the coordinator can add one with hansa lane target ${l} ${t} --about`, releaseLast:(at, st) => `Last release: ${at}, ${st}`, releaseNever:"Never released",
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
   releaseStopNote:"Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
   releasesWithoutAsking:"Each target is ticked on its own. A tick stops counting once the lane's repository or base branch, the target's command or an outside file it names, its watch command (--watch), the target it must follow or the way it runs (fixed) changes: a release asked for by hand then waits for your yes, and one that runs by itself after merges waits until you tick it again.",
@@ -1708,7 +1710,7 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
 // Drafts live only in this page's memory. In particular, keys never enter browser storage or settings JSON.
 let settingsBaseline = null, settingsLoading = null, settingsSaving = false, settingsGroup = "providers", settingsEpoch = 0;
 let settingsMessage = "", settingsProblems = [], KEY_DRAFTS = {}, newProviderName = "", newPriceName = "";
@@ -1847,7 +1849,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   if (background && (epoch !== settingsEpoch || settingsSaving || settingsDirty() || JSON.stringify(S) !== before || newProviderName || newPriceName)) return;
   S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
   CREDIT_RESTS = r.provider_credit || {};
-  RELEASE_UNMATCHED = r.release_unmatched || []; LANE_WARNINGS = r.lane_warnings || [];
+  RELEASE_UNMATCHED = r.release_unmatched || []; RELEASE_LAST = r.release_last || {}; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
   S.alert = S.alert || {command:""}; S.coordinator_alert = S.coordinator_alert || {}; S.coordinator_compact = S.coordinator_compact || {};
   if (!keepKeys) KEY_DRAFTS = {};
@@ -2133,6 +2135,9 @@ const laneTargets = l => l && l.targets && Object.keys(l.targets).length ? Objec
 const targetGone = (lane, t) => !laneTargets(S.lanes[lane]).includes(t);
 /* one tick per release target of each lane, and per entry on the list that no lane has now, said as such with
    the command it had when saved, so it can be unticked; a tick for one target never covers another */
+/* a target's last release that ran to an end, in a few words, from what the settings reply carries */
+const lastRelease = (lane, t) => { const r = RELEASE_LAST[`${lane}/${t}`];
+  return r ? T.releaseLast(when(r.ended), T.goalReleaseStates[r.state] || r.state) : T.releaseNever; };
 function releaseTicks() {
   const rows = [];
   for (const [lane, l] of Object.entries(S.lanes)) laneTargets(l).forEach(t => rows.push([lane, t]));
@@ -2149,7 +2154,8 @@ function releaseTicks() {
         S.releases_without_asking = (S.releases_without_asking || []).filter(x => !same(lane, t)(x));
         if (e.target.checked) S.releases_without_asking.push({lane, target:t}); refreshSettingsState(); }}),
       h("span", {class:"release-tick-info"}, t ? `${t} · ${lane}` : lane,
-        was == null && target.about ? h("div", {}, target.about) : null,
+        was == null ? h("div", {class:target.about ? "" : "muted"}, target.about || T.releaseNoAbout(lane, t)) : null,
+        was == null ? h("div", {class:"muted release-tick-last"}, lastRelease(lane, t)) : null,
         was == null ? h("div", {class:"mono muted release-tick-command", title:target.command}, target.command) : null,
         was == null && target.watch ? h("div", {class:"mono muted release-tick-command", title:target.watch}, `--watch: ${target.watch}`) : null,
         was == null ? null : h("span", {class:"warn"}, " — " + T.releaseGone,
