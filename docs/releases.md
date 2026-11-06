@@ -69,9 +69,20 @@ unticks it and saves. The principal answers in one of two ways: on the page, or 
 in the conversation the one-time code that comes with the alert for that
 release (6 characters, no look-alikes), which the coordinator passes on
 with `hansa release yes ID CODE` (or `no ID CODE`). The code travels only
-in the principal's alert: hansa keeps only a keyed hash of it (the key is in
+in the principal's alert: the queue holds the release ID, request time and text
+without a code. Immediately before the alert command runs, hansa checks that the
+same request still waits, makes one code per release in that run, and rebuilds
+its text in memory. Re-asking after a void gets a new release ID; an old alert
+cannot acquire a code for the new request. Alerts whose requests no longer wait
+still go out, without a code. Waiting through the hourly cap or a server restart
+creates no code. Older queues that contain codes are rewritten on their next
+read under the desk lock: the old code is revoked and both it and its text are
+replaced by a code-free entry, ready for a fresh code when sent. This migration
+is needed while desks may still have queues written by older hansa versions.
+hansa keeps only a keyed hash of a code (the key is in
 the desk's `secrets/`, which no agent may read), keeps none of what the
-alert command prints for such an alert (only how it ended), runs the command
+alert command prints for such an alert (only how it ended), passes its text
+through a pipe on stdin without a temporary input file, runs the command
 in a temporary folder of its own under the desk's `secrets/alert-runs`
 (closed to every agent, removed when it ends), and never writes
 the code in events, the release's

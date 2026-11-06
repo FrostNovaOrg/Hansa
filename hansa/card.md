@@ -218,6 +218,7 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   asking. While the desk is paused only a release they said yes to runs.
 - They answer on the page, or in the conversation with the one-time code their alert carries (6
   characters, right after the desk's name: `release #1 (lane a, target staging) · code K7P3QX: ...`).
+  hansa makes it only when the alert runs, while that request still waits; queued alerts hold no code.
   A plain yes does not count: ask for the code or page. Pass it with `hansa
   release yes ID CODE` (or `no ID CODE [reason]`). The code is one word (dashes allowed, no spaces):
   pass `K7P 3QX` as `K7P3QX`: that is not guessing. A yes with a word too many is refused, and

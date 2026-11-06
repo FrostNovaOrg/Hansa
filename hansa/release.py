@@ -1084,7 +1084,7 @@ def _answered(desk: Desk, r: dict, yes: bool, reason: str, by: str, channel: str
 # principal may say it in the conversation, and the coordinator passes it on (hansa release yes|no ID CODE). hansa
 # keeps only an HMAC of it (the release's number and the code), keyed with a key in the desk's secrets/, which no
 # agent may read. It answers that release only, once, while it waits as it was asked, for CODE_LIFE seconds; a new
-# waiting alert for the release makes a new one; CODE_TRIES wrong codes void it (then only the page answers).
+# waiting alert for the release makes a new one when sent; CODE_TRIES wrong codes void it (then only the page answers).
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no look-alikes: no 0/O, 1/I/l
 CODE_LENGTH = 6
 CODE_LIFE = 24 * 3600
