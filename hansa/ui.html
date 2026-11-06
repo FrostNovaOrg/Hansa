@@ -607,7 +607,7 @@ const T = ZH ? {
   releaseMailboxes:"新增行中的邮箱必须使用保留示例域名或列入允许名单（合并和发布时检查；默认关闭）",
   releaseMailboxAllow:"邮箱允许名单（每行一项，忽略大小写）：完整邮箱地址允许该地址；@域名允许该域名及其子域名",
   f_release:"发布命令",
-  alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调员叫停了发布、协调员向你提了请求、hansa serve 很久没跑完一轮、hansa 发给协调员会话的消息到不了它）由 hansa 运行，以这台机器的账号在沙箱外、在工作台 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，正文（英文，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；20 秒内产生的提醒合并处理，只运行一次提醒命令（空＝不提醒）。协调员不能设置它，也不发提醒",
+  alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调员叫停了发布、协调员向你提了请求、hansa serve 很久没跑完一轮、hansa 发给协调员会话的消息到不了它）由 hansa 运行，以这台机器的账号在沙箱外、在工作台 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，级别在 HANSA_ALERT_LEVEL，正文（按保存的提醒语言，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；20 秒内产生的提醒合并处理，只运行一次提醒命令（空＝不提醒）。协调员不能设置它，也不发提醒",
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
   alertKeep:"提醒命令不要把提醒的文字留在协调员能读到的地方（文件、日志或聊天记录）：其中的一次性码能批准发布。",
   alertOutside:"这个文件在工作台的 secrets/ 外，协调员可以修改它，一次性发布码会经过它；请把它放在 secrets/ 下。",
@@ -762,7 +762,7 @@ const T = ZH ? {
   releaseMailboxes:"Require reserved example domains or allowlisted mailboxes in added lines (checked at merges and releases; off by default)",
   releaseMailboxAllow:"Mailbox allowlist (one entry per line, ignoring case): a full address allows that address; @domain allows the domain and its subdomains",
   f_release:"release",
-  alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time, what hansa posts to the coordinator's session cannot reach it), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND, the text (in English, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
+  alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time, what hansa posts to the coordinator's session cannot reach it), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND and its level in HANSA_ALERT_LEVEL, the text (in the saved alert language, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
   alertSavedAt:t => `saved on this page ${t}`, alertTest:"Send a test alert", alertTesting:"sending…", alertTestOk:"test alert sent", alertTestBad:"test alert failed: ",
   alertKeep:"Your alert command must not keep the alert's text anywhere the coordinator can read it (a file, a log, a chat history): the one-time code in it approves a release.",
   alertOutside:"This file is outside the desk's secrets/: the coordinator can change it, and one-time release codes pass through it; keep it under secrets/.",
@@ -792,7 +792,7 @@ Object.assign(T, ZH ? {
   releaseApproval:"发布前要不要问你", autoRelease:"不用问你就执行的发布目标", autoReleaseHint:"勾上：提出发布后可以不用问你就执行。不勾：每次等你点头。",
   directPolicy:"直接提交的点头规则", contentRules:"发布内容检查", forbiddenWords:"禁止发布的字眼",
   forbiddenHint:"每行一个词、短语或 re:Python 正则表达式，每项最多 200 字符；只在一行之内匹配，只查 UTF-8 文字。", exceptionsTitle:"按工作线豁免", mailboxTitle:"检查新增行中的邮箱",
-  mailboxAllowTitle:"邮箱允许名单", mailboxHint:"每行一个完整邮箱地址，或 @域名。", alertCommandTitle:"提醒命令",
+  mailboxAllowTitle:"邮箱允许名单", mailboxHint:"每行一个完整邮箱地址，或 @域名。", alertCommandTitle:"提醒命令", alertLanguage:"提醒语言",
   alertCommandHint:"留空时不发送提醒。测试按钮使用已保存的命令。", alertTiming:"何时提醒你",
   noSessionShort:"没有会话接收消息（分钟）", windowShort:"协调员等待操作（分钟）", reviewShort:"任务等待审核（分钟）",
   compactTitle:"协调员模型"
@@ -818,7 +818,7 @@ Object.assign(T, ZH ? {
   releaseApproval:"Asking you before a release", autoRelease:"Targets that go out without asking you", autoReleaseHint:"Ticked: a release can run without asking you. Unticked: each one waits for your yes.",
   directPolicy:"Approval for direct commits", contentRules:"Release content checks", forbiddenWords:"Forbidden words",
   forbiddenHint:"One word, phrase or re:Python pattern per line, at most 200 characters per entry. Matches within one line, in UTF-8 text only.", exceptionsTitle:"Exceptions by lane", mailboxTitle:"Check mailboxes in added lines",
-  mailboxAllowTitle:"Mailbox allowlist", mailboxHint:"One full mailbox or @domain per line.", alertCommandTitle:"Alert command",
+  mailboxAllowTitle:"Mailbox allowlist", mailboxHint:"One full mailbox or @domain per line.", alertCommandTitle:"Alert command", alertLanguage:"Alert language",
   alertCommandHint:"Blank means no alerts. The test uses the saved command.", alertTiming:"When to alert",
   noSessionShort:"No listening session (minutes)", windowShort:"Coordinator waiting for input (minutes)", reviewShort:"Task waiting for review (minutes)",
   compactTitle:"Coordinator model"
@@ -1733,7 +1733,7 @@ const GROUP_KEYS = {
   providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact"], lanes:[],
   security:["workers_may_not_read", "workers_may_not_read_added"],
   releases:["releases_without_asking", "release_direct", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow"],
-  alerts:["alert", "coordinator_alert"], prices:["prices"]
+  alerts:["alert", "alert_language", "coordinator_alert"], prices:["prices"]
 };
 // Object order and optional blank fields do not change a setting's value. Array order still matters.
 function settingValue(value) {
@@ -1855,6 +1855,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   RELEASE_UNMATCHED = r.release_unmatched || []; RELEASE_LAST = r.release_last || {}; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
   S.alert = S.alert || {command:""}; S.coordinator_alert = S.coordinator_alert || {}; S.coordinator_compact = S.coordinator_compact || {};
+  if (!r.alert_language_saved) S.alert_language = ZH ? "zh" : "en";
   if (!keepKeys) KEY_DRAFTS = {};
   newProviderName = ""; newPriceName = ""; settingsMessage = ""; settingsFailure = ""; settingsRebase = ""; keyProblemProvider = "";
   settingsBaseline = settingText(S);
@@ -1951,7 +1952,8 @@ const help = (text, title = T.learnMore) => h("details", {class:"help"}, h("summ
 function controlMeta(obj, key) {
   if (!S) return null;
   const prefix = (group, text) => ({group, matches:problem => problem.startsWith(text)});
-  if (obj === S) return prefix(key.startsWith("release") ? "releases" : key === "cool_minutes" ? "providers" : "coordinator", key);
+  if (obj === S) return prefix(key.startsWith("release") ? "releases" : key === "alert_language" ? "alerts"
+    : key === "cool_minutes" ? "providers" : "coordinator", key);
   if (obj === S.coordinator_compact) return prefix("coordinator", "coordinator_compact:");
   if (obj === S.coordinator_alert) return {group:"alerts", matches:p => p.startsWith("coordinator_alert") && (p.includes(`(${key})`) || p.startsWith("coordinator_alert must"))};
   if (obj === S.alert) return prefix("alerts", "the alert command");
@@ -1974,7 +1976,7 @@ function problemTarget(problem) {
   const record = fieldRecords.find(r => r.matches(problem));
   if (record) return record;
   const group = /^(provider |at least one provider)/.test(problem) ? "providers"
-    : /^(coordinator_alert|the alert command)/.test(problem) ? "alerts"
+    : /^(coordinator_alert|alert_language|the alert command)/.test(problem) ? "alerts"
     : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
     : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
     : /^(release|the releases without asking|the words no release)/.test(problem) ? "releases" : /^price/.test(problem) ? "prices" : /^lane/.test(problem) ? "lanes" : "";
@@ -2120,7 +2122,8 @@ function alertSection() {
     test.disabled = false; }}, T.alertTest);
   S.coordinator_alert = S.coordinator_alert || {};
   return [section(T.alertCommandTitle,
-    fields(field(T.alertCommandTitle, bind(S.alert, "command"), T.alertCommandHint, T.alertCmd, true)),
+    fields(field(T.alertCommandTitle, bind(S.alert, "command"), T.alertCommandHint, T.alertCmd, true),
+      field(T.alertLanguage, pick(S, "alert_language", ["en", "zh"], ["English", "中文"]))),
     h("p", {class:"field-note"}, T.alertBoundary),
     S.alert.at ? h("p", {class:"field-note"}, T.alertSavedAt(when(S.alert.at))) : null,
     h("p", {class:"field-note"}, T.alertKeep),
