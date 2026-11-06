@@ -88,7 +88,7 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow",
-                  "release_direct", "alert", "alert_language", "coordinator_compact", "coordinator_alert")
+                  "release_direct", "alert", "alert_language", "alert_bark", "coordinator_compact", "coordinator_alert")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -301,6 +301,8 @@ def default_settings() -> dict:
         # The command hansa runs when something waits for the principal (hansa/alert.py), with when the page saved
         # it. The principal's, on the page; empty: no alerts.
         "alert": {"command": ""},
+        # Built-in Bark channel; its device key lives only under secrets/.
+        "alert_bark": {"on": False, "server": "https://api.day.app"},
         # US dollars per million tokens. Cache prices default to the usual
         # multiples of the input price when left out.
         "prices": {
@@ -586,8 +588,11 @@ def forbidden_exceptions_ok(exceptions) -> bool:
 
 
 def current_settings(settings: dict) -> dict:
-    """Ignore retired settings from older desks, including malformed values, without changing the file."""
+    """Normalize defaults and ignore retired settings from older desks without changing the file."""
     s = copy.deepcopy(settings)
+    bark = s.get("alert_bark")
+    if isinstance(bark, dict):
+        s["alert_bark"] = {**default_settings()["alert_bark"], **bark}
     for key in ("design", "browser", "coordinator_read", "audits_cost"):
         s.pop(key, None)
     co = s.get("coordinator")
@@ -632,7 +637,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     known = {"version", "concurrency", "disk_floor", "memory_floor", "cool_minutes", "coordinator", "providers", "lanes", "prices",
              "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
              "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "release_direct", "alert", "coordinator_compact",
-             "coordinator_alert", "alert_language", "bench"}
+             "coordinator_alert", "alert_language", "alert_bark", "bench"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     bench = s.get("bench", default_settings()["bench"])
     if (not isinstance(bench, dict) or set(bench) != set(default_settings()["bench"])
@@ -708,6 +713,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                  "names no entry in release_forbidden"
                  for i, x in enumerate(exceptions, 1) if x["entry"] not in words)
     al = s.get("alert", {"command": ""})
+    from .alert_bark import problems as bark_problems
+    p.extend(bark_problems(s.get("alert_bark", default_settings()["alert_bark"])))
     if s.get("alert_language", "en") not in ("en", "zh"):
         p.append('alert_language must be "en" or "zh"')
     if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
@@ -2733,6 +2740,7 @@ class Desk:
                 new = current_settings(new)
                 # Older pages omit this field: an unrelated save must keep the principal's choice.
                 new.setdefault("alert_language", old["alert_language"])
+                new.setdefault("alert_bark", old["alert_bark"])
                 if by == "page":
                     new["bench"] = old["bench"]
                 mailbox_key = mailbox_settings(new)
@@ -2978,15 +2986,17 @@ class Desk:
         return d
 
     def keys(self) -> dict:
-        """Every stored key by provider name, for checking text against; never shown."""
+        """Stored provider and channel keys, for checking text against; never shown."""
         out = {}
-        for f in sorted(self.secrets_dir.glob("*.key")) if self.secrets_dir.is_dir() else []:
+        from .alert_bark import _key_file
+        files = sorted(self.secrets_dir.glob("*.key")) if self.secrets_dir.is_dir() else []
+        for f in [*files, _key_file(self)]:
             try:
                 k = f.read_text(encoding="utf-8").strip()
             except OSError:
                 continue
             if len(k) >= 8:  # shorter strings would match ordinary text
-                out[f.stem] = k
+                out["Bark" if f == _key_file(self) else f.stem] = k
         return out
 
     def keys_in(self, text: str) -> list:

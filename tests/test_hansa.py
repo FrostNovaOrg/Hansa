@@ -36,7 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import hansa  # noqa: E402
-from hansa import account, alert_http, cli, cost, menu, notify, plugin, up, views  # noqa: E402
+from hansa import account, alert_bark, alert_http, cli, cost, menu, notify, plugin, up, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, read_json, validate, write_json, write_problems  # noqa: E402
 from hansa.run import (Dispatcher, provider_problem, text_only,  # noqa: E402
@@ -45456,6 +45456,258 @@ class WorkflowTest(unittest.TestCase):
                                 "python3 -m unittest -v contrib.codex.tests",
                                 "claude plugin validate hansa/mod", "claude plugin test hansa/mod"):
                     self.assertIn(command, job)
+
+
+class AlertBarkTest(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.tmp = Path(folder.name)
+        env = unittest.mock.patch.dict(os.environ, {
+            "CLAUDE_CONFIG_DIR": str(self.tmp / "conf"), "XDG_STATE_HOME": str(self.tmp / "state")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.desk = init_desk(self.tmp / "advisor" / "desk")
+        self.key = "bark-fixture-device-key"
+        http = unittest.mock.patch.object(alert_http, "send", return_value=[
+            {"ok": True, "why": "sent", "status": 200, "tries": 1}])
+        self.http = http.start()
+        self.addCleanup(http.stop)
+
+    def configure(self, *, language="en", server="https://api.day.app", on=True):
+        settings = self.desk.settings()
+        settings.update(alert_language=language, alert_bark={"on": on, "server": server})
+        self.assertEqual(self.desk.save_settings(settings, by="page"), [])
+        alert_bark.save_key(self.desk, self.key, by="page")
+
+    def pushed(self):
+        self.http.assert_called_once()
+        self.assertEqual(self.http.call_args.kwargs, {"deadline_s": 30})
+        [request] = self.http.call_args.args[0]
+        self.assertEqual(set(request), {"url", "json"})
+        self.assertLessEqual(len(json.dumps(request["json"], ensure_ascii=False).encode("utf-8")), 3500)
+        return request
+
+    def snapshot(self):
+        return {str(p.relative_to(self.desk.root)): p.read_bytes()
+                for p in self.desk.root.rglob("*") if p.is_file()}
+
+    def test_bark_two_alerts_are_one_push_at_the_highest_level(self):
+        self.configure()
+        for level, expected in (("passive", "passive"), ("active", "active"), ("urgent", "timeSensitive")):
+            with self.subTest(level=level):
+                self.http.reset_mock()
+                batch = [{"kind": "release_ended", "level": "passive", "text": "release finished"},
+                         {"kind": "disk", "level": level, "text": "disk needs space"}]
+                self.assertEqual(alert_bark.send(self.desk, batch), "sent")
+                request = self.pushed()
+                self.assertEqual(request["url"], "https://api.day.app/push")
+                payload = request["json"]
+                self.assertEqual((payload["title"], payload["group"], payload["device_key"]),
+                                 ("advisor/desk", "advisor/desk", self.key))
+                self.assertEqual(payload["level"], expected)
+                self.assertIn("release finished", payload["body"])
+                self.assertIn("disk needs space", payload["body"])
+                self.assertNotIn("[hansa]", payload["body"])
+        # Channel titles and the command's header share the same naming, even at /.
+        from hansa import alert
+        for root, expected in ((Path("/"), "/"), (Path("/desk"), "desk")):
+            with self.subTest(root=root), unittest.mock.patch.object(self.desk, "root", root):
+                self.http.reset_mock()
+                self.assertEqual(alert_bark.send(self.desk, [{"kind": "ask", "text": "hello"}]), "sent")
+                payload = self.pushed()["json"]
+                self.assertEqual((payload["title"], payload["group"], payload["body"]), (expected, expected, "hello"))
+                self.assertEqual(alert.text_of(self.desk, [{"text": "hello"}]), f"[hansa] desk {expected}: hello")
+
+    def test_bark_release_uses_queued_page_wording_and_command_keeps_its_code(self):
+        from hansa import alert, release
+        self.configure()
+        settings = self.desk.settings()
+        settings["alert"] = {"command": "true"}
+        self.assertEqual(self.desk.save_settings(settings, by="page"), [])
+        r = {"id": 7, "lane": "a", "target": "staging", "base": "main", "commit": "abcdef1234",
+             "count": 1, "command": "deploy", "state": "waiting", "asked": 123}
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                settings = self.desk.settings()
+                settings["alert_language"] = language
+                self.assertEqual(self.desk.save_settings(settings, by="page"), [])
+                with unittest.mock.patch.object(release, "get", return_value=r), \
+                        unittest.mock.patch.object(release, "new_code", return_value="K7P3QX"):
+                    self.assertTrue(alert.add(self.desk, "release_waiting", alert._release_text(self.desk, 7, True),
+                        release=7, asked=123, zh=alert._release_text(self.desk, 7, True, zh=True)))
+                    batch = alert.queued(self.desk)
+                    alert._with_codes(self.desk, batch)
+                command_text = alert.text_of(self.desk, batch)
+                self.assertIn("K7P3QX", command_text)
+                self.http.reset_mock()
+                self.assertEqual(alert_bark.send(self.desk, batch), "sent")
+                payload = self.pushed()["json"]
+                self.assertIn("网页上点头" if language == "zh" else "yes on the page", payload["body"])
+                self.assertNotIn("K7P3QX", json.dumps(payload))
+                self.assertNotIn("一次性码" if language == "zh" else "code ", payload["body"])
+                self.assertIn("K7P3QX", alert.text_of(self.desk, batch))  # no input mutation
+                batch[0].pop("translations")  # even an older code-bearing batch cannot leak
+                batch.append({"kind": "ask", "text": "a to-do mentioning K7P3QX"})
+                self.http.reset_mock()
+                self.assertEqual(alert_bark.send(self.desk, batch), "sent")
+                self.assertNotIn("K7P3QX", json.dumps(self.pushed()))
+
+    def test_bark_chinese_and_escaped_text_fit_the_whole_json_byte_limit(self):
+        self.configure(language="zh")
+        self.assertEqual(alert_bark.send(self.desk, [{"kind": "ask", "text": "中" * 1000}]), "sent")
+        body = self.pushed()["json"]["body"]
+        self.assertTrue(body.endswith("…"))
+        self.assertLess(len(body), 1000)
+        # A longer device key makes the byte limit tighter than the command's character cap.
+        alert_bark.save_key(self.desk, "k" * 800, by="page")
+        for text in ("中" * 1000, '中"\\\x00' * 400):
+            with self.subTest(text=text[:4]):
+                self.http.reset_mock()
+                self.assertEqual(alert_bark.send(self.desk, [{"kind": "ask", "text": text}]), "sent")
+                payload = self.pushed()["json"]
+                self.assertEqual(payload["title"], "advisor/desk")
+                self.assertEqual(payload["level"], "active")
+                self.assertTrue(payload["body"].endswith("…"))
+                self.assertTrue(" ".join(text.split()).startswith(payload["body"][:-1]))
+                next_char = " ".join(text.split())[len(payload["body"]) - 1]
+                larger = {**payload, "body": payload["body"][:-1] + next_char + "…"}
+                self.assertGreater(len(json.dumps(larger, ensure_ascii=False).encode("utf-8")), 3500)
+        alert_bark.save_key(self.desk, "k" * 3600, by="page")
+        self.http.reset_mock()
+        self.assertEqual(alert_bark.test(self.desk), "too_big")
+        self.http.assert_not_called()
+
+    def test_bark_unsafe_servers_and_invalid_settings_write_nothing(self):
+        before = self.snapshot()
+        for server in ("http://api.day.app", "https://u:p@api.day.app", "https://api.day.app?x=1",
+                       "https://api.day.app?", "https://api.day.app#", "https://api.day.app/push",
+                       "https://api.day.app//", "https://api.day.app/../", "https://api.day.app/#x",
+                       "https://api.day.app\n", "https://api.day.app\x00", "https://api.day.app\\other",
+                       "https://api.day.app:bad", "https://[bad", "", None):
+            with self.subTest(server=server):
+                settings = self.desk.settings()
+                settings["alert_bark"] = {"on": True, "server": server}
+                self.assertTrue(self.desk.save_settings(settings, by="page"))
+                self.assertEqual(self.snapshot(), before)
+        for config in (None, [], {"on": "yes"}, {"on": 1}, {"key": self.key}):
+            with self.subTest(config=config):
+                settings = self.desk.settings()
+                settings["alert_bark"] = config
+                self.assertTrue(self.desk.save_settings(settings, by="page"))
+                self.assertEqual(self.snapshot(), before)
+        self.http.assert_not_called()
+
+    def test_bark_key_is_private_atomic_replaceable_and_redacted(self):
+        self.configure()
+        path = self.desk.secrets_dir / "alert-bark.device-key"
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+        self.assertEqual(path.read_text().strip(), self.key)
+        with unittest.mock.patch.object(Path, "read_text", side_effect=AssertionError("presence must not read keys")):
+            self.assertIs(alert_bark.has_key(self.desk), True)
+        self.assertNotIn(self.key, self.desk.redact("saw " + self.key))
+        self.desk.event("example", text=self.key)
+        outputs = [self.desk.settings_path.read_text(), self.desk.events_path.read_text(),
+                   (self.desk.state_dir / "settings-history.jsonl").read_text(),
+                   json.dumps(public_settings(self.desk)), json.dumps(views.status(self.desk)),
+                   views.status_text(views.status(self.desk))]
+        for output in outputs:
+            self.assertNotIn(self.key, output)
+        from hansa import history
+        [entry] = [x for x in history.read(self.desk)["entries"] if x["path"] == "alert_bark.key"]
+        self.assertTrue(entry["redacted"])
+        self.assertNotIn("new", entry)
+        with unittest.mock.patch("hansa.desk.os.replace", wraps=os.replace) as replace:
+            alert_bark.save_key(self.desk, "replacement-bark-key", by="page")
+        self.assertTrue(any(call.args[1] == path and call.args[0] != path for call in replace.call_args_list))
+        self.assertEqual(path.read_text().strip(), "replacement-bark-key")
+        self.assertNotIn("replacement-bark-key", self.desk.redact("replacement-bark-key"))
+        self.assertNotIn("replacement-bark-key", json.dumps(history.read(self.desk)))
+        self.assertEqual(len([x for x in history.read(self.desk)["entries"] if x["path"] == "alert_bark.key"]), 2)
+        before = self.snapshot()
+        for value in (None, "short", "a key with spaces"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                alert_bark.save_key(self.desk, value, by="page")
+            self.assertEqual(self.snapshot(), before)
+
+    def test_bark_key_removal_reports_no_key_set(self):
+        self.configure()
+        alert_bark.remove_key(self.desk, by="page")
+        self.assertFalse((self.desk.secrets_dir / "alert-bark.device-key").exists())
+        self.assertFalse(alert_bark.has_key(self.desk))
+        self.assertEqual(alert_bark.test(self.desk), "no_key")
+        self.http.assert_not_called()
+        self.assertIn("no key set", views.status_text(views.status(self.desk)))
+        self.assertNotIn(self.key, self.desk.events_path.read_text())
+
+    def test_bark_coordinator_cannot_set_settings_or_change_keys(self):
+        for configured in (False, True):
+            if configured:
+                self.configure()
+            before = self.snapshot()
+            settings = self.desk.settings()
+            settings["alert_bark"] = {"on": not configured, "server": "https://bark.example"}
+            problems = self.desk.save_settings(settings, by="coordinator")
+            self.assertTrue(any("alert_bark" in p and "principal" in p for p in problems))
+            self.assertEqual(self.snapshot(), before)
+            for by in ("", "coordinator"):
+                with self.assertRaisesRegex(ValueError, "principal"):
+                    alert_bark.save_key(self.desk, "coordinator-bark-key", by=by)
+                with self.assertRaisesRegex(ValueError, "principal"):
+                    alert_bark.remove_key(self.desk, by=by)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_bark_network_category_is_recorded_without_a_key_or_url(self):
+        self.configure(server="https://bark.example:8443/")
+        self.http.return_value = [{"ok": False, "why": "network", "status": None, "tries": 3}]
+        self.assertEqual(alert_bark.send(self.desk, [{"kind": "ask", "text": "please answer"}]), "network")
+        self.assertEqual(self.pushed()["url"], "https://bark.example:8443/push")
+        last = alert_bark.last_result(self.desk)
+        self.assertEqual(set(last), {"at", "ok", "why"})
+        self.assertEqual((last["ok"], last["why"]), (False, "network"))
+        self.assertLessEqual(abs(time.time() - last["at"]), 10)
+        [event] = [x for x in map(json.loads, self.desk.events_path.read_text().splitlines())
+                   if x["event"] == "alert_channel"]
+        self.assertEqual({k: event[k] for k in ("channel", "ok", "why")},
+                         {"channel": "bark", "ok": False, "why": "network"})
+        status = views.status(self.desk)
+        self.assertEqual(status["alert_bark"]["last"], last)
+        self.assertIn("network", views.status_text(status))
+        for text in (json.dumps(last), json.dumps(event), json.dumps(status)):
+            self.assertNotIn(self.key, text)
+            self.assertNotIn("https://", text)
+
+    def test_bark_test_language_defaults_off_and_no_automatic_delivery(self):
+        self.assertEqual(self.desk.settings()["alert_bark"], {"on": False, "server": "https://api.day.app"})
+        self.assertIsNone(alert_bark.last_result(self.desk))
+        settings = self.desk.settings()
+        settings["alert_bark"] = {"on": False}
+        self.assertEqual(self.desk.save_settings(settings, by="page"), [])
+        self.assertEqual(self.desk.settings()["alert_bark"]["server"], "https://api.day.app")
+        self.assertEqual(alert_bark.send(self.desk, [{"kind": "ask", "text": "hello"}]), "off")
+        self.http.assert_not_called()
+        for language, wording in (("en", "test alert"), ("zh", "测试提醒")):
+            self.configure(language=language, on=False)
+            self.http.reset_mock()
+            self.assertEqual(alert_bark.test(self.desk), "sent")
+            self.assertIn(wording, self.pushed()["json"]["body"])
+            self.assertEqual(alert_bark.last_result(self.desk)["why"], "sent")
+        self.configure()
+        self.http.reset_mock()
+        self.desk.add_ask("This task does not wire automatic sends")
+        self.http.assert_not_called()
+        self.assertEqual(alert_bark.send(self.desk, []), "empty")
+        older_page = self.desk.settings()
+        older_page.pop("alert_bark")
+        self.assertEqual(self.desk.save_settings(older_page, by="page"), [])
+        self.assertTrue(self.desk.settings()["alert_bark"]["on"])
+        # A hand-edited unsafe server is refused again at send time.
+        settings = self.desk.settings()
+        settings["alert_bark"]["server"] = "http://bark.example"
+        write_json(self.desk.settings_path, settings)
+        self.assertEqual(alert_bark.test(self.desk), "refused_url")
+        self.http.assert_not_called()
 
 
 class AlertHTTPTest(unittest.TestCase):

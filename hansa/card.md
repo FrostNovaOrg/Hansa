@@ -230,7 +230,8 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   and its end; `hansa release` lists them.
 - hansa runs the principal's alert command; the coordinator does not send alerts. `coordinator`
   alerts say your session has not heard hansa, waits on a dialog, or leaves a finished task waiting
-  for review; when they mention it, run `hansa status`. More: `hansa help alerts`.
+  for review; when they mention it, run `hansa status`. Bark's settings and key are also the
+  principal's; its channel groundwork does not yet send alerts automatically. More: `hansa help alerts`.
 
 ## Hearing from hansa
 hansa serve repairs recent saved task ends missing from the event log when it starts, even after a

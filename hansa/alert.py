@@ -38,7 +38,7 @@ keys removed, cut at MOST_TEXT characters), stopped after TIMEOUT seconds. Alert
 of each other go out in one run (none waits more than MOST_WAIT); to-dos closed before that run are left out.
 Each queued alert has a level: passive for a release that finished successfully; active for release_waiting, ask,
 a failed, void or forbidden release, release_stopped and test; urgent for server_stuck, coordinator, sandbox, disk
-and credit. A batch takes the highest (passive < active < urgent). Nothing else uses the level yet.
+and credit. A batch takes the highest (passive < active < urgent); Bark maps that level to its own attention levels.
 One run at a time (.hansa/alert.lock), and at
 most MOST_RUNS in an hour: beyond that, what comes waits and goes out in one run when the hour frees a run, with a
 line saying how many were held back. An entry of the queue that cannot be read is dropped, and recorded once
@@ -301,6 +301,11 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
 
 
 # -- sending -----------------------------------------------------------------------------------------------------------
+def desk_name(desk: Desk) -> str:
+    """The desk's name in alert headers and channel titles/groups."""
+    return "/".join(str(desk.root).split("/")[-2:]).lstrip("/") or "/"
+
+
 def text_of(desk: Desk, items: list, held: int = 0) -> str:
     """What the command reads on its standard input: one line per alert, keys removed, cut at MOST_TEXT characters.
     held: how many of them the limit of MOST_RUNS runs an hour held back."""
@@ -308,7 +313,7 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
     lines = [" ".join(str(x.get("text") or "").split()) for x in items]
     codes = [x for x in items if x.get("code")]
     zh = chinese(desk)
-    name = "/".join(str(desk.root).split("/")[-2:]).lstrip("/") or "/"
+    name = desk_name(desk)
     head = f"[hansa] 工作台 {name}" if zh else f"[hansa] desk {name}"
     held_text = ((f"（每小时最多 {MOST_RUNS} 次，{held} 条提醒因此暂缓）" if zh else
                   f" ({held} held back by the limit of {MOST_RUNS} runs an hour)") if held else "")
