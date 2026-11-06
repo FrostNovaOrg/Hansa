@@ -795,6 +795,10 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                          f"base {target[1]}; at most one merge lane serves each repository and base")
             else:
                 merge_lanes[target] = name
+        was = ((before or {}).get("lanes") or {}).get(name) or {}
+        if ln.get("merge_lane") and lane_targets(ln) and (not was.get("merge_lane") or any(
+                t != lane_targets(was).get(n) for n, t in lane_targets(ln).items())):
+            p.append(merge_targets_problem(name, ln))  # old targets may be removed one at a time
         verify_for = ln.get("verify_for", [])
         if not isinstance(verify_for, list) or not all(isinstance(n, str) for n in verify_for):
             p.append(f"{at}: verify_for must be a list of lane names")
@@ -1292,6 +1296,13 @@ def lane_targets(ln) -> dict:
         return {k: v for k, v in named.items() if isinstance(v, dict)}
     cmd = ln.get("release")
     return {"default": {"command": cmd}} if isinstance(cmd, str) and cmd.strip() else {}
+
+
+def merge_targets_problem(name: str, ln: dict) -> str:
+    """Old or hand-edited merge lanes may still have targets: name them and how to remove them."""
+    targets = lane_targets(ln) if ln.get("merge_lane") else {}
+    return (f"lane {name}: a merge lane releases nothing but has release targets {', '.join(sorted(targets))}; "
+            "take them out: " + "; ".join(f"hansa lane target {name} {t} none" for t in sorted(targets))) if targets else ""
 
 
 def migrate_releases(s: dict) -> None:

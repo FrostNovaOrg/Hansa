@@ -63,7 +63,7 @@ import uuid
 from pathlib import Path
 
 from . import outside, without_session
-from .desk import (WRITE_FILE, Desk, _is_int, forbidden_exceptions_ok, forbidden_pattern, lane_targets, listed_key,
+from .desk import (WRITE_FILE, Desk, _is_int, forbidden_exceptions_ok, forbidden_pattern, lane_targets, merge_targets_problem, listed_key,
                    listed_mismatch, now, read_json, target_name, write_json, write_text)
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
                   oom_begin, oom_result, oom_text,
@@ -829,6 +829,9 @@ def _askable(desk: Desk, s: dict, lane: str, target: str | None) -> dict:
         raise SystemExit(f"hansa: there is no lane {lane}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}. "
                          "Nothing was asked")
     targets = lane_targets(ln)
+    if ln.get("merge_lane"):
+        why = merge_targets_problem(lane, ln) or f"lane {lane}: a merge lane releases nothing; use a lane that releases"
+        raise SystemExit(f"hansa: {why}. Nothing was asked")
     if not targets:
         raise SystemExit(f"hansa: lane {lane} has no release target; set it first: hansa lane target "
                          f"{lane} NAME \"<the command that sends the base branch out>\" "

@@ -184,8 +184,8 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   `--recheck` does the same even if the base has not moved.
 - `hansa lane set L merge_check "<command>"` (limit: `merge_timeout_min`) is for checks too slow to
   run after every task; it runs before every merge of a changed task. Try `hansa lane try L --merge-check`.
-  For long merge checks and busy lanes, a merge lane:
-  `hansa lane add m --like a`, its own caches, `hansa lane set m merge_lane true`.
+  A merge lane releases nothing. For slow checks:
+  `hansa lane add m --like a` (no targets), `hansa lane set m merge_lane true`.
 - Keep the lane's check quick and the whole suite in the merge check; when either grows slow, a task
   splits the project's tests or runs them in parallel.
 - A conflict lists each conflicting file and the lines where the sides meet. Settle it with
