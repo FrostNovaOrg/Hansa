@@ -47,8 +47,7 @@ message or the author's or committer's name or email of any outgoing commit
 were checked; the word scan and its limits are under [Forbidden words before a
 release](#forbidden-words-before-a-release)), refuses it; each hit names its commit and where it is (`author`, `committer`, a
 file). A command that holds one of those words
-is kept when it is set (`hansa lane target`,
-`hansa lane add --like`), and hansa says the word and where at once, before
+is kept when it is set (`hansa lane target`), and hansa says the word and where at once, before
 any release is asked. A command that holds one of the desk's keys is
 refused when it is set, since a command is stored and shown as written: have
 it read the key from where the tool keeps it (its own login or config). A target that must follow another is asked only for

@@ -32470,6 +32470,9 @@ def save():'''))
         out = self.hansa("lane", "target", "a", "test", "--minutes", "30")  # changed otherwise: still said
         self.assertIn("release target test holds \"maplebox\"", out)
         out = self.hansa("lane", "add", "b", "--like", "a")
+        self.assertNotIn("Warning: lane b's release target", out)
+        self.assertNotIn("targets", self.desk.settings()["lanes"]["b"])
+        out = self.hansa("lane", "target", "b", "test", "./install.sh /home/maplebox/test")
         self.assertIn("Warning: lane b's release target test holds \"maplebox\"", out)
         self.assertIn("test", self.desk.settings()["lanes"]["b"]["targets"])
         said = self.refused("release", "a", "test")  # and refused at release time, as before
@@ -33124,7 +33127,10 @@ def save():'''))
                     if row == 1:
                         warning(c, command, script)
                         c.assertIn(path, c.hansa("lane", "target", "a", "default", command))
-                        c.assertIn(path, c.hansa("lane", "add", "b", "--like", "a"))
+                        out = c.hansa("lane", "add", "b", "--like", "a")
+                        c.assertNotIn("Warning: lane b's release target", out)
+                        c.assertNotIn("targets", c.desk.settings()["lanes"]["b"])
+                        c.assertIn(path, c.hansa("lane", "target", "b", "default", command))
                     elif row == 2:
                         for cmd in (path + " prod", "$HOME/ops/deploy.sh prod", "${HOME}/ops/deploy.sh prod",
                                     "../ops/deploy.sh prod", "bash -c '~/ops/deploy.sh'",
