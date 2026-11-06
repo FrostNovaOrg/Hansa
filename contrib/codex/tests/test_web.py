@@ -1,5 +1,19 @@
 """HANSA_CODEX_WEB_SEARCH and HANSA_CODEX_DISABLE: the ways to the web on OpenAI's side, which srt cannot stop."""
+import unittest
+
 from .codexkit import Scratch, hansa_run, shim
+
+
+class MemoryFeatures(unittest.TestCase):
+    def test_memories_always_disabled(self):
+        for conf in ({}, {"HANSA_CODEX_DISABLE": "plugins"}, {"HANSA_CODEX_DISABLE": ""}):
+            for no_repo in (False, True):
+                with self.subTest(conf=conf, no_repo=no_repo):
+                    argv = shim.codex_argv("codex", "/work", "model", "high", "", "/last",
+                                           *shim.web_options(conf), no_repo=no_repo)
+                    options = list(zip(argv, argv[1:]))
+                    for feature in ("memories", "external_agent_memory_import"):
+                        self.assertIn(("--disable", feature), options)
 
 
 class WebRoutes(Scratch):
@@ -14,22 +28,25 @@ class WebRoutes(Scratch):
         self.assertEqual(self.codex_options(), [
             "-c", 'web_search="disabled"', "--disable", "apps", "--disable", "plugins", "--disable", "browser_use",
             "--disable", "computer_use", "--disable", "image_generation", "--disable", "multi_agent",
-            "--disable", "hooks"])
+            "--disable", "hooks", "--disable", "memories", "--disable", "external_agent_memory_import"])
         # empty in the environment is unset for the web search: the default
         self.assertEqual(self.codex_options(HANSA_CODEX_WEB_SEARCH="")[:2], ["-c", 'web_search="disabled"'])
 
     def test_empty_disable_gives_none(self):
-        self.assertEqual(self.codex_options(HANSA_CODEX_DISABLE=""), ["-c", 'web_search="disabled"'])
-        self.assertEqual(self.codex_options(HANSA_CODEX_DISABLE="  "), ["-c", 'web_search="disabled"'])
+        self.assertEqual(self.codex_options(HANSA_CODEX_DISABLE=""), ["-c", 'web_search="disabled"',
+                         "--disable", "memories", "--disable", "external_agent_memory_import"])
+        self.assertEqual(self.codex_options(HANSA_CODEX_DISABLE="  "), ["-c", 'web_search="disabled"',
+                         "--disable", "memories", "--disable", "external_agent_memory_import"])
 
     def test_live_and_a_list_of_its_own(self):
         self.assertEqual(self.codex_options(HANSA_CODEX_WEB_SEARCH="live"), [
             "-c", 'web_search="live"', "--disable", "apps", "--disable", "plugins", "--disable", "browser_use",
             "--disable", "computer_use", "--disable", "image_generation", "--disable", "multi_agent",
-            "--disable", "hooks"])
+            "--disable", "hooks", "--disable", "memories", "--disable", "external_agent_memory_import"])
         # independent: web search on leaves apps on only when the list does not name it
         self.assertEqual(self.codex_options(HANSA_CODEX_WEB_SEARCH="cached", HANSA_CODEX_DISABLE="plugins"),
-                         ["-c", 'web_search="cached"', "--disable", "plugins"])
+                         ["-c", 'web_search="cached"', "--disable", "plugins",
+                          "--disable", "memories", "--disable", "external_agent_memory_import"])
 
     def test_read_from_trial_env(self):
         # codex.env's older name, read while there is no codex.env, as from codex.env

@@ -59,6 +59,8 @@ boundary, and some of its write denies are globs (below). On Linux srt drops eve
 | `HANSA_CODEX_WEB_SEARCH` | Codex's own web search, `-c web_search=…`: `disabled`, `cached` or `live`; anything else is refused | `disabled` |
 | `HANSA_CODEX_DISABLE` | Codex features turned off, space-separated, one `--disable` each; set but empty, none | `apps plugins browser_use computer_use image_generation multi_agent hooks` |
 
+Codex's memories (`memories`, `external_agent_memory_import`) are always disabled for these runs, whatever `HANSA_CODEX_DISABLE` says.
+
 ## The Codex run
 
 ```

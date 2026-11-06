@@ -41,6 +41,7 @@ class CodexRun(Scratch):
                                 "-c", 'web_search="disabled"', "--disable", "apps", "--disable", "plugins",
                                 "--disable", "browser_use", "--disable", "computer_use",
                                 "--disable", "image_generation", "--disable", "multi_agent", "--disable", "hooks",
+                                "--disable", "memories", "--disable", "external_agent_memory_import",
                                 "-s", "danger-full-access", "-o", out, "-"])
         # the value is a TOML basic string; these escapes read the same in JSON
         self.assertEqual(json.loads(argv[argv.index("-c", 12) + 1].split("=", 1)[1]), system)
