@@ -3267,7 +3267,10 @@ def public_settings(desk: Desk) -> dict:
                  for x in listed if isinstance(x, (str, dict)) for lane, target in [listed_key(x)]
                  for observed in [listed_as(s.get("lanes", {}).get(lane), target)]
                  for why in [listed_mismatch(s, x, now_as=observed)] if why]
+    from . import alert_bark
     return {"settings": s, "alert_language_saved": "alert_language" in desk._saved_settings(),
+            # whether a Bark device key is saved, never the key, and the channel's last push
+            "alert_bark_key_set": alert_bark.has_key(desk), "alert_bark_last": alert_bark.last_result(desk),
             "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},

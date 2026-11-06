@@ -1,4 +1,4 @@
-"""Bark channel groundwork. The page and automatic alert delivery do not call it yet.
+"""Bark channel groundwork. The page saves its key and tests it; automatic alert delivery does not call it yet.
 
 send takes a gathered, code-free queue batch, before alert._with_codes. There is no
 public key reader: consumers get only has_key; sending and Desk's redaction read it.

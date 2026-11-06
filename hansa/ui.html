@@ -127,6 +127,10 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .password-control { position:relative; flex:1; min-width:160px; }
 .password-control input { width:100%; padding:9px 44px 9px 11px; min-width:0; }
 .password-control button { position:absolute; top:4px; right:4px; width:32px; min-height:32px; padding:0; border:0; color:var(--muted); background:transparent; }
+/* the Bark block: the key row wraps and long addresses break, so a 390 px screen has no sideways scroll */
+section.bark { overflow-wrap:anywhere; }
+section.bark ol { margin:8px 0 0; padding-left:20px; line-height:1.65; }
+.bark-key .password-control { flex:1 1 160px; }
 .key-status { display:inline-flex; align-items:center; gap:5px; padding:3px 7px; border-radius:5px; font-size:11px; background:var(--surface); }
 .help { margin:10px 0 0; font-size:12px; color:var(--muted); }
 .help summary { display:flex; align-items:center; gap:7px; cursor:pointer; width:fit-content; font-weight:500; padding:3px 0; list-style:none; }
@@ -794,6 +798,27 @@ Object.assign(T, ZH ? {
   forbiddenHint:"每行一个词、短语或 re:Python 正则表达式，每项最多 200 字符；只在一行之内匹配，只查 UTF-8 文字。", exceptionsTitle:"按工作线豁免", mailboxTitle:"检查新增行中的邮箱",
   mailboxAllowTitle:"邮箱允许名单", mailboxHint:"每行一个完整邮箱地址，或 @域名。", alertCommandTitle:"提醒命令", alertLanguage:"提醒语言",
   alertCommandHint:"留空时不发送提醒。测试按钮使用已保存的命令。", alertTiming:"何时提醒你",
+  barkTitle:"Bark（iPhone 推送）", barkOn:"打开 Bark", barkServer:"服务器",
+  barkServerHint:"留空＝https://api.day.app（Bark 的公共服务器）。自己的服务器须以 https:// 开头。",
+  barkKey:"设备密钥", barkKeySaved:"已保存", barkKeyNone:"未保存", barkKeyPlaceholder:"粘贴 Bark 里的密钥",
+  barkKeyHint:"留空则保留已保存的密钥。网页从不显示已保存的密钥。", barkKeyRemove:"删除密钥", barkKeyUndo:"保留密钥",
+  barkKeyRemoving:"保存设置时删除密钥，并关闭 Bark。",
+  barkNeedsKey:"没有设备密钥，不能打开 Bark：请先粘贴 Bark 应用里的密钥。",
+  barkTest:"发一条测试推送", barkTesting:"发送中…", barkSent:"已发出", barkTestBad:"测试推送没有发出：",
+  barkTestHint:"测试使用已保存的密钥和服务器：先保存设置，再按测试。",
+  barkLast:(what, t) => `上次推送：${what}（${t}）`, barkLastNone:"还没有推送过。",
+  barkLater:"hansa 目前还不会自动把提醒推送到 Bark，只有“测试”会发送；提醒仍由上面的提醒命令发出。",
+  barkHelpTitle:"如何设置 Bark",
+  barkSteps:["在 iPhone 的 App Store 安装 Bark，然后打开它。",
+    "Bark 会显示一个示例地址，例如 https://api.day.app/AbCd1234Ef/推送内容。复制其中的密钥：紧跟在服务器地址后面的那一段（这里是 AbCd1234Ef），不要带斜杠。",
+    "粘贴到这里的“设备密钥”，打开 Bark，保存设置，然后按“发一条测试推送”。"],
+  barkPrivacy:"发到公共服务器的推送，那台服务器能读到内容（苹果的推送服务也能）。介意的话，请用自己的 Bark 服务器。",
+  barkNoCodes:"发布码从不发到 Bark：发布要在这个网页上回答。",
+  barkWhy:{off:"Bark 已关闭", no_key:"没有保存设备密钥", empty:"没有要发送的内容",
+    refused_url:"服务器地址不被允许（须为 https://，不带路径）", too_big:"推送太大，没有发送",
+    redirect:"服务器要求转到别的地址，hansa 不跟随", timeout:"服务器没有及时回应", deadline:"服务器 30 秒内没有回应",
+    network:"连不上服务器", tls:"与服务器的安全连接（TLS）失败", http_429:"服务器说推送太多，请稍后再试",
+    http_4xx:"服务器拒绝了推送：请检查设备密钥", http_5xx:"服务器出错，请稍后再试"},
   noSessionShort:"没有会话接收消息（分钟）", windowShort:"协调员等待操作（分钟）", reviewShort:"任务等待审核（分钟）",
   compactTitle:"协调员模型"
 } : {
@@ -820,6 +845,28 @@ Object.assign(T, ZH ? {
   forbiddenHint:"One word, phrase or re:Python pattern per line, at most 200 characters per entry. Matches within one line, in UTF-8 text only.", exceptionsTitle:"Exceptions by lane", mailboxTitle:"Check mailboxes in added lines",
   mailboxAllowTitle:"Mailbox allowlist", mailboxHint:"One full mailbox or @domain per line.", alertCommandTitle:"Alert command", alertLanguage:"Alert language",
   alertCommandHint:"Blank means no alerts. The test uses the saved command.", alertTiming:"When to alert",
+  barkTitle:"Bark (iPhone push)", barkOn:"Bark on", barkServer:"Server",
+  barkServerHint:"Blank = https://api.day.app (Bark's public server). A server of your own must start with https://.",
+  barkKey:"Device key", barkKeySaved:"saved", barkKeyNone:"not saved", barkKeyPlaceholder:"paste the key from Bark",
+  barkKeyHint:"Left blank, the saved key is kept. The page never shows a saved key.", barkKeyRemove:"Remove key", barkKeyUndo:"Keep key",
+  barkKeyRemoving:"When you save settings, the key is removed and Bark switched off.",
+  barkNeedsKey:"Bark cannot be switched on without a device key: paste the key from the Bark app first.",
+  barkTest:"Send a test push", barkTesting:"sending…", barkSent:"sent", barkTestBad:"the test push was not sent: ",
+  barkTestHint:"The test uses the saved key and server: save settings first, then press Test.",
+  barkLast:(what, t) => `Last push: ${what} (${t})`, barkLastNone:"No push yet.",
+  barkLater:"hansa does not yet send alerts to Bark by itself: only Test sends. Alerts still go out through the alert command above.",
+  barkHelpTitle:"How to set up Bark",
+  barkSteps:["Install Bark from the App Store on your iPhone, and open it.",
+    "Bark shows an example address, such as https://api.day.app/AbCd1234Ef/your-text. Copy the key: the part right after the server's address (here AbCd1234Ef), without the slashes.",
+    "Paste it here under Device key, switch Bark on, save settings, then press Send a test push."],
+  barkPrivacy:"A push sent to the public server can be read by that server (and by Apple's push service). If that matters, use a Bark server of your own.",
+  barkNoCodes:"Release codes never go to Bark: releases are answered on this page.",
+  barkWhy:{off:"Bark is off", no_key:"no device key is saved", empty:"there was nothing to send",
+    refused_url:"the server address is not allowed (it must be https://, with no path)", too_big:"the push was too big to send",
+    redirect:"the server sent it elsewhere, which hansa does not follow", timeout:"the server did not answer in time",
+    deadline:"the server did not answer within 30 seconds", network:"the server could not be reached",
+    tls:"the secure connection (TLS) to the server failed", http_429:"the server says too many pushes; try again later",
+    http_4xx:"the server refused the push: check the device key", http_5xx:"the server had an error; try again later"},
   noSessionShort:"No listening session (minutes)", windowShort:"Coordinator waiting for input (minutes)", reviewShort:"Task waiting for review (minutes)",
   compactTitle:"Coordinator model"
 });
@@ -1714,6 +1761,10 @@ function checkButton(name, after) {
 
 /* ---------- settings ---------- */
 let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+/* Bark: whether a device key is saved (never the key) and the last push; the key typed here and the removal asked
+   for, both sent with the next settings save and cleared when it succeeds */
+let BARK_KEY_SET = false, BARK_LAST = null, BARK_DRAFT = "", BARK_REMOVE = false;
+const BARK_SERVER = "https://api.day.app";
 // Drafts live only in this page's memory. In particular, keys never enter browser storage or settings JSON.
 let settingsBaseline = null, settingsLoading = null, settingsSaving = false, settingsGroup = "providers", settingsEpoch = 0;
 let settingsMessage = "", settingsProblems = [], KEY_DRAFTS = {}, newProviderName = "", newPriceName = "";
@@ -1733,7 +1784,7 @@ const GROUP_KEYS = {
   providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact"], lanes:[],
   security:["workers_may_not_read", "workers_may_not_read_added"],
   releases:["releases_without_asking", "release_direct", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow"],
-  alerts:["alert", "alert_language", "coordinator_alert"], prices:["prices"]
+  alerts:["alert", "alert_language", "coordinator_alert", "alert_bark"], prices:["prices"]
 };
 // Object order and optional blank fields do not change a setting's value. Array order still matters.
 function settingValue(value) {
@@ -1763,11 +1814,13 @@ function groupDirty(key) {
   const base = JSON.parse(settingsBaseline);
   return (GROUP_KEYS[key] || []).some(k => settingText(S[k]) !== settingText(base[k]))
     || (key === "providers" && (Object.values(KEY_DRAFTS).some(Boolean) || !!newProviderName))
-    || (key === "prices" && !!newPriceName);
+    || (key === "prices" && !!newPriceName)
+    || (key === "alerts" && barkDraftDirty());
 }
+const barkDraftDirty = () => !!BARK_DRAFT.trim() || BARK_REMOVE;
 function settingsDirty() {
   return !!S && ((settingsBaseline !== null && settingText(S) !== settingsBaseline)
-    || Object.values(KEY_DRAFTS).some(value => value !== "") || !!newProviderName || !!newPriceName);
+    || Object.values(KEY_DRAFTS).some(value => value !== "") || !!newProviderName || !!newPriceName || barkDraftDirty());
 }
 function refreshSettingsState() {
   const dirty = settingsDirty(), pendingKeys = Object.values(KEY_DRAFTS).some(Boolean);
@@ -1854,9 +1907,11 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   CREDIT_RESTS = r.provider_credit || {};
   RELEASE_UNMATCHED = r.release_unmatched || []; RELEASE_LAST = r.release_last || {}; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
+  BARK_KEY_SET = r.alert_bark_key_set === true; BARK_LAST = r.alert_bark_last || null;
+  S.alert_bark = {on:false, server:BARK_SERVER, ...(S.alert_bark || {})};
   S.alert = S.alert || {command:""}; S.coordinator_alert = S.coordinator_alert || {}; S.coordinator_compact = S.coordinator_compact || {};
   if (!r.alert_language_saved) S.alert_language = ZH ? "zh" : "en";
-  if (!keepKeys) KEY_DRAFTS = {};
+  if (!keepKeys) { KEY_DRAFTS = {}; BARK_DRAFT = ""; BARK_REMOVE = false; }
   newProviderName = ""; newPriceName = ""; settingsMessage = ""; settingsFailure = ""; settingsRebase = ""; keyProblemProvider = "";
   settingsBaseline = settingText(S);
   forbiddenSeenEntries = new Set(S.release_forbidden || []);
@@ -1878,9 +1933,14 @@ async function saveSettings() {
     }
     // Capture the changes before the canonical reload replaces the baseline.
     const successMessage = settingsSavedMessage(settings);
-    const r = await api("/api/settings", {settings, rev:REV});
+    // The Bark key goes beside the settings, to the channel's key functions; never inside them.
+    const bark = BARK_REMOVE ? {alert_bark_key_remove:true} : BARK_DRAFT.trim() ? {alert_bark_key:BARK_DRAFT.trim()} : {};
+    if (settings.alert_bark?.on && !BARK_KEY_SET && !bark.alert_bark_key && !JSON.parse(settingsBaseline || "{}").alert_bark?.on) {
+      settingsFailure = "save"; renderSettings([T.barkNeedsKey]); return;
+    }
+    const r = await api("/api/settings", {settings, rev:REV, ...bark});
     if (r.ok) {
-      saved = true;
+      saved = true; BARK_DRAFT = ""; BARK_REMOVE = false;
       await loadSettings(undefined, true);
       settingsMessage = successMessage;
     } else if ((r.problems || []).some(p => p.startsWith("the settings changed since this page loaded them"))) {
@@ -1957,6 +2017,8 @@ function controlMeta(obj, key) {
   if (obj === S.coordinator_compact) return prefix("coordinator", "coordinator_compact:");
   if (obj === S.coordinator_alert) return {group:"alerts", matches:p => p.startsWith("coordinator_alert") && (p.includes(`(${key})`) || p.startsWith("coordinator_alert must"))};
   if (obj === S.alert) return prefix("alerts", "the alert command");
+  if (obj === S.alert_bark) return {group:"alerts", matches:p => p.startsWith("alert_bark") || p.startsWith("Bark ")
+    || p.startsWith("the Bark") || p === T.barkNeedsKey};
   if (obj === S.coordinator) return {group:"coordinator", matches:p => p.startsWith("coordinator:") && p.includes(key)};
   const provider = Object.entries(S.providers).find(([, value]) => value === obj);
   if (provider) return prefix("providers", `provider ${provider[0]}: ${key === "base_url" ? "the endpoint address" : key}`);
@@ -1976,7 +2038,7 @@ function problemTarget(problem) {
   const record = fieldRecords.find(r => r.matches(problem));
   if (record) return record;
   const group = /^(provider |at least one provider)/.test(problem) ? "providers"
-    : /^(coordinator_alert|alert_language|the alert command)/.test(problem) ? "alerts"
+    : /^(coordinator_alert|alert_language|the alert command|alert_bark|Bark |the Bark)/.test(problem) || problem === T.barkNeedsKey ? "alerts"
     : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
     : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
     : /^(release|the releases without asking|the words no release)/.test(problem) ? "releases" : /^price/.test(problem) ? "prices" : /^lane/.test(problem) ? "lanes" : "";
@@ -2129,10 +2191,55 @@ function alertSection() {
     h("p", {class:"field-note"}, T.alertKeep),
     ALERT_OUTSIDE.map(f => h("div", {class:"warn"}, `${f.path}: ${T.alertOutside}`)),
     h("div", {class:"row"}, test, said)),
+    barkSection(),
     section(T.alertTiming, fields(
       field(T.noSessionShort, bind(S.coordinator_alert, "no_session_min", "number")),
       field(T.windowShort, bind(S.coordinator_alert, "window_min", "number")),
       field(T.reviewShort, bind(S.coordinator_alert, "review_min", "number"))), help(T.alertCoordinatorNote))];
+}
+/* The Bark channel: its switch and server are settings; its device key is shown only as saved or not, and goes with
+   the settings save to the channel's key functions. Test pushes once with what is saved. */
+function barkSection() {
+  const bark = S.alert_bark;
+  const said = h("span", {class:"muted", "aria-live":"polite"});
+  const whyText = why => why === "sent" ? T.barkSent : T.barkWhy[why] || why;
+  const lastLine = () => BARK_LAST ? T.barkLast(whyText(BARK_LAST.why), when(BARK_LAST.at)) : T.barkLastNone;
+  const last = h("p", {class:"field-note", "data-bark-last":""}, lastLine());
+  const test = h("button", {type:"button", "data-bark-test":"", onclick: async () => {
+    test.disabled = true; said.textContent = T.barkTesting; said.className = "muted";
+    try {
+      const r = await api("/api/alert/bark-test", {});
+      said.textContent = r.ok ? T.barkSent : T.barkTestBad + whyText(r.why);
+      said.className = r.ok ? "ok" : "bad";
+      if (r.last) { BARK_LAST = r.last; last.textContent = lastLine(); }
+    } catch (e) { err(e); }
+    test.disabled = false; }}, T.barkTest);
+  const on = bind(bark, "on", "bool");
+  on.setAttribute("id", "alert-bark-on"); on.setAttribute("role", "switch"); on.disabled = BARK_REMOVE;
+  const server = h("input", {type:"text", value:bark.server ?? BARK_SERVER, placeholder:BARK_SERVER, autocomplete:"off",
+    inputmode:"url", spellcheck:"false",
+    oninput:e => { bark.server = e.target.value.trim() || BARK_SERVER; refreshSettingsState(); }});
+  server._settingMeta = controlMeta(bark, "server");
+  const key = h("input", {type:"password", value:BARK_DRAFT, placeholder:T.barkKeyPlaceholder, autocomplete:"off",
+    "data-bark-key":"", disabled:BARK_REMOVE, "aria-label":T.barkKey,
+    oninput:e => { BARK_DRAFT = e.target.value; refreshSettingsState(); }});
+  const state = BARK_REMOVE ? null : h("span", {class:"key-status " + (BARK_KEY_SET ? "ok" : "warn"), "data-bark-key-state":""},
+    icon(BARK_KEY_SET ? "check" : "security"), BARK_KEY_SET ? T.barkKeySaved : T.barkKeyNone);
+  const remove = BARK_REMOVE
+    ? h("button", {type:"button", "data-bark-remove":"", onclick:() => { BARK_REMOVE = false; renderSettings(); }}, T.barkKeyUndo)
+    : BARK_KEY_SET ? h("button", {type:"button", class:"danger", "data-bark-remove":"",
+        onclick:() => { BARK_REMOVE = true; BARK_DRAFT = ""; bark.on = false; renderSettings(); }}, T.barkKeyRemove) : null;
+  const block = section(T.barkTitle,
+    fields(field(T.barkOn, on, "", "", true),
+      field(T.barkServer, server, T.barkServerHint, "", true),
+      field(T.barkKey, h("div", {class:"row bark-key"}, state, passwordControl(key), remove),
+        BARK_REMOVE ? T.barkKeyRemoving : T.barkKeyHint, "", true)),
+    h("p", {class:"field-note"}, T.barkLater),
+    h("div", {class:"row"}, test, said), h("p", {class:"field-note"}, T.barkTestHint), last,
+    h("details", {class:"help", "data-bark-help":"", open:!BARK_KEY_SET}, h("summary", {}, T.barkHelpTitle),
+      h("ol", {}, T.barkSteps.map(step => h("li", {}, step))), h("p", {}, T.barkPrivacy), h("p", {}, T.barkNoCodes)));
+  block.className = "bark";
+  return block;
 }
 /* an entry of the releases without asking: [lane, target]; an old unnamed entry stays distinct unless migrated */
 const listedKey = x => typeof x === "string" ? [x, ""] : [x.lane, x.target || ""];

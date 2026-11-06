@@ -610,9 +610,35 @@ alerted stays alerted when it restarts on new code. `hansa status` shows a line 
 ### Bark channel groundwork
 
 `hansa.alert_bark` supplies a built-in channel for the principal's Bark iPhone
-app. This is groundwork: the page has no Bark controls yet, and the alert queue
-does not automatically deliver to Bark. The existing alert command still gets
-its release codes as before. No coordinator command sets or tests Bark.
+app. This is groundwork: the alert queue does not automatically deliver to Bark
+yet, so only the page's Test sends. The existing alert command still gets its
+release codes as before. No coordinator command sets or tests Bark.
+
+#### On the page
+
+Settings, Alerts has a Bark block below the alert command: a switch, the server
+(blank means `https://api.day.app`), the device key in a password field, Send a
+test push, and the last push's result and time. Its help, in English and Chinese,
+says to install Bark from the App Store, copy the key from the example address
+Bark shows (the part right after the server's address), paste it, switch Bark
+on, save and test; that the public server can read what is pushed through it;
+and that release codes never go to Bark, since releases are answered on the page.
+
+- The page shows only whether a key is saved (`alert_bark_key_set` in
+  `GET /api/settings`, with `alert_bark_last`), never the key.
+- The key typed there goes with the ordinary settings save, `POST /api/settings`,
+  beside the settings as `alert_bark_key`; Remove key sends
+  `alert_bark_key_remove: true` and switches Bark off. Left blank, the saved key
+  is kept. The save is judged whole first (a stale page, any settings problem,
+  a key that does not look like one) and only then writes the settings and gives
+  the key to `save_key`/`remove_key`, so a refused save changes neither. No reply
+  holds the key.
+- Switching Bark on while no key is saved, and none comes with the save, is
+  refused with a plain message; nothing changes. The page refuses it before
+  posting, in its own language. A switch already on is not refused by an
+  unrelated save, even if the key file went missing.
+- Test (`POST /api/alert/bark-test`) calls `alert_bark.test` once with what is
+  saved and replies `{ok, why, last}`; the page puts `why` in plain words.
 
 Desk settings hold `alert_bark: {"on": false, "server": "https://api.day.app"}`.
 Only the principal (`Desk.save_settings(..., by="page")`) changes these. An older
@@ -668,8 +694,8 @@ the configured Bark server and Apple's push service can read the push text.
 ### HTTPS transport
 
 `hansa.alert_http.send(requests: list[dict], deadline_s: float = 30) -> list[dict]`
-is the transport for built-in push channels, currently Bark. Automatic delivery,
-page controls and ntfy come later.
+is the transport for built-in push channels, currently Bark. Automatic delivery
+and ntfy come later.
 
 Each request supplies `url`, a `json` object and a `headers` mapping. The transport
 POSTs UTF-8 JSON with `ensure_ascii=False` and

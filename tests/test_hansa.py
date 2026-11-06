@@ -36910,6 +36910,42 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     await vm.runInContext("saveSettings()", ctx);
     console.log(JSON.stringify({before, options, dirty, group, posted})); return;
   }
+  if (ask === "bark") {
+    // given.barkSteps, in order: {key}, {on}, {server} typed or ticked; {remove}, {save}, {test} pressed; {reply}: what
+    // the next settings save is told. Prints the Bark block's text and controls, what was posted and the page's labels.
+    const run = code => vm.runInContext(code, ctx);
+    const find = pred => { let found = null; walk(ids["#tab-settings"], el => { if (!found && pred(el)) found = el; }); return found; };
+    const block = () => find(el => el.tag === "section" && el.kids[0]?.textContent === run("T.barkTitle"));
+    const inBlock = pred => { let found = null; walk(block(), el => { if (!found && pred(el)) found = el; }); return found; };
+    const shown = () => { const b = block(); if (!b) throw new Error("Bark block missing");
+      const key = inBlock(el => "data-bark-key" in el.attrs), on = inBlock(el => el.attrs.id === "alert-bark-on");
+      const state = inBlock(el => "data-bark-key-state" in el.attrs);
+      return {text:b.textContent, keyType:key.attrs.type, keyValue:key.value, keyDisabled:key.disabled,
+        on:on.checked, switchType:on.attrs.type, state:state ? state.textContent : null,
+        remove:inBlock(el => "data-bark-remove" in el.attrs)?.textContent ?? null,
+        last:inBlock(el => "data-bark-last" in el.attrs).textContent,
+        help:inBlock(el => "data-bark-help" in el.attrs).textContent,
+        alertsIndex:ids["#tab-settings"].textContent.indexOf(run("T.alertCommandTitle")) <
+          ids["#tab-settings"].textContent.indexOf(run("T.barkTitle"))};
+    };
+    const before = shown();
+    for (const step of given.barkSteps || []) {
+      if ("reply" in step) settingsPostReply = step.reply;
+      if ("key" in step) { const el = inBlock(el => "data-bark-key" in el.attrs); el.value = step.key; el.on.input({target:el}); }
+      if ("server" in step) { const el = inBlock(el => el.tag === "input" && el.attrs.placeholder === "https://api.day.app");
+        el.value = step.server; el.on.input({target:el}); }
+      if ("on" in step) { const el = inBlock(el => el.attrs.id === "alert-bark-on"); el.checked = step.on; el.on.change({target:el}); }
+      if (step.remove) inBlock(el => "data-bark-remove" in el.attrs).on.click();
+      if (step.save) await run("saveSettings()");
+      if (step.test) await inBlock(el => "data-bark-test" in el.attrs).on.click();
+    }
+    const labels = Object.fromEntries(Object.entries(run("T")).filter(([k]) => k.startsWith("bark"))
+      .map(([k, v]) => [k, typeof v === "function" ? v("WHAT", "WHEN") : v]));
+    console.log(JSON.stringify({before, after:shown(), posted, posts:apiPosts.filter(p => p.path !== "/api/settings"),
+      settingsPosts:settingsPostCount, problems:run("settingsProblems"), dirty:run("settingsDirty()"),
+      settings:ids["#tab-settings"].textContent, labels}));
+    return;
+  }
   if (ask === "credit") {
     const before = ids["#tab-settings"].textContent;
     let button = null;
@@ -46029,6 +46065,209 @@ class AlertBarkTest(unittest.TestCase):
         self.assertEqual(alert_bark.test(self.desk), "refused_url")
         self.http.assert_not_called()
 
+
+class AlertBarkPageTest(unittest.TestCase):
+    """The Bark block of Settings, Alerts: the page as the principal uses it (PAGE_HARNESS), what it posts saved by the
+    page's own settings save, and the channel's test through the real request handler; alert_http.send is a fake."""
+    PAGE_HARNESS = DeskTest.PAGE_HARNESS
+    web_request = DeskTest.web_request
+    page_save = DeskTest.page_save
+    KEY = "barkPageKey12345"
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.tmp = Path(folder.name)
+        env = unittest.mock.patch.dict(os.environ, {
+            "CLAUDE_CONFIG_DIR": str(self.tmp / "conf"), "XDG_STATE_HOME": str(self.tmp / "state")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.desk = init_desk(self.tmp / "advisor" / "desk")
+        http = unittest.mock.patch.object(alert_http, "send", return_value=[
+            {"ok": True, "why": "sent", "status": 200, "tries": 1}])
+        self.http = http.start()
+        self.addCleanup(http.stop)
+
+    def key_file(self):
+        return self.desk.secrets_dir / "alert-bark.device-key"
+
+    def page(self, steps=(), language="en", extra=None):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        harness = self.tmp / "bark-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        given = {"/api/settings": public_settings(self.desk), "barkSteps": list(steps), **(extra or {})}
+        result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"), "bark",
+                                 "zh-CN" if language == "zh" else "en"],
+                                input=json.dumps(given), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def no_key_anywhere(self, *texts):
+        from hansa import history
+        for text in texts:
+            self.assertNotIn(self.KEY, text if isinstance(text, str) else json.dumps(text, ensure_ascii=False))
+        for path in (self.desk.settings_path, self.desk.events_path):
+            if path.exists():
+                self.assertNotIn(self.KEY, path.read_text(encoding="utf-8"))
+        self.assertNotIn(self.KEY, json.dumps(history.read(self.desk), ensure_ascii=False))
+
+    def test_bark_page_save_with_a_key_goes_to_the_channel_and_shows_only_saved(self):
+        for language, saved in (("en", "saved"), ("zh", "已保存")):
+            with self.subTest(language=language):
+                if alert_bark.has_key(self.desk):
+                    alert_bark.remove_key(self.desk, by="page")
+                shown = self.page([{"key": " " + self.KEY + " "}, {"on": True}, {"save": True}], language)
+                self.assertTrue(shown["before"]["alertsIndex"], "the Bark block follows the alert command")
+                self.assertEqual((shown["before"]["keyType"], shown["before"]["switchType"]), ("password", "checkbox"))
+                posted = shown["posted"]
+                self.assertEqual(posted["alert_bark_key"], self.KEY)
+                self.assertNotIn(self.KEY, json.dumps(posted["settings"]))
+                told = save_from_page(self.desk, posted)
+                self.assertEqual(told, {"ok": True, "problems": []})
+                self.assertTrue(alert_bark.has_key(self.desk))
+                self.assertEqual(self.key_file().read_text().strip(), self.KEY)
+                self.assertEqual(self.desk.settings()["alert_bark"], {"on": True, "server": "https://api.day.app"})
+                again = self.page(language=language)
+                self.assertEqual(again["before"]["state"], saved)
+                self.assertEqual(again["before"]["keyValue"], "")
+                self.assertTrue(again["before"]["on"])
+                self.no_key_anywhere(told, public_settings(self.desk), again, self.web_request(
+                    "/api/settings", headers={"Authorization": "Bearer " + self.desk.web_token()})[1])
+
+    def test_bark_page_save_with_the_key_left_blank_keeps_the_saved_key(self):
+        alert_bark.save_key(self.desk, self.KEY, by="page")
+        shown = self.page([{"server": "https://bark.example.org"}, {"save": True}])
+        self.assertEqual(shown["before"]["state"], "saved")
+        self.assertNotIn("alert_bark_key", shown["posted"])
+        self.assertNotIn("alert_bark_key_remove", shown["posted"])
+        self.assertEqual(save_from_page(self.desk, shown["posted"]), {"ok": True, "problems": []})
+        self.assertEqual(self.key_file().read_text().strip(), self.KEY)
+        self.assertEqual(self.desk.settings()["alert_bark"]["server"], "https://bark.example.org")
+        # a blank or spaces-only key from any page keeps it too
+        loaded = public_settings(self.desk)
+        self.assertTrue(save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"],
+                                                   "alert_bark_key": "   "})["ok"])
+        self.assertEqual(self.key_file().read_text().strip(), self.KEY)
+
+    def test_bark_page_remove_takes_the_key_away_and_switches_bark_off(self):
+        alert_bark.save_key(self.desk, self.KEY, by="page")
+        self.assertTrue(self.page_save(lambda s: s.update(alert_bark={"on": True, "server": "https://api.day.app"}))["ok"])
+        for language, removing in (("en", "the key is removed"), ("zh", "删除密钥")):
+            with self.subTest(language=language):
+                shown = self.page([{"remove": True}], language)
+                self.assertIn(removing, shown["after"]["text"])
+                self.assertFalse(shown["after"]["on"])
+                self.assertTrue(shown["dirty"])
+                self.assertEqual(shown["settingsPosts"], 0, "removal waits for the settings save")
+        shown = self.page([{"remove": True}, {"save": True}])
+        self.assertIs(shown["posted"]["alert_bark_key_remove"], True)
+        self.assertFalse(shown["posted"]["settings"]["alert_bark"]["on"])
+        self.assertEqual(save_from_page(self.desk, shown["posted"]), {"ok": True, "problems": []})
+        self.assertFalse(alert_bark.has_key(self.desk))
+        self.assertFalse(self.key_file().exists())
+        self.assertFalse(self.desk.settings()["alert_bark"]["on"])
+        self.assertEqual(self.page()["before"]["state"], "not saved")
+        # an older or hand-made body asking removal with the switch on still ends off
+        alert_bark.save_key(self.desk, self.KEY, by="page")
+        loaded = public_settings(self.desk)
+        loaded["settings"]["alert_bark"]["on"] = True
+        told = save_from_page(self.desk, {**loaded, "alert_bark_key_remove": True})
+        self.assertTrue(told["ok"], told)
+        self.assertFalse(alert_bark.has_key(self.desk))
+        self.assertFalse(self.desk.settings()["alert_bark"]["on"])
+
+    def test_bark_page_switch_on_without_a_key_is_refused_and_changes_nothing(self):
+        for language, words in (("en", "cannot be switched on without a device key"), ("zh", "没有设备密钥，不能打开 Bark")):
+            with self.subTest(language=language):
+                shown = self.page([{"on": True}, {"save": True}], language)
+                self.assertEqual(shown["settingsPosts"], 0)
+                self.assertTrue(any(words in p for p in shown["problems"]), shown["problems"])
+                self.assertIn(words, shown["settings"])
+        before = {str(p): p.read_bytes() for p in self.desk.root.rglob("*") if p.is_file()}
+        told = self.page_save(lambda s: s.update(alert_bark={"on": True, "server": "https://api.day.app"},
+                                                cool_minutes=7))
+        self.assertFalse(told["ok"])
+        self.assertTrue(any("without a device key" in p and "nothing was changed" in p for p in told["problems"]))
+        self.assertEqual({str(p): p.read_bytes() for p in self.desk.root.rglob("*") if p.is_file()}, before)
+        # removing the key while switching on is refused the same way
+        alert_bark.save_key(self.desk, self.KEY, by="page")
+        loaded = public_settings(self.desk)
+        loaded["settings"]["alert_bark"]["on"] = True
+        told = save_from_page(self.desk, {**loaded, "alert_bark_key": "", "alert_bark_key_remove": False})
+        self.assertTrue(told["ok"], "a saved key lets the switch go on")
+        # a stale page's key is refused with its settings, and a bad key leaves the settings as they were
+        stale = public_settings(self.desk)
+        self.assertTrue(self.page_save(lambda s: s.update(cool_minutes=8))["ok"])
+        told = save_from_page(self.desk, {**stale, "alert_bark_key": "anotherBarkKey987"})
+        self.assertTrue(told["problems"][0].startswith("the settings changed since this page loaded them"))
+        self.assertEqual(self.key_file().read_text().strip(), self.KEY)
+        loaded = public_settings(self.desk)
+        loaded["settings"]["cool_minutes"] = 9
+        told = save_from_page(self.desk, {**loaded, "alert_bark_key": "short"})
+        self.assertEqual(told["ok"], False)
+        self.assertTrue(told["problems"][0].startswith("the Bark device key"))
+        self.assertEqual(self.desk.settings()["cool_minutes"], 8)
+        self.assertEqual(self.key_file().read_text().strip(), self.KEY)
+
+    def test_bark_page_test_pushes_once_through_the_channel_and_shows_its_result(self):
+        alert_bark.save_key(self.desk, self.KEY, by="page")
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        code, body, _ = self.web_request("/api/alert/bark-test", method="POST", headers=auth, data=b"{}")
+        self.assertEqual(code, 200)
+        self.http.assert_called_once()
+        self.assertEqual(self.http.call_args.args[0][0]["json"]["device_key"], self.KEY)
+        self.assertEqual((body["ok"], body["why"], body["last"]["why"]), (True, "sent", "sent"))
+        self.no_key_anywhere(body)
+        self.http.reset_mock(return_value=True)
+        self.http.return_value = [{"ok": False, "why": "http_4xx", "status": 400, "tries": 1}]
+        code, failed, _ = self.web_request("/api/alert/bark-test", method="POST", headers=auth, data=b"{}")
+        self.http.assert_called_once()
+        self.assertEqual((failed["ok"], failed["why"]), (False, "http_4xx"))
+        for language, sent, reason, last in (("en", "sent", "check the device key", "Last push: sent"),
+                                             ("zh", "已发出", "请检查设备密钥", "上次推送：已发出")):
+            with self.subTest(language=language):
+                shown = self.page([{"test": True}], language, {"/api/alert/bark-test": body})
+                self.assertEqual([p["path"] for p in shown["posts"]], ["/api/alert/bark-test"])
+                self.assertIn(sent, shown["after"]["text"])
+                self.assertIn(last, shown["after"]["last"])
+                shown = self.page([{"test": True}], language, {"/api/alert/bark-test": failed})
+                self.assertIn(reason, shown["after"]["text"])
+                self.assertNotIn("http_4xx", shown["after"]["text"])
+
+    def test_bark_page_labels_and_help_in_both_languages(self):
+        en, zh = self.page()["labels"], self.page(language="zh")["labels"]
+        self.assertEqual(set(en), set(zh))
+        self.assertEqual(set(en["barkWhy"]), set(zh["barkWhy"]))
+        self.assertTrue(set(en["barkWhy"]) >= {"off", "no_key", "refused_url", "network", "timeout", "http_4xx", "too_big"})
+        flat = lambda d: [x for v in d.values() for x in (flat(v) if isinstance(v, dict) else v if isinstance(v, list) else [v])]
+        for one, other in zip(flat(en), flat(zh)):
+            self.assertNotEqual(one, other)
+            self.assertRegex(other, r"[一-鿿]")
+        for language, words in (("en", ["App Store", "right after the server's address", "switch Bark on",
+                                        "can be read by that server", "Release codes never go to Bark"]),
+                                ("zh", ["App Store", "紧跟在服务器地址后面", "打开 Bark", "那台服务器能读到",
+                                        "发布码从不发到 Bark"])):
+            with self.subTest(language=language):
+                shown = self.page(language=language)["before"]
+                for word in words:
+                    self.assertIn(word, shown["help"])
+                if language == "zh":  # the page's own words: no English beyond names and the example address
+                    allowed = {"Bark", "iPhone", "App", "Store", "https", "api", "day", "app", "AbCd1234Ef", "TLS", "hansa"}
+                    self.assertFalse(set(re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", shown["text"])) - allowed, shown["text"])
+
+    def test_bark_page_block_fits_a_390_px_screen(self):
+        # PAGE_HARNESS has no layout engine: guard the rules that keep the block inside 390 px (seen on the bench).
+        css = (Path(hansa.__file__).parent / "ui.html").read_text()
+        self.assertRegex(css, r"section\.bark \{[^}]*overflow-wrap:anywhere")
+        self.assertRegex(css, r"\.bark-key \.password-control \{[^}]*flex:1 1 160px")
+        self.assertRegex(css, r"\.row \{[^}]*flex-wrap:wrap")
+        shown = self.page()["before"]
+        self.assertIn("https://api.day.app", shown["text"])
+        script = css[css.index("function barkSection"):css.index("function barkSection") + 4000]
+        self.assertNotRegex(script, r"width:\s*\d{3,}px")
+        self.assertEqual(script.count(', "", "", true)') + script.count('T.barkServerHint, "", true)')
+                         + script.count('T.barkKeyHint, "", true)'), 3, "every Bark field spans the row")
 
 class AlertHTTPTest(unittest.TestCase):
     """Push transport rules with fake openers, including fakes inside a real isolated child."""
