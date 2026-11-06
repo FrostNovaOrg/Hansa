@@ -44140,8 +44140,8 @@ else:
             """the page saves -1, 1441 or 2.5: refused, saying why"""
             self.coordinator_desk(12)
             self.assertEqual(self.desk.settings()["coordinator_alert"],
-                             {"no_session_min": 10, "window_min": 10, "review_min": 120})
-            for k in ("no_session_min", "window_min", "review_min"):
+                             {"no_session_min": 10, "window_min": 10, "review_min": 120, "turn_min": 30})
+            for k in ("no_session_min", "window_min", "review_min", "turn_min"):
                 for bad in (-1, 1441, 2.5):
                     said = self.page_save(lambda s: s["coordinator_alert"].update({k: bad}))
                     self.assertFalse(said["ok"], (k, bad))
@@ -44277,6 +44277,294 @@ else:
             while chunk := ours.recv(65536):
                 answer += chunk
         return json.loads(answer.split(b"\r\n\r\n", 1)[1])
+
+    # -- the coordinator's turns end with API errors (notify.Turns) --------------------------------------------------
+    T0 = 1_800_000_000.0  # the fake clock's start: a failure at T0 + m * 60 is m minutes in
+
+    @staticmethod
+    def turn(at, ok=False, error="overloaded", since=None, last_ok=None, fails=1) -> dict:
+        """A record as the session's Stop and StopFailure hooks write it (up.record_turn)."""
+        return ({"at": at, "ok": True, "error": None, "fails": 0, "failed_since": None, "last_ok": at} if ok else
+                {"at": at, "ok": False, "error": error, "fails": fails, "failed_since": at if since is None else since,
+                 "last_ok": last_ok})
+
+    def turns_after_a_post(self, posted=-100, lines=("t0001 done: Add a",)):
+        """A Turns that posted lines at T0 + posted seconds, after the session's last ok turn at T0 - 200."""
+        turns = notify.Turns()
+        turns.tick(self.T0 - 200, self.turn(self.T0 - 200, ok=True), "idle", self.T0 - 200, 30)
+        turns.posted_lines(self.T0 + posted, [(json.dumps(["task", f"t{i}"]), x) for i, x in enumerate(lines)])
+        return turns
+
+    def at_minutes(self, turns, rec, minutes, status="idle", turn_min=30, carry=False):
+        """tick() at each of these minutes after T0, the status seen 10 s before; each repost goes. Returns
+        [(minute, repost's why or None, [cases])]; carry: through state() and a new Turns at each, as a restart does."""
+        out = []
+        for m in minutes:
+            t = self.T0 + m * 60
+            if carry:  # made again, in place, from only what a restart carries
+                turns.__init__(json.loads(json.dumps(turns.state())))
+            repost, cases = turns.tick(t, rec, status, t - 10, turn_min)
+            if repost:
+                turns.went(t + 1, repost["why"])
+            out.append((m, repost and repost["why"], [c for c, _ in cases]))
+        return [x for x in out if x[1] or x[2]]
+
+    def test_turns_a_failure_that_waiting_may_cure_is_posted_again_at_2_10_and_30_minutes_at_most_3_times(self):
+        for error in notify.TURN_WAIT:
+            with self.subTest(error=error):
+                turns = self.turns_after_a_post()
+                fail = lambda m, n: self.turn(self.T0 + m * 60, error=error, since=self.T0, last_ok=self.T0 - 200,
+                                              fails=n)
+                self.assertEqual(self.at_minutes(turns, fail(0, 1), [0, 1, 1.9], turn_min=0), [])
+                repost, _ = turns.tick(self.T0 + 120, fail(0, 1), "idle", self.T0 + 110, 0)
+                self.assertEqual((repost["why"], repost["error"], repost["at"], repost["lines"], repost["go_on"]),
+                                 ("wait", error, self.T0, ["t0001 done: Add a"], False))
+                turns.went(self.T0 + 121, "wait")
+                # one per failed turn: the same failure is not posted again, however long it stays the last
+                self.assertEqual(self.at_minutes(turns, fail(0, 1), [3, 10, 30, 60], turn_min=0), [])
+                self.assertEqual(self.at_minutes(turns, fail(3, 2), [4, 9, 10, 11], turn_min=0), [(10, "wait", [])])
+                self.assertEqual(self.at_minutes(turns, fail(11, 3), [12, 29, 30, 31], turn_min=0), [(30, "wait", [])])
+                # the fourth failure, and later ones: no more reposts in this stretch; turn_min 0: no alert
+                self.assertEqual(self.at_minutes(turns, fail(31, 4), [32, 60, 600], turn_min=0), [])
+                self.assertEqual(self.at_minutes(turns, fail(601, 5), [602, 1200], turn_min=0), [])
+                self.assertEqual(turns.reposts, 3)
+
+    def test_turns_nothing_unhandled_is_not_posted_again(self):
+        turns = notify.Turns()
+        turns.tick(self.T0 - 200, self.turn(self.T0 - 200, ok=True), "idle", self.T0 - 200, 30)
+        turns.posted_lines(self.T0 - 300, [("x", "old line")])  # posted before the ok turn: handled
+        turns.tick(self.T0 - 100, self.turn(self.T0 - 100, ok=True), "idle", self.T0 - 100, 30)
+        self.assertEqual(turns.unhandled, {})
+        turns.posted = self.T0 - 50  # posted, then handled: the failure is still hansa's turn
+        self.assertEqual(self.at_minutes(turns, self.turn(self.T0, last_ok=self.T0 - 100), [2, 10, 30], turn_min=0),
+                         [])
+
+    def test_turns_failures_still_going_turn_min_after_they_began_alert_once(self):
+        turns = self.turns_after_a_post()
+        fail = lambda m, n: self.turn(self.T0 + m * 60, since=self.T0, last_ok=self.T0 - 200, fails=n)
+        self.assertEqual(self.at_minutes(turns, fail(0, 1), [1], status="busy", turn_min=20), [])
+        self.assertEqual(self.at_minutes(turns, fail(0, 1), [19.9], status="busy", turn_min=20), [])
+        repost, cases = turns.tick(self.T0 + 20 * 60, fail(19, 7), "busy", self.T0 + 1190, 20)
+        self.assertEqual((repost, cases), (None, [("turn", {"error": "overloaded", "since": self.T0, "count": 1,
+                                                             "fails": 7})]))
+        # a new failure while the alert holds: nothing more, neither alert nor repost
+        self.assertEqual(self.at_minutes(turns, fail(21, 8), [22, 30, 60, 600], turn_min=20), [])
+        self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 2000, error="billing_error", since=self.T0,
+                                                          fails=9), [40, 50]), [])
+
+    def test_turns_a_failure_that_needs_the_principal_alerts_at_once_and_is_not_posted_again(self):
+        for error in notify.TURN_PRINCIPAL:
+            with self.subTest(error=error):
+                turns = self.turns_after_a_post()
+                rec = self.turn(self.T0, error=error, last_ok=self.T0 - 200)
+                self.assertEqual(self.at_minutes(turns, rec, [0.1, 2, 10, 30, 60]), [(0.1, None, ["turn"])])
+                # then a failure waiting may cure, in the same stretch: still no repost until an ok turn
+                rec = self.turn(self.T0 + 3600, since=self.T0, fails=2)
+                self.assertEqual(self.at_minutes(turns, rec, [61, 70, 90], turn_min=0), [])
+                self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 6000, ok=True), [101]),
+                                 [(101, None, ["turn_ok"])])
+                turns = self.turns_after_a_post()  # turn_min 0: no alert, and still no repost
+                self.assertEqual(self.at_minutes(turns, self.turn(self.T0, error=error, last_ok=self.T0 - 200),
+                                                 [0.1, 2, 10, 30], turn_min=0), [])
+
+    def test_turns_authentication_failed_waits_2_minutes_then_posts_again_once_or_alerts(self):
+        login = notify.TURN_LOGIN
+        with self.subTest("something waits: one repost, and an alert when that turn fails too"):
+            turns = self.turns_after_a_post()
+            rec = self.turn(self.T0, error=login, last_ok=self.T0 - 200)
+            self.assertEqual(self.at_minutes(turns, rec, [0.1, 1, 1.9]), [])
+            self.assertEqual(self.at_minutes(turns, rec, [2, 3]), [(2, "login", [])])
+            self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 200, error="overloaded", since=self.T0,
+                                                              fails=2), [3.5, 5]), [(3.5, None, ["turn"])])
+        with self.subTest("something waits, the repost's turn ends ok: no alert"):
+            turns = self.turns_after_a_post()
+            self.assertEqual(self.at_minutes(turns, self.turn(self.T0, error=login, last_ok=self.T0 - 200), [2]),
+                             [(2, "login", [])])
+            self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 150, ok=True), [3, 60]), [])
+        with self.subTest("nothing waits: an alert at 2 minutes"):
+            turns = self.turns_after_a_post(posted=-300)  # posted before the last ok turn: handled
+            turns.tick(self.T0 - 100, self.turn(self.T0 - 100, ok=True), "idle", self.T0 - 100, 30)
+            rec = self.turn(self.T0, error=login, last_ok=self.T0 - 100)
+            self.assertEqual(self.at_minutes(turns, rec, [0.1, 1.9, 2, 10]), [(2, None, ["turn"])])
+        with self.subTest("nothing waits, an ok turn first: none"):
+            turns = notify.Turns()
+            self.assertEqual(self.at_minutes(turns, self.turn(self.T0, error=login), [0.1, 1]), [])
+            self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 90, ok=True), [2, 10, 60]), [])
+
+    def test_turns_max_output_tokens_is_posted_again_once_saying_go_on(self):
+        turns = self.turns_after_a_post()
+        rec = self.turn(self.T0, error=notify.TURN_LONG, last_ok=self.T0 - 200)
+        repost, cases = turns.tick(self.T0 + 30, rec, "idle", self.T0 + 20, 30)
+        self.assertEqual((repost["why"], repost["go_on"], cases), ("long", True, []))
+        self.assertTrue(notify.repost_text("/d", repost).endswith("\n- t0001 done: Add a\ngo on"))
+        turns.went(self.T0 + 31, "long")
+        self.assertEqual(self.at_minutes(turns, rec, [1, 5]), [])
+        again = self.turn(self.T0 + 200, error=notify.TURN_LONG, since=self.T0, fails=2)
+        self.assertEqual(self.at_minutes(turns, again, [4, 10]), [(4, None, ["turn"])])
+        with self.subTest("the next failure is another: as that one's"):
+            turns = self.turns_after_a_post()
+            turns.tick(self.T0 + 30, rec, "idle", self.T0 + 20, 30)
+            turns.went(self.T0 + 31, "long")
+            other = self.turn(self.T0 + 200, since=self.T0, fails=2)
+            self.assertEqual(self.at_minutes(turns, other, [4, 10, 29]), [(10, "wait", [])])
+
+    def test_turns_a_failure_of_a_turn_the_principal_started_is_not_posted_again(self):
+        for error in ("overloaded", "rate_limit", notify.TURN_LONG, "billing_error"):
+            with self.subTest(error=error):
+                turns = self.turns_after_a_post(posted=-300)  # the last post came before the turn before ended
+                rec = self.turn(self.T0, error=error, last_ok=self.T0 - 200)
+                self.assertEqual(self.at_minutes(turns, rec, [0.1, 2, 10, 29.9]), [])
+                self.assertEqual(self.at_minutes(turns, rec, [30, 31]), [(30, None, ["turn"])])
+                turns = self.turns_after_a_post(posted=-300)  # an ok turn within turn_min: none
+                self.assertEqual(self.at_minutes(turns, rec, [0.1, 2, 10]), [])
+                self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 900, ok=True), [16, 30, 60]), [])
+        with self.subTest("a later failure in that stretch, of a turn hansa started, is posted again"):
+            turns = self.turns_after_a_post(posted=-300)
+            self.assertEqual(self.at_minutes(turns, self.turn(self.T0, last_ok=self.T0 - 200), [1]), [])
+            turns.posted_lines(self.T0 + 90, [("y", "t0002 done: Add b")])
+            rec = self.turn(self.T0 + 100, since=self.T0, fails=2)
+            self.assertEqual(self.at_minutes(turns, rec, [2, 3], turn_min=0), [(2, "wait", [])])
+
+    def test_turns_a_due_repost_waits_while_the_session_is_busy_or_waiting(self):
+        for status in ("busy", "waiting", "shell", ""):
+            with self.subTest(status=status):
+                turns = self.turns_after_a_post()
+                rec = self.turn(self.T0, last_ok=self.T0 - 200)
+                self.assertEqual(self.at_minutes(turns, rec, [2, 5, 9], status=status, turn_min=0), [])
+                self.assertEqual(self.at_minutes(turns, rec, [9.5], turn_min=0), [(9.5, "wait", [])])
+        turns = self.turns_after_a_post()  # idle, but as seen before the failure: not yet
+        repost, _ = turns.tick(self.T0 + 120, self.turn(self.T0, last_ok=self.T0 - 200), "idle", self.T0 - 5, 0)
+        self.assertIsNone(repost)
+        self.assertTrue(turns.wants())  # so the Watch looks the status up
+
+    def test_turns_an_ok_turn_after_an_alert_says_the_coordinator_works_again(self):
+        turns = self.turns_after_a_post()
+        turns.posted_lines(self.T0 + 2000, [("z", "posted after the failure")])
+        self.assertEqual(self.at_minutes(turns, self.turn(self.T0, error="billing_error", last_ok=self.T0 - 200),
+                                         [1]), [(1, None, ["turn"])])
+        repost, cases = turns.tick(self.T0 + 2100, self.turn(self.T0 + 1900, ok=True), "idle", self.T0 + 2090, 30)
+        self.assertEqual((repost, cases), (None, [("turn_ok", {"since": self.T0, "at": self.T0 + 1900})]))
+        self.assertEqual([v["line"] for v in turns.unhandled.values()], ["posted after the failure"])
+        self.assertFalse(turns.wants())
+        self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 1900, ok=True), [40, 60]), [])
+        with self.subTest("an ok turn unseen between two stretches still ends the first"):
+            turns = self.turns_after_a_post()
+            self.assertEqual(self.at_minutes(turns, self.turn(self.T0, error="billing_error", last_ok=self.T0 - 200),
+                                             [1]), [(1, None, ["turn"])])
+            rec = self.turn(self.T0 + 600, error="overloaded", last_ok=self.T0 + 500)
+            self.assertEqual(self.at_minutes(turns, rec, [11]), [(11, None, ["turn_ok"])])
+        with self.subTest("no alert: no turn_ok"):
+            turns = self.turns_after_a_post()
+            self.assertEqual(self.at_minutes(turns, self.turn(self.T0, last_ok=self.T0 - 200), [2]),
+                             [(2, "wait", [])])
+            self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 200, ok=True), [4]), [])
+            self.assertEqual(turns.unhandled, {})
+
+    def test_turns_carry_over_a_restart_in_the_middle_of_a_stretch(self):
+        turns = self.turns_after_a_post()
+        fail = lambda m, n: self.turn(self.T0 + m * 60, since=self.T0, last_ok=self.T0 - 200, fails=n)
+        self.assertEqual(self.at_minutes(turns, fail(0, 1), [1, 2, 3, 5], turn_min=0, carry=True), [(2, "wait", [])])
+        self.assertEqual(self.at_minutes(turns, fail(3, 2), [4, 10, 11], turn_min=0, carry=True), [(10, "wait", [])])
+        # alerted: no repost at 30 after that, and no second alert
+        self.assertEqual(self.at_minutes(turns, fail(11, 3), [20, 26, 30, 31], turn_min=25, carry=True),
+                         [(26, None, ["turn"])])
+        self.assertEqual(self.at_minutes(turns, fail(32, 4), [33, 60, 600], carry=True), [])
+        self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 40000, ok=True), [700, 701], carry=True),
+                         [(700, None, ["turn_ok"])])
+
+    def test_turns_without_a_record_know_nothing_and_do_nothing(self):
+        turns = self.turns_after_a_post()
+        for rec in (None, {}, [], "x", {"ok": False}, {"at": "soon", "ok": False}):
+            self.assertEqual(turns.tick(self.T0 + 3600, rec, "idle", self.T0 + 3590, 1), (None, []))
+        self.assertFalse(turns.wants())
+        self.assertEqual(len(turns.unhandled), 1)
+
+    def test_turns_texts_in_both_alert_languages(self):
+        from hansa import alert
+        at = time.mktime((2026, 11, 6, 14, 2, 0, 0, 0, -1))
+        r = {"why": "wait", "error": "overloaded", "at": at, "lines": ["t0001 done: Add a", "t0002 failed: Add b"],
+             "go_on": False}
+        self.assertEqual(notify.repost_text("/d", r), "[hansa] desk /d: Your last turn ended with an API error "
+                         "(overloaded) at 14:02. Posted since then and not yet handled:\n- t0001 done: Add a\n"
+                         "- t0002 failed: Add b")
+        self.assertEqual(notify.repost_text("/d", {**r, "go_on": True}, zh=True),
+                         "[hansa] desk /d: 你的上一轮在 14:02 因 API 错误（overloaded）结束。此后发来、尚未处理的：\n"
+                         "- t0001 done: Add a\n- t0002 failed: Add b\n请继续")
+        self.assertEqual(notify.repost_text("/d", {**r, "lines": [], "go_on": True}),
+                         "[hansa] desk /d: Your last turn ended with an API error (overloaded) at 14:02.\ngo on")
+        self.coordinator_desk("turn-texts")
+        me = {"session": {"pid": 4242, "start": ""}, "name": "desk-4242"}
+        for zh in (False, True):
+            self.assertEqual(self.page_save(lambda s: s.update(alert_language="zh" if zh else "en")),
+                             {"ok": True, "problems": []})
+            for error, en_said, zh_said in (
+                    ("rate_limit", "a usage limit may only reset hours later", "用量上限可能要几个小时后才重置"),
+                    ("invalid_request", "the session's context may have gone wrong: /compact or /clear in that "
+                     "session may cure it", "在那个会话里 /compact 或 /clear 也许能解决"),
+                    ("authentication_failed", "log in again in that session", "请在那个会话里重新登录"),
+                    ("overloaded", "", "")):
+                with self.subTest(zh=zh, error=error):
+                    write_json(alert.queue_file(self.desk), [])
+                    self.assertEqual(alert.from_follower(self.desk, me, {"case": "turn", "error": error,
+                                                                         "since": time.time() - 1860, "count": 3}),
+                                     "queued")
+                    [x] = alert.queued(self.desk)
+                    self.assertEqual((x["kind"], x["level"]), ("coordinator", "urgent"))
+                    if zh:
+                        self.assertIn("协调员的会话 pid 4242 (desk-4242) 无法工作：自 ", x["text"])
+                        self.assertIn(f"（31 分钟）轮次一直以 API 错误（{error}）结束 · hansa 发去的 3 件事尚未处理",
+                                      x["text"])
+                        self.assertIn(zh_said, x["text"])
+                    else:
+                        self.assertIn("the coordinator's session pid 4242 (desk-4242) cannot work: its turns end "
+                                      f"with an API error ({error}) since ", x["text"])
+                        self.assertIn("(31 min) · 3 thing(s) hansa posted to it wait unhandled", x["text"])
+                        self.assertIn(en_said, x["text"])
+                    self.assertEqual(x["text"].count(" · "), 1 if error == "overloaded" else 2)
+            write_json(alert.queue_file(self.desk), [])
+            self.assertEqual(alert.from_follower(self.desk, me, {"case": "turn_ok", "since": at, "at": at + 600}),
+                             "queued")
+            [x] = alert.queued(self.desk)
+            self.assertEqual((x["kind"], x["level"]), ("coordinator", "passive"))
+            self.assertEqual(x["text"], "协调员的会话 pid 4242 (desk-4242) 恢复工作：14:12 有一轮正常结束，此前自 14:02 "
+                                        "起 API 一直出错" if zh else "the coordinator's session pid 4242 (desk-4242) "
+                                        "works again: a turn ended normally at 14:12, after API errors since 14:02")
+        self.assertEqual(self.page_save(lambda s: s.update(alert={"command": ""})), {"ok": True, "problems": []})
+        self.assertEqual(alert.from_follower(self.desk, me, {"case": "turn", "error": "overloaded"}), "")  # the gate
+        self.assertEqual(alert.session_minutes(self.desk.settings())["turn"], 0)
+
+    def test_a_follower_posts_again_what_a_failed_turn_left_and_alerts_after_turn_min(self):
+        from hansa import alert
+        self.coordinator_desk("turns", no_session_min=0, window_min=0, review_min=0, turn_min=4)
+        self.assertEqual(alert.session_minutes(self.desk.settings())["turn"], 4)
+        self.agents_say({"4242": "idle"})
+        t0 = float(int(time.time()))
+        record = self.desk.state_dir / "coordinator-turns" / "4242.json"
+
+        def fail():
+            record.parent.mkdir(exist_ok=True)
+            write_json(record, self.turn(t0 + 60, last_ok=t0 - 100))
+        log, end, carried = self.follow_on_a_clock(7, start=t0, restart_at=4.5, at={
+            0.2: lambda: self.coordinator_task_ended("Add a"), 1: fail})
+        posted = self.posts(str(self.tmp / f"inbox-{self.desk.root.name}.sock"))
+        self.assertEqual(len(posted), 2, (posted, log))
+        self.assertIn("Your last turn ended with an API error (overloaded) at ", posted[1])
+        self.assertIn("Posted since then and not yet handled:\n- t0001 done: Add a", posted[1])
+        self.assertEqual(carried["turns"]["reposts"], 1)
+        # after the restart: no repost again; the alert at turn_min, once
+        log, end, carried = self.follow_on_a_clock(9, start=end, resume=carried, restart_at=4)
+        alerts = self.coordinator_alerts()
+        self.assertEqual(len(alerts), 1, (alerts, log))
+        self.assertIn("cannot work: its turns end with an API error (overloaded) since ", alerts[0])
+        self.assertIn("1 thing(s) hansa posted to it wait unhandled", alerts[0])
+        self.assertEqual(len(self.posts(str(self.tmp / f"inbox-{self.desk.root.name}.sock"))), 2)
+        self.assertTrue(carried["turns"]["told"])
+        write_json(record, self.turn(end + 30, ok=True))  # the session works again
+        log = self.follow_on_a_clock(3, start=end, resume=carried)[0]
+        alerts = self.coordinator_alerts()
+        self.assertEqual(len(alerts), 2, (alerts, log))
+        self.assertIn("works again: a turn ended normally at ", alerts[1])
+        self.assertEqual([x["level"] for x in alert.queued(self.desk)], ["urgent", "passive"])
 
     def test_show_full_gives_claude_codes_reason_for_a_refused_call_whole(self):
         tid = self.desk.new_task("Build it")

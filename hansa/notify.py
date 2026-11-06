@@ -573,9 +573,10 @@ def handle(desk: Desk, req: dict) -> dict:
         if op == "seen":
             return {}
         out = {"pos": pos, "items": items, **_server(desk), "srt_ran": _srt_ran(desk)}
-        if req.get("minutes"):  # what the follower watches its session for (Watch); it asks once a minute
-            from .alert import session_minutes
+        if req.get("minutes"):  # what the follower watches its session for (Watch, Turns); it asks once a minute
+            from .alert import chinese, session_minutes
             out["coordinator_alert"] = session_minutes(desk.settings())
+            out["turns"], out["alert_zh"] = turns_of(desk, (me.get("session") or {}).get("pid")), chinese(desk)
         if isinstance(req.get("review"), list):  # of the tasks it posted waiting for review, those that still do
             out["review"] = [x for x in req["review"] if waits_review(desk, x)]
         return out
@@ -588,6 +589,16 @@ def handle(desk: Desk, req: dict) -> dict:
                                   "ended": now()})
         return {}
     raise ValueError(f"unknown request {op!r}")
+
+
+def turns_of(desk: Desk, pid):
+    """The record of how the session's turns end (up.record_turn), as written; None when there is none."""
+    from .up import turns_dir
+    try:
+        path = turns_dir(desk) / f"{int(pid)}.json"
+        return read_json(path, None) if path.is_file() and not path.is_symlink() else None
+    except (TypeError, ValueError, OSError):
+        return None
 
 
 def cmd_feed(desk: Desk) -> None:
@@ -799,10 +810,10 @@ class Watch:
             return True
         return bool(review) and any(not v.get("told") and t - v["posted"] >= review * 60 for v in self.reviews.values())
 
-    def tick(self, t: float, pending: bool, minutes: dict, heard=None, last_post=None) -> list:
+    def tick(self, t: float, pending: bool, minutes: dict, heard=None, last_post=None, want: bool = False) -> list:
         """Takes the answer of a lookup that ended, and starts one when due; never waits for one. Returns the cases
         that hold for the first time now, [(case, fields)], for the desk to queue (alert.from_follower). heard: given
-        the session's name from each answer."""
+        the session's name from each answer. want: the status is wanted besides (Turns.wants)."""
         window, review = (int(minutes.get(k) or 0) for k in ("window", "review"))
         out = []
         since = refused_since(last_post, pending)
@@ -819,7 +830,7 @@ class Watch:
                 if heard:
                     heard(str((row or {}).get("name") or "")[:80])
                 out += self.saw(at, str((row or {}).get("status") or ""), window, review)
-        if not self.thread and self.clock.due(t) and self.wants(t, pending, window, review):
+        if not self.thread and self.clock.due(t) and (want or self.wants(t, pending, window, review)):
             self.clock.at = t
             self.thread = threading.Thread(target=self._run, args=(t,), name="hansa-look", daemon=True)
             self.thread.start()
@@ -867,6 +878,169 @@ class Watch:
         if minutes.get("review") and self.status == "idle" and told:
             out["review"] = told
         return out
+
+
+# How the coordinator's turns ended (up.record_turn's record), by what may cure a failure
+TURN_WAIT = ("rate_limit", "overloaded", "server_error", "unknown")  # waiting may
+TURN_PRINCIPAL = ("billing_error", "oauth_org_not_allowed", "account_on_hold", "verification_required",
+                  "model_not_found", "cloud_credential_error", "invalid_request")  # only the principal can
+TURN_LOGIN, TURN_LONG = "authentication_failed", "max_output_tokens"
+TURN_REPOSTS = (2, 10, 30)  # minutes after a stretch of failures began: its reposts, while failures that wait may cure
+TURN_LOGIN_WAIT = 2  # minutes after authentication_failed (perhaps a short login refresh) before acting on it
+TURN_KEPT = 50  # subjects kept unhandled at most: without the hooks, nothing ever empties it
+
+
+def turn_record(rec):
+    """A turn record (up.record_turn's) as Turns uses it, or None when there is none or it is not one."""
+    if not isinstance(rec, dict) or not isinstance(rec.get("ok"), bool):
+        return None
+    num = [rec.get(k) if isinstance(rec.get(k), (int, float)) and not isinstance(rec.get(k), bool) else None
+           for k in ("at", "failed_since", "last_ok", "fails")]
+    if num[0] is None:
+        return None
+    return {"at": float(num[0]), "ok": rec["ok"], "error": str(rec.get("error") or "unknown"),
+            "failed_since": num[1], "last_ok": num[2], "fails": int(num[3] or 0)}
+
+
+class Turns:
+    """The follower's part of how its session's turns end (.hansa/coordinator-turns/<pid>.json, which the session's
+    Stop and StopFailure hooks write; the desk gives it with the feed, once a minute): when an API error ended a turn
+    hansa started, it posts again what the session has not handled, or alerts the principal (kind coordinator, case
+    `turn`; `turn_ok` once the session works again).
+        unhandled  subject: {line, at}, the latest line posted for it; filled at each post, emptied of what was
+                   posted before an ok turn ended
+        a stretch  failures in a row (the record's failed_since); a turn the principal started (nothing posted
+                   between the turn before's end and its failure) is never posted again, and alerts only after
+                   turn_min. Failures that waiting may cure (TURN_WAIT) post again at TURN_REPOSTS minutes, and alert
+                   after turn_min; those only the principal can cure (TURN_PRINCIPAL) alert at once and stop reposts
+                   until an ok turn; authentication_failed is posted again once after TURN_LOGIN_WAIT minutes and alerts
+                   if that turn fails too (alerts then when nothing waits); max_output_tokens is posted again once,
+                   ending "go on", and alerts if the next failure is that too. At most len(TURN_REPOSTS) reposts in a
+                   stretch, each only while the session was seen idle after the failure, one per failed turn; none
+                   once alerted, and no second alert in a stretch
+    turn_min: the minutes as the desk gives them (alert.session_minutes; 0: no turn alerts, reposts still go). No
+    record (a session without the hooks, or no turn ended yet) does nothing. state() is carried over a restart on
+    new code, so what was told stays told and what was posted again is not posted again."""
+
+    KEEP = ("unhandled", "posted", "seen_at", "since", "error", "failed_at", "principal", "reposts", "reposted",
+            "told", "login", "long", "blocked", "urgent")
+
+    def __init__(self, was=None):
+        w = was if isinstance(was, dict) else {}
+
+        def num(k):
+            return float(w[k]) if isinstance(w.get(k), (int, float)) and not isinstance(w.get(k), bool) else 0.0
+        given = w.get("unhandled") if isinstance(w.get("unhandled"), dict) else {}
+        self.unhandled = {str(k): {"line": str(v.get("line") or ""), "at": float(v["at"])} for k, v in given.items()
+                          if isinstance(v, dict) and isinstance(v.get("at"), (int, float))}
+        self.posted, self.seen_at, self.since, self.failed_at, self.reposted, self.told, self.login, self.long = (
+            num(k) for k in ("posted", "seen_at", "since", "failed_at", "reposted", "told", "login", "long"))
+        self.reposts = int(num("reposts"))
+        self.error = str(w.get("error") or "")
+        self.principal, self.blocked, self.urgent = (bool(w.get(k)) for k in ("principal", "blocked", "urgent"))
+
+    def state(self) -> dict:
+        return {k: getattr(self, k) for k in self.KEEP}
+
+    def posted_lines(self, t: float, items) -> None:
+        """A message went to the session at t: [(subject, line)]."""
+        for k, line in items:
+            self.unhandled.pop(k, None)
+            self.unhandled[k] = {"line": line, "at": t}
+        while len(self.unhandled) > TURN_KEPT:
+            self.unhandled.pop(next(iter(self.unhandled)))
+        self.posted = t
+
+    def wants(self) -> bool:
+        """Whether the session's status is worth looking up for this: a stretch of failures goes on, not yet alerted."""
+        return bool(self.since) and not self.told
+
+    def _new_stretch(self, since: float) -> None:
+        self.since, self.reposts, self.reposted, self.told, self.login, self.long = since, 0, 0.0, 0.0, 0.0, 0.0
+        self.blocked = self.urgent = self.principal = False
+        self.error, self.failed_at = "", 0.0
+
+    def _over(self, ok_at, turn_min: int) -> list:
+        """An ok turn ended at ok_at: the stretch is over, and what was posted before it handled."""
+        out = [("turn_ok", {"since": self.since, "at": ok_at})] if self.told and turn_min else []
+        self.unhandled = {k: v for k, v in self.unhandled.items() if v["at"] > ok_at}
+        self._new_stretch(0.0)
+        return out
+
+    def _ended(self, rec: dict, turn_min: int) -> list:
+        """A turn ended that this has not seen yet."""
+        prev, self.seen_at = self.seen_at, rec["at"]
+        if rec["ok"]:
+            return self._over(rec["at"], turn_min)
+        since = rec["failed_since"] or rec["at"]
+        out = []
+        if self.since and since != self.since:  # an ok turn came between, unseen: that stretch is over
+            out = self._over(rec["last_ok"] or since, turn_min)
+        if not self.since:
+            self._new_stretch(since)
+        # the end of the turn before this one: exact for a stretch's first failure, else no earlier than seen
+        prev = (rec["last_ok"] or 0.0) if rec["fails"] <= 1 else max(prev, since)
+        self.principal = self.posted <= prev
+        self.error, self.failed_at = rec["error"], rec["at"]
+        if self.error in TURN_PRINCIPAL:
+            self.blocked = True
+            self.urgent = self.urgent or not self.principal
+        if self.login and rec["at"] > self.login or self.error == TURN_LONG and self.long and rec["at"] > self.long:
+            self.urgent = True  # what was posted again after authentication_failed failed too; or max_output_tokens
+        return out
+
+    def tick(self, t: float, rec, status: str, seen: float, turn_min: int) -> tuple:
+        """What to do now, with the record as last read and the status a lookup begun at `seen` found: (a repost
+        {why, error, at, lines, go_on} or None, the alert cases [(case, fields)] that hold for the first time now).
+        The follower posts the repost, and calls went() once it did."""
+        rec, turn_min = turn_record(rec), int(turn_min or 0)
+        if rec is None:
+            return None, []
+        out = self._ended(rec, turn_min) if rec["at"] != self.seen_at else []
+        if rec["ok"] or not self.since:
+            return None, out
+        repost = None
+        if (not self.told and not self.blocked and not self.principal and status == "idle" and seen >= self.failed_at
+                and self.reposted < self.failed_at and self.reposts < len(TURN_REPOSTS)):
+            lines = [v["line"] for v in self.unhandled.values()]
+            why = ("wait" if self.error in TURN_WAIT and lines and t >= self.since + TURN_REPOSTS[self.reposts] * 60
+                   else "login" if self.error == TURN_LOGIN and not self.login and lines
+                   and t >= self.failed_at + TURN_LOGIN_WAIT * 60
+                   else "long" if self.error == TURN_LONG and not self.long else "")
+            if why:
+                repost = {"why": why, "error": self.error, "at": self.failed_at, "lines": lines,
+                          "go_on": why == "long"}
+        if not self.told and turn_min and (
+                self.urgent or t - self.since >= turn_min * 60
+                or self.error == TURN_LOGIN and not self.login and not self.unhandled
+                and t >= self.failed_at + TURN_LOGIN_WAIT * 60):
+            self.told = t
+            out.append(("turn", {"error": self.error, "since": self.since, "count": len(self.unhandled),
+                                 "fails": rec["fails"]}))
+        return repost, out
+
+    def went(self, t: float, why: str) -> None:
+        """The repost tick() gave went to the session at t."""
+        self.reposts += 1
+        self.reposted = self.posted = t
+        if why == "login":
+            self.login = t
+        elif why == "long":
+            self.long = t
+
+
+def repost_text(desk_root: str, r: dict, zh: bool = False) -> str:
+    """What the follower posts again after a turn ended with an API error (Turns.tick's repost), in the alert
+    language."""
+    at = time.strftime("%H:%M", time.localtime(r["at"]))
+    lines = r["lines"]
+    if zh:
+        head = f"你的上一轮在 {at} 因 API 错误（{r['error']}）结束。" + ("此后发来、尚未处理的：" if lines else "")
+    else:
+        head = (f"Your last turn ended with an API error ({r['error']}) at {at}."
+                + (" Posted since then and not yet handled:" if lines else ""))
+    text = message(desk_root, lines, head)
+    return text + ("\n" + ("请继续" if zh else "go on") if r.get("go_on") else "")
 
 
 def refused_since(last_post, pending: bool):
@@ -956,6 +1130,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
           "uid": os.getuid(), "user": account.name_of(os.getuid()), "since": was.get("since") or now(),
           "last_post": was.get("last_post"), "coordinator": {}}  # coordinator: what hansa status shows of Watch
     watch = Watch(sess["pid"], was.get("watch"))
+    turns, turn_rec, zh = Turns(was.get("turns")), None, False  # the record of how its turns end, as last read
     minutes, minutes_at = {}, 0.0  # what it watches for, as the desk last said (alert.session_minutes)
     done = 0
     try:
@@ -994,7 +1169,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 _say(f"hansa's code changed on disk; restarting on it from byte {done}")
                 _restart({"pos": done, "since": me["since"], "name": me["name"], "last_post": me["last_post"],
                           "was_up": was_up, "told_down": told_down, "told_srt": srt_done, "told_stuck": told_stuck,
-                          "watch": watch.state()})
+                          "watch": watch.state(), "turns": turns.state()})
                 changed = 0.0
             try:
                 asked = time.time() - minutes_at >= LOOK_EVERY
@@ -1003,6 +1178,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 errors = 0
                 if asked:
                     minutes, minutes_at = r.get("coordinator_alert") or {}, time.time()
+                    turn_rec, zh = r.get("turns"), bool(r.get("alert_zh"))
             except Exception as e:  # noqa: BLE001 - the desk may be busy or moving; try again, then give up
                 errors += 1
                 _say(f"could not read the desk: {e}")
@@ -1032,6 +1208,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 if _deliver(sock, message(str(desk.root), lines, missed_head(missed) if summary else ""), sess, me,
                             beat=beat):
                     watch.posted(time.time(), lines, [x["review"] for x in pending.values() if x.get("review")])
+                    turns.posted_lines(time.time(), [(json.dumps(x["key"]), x["line"]) for x in pending.values()])
                     pending, first, done, srt_done = {}, 0.0, pos, told_srt
                     if summary:
                         summary = False
@@ -1041,8 +1218,15 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                             _say(f"could not record that what was missed is told: {e}")
                 elif gone(sess):
                     return 0
-            for case, fields in watch.tick(time.time(), bool(pending or summary), minutes,
-                                           heard=lambda n: namer.heard(n), last_post=me["last_post"]):
+            cases = watch.tick(time.time(), bool(pending or summary), minutes, heard=lambda n: namer.heard(n),
+                               last_post=me["last_post"], want=turns.wants())
+            repost, said = turns.tick(time.time(), turn_rec, watch.status, watch.seen, minutes.get("turn") or 0)
+            if repost:
+                if _deliver(sock, repost_text(str(desk.root), repost, zh), sess, me, beat=beat):
+                    turns.went(time.time(), repost["why"])
+                elif gone(sess):
+                    return 0
+            for case, fields in cases + said:
                 try:
                     r = ask({"op": "alert", "me": me, "case": case, **fields})
                     _say(f"the principal's coordinator alert ({case}) " + (
