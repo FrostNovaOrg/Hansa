@@ -61,6 +61,11 @@ prefixed with the number of releases waiting for approval, open to-dos and
 providers resting until a top-up is confirmed when that count is nonzero.
 It updates with each status refresh.
 
+Up to 860 px wide the tabs wrap onto a second row, so every tab stays in view
+without a sideways scroll; wider windows keep them in one row. Under 640 px a
+page's heading takes one column: on Status, the “Auto updates” note comes below
+the tagline.
+
 Goals lists the open goals recorded with `hansa goal add`. Each row uses the counts
 from `hansa goal list`: queued/running, waiting for review, merged, failed, open
 to-dos, merged chains missing evidence and released chains, plus its lifetime

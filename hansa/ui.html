@@ -271,7 +271,7 @@ td .task-detail { min-width:200px; }
 .work-chart-track:hover .work-chart-tooltip, .work-chart-track:focus .work-chart-tooltip { display:block; }
 @media (max-width:860px) {
   header { grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:12px 18px; }
-  #tabs { grid-column:1 / -1; grid-row:2; }
+  #tabs { grid-column:1 / -1; grid-row:2; flex-wrap:wrap; }
   #state { grid-column:1 / -1; grid-row:3; font-size:11px; }
   #language { grid-column:2; grid-row:1; }
   main { padding:24px 18px; }
@@ -300,7 +300,7 @@ td .task-detail { min-width:200px; }
   .form-fields, .settings-group .facts { grid-template-columns:minmax(0,1fr); }
   .settings-footer { gap:9px; padding:12px; bottom:8px; }
   .settings-footer .save-state { flex-basis:100%; }
-  .page-head { gap:12px; margin-bottom:20px; }
+  .page-head { flex-direction:column; gap:12px; margin-bottom:20px; }
   .page-head h1 { font-size:25px; }
   .page-head p { font-size:12px; }
   .page-head > .status-pill { max-width:110px; }
