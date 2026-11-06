@@ -35396,6 +35396,10 @@ const fetch = async (path, options) => {
   if (options && options.method === "POST" && path === "/api/key") {
     keyPosts.push(JSON.parse(options.body)); return {status:200, json:async () => keyPostReply};
   }
+  if (options && options.method === "POST" && path === "/api/alert/bark/key") {
+    if (keyPostReply.ok) given["/api/settings"].alert_bark_key_set = !!JSON.parse(options.body).key;
+    return {status:200, json:async () => keyPostReply};
+  }
   if (options && options.method === "POST" && path === "/api/provider/top-up") {
     const r = given[path] || {ok:true}, name = JSON.parse(options.body).provider;
     if (r.ok) {
@@ -36900,6 +36904,36 @@ else if (ask === "settings-unavailable") vm.runInContext('show("settings")', ctx
   console.log(JSON.stringify(ids["#state"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {
+  if (ask === "bark-setup") {
+    const run = code => vm.runInContext(code, ctx);
+    const check = (ok, why) => { if (!ok) throw new Error(why); };
+    const find = predicate => { let found = null; walk(ids["#tab-settings"], el => { if (predicate(el)) found = el; }); return found; };
+    run('showSettingsGroup("alerts")');
+    const note = ids["#tab-settings"].textContent;
+    check(note.includes("Bark") && note.includes("Apple") && note.includes("https://api.day.app"), "missing Bark privacy/setup guidance");
+    const toggle = find(el => el.tag === "input" && el.type === "checkbox" && el._settingMeta?.group === "alerts");
+    const server = find(el => el.tag === "input" && el._settingMeta?.matches("alert_bark.server must be HTTPS"));
+    const key = find(el => el.tag === "input" && el.attrs["aria-label"] === run("T.barkKey"));
+    check(toggle && server && key && key.type === "password", "Bark setup controls missing");
+    toggle.checked = true; toggle.on.change({target:toggle});
+    server.value = "https://bark.example"; server.on.input({target:server});
+    key.value = "fixture-bark-key"; key.on.input({target:key});
+    check(run('groupDirty("alerts")') && run("settingsDirty()"), "Bark edits lost their dirty state");
+    const save = find(el => el.tag === "button" && el.textContent === run("T.saveKey"));
+    keyPostReply = {ok:false, problems:["fixture save refused"]};
+    await save.on.click();
+    check(run('BARK_KEY_DRAFT === "fixture-bark-key" && !BARK_KEY_SET'), "failed save lost the draft or marked key set");
+    keyPostReply = {ok:true};
+    await find(el => el.tag === "button" && el.textContent === run("T.saveKey")).on.click();
+    check(run('!BARK_KEY_DRAFT && BARK_KEY_SET'), "successful save did not clear the private draft");
+    check(apiPosts.filter(p => p.path === "/api/alert/bark/key").every(p => p.body.key === "fixture-bark-key"), "wrong key endpoint/payload");
+    await run("saveSettings()");
+    check(posted.settings.alert_bark.on && posted.settings.alert_bark.server === "https://bark.example", "Bark settings were not saved");
+    check(!JSON.stringify(posted).includes("fixture-bark-key"), "key leaked into settings");
+    await find(el => el.tag === "button" && el.textContent === run("T.clearKey")).on.click();
+    check(!run("BARK_KEY_SET") && apiPosts.at(-1).body.key === "", "clear key failed");
+    console.log(JSON.stringify({setup:true, privacy:true})); return;
+  }
   if (ask === "alert-language") {
     let select = null;
     walk(ids["#tab-settings"], el => { if (el.tag === "select" && el._settingMeta?.matches('alert_language must be "en" or "zh"')) select = el; });
@@ -42188,6 +42222,254 @@ else:
     def alerted(self, out) -> list:
         return [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines()] if out.exists() else []
 
+    def bark_fake(self, why="sent"):
+        """The real Bark sender with a fake transport: no network, including in follower tests."""
+        self.assertTrue(self.page_save(lambda s: s.update(alert_bark={"on": True}))["ok"])
+        alert_bark.save_key(self.desk, "fixture-bark-device-key", by="page")
+        http = unittest.mock.patch.object(alert_http, "send", return_value=[
+            {"ok": why == "sent", "why": why, "status": 200 if why == "sent" else None, "tries": 3}])
+        sender = unittest.mock.patch.object(alert_bark, "send", wraps=alert_bark.send)
+        self.addCleanup(http.stop)
+        self.addCleanup(sender.stop)
+        return sender.start(), http.start()
+
+    def test_alert_channels_command_only_keeps_command_behavior(self):
+        from hansa import alert
+        out = self.alert_fake("sys.exit(7)\n")
+        self.desk.add_ask("Renew the login")
+        with unittest.mock.patch.object(alert_bark, "send") as bark:
+            result = alert.send_due(self.desk, gather=0)
+        self.assertEqual((result["ok"], result["exit"]), (False, 7))
+        bark.assert_not_called()
+        [sent] = self.alerted(out)
+        self.assertIn("Renew the login", sent["text"])
+        self.assertEqual((sent["kind"], sent["level"], sent["task"]), ("ask", "active", None))
+        self.assertEqual(self.events("alert_failed")[0]["channel"], "command")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))  # never retry the command
+        self.assertEqual(len(self.alerted(out)), 1)
+
+    def test_alert_channels_bark_only_queues_release_without_making_a_code(self):
+        from hansa import alert, release
+        sender, http = self.bark_fake()
+        self.with_release("true")
+        with unittest.mock.patch.object(release, "new_code") as new_code, \
+                unittest.mock.patch.object(alert, "run") as command:
+            self.hansa("release", "a")
+            self.assertEqual([x["kind"] for x in alert.queued(self.desk)], ["release_waiting"])
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        command.assert_not_called()
+        new_code.assert_not_called()
+        sender.assert_called_once()
+        [request] = http.call_args.args[0]
+        self.assertIn("waits for your yes on the page", request["json"]["body"])
+        self.assertNotIn("code", request["json"]["body"])
+        self.assertFalse(views.status(self.desk)["release_codes"])
+        self.assertIn("last ok: sent", self.hansa("status"))
+        self.assertEqual(len(alert._last(self.desk)["runs"]), 1)
+
+    def test_alert_channels_both_share_one_batch_but_only_command_gets_code(self):
+        from hansa import alert
+        out = self.alert_fake()
+        sender, http = self.bark_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        self.desk.add_ask("Renew the login")
+        self.assertIsNone(alert.send_due(self.desk))  # the same gathering window covers both channels
+        sender.assert_not_called()
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        [sent] = self.alerted(out)
+        code = re.search(r"code ([A-Z0-9]{6})", sent["text"])[1]
+        sender.assert_called_once()
+        self.assertEqual([x["kind"] for x in sender.call_args.args[1]], ["release_waiting", "ask"])
+        self.assertTrue(all(not x.get("code") for x in sender.call_args.args[1]))
+        [request] = http.call_args.args[0]
+        self.assertIn("Renew the login", request["json"]["body"])
+        self.assertNotIn(code, request["json"]["body"])
+        self.assertEqual((sent["kind"], sent["level"]), ("release_waiting,ask", "active"))
+        self.assertEqual(len(alert._last(self.desk)["runs"]), 1)
+
+    def test_alert_channels_bark_failure_does_not_change_or_notify_command(self):
+        from hansa import alert
+        out = self.alert_fake()
+        sender, http = self.bark_fake("network")
+        self.desk.add_ask("Renew the login")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertTrue(alert._last(self.desk)["last"]["ok"])
+        self.assertEqual(alert_bark.last_result(self.desk)["why"], "network")
+        [failed] = self.events("alert_failed")
+        self.assertEqual((failed["channel"], failed["why"]), ("bark", "network"))
+        self.assertIn("last failed: network", self.hansa("status"))
+        self.assertEqual([x["kind"] for x in self.alerted(out)], ["ask"])
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        sender.assert_called_once()
+        http.assert_called_once()  # retries belong to alert_http, never to the batch
+
+    def test_alert_channels_hanging_command_does_not_delay_bark(self):
+        from hansa import alert
+        started = self.tmp / "command-started"
+        self.alert_fake(f"from pathlib import Path\nPath({str(started)!r}).touch()\nimport time\ntime.sleep(60)\n")
+        sender, http = self.bark_fake()
+        pushed = []
+        began = time.monotonic()
+
+        def push(*args, **kwargs):
+            self.soon(started.exists, timeout=10)
+            pushed.append(time.monotonic() - began)
+            self.assertNotIn("last", alert._last(self.desk))  # command is still running
+            return [{"ok": True, "why": "sent", "status": 200, "tries": 1}]
+        http.side_effect = push
+        self.desk.add_ask("Renew the login")
+        result = alert.send_due(self.desk, gather=0)  # the real 30-second command limit
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["limit"], 30)
+        self.assertEqual(len(pushed), 1)
+        self.assertLess(pushed[0], 10)
+        self.assertEqual(alert_bark.last_result(self.desk)["why"], "sent")
+        self.assertEqual(self.events("alert_failed")[0]["channel"], "command")
+
+    def test_alert_channels_neither_does_not_queue_or_send(self):
+        from hansa import alert
+        for on, key in ((False, False), (True, False), (False, True)):
+            with self.subTest(on=on, key=key):
+                self.assertTrue(self.page_save(lambda s: s.update(alert_bark={"on": on}))["ok"])
+                alert_bark.save_key(self.desk, "fixture-bark-key" if key else "", by="page")
+                self.assertFalse(alert.add(self.desk, "disk", "Low disk"))
+                self.assertEqual(alert.queued(self.desk), [])
+                self.assertIn("no alert channel", " ".join(alert.test(self.desk)["problems"]))
+                with unittest.mock.patch.object(alert_bark, "send") as bark, \
+                        unittest.mock.patch.object(alert, "run") as command:
+                    self.assertIsNone(alert.send_due(self.desk, gather=0))
+                bark.assert_not_called()
+                command.assert_not_called()
+
+    def test_alert_channels_bark_only_page_test_and_hourly_batch_limit(self):
+        from hansa import alert
+        sender, http = self.bark_fake()
+        t = time.time()
+        write_json(alert.last_file(self.desk), {"runs": [t] * alert.MOST_RUNS})
+        self.assertTrue(alert.add(self.desk, "disk", "Low disk"))
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        sender.assert_not_called()
+        self.assertEqual(len(self.events("alert_held")), 1)
+        self.assertTrue(alert.test(self.desk)["ok"])  # the principal's test bypasses the cap for the whole batch
+        self.assertEqual([x["kind"] for x in sender.call_args.args[1]], ["disk", "test"])
+        self.assertEqual(sender.call_args.args[2], 2)
+        self.assertEqual(len(alert._last(self.desk)["runs"]), alert.MOST_RUNS + 1)
+
+    def test_alert_channels_slow_bark_and_sender_exception_leave_command_independent(self):
+        from hansa import alert
+        out = self.alert_fake()
+        sender, http = self.bark_fake()
+        self.desk.add_ask("Renew the login")
+
+        def push(*args, **kwargs):
+            self.soon(lambda: alert._last(self.desk).get("last", {}).get("ok"), timeout=15)
+            self.desk.add_ask("This belongs to the next batch")
+            self.assertIsNone(alert.send_due(self.desk, gather=0))  # the whole batch still holds the one-run lock
+            raise OSError("fixture-bark-device-key must never be logged")
+        http.side_effect = push
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertEqual(len(self.alerted(out)), 1)
+        self.assertEqual(alert_bark.last_result(self.desk)["why"], "network")
+        self.assertNotIn("fixture-bark-device-key", self.desk.events_path.read_text())
+        self.assertEqual(len(alert.queued(self.desk)), 1)
+
+    def test_alert_channels_command_setup_failure_does_not_change_bark(self):
+        from hansa import alert
+        self.alert_fake()
+        sender, http = self.bark_fake()
+        self.desk.add_ask("Renew the login")
+        with unittest.mock.patch.object(alert, "run", side_effect=OSError("fixture-bark-device-key")):
+            self.assertFalse(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertEqual(alert_bark.last_result(self.desk)["why"], "sent")
+        self.assertEqual(self.events("alert_failed")[0]["channel"], "command")
+        self.assertEqual(alert.queued(self.desk), [])
+        sender.assert_called_once()
+        http.assert_called_once()
+        self.assertNotIn("fixture-bark-device-key", self.desk.events_path.read_text())
+
+    def test_alert_channels_bark_only_unheard_coordinator_gate(self):
+        from hansa import alert
+        sender, http = self.bark_fake()
+        alert.unheard_check(self.desk)
+        self.coordinator_task_ended("Review the work")
+        at = self.events("task_finished")[0]["ts"]
+        alert.unheard_check(self.desk, at + 11 * 60)
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        self.assertIn("no session hears", self.coordinator_alerts()[0])
+        alert.unheard_check(self.desk, at + 20 * 60)
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        sender.assert_called_once()
+
+    def test_alert_channels_bark_only_follower_gates(self):
+        from hansa import alert
+        for case in ("inbox", "window", "review", "turn"):
+            with self.subTest(case=case):
+                self.coordinator_desk(f"bark-{case}", command=False, no_session_min=1, window_min=1,
+                                      review_min=1, turn_min=1)
+                sender, http = self.bark_fake()
+                self.agents_say({"4242": "waiting" if case == "window" else "idle"})
+                if case == "inbox":
+                    self.follow_with_refusing_inbox(240, lambda _: False, at={
+                        1: lambda: self.coordinator_task_ended("Refused work")})
+                else:
+                    start = float(int(time.time()))
+                    changes = {0.2: lambda: self.coordinator_task_ended("Review the work")}
+                    if case == "turn":
+                        record = self.desk.state_dir / "coordinator-turns" / "4242.json"
+                        record.parent.mkdir(exist_ok=True)
+                        changes[0.5] = lambda: write_json(record, self.turn(start + 30, last_ok=start - 100))
+                        changes[3] = lambda: write_json(record, self.turn(start + 180, ok=True))
+                    self.follow_on_a_clock(5, start=start, at=changes)
+                    self.assertGreater(self.looked_up(), 0)
+                texts = self.coordinator_alerts()
+                expected = {"inbox": "inbox refuses", "window": "waited on its window",
+                            "review": "waited for review", "turn": "turns end with an API error"}[case]
+                self.assertTrue(any(expected in x for x in texts), texts)
+                if case == "turn":
+                    self.assertTrue(any("works again" in x for x in texts), texts)
+                after = max(x["at"] for x in alert.queued(self.desk)) + 1
+                with unittest.mock.patch.object(alert, "time", unittest.mock.Mock(wraps=time, time=lambda: after)):
+                    self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+                sender.assert_called_once()
+
+    def test_bark_page_key_endpoint_requires_page_auth_and_never_returns_key(self):
+        from hansa import web
+        with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
+                unittest.mock.patch.object(web.threading, "Thread"):
+            start_web(self.desk, "127.0.0.1", 0)
+        page = object.__new__(server.call_args.args[1])
+        page.path = "/api/alert/bark/key"
+        for token, value, expected in (("wrong", "fixture-bark-key", 403),
+                                        (self.desk.web_token(), "fixture-bark-key", 200),
+                                        (self.desk.web_token(), [], 400),
+                                        (self.desk.web_token(), "", 200)):
+            with self.subTest(value=value, expected=expected):
+                data = json.dumps({"key": value}).encode()
+                page.headers = {"Authorization": "Bearer " + token, "X-Hansa": "1", "Content-Length": str(len(data))}
+                page.rfile, page._send = io.BytesIO(data), unittest.mock.Mock()
+                page.do_POST()
+                self.assertEqual(page._send.call_args.args[0], expected)
+                self.assertNotIn("fixture-bark-key", json.dumps(page._send.call_args.args))
+                shown = public_settings(self.desk)
+                self.assertEqual(shown["alert_bark_key_set"], expected != 403 and value != "")
+                self.assertNotIn("fixture-bark-key", json.dumps(shown))
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_bark_page_setup_saves_settings_and_key_separately_in_both_languages(self):
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language in ("en", "zh-CN"):
+            with self.subTest(language=language):
+                r = subprocess.run(["node", str(harness), str(page), "bark-setup", language],
+                                   input=json.dumps({"/api/settings": public_settings(self.desk)}),
+                                   capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(json.loads(r.stdout), {"setup": True, "privacy": True})
+
     def test_alert_language_is_validated_recorded_and_principal_only(self):
         self.assertEqual(self.desk.settings()["alert_language"], "en")
         self.assertFalse(public_settings(self.desk)["alert_language_saved"])
@@ -44531,12 +44813,12 @@ else:
                                         "works again: a turn ended normally at 14:12, after API errors since 14:02")
         self.assertEqual(self.page_save(lambda s: s.update(alert={"command": ""})), {"ok": True, "problems": []})
         self.assertEqual(alert.from_follower(self.desk, me, {"case": "turn", "error": "overloaded"}), "")  # the gate
-        self.assertEqual(alert.session_minutes(self.desk.settings())["turn"], 0)
+        self.assertEqual(alert.session_minutes(self.desk)["turn"], 0)
 
     def test_a_follower_posts_again_what_a_failed_turn_left_and_alerts_after_turn_min(self):
         from hansa import alert
         self.coordinator_desk("turns", no_session_min=0, window_min=0, review_min=0, turn_min=4)
-        self.assertEqual(alert.session_minutes(self.desk.settings())["turn"], 4)
+        self.assertEqual(alert.session_minutes(self.desk)["turn"], 4)
         self.agents_say({"4242": "idle"})
         t0 = float(int(time.time()))
         record = self.desk.state_dir / "coordinator-turns" / "4242.json"
@@ -45998,7 +46280,7 @@ class AlertBarkTest(unittest.TestCase):
             self.assertNotIn(self.key, text)
             self.assertNotIn("https://", text)
 
-    def test_bark_test_language_defaults_off_and_no_automatic_delivery(self):
+    def test_bark_test_language_defaults_off_and_waits_for_alert_thread(self):
         self.assertEqual(self.desk.settings()["alert_bark"], {"on": False, "server": "https://api.day.app"})
         self.assertIsNone(alert_bark.last_result(self.desk))
         settings = self.desk.settings()
@@ -46015,7 +46297,7 @@ class AlertBarkTest(unittest.TestCase):
             self.assertEqual(alert_bark.last_result(self.desk)["why"], "sent")
         self.configure()
         self.http.reset_mock()
-        self.desk.add_ask("This task does not wire automatic sends")
+        self.desk.add_ask("An event queues work for the alert thread")
         self.http.assert_not_called()
         self.assertEqual(alert_bark.send(self.desk, []), "empty")
         older_page = self.desk.settings()

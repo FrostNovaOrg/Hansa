@@ -284,6 +284,10 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if path == "/api/key":
                     desk.write_key(body["provider"], body.get("key", ""), by="page")
                     return self._send(200, {"ok": True})
+                if path == "/api/alert/bark/key":
+                    from . import alert_bark
+                    alert_bark.save_key(desk, body["key"], by="page")
+                    return self._send(200, {"ok": True})
                 if path == "/api/provider/top-up":
                     return self._send(200, _top_up_provider(desk, body["provider"]))
                 if path == "/api/pause":

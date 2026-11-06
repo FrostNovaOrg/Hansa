@@ -3247,6 +3247,7 @@ def release_last(desk: Desk) -> dict:
 def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
     from .run import credit_text
+    from . import alert_bark
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
     mailbox_key = ""
@@ -3268,6 +3269,7 @@ def public_settings(desk: Desk) -> dict:
                  for observed in [listed_as(s.get("lanes", {}).get(lane), target)]
                  for why in [listed_mismatch(s, x, now_as=observed)] if why]
     return {"settings": s, "alert_language_saved": "alert_language" in desk._saved_settings(),
+            "alert_bark_key_set": alert_bark.has_key(desk),
             "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
