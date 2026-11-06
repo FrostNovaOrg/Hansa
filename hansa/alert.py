@@ -37,8 +37,9 @@ line saying how many were held back. An entry of the queue that cannot be read i
 only at the time limit is its process group killed. A run
 that fails or times out is recorded (event alert_failed, and .hansa/alert-last.json, which hansa status reads);
 there is no retry: the next alert tries again. A
-release_waiting alert carries the release's one-time code (release.new_code), which goes nowhere else: its queue
-entry is gone once sent, and none of what the command printed for such an alert is kept (only how it ended). A phone
+release_waiting alert queues only its release ID, request time and text without a code. Just before sending,
+the text is rebuilt in memory with a new code (release.new_code), only while that request still waits. Neither
+the code nor what the command printed for such an alert is written to a file (only how it ended is kept). A phone
 shows the first hundred characters or so, so the code and what to do with it come right after the desk's name:
 "[hansa] desk NAME: release #1 (lane a, target staging) · code K7P3QX: to release it, give this code to the coordinator
 in the conversation (this release only, once, 24 hours; send it nowhere else), or answer on the page · main at
@@ -138,31 +139,48 @@ def _read(desk: Desk) -> tuple:
 
 
 def queued(desk: Desk) -> list:
-    return _read(desk)[0]
+    with desk.lock():
+        return _clean(desk)
 
 
 def _clean(desk: Desk) -> list:
     """Under the desk lock: the queue's good entries, with any that cannot be read dropped and recorded once."""
+    from . import release
     good, bad = _read(desk)
-    if bad:
+    migrated = False
+    for x in good:
+        if "code" not in x:
+            continue
+        # Older queues stored the credential and its text. Remove both, even during a rate-limit hold;
+        # revoke only that code, so migrating an old entry cannot revoke a newer, already delivered one.
+        code = x.pop("code")
+        rid = x.get("release")
+        if isinstance(code, str) and code:
+            release.code_unsent(desk, rid, code)
+        r = release.get(desk, rid) or {}
+        x["asked"] = r.get("asked")
+        x["text"] = desk.redact(_release_text(desk, rid, True) or f"release #{rid} waits for your yes on the page")
+        migrated = True
+    if bad or migrated:
         write_json(queue_file(desk), good)
+    if bad:
         desk.event("alert_dropped", entries=bad, why="an entry of .hansa/alerts.json that cannot be read")
     return good
 
 
-def add(desk: Desk, kind: str, text: str, code: str = "", release=None, ask=None) -> bool:
-    """Queue an alert for the next run; False (nothing queued) when no alert command is set. code: the one-time
-    code of release `release` the text holds (it replaces one queued before for that release, now void); the entry
-    goes once it is sent, and none of what the command prints for it is kept. ask: the to-do's ID, so a closed
+def add(desk: Desk, kind: str, text: str, release=None, asked=None, ask=None) -> bool:
+    """Queue code-free text for the next run; False when no alert command is set. release and asked identify
+    the waiting request whose text is rebuilt with a code at send time. ask: the to-do's ID, so a closed
     to-do can be left out when the gathered alerts go out."""
     if not command(desk.settings()):
         return False
     with desk.lock():
         q = _clean(desk)
-        if code:
-            q = [x for x in q if not (x.get("code") and x.get("release") == release)]
+        if release is not None:
+            q = [x for x in q if x.get("release") != release]
         q.append({"kind": kind, "text": desk.redact(text), "at": time.time(),
-                  **({"code": code, "release": release} if code else {}), **({"ask": ask} if ask is not None else {})})
+                  **({"release": release, "asked": asked} if release is not None else {}),
+                  **({"ask": ask} if ask is not None else {})})
         desk.state_dir.mkdir(exist_ok=True)
         write_json(queue_file(desk), q)
     return True
@@ -203,8 +221,9 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
         rid = fields.get("id")
         if not command(desk.settings()):  # no alert command: no code; the page answers
             return
-        code = release.new_code(desk, rid)  # a new one each time it waits: one made before is void
-        add(desk, "release_waiting", _release_text(desk, rid, True, code), code=code, release=rid)
+        with desk.lock():
+            r = release.get(desk, rid) or {}
+            add(desk, "release_waiting", _release_text(desk, rid, True), release=rid, asked=r.get("asked"))
     elif kind in ("release_ended", "release_void", "release_forbidden"):
         add(desk, "release_ended", _release_text(desk, fields.get("id"), False))
     elif kind == "release_stopped" and fields.get("by") != "page":  # the principal knows of their own Stop
@@ -255,28 +274,31 @@ def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT, c
     for k in ("HANSA_TASK", "HANSA_MERGING"):
         env.pop(k, None)
     timed_out, code, out = False, None, b""
-    # stdin and output are files, not pipes: the command's own exit ends the run, even when a child it left behind
-    # still holds them; only at the time limit is its whole group killed
+    # stdin is a pipe so a code never lands in a temporary file. Output goes straight to /dev/null for
+    # code-bearing runs, otherwise to a file: descendants holding output open cannot delay the command's exit.
     desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
     os.chmod(desk.secrets_dir, 0o700)
     runs_dir(desk).mkdir(mode=0o700, exist_ok=True)
-    with tempfile.TemporaryFile() as given, tempfile.TemporaryFile() as said, \
-            tempfile.TemporaryDirectory(prefix="run-", dir=runs_dir(desk)) as here:
-        given.write(text.encode("utf-8"))
-        given.seek(0)
+    with contextlib.ExitStack() as stack:
+        here = stack.enter_context(tempfile.TemporaryDirectory(prefix="run-", dir=runs_dir(desk)))
+        said = None if codes else stack.enter_context(tempfile.TemporaryFile())
         try:
-            proc = subprocess.Popen(["/bin/sh", "-c", cmd], cwd=here, env=env, stdin=given,
-                                    stdout=said, stderr=subprocess.STDOUT, start_new_session=True)
+            proc = subprocess.Popen(["/bin/sh", "-c", cmd], cwd=here, env=env, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL if codes else said,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+            stack.enter_context(proc.stdin)
             try:
-                code = proc.wait(timeout=timeout)
+                proc.communicate(text.encode("utf-8"), timeout=timeout)
+                code = proc.returncode
             except subprocess.TimeoutExpired:
                 timed_out = True
                 with contextlib.suppress(OSError):
                     os.killpg(proc.pid, signal.SIGKILL)
                 with contextlib.suppress(subprocess.TimeoutExpired, OSError):
                     proc.wait(timeout=5)
-            said.seek(0)
-            out = said.read()
+            if said is not None:
+                said.seek(0)
+                out = said.read()
         except OSError as e:
             out = str(e).encode()
     result = {"ok": code == 0 and not timed_out, "exit": code, "timed_out": timed_out, "limit": timeout, "tail": [],
@@ -340,10 +362,8 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
     with _one_run(desk, wait) as mine:
         if not mine:
             return None
-        good, bad = _read(desk)
-        if bad:
-            with desk.lock():
-                good = _clean(desk)
+        with desk.lock():
+            good = _clean(desk)
         if not good:
             return None
         t = time.time()
@@ -360,20 +380,42 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             q = [x for x in _clean(desk) if x["kind"] != "ask" or x.get("ask") not in closed]
             write_json(queue_file(desk), [])
         cmd = command(desk.settings())
-        codes = [x for x in q if isinstance(x.get("code"), str) and x["code"]]
         held_since = rec.get("held_since") if isinstance(rec.get("held_since"), (int, float)) else None
         if held_since:
             write_json(last_file(desk), {k: v for k, v in rec.items() if k != "held_since"})
         if not cmd or not q:  # cleared since they were queued: nothing to send them with
-            _codes_went(desk, codes, "", False)
             return None
         held = len(q) if held_since else 0
         kinds = ",".join(dict.fromkeys(x["kind"] for x in q))
+        codes = _with_codes(desk, q)
         text = text_of(desk, q, held)
         result = run(desk, cmd, kinds, text, timeout, codes=[x["code"] for x in codes])
         _codes_went(desk, codes, text, result["ok"])
         _record(desk, result, len(q), t)
         return result
+
+
+def _with_codes(desk: Desk, items: list) -> list:
+    """Add codes only in memory, once per release in this run, under the lock that protects its state.
+    Requests get increasing IDs, including re-asks after a void; asked also binds the queued text to the request.
+    Keep this check while queued alerts may outlive the request they describe."""
+    from . import release
+    codes = []
+    seen = set()
+    with desk.lock():
+        for x in items:
+            rid = x.get("release")
+            if x["kind"] != "release_waiting" or not isinstance(rid, int) or rid in seen:
+                continue
+            r = release.get(desk, rid) or {}
+            if r.get("state") != "waiting" or not x.get("asked") or r.get("asked") != x["asked"]:
+                continue
+            code = release.new_code(desk, rid)
+            if code:
+                seen.add(rid)
+                x.update(code=code, text=_release_text(desk, rid, True, code))
+                codes.append(x)
+    return codes
 
 
 def _codes_went(desk: Desk, codes: list, text: str, ok: bool) -> None:
