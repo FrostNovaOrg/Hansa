@@ -33,13 +33,13 @@ class BenchSelftestTest(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, json.dumps(evidence).encode())
         machine._call.side_effect = lambda command, deadline, **kwargs: call(command, **kwargs)
         listener = Mock(); listener.__enter__ = Mock(return_value=listener); listener.__exit__ = Mock(return_value=False)
-        listener.getsockname.return_value = ('192.0.2.1', 12345)
+        listener.getsockname.return_value = ('192.168.42.9', 12345)
         shipped = probes.fixtures()
         if missing: shipped.pop('account')
         def submission(machine, name, source, deadline, observed=None):
             self.assertEqual(source, '' if name in probes.malformed() else shipped[name][1])
             return dict.fromkeys(selftest.mandatory()['1/' + name], 'passed')
-        with patch.object(selftest.socket, 'socket', return_value=listener), patch.object(selftest.socket, 'create_connection', return_value=listener), patch.object(selftest.socket, 'gethostbyname', return_value='192.0.2.1'), patch.object(probes, 'fixtures', return_value=shipped), patch.object(selftest, 'submission', side_effect=submission), patch.object(selftest, 'lifecycle', return_value=dict.fromkeys(selftest.mandatory()['lifecycle'], 'passed')):
+        with patch.object(selftest.socket, 'socket', return_value=listener), patch.object(selftest.socket, 'create_connection', return_value=listener), patch.object(selftest.socket, 'getaddrinfo', return_value=[(selftest.socket.AF_INET, 1, 6, '', ('192.168.42.9', 0))]), patch.object(probes, 'fixtures', return_value=shipped), patch.object(selftest, 'submission', side_effect=submission), patch.object(selftest, 'lifecycle', return_value=dict.fromkeys(selftest.mandatory()['lifecycle'], 'passed')):
             return self.runner(machine)
 
     def test_missing_probe_blocks_on(self):
@@ -303,20 +303,20 @@ class BenchSelftestTest(unittest.TestCase):
         def runner(machine):
             from unittest.mock import MagicMock
             host, lan, connection = MagicMock(), MagicMock(), MagicMock()
-            for listener, address, port in ((host, '127.0.0.1', 12001), (lan, '192.0.2.1', 12002)):
+            for listener, address, port in ((host, '127.0.0.1', 12001), (lan, '192.168.42.9', 12002)):
                 listener.__enter__.return_value = listener
                 listener.getsockname.return_value = (address, port)
             with patch.object(selftest.socket, 'socket', side_effect=[host, lan]), \
                     patch.object(selftest.socket, 'create_connection', return_value=connection) as connect:
                 report = selftest.run(machine)
-            for listener, address, port in ((host, '127.0.0.1', 12001), (lan, '192.0.2.1', 12002)):
+            for listener, address, port in ((host, '127.0.0.1', 12001), (lan, '192.168.42.9', 12002)):
                 listener.bind.assert_called_once_with((address, 0)); listener.listen.assert_called_once_with(16)
                 listener.__exit__.assert_called_once()
                 connect.assert_any_call((address, port), timeout=3)
             edges = [c.args[0] for c in machine._call.call_args_list if probes.fixtures()['root-edge'][1] in c.args[0]]
             self.assertEqual(len(edges), 4)
             for command in edges:
-                self.assertEqual(json.loads(command[-1]), dict(host=['192.168.5.2', 12001], lan=['192.0.2.1', 12002]))
+                self.assertEqual(json.loads(command[-1]), dict(host=['192.168.5.2', 12001], lan=['192.168.42.9', 12002]))
             controls = probes.fixtures()['edge-control'][1]
             sequence = [c.args[0] for c in machine._call.call_args_list if controls in c.args[0] or c.args[0] in edges]
             self.assertEqual([c[c.index('-c') + 1] for c in sequence], [controls, edges[0][-2], edges[0][-2]] * 2)
@@ -343,10 +343,25 @@ class BenchSelftestTest(unittest.TestCase):
             self.assertIn('[key of fixture]', error); self.assertNotIn(secret, json.dumps(report))
             self.assertEqual(self.desk.settings()['bench']['acceptance'], report)
 
+    def test_lan_address_is_private_and_independent_of_lookup_order(self):
+        measured = ('127.0.0.1', '10.23.0.9', '10.23.0.2', '192.168.42.9')
+        cases = [(answers, measured[-1]) for answers in itertools.permutations(measured)]
+        cases += [(('192.168.42.10', '192.168.42.2', '172.20.0.2'), '192.168.42.2'),
+                  (('10.23.0.2', '172.20.0.10', '172.20.0.2'), '172.20.0.2'),
+                  (('198.18.1.9', '192.0.2.1', '10.23.0.10', '10.23.0.2'), '10.23.0.2')]
+        for answers, expected in cases:
+            def runner(machine):
+                selftest.socket.getaddrinfo.return_value = [(selftest.socket.AF_INET, 1, 6, '', (a, 0)) for a in answers]
+                report = selftest.run(machine)
+                self.assertEqual(report['status'], 'passed', report.get('error'))
+                selftest.socket.socket.return_value.bind.assert_any_call((expected, 0))
+                return report
+            with self.subTest(answers=answers), patch.object(self, 'runner', side_effect=runner): self.acceptance()
+
     def test_unavailable_controlled_listener_blocks_acceptance(self):
         for stage in ('bind', 'listen', 'create_connection', 'lan'):
             def runner(machine):
-                if stage == 'lan': selftest.socket.gethostbyname.return_value = '127.0.0.1'
+                if stage == 'lan': selftest.socket.getaddrinfo.return_value = [(selftest.socket.AF_INET, 1, 6, '', (a, 0)) for a in ('127.0.0.1', '127.0.0.2')]
                 else:
                     failing = (selftest.socket.create_connection if stage == 'create_connection' else
                                getattr(selftest.socket.socket.return_value, stage))
@@ -356,6 +371,7 @@ class BenchSelftestTest(unittest.TestCase):
                 report = self.acceptance()
                 self.assertEqual(report['status'], 'incomplete')
                 self.assertIn('listener', report['error'])
+                if stage == 'lan': self.assertEqual(report['error'], 'RuntimeError: LAN listener unavailable')
                 self.assertFalse(selftest.complete(report))
 
     def test_failed_edge_control_aborts_and_stops(self):

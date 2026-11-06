@@ -2,6 +2,7 @@
 Keep all gates until the corresponding isolation/lifecycle requirement is removed.
 """
 from contextlib import ExitStack
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -210,8 +211,11 @@ def run(machine):
         with ExitStack() as stack:
             report['versions']['lima'] = machine._call(['limactl', '--version'], machine.clock() + 10, stdout=subprocess.PIPE).stdout.decode()
             targets = {}
-            for name, address in (('host', '127.0.0.1'), ('lan', socket.gethostbyname(socket.gethostname()))):
-                if name == 'lan' and (address.startswith('127.') or address == '0.0.0.0'): raise RuntimeError('LAN listener unavailable')
+            addresses = {ipaddress.IPv4Address(info[4][0]) for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
+            lan = next((str(address) for cidr in ('192.168.0.0/16', '172.16.0.0/12', '10.0.0.0/8')
+                        for address in sorted(addresses) if address in ipaddress.IPv4Network(cidr)), None)
+            if lan is None: raise RuntimeError('LAN listener unavailable')
+            for name, address in (('host', '127.0.0.1'), ('lan', lan)):
                 listener = stack.enter_context(socket.socket()); listener.bind((address, 0)); listener.listen(16)
                 with socket.create_connection(listener.getsockname(), timeout=3): pass
                 targets[name] = ['192.168.5.2' if name == 'host' else address, listener.getsockname()[1]]
