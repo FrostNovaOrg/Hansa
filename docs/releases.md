@@ -607,10 +607,69 @@ alerted stays alerted when it restarts on new code. `hansa status` shows a line 
 
 ### HTTPS transport groundwork
 
+### Bark channel groundwork
+
+`hansa.alert_bark` supplies a built-in channel for the principal's Bark iPhone
+app. This is groundwork: the page has no Bark controls yet, and the alert queue
+does not automatically deliver to Bark. The existing alert command still gets
+its release codes as before. No coordinator command sets or tests Bark.
+
+Desk settings hold `alert_bark: {"on": false, "server": "https://api.day.app"}`.
+Only the principal (`Desk.save_settings(..., by="page")`) changes these. An older
+page that omits the setting preserves it; an omitted server uses the default.
+A private Bark server may replace the
+default; it must be HTTPS, without userinfo, query, fragment or a path except
+an optional `/`. Invalid saves write nothing. This prevents a pasted device URL
+or credential from becoming a stored destination; retain this rule while the
+principal can set a server address. Sending adds `/push`.
+
+The channel functions are:
+
+- `save_key(desk, value, by="page")`: create or replace the device key; an empty
+  value removes it. `remove_key(desk, by="page")` removes it explicitly. Other
+  callers are refused before writing. Both record only that the key changed in
+  settings history. They expose no key reader.
+- `has_key(desk)`: key presence without returning its value. The key is in
+  `secrets/alert-bark.device-key`, atomically replaced with mode 0600 under the
+  0700 `secrets/` folder. Its distinct filename cannot collide with a provider's
+  key. It is included in `Desk.redact()` and the shared secret checks.
+- `send(desk, items, held=0)`: send one gathered queue batch, before the command
+  adds codes. It uses the saved alert language and queued code-free wording;
+  releases ask for an answer on the page. Even a batch already given codes uses
+  its queued translations, falling back to a code-free page instruction when
+  those are absent. This safeguard must remain while command batches can hold
+  release credentials.
+- `test(desk)`: send a test in the saved alert language using the saved key and
+  server, even while the channel is off; leave the alert queue alone.
+- `last_result(desk)`: the last attempt's `{at, ok, why}`, or `None` before any
+  attempt, stored in `.hansa/alert-bark-last.json`.
+
+One batch makes one JSON POST: the title and group are the desk name from the
+alert header, and the body is the alert text with that header removed. The highest
+level maps passive to `passive`, active to `active`, urgent to `timeSensitive`;
+`critical` is never sent. The existing alert formatter's character cap applies,
+then a byte limit counts the entire JSON encoding, including the key and JSON
+escapes. If necessary the body is cut at a character boundary and ends in `…`,
+so the full UTF-8 JSON stays at most 3,500 bytes. Fixed fields are never cut; if
+they cannot fit, the result is `too_big` without a request. Retain this bound
+while Bark and Apple's push service add their own envelope.
+
+Send and test use `alert_http.send(..., deadline_s=30)` and return only a category.
+Each attempt records `alert_channel` with `channel: "bark"`, `ok` and `why`, and
+updates the last result. Local outcomes are `off`, `no_key`, `empty`,
+`refused_url` and `too_big`; otherwise the category is the transport's result.
+`hansa status` and its JSON/page API expose `alert_bark: {on, key_set, last}`;
+the command shows key presence and the last category, without the key or server.
+Keys never enter settings, history values, status, events or page replies.
+
+A Bark key addresses one device. This channel does not implement Bark encryption:
+the configured Bark server and Apple's push service can read the push text.
+
+### HTTPS transport
+
 `hansa.alert_http.send(requests: list[dict], deadline_s: float = 30) -> list[dict]`
-is the transport for future built-in push channels. Only its tests call it today;
-Bark and ntfy channels, settings, status and event integration come later. The
-existing alert command and page are unchanged.
+is the transport for built-in push channels, currently Bark. Automatic delivery,
+page controls and ntfy come later.
 
 Each request supplies `url`, a `json` object and a `headers` mapping. The transport
 POSTs UTF-8 JSON with `ensure_ascii=False` and

@@ -594,7 +594,8 @@ The command receives `HANSA_ALERT_KIND` and `HANSA_ALERT_LEVEL`: `passive` for a
 successful release, `active` for a waiting release, a to-do, a failed, void,
 forbidden or stopped release and the test, and `urgent` for `server_stuck`,
 `coordinator`, `sandbox`, `disk` and `credit`. A batch takes the highest level;
-nothing else uses it yet. Release alerts start with the target description kept
+the Bark channel groundwork maps it to Bark's attention level (automatic delivery
+comes later). Release alerts start with the target description kept
 when the release was asked, even if the description changes later. See
 [alerts](releases.md#alerts) for command timing and one-time codes.
 Prices must be finite numbers, zero or more; zero and decimals are accepted.

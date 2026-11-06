@@ -1,4 +1,4 @@
-"""Private HTTPS transport for future push channels; nothing in hansa calls it yet.
+"""Private HTTPS transport for push channels.
 
 Only send is a caller interface. The same file runs under Python -I as a child,
 without importing hansa, so request secrets travel only over stdin. Its stdout
