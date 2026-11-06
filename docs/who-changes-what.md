@@ -221,9 +221,11 @@ Nothing else hansa prints holds the token or a one-time code: `hansa serve`,
 page logs no requests and answers an API request without the token with a fixed
 refusal; the event log, posts to a session and errors never carry either; a
 release's code is kept as a keyed hash, and an alert command's output is not
-kept when its alert held a code. Two places hold them in the clear, closed to
-agents by the coordinator's permission rules (Read is denied there) and the
-workers' sandbox: `.hansa/web-token`, and `.hansa/alerts.json` while an alert
-with a code waits to go out. The coordinator runs outside any sandbox, so a
+kept when its alert held a code. The token is held in the clear in
+`.hansa/web-token`, closed to agents by the coordinator's permission rules
+(Read is denied there) and the workers' sandbox; a release's code is made
+immediately before its alert command runs, kept in memory and passed through
+a pipe on standard input without a temporary input file.
+The coordinator runs outside any sandbox, so a
 Bash command the principal approves could still read them; it should never be
 asked to.
