@@ -35,6 +35,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import tests.git_env as git_env  # noqa: E402 - as hansa is imported: every git in a test reads it
+git_env.apply()
+
 import hansa  # noqa: E402
 from hansa import account, alert_http, cli, cost, menu, notify, plugin, up, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
@@ -68,7 +71,8 @@ IN_LANE = in_lane_sandbox()  # as the suite started, before setUpModule takes HA
 def setUpModule():
     """Run as a lane's check, the tests meet what they meet on GitHub's machines: without the outer prelude's
     variables (LANE_GIT_ENV and an older git's GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n), but with its TMPDIR. A
-    test of how the prelude treats an account's own GIT_CONFIG_GLOBAL sets its own."""
+    test of how the prelude treats an account's own GIT_CONFIG_GLOBAL sets its own. The suite's own git settings
+    (git_env) are put back once the prelude's are out: they are not the prelude's."""
     if not IN_LANE:
         return
     env = unittest.mock.patch.dict(os.environ)
@@ -76,6 +80,7 @@ def setUpModule():
     unittest.addModuleCleanup(env.stop)
     for k in [k for k in os.environ if k in LANE_GIT_ENV or re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_[0-9]+", k)]:
         del os.environ[k]
+    git_env.apply()
 
 
 def ports_refused() -> str:
@@ -45361,9 +45366,20 @@ class LaneEnvTest(unittest.TestCase):
     def test_the_tests_meet_none_of_the_preludes_git_settings_there(self):
         if not IN_LANE:
             self.skipTest("not run inside a lane's sandbox on Linux")
-        self.assertEqual([k for k in os.environ if k in LANE_GIT_ENV or k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))],
-                         [])
+        own = git_env.GIT_ENV  # the suite's own, which setUpModule puts back
+        self.assertEqual([k for k in os.environ if (k in LANE_GIT_ENV or k.startswith(("GIT_CONFIG_KEY_",
+                                                                                         "GIT_CONFIG_VALUE_")))
+                          and k not in own], [])
+        self.assertEqual({k: os.environ[k] for k in own}, own)
         self.assertTrue(os.environ["TMPDIR"])  # the run's own, kept
+
+
+class GitEnvTest(unittest.TestCase):
+    """The suite's git settings (tests/git_env.py): what GitHub's machines have, git gets no identity of its own."""
+
+    def test_the_suite_gives_git_its_settings_and_no_identity_a_test_did_not_set(self):
+        self.assertEqual({k: os.environ.get(k) for k in git_env.GIT_ENV}, git_env.GIT_ENV)
+        self.assertEqual([k for k in git_env.IDENTITY_ENV if k in os.environ], [])
 
 
 class Samples:
