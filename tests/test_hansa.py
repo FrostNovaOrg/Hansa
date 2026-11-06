@@ -4156,6 +4156,69 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertEqual(up.sweep_turns(self.desk), [gone.pid])
         self.assertEqual([f.name for f in d.iterdir()], [f"{os.getpid()}.json"])
 
+    def test_serve_never_dies_on_a_turn_file_whose_name_is_not_a_pid(self):
+        from hansa import up
+        d = self.desk.state_dir / "coordinator-turns"
+        d.mkdir()
+        gone = subprocess.Popen([sys.executable, "-c", ""])
+        gone.wait()
+        odd = ["99999999999999999999.json", "0.json", "00.json", "-5.json", "\u00b2\u00b3.json", "\u0661\u0662.json",
+               "4194305.json", "12 .json", "notes.txt", f"{gone.pid}.json.tmp"]
+        for name in [*odd, f"{gone.pid}.json"]:
+            (d / name).write_text("{}")
+        self.assertEqual(up.sweep_turns(self.desk), [gone.pid])  # too large for a C long, once: OverflowError
+        self.assertEqual(sorted(f.name for f in d.iterdir()), sorted(odd))  # left alone
+        with unittest.mock.patch.object(up, "alive", side_effect=OverflowError("x")):
+            (d / f"{gone.pid}.json").write_text("{}")
+            self.assertEqual(up.sweep_turns(self.desk), [])  # never raises
+        # and hansa serve starts all the same, with such a file there (up to its first check, faked here)
+        with unittest.mock.patch.object(cli, "bring_card", side_effect=SystemExit("got past the sweep")), \
+                unittest.mock.patch.object(cli, "hold_server_lock", return_value=object()), \
+                contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as got:
+                main(["--desk", str(self.desk.root), "serve"])
+        self.assertEqual(str(got.exception), "got past the sweep")
+
+    def test_the_launcher_removes_a_dead_sessions_turn_record_for_its_own_pid(self):
+        d = self.desk.state_dir / "coordinator-turns"
+        d.mkdir()
+        stale = d / f"{os.getpid()}.json"  # a dead session's, whose pid this launcher got
+        write_json(stale, {"at": 1, "ok": False, "error": "rate_limit", "fails": 9, "failed_since": 1, "last_ok": 1})
+        other = d / "4242.json"
+        write_json(other, {"ok": True})
+        words = self.launch("claude", "--name", "desk b")
+        self.assertIn(f"--pid {os.getpid()}", words[words.index("--settings") + 1])  # the pid the hook is given
+        self.assertFalse(stale.exists())  # gone before claude starts
+        self.assertTrue(other.exists())
+
+    def test_the_turn_records_forget_as_root_on_the_accounts_desk_is_the_accounts(self):
+        ran = []
+        with unittest.mock.patch.object(account, "desk_account", return_value="desk-owner"), \
+                unittest.mock.patch.object(account, "run", lambda who, argv, root, **kw: ran.append((who, argv))):
+            self.assertEqual(main(["--desk", str(self.desk.root), "coordinator-turn", "--pid", "77", "--forget"]), 0)
+        self.assertEqual(ran, [("desk-owner", ["coordinator-turn", "--pid", "77", "--forget"])])
+
+    def test_status_says_recorded_only_when_the_start_record_says_hansa_gave_the_hooks(self):
+        from hansa import up
+        me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
+        with unittest.mock.patch.object(up, "record_tmux", return_value={}):
+            self.assertEqual(up.record_coordinator(self.desk, "", ["--name", "co"]), "")
+        rec = up.read_coordinator(self.desk)
+        self.assertIs(rec["turn_hooks"], True)  # hansa coordinator's start record says so from now on
+        self.assertIn("recorded (hansa coordinator gave it", up.turn_line(self.desk, me, "p"))
+        del rec["turn_hooks"]  # a start record of a session started before: no hooks, whatever hansa is now
+        write_json(self.desk.state_dir / "coordinator-start.json", rec)
+        self.assertEqual(up.turn_line(self.desk, me, "p"), "turns of p: not recorded: started before hansa gave its "
+                         "sessions turn hooks; they come with its next start by hansa coordinator or hansa up")
+        # notify-launch's start record says so too; one from before has its deny rules but no hooks
+        self.launch("claude", "--name", "desk b")
+        rec = up.read_coordinator(self.desk)
+        self.assertIs(rec["turn_hooks"], True)
+        self.assertIn("recorded (hansa up gave it", up.turn_line(self.desk, me, "p"))
+        rec = {k: v for k, v in rec.items() if k not in ("turn_hooks", "launch_settings")}
+        write_json(self.desk.state_dir / "coordinator-start.json", rec)
+        self.assertIn("not recorded: started before hansa gave its sessions turn hooks", up.turn_line(self.desk, me, "p"))
+
     def fake_claude(self):
         """A stand-in claude that writes the words it was started with to a file, one after another: (it, file)."""
         seen = self.tmp / "claude-words"
@@ -19781,7 +19844,20 @@ def save():'''))
         self.assertIn("SessionStart", json.loads(words[words.index("--settings") + 1])["hooks"])  # kept
         rec = self.soon(lambda: notify.records(self.desk))  # the follower posts to the session: the same pid
         self.soon(lambda: all(x.get("ended") for x in notify.records(self.desk)))
+        self.assertIs(json.loads((self.desk.state_dir / "coordinator-start.json").read_text())["turn_hooks"], True)
         check_turn_hooks(self, words, self.desk, rec[0]["session"]["pid"])
+
+    def test_coordinator_removes_a_dead_sessions_turn_record_for_its_own_pid(self):
+        d = self.desk.state_dir / "coordinator-turns"
+        d.mkdir(parents=True)
+        stale = d / f"{os.getpid()}.json"  # a dead session's, whose pid this start got
+        write_json(stale, {"at": 1, "ok": False, "error": "rate_limit", "fails": 9, "failed_since": 1, "last_ok": 1})
+        other = d / "4242.json"
+        write_json(other, {"ok": True})
+        argv, _, _ = self.start_with_mod()
+        self.assertIn(f"--pid {os.getpid()}", argv[argv.index("--settings") + 1])  # the pid the hook is given
+        self.assertFalse(stale.exists())  # gone before claude starts
+        self.assertTrue(other.exists())
 
     def test_coordinator_takes_clear_daily_for_itself_and_gives_the_session_a_hook_after_a_clear(self):
         show = self.tmp / "argv-claude"  # the session: its options, one per line (and no version: no mod)
@@ -20726,6 +20802,10 @@ def save():'''))
         args = json.loads(log.read_text().splitlines()[-1])
         at = args.index("coordinator-desk")
         self.assertEqual(args[:2] + args[at:at + 3], ["-u", account.name_of(os.getuid()), "coordinator-desk", "--by", "0"])
+        # a dead session's turn record for this pid: the account's hansa removes it, before claude starts
+        calls = [json.loads(x) for x in log.read_text().splitlines()]
+        self.assertIn(["coordinator-turn", "--pid", str(os.getpid()), "--forget"],
+                      [c[c.index("coordinator-turn"):] for c in calls if "coordinator-turn" in c])
         # the account's hansa did the desk's part: the card, the helpers, the permissions, the record, the events
         self.assertEqual((self.desk.root / "CLAUDE.md").read_text(), (Path(__file__).resolve().parent.parent / "hansa" /
                                                                        "card.md").read_text())

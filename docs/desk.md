@@ -1012,17 +1012,27 @@ error's details, the transcript's path, the folder or the session's id.
 Missing or malformed input writes nothing, and the command always exits 0. As
 root on an account's desk, root passes only the event and the error type to the
 account's hansa, which writes the record. `hansa serve` removes, as it starts,
-the records of sessions whose process is gone.
+the records of sessions whose process is gone (`up.sweep_turns`); it leaves
+alone any file there whose name is not a pid's record (`<pid>.json`, the pid
+plain digits from 1 to 4194304), and the sweep never stops the server.
+Records are keyed by pid alone, so before it execs claude, `hansa coordinator`
+or the launcher removes any record for its own pid, the one it gives the hook:
+a dead session's record is never the new one's (as root on an account's desk,
+the account's hansa removes it).
 
 `hansa notify on`, in a session the launcher started, leaves that `--settings`
 out of what it records, as it leaves out the deny rules, and keeps it in the
 record as `launch_settings`; so a session started, recorded again and started
 again carries one copy. `hansa status` says, after its `hansa posts to` line,
-whether that session's turns are recorded, by the record of how it started: a
-`hansa coordinator` start, or a launcher start with `launch_settings`, is
-recorded; a session started by hand and recorded with `hansa notify on` is not
-until `hansa up` starts it; one whose command gives a `--settings` of its own is
-not.
+whether that session's turns are recorded, by the record of how it started
+(`.hansa/coordinator-start.json`, when it is of that same session: the same pid
+and start time). `hansa coordinator` and the launcher write `"turn_hooks": true`
+in it when they gave the session the hooks, and status says recorded only then.
+A start record without it is of a session started before hansa gave its
+sessions these hooks (hansa updated while it ran): not recorded, until its next
+start by `hansa coordinator` or `hansa up`. A session started by hand and
+recorded with `hansa notify on` is not recorded until `hansa up` starts it; one
+whose command gives a `--settings` of its own is not.
 
 ## A desk's files
 

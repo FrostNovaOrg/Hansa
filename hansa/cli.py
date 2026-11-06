@@ -1430,7 +1430,20 @@ def turn_hooks(desk: Desk, pid: int) -> dict:
 def cmd_coordinator_turn(a):
     """The coordinator's Stop and StopFailure hook: how its turn ended, in .hansa/coordinator-turns/<pid>.json.
     Keeps only the event and the error type of its input; never fails loudly or slowly: on any problem it writes
-    nothing and exits 0. As root on the account's desk, the account's hansa writes it, given only those two."""
+    nothing and exits 0. As root on the account's desk, the account's hansa writes it, given only those two.
+    --forget: remove the record of this pid instead (forget_turns), reading no input."""
+    if a.forget:
+        try:
+            desk = Desk.find(a.desk)
+            theirs = account.desk_account(desk.root)
+            if theirs:
+                account.run(theirs, ["coordinator-turn", "--pid", str(a.pid), "--forget"], desk.root,
+                            stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+            else:
+                up.forget_turns(desk, a.pid)
+        except (Exception, SystemExit):  # noqa: BLE001 - as below
+            pass
+        return
     try:
         given = up.turn_input(sys.stdin.read(1 << 20))
         if given is None or a.pid <= 0:
@@ -1470,6 +1483,7 @@ def cmd_notify_launch(a):
               "recorded", file=sys.stderr)
     words = up.with_rules(a.rest[1:], rules)
     argv = [a.rest[0], *_notified(desk, a.rest), *(up.with_settings(words, settings) if settings else words)]
+    up.forget_turns(desk, os.getpid())  # a dead session's record, whose pid this one got, is not this one's
     try:
         os.execvpe(argv[0], argv, os.environ)
     except OSError as e:
@@ -1805,6 +1819,9 @@ def cmd_coordinator(a):
     else:
         argv += ["--settings", json.dumps({"permissions": {"deny": own}, "hooks": hooks, **QUIET})]
     argv += _notified(desk, rest)
+    # a dead session's turn record, whose pid this one got, is not this one's: removed as the desk's owner, the way
+    # the hook writes it (cmd_coordinator_turn; root's, by the account's hansa)
+    cmd_coordinator_turn(argparse.Namespace(desk=str(desk.root), pid=os.getpid(), forget=True))
     # what hansa did at this start, kept in the desk by its owner (root's, by the account's hansa) for status and the
     # page, with the --autocompact options of the whole command line, the caller's too, as given, and the window
     rec = plugin.start_record(mod, argv + rest, plan.get("started"), clear)
@@ -3689,6 +3706,7 @@ def main(argv=None):
     p = sub.add_parser("coordinator-turn")  # hidden: the coordinator's Stop and StopFailure hook (turn_hooks)
     p.set_defaults(fn=cmd_coordinator_turn)
     p.add_argument("--pid", type=int, required=True)
+    p.add_argument("--forget", action="store_true")  # remove this pid's record, before a new session with it starts
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_desk)
     p.add_argument("--mod", default="")  # only this: record root's start of the mod (plugin.start_record), as JSON

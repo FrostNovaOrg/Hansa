@@ -429,23 +429,49 @@ def record_turn(desk: Desk, pid: int, given: dict) -> None:
     write_json(path, rec)
 
 
+PID_MAX = 1 << 22  # the most a pid can be (Linux's PID_MAX_LIMIT; macOS's is lower)
+
+
+def turn_pid(name: str) -> int | None:
+    """The pid a file in coordinator-turns/ is the record of: '<pid>.json', the pid plain ASCII digits in the range a
+    pid can have; None for any other name."""
+    m = re.fullmatch(r"([1-9][0-9]{0,6})\.json", name)
+    return int(m.group(1)) if m and int(m.group(1)) <= PID_MAX else None
+
+
 def sweep_turns(desk: Desk) -> list:
-    """Remove the turn records of sessions whose process is gone (hansa serve's start); returns the pids removed."""
+    """Remove the turn records of sessions whose process is gone (hansa serve's start); returns the pids removed.
+    Leaves alone any file whose name is not a pid's record (turn_pid), and never raises."""
     gone = []
     try:
         entries = list(turns_dir(desk).iterdir())
     except OSError:
         return gone
     for f in entries:
-        stem = f.name[:-len(".json")] if f.name.endswith(".json") else ""
-        if not stem.isdigit() or alive(int(stem)):
-            continue
         try:
+            pid = turn_pid(f.name)
+            if pid is None or alive(pid):
+                continue
             f.unlink()
-            gone.append(int(stem))
-        except OSError:
+            gone.append(pid)
+        except Exception:  # noqa: BLE001 - one record left behind is never worth hansa serve's start
             pass
     return gone
+
+
+def forget_turns(desk: Desk, pid: int) -> None:
+    """Remove the turn record of this pid, before a new session with it starts: a dead session's record, whose pid
+    the new one got, is not the new one's. Never raises."""
+    try:
+        if turn_pid(f"{int(pid)}.json") is not None:
+            (turns_dir(desk) / f"{int(pid)}.json").unlink()
+    except (Exception, SystemExit):  # noqa: BLE001 - none there, mostly
+        pass
+
+
+# a session hansa started before its starts gave the turn hooks: its start record does not say it has them
+OLDER_START = ("not recorded: started before hansa gave its sessions turn hooks; they come with its next start by "
+               "hansa coordinator or hansa up")
 
 
 def turn_line(desk: Desk, sess: dict, name: str) -> str:
@@ -461,14 +487,18 @@ def turn_line(desk: Desk, sess: dict, name: str) -> str:
         if has_settings(words):
             return head + ("not recorded: it was started with a --settings of its own, which takes the place of "
                            "hansa's (with its Stop and StopFailure hooks)")
-        return head + "recorded (hansa coordinator gave it Stop and StopFailure hooks)" + _turn_said(desk, pid)
+        if rec.get("turn_hooks") is True:
+            return head + "recorded (hansa coordinator gave it Stop and StopFailure hooks)" + _turn_said(desk, pid)
+        return head + OLDER_START
     if mine and rec.get("kind") == "notify":
         argv = [x for x in rec.get("argv") or [] if isinstance(x, str)]
-        if isinstance(rec.get("launch_settings"), str):
+        if rec.get("turn_hooks") is True or isinstance(rec.get("launch_settings"), str):
             return head + "recorded (hansa up gave it Stop and StopFailure hooks)" + _turn_said(desk, pid)
         if has_settings(argv[1:]):
             return head + ("not recorded: it was started with a --settings of its own, and hansa up adds no hooks "
                            "to such a command")
+        if isinstance(rec.get("launch_rules"), list):  # notify-launch started it, before it gave the hooks
+            return head + OLDER_START
         return head + ("not recorded: it was started by hand and recorded with hansa notify on; hansa up gives it "
                        "Stop and StopFailure hooks when it starts it")
     if written:
@@ -552,7 +582,8 @@ def record_coordinator(desk: Desk, clear: str, words: list) -> str:
     recorded, else why not. Its own option, the words it gave claude, the desk, tmux and the launch settings."""
     rec = {"kind": "coordinator", "hansa": hansa_command(), "clear_daily": clear, "words": unpicked(words),
            "folder": str(desk.root), "tmux": record_tmux(), "env": start_env(desk, os.environ),
-           "session": {"pid": os.getpid(), "start": proc_start(os.getpid())}}
+           "session": {"pid": os.getpid(), "start": proc_start(os.getpid())},
+           "turn_hooks": True}  # hansa coordinator gives every session it starts the Stop and StopFailure hooks
     # the words kept: those --continue replaces (as --resume <its id>) are not recorded, so they refuse nothing
     return _keep(desk, rec, unsafe(desk, [clear, *rec["words"], str(desk.root)]))
 
@@ -571,7 +602,7 @@ def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None
     rec = {"kind": "notify", "hansa": hansa_command(), "argv": argv and [argv[0], *words],
            "folder": folder, "tmux": record_tmux(), "env": start_env(desk, os.environ), "session": sess,
            **({"launch_rules": rules} if rules is not None else {}),
-           **({"launch_settings": settings} if isinstance(settings, str) else {})}
+           **({"launch_settings": settings, "turn_hooks": True} if isinstance(settings, str) else {})}
     if not argv:
         return _keep(desk, rec, "the arguments of its claude process cannot be read", unread=True)
     if not folder or not os.path.isdir(folder):
