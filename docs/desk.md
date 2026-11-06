@@ -959,7 +959,10 @@ variables, and runs in the recorded folder:
   (it may hold what this session's work reads), the no-edit rules on the lanes'
   repositories and worktrees, and turning off helpers it does not have. A
   session started otherwise has none of these rules until `hansa up` starts
-  it; `hansa notify on` and the copy's header say so.
+  it; `hansa notify on` and the copy's header say so. The launcher also adds
+  the turn hooks below with `--settings '{"hooks": ...}'`, unless the recorded
+  words give a `--settings` of their own (then it adds nothing: the two are
+  not merged).
 
 `--continue` continues the most recent conversation in that folder. hansa's own
 `claude -p` runs (`hansa ping`) use a temporary folder, so they leave none
@@ -984,6 +987,52 @@ nothing, as for the server. While no session hears from hansa, `hansa status`
 says in one line that `hansa up` starts the session again, and how, or why it
 does not, including a start not recorded yet and what to do about it, and a
 recorded folder that is not there.
+
+### How each of the coordinator's turns ended
+
+When the API keeps failing, Claude Code retries, then ends the turn with an API
+error and sits idle. So that this can be noticed, `hansa coordinator` and the
+launcher give the session two hooks, `Stop` (a turn ended normally) and
+`StopFailure` (an API error ended it), each running hansa's own
+`bin/hansa --desk <desk> coordinator-turn --pid <N>` (not listed in help). `N`
+is the pid of the process that execs claude, so the session's pid. The hooks
+are not async: a turn may end right after another, and each record counts on
+the one before it; the command takes about a third of a second.
+
+`coordinator-turn` writes `.hansa/coordinator-turns/<N>.json`, whole, in one
+rename, without the desk's lock:
+
+    {"at": <time>, "ok": true|false, "error": <type>|null, "fails": <failures in a row>,
+     "failed_since": <time of the first of them>|null, "last_ok": <time of the last ok turn>|null}
+
+`error` is Claude Code's error type (`rate_limit`, `overloaded`,
+`authentication_failed`, ... `unknown`); a type not on its list is kept as
+`unknown`. Nothing else of the hook's input is kept: not the last message, the
+error's details, the transcript's path, the folder or the session's id.
+Missing or malformed input writes nothing, and the command always exits 0. As
+root on an account's desk, root passes only the event and the error type to the
+account's hansa, which writes the record. `hansa serve` removes, as it starts,
+the records of sessions whose process is gone (`up.sweep_turns`); it leaves
+alone any file there whose name is not a pid's record (`<pid>.json`, the pid
+plain digits from 1 to 4194304), and the sweep never stops the server.
+Records are keyed by pid alone, so before it execs claude, `hansa coordinator`
+or the launcher removes any record for its own pid, the one it gives the hook:
+a dead session's record is never the new one's (as root on an account's desk,
+the account's hansa removes it).
+
+`hansa notify on`, in a session the launcher started, leaves that `--settings`
+out of what it records, as it leaves out the deny rules, and keeps it in the
+record as `launch_settings`; so a session started, recorded again and started
+again carries one copy. `hansa status` says, after its `hansa posts to` line,
+whether that session's turns are recorded, by the record of how it started
+(`.hansa/coordinator-start.json`, when it is of that same session: the same pid
+and start time). `hansa coordinator` and the launcher write `"turn_hooks": true`
+in it when they gave the session the hooks, and status says recorded only then.
+A start record without it is of a session started before hansa gave its
+sessions these hooks (hansa updated while it ran): not recorded, until its next
+start by `hansa coordinator` or `hansa up`. A session started by hand and
+recorded with `hansa notify on` is not recorded until `hansa up` starts it; one
+whose command gives a `--settings` of its own is not.
 
 ## A desk's files
 

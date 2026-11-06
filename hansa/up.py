@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import pwd
 import re
@@ -346,6 +347,174 @@ def without_rules(words: list, rules: list) -> list:
     return out
 
 
+SETTINGS_FLAG = "--settings"
+
+
+def has_settings(words: list) -> bool:
+    """Whether claude's words (before --) give a --settings option of their own."""
+    end = words.index("--") if "--" in words else len(words)
+    return any(x == SETTINGS_FLAG or x.startswith(SETTINGS_FLAG + "=") for x in words[:end])
+
+
+def with_settings(words: list, settings: str) -> list:
+    """claude's words with --settings SETTINGS at the end of the options (before --)."""
+    end = words.index("--") if "--" in words else len(words)
+    return words[:end] + [SETTINGS_FLAG, settings] + words[end:]
+
+
+def without_settings(words: list, settings) -> list:
+    """claude's words without the --settings SETTINGS with_settings added (that exact value only): what a session
+    hansa notify-launch started is recorded with when it runs hansa notify on, as without_rules."""
+    if not isinstance(settings, str):
+        return words
+    out, i = [], 0
+    while i < len(words):
+        x = words[i]
+        if x == "--":
+            return out + words[i:]
+        if x == SETTINGS_FLAG and i + 1 < len(words) and words[i + 1] == settings:
+            i += 2
+            continue
+        if x == f"{SETTINGS_FLAG}={settings}":
+            i += 1
+            continue
+        out.append(x)
+        i += 1
+    return out
+
+
+# -- the coordinator's turns: how each ended, written by its Stop and StopFailure hooks (hansa coordinator-turn) --
+TURNS_DIR = "coordinator-turns"
+# Claude Code's StopFailure error types; any other is kept as "unknown"
+TURN_ERRORS = ("rate_limit", "overloaded", "authentication_failed", "oauth_org_not_allowed", "account_on_hold",
+               "verification_required", "billing_error", "invalid_request", "model_not_found", "server_error",
+               "max_output_tokens", "cloud_credential_error", "unknown")
+TURN_EVENTS = ("Stop", "StopFailure")
+
+
+def turns_dir(desk: Desk) -> Path:
+    return desk.state_dir / TURNS_DIR
+
+
+def turn_input(raw: str) -> dict | None:
+    """Of a Stop or StopFailure hook's input, only what the record keeps: the event and the error type. None when
+    the input is not such a hook's."""
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or data.get("hook_event_name") not in TURN_EVENTS:
+        return None
+    err = data.get("error")
+    return {"hook_event_name": data["hook_event_name"],
+            **({"error": err if err in TURN_ERRORS else "unknown"} if data["hook_event_name"] == "StopFailure" else {})}
+
+
+def record_turn(desk: Desk, pid: int, given: dict) -> None:
+    """Write .hansa/coordinator-turns/<pid>.json for one turn's end (given: turn_input's), whole, in one rename."""
+    path = turns_dir(desk) / f"{int(pid)}.json"
+    old = read_json(path, {}) if path.is_file() and not path.is_symlink() else {}
+    old = old if isinstance(old, dict) else {}
+    at = now()
+    fails = old.get("fails") if isinstance(old.get("fails"), int) and not isinstance(old.get("fails"), bool) else 0
+    last_ok = old.get("last_ok") if isinstance(old.get("last_ok"), (int, float)) else None
+    if given["hook_event_name"] == "Stop":
+        rec = {"at": at, "ok": True, "error": None, "fails": 0, "failed_since": None, "last_ok": at}
+    else:
+        since = old.get("failed_since") if fails > 0 and isinstance(old.get("failed_since"), (int, float)) else at
+        rec = {"at": at, "ok": False, "error": given.get("error") or "unknown", "fails": max(fails, 0) + 1,
+               "failed_since": since, "last_ok": last_ok}
+    desk.state_dir.mkdir(exist_ok=True)
+    turns_dir(desk).mkdir(exist_ok=True)
+    write_json(path, rec)
+
+
+PID_MAX = 1 << 22  # the most a pid can be (Linux's PID_MAX_LIMIT; macOS's is lower)
+
+
+def turn_pid(name: str) -> int | None:
+    """The pid a file in coordinator-turns/ is the record of: '<pid>.json', the pid plain ASCII digits in the range a
+    pid can have; None for any other name."""
+    m = re.fullmatch(r"([1-9][0-9]{0,6})\.json", name)
+    return int(m.group(1)) if m and int(m.group(1)) <= PID_MAX else None
+
+
+def sweep_turns(desk: Desk) -> list:
+    """Remove the turn records of sessions whose process is gone (hansa serve's start); returns the pids removed.
+    Leaves alone any file whose name is not a pid's record (turn_pid), and never raises."""
+    gone = []
+    try:
+        entries = list(turns_dir(desk).iterdir())
+    except OSError:
+        return gone
+    for f in entries:
+        try:
+            pid = turn_pid(f.name)
+            if pid is None or alive(pid):
+                continue
+            f.unlink()
+            gone.append(pid)
+        except Exception:  # noqa: BLE001 - one record left behind is never worth hansa serve's start
+            pass
+    return gone
+
+
+def forget_turns(desk: Desk, pid: int) -> None:
+    """Remove the turn record of this pid, before a new session with it starts: a dead session's record, whose pid
+    the new one got, is not the new one's. Never raises."""
+    try:
+        if turn_pid(f"{int(pid)}.json") is not None:
+            (turns_dir(desk) / f"{int(pid)}.json").unlink()
+    except (Exception, SystemExit):  # noqa: BLE001 - none there, mostly
+        pass
+
+
+# a session hansa started before its starts gave the turn hooks: its start record does not say it has them
+OLDER_START = ("not recorded: started before hansa gave its sessions turn hooks; they come with its next start by "
+               "hansa coordinator or hansa up")
+
+
+def turn_line(desk: Desk, sess: dict, name: str) -> str:
+    """For hansa status: whether the turns of this session hansa posts to are recorded, and if not, why not. By the
+    record of how the session started (COORDINATOR_START), and the turn record its hooks wrote."""
+    rec = read_coordinator(desk)
+    pid = sess.get("pid") if isinstance(sess, dict) else None
+    mine = notify.same(rec.get("session"), sess)
+    written = isinstance(pid, int) and (turns_dir(desk) / f"{pid}.json").is_file()
+    head = f"turns of {name}: "
+    if mine and rec.get("kind") == "coordinator":
+        words = [x for x in rec.get("words") or [] if isinstance(x, str)]
+        if has_settings(words):
+            return head + ("not recorded: it was started with a --settings of its own, which takes the place of "
+                           "hansa's (with its Stop and StopFailure hooks)")
+        if rec.get("turn_hooks") is True:
+            return head + "recorded (hansa coordinator gave it Stop and StopFailure hooks)" + _turn_said(desk, pid)
+        return head + OLDER_START
+    if mine and rec.get("kind") == "notify":
+        argv = [x for x in rec.get("argv") or [] if isinstance(x, str)]
+        if rec.get("turn_hooks") is True or isinstance(rec.get("launch_settings"), str):
+            return head + "recorded (hansa up gave it Stop and StopFailure hooks)" + _turn_said(desk, pid)
+        if has_settings(argv[1:]):
+            return head + ("not recorded: it was started with a --settings of its own, and hansa up adds no hooks "
+                           "to such a command")
+        if isinstance(rec.get("launch_rules"), list):  # notify-launch started it, before it gave the hooks
+            return head + OLDER_START
+        return head + ("not recorded: it was started by hand and recorded with hansa notify on; hansa up gives it "
+                       "Stop and StopFailure hooks when it starts it")
+    if written:
+        return head + "recorded" + _turn_said(desk, pid)
+    return head + "not recorded: hansa's record of the coordinator's start is of another session (or none)"
+
+
+def _turn_said(desk: Desk, pid) -> str:
+    rec = read_json(turns_dir(desk) / f"{pid}.json", {}) if isinstance(pid, int) else {}
+    if not isinstance(rec, dict) or "ok" not in rec:
+        return ", none ended yet"
+    if rec.get("ok"):
+        return ", the last ended normally"
+    return f", the last {rec.get('fails')} ended with an API error ({rec.get('error')})"
+
+
 def resumed(words: list) -> list:
     """The words to start claude again with: --continue in place of the words that picked a conversation."""
     words = unpicked(words)
@@ -413,23 +582,27 @@ def record_coordinator(desk: Desk, clear: str, words: list) -> str:
     recorded, else why not. Its own option, the words it gave claude, the desk, tmux and the launch settings."""
     rec = {"kind": "coordinator", "hansa": hansa_command(), "clear_daily": clear, "words": unpicked(words),
            "folder": str(desk.root), "tmux": record_tmux(), "env": start_env(desk, os.environ),
-           "session": {"pid": os.getpid(), "start": proc_start(os.getpid())}}
+           "session": {"pid": os.getpid(), "start": proc_start(os.getpid())},
+           "turn_hooks": True}  # hansa coordinator gives every session it starts the Stop and StopFailure hooks
     # the words kept: those --continue replaces (as --resume <its id>) are not recorded, so they refuse nothing
     return _keep(desk, rec, unsafe(desk, [clear, *rec["words"], str(desk.root)]))
 
 
-def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None, rules: list = None) -> str:
+def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None, rules: list = None,
+                   settings: str = None) -> str:
     """How a session hansa did not start began, for hansa up: its claude's exact arguments and folder, read from
     its process unless given (notify-launch gives its own), tmux, and the launch settings of this command's
     environment, which it has from the session. rules: the deny rules notify-launch starts it with (launch_rules),
-    kept in the record, which so says the session has them, and left out of its arguments. '' when recorded, else
-    why not."""
+    kept in the record, which so says the session has them, and left out of its arguments; settings: the --settings
+    with the Stop and StopFailure hooks notify-launch gave it (turn_hooks), kept and left out the same way. '' when
+    recorded, else why not."""
     argv = proc_args(sess["pid"]) if argv is None else argv
     folder = proc_cwd(sess["pid"]) if folder is None else folder
-    words = without_rules(unpicked(argv[1:]), rules or []) if argv else []
+    words = without_settings(without_rules(unpicked(argv[1:]), rules or []), settings) if argv else []
     rec = {"kind": "notify", "hansa": hansa_command(), "argv": argv and [argv[0], *words],
            "folder": folder, "tmux": record_tmux(), "env": start_env(desk, os.environ), "session": sess,
-           **({"launch_rules": rules} if rules is not None else {})}
+           **({"launch_rules": rules} if rules is not None else {}),
+           **({"launch_settings": settings, "turn_hooks": True} if isinstance(settings, str) else {})}
     if not argv:
         return _keep(desk, rec, "the arguments of its claude process cannot be read", unread=True)
     if not folder or not os.path.isdir(folder):
@@ -507,7 +680,8 @@ def notify_on_line(desk: Desk, card: bool | None = None) -> str:
     # hansa up started this session through notify-launch, with the deny rules its record keeps
     rules = rec.get("launch_rules") if rec.get("kind") == "notify" and notify.same(rec.get("session"), sess) \
         and isinstance(rec.get("launch_rules"), list) else None
-    why = record_session(desk, sess, rules=rules)
+    settings = rec.get("launch_settings") if rules is not None and isinstance(rec.get("launch_settings"), str) else None
+    why = record_session(desk, sess, rules=rules, settings=settings)
     rec = read_coordinator(desk)
     kept = rec.get("kind") == "notify" and notify.same(rec.get("session"), sess)
     if why and not kept:
