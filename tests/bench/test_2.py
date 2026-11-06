@@ -91,12 +91,35 @@ class BenchSnapshotTest(unittest.TestCase):
             def racing(archive, info, fileobj=None):
                 original(archive, info, fileobj)
                 p = self.wt / ("new" if change == "new" else "tracked")
+                before = p.stat() if change == "write" else None
                 if change == "replace":
                     p.unlink()
                 p.write_text("mutation!")
+                if change == "write":
+                    # Same inode and size: make the mtime seal change exactly,
+                    # even when both writes fall within one filesystem clock tick.
+                    os.utime(p, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+                    after = p.stat()
+                    self.assertEqual((after.st_dev, after.st_ino, after.st_size),
+                                     (before.st_dev, before.st_ino, before.st_size))
+                    self.assertNotEqual(after.st_mtime_ns, before.st_mtime_ns)
             with self.subTest(change=change), patch.object(tarfile.TarFile, "addfile", racing), \
                     self.assertRaisesRegex(ValueError, "changed"):
                 self.contents()
+
+    def test_mutation_fixture_without_clock_tick(self):
+        # Model a filesystem clock that never ticks during write_text. Explicit
+        # utime still works; ctime stays fixed because it is clock-generated.
+        write_text, stamp = Path.write_text, self.s._stamp
+        def frozen_write(path, *args, **kwargs):
+            mtime = path.stat().st_mtime_ns if path.exists() else 0
+            count = write_text(path, *args, **kwargs)
+            os.utime(path, ns=(0, mtime))
+            return count
+        def frozen_ctime(st):
+            return stamp(st)[:-1] + (0,)
+        with patch.object(Path, "write_text", frozen_write), patch.object(self.s, "_stamp", frozen_ctime):
+            self.test_secret_link_and_mutation_refused()
 
     def test_tracked_file_under_directory_link_refused(self):
         folder = self.wt / "inner"
