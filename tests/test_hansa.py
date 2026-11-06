@@ -40961,8 +40961,9 @@ else:
                 self.assertEqual(result.returncode, 0, result.stderr)
                 page = json.loads(result.stdout)
                 rows = {r["target"]: r for r in page["rows"]}
-                self.assertEqual(rows["test"]["lines"], ["test · a", about, command])
-                self.assertEqual(rows["push"]["lines"], ["push · a", "true"])
+                never = "Never released" if language == "en" else "还没发布过"
+                self.assertEqual(rows["test"]["lines"], ["test · a", about, never, command])
+                self.assertEqual(rows["push"]["lines"][2:], [never, "true"])
                 for name, cmd in (("test", command), ("push", "true"), ("removed", "false")):
                     self.assertEqual(rows[name]["commands"], [{"text": cmd, "title": cmd, "tag": "div"}])
                 self.assertTrue(rows["removed"]["ticked"])
@@ -40988,6 +40989,33 @@ else:
         self.assertIn(".tick > span { min-width:0; }", css)
         self.assertIn(".release-tick-info { flex:1; }", css)
         self.assertIn(".release-tick-command { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }", css)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_release_ticks_say_a_missing_description_and_the_last_release_in_both_languages(self):
+        from hansa import web
+        told = self.hansa("lane", "target", "a", "push", "true")
+        self.assertIn("hansa lane target a push --about", told)
+        told = self.hansa("lane", "target", "a", "test", "true", "--about", "install on the test server")
+        self.assertNotIn("--about \"<text>\"", told)
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        harness = self.tmp / "page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        given = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk), "/api/events": []}
+        for language, missing, last, never in (
+                ("en", "No description yet: the coordinator can add one with hansa lane target a push --about",
+                 "Last release: ", "Never released"),
+                ("zh", "还没有说明：协调员可以用 hansa lane target a push --about 加上", "上次发布：", "还没发布过")):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(web.UI), "release-tick-details", language],
+                                        input=json.dumps(given), capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rows = {r["target"]: r["lines"] for r in json.loads(result.stdout)["rows"]}
+                self.assertEqual(rows["push"][1], missing)
+                self.assertTrue(rows["push"][2].startswith(last), rows["push"])
+                self.assertTrue(rows["push"][2].endswith("done" if language == "en" else "已完成"), rows["push"])
+                self.assertEqual(rows["test"][1:3], ["install on the test server", never])
 
     def test_an_old_settings_file_with_one_release_command_and_an_old_entry_works_unchanged(self):
         from hansa import release

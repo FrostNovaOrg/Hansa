@@ -27,6 +27,10 @@ Other unnamed ticks match nothing, even if `default` has the same command.
 in plain words: one line of up to 120 characters; a longer description or a line
 break is refused without changing anything. `--about none` removes it.
 `--about` alone changes only the description, and is recorded like other target changes.
+A target left without one gets a one-line reminder from `hansa lane target`, and on the
+page (Settings, the list of releases without asking) a line saying it has no description yet
+and the command that adds it. Each entry there also says its target's last release that ran
+to an end (when, and done, failed or stopped) or that it was never released.
 A new or changed description holding a key the desk knows is refused to prevent
 storing and showing the key as written; this check is needed while descriptions
 are stored and shown as written.
