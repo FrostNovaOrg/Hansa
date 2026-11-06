@@ -6210,7 +6210,10 @@ def save():'''))
         tid = self.desk.new_task("Add hello.txt", lane="a", browser=True)
         self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
         self.assertEqual(self.desk.save_settings(old, by="page"), [])
-        self.assertEqual(json.loads(self.desk.settings_path.read_text()), current)
+        saved = json.loads(self.desk.settings_path.read_text())
+        self.assertNotIn("alert_bark", saved)
+        self.assertIn("alert_bark", current)  # derived for the page's current Bark block
+        self.assertEqual(saved, {k: v for k, v in current.items() if k != "alert_bark"})
 
     def test_historical_task_metadata_and_events_render_without_live_features(self):
         from hansa import web
