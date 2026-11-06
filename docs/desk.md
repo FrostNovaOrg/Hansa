@@ -1179,7 +1179,11 @@ left off and ends when the session's process does; one that starts after
 another ended first posts what was missed meanwhile, as it is now. A `hansa
 serve` stop missed meanwhile is told only while the server is still not
 running; when it runs again by then, that line is left out, and a busy or stuck
-server is left to the follower's own checks.
+server is left to the follower's own checks. `hansa notify on` returns once its
+new follower has its place in the log, not merely once the follower runs, so
+an event logged after it returns (a task ending a moment later) is posted; if
+the follower has not taken its place within 60 seconds, the command says so and
+names the follower's log.
 
 If the session's inbox refuses a post, the follower keeps the lines until a post succeeds. It tries every two
 seconds for up to a minute, then gathers new events and tries again with only the latest line per task or subject.

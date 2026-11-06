@@ -16008,7 +16008,7 @@ def save():'''))
             return m
 
         def wait(d, desk, tid, predicate):
-            end = time.monotonic() + 25
+            end = time.monotonic() + 120  # a last guard: each round returns as soon as the state is there
             while time.monotonic() < end:
                 d.tick()
                 m = desk.meta(tid)
@@ -16019,7 +16019,7 @@ def save():'''))
 
         def join(d):
             for thread in getattr(d, "probes", {}).values():
-                thread.join(timeout=30)
+                thread.join(timeout=120)  # a last guard: the check's own timeout ends it
                 self.assertFalse(thread.is_alive(), "provider check did not end")
 
         def queue_verification(desk, parent):
@@ -16072,7 +16072,9 @@ def save():'''))
             def answer(argv, **kwargs):
                 if kwargs.get("input") != "Reply with the single word OK.":
                     return actual(argv, **kwargs)
-                calls.append(time.monotonic())
+                # when serve started this check, as it recorded it before the thread ran: how late a loaded machine
+                # runs the thread does not shorten the gap measured
+                calls.append(desk.provider_state()["claude"]["probe_at"])
                 self.assertEqual(kwargs["env"]["CLAUDE_CODE_MAX_RETRIES"], "0")
                 if len(calls) <= 2:
                     raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
@@ -16086,8 +16088,8 @@ def save():'''))
                     join(d)
             self.assertEqual(len(calls), 3)
             for first, second in zip(calls, calls[1:]):
-                self.assertGreaterEqual(second - first, 0.23)
-                self.assertLess(second - first, 15)  # probes stuck on the normal three-minute interval
+                self.assertGreaterEqual(second - first, 60 * 0.004)
+                self.assertLess(second - first, 90)  # probes stuck on the normal three-minute interval
             first, second = map(json.loads, seen.read_text().splitlines())
             self.assertEqual(second["head"], kept)
             self.assertEqual(second["partial"], f"half done for {tid}\n")
@@ -16202,12 +16204,15 @@ def save():'''))
         def row8():
             desk, repo, root = setup(8, other=True)
             drop(desk, root, desk.new_task("Wait", lane="a"))
-            started, ended = threading.Event(), threading.Event()
+            started, released, ended = threading.Event(), threading.Event(), threading.Event()
             actual, check = subprocess.run, run.check_provider
 
             def request(argv, **kwargs):
                 if kwargs.get("input") == "Reply with the single word OK.":
                     started.set()
+                    # held until the other lane's task is done, so its time (however slow the machine) cannot
+                    # outlast the check's own timeout and end the check first
+                    released.wait(120)
                     try:
                         return actual([str(sleeper)], **kwargs)
                     finally:
@@ -16227,12 +16232,13 @@ def save():'''))
                     unittest.mock.patch.object(run.subprocess, "run", request):
                 try:
                     d.tick()
-                    self.assertTrue(started.wait(5), "serve did not start its provider check")
+                    self.assertTrue(started.wait(60), "serve did not start its provider check")
                     other = desk.new_task("Add hello.txt", lane="b")
                     m = wait(d, desk, other, lambda m: m["state"] == "done")
                     self.assertEqual(m["provider"], "other")
                     self.assertFalse(ended.is_set(), "the provider check held up another lane")
                 finally:
+                    released.set()
                     join(d)
             self.assertTrue(ended.is_set())
             problem = next(p["problem"] for p in views.status(desk)["providers"] if p["name"] == "claude")
@@ -17518,6 +17524,10 @@ def save():'''))
                         self.addCleanup(stop_started_on, desk.root, time.time())
                         with self.in_session(p, sock):
                             self.hansa_out("notify", "on")
+                        # notify on returns once its follower reads from a position before what is logged next
+                        follower = notify.running(self.desk, notify.key_of(
+                            {"pid": p.pid, "start": notify.proc_start(p.pid)}))
+                        self.assertLessEqual(follower["from"], notify.log_end(self.desk))
                         self.desk.update(tid, state="done", finished=at, error="")
                         pos = notify.log_end(self.desk)
                         self.start_server_once(command)
@@ -17527,7 +17537,7 @@ def save():'''))
                                                             {"key": "probe", "session": None})
                                   if x["key"] == ["task", tid]]
                         self.assertIn(f"{tid} done", item["line"])
-                        self.soon(lambda: [x for x in self.posts(sock) if f"{tid} done" in x], timeout=30)
+                        self.soon(lambda: [x for x in self.posts(sock) if f"{tid} done" in x])  # the default, a last guard
                         end = notify.log_end(self.desk)
                         self.start_server_once(command)
                         self.assertEqual([e for e in self.events("task_finished") if e.get("task") == tid], ends)
@@ -17535,7 +17545,7 @@ def save():'''))
                             self.desk, notify.read_log(self.desk, end)[0], {"key": "probe", "session": None})
                                           if x["key"] == ["task", tid]], [])
                         after = notify.log_end(self.desk)
-                        self.soon(lambda: any(r.get("pos", 0) >= after for r in notify.records(self.desk)), timeout=30)
+                        self.soon(lambda: any(r.get("pos", 0) >= after for r in notify.records(self.desk)))
                         self.assertEqual(len([x for x in self.posts(sock) if f"{tid} done" in x]), 1)
 
     def test_startup_does_not_repeat_posted_ends_before_an_older_repaired_event(self):
@@ -30406,8 +30416,14 @@ def save():'''))
                     self.assertEqual(self.web_request(path, headers=credentials)[0], 403)
                     folder.assert_not_called()
             self.assertEqual(self.web_request(path, headers=headers)[0], 200)
+        # The request runs in this thread (web_request): only its opens are caught. notes.os is the os module, so
+        # a background thread's (the server's pulse, say) open goes on to the real one, unseen by the test.
+        real_open, request_thread = os.open, threading.get_ident()
         for name in ("../settings.json", str(self.desk.settings_path), "other/note.md"):
-            with unittest.mock.patch.object(notes.os, "open") as opened:
+            opened = unittest.mock.Mock(name="os.open in the request's thread")
+            def watched(*args, **kwargs):
+                return (opened if threading.get_ident() == request_thread else real_open)(*args, **kwargs)
+            with unittest.mock.patch.object(notes.os, "open", watched):
                 self.assertEqual(self.web_request("/api/note?" + urllib.parse.urlencode({"name": name}),
                                                  headers=headers)[0], 404)
                 opened.assert_not_called()

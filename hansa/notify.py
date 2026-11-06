@@ -18,7 +18,8 @@ and from where it was: otherwise a module it imports later would come from the n
 Where things are kept:
     .hansa/followers/<key>.json   the desk's register: one record per follower (session, socket, read
                                   position, when it was last seen, its last post); written by the desk's owner
-    <private>/<key>.state.json    the follower's own: its pid, and the nonce it was started with
+    <private>/<key>.state.json    the follower's own: its pid, the nonce it was started with, and, once the
+                                  desk gave it, the log position it reads from (`notify on` waits for it)
     <private>/<key>.lock          held while it runs: one follower per session and desk
     <private>/<key>.log           what it printed
 <private> is .hansa/followers/ too, except for root on an account's desk (see account.py): root neither reads
@@ -960,6 +961,8 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
     try:
         r = ask({"op": "start", "me": me, **({"resume": resume["pos"]} if resume else {})})
         pos, done = r["pos"], r.get("done", r["pos"])
+        # only now is it started (start): an event logged after `notify on` said so is past this position
+        write_json(priv / f"{key}.state.json", {**read_json(priv / f"{key}.state.json", {}), "from": pos})
         if resume:
             was_up, told_down, told_srt = was.get("was_up"), float(was.get("told_down") or 0), bool(was.get("told_srt"))
             told_stuck = float(was.get("told_stuck") or 0)
@@ -1152,8 +1155,13 @@ def running(desk: Desk, key: str):
     return st if st.get("pid") and not st.get("ended") and alive(st["pid"], st.get("start", "")) else None
 
 
+START_WAIT = 60  # seconds notify on waits for its follower to say where it reads from; a last guard
+
+
 def start(desk: Desk, sess: dict, sock: str, name: str = "", wait: bool = True) -> str:
-    """Start the follower of this session: 'started', 'already' (one runs), or 'unknown' (it has not said yet)."""
+    """Start the follower of this session: 'started', 'already' (one runs), or 'unknown' (it has not said yet).
+    'started' once the desk gave it the log position it reads from, not before: an event logged after this
+    returns is one it reads (a follower that only runs could still be asking, and start after that event)."""
     key = key_of(sess)
     if running(desk, key):
         return "already"
@@ -1161,11 +1169,14 @@ def start(desk: Desk, sess: dict, sock: str, name: str = "", wait: bool = True) 
     spawn(desk, ["notify-follow", "--key", key, "--pid", str(sess["pid"]), "--start", sess.get("start") or "",
                  "--socket", sock, "--nonce", nonce, "--name", name],
           private_dir(desk) / f"{key}.log")
-    end = time.time() + (10 if wait else 0)
+    end = time.time() + (START_WAIT if wait else 0)
     while time.time() < end:
         st = running(desk, key)
         if st and st.get("nonce") == nonce:
-            return "started"
+            if isinstance(st.get("from"), int):
+                return "started"
+            time.sleep(0.1)
+            continue
         if st:
             return "already"
         time.sleep(0.1)
@@ -1230,7 +1241,7 @@ def turn_on(desk: Desk) -> str:
         return (f"hansa already notifies this session, {who(sess['pid'], name)}; nothing was started. hansa notify lists "
                 "the desk's followers")
     if how == "unknown":
-        raise SystemExit(f"hansa: the follower did not say it started within 10 s; see "
+        raise SystemExit(f"hansa: the follower did not say it started within {START_WAIT} s; see "
                          f"{private_dir(desk) / (key_of(sess) + '.log')}")
     said = (f"hansa now posts to this session, {who(sess['pid'], name)}, through its inbox: its own tasks and requests, and "
             "those no other session hears. Do not keep hansa wait running in the background meanwhile. "
