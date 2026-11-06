@@ -63,6 +63,9 @@ saves evidence in `/out`. Submit it with:
 hansa bench run --script run.sh --cwd . --timeout 300 --wait 60
 ```
 
+The worktree copy lands at `/work`; the script starts there, with `--cwd` relative
+to it. `--cwd` defaults to `.`.
+
 The command prints a request ID. Wait for `ID.reply` in `HANSA_BENCH_DIR`, without
 editing source: copying happens when admitted. Read the reply's `result`; when
 it includes `report`, read that JSON file in the same folder. It holds the guest
@@ -70,11 +73,18 @@ result, stdout, stderr and an artifact-name mapping. Artifacts appear there
 automatically under broker-chosen names. There is no fetch command. These files
 last only for the worker run; include findings in the report before ending.
 
+Artifacts have no extensions; the report's artifact mapping gives each original
+name. To view an image, first copy it to a name with its extension.
+
 Each hand-in starts fresh with only its own loopback. Downloads, host dependencies,
 host environment and caches are unavailable. Git data, credentials and agent
 configuration are excluded. Links, special files and files changing while copied
 are refused. Edit source on the Mac and report Linux-specific limits. Guest state
 is deleted after every run. Chromium keeps its own sandbox; do not disable it.
+
+The guest has Debian 13, Python 3.13, git, headless Chromium, tmux and only DejaVu
+fonts, so pages render with different fonts than on a Mac. The copy has no git
+data; make a fresh repository if a command needs one.
 
 One request runs, four wait, and each worker may have one outstanding request;
 excess requests receive `busy`. Total time defaults to 300 seconds (maximum 900),
