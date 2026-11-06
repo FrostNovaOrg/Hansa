@@ -81,7 +81,10 @@ leases = {p: p.stat().st_mtime_ns for p in Path('/run/systemd/netif/leases').ite
 if not leases: raise RuntimeError('no DHCP lease')
 subprocess.run(['networkctl', 'reconfigure', *[p.name for p in leases]], check=True, timeout=30)
 deadline = time.monotonic() + 60
-while not all(p.stat().st_mtime_ns != stamp and 'ADDRESS=' in p.read_text() for p, stamp in leases.items()):
+def rewritten(p, stamp):
+    try: return p.stat().st_mtime_ns != stamp and 'ADDRESS=' in p.read_text()
+    except FileNotFoundError: return False
+while not all(rewritten(p, stamp) for p, stamp in leases.items()):
     if time.monotonic() >= deadline: raise TimeoutError('DHCP renewal')
     time.sleep(.1)
 print(json.dumps({'renewed': 'passed'}))
