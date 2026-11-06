@@ -78,9 +78,27 @@ name. To view an image, first copy it to a name with its extension.
 
 Each hand-in starts fresh with only its own loopback. Downloads, host dependencies,
 host environment and caches are unavailable. Git data, credentials and agent
-configuration are excluded. Links, special files and files changing while copied
+configuration are excluded. Links, special files and detected source changes
 are refused. Edit source on the Mac and report Linux-specific limits. Guest state
 is deleted after every run. Chromium keeps its own sandbox; do not disable it.
+
+Source change detection compares file identity, mode, link count, owner, size and
+modification/change timestamps before and after packing, then scans again. Timestamp
+fields expressed in nanoseconds do not guarantee a clock with nanosecond resolution.
+A same-size in-place write within one timestamp tick can leave every compared field
+unchanged. The bench can then run an older copy or, if a write overlaps a read, a
+mixture of contents. These checks do not provide an atomic filesystem snapshot;
+leave source unchanged while a submission is admitted and copied.
+
+Comparing content hashes from scans and the bytes packed would catch persistent
+same-size changes despite timestamp collisions, at the cost of extra full reads and
+hashing. It would still miss a write restored between observations. A guaranteed
+stable copy needs all writers excluded while copying (a cooperative lock is not
+enough for worker-controlled files), or an atomic filesystem snapshot/clone with
+platform support, storage and cleanup costs; per-file clones alone do not make
+the whole tree atomic. The mutation test advances mtime explicitly and also runs
+with a simulated clock that never ticks, so it tests the metadata guard without
+depending on the host clock advancing. Keep that fixture while seals use timestamps.
 
 The guest has Debian 13, Python 3.13, git, headless Chromium, tmux and only DejaVu
 fonts, so pages render with different fonts than on a Mac. The copy has no git
