@@ -1,16 +1,21 @@
-"""Alerts: phone pushes through Bark and the principal's own alert command.
+"""Alerts: push addresses and the principal's own alert command.
 
-On the page, open Settings, Alerts. For an iPhone, copy the device key from the Bark app (not the whole URL),
-paste it into Device key, switch Bark on and Save settings (the key is saved with them), then press Send a test
-push. Keep the default server https://api.day.app, or enter your own HTTPS Bark server. Only the principal can save
-the switch, server and key; the key stays under the desk's secrets/, never in settings or page replies. Left blank,
-the key field keeps the saved key; Remove key removes it and switches Bark off.
-With Bark on and a key saved, hansa serve sends alerts even if the alert command is blank. The desk's name and
-alert texts leave this machine for the Bark server and Apple's push service; both can read them.
-One-time release codes never go to Bark: answer its release alerts on the page. Only the alert command gets codes.
-When both channels are set up, each gathered batch goes to both side by side, with separate deadlines and results.
-A slow or failed channel does not delay the other's send, change its result, or send it a failure alert.
-Bark's last result (sent or its reason) appears in hansa status beside the command's failure, if any.
+Push addresses are set up on the page, Settings, Alerts. Each of at most ten entries has a service, an on/off
+switch and an optional name. Bark is the first service: paste the whole address on the Bark app's home screen,
+such as https://api.day.app/KEY/example. Hansa keeps the server and key and drops the example text. A bare key
+uses the official server; for a self-hosted address choose Bark explicitly, since services can look alike.
+Only the principal's page save changes addresses. Each whole address, including its key, stays in a 0600 file
+under the desk's 0700 secrets/ folder, with the same protection for an extra signing secret or access token.
+Settings hold only metadata; history records changes without credentials. Page replies and status hide secret
+parts. Previously saved Bark settings and key move automatically to the first push address, keeping on or off;
+the old setting and key file are removed and settings history records the move.
+
+Each gathered batch goes to every enabled entry with an address, even with no alert command. The desk's name
+and alert texts leave this machine for each address's service; for phone apps they go on to Apple's or Google's
+push service. Those services can read the text. One-time release codes never go to push addresses: answer those
+release alerts on the page. Only the alert command gets codes. The sends run side by side with independent
+deadlines and results, so one slow or failed destination does not delay another's send or change its result.
+Hansa status shows each service, hidden address, on/off switch and last result (sent or its reason).
 
 The principal sets one command line on the page (settings `alert`, which only the page saves: desk.PRINCIPAL_ONLY);
 the page records that it saved it, and when. Beside it, `alert_language` selects "en" (the default) or "zh".
@@ -81,12 +86,13 @@ line saying how many were held back. An entry of the queue that cannot be read i
 (event alert_dropped); the others go. The command's own exit ends its run, even when it leaves a child behind;
 only at the time limit is its process group killed. A run
 that fails or times out is recorded (event alert_failed with channel command, and .hansa/alert-last.json,
-which hansa status reads); the command is never retried. Bark records its own last result in
-.hansa/alert-bark-last.json, and alert_failed with channel bark on failure. Bark has its own 30-second deadline,
+which hansa status reads); the command is never retried. Each push entry records its last result in
+.hansa/alert-push-ID-last.json, and alert_failed with channel push, id and service on failure, never its address.
+Bark has its own 30-second deadline,
 including alert_http's at most three tries; the alert run adds no retries. A
 release_waiting alert queues only its release ID, request time and text without a code. Just before sending,
 the command's text is rebuilt in memory with a new code (release.new_code), only while that request still waits
-and a command gets the batch. Bark gets the gathered text without codes; Bark alone makes no code. Neither
+and a command gets the batch. Push addresses get the gathered text without codes; push addresses alone make no code. Neither
 the code nor what the command printed for such an alert is written to a file (only how it ended is kept). A phone
 shows the first hundred characters or so, so the code and what to do with it come right after the desk's name:
 "[hansa] desk NAME: release #1 (lane a, target staging) · code K7P3QX: to release it, give this code to the coordinator
@@ -168,21 +174,17 @@ def command(s: dict) -> str:
     return a["command"].strip() if isinstance(a, dict) and isinstance(a.get("command"), str) else ""
 
 
-def bark_settings(s: dict) -> dict:
-    """The Bark channel's settings; {} (not set up) when the desk's are not a dict, say a hand-edited "on"."""
-    b = s.get("alert_bark") if isinstance(s, dict) else None
-    return b if isinstance(b, dict) else {}
-
-
 def bark_ready(desk: Desk, s: dict) -> bool:
-    from . import alert_bark
-    return bool(bark_settings(s).get("on") is True and alert_bark.has_key(desk))
+    """Compatibility for callers asking whether any Bark entry is ready."""
+    from . import alert_push
+    return any(e["service"] == "bark" for e in alert_push.enabled(desk, s))
 
 
 def configured(desk: Desk, s: dict | None = None) -> bool:
-    """Whether any channel can take alerts; Bark needs both its switch and key."""
+    """Whether the command or any enabled push address can take alerts."""
+    from . import alert_push
     s = desk.settings() if s is None else s
-    return bool(command(s)) or bark_ready(desk, s)
+    return bool(command(s) or alert_push.enabled(desk, s))
 
 
 def chinese(desk: Desk) -> bool:
@@ -477,7 +479,7 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
              wait: bool = False, capped: bool = True) -> dict | None:
     """Send what is queued once it has gathered: when no alert came for `gather` seconds, or the first has waited
     `most_wait`; and, when capped, only if fewer than MOST_RUNS runs began in the last hour (else they wait, and go
-    out together when the hour frees a run). Return the command's result when set, otherwise Bark's;
+    out together when the hour frees a run). Return the command's result when set, otherwise the first push entry's;
     None when nothing went out. Each channel records its own result independently."""
     with _one_run(desk, wait) as mine:
         if not mine:
@@ -500,11 +502,12 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             q = [x for x in _clean(desk) if x["kind"] != "ask" or x.get("ask") not in closed]
             write_json(queue_file(desk), [])
         s = desk.settings()
-        cmd, bark = command(s), bark_ready(desk, s)
+        from . import alert_push
+        cmd, pushes = command(s), alert_push.enabled(desk, s)
         held_since = rec.get("held_since") if isinstance(rec.get("held_since"), (int, float)) else None
         if held_since:
             write_json(last_file(desk), {k: v for k, v in rec.items() if k != "held_since"})
-        if not (cmd or bark) or not q:  # cleared since they were queued: nothing to send them with
+        if not (cmd or pushes) or not q:  # cleared since they were queued: nothing to send them with
             return None
         held = len(q) if held_since else 0
         kinds = ",".join(dict.fromkeys(x["kind"] for x in q))
@@ -514,13 +517,13 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             translations = x.get("translations")
             if isinstance(translations, dict) and isinstance(translations.get(lang), str):
                 x["text"] = translations[lang]
-        # Count the batch once, including Bark-only batches. Each channel records
+        # Count the batch once, including push-only batches. Each channel records
         # its own result as soon as it finishes, without waiting for its sibling.
         write_json(last_file(desk), {**{k: v for k, v in rec.items() if k != "held_since"},
                                      "runs": _runs(rec, t) + [t]})
 
         def send_command():
-            items = [dict(x) for x in q]  # _with_codes must never alter Bark's batch
+            items = [dict(x) for x in q]  # _with_codes must never alter a push batch
             codes, text = [], ""
             try:
                 codes = _with_codes(desk, items)
@@ -533,18 +536,14 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             _record(desk, result, len(items))
             return result
 
-        def send_bark():
-            from . import alert_bark
-            try:
-                why = alert_bark.send(desk, q, held)
-            except Exception:  # a removed key or local failure must not affect the command or expose secrets
-                why = alert_bark._record(desk, "network")
+        def send_push(entry):
+            why = alert_push.send(desk, entry, q, held)
             return {"ok": why == "sent", "why": why}
 
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hansa-alert-channel") as pool:
-            bark_run = pool.submit(send_bark) if bark else None
+        with ThreadPoolExecutor(max_workers=len(pushes) + bool(cmd), thread_name_prefix="hansa-alert-channel") as pool:
+            push_runs = [pool.submit(send_push, entry) for entry in pushes]
             command_run = pool.submit(send_command) if cmd else None
-            return command_run.result() if command_run else bark_run.result()
+            return command_run.result() if command_run else push_runs[0].result()
 
 
 def _with_codes(desk: Desk, items: list) -> list:
@@ -584,7 +583,7 @@ def _codes_went(desk: Desk, codes: list, text: str, ok: bool) -> None:
 def test(desk: Desk, timeout: float = TIMEOUT) -> dict:
     """The page's test button: a test alert sent now, with anything already queued."""
     if not configured(desk):
-        return {"ok": False, "problems": ["no alert channel is set up; save a command or turn on Bark with a key first"]}
+        return {"ok": False, "problems": ["no alert channel is set up; save a command or enable a push address first"]}
     cmd = command(desk.settings())
     add(desk, "test", "a test alert from the page: the alert command works" if cmd else "a test alert from the page",
         zh="来自网页的测试提醒：提醒命令正常" if cmd else "来自网页的测试提醒")
@@ -914,19 +913,19 @@ def failure_line(desk: Desk) -> str:
 
 
 def explain_line(s: dict, desk: Desk | None = None) -> str:
-    """For hansa explain: which channels the principal set up (the alert command, Bark), and what the command is."""
+    """For hansa explain: which channels the principal set up (the alert command and push addresses), and what the command is."""
     cmd = command(s)
-    from . import alert_bark
-    bark_on, bark_key = bark_settings(s).get("on") is True, desk is not None and alert_bark.has_key(desk)
-    bark = ("Bark is set up: alerts reach the principal's phone through it" if bark_on and bark_key
-            else "Bark is on but has no device key, so it sends nothing" if bark_on
-            else "Bark has a device key but is off, so it sends nothing" if bark_key else "Bark is not set up")
+    from . import alert_push, alert_services
+    destinations = alert_push.public(desk, s) if desk else []
+    pushes = ("Push addresses: " + "; ".join(
+        f"{alert_services.SERVICES[e['service']].names['en']} {e['name'] or e['id']} ({e['address']}; "
+        f"{'on' if e['on'] else 'off'})" for e in destinations) if destinations else "No push addresses are set up")
     a = s.get("alert") if isinstance(s.get("alert"), dict) else {}
     if not cmd:
-        return (f"Alerts: no alert command is set. {bark}. The principal sets both channels up on the page; hansa "
+        return (f"Alerts: no alert command is set. {pushes}. The principal sets these up on the page, Settings, Alerts; hansa "
                 "alerts through those set up when a release waits for the principal or ends, a request is filed, and "
                 "the rest hansa help alerts lists; you send no alerts and cannot set them up. With no alert command, "
-                "no release gets a one-time code (Bark never carries one): the principal approves releases on the page "
+                "no release gets a one-time code (push addresses never carry one): the principal approves releases on the page "
                 "only.")
     return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
@@ -934,7 +933,7 @@ def explain_line(s: dict, desk: Desk | None = None) -> str:
             "floor (hansa disk-floor), hansa serve finishes no round for a long time, or what hansa posts to your "
             "session cannot reach it (no session hears from hansa, its inbox refuses posts, your session waits on a "
             "permission dialog or a question, or a task posted to it waits for review while it is idle). You send no "
-            f"alerts and cannot set it. {bark} (set up on the page; it never carries a code). A release waiting for "
+            f"alerts and cannot set it. {pushes} (set up on the page, Settings, Alerts; they never carry codes). A release waiting for "
             "the principal gets a one-time code that only that alert carries: the principal answers on the page, or "
             "says the code in the conversation, and you pass it on with hansa release yes ID CODE (or no ID CODE). "
             "Never guess one.")

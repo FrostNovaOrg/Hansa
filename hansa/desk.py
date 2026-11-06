@@ -88,7 +88,7 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow",
-                  "release_direct", "alert", "alert_language", "alert_bark", "coordinator_compact", "coordinator_alert")
+                  "release_direct", "alert", "alert_language", "alert_push", "coordinator_compact", "coordinator_alert")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -303,8 +303,8 @@ def default_settings() -> dict:
         # The command hansa runs when something waits for the principal (hansa/alert.py), with when the page saved
         # it. The principal's, on the page; empty: no alerts.
         "alert": {"command": ""},
-        # Built-in Bark channel; its device key lives only under secrets/.
-        "alert_bark": {"on": False, "server": "https://api.day.app"},
+        # Push metadata only; addresses and extra credentials live under secrets/.
+        "alert_push": [],
         # US dollars per million tokens. Cache prices default to the usual
         # multiples of the input price when left out.
         "prices": {
@@ -592,9 +592,6 @@ def forbidden_exceptions_ok(exceptions) -> bool:
 def current_settings(settings: dict) -> dict:
     """Normalize defaults and ignore retired settings from older desks without changing the file."""
     s = copy.deepcopy(settings)
-    bark = s.get("alert_bark")
-    if isinstance(bark, dict):
-        s["alert_bark"] = {**default_settings()["alert_bark"], **bark}
     for key in ("design", "browser", "coordinator_read", "audits_cost"):
         s.pop(key, None)
     co = s.get("coordinator")
@@ -639,7 +636,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     known = {"version", "concurrency", "disk_floor", "memory_floor", "cool_minutes", "coordinator", "providers", "lanes", "prices",
              "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
              "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "release_direct", "alert", "coordinator_compact",
-             "coordinator_alert", "alert_language", "alert_bark", "bench"}
+             "coordinator_alert", "alert_language", "alert_push", "bench"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     bench = s.get("bench", default_settings()["bench"])
     if (not isinstance(bench, dict) or set(bench) != set(default_settings()["bench"])
@@ -715,8 +712,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                  "names no entry in release_forbidden"
                  for i, x in enumerate(exceptions, 1) if x["entry"] not in words)
     al = s.get("alert", {"command": ""})
-    from .alert_bark import problems as bark_problems
-    p.extend(bark_problems(s.get("alert_bark", default_settings()["alert_bark"])))
+    from .alert_push import problems as push_problems
+    p.extend(push_problems(s.get("alert_push", [])))
     if s.get("alert_language", "en") not in ("en", "zh"):
         p.append('alert_language must be "en" or "zh"')
     if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
@@ -2704,6 +2701,8 @@ class Desk:
     def settings(self) -> dict:
         s = default_settings()
         loaded = self._saved_settings()
+        from .alert_push import migrate
+        loaded = migrate(self, loaded)
         mailbox_settings(loaded)
         s.update(loaded)
         # Only a page save records this choice; an absent or hand-edited value sends English.
@@ -2739,10 +2738,15 @@ class Desk:
             language_given = isinstance(new, dict) and "alert_language" in new
             mailbox_key = ""
             if isinstance(new, dict):
+                # The old page's Bark view is read-only outside its web adapter.
+                # Accept an unchanged projection on an unrelated settings save.
+                from .alert_bark import projection
+                if "alert_bark" in new and new["alert_bark"] == projection(self):
+                    new = {k: v for k, v in new.items() if k != "alert_bark"}
                 new = current_settings(new)
                 # Older pages omit this field: an unrelated save must keep the principal's choice.
                 new.setdefault("alert_language", old["alert_language"])
-                new.setdefault("alert_bark", old["alert_bark"])
+                new.setdefault("alert_push", old["alert_push"])
                 if by == "page":
                     new["bench"] = old["bench"]
                 mailbox_key = mailbox_settings(new)
@@ -2792,6 +2796,8 @@ class Desk:
             problems = (validate(new, self.root, page=page, before=old, mailbox_key=mailbox_key)
                         + self.keys_in_release(old, new)
                         + self.keys_in_alert(old, new) + answer_names(old, new))
+            from .alert_push import entries as push_entries, private_metadata_problems
+            problems += private_metadata_problems(self, push_entries(new))
             lanes = new.get("lanes")
             for name, ln in (lanes.items() if isinstance(lanes, dict) else []):
                 if isinstance(ln, dict) and ln.get("merge_lane") and not (old["lanes"].get(name) or {}).get("merge_lane"):
@@ -2990,15 +2996,16 @@ class Desk:
     def keys(self) -> dict:
         """Stored provider and channel keys, for checking text against; never shown."""
         out = {}
-        from .alert_bark import _key_file
+        from .alert_push import keys as push_keys
         files = sorted(self.secrets_dir.glob("*.key")) if self.secrets_dir.is_dir() else []
-        for f in [*files, _key_file(self)]:
+        for f in [*files, self.secrets_dir / "alert-bark.device-key"]:
             try:
                 k = f.read_text(encoding="utf-8").strip()
             except OSError:
                 continue
             if len(k) >= 8:  # shorter strings would match ordinary text
-                out["Bark" if f == _key_file(self) else f.stem] = k
+                out[f.stem] = k
+        out.update(push_keys(self))
         return out
 
     def keys_in(self, text: str) -> list:
@@ -3248,6 +3255,7 @@ def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
     from .run import credit_text
     from . import alert_bark
+    desk.settings()  # finish any legacy upgrade before obtaining the revision
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
     mailbox_key = ""
@@ -3268,11 +3276,13 @@ def public_settings(desk: Desk) -> dict:
                  for x in listed if isinstance(x, (str, dict)) for lane, target in [listed_key(x)]
                  for observed in [listed_as(s.get("lanes", {}).get(lane), target)]
                  for why in [listed_mismatch(s, x, now_as=observed)] if why]
-    from . import alert_bark
-    return {"settings": s, "alert_language_saved": "alert_language" in desk._saved_settings(),
+    from . import alert_push, alert_services
+    s["alert_bark"] = alert_bark.projection(desk)  # temporary interface for the existing page
+    return {"settings": s, "alert_push": alert_push.public(desk), "alert_push_services": alert_services.public(), "alert_language_saved": "alert_language" in desk._saved_settings(),
             # whether a Bark device key is saved, never the key, and the channel's last push
             "alert_bark_key_set": alert_bark.has_key(desk), "alert_bark_last": alert_bark.last_result(desk),
-            "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
+            "keys": keys, "problems": validate({k: v for k, v in s.items() if k != "alert_bark"}, desk.root,
+                                               page=True, mailbox_key=mailbox_key), "rev": rev,
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),

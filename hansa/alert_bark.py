@@ -1,18 +1,10 @@
-"""Bark push channel for the principal, delivered alongside the alert command.
-
-send takes a gathered, code-free queue batch, before alert._with_codes. There is no
-public key reader: consumers get only has_key; sending and Desk's redaction read it.
-"""
+"""Bark service definition and compatibility for the page's original Bark block."""
 from __future__ import annotations
 
 import json
-import os
+import re
 import unicodedata
-from pathlib import Path
-from urllib.parse import urlsplit
-
-from . import alert, alert_http
-from .desk import Desk, KeyScrubError, key_problem, now, read_json, write_json, write_text
+from urllib.parse import urlsplit, unquote
 
 DEFAULT_SERVER = "https://api.day.app"
 MAX_BYTES = 3500
@@ -20,115 +12,65 @@ LEVELS = {"passive": "passive", "active": "active", "urgent": "timeSensitive"}
 
 
 def problems(config) -> list[str]:
-    """Refuse destinations that could disclose a key or change Bark's /push path.
-
-    Keep these checks while the principal can supply a server address. Check the
-    original spelling too: urlsplit silently removes some control characters.
-    """
     if (not isinstance(config, dict) or set(config) - {"on", "server"}
             or type(config.get("on", False)) is not bool):
-        return ["alert_bark must hold on (a boolean) and server (an HTTPS server address), with no key"]
-    server = config.get("server", DEFAULT_SERVER)
+        return ["alert_bark must hold on and server, with no key"]
     try:
-        if (not isinstance(server, str) or any(c.isspace() or unicodedata.category(c) == "Cc" for c in server)
-                or "?" in server or "#" in server or "\\" in server):
+        Bark().normalize(config.get("server", DEFAULT_SERVER).rstrip("/") + "/fixture-key")
+        if urlsplit(config.get("server", DEFAULT_SERVER)).path not in ("", "/"):
             raise ValueError
-        parsed = urlsplit(server)
-        if (parsed.scheme != "https" or not parsed.hostname or "@" in parsed.netloc
-                or parsed.path not in ("", "/")):
-            raise ValueError
-        parsed.port
-    except (ValueError, TypeError):
-        return ["alert_bark.server must be HTTPS, without userinfo, a query, a fragment or a path except /"]
+    except (ValueError, TypeError, AttributeError):
+        return ["alert_bark.server must be HTTPS, without userinfo, query, fragment or path except /"]
     return []
 
 
-def _key_file(desk: Desk) -> Path:
-    # Not <provider>.key: a provider with a similar name cannot replace this key.
-    return desk.secrets_dir / "alert-bark.device-key"
+class Bark:
+    id = "bark"
+    names = {"en": "Bark", "zh": "Bark"}
+    hints = {"en": "Paste the whole address on the Bark app's home screen.",
+             "zh": "粘贴 Bark 应用首页显示的完整地址。"}
+    extra_secret = False
+    deadline_s = 30
+    max_bytes = MAX_BYTES
+    levels = LEVELS
 
+    def recognizes(self, value):
+        return bool(re.fullmatch(r"[A-Za-z0-9_-]+", value) or urlsplit(value).hostname == "api.day.app")
 
-def has_key(desk: Desk) -> bool:
-    """Whether a key is set, without reading or returning it."""
-    path = _key_file(desk)
-    return path.is_file() and path.stat().st_size > 0
+    def normalize(self, value):
+        # Check original spelling before urlsplit strips controls. Keep this rule
+        # while addresses can contain credentials: normalization must not reroute them.
+        if (not value or any(c.isspace() or unicodedata.category(c) == "Cc" for c in value)
+                or any(c in value for c in "?#\\")):
+            raise ValueError("Bark needs an HTTPS address without spaces, controls, userinfo, query or fragment")
+        if re.fullmatch(r"[A-Za-z0-9_-]+", value):
+            value = DEFAULT_SERVER + "/" + value
+        try:
+            parsed = urlsplit(value)
+            parsed.port
+            key = unquote(parsed.path.split("/")[1], errors="strict")
+            if (parsed.scheme != "https" or not parsed.hostname or "@" in parsed.netloc
+                    or not re.fullmatch(r"[A-Za-z0-9_-]+", key)):
+                raise ValueError
+        except (ValueError, IndexError, UnicodeError):
+            raise ValueError("Bark needs an HTTPS server address followed by its device key") from None
+        return "https://" + parsed.netloc.lower() + "/" + key
 
+    def secrets(self, address):
+        return [address, urlsplit(address).path[1:]]
 
-def save_key(desk: Desk, value: str, *, by: str = "") -> None:
-    """Create or replace the principal's key atomically; an empty value removes it.
+    def hidden(self, address):
+        parsed = urlsplit(address)
+        key = parsed.path[1:]
+        return parsed.netloc + "/…" + (key[-2:] if len(key) > 2 else "")
 
-    Like settings, only by='page' is the principal's save. History records just
-    that it changed, including replacements, without reading the previous key.
-    A saved key is taken out of what hansa already wrote (Desk.scrub, as for a
-    provider's key), so one pasted somewhere before does not stay there; files
-    that could not be scrubbed raise KeyScrubError after the key is saved.
-    """
-    if by != "page":
-        raise ValueError("the Bark key is the principal's, set only on the web page (Settings); ask with hansa ask")
-    if not isinstance(value, str):
-        raise ValueError("paste only the Bark device key")
-    value = value.strip()
-    if value and (problem := key_problem(value)):
-        raise ValueError(problem)
-    from .history import record
-    failed = []
-    with desk.lock():
-        path = _key_file(desk)
-        if value:
-            desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
-            os.chmod(desk.secrets_dir, 0o700)
-            write_text(path, value + "\n", mode=0o600, follow_symlinks=False)
-        else:
-            if not path.exists():
-                return
-            path.unlink()
-        record(desk, {}, {"alert_bark": {"key": "changed"}}, by)
-        desk.event("key_set" if value else "key_removed", channel="bark", by=by)
-        if value:
-            failed = desk.scrub(value, "Bark")
-    if failed:
-        paths = ", ".join(str(f.relative_to(desk.root)) for f in failed)
-        raise KeyScrubError(desk.redact(f"The Bark key was saved, but these files still hold it: {paths}. "
-                                        "Fix them and save the key again to scrub them again."))
-
-
-def remove_key(desk: Desk, *, by: str = "") -> None:
-    save_key(desk, "", by=by)
-
-
-def last_result(desk: Desk) -> dict | None:
-    """The last attempt's time, ok and why; no destination or request data."""
-    return read_json(desk.state_dir / "alert-bark-last.json", None)
-
-
-def _record(desk: Desk, why: str) -> str:
-    with desk.lock():
-        write_json(desk.state_dir / "alert-bark-last.json", {"at": now(), "ok": why == "sent", "why": why})
-        desk.event("alert_channel", channel="bark", ok=why == "sent", why=why)
-        if why != "sent":
-            desk.event("alert_failed", channel="bark", why=why)
-    return why
-
-
-def _text(desk: Desk, items: list[dict], held: int) -> tuple[str, str]:
-    lang = "zh" if alert.chinese(desk) else "en"
-    safe = []
-    codes = [x["code"] for x in items if x.get("code")]
-    for item in items:
-        translations = item.get("translations") or {}
-        text = translations.get(lang, item.get("text", ""))
-        if item["kind"] == "release_waiting" and item.get("code") and lang not in translations:
-            # A caller passed the command's in-memory batch. Never reuse its
-            # code-bearing wording, even for an older queue without translations.
-            text = "发布等你在网页上点头" if lang == "zh" else "the release waits for your yes on the page"
-        for code in codes:
-            text = text.replace(code, "")
-        safe.append({**item, "text": text, "code": ""})
-    # Reuse the command's language, grouping and character cap, without its codes.
-    title = desk.redact(alert.desk_name(desk))
-    header = f"[hansa] {'工作台' if lang == 'zh' else 'desk'} {title}"
-    body = alert.text_of(desk, safe, held).removeprefix(header).removeprefix(": ").lstrip()
-    return title, body
+    def requests(self, address, secret, title, body, level):
+        parsed = urlsplit(address)
+        payload = {"device_key": parsed.path[1:], "title": title, "body": body,
+                   "group": title, "level": self.levels[level]}
+        if not _fit(payload):
+            raise ValueError("too_big")
+        return [{"url": "https://" + parsed.netloc + "/push", "json": payload}]
 
 
 def _fit(payload: dict) -> bool:
@@ -156,34 +98,60 @@ def _fit(payload: dict) -> bool:
     return True
 
 
-def _send(desk: Desk, items: list[dict], held: int, *, testing: bool = False) -> str:
-    config = desk.settings().get("alert_bark", {})
-    if problems(config):
-        return _record(desk, "refused_url")
-    if not testing and not config.get("on", False):
-        return _record(desk, "off")
-    if not has_key(desk):
-        return _record(desk, "no_key")
-    if not items:
-        return _record(desk, "empty")
-    title, body = _text(desk, items, held)
-    payload = {"device_key": _key_file(desk).read_text(encoding="utf-8").strip(), "title": title, "body": body,
-               "group": title, "level": LEVELS[max((x.get("level", alert.level_of(x["kind"])) for x in items),
-                                                  key=alert.LEVELS.index)]}
-    if not _fit(payload):
-        return _record(desk, "too_big")
-    [result] = alert_http.send([{"url": config.get("server", DEFAULT_SERVER).rstrip("/") + "/push",
-                                 "json": payload}], deadline_s=30)
-    return _record(desk, result["why"])
+
+def first(desk):
+    from . import alert_push
+    return next((e for e in alert_push.entries(desk.settings()) if e["service"] == "bark"), None)
 
 
-def send(desk: Desk, items: list[dict], held: int = 0) -> str:
-    """Send one gathered code-free batch when on; return only the result category."""
-    return _send(desk, items, held)
+def projection(desk):
+    from . import alert_push
+    entry = first(desk)
+    address = alert_push._read(desk, entry["id"]) if entry else ""
+    parsed = urlsplit(address)
+    return {"on": bool(entry and entry["on"]),
+            "server": "https://" + parsed.netloc if address else DEFAULT_SERVER}
 
 
-def test(desk: Desk) -> str:
-    """Test the saved key/server now, even while off; leave the alert queue alone."""
-    return _send(desk, [{"kind": "test", "level": "active", "text": "a test alert from hansa",
-                         "translations": {"en": "a test alert from hansa", "zh": "来自 hansa 的测试提醒"}}], 0,
-                 testing=True)
+def has_key(desk):
+    from . import alert_push
+    entry = first(desk)
+    return bool(entry and alert_push.has_address(desk, entry))
+
+
+def save_key(desk, value, *, by=""):
+    from . import alert_push
+    if by != "page":
+        raise ValueError("the Bark key is the principal's, set only on the web page (Settings)")
+    if not isinstance(value, str):
+        raise ValueError("paste the Bark device key")
+    if value and (len(value) < 8 or not re.fullmatch(r"[A-Za-z0-9_-]+", value)):
+        raise ValueError("paste only the Bark device key (at least 8 characters)")
+    entry = first(desk)
+    change = {"id": entry["id"]} if entry else {"service": "bark", "on": False}
+    change.update({"address": projection(desk)["server"] + "/" + value} if value else {"remove": True})
+    if not entry and not value:
+        return
+    alert_push.change(desk, [change], by=by)
+
+
+def remove_key(desk, *, by=""):
+    save_key(desk, "", by=by)
+
+
+def last_result(desk):
+    from . import alert_push
+    entry = first(desk)
+    return alert_push.last_result(desk, entry["id"]) if entry else None
+
+
+def send(desk, items, held=0):
+    from . import alert_push
+    entry = first(desk)
+    return alert_push.send(desk, entry, items, held) if entry else "no_key"
+
+
+def test(desk):
+    from . import alert_push
+    entry = first(desk)
+    return alert_push.test(desk, entry["id"]) if entry else "no_key"

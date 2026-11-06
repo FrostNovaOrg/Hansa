@@ -99,54 +99,88 @@ BARK_NO_KEY = ("Bark cannot be switched on without a device key: paste the key f
                "then save (nothing was changed)")
 
 
-def _bark_key_change(desk: Desk, body: dict, new) -> tuple[str | None, list]:
-    """The page's Bark key edit, with what refuses the save before anything is written. Returns the value to give
-    the channel's save_key (None: leave the key as it is; "": remove it) and the problems. The key never enters
-    settings and no problem quotes it."""
-    from .alert_bark import has_key
+def _bark_key_change(desk: Desk, body: dict, config) -> list:
+    """Translate the old page's fields into edits of the first Bark address."""
+    from . import alert_bark, alert_push
     from .desk import key_problem
     value, remove = body.get("alert_bark_key", ""), body.get("alert_bark_key_remove", False)
     if not isinstance(value, str) or type(remove) is not bool:
-        return None, ["the Bark device key must be text, and its removal true or false"]
-    value = value.strip()
+        raise ValueError("the Bark device key must be text, and its removal true or false")
+    if "://" not in value:
+        value = value.strip()
+    if value and not remove and (problem := key_problem(value)):
+        raise ValueError("the Bark device key: " + problem)
+    old = alert_bark.projection(desk)
+    if issues := alert_bark.problems(config):
+        raise ValueError(issues[0])
+    entry = alert_bark.first(desk)
+    on = config.get("on", False)
     if remove:
-        value = ""
-    elif value and (problem := key_problem(value)):
-        return None, [f"the Bark device key: {problem}"]
-    bark = new.get("alert_bark") if isinstance(new, dict) else None
-    was_on = (desk.settings().get("alert_bark") or {}).get("on") is True
-    if (isinstance(bark, dict) and bark.get("on") is True and not was_on
-            and not (value or (has_key(desk) and not remove))):
-        return None, [BARK_NO_KEY]
-    return ("" if remove else value or None), []
+        return [{"id": entry["id"], "remove": True}] if entry else []
+    if on and not old["on"] and not (value or (alert_bark.has_key(desk) and not remove)):
+        raise ValueError(BARK_NO_KEY)
+    server = config.get("server", alert_bark.DEFAULT_SERVER).rstrip("/")
+    if not entry and not value:
+        return []
+    edit = {"id": entry["id"]} if entry else {"service": "bark"}
+    edit["on"] = on
+    if value:
+        edit["address"] = value if "://" in value else server + "/" + value
+    elif entry and server != old["server"]:
+        saved = alert_push._read(desk, entry["id"])
+        if saved:
+            edit["address"] = server + "/" + saved.rsplit("/", 1)[-1]
+    return [edit] if value or config != old else []
 
 
 def _save_settings(desk: Desk, body: dict) -> dict:
+    from . import alert_bark, alert_push
     new = body.get("settings")
-    with desk.lock():  # the same lock save_settings takes, so no lane change lands in between
+    with desk.lock():
+        on_disk = desk.settings()
+        if body.get("rev") is not None and body["rev"] != desk.settings_rev():
+            return {"ok": False, "problems": ["the settings changed since this page loaded them (another tab or a command); "
+                                              "press Reload, then make the change again"]}
+        writes, removes = [], []
+        problems = []
         if isinstance(new, dict):
-            on_disk = desk.settings()
             new = {**new, **{k: on_disk[k] for k in NOT_FROM_PAGE if k in on_disk}}
-            if body.get("alert_bark_key_remove") is True and isinstance(new.get("alert_bark"), dict):
-                new["alert_bark"] = {**new["alert_bark"], "on": False}  # no key, no channel
-        # a stale page first, then the lists (desk.page_list_problems), then the rest; then the Bark key's own
-        # checks, before anything is written, so a refused key leaves the settings as they were and the reverse
-        problems = desk.save_settings(new, by="page", rev=body.get("rev"), dry=True)
-        key = None
+            legacy = new.pop("alert_bark", alert_bark.projection(desk))
+            new.setdefault("alert_push", on_disk["alert_push"])
+            try:
+                changes = body.get("alert_push_changes", [])
+                legacy_changes = _bark_key_change(desk, body, legacy)
+                if not isinstance(changes, list):
+                    raise ValueError("push changes must be a list")
+                # Ignore an unchanged old-page projection when the new API edits entries.
+                value, writes, removes = alert_push.prepare(desk, new, changes + legacy_changes, by="page")
+                new["alert_push"] = value
+                old_ids = {e["id"] for e in alert_push.entries(on_disk)}
+                removes += list(old_ids - {e["id"] for e in value})
+            except ValueError as error:
+                problems = [str(error)]
         if not problems:
-            key, problems = _bark_key_change(desk, body, new)
+            problems = desk.save_settings(new, by="page", rev=body.get("rev"), dry=True)
         if not problems:
-            problems = desk.save_settings(new, by="page", rev=body.get("rev"))
-        if not problems and key is not None:
-            from .alert_bark import save_key
-            save_key(desk, key, by="page")
+            failed = alert_push.apply(desk, writes, removes)
+            problems = desk.save_settings(new, by="page")
+            alert_push.check_scrub(failed)
     if not problems:
         for name in desk.settings()["lanes"]:
             brief = desk.lanes_dir / name / "brief.md"
             brief.parent.mkdir(parents=True, exist_ok=True)
             brief.touch(exist_ok=True)
-    warnings = [] if problems else lane_warnings(new)  # the coordinator's to fix: the page saved all the same
+    warnings = [] if problems else lane_warnings(new)
     return {"ok": not problems, "problems": problems, **({"lane_warnings": warnings} if warnings else {})}
+
+
+def _push_test(desk: Desk, body: dict) -> dict:
+    from . import alert_push
+    id = body.get("id")
+    if not isinstance(id, str) or not alert_push.ID.fullmatch(id):
+        return {"ok": False, "why": "no_address", "last": None}
+    why = alert_push.test(desk, id)
+    return {"ok": why == "sent", "why": why, "last": alert_push.last_result(desk, id)}
 
 
 def _bark_test(desk: Desk) -> dict:
@@ -347,6 +381,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                                                                 by="page"))
                 if path == "/api/alert/test":  # the principal's test of the alert command; no command sends one
                     return self._send(200, alert.test(desk))
+                if path == "/api/alert/push-test":
+                    return self._send(200, _push_test(desk, body))
                 if path == "/api/alert/bark-test":  # the principal's Test of the Bark channel: one push, its category
                     return self._send(200, _bark_test(desk))
                 return self._send(404, {"error": "not found"})

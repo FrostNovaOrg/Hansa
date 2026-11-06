@@ -39,7 +39,7 @@ import tests.git_env as git_env  # noqa: E402 - as hansa is imported: every git 
 git_env.apply()
 
 import hansa  # noqa: E402
-from hansa import account, alert_bark, alert_http, cli, cost, menu, notify, plugin, up, views  # noqa: E402
+from hansa import account, alert_bark, alert_http, alert_push, cli, cost, menu, notify, plugin, up, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, read_json, validate, write_json, write_problems  # noqa: E402
 from hansa.run import (Dispatcher, provider_problem, text_only,  # noqa: E402
@@ -6484,6 +6484,34 @@ def save():'''))
         self.assertNotIn(key, shown)
         self.assertNotIn(key, views.diff_text(self.desk, tid))
         self.assertIn("key of mimo", views.diff_text(self.desk, tid))
+        self.assertNotIn(key, json.dumps(m["check"]))
+        self.assertNotIn(key, (self.desk.tasks_dir / tid / "check.log").read_text())
+        self.assertNotIn(key, (self.desk.tasks_dir / tid / "result.md").read_text())
+        self.assertNotIn(key, self.desk.events_path.read_text())
+        self.assertIn("key", views.status_text(views.status(self.desk)))
+        with self.assertRaises(SystemExit):
+            main(["--desk", str(self.desk.root), "merge", tid, "--despite-check"])
+        self.assertFalse((self.repo / "notes.txt").exists())
+        self.desk.event("anything", detail=f"the endpoint said: bad key {key}")
+        self.assertNotIn(key, self.desk.events_path.read_text())
+
+    def test_a_change_holding_a_push_key_is_refused_at_merge(self):
+        key = "sk-test-0123456789"
+        alert_push.change(self.desk, [{"address": "https://api.day.app/" + key}], by="page")
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_WRITE": key}
+        s["lanes"]["a"]["check"] = "cat notes.txt"  # a check that prints what the change holds
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertTrue(m["leaked"], m)
+        self.assertTrue(all("alert-push-" in name for name in m["leaked"]))
+        shown = views.show_text(self.desk, tid)
+        self.assertIn("key of alert-push-", shown)
+        self.assertNotIn(key, shown)
+        self.assertNotIn(key, views.diff_text(self.desk, tid))
+        self.assertIn("key of alert-push-", views.diff_text(self.desk, tid))
         self.assertNotIn(key, json.dumps(m["check"]))
         self.assertNotIn(key, (self.desk.tasks_dir / tid / "check.log").read_text())
         self.assertNotIn(key, (self.desk.tasks_dir / tid / "result.md").read_text())
@@ -42237,7 +42265,7 @@ else:
         self.assertTrue(self.page_save(lambda s: s.update(alert_bark={"on": True}))["ok"])
         http = unittest.mock.patch.object(alert_http, "send", return_value=[
             {"ok": why == "sent", "why": why, "status": 200 if why == "sent" else None, "tries": 3}])
-        sender = unittest.mock.patch.object(alert_bark, "send", wraps=alert_bark.send)
+        sender = unittest.mock.patch.object(alert_push, "send", wraps=alert_push.send)
         self.addCleanup(http.stop)
         self.addCleanup(sender.stop)
         return sender.start(), http.start()
@@ -42246,7 +42274,7 @@ else:
         from hansa import alert
         out = self.alert_fake("sys.exit(7)\n")
         self.desk.add_ask("Renew the login")
-        with unittest.mock.patch.object(alert_bark, "send") as bark:
+        with unittest.mock.patch.object(alert_push, "send") as bark:
             result = alert.send_due(self.desk, gather=0)
         self.assertEqual((result["ok"], result["exit"]), (False, 7))
         bark.assert_not_called()
@@ -42289,8 +42317,8 @@ else:
         [sent] = self.alerted(out)
         code = re.search(r"code ([A-Z0-9]{6})", sent["text"])[1]
         sender.assert_called_once()
-        self.assertEqual([x["kind"] for x in sender.call_args.args[1]], ["release_waiting", "ask"])
-        self.assertTrue(all(not x.get("code") for x in sender.call_args.args[1]))
+        self.assertEqual([x["kind"] for x in sender.call_args.args[2]], ["release_waiting", "ask"])
+        self.assertTrue(all(not x.get("code") for x in sender.call_args.args[2]))
         [request] = http.call_args.args[0]
         self.assertIn("Renew the login", request["json"]["body"])
         self.assertNotIn(code, request["json"]["body"])
@@ -42306,7 +42334,7 @@ else:
         self.assertTrue(alert._last(self.desk)["last"]["ok"])
         self.assertEqual(alert_bark.last_result(self.desk)["why"], "network")
         [failed] = self.events("alert_failed")
-        self.assertEqual((failed["channel"], failed["why"]), ("bark", "network"))
+        self.assertEqual((failed["channel"], failed["why"]), ("push", "network"))
         self.assertIn("last failed: network", self.hansa("status"))
         self.assertEqual([x["kind"] for x in self.alerted(out)], ["ask"])
         self.assertEqual(alert.queued(self.desk), [])
@@ -42349,7 +42377,7 @@ else:
                 self.assertFalse(alert.add(self.desk, "disk", "Low disk"))
                 self.assertEqual(alert.queued(self.desk), [])
                 self.assertIn("no alert channel", " ".join(alert.test(self.desk)["problems"]))
-                with unittest.mock.patch.object(alert_bark, "send") as bark, \
+                with unittest.mock.patch.object(alert_push, "send") as bark, \
                         unittest.mock.patch.object(alert, "run") as command:
                     self.assertIsNone(alert.send_due(self.desk, gather=0))
                 bark.assert_not_called()
@@ -42365,8 +42393,8 @@ else:
         sender.assert_not_called()
         self.assertEqual(len(self.events("alert_held")), 1)
         self.assertTrue(alert.test(self.desk)["ok"])  # the principal's test bypasses the cap for the whole batch
-        self.assertEqual([x["kind"] for x in sender.call_args.args[1]], ["disk", "test"])
-        self.assertEqual(sender.call_args.args[2], 2)
+        self.assertEqual([x["kind"] for x in sender.call_args.args[2]], ["disk", "test"])
+        self.assertEqual(sender.call_args.args[3], 2)
         self.assertEqual(len(alert._last(self.desk)["runs"]), alert.MOST_RUNS + 1)
 
     def test_alert_channels_slow_bark_and_sender_exception_leave_command_independent(self):
@@ -46136,8 +46164,7 @@ class AlertBarkTest(unittest.TestCase):
     def configure(self, *, language="en", server="https://api.day.app", on=True):
         settings = self.desk.settings()
         settings.update(alert_language=language, alert_bark={"on": on, "server": server})
-        self.assertEqual(self.desk.save_settings(settings, by="page"), [])
-        alert_bark.save_key(self.desk, self.key, by="page")
+        self.assertTrue(save_from_page(self.desk, {"settings": settings, "alert_bark_key": self.key})["ok"])
 
     def pushed(self):
         self.http.assert_called_once()
@@ -46247,23 +46274,23 @@ class AlertBarkTest(unittest.TestCase):
             with self.subTest(server=server):
                 settings = self.desk.settings()
                 settings["alert_bark"] = {"on": True, "server": server}
-                self.assertTrue(self.desk.save_settings(settings, by="page"))
+                self.assertFalse(save_from_page(self.desk, {"settings": settings})["ok"])
                 self.assertEqual(self.snapshot(), before)
         for config in (None, [], {"on": "yes"}, {"on": 1}, {"key": self.key}):
             with self.subTest(config=config):
                 settings = self.desk.settings()
                 settings["alert_bark"] = config
-                self.assertTrue(self.desk.save_settings(settings, by="page"))
+                self.assertFalse(save_from_page(self.desk, {"settings": settings})["ok"])
                 self.assertEqual(self.snapshot(), before)
         self.http.assert_not_called()
 
     def test_bark_key_is_private_atomic_replaceable_and_redacted(self):
         self.configure()
-        path = self.desk.secrets_dir / "alert-bark.device-key"
+        path = alert_push._file(self.desk, alert_bark.first(self.desk)["id"])
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
-        self.assertEqual(path.read_text().strip(), self.key)
-        with unittest.mock.patch.object(Path, "read_text", side_effect=AssertionError("presence must not read keys")):
+        self.assertEqual(path.read_text().strip(), "https://api.day.app/" + self.key)
+        with unittest.mock.patch.object(alert_push, "_read", side_effect=AssertionError("presence must not read keys")):
             self.assertIs(alert_bark.has_key(self.desk), True)
         self.assertNotIn(self.key, self.desk.redact("saw " + self.key))
         self.desk.event("example", text=self.key)
@@ -46274,16 +46301,16 @@ class AlertBarkTest(unittest.TestCase):
         for output in outputs:
             self.assertNotIn(self.key, output)
         from hansa import history
-        [entry] = [x for x in history.read(self.desk)["entries"] if x["path"] == "alert_bark.key"]
+        [entry] = [x for x in history.read(self.desk)["entries"] if x["path"].startswith("alert_push.") and x["path"].endswith(".secret")]
         self.assertTrue(entry["redacted"])
         self.assertNotIn("new", entry)
         with unittest.mock.patch("hansa.desk.os.replace", wraps=os.replace) as replace:
             alert_bark.save_key(self.desk, "replacement-bark-key", by="page")
         self.assertTrue(any(call.args[1] == path and call.args[0] != path for call in replace.call_args_list))
-        self.assertEqual(path.read_text().strip(), "replacement-bark-key")
+        self.assertEqual(path.read_text().strip(), "https://api.day.app/replacement-bark-key")
         self.assertNotIn("replacement-bark-key", self.desk.redact("replacement-bark-key"))
         self.assertNotIn("replacement-bark-key", json.dumps(history.read(self.desk)))
-        self.assertEqual(len([x for x in history.read(self.desk)["entries"] if x["path"] == "alert_bark.key"]), 2)
+        self.assertEqual(len([x for x in history.read(self.desk)["entries"] if x["path"].startswith("alert_push.") and x["path"].endswith(".secret")]), 2)
         before = self.snapshot()
         for value in (None, "short", "a key with spaces"):
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -46297,7 +46324,7 @@ class AlertBarkTest(unittest.TestCase):
         self.assertFalse(alert_bark.has_key(self.desk))
         self.assertEqual(alert_bark.test(self.desk), "no_key")
         self.http.assert_not_called()
-        self.assertIn("no key set", views.status_text(views.status(self.desk)))
+        self.assertEqual(views.status(self.desk)["alert_push"], [])
         self.assertNotIn(self.key, self.desk.events_path.read_text())
 
     def test_bark_coordinator_cannot_set_settings_or_change_keys(self):
@@ -46306,9 +46333,9 @@ class AlertBarkTest(unittest.TestCase):
                 self.configure()
             before = self.snapshot()
             settings = self.desk.settings()
-            settings["alert_bark"] = {"on": not configured, "server": "https://bark.example"}
+            settings["alert_push"] = [{"id": "fixture", "service": "bark", "on": not configured}]
             problems = self.desk.save_settings(settings, by="coordinator")
-            self.assertTrue(any("alert_bark" in p and "principal" in p for p in problems))
+            self.assertTrue(any("alert_push" in p and "principal" in p for p in problems))
             self.assertEqual(self.snapshot(), before)
             for by in ("", "coordinator"):
                 with self.assertRaisesRegex(ValueError, "principal"):
@@ -46329,7 +46356,7 @@ class AlertBarkTest(unittest.TestCase):
         [event] = [x for x in map(json.loads, self.desk.events_path.read_text().splitlines())
                    if x["event"] == "alert_channel"]
         self.assertEqual({k: event[k] for k in ("channel", "ok", "why")},
-                         {"channel": "bark", "ok": False, "why": "network"})
+                         {"channel": "push", "ok": False, "why": "network"})
         status = views.status(self.desk)
         self.assertEqual(status["alert_bark"]["last"], last)
         self.assertIn("network", views.status_text(status))
@@ -46338,13 +46365,13 @@ class AlertBarkTest(unittest.TestCase):
             self.assertNotIn("https://", text)
 
     def test_bark_test_language_defaults_off_and_waits_for_alert_thread(self):
-        self.assertEqual(self.desk.settings()["alert_bark"], {"on": False, "server": "https://api.day.app"})
+        self.assertEqual(alert_bark.projection(self.desk), {"on": False, "server": "https://api.day.app"})
         self.assertIsNone(alert_bark.last_result(self.desk))
         settings = self.desk.settings()
-        settings["alert_bark"] = {"on": False}
+        settings["alert_push"] = []
         self.assertEqual(self.desk.save_settings(settings, by="page"), [])
-        self.assertEqual(self.desk.settings()["alert_bark"]["server"], "https://api.day.app")
-        self.assertEqual(alert_bark.send(self.desk, [{"kind": "ask", "text": "hello"}]), "off")
+        self.assertEqual(alert_bark.projection(self.desk)["server"], "https://api.day.app")
+        self.assertEqual(alert_bark.send(self.desk, [{"kind": "ask", "text": "hello"}]), "no_key")
         self.http.assert_not_called()
         for language, wording in (("en", "test alert"), ("zh", "测试提醒")):
             self.configure(language=language, on=False)
@@ -46358,13 +46385,12 @@ class AlertBarkTest(unittest.TestCase):
         self.http.assert_not_called()
         self.assertEqual(alert_bark.send(self.desk, []), "empty")
         older_page = self.desk.settings()
-        older_page.pop("alert_bark")
+        older_page.pop("alert_push")
         self.assertEqual(self.desk.save_settings(older_page, by="page"), [])
-        self.assertTrue(self.desk.settings()["alert_bark"]["on"])
+        self.assertTrue(alert_bark.projection(self.desk)["on"])
         # A hand-edited unsafe server is refused again at send time.
         settings = self.desk.settings()
-        settings["alert_bark"]["server"] = "http://bark.example"
-        write_json(self.desk.settings_path, settings)
+        alert_push._file(self.desk, alert_bark.first(self.desk)["id"]).write_text("http://bark.example/fixture-key")
         self.assertEqual(alert_bark.test(self.desk), "refused_url")
         self.http.assert_not_called()
 
@@ -46392,7 +46418,8 @@ class AlertBarkPageTest(unittest.TestCase):
         self.addCleanup(http.stop)
 
     def key_file(self):
-        return self.desk.secrets_dir / "alert-bark.device-key"
+        entry = alert_bark.first(self.desk)
+        return alert_push._file(self.desk, entry["id"]) if entry else self.desk.secrets_dir / "no-bark-address"
 
     def page(self, steps=(), language="en", extra=None):
         if not shutil.which("node"):
@@ -46429,8 +46456,8 @@ class AlertBarkPageTest(unittest.TestCase):
                 told = save_from_page(self.desk, posted)
                 self.assertEqual(told, {"ok": True, "problems": []})
                 self.assertTrue(alert_bark.has_key(self.desk))
-                self.assertEqual(self.key_file().read_text().strip(), self.KEY)
-                self.assertEqual(self.desk.settings()["alert_bark"], {"on": True, "server": "https://api.day.app"})
+                self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
+                self.assertEqual(alert_bark.projection(self.desk), {"on": True, "server": "https://api.day.app"})
                 again = self.page(language=language)
                 self.assertEqual(again["before"]["state"], saved)
                 self.assertEqual(again["before"]["keyValue"], "")
@@ -46445,13 +46472,13 @@ class AlertBarkPageTest(unittest.TestCase):
         self.assertNotIn("alert_bark_key", shown["posted"])
         self.assertNotIn("alert_bark_key_remove", shown["posted"])
         self.assertEqual(save_from_page(self.desk, shown["posted"]), {"ok": True, "problems": []})
-        self.assertEqual(self.key_file().read_text().strip(), self.KEY)
-        self.assertEqual(self.desk.settings()["alert_bark"]["server"], "https://bark.example.org")
+        self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
+        self.assertEqual(alert_bark.projection(self.desk)["server"], "https://bark.example.org")
         # a blank or spaces-only key from any page keeps it too
         loaded = public_settings(self.desk)
         self.assertTrue(save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"],
                                                    "alert_bark_key": "   "})["ok"])
-        self.assertEqual(self.key_file().read_text().strip(), self.KEY)
+        self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
 
     def test_bark_page_remove_takes_the_key_away_and_switches_bark_off(self):
         alert_bark.save_key(self.desk, self.KEY, by="page")
@@ -46469,7 +46496,7 @@ class AlertBarkPageTest(unittest.TestCase):
         self.assertEqual(save_from_page(self.desk, shown["posted"]), {"ok": True, "problems": []})
         self.assertFalse(alert_bark.has_key(self.desk))
         self.assertFalse(self.key_file().exists())
-        self.assertFalse(self.desk.settings()["alert_bark"]["on"])
+        self.assertFalse(alert_bark.projection(self.desk)["on"])
         self.assertEqual(self.page()["before"]["state"], "not saved")
         # an older or hand-made body asking removal with the switch on still ends off
         alert_bark.save_key(self.desk, self.KEY, by="page")
@@ -46478,7 +46505,7 @@ class AlertBarkPageTest(unittest.TestCase):
         told = save_from_page(self.desk, {**loaded, "alert_bark_key_remove": True})
         self.assertTrue(told["ok"], told)
         self.assertFalse(alert_bark.has_key(self.desk))
-        self.assertFalse(self.desk.settings()["alert_bark"]["on"])
+        self.assertFalse(alert_bark.projection(self.desk)["on"])
 
     def test_bark_page_switch_on_without_a_key_is_refused_and_changes_nothing(self):
         for language, words in (("en", "cannot be switched on without a device key"), ("zh", "没有设备密钥，不能打开 Bark")):
@@ -46504,14 +46531,14 @@ class AlertBarkPageTest(unittest.TestCase):
         self.assertTrue(self.page_save(lambda s: s.update(cool_minutes=8))["ok"])
         told = save_from_page(self.desk, {**stale, "alert_bark_key": "anotherBarkKey987"})
         self.assertTrue(told["problems"][0].startswith("the settings changed since this page loaded them"))
-        self.assertEqual(self.key_file().read_text().strip(), self.KEY)
+        self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
         loaded = public_settings(self.desk)
         loaded["settings"]["cool_minutes"] = 9
         told = save_from_page(self.desk, {**loaded, "alert_bark_key": "short"})
         self.assertEqual(told["ok"], False)
         self.assertTrue(told["problems"][0].startswith("the Bark device key"))
         self.assertEqual(self.desk.settings()["cool_minutes"], 8)
-        self.assertEqual(self.key_file().read_text().strip(), self.KEY)
+        self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
 
     def test_bark_page_test_pushes_once_through_the_channel_and_shows_its_result(self):
         alert_bark.save_key(self.desk, self.KEY, by="page")
@@ -46573,6 +46600,8 @@ class AlertBarkPageTest(unittest.TestCase):
                          + script.count('T.barkKeyHint, "", true)'), 3, "every Bark field spans the row")
 
     def test_page_turn_min_field_saves_reloads_and_refuses_out_of_range_in_both_languages(self):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
         from hansa import alert
         from hansa import history
         for language, label in (("en", "Coordinator's turns failing (minutes)"), ("zh", "协调员轮次接连出错（分钟）")):
@@ -46625,7 +46654,8 @@ class AlertBarkPageTest(unittest.TestCase):
             self.assertNotIn(providers[language], got["before"]["saveState"])
 
     def test_bark_page_shows_the_last_push_from_the_settings_reply(self):
-        write_json(self.desk.state_dir / "alert-bark-last.json", {"at": time.time() - 60, "ok": False,
+        alert_bark.save_key(self.desk, self.KEY, by="page")
+        write_json(alert_push._last_file(self.desk, alert_bark.first(self.desk)["id"]), {"at": time.time() - 60, "ok": False,
                                                                    "why": "timeout"})
         code, reply, _ = self.web_request("/api/settings", headers={"Authorization": "Bearer " + self.desk.web_token()})
         self.assertEqual(code, 200)
@@ -46645,12 +46675,12 @@ class AlertBarkPageTest(unittest.TestCase):
         told = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"],
                                           "alert_bark_key": self.KEY})
         self.assertEqual(told, {"ok": True, "problems": []})
-        self.assertEqual(self.key_file().read_text().strip(), self.KEY)
+        self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
         for path in (self.desk.asks_path, log):
             text = path.read_text()
             self.assertNotIn(self.KEY, text)
-            self.assertIn("[key of Bark]", text)
-        self.assertIn("the principal's Bark key is [key of Bark]", json.dumps(self.desk.asks()))
+            self.assertIn("[key of push]", text)
+        self.assertIn("the principal's Bark key is [key of push]", json.dumps(self.desk.asks()))
 
     def test_explain_says_which_alert_channels_are_set_up(self):
         def explained():
@@ -46658,20 +46688,20 @@ class AlertBarkPageTest(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 main(["--desk", str(self.desk.root), "explain"])
             return next(x for x in out.getvalue().splitlines() if x.startswith("Alerts:"))
-        self.assertIn("Bark is not set up", explained())
+        self.assertIn("No push addresses are set up", explained())
         alert_bark.save_key(self.desk, self.KEY, by="page")
-        self.assertIn("Bark has a device key but is off", explained())
+        self.assertIn("off)", explained())
         self.assertTrue(self.page_save(lambda s: s.update(alert_bark={"on": True, "server": "https://api.day.app"}))["ok"])
         line = explained()
         self.assertIn("no alert command is set", line)
-        self.assertIn("Bark is set up: alerts reach the principal's phone", line)
+        self.assertIn("on)", line)
         self.assertNotIn(self.KEY, line)
         self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "echo hi"}))["ok"])
         line = explained()
         self.assertIn("the principal's alert command is 'echo hi'", line)
-        self.assertIn("Bark is set up", line)
+        self.assertIn("Push addresses: Bark", line)
 
-    def test_alert_bark_settings_that_are_not_a_dict_read_as_bark_not_set_up(self):
+    def test_malformed_push_settings_leave_command_working(self):
         from hansa import alert
         out = self.tmp / "said.txt"
         self.assertTrue(self.page_save(lambda s: s.update(
@@ -46680,7 +46710,7 @@ class AlertBarkPageTest(unittest.TestCase):
         for bad in ("on", None, ["on"], True):
             with self.subTest(bad=bad):
                 s = json.loads(self.desk.settings_path.read_text())
-                s["alert_bark"] = bad
+                s["alert_push"] = bad
                 self.desk.settings_path.write_text(json.dumps(s))
                 self.assertFalse(alert.bark_ready(self.desk, self.desk.settings()))
                 self.assertTrue(alert.configured(self.desk))  # the command still is
@@ -46692,6 +46722,303 @@ class AlertBarkPageTest(unittest.TestCase):
                 self.assertTrue(result and result.get("ok"), result)
                 self.assertIn(f"a to-do {bad!r}", out.read_text())
                 self.http.assert_not_called()
+
+class AlertPushTest(unittest.TestCase):
+    """Push addresses through real saves, gates and delivery, with no network."""
+    setUp = AlertBarkTest.setUp
+    snapshot = AlertBarkTest.snapshot
+    web_request = DeskTest.web_request
+    soon = DeskTest.soon
+
+    def save(self, changes, **body):
+        loaded = public_settings(self.desk)
+        return save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"],
+                                          "alert_push_changes": changes, **body})
+
+    def test_upgrade_bark_on_off_and_without_key(self):
+        from hansa import history
+        for on, key in ((True, "legacy-device-key"), (False, "legacy-device-key"), (True, "")):
+            with self.subTest(on=on, key=bool(key)):
+                desk = init_desk(self.tmp / f"upgrade-{on}-{bool(key)}")
+                settings = desk.settings()
+                settings.pop("alert_push")
+                settings["alert_bark"] = {"on": on, "server": "https://bark.example:8443/"}
+                write_json(desk.settings_path, settings)
+                legacy = desk.secrets_dir / "alert-bark.device-key"
+                if key:
+                    legacy.write_text(key)
+                last = {"at": now(), "ok": False, "why": "timeout"}
+                write_json(desk.state_dir / "alert-bark-last.json", last)
+                reply = public_settings(desk)
+                entries = desk.settings()["alert_push"]
+                self.assertEqual(len(entries), int(bool(key)))
+                self.assertNotIn("alert_bark", desk.settings())
+                self.assertNotIn("alert_bark", read_json(desk.settings_path, {}))
+                self.assertFalse(legacy.exists())
+                self.assertFalse((desk.state_dir / "alert-bark-last.json").exists())
+                self.assertEqual(reply["rev"], desk.settings_rev())
+                if key:
+                    [entry] = entries
+                    self.assertEqual((entry["service"], entry["on"]), ("bark", on))
+                    self.assertEqual(alert_push._read(desk, entry["id"]), "https://bark.example:8443/" + key)
+                    self.assertEqual(alert_push.last_result(desk, entry["id"]), last)
+                    self.assertEqual(stat.S_IMODE(alert_push._file(desk, entry["id"]).stat().st_mode), 0o600)
+                    self.assertEqual(stat.S_IMODE(desk.secrets_dir.stat().st_mode), 0o700)
+                    self.assertEqual(alert_push.test(desk, entry["id"]), "sent")
+                    self.assertEqual(self.http.call_args.args[0][0]["json"]["device_key"], key)
+                    self.assertEqual(self.http.call_args.args[0][0]["url"], "https://bark.example:8443/push")
+                changes = history.read(desk)["entries"]
+                self.assertTrue(any("moved Bark" in e.get("command", "") for e in changes))
+                self.assertNotIn(key or "no-key-fixture", json.dumps(changes))
+                revision = desk.settings_rev()
+                self.assertEqual(desk.settings()["alert_push"], entries)
+                self.assertEqual(desk.settings_rev(), revision)
+
+    def test_whole_bark_addresses_and_bare_key(self):
+        for address, service, saved in (
+                ("https://api.day.app/KEY/示例文字", "recognize", "https://api.day.app/KEY"),
+                ("KEY", "recognize", "https://api.day.app/KEY"),
+                ("https://bark.example.com/KEY/", "bark", "https://bark.example.com/KEY")):
+            with self.subTest(address=address):
+                result = self.save([{"address": address, "service": service, "name": "phone"}])
+                self.assertTrue(result["ok"], result)
+                entry = self.desk.settings()["alert_push"][-1]
+                self.assertEqual(alert_push._read(self.desk, entry["id"]), saved)
+                self.assertEqual(entry["service"], "bark")
+                self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
+                request = self.http.call_args.args[0][0]
+                self.assertEqual(request["json"]["device_key"], "KEY")
+                self.assertEqual(request["url"], saved.rsplit("/", 1)[0] + "/push")
+
+    def test_unsafe_and_unrecognized_addresses_save_nothing(self):
+        for address, service in (
+                ("https://bark.example.com/KEY/", "recognize"),
+                ("http://api.day.app/KEY", "recognize"), ("https://u:p@api.day.app/KEY", "bark"),
+                ("https://api.day.app/KEY#", "bark"), ("https://api.day.app/KEY?", "bark"),
+                ("https://api.day.app/KEY?group=fixture", "bark"),
+                ("https://api.day.app/KEY\n", "bark"), ("https://api.day.app/KEY\x00", "bark"),
+                ("https://api.day.app/KEY/a text", "bark"), ("K EY", "recognize"),
+                ("https://api.day.app/KEY\\x", "bark"), ("https://[bad/KEY", "recognize"),
+                ("https://api.day.app:bad/KEY", "bark"), ("https://api.day.app/", "bark"),
+                ("https://api.day.app/%2fKEY", "bark"), ("https://api.day.app/%0aKEY", "bark"),
+                ("https://api.day.app/KEY", "unknown"), (None, "bark")):
+            with self.subTest(address=address, service=service):
+                before = self.snapshot()
+                result = self.save([{"address": address, "service": service}])
+                self.assertFalse(result["ok"])
+                self.assertEqual(self.snapshot(), before)
+        self.http.assert_not_called()
+
+    def test_ten_entries_and_an_eleventh_is_refused(self):
+        self.assertTrue(self.save([{"address": f"fixture-device-{n}"} for n in range(10)])["ok"])
+        self.assertEqual(len(self.desk.settings()["alert_push"]), 10)
+        before = self.snapshot()
+        result = self.save([{"address": "fixture-eleventh-device"}])
+        self.assertFalse(result["ok"])
+        self.assertIn("10", " ".join(result["problems"]))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_metadata_and_private_edits_are_validated_before_any_write(self):
+        self.assertTrue(self.save([{"address": "fixture-original-device"}])["ok"])
+        [entry] = self.desk.settings()["alert_push"]
+        for edit in ({"id": entry["id"], "on": "yes"}, {"id": entry["id"], "name": "bad\nname"},
+                     {"id": "missing", "address": "fixture-other-device"},
+                     {"id": entry["id"], "secret": "bark-does-not-take-this"},
+                     {"id": entry["id"], "remove": "yes"}):
+            with self.subTest(edit=edit):
+                before = self.snapshot()
+                self.assertFalse(self.save([edit])["ok"])
+                self.assertEqual(self.snapshot(), before)
+        stale = public_settings(self.desk)
+        self.assertTrue(self.save([{"id": entry["id"], "name": "renamed"}])["ok"])
+        before = self.snapshot()
+        self.assertFalse(save_from_page(self.desk, {**stale, "alert_push_changes": [
+            {"id": entry["id"], "address": "fixture-stale-device"}]})["ok"])
+        self.assertEqual(self.snapshot(), before)
+        loaded = public_settings(self.desk)
+        loaded["settings"]["cool_minutes"] = -1
+        self.assertFalse(save_from_page(self.desk, {**loaded, "alert_push_changes": [
+            {"id": entry["id"], "address": "fixture-invalid-settings-device"}]})["ok"])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_enabled_entry_without_an_address_does_not_queue(self):
+        from hansa import alert
+        self.assertTrue(self.save([{"address": "fixture-device"}])["ok"])
+        [entry] = self.desk.settings()["alert_push"]
+        alert_push._file(self.desk, entry["id"]).unlink()
+        self.assertFalse(alert.configured(self.desk))
+        self.assertFalse(alert.add(self.desk, "disk", "low disk"))
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertEqual(alert_push.test(self.desk, entry["id"]), "no_address")
+        self.http.assert_not_called()
+
+    def test_scrub_failure_keeps_saved_entry_available_to_retry(self):
+        from hansa.desk import KeyScrubError
+        with unittest.mock.patch.object(self.desk, "scrub", return_value=[self.desk.asks_path]):
+            with self.assertRaisesRegex(KeyScrubError, "saved"):
+                self.save([{"address": "fixture-retry-device"}])
+        [entry] = self.desk.settings()["alert_push"]
+        self.assertTrue(alert_push.has_address(self.desk, entry))
+        self.assertTrue(self.save([{"id": entry["id"], "address": "fixture-retry-device"}])["ok"])
+
+    def test_page_metadata_replace_toggle_rename_test_and_remove(self):
+        self.assertTrue(self.save([{"address": "fixture-first-device", "on": False, "name": "my phone"}])["ok"])
+        reply = public_settings(self.desk)
+        [entry] = reply["alert_push"]
+        self.assertEqual((entry["service"], entry["on"], entry["name"]), ("bark", False, "my phone"))
+        self.assertEqual(entry["address"], "api.day.app/…ce")
+        self.assertIsNone(entry["last"])
+        [service] = reply["alert_push_services"]
+        self.assertEqual(service["id"], "bark")
+        self.assertEqual(set(service["name"]), {"en", "zh"})
+        self.assertIn("home screen", service["hint"]["en"])
+        self.assertIn("首页", service["hint"]["zh"])
+        self.assertFalse(service["extra_secret"])
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        code, result, _ = self.web_request("/api/alert/push-test", method="POST", headers=auth,
+                                          data=json.dumps({"id": entry["id"]}).encode())
+        self.assertEqual((code, result["ok"], result["last"]["why"]), (200, True, "sent"))
+        self.assertFalse(self.desk.settings()["alert_push"][0]["on"])
+        self.assertEqual(self.http.call_count, 1)
+        self.assertTrue(self.save([{"id": entry["id"], "address": "https://bark.example/fixture-next-device/text",
+                                   "name": "desk phone", "on": True}])["ok"])
+        [changed] = public_settings(self.desk)["alert_push"]
+        self.assertEqual(changed["id"], entry["id"])
+        self.assertEqual((changed["name"], changed["on"], changed["address"]), ("desk phone", True, "bark.example/…ce"))
+        from hansa import alert
+        self.assertIn("desk phone", alert.explain_line(self.desk.settings(), self.desk))
+        shown = views.status_text(views.status(self.desk))
+        self.assertIn("bark", shown)
+        self.assertIn("bark.example/…ce", shown)
+        self.assertIn("last ok: sent", shown)
+        self.assertTrue(self.save([{"id": entry["id"], "remove": True}])["ok"])
+        self.assertEqual(self.desk.settings()["alert_push"], [])
+        self.assertFalse(alert_push._file(self.desk, entry["id"]).exists())
+        self.assertFalse(alert_push._last_file(self.desk, entry["id"]).exists())
+
+    def test_address_secrets_scrub_redact_and_refuse_non_page_saves(self):
+        from hansa import history
+        address, key = "https://api.day.app/private-push-fixture", "private-push-fixture"
+        self.desk.add_ask("pasted " + address)
+        log = self.desk.lanes_dir / "x" / "try.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("pasted " + key)
+        for by in ("", "coordinator", "worker"):
+            before = self.snapshot()
+            with self.assertRaisesRegex(ValueError, "principal"):
+                alert_push.change(self.desk, [{"address": address}], by=by)
+            self.assertEqual(self.snapshot(), before)
+        self.assertTrue(self.save([{"address": address}])["ok"])
+        [entry] = self.desk.settings()["alert_push"]
+        for text in (self.desk.asks_path.read_text(), log.read_text(), self.desk.redact(address + key),
+                     self.desk.settings_path.read_text(), self.desk.events_path.read_text(),
+                     json.dumps(history.read(self.desk)), json.dumps(public_settings(self.desk)),
+                     json.dumps(views.status(self.desk))):
+            self.assertNotIn(address, text)
+            self.assertNotIn(key, text)
+        for field in ("on", "name", "remove"):
+            settings = self.desk.settings()
+            if field == "remove":
+                settings["alert_push"] = []
+            else:
+                settings["alert_push"][0][field] = False if field == "on" else "renamed"
+            before = self.snapshot()
+            self.assertTrue(self.desk.save_settings(settings, by="coordinator"))
+            self.assertEqual(self.snapshot(), before)
+        before = self.snapshot()
+        self.assertFalse(self.save([{"id": entry["id"], "name": key}])["ok"])
+        self.assertEqual(self.snapshot(), before)
+        settings = self.desk.settings()
+        settings["alert_push"][0]["name"] = key
+        self.assertTrue(self.desk.save_settings(settings, by="page"))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_legacy_page_fields_only_change_and_test_the_first_bark_entry(self):
+        self.assertTrue(self.save([{"address": "fixture-first-device"}, {"address": "fixture-second-device"}])["ok"])
+        first, second = self.desk.settings()["alert_push"]
+        loaded = public_settings(self.desk)
+        loaded["settings"]["alert_bark"]["server"] = "https://bark.example"
+        loaded["settings"]["alert_bark"]["on"] = False
+        self.assertTrue(save_from_page(self.desk, {**loaded, "alert_bark_key":
+            "https://bark.example/fixture-replacement-device/示例文字"})["ok"])
+        self.assertEqual(alert_push._read(self.desk, first["id"]), "https://bark.example/fixture-replacement-device")
+        self.assertEqual(alert_push._read(self.desk, second["id"]), "https://api.day.app/fixture-second-device")
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        code, result, _ = self.web_request("/api/alert/bark-test", method="POST", headers=auth, data=b"{}")
+        self.assertEqual((code, result["ok"]), (200, True))
+        self.assertEqual(self.http.call_args.args[0][0]["json"]["device_key"], "fixture-replacement-device")
+        loaded = public_settings(self.desk)
+        self.assertTrue(save_from_page(self.desk, {**loaded, "alert_bark_key_remove": True})["ok"])
+        self.assertFalse(alert_push._file(self.desk, first["id"]).exists())
+        self.assertEqual(self.desk.settings()["alert_push"], [second])
+
+    def test_unexpected_sender_result_never_enters_status_or_events(self):
+        address = "https://api.day.app/fixture-private-result"
+        self.assertTrue(self.save([{"address": address}])["ok"])
+        [entry] = self.desk.settings()["alert_push"]
+        self.http.return_value = [{"why": address}]
+        self.assertEqual(alert_push.test(self.desk, entry["id"]), "network")
+        self.assertNotIn(address, self.desk.events_path.read_text())
+        self.assertEqual(alert_push.last_result(self.desk, entry["id"])["why"], "network")
+
+    def test_two_push_entries_finish_independently_when_one_fails(self):
+        from hansa import alert
+        self.assertTrue(self.save([{"address": "first-fixture-device"}, {"address": "second-fixture-device"}])["ok"])
+        first, second = self.desk.settings()["alert_push"]
+        def sender(requests, deadline_s):
+            self.assertEqual(deadline_s, 30)
+            if requests[0]["json"]["device_key"] == "first-fixture-device":
+                self.soon(lambda: alert_push.last_result(self.desk, second["id"]), timeout=10)
+                raise OSError("https://api.day.app/first-fixture-device must never be logged")
+            return [{"why": "sent"}]
+        self.http.side_effect = sender
+        self.assertTrue(alert.add(self.desk, "ask", "answer the request"))
+        alert.send_due(self.desk, gather=0)
+        self.assertEqual(self.http.call_count, 2)
+        self.assertEqual(alert_push.last_result(self.desk, first["id"])["why"], "network")
+        self.assertEqual(alert_push.last_result(self.desk, second["id"])["why"], "sent")
+        failures = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines()) if e["event"] == "alert_failed"]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual((failures[0]["id"], failures[0]["service"]), (first["id"], "bark"))
+        self.assertNotIn("first-fixture-device", self.desk.events_path.read_text())
+        self.assertNotIn("https://", json.dumps(failures))
+        lines = [line for line in views.status_text(views.status(self.desk)).splitlines() if line.startswith("Push ")]
+        self.assertEqual(len(lines), 2)
+
+    def test_registry_extra_secret_has_same_protection(self):
+        from hansa import alert_services
+        class FutureService(alert_bark.Bark):
+            id = "fixture"
+            extra_secret = True
+            def requests(self, address, secret, title, body, level):
+                [request] = super().requests(address, secret, title, body, level)
+                request["headers"] = {"Authorization": secret}
+                return [request]
+        with unittest.mock.patch.dict(alert_services.SERVICES, {"fixture": FutureService()}):
+            from hansa import alert
+            secret = "extra-signing-fixture"
+            self.desk.add_ask("pasted " + secret)
+            self.assertTrue(self.save([{"service": "fixture", "address": "fixture-device", "secret": secret}])["ok"])
+            [entry] = self.desk.settings()["alert_push"]
+            self.assertTrue(alert.configured(self.desk))
+            self.assertFalse(alert.bark_ready(self.desk, self.desk.settings()))
+            path = alert_push._file(self.desk, entry["id"], True)
+            self.assertEqual(path.read_text().strip(), secret)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertNotIn(secret, self.desk.asks_path.read_text())
+            self.assertNotIn(secret, self.desk.redact(secret))
+            self.assertTrue(self.desk.keys_in(secret))
+            self.assertNotIn(secret, json.dumps(public_settings(self.desk)))
+            self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
+            self.assertEqual(self.http.call_args.args[0][0]["headers"], {"Authorization": secret})
+            self.assertTrue(self.save([{"id": entry["id"], "secret": ""}])["ok"])
+            self.assertFalse(path.exists())
+            self.assertTrue(self.save([{"id": entry["id"], "secret": secret}])["ok"])
+            self.assertTrue(self.save([{"id": entry["id"], "service": "bark", "address": "fixture-bark-device"}])["ok"])
+            self.assertFalse(path.exists(), "switching services must not reuse its old extra credential")
+            self.assertTrue(self.save([{"id": entry["id"], "remove": True}])["ok"])
+            self.assertFalse(path.exists())
+
 
 class AlertHTTPTest(unittest.TestCase):
     """Push transport rules with fake openers, including fakes inside a real isolated child."""
