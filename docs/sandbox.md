@@ -143,7 +143,9 @@ says so ([A lane's write list and env](#a-lanes-write-list-and-env)).
 
 Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the card,
 and not the settings, plugins, hooks or MCP servers of the account they run as. Nor may they, a
-verifier read the card or `notes/`.
+verifier read the card or `notes/`. Claude Code's auto memory is off for every worker and verifier
+run (and the provider check), whatever the repository's settings say, so a run starts with nothing
+an earlier run in its lane remembered; the repository's CLAUDE.md still loads.
 
 ## Headless browsers
 

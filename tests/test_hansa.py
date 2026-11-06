@@ -16924,6 +16924,41 @@ def save():'''))
         self.assertEqual(retries, {tid: {"8"}, vid: {"8"}})  # a task and a verification
         self.assertEqual(cli.coordinator_desk(self.desk, os.getuid())["env"]["CLAUDE_CODE_MAX_RETRIES"], "8")
 
+    def test_no_run_has_claude_codes_auto_memory_even_when_the_repository_turns_it_on(self):
+        from hansa import cli, run
+        (self.repo / ".claude").mkdir(exist_ok=True)
+        (self.repo / ".claude" / "settings.json").write_text(json.dumps({"autoMemoryEnabled": True}))
+        subprocess.run(["git", "add", ".claude/settings.json"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "memory on"], cwd=self.repo, check=True)
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "holds"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-memory-0001")
+        popen = run.subprocess.Popen
+        for prov in ("claude", "mimo"):
+            with self.subTest(provider=prov):
+                s = self.desk.settings()
+                s["lanes"]["a"]["providers"] = [prov]
+                self.assertEqual(self.desk.save_settings(s), [])
+                seen = {}
+
+                def started(argv, **kwargs):
+                    env = kwargs.get("env") or {}
+                    if "HANSA_TASK" in env and "--settings" in argv:
+                        seen[env["HANSA_TASK"]] = (env.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+                                                   json.loads(argv[argv.index("--settings") + 1]).get("autoMemoryEnabled"))
+                    return popen(argv, **kwargs)
+                d = Dispatcher(self.desk)
+                tid = self.desk.new_task(f"Add hello.txt on {prov}")
+                with unittest.mock.patch.object(run.subprocess, "Popen", started):
+                    self.settle(d, tid)
+                    self.hansa("verify", tid, "the file's contents")
+                    vid = self.desk.meta(tid)["verify"]
+                    self.assertEqual(self.settle(d, vid)["verdict"], "holds")
+                self.assertEqual(seen, {tid: ("1", False), vid: ("1", False)})  # a task and a verification
+        self.assertNotIn("CLAUDE_CODE_DISABLE_AUTO_MEMORY", cli.coordinator_desk(self.desk, os.getuid())["env"])
+
     def test_a_providers_rest_uses_the_desks_cool_minutes_and_names_it(self):
         from hansa import run
         for minutes in (30, 45):
