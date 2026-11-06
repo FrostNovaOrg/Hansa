@@ -173,6 +173,32 @@ class BenchVMTest(unittest.TestCase):
         self.assertEqual(len(caught.exception.stderr), 4096)
         self.assertTrue(caught.exception.stderr.endswith(b"final diagnostic"))
 
+    def test_stderr_completion_races_keep_final_bytes(self):
+        import threading
+        for stalled in ("select", "read"):
+            with self.subTest(stalled=stalled):
+                waiting, finished = threading.Event(), threading.Event()
+                select, read, join = self.module.select.select, os.read, threading.Thread.join
+                # A full Linux pipe can refill after a read but before done.
+                chunks = iter([b"x" * 8192] * 7 + [b"final diagnostic", b""])
+                def pause(*args):
+                    if not waiting.is_set():
+                        waiting.set()
+                        self.assertTrue(finished.wait(10))
+                        return ([], [], []) if stalled == "select" else b"x" * 8192
+                    return select(*args) if stalled == "select" else next(chunks)
+                def finish(thread):
+                    finished.set()  # _stderr_tail has set done before joining.
+                    join(thread)
+                with patch.object(self.module.select, "select", side_effect=(
+                        pause if stalled == "select" else lambda *args: ([0], [], []))), \
+                        patch.object(os, "read", side_effect=read if stalled == "select" else pause), \
+                        patch.object(threading.Thread, "join", finish):
+                    with self.module._stderr_tail() as (errors, tail):
+                        self.assertTrue(waiting.wait(10))
+                        errors.write(b"final diagnostic")
+                    self.assertTrue(tail.endswith(b"final diagnostic"))
+
     def connect(self, deadline=100):
         reader, writer = os.pipe()
         with os.fdopen(reader, "rb") as source, os.fdopen(writer, "wb", buffering=0) as sender, \
