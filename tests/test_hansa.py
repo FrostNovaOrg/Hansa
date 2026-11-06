@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import hansa  # noqa: E402
 from hansa import account, cli, cost, menu, notify, plugin, up, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
-from hansa.desk import Desk, now, public_settings, validate, write_json, write_problems  # noqa: E402
+from hansa.desk import Desk, now, public_settings, read_json, validate, write_json, write_problems  # noqa: E402
 from hansa.run import (Dispatcher, provider_problem, text_only,  # noqa: E402
                        waiting_reason)
 from hansa.web import start_web  # noqa: E402
@@ -651,6 +651,63 @@ def tmp_writable() -> bool:
     except OSError:
         return False
     return True
+
+
+SECRETS = ("SECRET-TEXT", "org-123", "/x/transcript-77.jsonl", "sess-identity-77", "/y/cwd-77")
+
+
+def turn_hook_input(event: str, error=None) -> str:
+    """A Stop or StopFailure hook's input as Claude Code gives it, with what the record must not keep (SECRETS)."""
+    return json.dumps({"hook_event_name": event, **({"error": error} if error is not None else {}),
+                       "last_assistant_message": "SECRET-TEXT", "error_details": "org-123",
+                       "session_id": "sess-identity-77", "transcript_path": "/x/transcript-77.jsonl",
+                       "cwd": "/y/cwd-77", "stop_hook_active": False})
+
+
+def check_turn_hooks(test, words: list, desk, pid: int) -> None:
+    """Take the Stop and StopFailure hooks out of the one --settings in claude's words, run them as Claude Code
+    would (sh -c, the input on stdin) and check the record, row by row, and that the desk keeps none of SECRETS."""
+    test.assertEqual(words.count("--settings"), 1, words)
+    hooks = json.loads(words[words.index("--settings") + 1])["hooks"]
+    commands = {e: [h["command"] for m in hooks[e] for h in m["hooks"]] for e in ("Stop", "StopFailure")}
+    test.assertEqual([len(c) for c in commands.values()], [1, 1])
+    test.assertEqual(commands["Stop"], commands["StopFailure"])
+    test.assertFalse([h for m in hooks["Stop"] + hooks["StopFailure"] for h in m["hooks"] if h.get("async")])
+    code = Path(__file__).resolve().parent.parent
+    test.assertEqual(shlex.split(commands["Stop"][0]),
+                     [str(code / "bin" / "hansa"), "--desk", str(desk.root), "coordinator-turn", "--pid", str(pid)])
+    path = desk.state_dir / "coordinator-turns" / f"{pid}.json"
+
+    def hook(text):
+        r = subprocess.run(["/bin/sh", "-c", commands["Stop"][0]], input=text, capture_output=True, text=True,
+                           cwd=desk.root, timeout=60)
+        test.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        return read_json(path, None)
+
+    ok = hook(turn_hook_input("Stop"))
+    test.assertEqual(set(ok), {"at", "ok", "error", "fails", "failed_since", "last_ok"})
+    test.assertEqual((ok["ok"], ok["error"], ok["fails"], ok["failed_since"], ok["last_ok"]),
+                     (True, None, 0, None, ok["at"]))
+    one = hook(turn_hook_input("StopFailure", "overloaded"))
+    test.assertEqual((one["ok"], one["error"], one["fails"], one["failed_since"], one["last_ok"]),
+                     (False, "overloaded", 1, one["at"], ok["last_ok"]))
+    two = hook(turn_hook_input("StopFailure", "rate_limit"))
+    test.assertEqual((two["ok"], two["error"], two["fails"], two["failed_since"], two["last_ok"]),
+                     (False, "rate_limit", 2, one["failed_since"], ok["last_ok"]))
+    new = hook(turn_hook_input("StopFailure", "something_new"))
+    test.assertEqual((new["error"], new["fails"], new["failed_since"]), ("unknown", 3, one["failed_since"]))
+    back = hook(turn_hook_input("Stop"))
+    test.assertEqual((back["ok"], back["error"], back["fails"], back["failed_since"], back["last_ok"]),
+                     (True, None, 0, None, back["at"]))
+    path.unlink()
+    for text in ("", "not json {", json.dumps({"error": "rate_limit", "last_assistant_message": "SECRET-TEXT"}),
+                 "[1, 2]"):
+        test.assertIsNone(hook(text), text)  # nothing written
+    hook(turn_hook_input("StopFailure", "rate_limit"))
+    for f in desk.root.rglob("*"):  # the events too
+        if f.is_file():
+            text = f.read_text(encoding="utf-8", errors="replace")
+            test.assertFalse([x for x in SECRETS if x in text], f)
 
 
 def stop_started_on(desk_root: Path, since: float, wait=10) -> None:
@@ -4003,12 +4060,101 @@ class CoordinatorUpTest(unittest.TestCase):
         me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
         self.assertEqual(ran, [(me, sock, {"wait": False})])
         rules = cli.launch_rules(self.desk, str(self.tmp))
+        settings = json.dumps({"hooks": cli.turn_hooks(self.desk, os.getpid())})
         self.assertEqual(started, {"prog": "claude", "argv": ["claude", "--messaging-socket-path", sock, "--name",
-                                                              "desk b", "--continue", "--disallowedTools", *rules]})
+                                                              "desk b", "--continue", "--disallowedTools", *rules,
+                                                              "--settings", settings]})
         rec = up.read_coordinator(self.desk)
-        self.assertEqual((rec["kind"], rec["argv"], rec["folder"], rec["session"], rec["launch_rules"]),
-                         ("notify", ["claude", "--name", "desk b"], os.getcwd(), me, rules))
+        self.assertEqual((rec["kind"], rec["argv"], rec["folder"], rec["session"], rec["launch_rules"],
+                          rec["launch_settings"]),
+                         ("notify", ["claude", "--name", "desk b"], os.getcwd(), me, rules, settings))
         self.assertNotIn("notify-launch", self.say("help"))  # not listed
+
+    def test_the_launchers_stop_and_stopfailure_hooks_record_how_each_turn_ends(self):
+        """hansa notify-launch, run as hansa up's pane runs it, with the fake claude that records its words."""
+        self.addCleanup(stop_started_on, self.desk.root, time.time())  # the follower the launcher starts
+        fake, seen = self.fake_claude()
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk",
+                            str(self.desk.root), "notify-launch", str(fake), "--name", "desk b"],
+                           cwd=self.own_folder(), capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        words = seen.read_text().split("\0")[:-1]
+        pid = json.loads((self.desk.state_dir / "coordinator-start.json").read_text())["session"]["pid"]
+        check_turn_hooks(self, words, self.desk, pid)
+
+    def launch(self, *words) -> list:
+        """hansa notify-launch with these words, exec faked: claude's words."""
+        from hansa import up
+        started = {}
+        with unittest.mock.patch.object(notify, "socket_path", return_value=str(self.tmp / "c.sock")), \
+                unittest.mock.patch.object(notify, "start", return_value="started"), \
+                unittest.mock.patch.object(up, "record_tmux", return_value={}), \
+                unittest.mock.patch("os.execvpe", lambda prog, argv, env: started.update(argv=argv)):
+            self.say("notify-launch", *words)
+        return started["argv"]
+
+    def test_a_session_started_recorded_again_and_started_again_carries_one_copy_of_the_hooks(self):
+        from hansa import up
+        folder = str(self.own_folder())
+        me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
+        first = self.launch("claude", "--name", "desk b")
+        self.assertEqual(first.count("--settings"), 1)
+        said, rec, _ = self.notify_on(first, folder, me)  # hansa notify on in that session
+        self.assertNotIn("--settings", rec["argv"])
+        self.assertEqual(rec["launch_settings"], first[first.index("--settings") + 1])
+        self.assertIn("recorded (hansa up gave it", up.turn_line(self.desk, me, "pid x"))
+        plan = up.restart_plan(self.desk, rec)
+        again = self.launch(*plan["cmd"][plan["cmd"].index("notify-launch") + 1:])
+        self.assertEqual(again.count("--settings"), 1, again)
+        self.assertEqual(json.loads(again[again.index("--settings") + 1])["hooks"].keys(), {"Stop", "StopFailure"})
+        said, rec, _ = self.notify_on(again, folder, me)  # and recorded once more: still none in the record
+        self.assertNotIn("--settings", rec["argv"])
+
+    def test_a_command_with_its_own_settings_gets_no_hooks_and_status_says_why(self):
+        from hansa import up
+        folder = str(self.own_folder())
+        me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
+        own = '{"env": {"A": "1"}}'
+        words = self.launch("claude", "--settings", own, "--name", "n")
+        self.assertEqual(words.count("--settings"), 1)
+        self.assertEqual(words[words.index("--settings") + 1], own)  # not merged: as it was given
+        self.assertNotIn("launch_settings", up.read_coordinator(self.desk))
+        said, rec, _ = self.notify_on(words, folder, me)
+        self.assertEqual(rec["argv"][rec["argv"].index("--settings") + 1], own)  # its own, kept
+        self.assertIn("not recorded: it was started with a --settings of its own", up.turn_line(self.desk, me, "p"))
+        # started by hand and recorded with hansa notify on: until hansa up starts it
+        said, rec, _ = self.notify_on(["claude", "--name", "n"], folder, self.SESS)
+        line = up.turn_line(self.desk, self.SESS, "pid 4242 (n)")
+        self.assertIn("turns of pid 4242 (n): not recorded: it was started by hand and recorded with hansa notify on",
+                      line)
+        self.assertIn("hansa up gives it", line)
+        # and hansa status says it, in its lines about the session hansa posts to
+        with unittest.mock.patch.object(notify, "live_records", return_value=[{"session": self.SESS, "name": "n"}]):
+            text = views.status_text(views.status(self.desk))
+        lines = text.splitlines()
+        at = next(i for i, x in enumerate(lines) if x.startswith("hansa posts to: pid 4242"))
+        self.assertTrue(lines[at + 1].startswith("turns of pid 4242 (n): not recorded: it was started by hand"))
+
+    def test_the_turn_hook_as_root_on_the_accounts_desk_hands_over_only_the_event_and_error(self):
+        ran = []
+        with unittest.mock.patch.object(account, "desk_account", return_value="desk-owner"), \
+                unittest.mock.patch.object(account, "run", lambda who, argv, root, **kw: ran.append((who, argv, kw))), \
+                unittest.mock.patch("sys.stdin", io.StringIO(turn_hook_input("StopFailure", "billing_error"))):
+            self.assertEqual(main(["--desk", str(self.desk.root), "coordinator-turn", "--pid", "77"]), 0)
+        self.assertEqual([(w, argv) for w, argv, _ in ran], [("desk-owner", ["coordinator-turn", "--pid", "77"])])
+        self.assertEqual(json.loads(ran[0][2]["input"]), {"hook_event_name": "StopFailure", "error": "billing_error"})
+        self.assertFalse((self.desk.state_dir / "coordinator-turns").exists())  # root wrote nothing in the desk
+
+    def test_serve_sweeps_the_turn_records_of_sessions_that_are_gone(self):
+        from hansa import up
+        d = self.desk.state_dir / "coordinator-turns"
+        d.mkdir()
+        gone = subprocess.Popen([sys.executable, "-c", ""])
+        gone.wait()
+        for pid in (os.getpid(), gone.pid):
+            write_json(d / f"{pid}.json", {"ok": True})
+        self.assertEqual(up.sweep_turns(self.desk), [gone.pid])
+        self.assertEqual([f.name for f in d.iterdir()], [f"{os.getpid()}.json"])
 
     def fake_claude(self):
         """A stand-in claude that writes the words it was started with to a file, one after another: (it, file)."""
@@ -19623,6 +19769,19 @@ def save():'''))
                            text=True, env={**os.environ, "HANSA_CLAUDE": str(echo)}, timeout=30)
         self.assertEqual(r.stdout.split().count("--messaging-socket-path"), 1)  # the path given is the one followed
         self.soon(lambda: [x for x in notify.records(self.desk) if x["socket"] == str(self.tmp / "mine.sock")])
+
+    def test_coordinator_gives_the_session_stop_and_stopfailure_hooks_that_record_each_turn(self):
+        fake, seen = CoordinatorUpTest.fake_claude(self)
+        env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+        r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
+                            "coordinator", "--name", "co"], capture_output=True, text=True,
+                           env={**env, "HANSA_CLAUDE": str(fake)}, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        words = seen.read_text().split("\0")[:-1]
+        self.assertIn("SessionStart", json.loads(words[words.index("--settings") + 1])["hooks"])  # kept
+        rec = self.soon(lambda: notify.records(self.desk))  # the follower posts to the session: the same pid
+        self.soon(lambda: all(x.get("ended") for x in notify.records(self.desk)))
+        check_turn_hooks(self, words, self.desk, rec[0]["session"]["pid"])
 
     def test_coordinator_takes_clear_daily_for_itself_and_gives_the_session_a_hook_after_a_clear(self):
         show = self.tmp / "argv-claude"  # the session: its options, one per line (and no version: no mod)

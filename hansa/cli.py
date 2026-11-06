@@ -1418,6 +1418,34 @@ def cmd_notify(a):
                                               "folder no longer read it." for p in up.remove_copies(desk)]]))
 
 
+def turn_hooks(desk: Desk, pid: int) -> dict:
+    """The Stop and StopFailure hooks that record how each turn of the session with this pid ends (hansa
+    coordinator-turn), hansa's own code, never the desk's files. Not async: the next turn's end may follow at once,
+    and each record counts on the one before it."""
+    cmd = (f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
+           f"{shlex.quote(str(desk.root))} coordinator-turn --pid {int(pid)}")
+    return {event: [{"hooks": [{"type": "command", "command": cmd}]}] for event in up.TURN_EVENTS}
+
+
+def cmd_coordinator_turn(a):
+    """The coordinator's Stop and StopFailure hook: how its turn ended, in .hansa/coordinator-turns/<pid>.json.
+    Keeps only the event and the error type of its input; never fails loudly or slowly: on any problem it writes
+    nothing and exits 0. As root on the account's desk, the account's hansa writes it, given only those two."""
+    try:
+        given = up.turn_input(sys.stdin.read(1 << 20))
+        if given is None or a.pid <= 0:
+            return
+        desk = Desk.find(a.desk)
+        theirs = account.desk_account(desk.root)
+        if theirs:  # as the existing coordinator paths do for root (account.run)
+            account.run(theirs, ["coordinator-turn", "--pid", str(a.pid)], desk.root, input=json.dumps(given),
+                        text=True, capture_output=True, timeout=20)
+            return
+        up.record_turn(desk, a.pid, given)
+    except (Exception, SystemExit):  # noqa: BLE001 - a hook's record is never worth a failed turn
+        return
+
+
 def cmd_notify_launch(a):
     """hansa up's start of a session hansa notify on recorded: the follower for this process, which becomes the
     session as it execs claude (as hansa coordinator does), the start recorded again, then claude with the inbox
@@ -1432,12 +1460,16 @@ def cmd_notify_launch(a):
     unsplit = rules_problem(rules) or desk_paths_problem(desk, [home, *run_homes()])
     if unsplit:  # a deny rule Claude Code would split, or one under a path it reads as a pattern, closes nothing
         raise SystemExit(f"hansa: the coordinator's session was not started: {unsplit}")
+    # the Stop and StopFailure hooks that record how its turns end; none when its words give a --settings of their
+    # own (not merged), and left out of what hansa notify on records, as the rules are
+    settings = None if up.has_settings(a.rest[1:]) else json.dumps({"hooks": turn_hooks(desk, os.getpid())})
     unrecorded = up.record_session(desk, {"pid": os.getpid(), "start": proc_start(os.getpid())}, a.rest, os.getcwd(),
-                                   rules)
+                                   rules, settings)
     if unrecorded:
         print(f"hansa: hansa up will not start this session again after a restart: {unrecorded}; nothing was "
               "recorded", file=sys.stderr)
-    argv = [a.rest[0], *_notified(desk, a.rest), *up.with_rules(a.rest[1:], rules)]
+    words = up.with_rules(a.rest[1:], rules)
+    argv = [a.rest[0], *_notified(desk, a.rest), *(up.with_settings(words, settings) if settings else words)]
     try:
         os.execvpe(argv[0], argv, os.environ)
     except OSError as e:
@@ -1556,6 +1588,7 @@ def cmd_serve(a):
     dropped = record_serve_session(desk)  # a Claude Code session's identity, which nothing it starts gets
     up.record_start(desk, a)  # how hansa up brings this server back, and this account's list of desks
     alert.sweep_runs(desk)  # the folders of alert runs a stopped or killed server left (none runs now: one server)
+    up.sweep_turns(desk)  # the turn records of coordinator's sessions whose process is gone (hansa coordinator-turn)
     try:  # a desk whose coordinator only runs hansa notify on gets hansa's card (and its copy) only here
         bring_card(desk)
     except OSError as e:
@@ -1762,7 +1795,8 @@ def cmd_coordinator(a):
     # code, never the desk's files
     hooks = {"SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
         f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
-        f"{shlex.quote(str(desk.root))} {'status' if theirs else 'coordinator-cleared'}")}]}]}
+        f"{shlex.quote(str(desk.root))} {'status' if theirs else 'coordinator-cleared'}")}]}],
+        **turn_hooks(desk, os.getpid())}  # how each turn ends, for this process, which becomes the session
     own = own_folder_rules(env)  # the folder Claude Code runs from for this session: root's, when root runs it
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
         rules = permissions(desk)
@@ -3652,6 +3686,9 @@ def main(argv=None):
                    "effort: its section of docs/; card: the whole card; topics: the topics, one line each")
     p = sub.add_parser("coordinator-cleared")  # hidden: the coordinator's hook after a /clear, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_cleared)
+    p = sub.add_parser("coordinator-turn")  # hidden: the coordinator's Stop and StopFailure hook (turn_hooks)
+    p.set_defaults(fn=cmd_coordinator_turn)
+    p.add_argument("--pid", type=int, required=True)
     p = sub.add_parser("coordinator-desk")  # hidden: the desk's part of `hansa coordinator`, as the desk's owner
     p.set_defaults(fn=cmd_coordinator_desk)
     p.add_argument("--mod", default="")  # only this: record root's start of the mod (plugin.start_record), as JSON
@@ -3701,9 +3738,11 @@ def main(argv=None):
         ap.error("ask needs what the principal must do" if a.close is None else
                  "ask --close needs the outcome: hansa ask --close N \"<outcome>\"")
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
-    if a.cmd not in ("coordinator", "init", "notify", "notify-follow", "up", "desks", "menu", "doctor", "example"):
+    # coordinator-turn: root keeps only what the record needs of the hook's input before the account's hansa sees it
+    if a.cmd not in ("coordinator", "coordinator-turn", "init", "notify", "notify-follow", "up", "desks", "menu",
+                     "doctor", "example"):
         _as_desk_account(a, argv)
-    if a.cmd not in ("init", "desks", "menu", "doctor", "example") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
+    if a.cmd not in ("init", "desks", "menu", "doctor", "example", "coordinator-turn") and notify.session_here():  # run in the coordinator's session: hansa cost counts it by its id
         try:
             cost.note_session(Desk.find(a.desk))
         except SystemExit:  # no desk: the command says so itself
