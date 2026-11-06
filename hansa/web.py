@@ -95,14 +95,51 @@ def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
 NOT_FROM_PAGE = ("lanes", "concurrency", "disk_floor", "memory_floor", "bench")
 
 
+BARK_NO_KEY = ("Bark cannot be switched on without a device key: paste the key from the Bark app, "
+               "then save (nothing was changed)")
+
+
+def _bark_key_change(desk: Desk, body: dict, new) -> tuple[str | None, list]:
+    """The page's Bark key edit, with what refuses the save before anything is written. Returns the value to give
+    the channel's save_key (None: leave the key as it is; "": remove it) and the problems. The key never enters
+    settings and no problem quotes it."""
+    from .alert_bark import has_key
+    from .desk import key_problem
+    value, remove = body.get("alert_bark_key", ""), body.get("alert_bark_key_remove", False)
+    if not isinstance(value, str) or type(remove) is not bool:
+        return None, ["the Bark device key must be text, and its removal true or false"]
+    value = value.strip()
+    if remove:
+        value = ""
+    elif value and (problem := key_problem(value)):
+        return None, [f"the Bark device key: {problem}"]
+    bark = new.get("alert_bark") if isinstance(new, dict) else None
+    was_on = (desk.settings().get("alert_bark") or {}).get("on") is True
+    if (isinstance(bark, dict) and bark.get("on") is True and not was_on
+            and not (value or (has_key(desk) and not remove))):
+        return None, [BARK_NO_KEY]
+    return ("" if remove else value or None), []
+
+
 def _save_settings(desk: Desk, body: dict) -> dict:
     new = body.get("settings")
     with desk.lock():  # the same lock save_settings takes, so no lane change lands in between
         if isinstance(new, dict):
             on_disk = desk.settings()
             new = {**new, **{k: on_disk[k] for k in NOT_FROM_PAGE if k in on_disk}}
-        # a stale page first, then the lists (desk.page_list_problems), then the rest
-        problems = desk.save_settings(new, by="page", rev=body.get("rev"))
+            if body.get("alert_bark_key_remove") is True and isinstance(new.get("alert_bark"), dict):
+                new["alert_bark"] = {**new["alert_bark"], "on": False}  # no key, no channel
+        # a stale page first, then the lists (desk.page_list_problems), then the rest; then the Bark key's own
+        # checks, before anything is written, so a refused key leaves the settings as they were and the reverse
+        problems = desk.save_settings(new, by="page", rev=body.get("rev"), dry=True)
+        key = None
+        if not problems:
+            key, problems = _bark_key_change(desk, body, new)
+        if not problems:
+            problems = desk.save_settings(new, by="page", rev=body.get("rev"))
+        if not problems and key is not None:
+            from .alert_bark import save_key
+            save_key(desk, key, by="page")
     if not problems:
         for name in desk.settings()["lanes"]:
             brief = desk.lanes_dir / name / "brief.md"
@@ -110,6 +147,13 @@ def _save_settings(desk: Desk, body: dict) -> dict:
             brief.touch(exist_ok=True)
     warnings = [] if problems else lane_warnings(new)  # the coordinator's to fix: the page saved all the same
     return {"ok": not problems, "problems": problems, **({"lane_warnings": warnings} if warnings else {})}
+
+
+def _bark_test(desk: Desk) -> dict:
+    """One test push with the saved key and server (alert_bark.test); only its category and the last result."""
+    from . import alert_bark
+    why = alert_bark.test(desk)
+    return {"ok": why == "sent", "why": why, "last": alert_bark.last_result(desk)}
 
 
 def _top_up_provider(desk: Desk, name: str) -> dict:
@@ -284,10 +328,6 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if path == "/api/key":
                     desk.write_key(body["provider"], body.get("key", ""), by="page")
                     return self._send(200, {"ok": True})
-                if path == "/api/alert/bark/key":
-                    from . import alert_bark
-                    alert_bark.save_key(desk, body["key"], by="page")
-                    return self._send(200, {"ok": True})
                 if path == "/api/provider/top-up":
                     return self._send(200, _top_up_provider(desk, body["provider"]))
                 if path == "/api/pause":
@@ -307,6 +347,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                                                                 by="page"))
                 if path == "/api/alert/test":  # the principal's test of the alert command; no command sends one
                     return self._send(200, alert.test(desk))
+                if path == "/api/alert/bark-test":  # the principal's Test of the Bark channel: one push, its category
+                    return self._send(200, _bark_test(desk))
                 return self._send(404, {"error": "not found"})
             except SettingsError as e:
                 return self._settings_unavailable(e)

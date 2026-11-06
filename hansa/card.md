@@ -232,7 +232,7 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   the coordinator does not send alerts. Bark never receives release codes. `coordinator`
   alerts say your session has not heard hansa, waits on a dialog, or leaves a finished task waiting
   for review; when they mention it, run `hansa status`. Bark's settings and key are also the
-  principal's, set on the page. More: `hansa help alerts`.
+  principal's, set and tested on the page (Settings, Alerts). More: `hansa help alerts`.
 
 ## Hearing from hansa
 hansa serve repairs recent saved task ends missing from the event log when it starts, even after a

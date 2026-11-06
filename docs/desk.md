@@ -591,9 +591,11 @@ A saved language change also applies to alerts still gathering.
 
 To receive alerts on an iPhone, install Bark and copy its device key (not the
 whole device URL). On this page, in **Settings → Alerts → Bark**, paste it into
-**Bark device key** and press **Save key**. Turn on **Turn on Bark**, keep
-`https://api.day.app` or enter your own HTTPS Bark server, then **Save settings**.
-Key saving is separate from settings saving; **Clear key** removes the saved key.
+**Device key**, switch **Bark on**, keep `https://api.day.app` or enter your own
+HTTPS Bark server, then **Save settings**: the key goes with that save, and
+**Send a test push** sends one push through Bark alone and shows its result.
+Left blank, the key field keeps the saved key; **Remove key** removes it and
+switches Bark off at the next save. Switching Bark on with no key is refused.
 The page shows only whether a key is saved; its value stays in the desk's
 `secrets/`. Only the principal can change these settings or the key.
 The test-alert button sends through every channel that is set up.

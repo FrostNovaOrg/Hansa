@@ -1,9 +1,10 @@
 """Alerts: phone pushes through Bark and the principal's own alert command.
 
 On the page, open Settings, Alerts. For an iPhone, copy the device key from the Bark app (not the whole URL),
-paste it into Bark device key and press Save key. Turn on Bark and Save settings. Keep the default server
-https://api.day.app, or enter your own HTTPS Bark server. Only the principal can save the switch, server and key;
-the key stays under the desk's secrets/, never in settings or page replies. Clear key removes it.
+paste it into Device key, switch Bark on and Save settings (the key is saved with them), then press Send a test
+push. Keep the default server https://api.day.app, or enter your own HTTPS Bark server. Only the principal can save
+the switch, server and key; the key stays under the desk's secrets/, never in settings or page replies. Left blank,
+the key field keeps the saved key; Remove key removes it and switches Bark off.
 With Bark on and a key saved, hansa serve sends alerts even if the alert command is blank. The desk's name and
 alert texts leave this machine for the Bark server and Apple's push service; both can read them.
 One-time release codes never go to Bark: answer its release alerts on the page. Only the alert command gets codes.

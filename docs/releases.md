@@ -501,10 +501,12 @@ saving is still allowed.
 
 Alerts reach the principal away from the page through Bark on an iPhone, an
 alert command, or both. To set up Bark, open **Settings → Alerts → Bark** on the
-page. Copy the device key from the Bark app (not the whole URL), paste it into
-**Bark device key** and press **Save key**. Turn on **Turn on Bark**, keep the
-default `https://api.day.app` or enter your own HTTPS server, then **Save settings**.
-**Clear key** removes the key; the page shows only whether one is saved.
+page. Copy the device key from the Bark app (the part of its example address
+right after the server's address), paste it into **Device key**, switch **Bark on**,
+keep the default `https://api.day.app` or enter your own HTTPS server, then
+**Save settings** (the key is saved with them) and press **Send a test push**.
+Left blank, the key field keeps the saved key; **Remove key** removes it and
+switches Bark off at the next save. The page shows only whether a key is saved.
 Only the principal can save the settings and key, which stays under `secrets/`.
 The desk's name and alert texts leave this machine for the Bark server and
 Apple's push service; both can read them. One-time release codes never go to
@@ -634,9 +636,35 @@ alerted stays alerted when it restarts on new code. `hansa status` shows a line 
 ### Bark channel
 
 `hansa.alert_bark` supplies a built-in channel for the principal's Bark iPhone
-app. The page's setup steps are above; `hansa serve` automatically delivers each
-gathered batch while Bark is on with a key. No coordinator command sets or tests
-Bark. The following details describe what is saved and sent.
+app. `hansa serve` delivers each gathered batch to it while Bark is on with a
+key, beside the alert command, which alone still gets release codes. No
+coordinator command sets or tests Bark.
+
+#### On the page
+
+Settings, Alerts has a Bark block below the alert command: a switch, the server
+(blank means `https://api.day.app`), the device key in a password field, Send a
+test push, and the last push's result and time. Its help, in English and Chinese,
+says to install Bark from the App Store, copy the key from the example address
+Bark shows (the part right after the server's address), paste it, switch Bark
+on, save and test; that the public server can read what is pushed through it;
+and that release codes never go to Bark, since releases are answered on the page.
+
+- The page shows only whether a key is saved (`alert_bark_key_set` in
+  `GET /api/settings`, with `alert_bark_last`), never the key.
+- The key typed there goes with the ordinary settings save, `POST /api/settings`,
+  beside the settings as `alert_bark_key`; Remove key sends
+  `alert_bark_key_remove: true` and switches Bark off. Left blank, the saved key
+  is kept. The save is judged whole first (a stale page, any settings problem,
+  a key that does not look like one) and only then writes the settings and gives
+  the key to `save_key`/`remove_key`, so a refused save changes neither. No reply
+  holds the key.
+- Switching Bark on while no key is saved, and none comes with the save, is
+  refused with a plain message; nothing changes. The page refuses it before
+  posting, in its own language. A switch already on is not refused by an
+  unrelated save, even if the key file went missing.
+- Test (`POST /api/alert/bark-test`) calls `alert_bark.test` once with what is
+  saved and replies `{ok, why, last}`; the page puts `why` in plain words.
 
 Desk settings hold `alert_bark: {"on": false, "server": "https://api.day.app"}`.
 Only the principal (`Desk.save_settings(..., by="page")`) changes these. An older
