@@ -1514,11 +1514,15 @@ def progress_of(desk: Desk, m: dict) -> dict:
             "note": desk.redact(note[:160])}
 
 
-def provider_env(desk: Desk, name: str, p: dict) -> dict:
+def provider_env(desk: Desk, name: str, p: dict, run: bool = True) -> dict:
     """Environment for one Claude Code run on this provider. Starts clean, so a
-    worker never inherits keys that are not its own."""
+    worker never inherits keys that are not its own. A run (run=False only for the coordinator's own
+    session) has Claude Code's auto memory off, so it starts with nothing an earlier run in its project
+    folder remembered (isolated says so too)."""
     env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
     env["TERM"] = "dumb"
+    if run:
+        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     # 8 tries, with waits that double: Claude Code rides out a network drop of a minute or two inside
     # the run (its retries continue the same conversation; with 3 it gave up after about 20 seconds and
     # the run's work was lost). The cost: a rejected key takes about a minute longer to fail.
@@ -1546,13 +1550,15 @@ def isolated(cwd, settings: dict | None = None) -> list:
     plugins, hooks or CLAUDE.md of the user it runs as, no MCP servers but those hansa gives it, and no
     CLAUDE.md or .claude/rules from the folders above the checkout (the desk's card, the coordinator's, among them,
     and the copy of it hansa notify on puts in a session's folder that holds the desk).
-    `settings` go into the same --settings object (a worker's sandbox, say)."""
+    `settings` go into the same --settings object (a worker's sandbox, say). Auto memory is off: --settings
+    comes before the repository's project and local settings, so a repository cannot turn it back on."""
     above = []
     for d in dict.fromkeys([*Path(cwd).parents, *Path(cwd).resolve().parents]):
         above += [str(d / "CLAUDE.md"), str(d / "CLAUDE.local.md"), str(d / ".claude" / "CLAUDE.md"),
                   str(d / ".claude" / "rules" / "**")]
     return ["--setting-sources", "project,local", "--strict-mcp-config",
-            "--settings", json.dumps({"claudeMdExcludes": above, **(settings or {})})]
+            "--settings", json.dumps({"claudeMdExcludes": above, **(settings or {}),
+                                     "autoMemoryEnabled": False})]
 
 
 def full_paths(paths) -> list:

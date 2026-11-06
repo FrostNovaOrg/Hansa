@@ -1914,7 +1914,7 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
     for line in unkept:
         desk.event("no_read_skipped", why=line)
     return {"repos": sorted({ln["repo"] for ln in s["lanes"].values()}), "model": co.get("model") or p["model"],
-            "effort": co.get("effort") or "", "env": provider_env(desk, co["provider"], p),
+            "effort": co.get("effort") or "", "env": provider_env(desk, co["provider"], p, run=False),
             "no_read": kept, "no_read_refused": unkept,
             "compact": {"working_at": compact_settings(s)["working_at"]}, "started": started}
 
