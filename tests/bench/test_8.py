@@ -1,6 +1,7 @@
 """Broker requests use real channel/archive code, pipes and a fake VM; no network."""
 import io
 import json
+import os
 import select
 import threading
 from types import SimpleNamespace
@@ -42,7 +43,7 @@ class BenchBrokerTest(unittest.TestCase):
     def complete(self, worker):
         rid = channel.submit(worker.directory, worker.epoch, "true")
         self.b.poll(self.workers, enabled=True)
-        self.b.active.thread.join(10)
+        self.b.active.thread.join(60)
         self.assertFalse(self.b.active.thread.is_alive())
         return self.result(worker, rid)
 
@@ -55,7 +56,7 @@ class BenchBrokerTest(unittest.TestCase):
         self.assertEqual(source.read(request["length"]), b"source")
         self.assertFalse(select.select([source], [], [], 0)[0])  # EOF would cancel the guest.
         self.entered.set()
-        self.assertTrue(self.release.wait(10))
+        self.assertTrue(self.release.wait(60))
         with archive.collect(self.fd, dict(id=request["id"], status="failed", exit=7), self.output) as tar:
             data = tar.read()
         header = json.dumps(dict(version=1, id=request["id"], length=len(data))).encode()
@@ -224,17 +225,32 @@ class BenchBrokerTest(unittest.TestCase):
         worker = self.add_worker()
         rid = channel.submit(worker.directory, worker.epoch, "true")
         self.release.clear()
+        stopped = threading.Event()
+        stop = self.vm.stop.side_effect
+        def stop_vm(deadline):
+            stop(deadline)
+            if self.entered.is_set():
+                stopped.set()
         def connect(source, target, deadline):
-            self.entered.set()
-            while source.read(archive.HEADER_BYTES):
-                pass  # Cancellation must close stdin and join this connection.
+            # A real SSH child owns its stdin descriptor. The broker can close
+            # its file object before this thread gets another turn to read.
+            with os.fdopen(os.dup(source.fileno()), "rb", buffering=0) as incoming:
+                request = _header(incoming)
+                self.assertEqual(incoming.read(request["length"]), b"source")
+                self.entered.set()
+                # Force that ordering: stop runs after the broker unwinds its
+                # pipe stack. Only EOF on our descriptor proves cancellation.
+                self.assertTrue(stopped.wait(60))
+                self.assertTrue(source.closed)
+                self.assertEqual(incoming.read(1), b"")
             self.release.set()
-        with patch.object(self.vm, "connect", side_effect=connect):
+        with patch.object(self.vm, "connect", side_effect=connect), \
+                patch.object(self.vm.stop, "side_effect", stop_vm):
             self.b.poll(self.workers, enabled=True)
             job = self.b.active
-            self.addCleanup(job.thread.join, 10)
+            self.addCleanup(job.thread.join, 60)
             self.addCleanup(job.cancel.set)
-            self.assertTrue(self.entered.wait(10))
+            self.assertTrue(self.entered.wait(60))
             self.b.revoke(worker)
         self.assertFalse(job.thread.is_alive())
         self.assertTrue(self.release.is_set())

@@ -1,4 +1,5 @@
 """Offline selftest dispatch and evidence gates; every external call is fake."""
+import builtins
 import contextlib
 import io
 import json
@@ -7,10 +8,20 @@ import os
 import sys
 import subprocess
 import tarfile
+import threading
+import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from hansa.bench import archive, manage, probes, selftest
 from tests.bench import test_7
+
+
+def exec_probe(source, **modules):
+    """Give shipped probe imports fakes without changing any shared module."""
+    def importing(name, *args, **kwargs):
+        return modules[name] if name in modules else builtins.__import__(name, *args, **kwargs)
+    exec(source, {'__builtins__': dict(vars(builtins), __import__=importing)})
 
 
 class BenchSelftestTest(unittest.TestCase):
@@ -18,6 +29,20 @@ class BenchSelftestTest(unittest.TestCase):
     setUp = test_7.BenchManagementTest.setUp
     command = test_7.BenchManagementTest.command
     run_command = test_7.BenchManagementTest.run_command
+
+    def unrelated_clock_calls(self):
+        errors = []
+        def unrelated():
+            try:
+                for _ in range(8):
+                    time.monotonic()
+                    time.sleep(0)  # Exercise shared imports, without a timed delay.
+            except Exception as error:
+                errors.append(error)
+        thread = threading.Thread(target=unrelated)
+        thread.start(); thread.join(60)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
 
     def acceptance(self, missing=False, running=False):
         machine = Mock(clock=lambda: 0, private=self.desk.state_dir / 'bench', redact=self.desk.redact)
@@ -102,7 +127,7 @@ class BenchSelftestTest(unittest.TestCase):
         machine.stop.side_effect = lambda _: setattr(machine, 'port', None)
         machine._info.side_effect = lambda _: dict(status='Running' if machine.port else 'Stopped')
         machine._call.side_effect = lambda *a, **k: Mock(stdout=('1 0 1024 ' + str(machine.private / 'lima' / 'hansa-bench') + '\n2 1 512 vm\n').encode() if machine.port else b'')
-        with patch.object(selftest.time, 'sleep', side_effect=lambda _: now.__setitem__(0, now[0] + 30)):
+        with patch.object(selftest, 'time', SimpleNamespace(sleep=lambda _: now.__setitem__(0, now[0] + 30))):
             self.assertEqual(set(selftest.lifecycle(machine).values()), {'passed'})
 
     @contextlib.contextmanager
@@ -194,10 +219,21 @@ class BenchSelftestTest(unittest.TestCase):
             with self.subTest(remaining=remaining):
                 machine.port = None
                 machine._call.side_effect = lambda *a, **k: Mock(stdout=(parent + child if machine.port else remaining).encode())
-                with patch.object(selftest.time, 'sleep', side_effect=lambda _: now.__setitem__(0, now[0] + 30)):
+                with patch.object(selftest, 'time', SimpleNamespace(sleep=lambda _: now.__setitem__(0, now[0] + 30))):
                     observed = {}; checked = selftest.lifecycle(machine, observed)
                 self.assertEqual(checked, dict(queue='passed', restart='passed', idle='passed', memory='failed'))
                 self.assertEqual((observed['owned'], observed['remaining']), ([1, 2], [int(remaining.split()[0])]))
+
+    def test_lifecycle_clock_ignores_unrelated_sleeps(self):
+        lifecycle = selftest.lifecycle
+        def checked(machine, *args):
+            before = machine.clock()
+            self.unrelated_clock_calls()
+            self.assertEqual(machine.clock(), before)
+            return lifecycle(machine, *args)
+        with patch.object(selftest, 'lifecycle', side_effect=checked):
+            self.test_memory_return_requires_owned_processes_to_exit()
+            self.test_running_vm_cannot_pass()
 
     def test_boot_ports_and_keys_use_each_boot(self):
         with self.observations():
@@ -234,31 +270,35 @@ class BenchSelftestTest(unittest.TestCase):
         for fault in ('', 'stale', 'address'):
             for lease in leases: lease.write_text('ADDRESS=192.0.2.15\n'); os.utime(lease, ns=(1, 1))
             def networkctl(command, **kwargs):
+                self.unrelated_clock_calls()
                 self.assertEqual(command[2:], [p.name for p in folder.iterdir()])
                 if command[:2] == ['networkctl', 'reconfigure']:
                     for lease in leases:
                         if fault == 'stale' and lease == leases[-1]: continue
                         lease.write_text('SERVER=192.0.2.1' if fault == 'address' else 'ADDRESS=192.0.2.15')
                         os.utime(lease, ns=(1000000001, 1000000001))
-            with self.subTest(fault=fault), patch('pathlib.Path', return_value=folder), \
-                    patch('subprocess.run', side_effect=networkctl), patch('time.monotonic', side_effect=range(0, 150, 30)), \
-                    patch('time.sleep'), contextlib.redirect_stdout(io.StringIO()) as output:
+            clock = SimpleNamespace(monotonic=Mock(side_effect=range(0, 150, 30)), sleep=Mock())
+            modules = dict(pathlib=SimpleNamespace(Path=lambda _: folder),
+                           subprocess=SimpleNamespace(run=networkctl), time=clock)
+            with self.subTest(fault=fault), contextlib.redirect_stdout(io.StringIO()) as output:
                 if fault:
-                    with self.assertRaises(TimeoutError): exec(selftest.DHCP, {})
+                    with self.assertRaises(TimeoutError): exec_probe(selftest.DHCP, **modules)
                 else:
-                    exec(selftest.DHCP, {})
+                    exec_probe(selftest.DHCP, **modules)
                     self.assertEqual(json.loads(output.getvalue()), dict(renewed='passed'))
 
     def test_dhcp_waits_for_a_removed_lease(self):
         folder = self.desk.root / 'leases'; folder.mkdir()
         lease = folder / '2'; lease.write_text('ADDRESS=192.0.2.15'); os.utime(lease, ns=(1, 1))
         def networkctl(command, **kwargs):
+            self.unrelated_clock_calls()
             self.assertEqual(command, ['networkctl', 'reconfigure', '2'])
             lease.unlink()
-        with patch('pathlib.Path', return_value=folder), patch('subprocess.run', side_effect=networkctl), \
-                patch('time.sleep', side_effect=lambda _: lease.write_text('ADDRESS=192.0.2.15')), \
-                patch('time.monotonic', side_effect=range(0, 150, 30)), contextlib.redirect_stdout(io.StringIO()) as output:
-            exec(selftest.DHCP, {})
+        clock = SimpleNamespace(monotonic=Mock(side_effect=range(0, 150, 30)),
+                                sleep=lambda _: lease.write_text('ADDRESS=192.0.2.15'))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            exec_probe(selftest.DHCP, pathlib=SimpleNamespace(Path=lambda _: folder),
+                       subprocess=SimpleNamespace(run=networkctl), time=clock)
         self.assertEqual(json.loads(output.getvalue()), dict(renewed='passed'))
 
     def test_failed_and_incomplete_results_keep_bounded_redacted_evidence(self):
