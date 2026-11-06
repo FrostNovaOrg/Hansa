@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import account, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
 from .desk import (EFFORTS, Desk, SettingsError, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
-                   lane_targets, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
+                   lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, answer_name, compact_settings, work_lane_problem, write_text)
 from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
@@ -2183,6 +2183,9 @@ def cmd_lane(a):
                                      + f". Remove them with: {allow_fix(a.like, like.get('allow', []))}. Nothing was "
                                      f"changed. {see_more('web-tools')}")
                 ln = json.loads(json.dumps(like))  # a copy: later changes to the other lane do not reach this one
+                if lane_targets(like):
+                    for f in ("targets", "release"):
+                        ln.pop(f, None)
                 ln.update(given, **({"base": a.base} if a.base else {}))
                 for f in ("check", "setup", "merge_check", "merge_timeout_min", "identity"):
                     if ln.get(f) in ("", None):  # none: unset, as hansa lane set leaves it
@@ -2266,6 +2269,9 @@ def cmd_lane(a):
             changed = []
             if a.like:
                 changed = _changed_from(a.name, ln, a.like, s["lanes"][a.like])
+                if lane_targets(like):
+                    print(f"Lane {a.like}'s release targets were not copied; to name one on {a.name}: "
+                          f"hansa lane target {a.name} NAME \"<command>\"")
                 print(desk.redact(f"Lane {a.name} is a copy of lane {a.like} as it is now; later changes to "
                                   f"{a.like} do not reach it. "
                                   + ("Changed from " + a.like + ":\n" + "\n".join(f"  {x}" for x in changed)
@@ -2307,6 +2313,10 @@ def cmd_lane(a):
             return
         value = _lane_value(a.field, a.values)
         old = s["lanes"][a.name].get(a.field, [] if a.field in LANE_LISTS else "")
+        if a.field == "merge_lane" and value is True:
+            why = merge_targets_problem(a.name, {**s["lanes"][a.name], "merge_lane": True})
+            if why:
+                raise SystemExit(f"hansa: {why}. Nothing was changed")
         if value is None:  # unset: the check's command and limit, hansa's own message forms
             new["lanes"][a.name].pop(a.field, None)
             value = ""
@@ -2471,8 +2481,10 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
                              f"{', '.join(sorted(named)) or 'none'}. Nothing was changed. " + see_more("release-flow"))
         followers = sorted(n for n, x in named.items() if isinstance(x, dict) and x.get("after") == a.target)
         if followers:
+            fix = (f"hansa lane target {a.name} {followers[0]} none" if ln.get("merge_lane") else
+                   f"hansa lane target {a.name} {followers[0]} --after none")
             raise SystemExit(f"hansa: target {', '.join(followers)} of lane {a.name} goes out only after "
-                             f"{a.target}; change that first (hansa lane target {a.name} {followers[0]} --after none). "
+                             f"{a.target}; change that first ({fix}). "
                              "Nothing was changed. " + see_more("release-flow"))
         del named[a.target]
         if not named:
@@ -2484,6 +2496,9 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
         print(f"lane {a.name} release target {a.target} is taken out ({old.get('command')}); a release asked for it "
               "no longer runs. Tell the principal, in the conversation, what you changed and why.")
         return
+    if ln.get("merge_lane"):
+        raise SystemExit(f"hansa: lane {a.name} is a merge lane and releases nothing; to set a release target, "
+                         f"first make it an ordinary lane: hansa lane set {a.name} merge_lane false. Nothing was changed")
     if old is None and not cmd:
         raise SystemExit(f"hansa: lane {a.name} has no release target {a.target}; a new one needs its command: "
                          f"hansa lane target {a.name} {a.target} \"<command>\". Nothing was changed. " + see_more("release-flow"))
@@ -3363,9 +3378,8 @@ def main(argv=None):
     q.add_argument("--repo", help="the git checkout the lane works on")
     q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
                    "providers, setup, check, merge_check, merge_lane, verify_for, network, folders it may write, env, allow, limits "
-                   "with merge_timeout_min, commit_message, merge_message, identity, release "
-                   "targets, release_files) "
-                   "and standing instructions; "
+                   "with merge_timeout_min, commit_message, merge_message, identity, release_files) "
+                   "and standing instructions. Release targets are not copied; "
                    "each other option given replaces that one field. It is a copy: later changes to LANE do not "
                    "reach the new lane. The worktree is the new lane's own. Standing instructions an earlier lane "
                    "of this name left, when they differ, are kept as brief-before-DATE.md beside the new ones. Not "

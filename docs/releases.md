@@ -5,6 +5,13 @@ from the page. The coordinator's side of it is in [hansa/card.md](../hansa/card.
 
 ## How a release goes out
 
+`hansa lane add X --like a` leaves release targets out; name one deliberately with
+`hansa lane target X NAME "<command>"`. This keeps stale copies off the principal's release list.
+A merge lane releases nothing: remove every target with `hansa lane target L NAME none`
+before setting `merge_lane true`. It refuses target settings and release requests; old targets
+can still be removed one at a time. `hansa status` and `hansa explain lane L` name those
+left by older versions or hand edits, with the commands to remove them.
+
 Releases are the last step. hansa merges into a lane's base branch and stops
 there; a lane's release command (a push, a deploy script) is how the base branch goes out. A lane
 that sends it out in more than one way (a push to the public repository, an
@@ -40,8 +47,7 @@ message or the author's or committer's name or email of any outgoing commit
 were checked; the word scan and its limits are under [Forbidden words before a
 release](#forbidden-words-before-a-release)), refuses it; each hit names its commit and where it is (`author`, `committer`, a
 file). A command that holds one of those words
-is kept when it is set (`hansa lane target`,
-`hansa lane add --like`), and hansa says the word and where at once, before
+is kept when it is set (`hansa lane target`), and hansa says the word and where at once, before
 any release is asked. A command that holds one of the desk's keys is
 refused when it is set, since a command is stored and shown as written: have
 it read the key from where the tool keeps it (its own login or config). A target that must follow another is asked only for

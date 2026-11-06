@@ -12782,6 +12782,7 @@ def save():'''))
         self.hansa("lane", "brief", "a", "Use C++20.")
         s = self.desk.settings()
         s["providers"]["mimo"] = {**s["providers"]["claude"]}
+        s["lanes"]["a"]["targets"] = {}  # no targets: even an explicit empty field stays unchanged
         self.assertEqual(self.desk.save_settings(s), [])
         a = self.desk.settings()["lanes"]["a"]
         before = len(self.events("lane_command_changed"))
@@ -12793,8 +12794,9 @@ def save():'''))
         said = " ".join(helped.getvalue().split())
         # All it copies, said in its help (the card points there).
         for field in ("setup", "check", "merge_check", "network", "env", "allow", "merge_timeout_min",
-                      "commit_message", "merge_message", "identity", "release targets"):
+                      "commit_message", "merge_message", "identity"):
             self.assertIn(field, said)
+        self.assertIn("Release targets are not copied", said)
         self.assertEqual((self.desk.lanes_dir / "m" / "brief.md").read_text(), (self.desk.lanes_dir / "a" /
                                                                                  "brief.md").read_text())
         self.assertIn("Use C++20.", (self.desk.lanes_dir / "m" / "brief.md").read_text())
@@ -12819,6 +12821,7 @@ def save():'''))
         self.assertIn("nothing was copied from them but a", out)
         out = self.hansa("lane", "add", "p", "--like", "m")
         self.assertIn("Nothing was changed from it.", out)
+        self.assertNotIn("release targets were not copied", out)
         lanes = self.desk.settings()["lanes"]
         for extra, said in ((["--like", "z"], "there is no lane z to copy"),
                             (["--like", "a", "--repo", str(self.repo)], "cannot come with --repo"),
@@ -12830,6 +12833,81 @@ def save():'''))
         with contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
             main(["lane", "add", "--help"])
         self.assertIn("later changes to LANE do not reach the new lane", " ".join(helped.getvalue().split()))
+
+    def test_lane_add_like_omits_release_targets(self):
+        for lane, fields in (("copy", {"targets": {"push": {"command": "true"}, "deploy": {"command": "true"}}}),
+                             ("legacy", {"release": "true"})):
+            with self.subTest(fields=fields):
+                s = self.desk.settings()
+                s["lanes"]["a"].pop("targets", None)
+                s["lanes"]["a"].update(fields)
+                write_json(self.desk.settings_path, s)
+                source = self.desk.settings()["lanes"]["a"]
+                out = self.hansa("lane", "add", lane, "--like", "a")
+                self.assertEqual(self.desk.settings()["lanes"][lane],
+                                 {k: v for k, v in source.items() if k not in ("targets", "release")})
+                self.assertEqual(self.desk.settings()["lanes"]["a"], source)
+                self.assertIn("a's release targets were not copied", out)
+                self.assertIn(f'hansa lane target {lane} NAME "<command>"', out)
+
+    def test_merge_lane_refuses_target_settings(self):
+        self.hansa("lane", "add", "m", "--like", "a")
+        for name in ("push", "deploy"):
+            self.hansa("lane", "target", "m", name, "true")
+        files = (self.desk.settings_path, self.desk.events_path, self.desk.state_dir / "settings-history.jsonl")
+        before = [p.read_bytes() for p in files]
+        with self.subTest(conversion=True):
+            refused = self.refused("lane", "set", "m", "merge_lane", "true")
+            for name in ("push", "deploy"):
+                self.assertIn(f"hansa lane target m {name} none", refused)
+            self.assertEqual([p.read_bytes() for p in files], before)
+        s = self.desk.settings()
+        s["lanes"]["m"]["merge_lane"] = True  # an older or hand-edited settings file
+        self.assertTrue(self.desk.save_settings(s))
+        self.assertEqual([p.read_bytes() for p in files], before)
+        write_json(self.desk.settings_path, s)
+        before = [p.read_bytes() for p in files]
+        self.assertIn("hansa lane target m push none", self.refused("lane", "set", "m", "merge_lane", "true"))
+        self.assertEqual([p.read_bytes() for p in files], before)
+        for args in (("true",), ("--minutes", "7"), ("--after", "push"), ("--fixed",),
+                     ("--after-merge", "5"), ("--about", "deploy"), ("--watch", "true"),
+                     ("--watch-minutes", "7")):
+            with self.subTest(args=args):
+                self.assertIn("merge lane", self.refused("lane", "target", "m", "deploy", *args))
+                self.assertEqual([p.read_bytes() for p in files], before)
+        s["lanes"]["m"]["targets"]["new"] = {"command": "true"}
+        self.assertTrue(self.desk.save_settings(s))  # the shared settings path also refuses it
+        self.assertEqual([p.read_bytes() for p in files], before)
+
+    def test_merge_lane_legacy_targets_warn_refuse_release_and_can_be_removed(self):
+        from hansa import release
+        self.hansa("lane", "add", "m", "--like", "a", "--merge-lane", "true")
+        s = self.desk.settings()
+        s["lanes"]["m"]["targets"] = {"push": {"command": "true"},
+                                     "deploy": {"command": "true", "after": "push"}}
+        write_json(self.desk.settings_path, s)
+        files = (self.desk.settings_path, self.desk.events_path, self.desk.state_dir / "settings-history.jsonl")
+        before = [p.read_bytes() for p in files]
+        for args in (("status",), ("explain", "lane", "m"), ("release", "m"), ("release", "m", "push")):
+            with self.subTest(args=args):
+                out = self.refused(*args) if args[0] == "release" else self.hansa(*args)
+                lines = [line for line in out.splitlines() if "hansa lane target m push none" in line]
+                self.assertEqual(len(lines), 1, out)
+                self.assertIn("hansa lane target m deploy none", lines[0])
+                self.assertIn("merge lane", lines[0])
+                self.assertEqual(release.releases(self.desk), [])
+                self.assertEqual([p.read_bytes() for p in files], before)
+        self.assertIn("hansa lane target m deploy none", self.refused("lane", "target", "m", "push", "none"))
+        self.assertEqual([p.read_bytes() for p in files], before)
+        for name in ("deploy", "push"):
+            self.hansa("lane", "target", "m", name, "none")
+        self.assertNotIn("targets", self.desk.settings()["lanes"]["m"])
+        self.assertNotIn("release targets", self.hansa("status"))
+        self.assertIn("merge lane", self.refused("release", "m"))
+        self.assertIn("merge lane", self.refused("lane", "target", "m", "new", "true"))
+        self.hansa("lane", "target", "a", "push", "true")
+        self.hansa("release", "a", "push")
+        self.assertEqual(len(release.releases(self.desk)), 1)
 
     def test_lane_add_like_refuses_an_empty_repo_and_sets_an_earlier_brief_aside(self):
         with self.assertRaises(SystemExit) as e:
@@ -32427,6 +32505,9 @@ def save():'''))
         out = self.hansa("lane", "target", "a", "test", "--minutes", "30")  # changed otherwise: still said
         self.assertIn("release target test holds \"maplebox\"", out)
         out = self.hansa("lane", "add", "b", "--like", "a")
+        self.assertNotIn("Warning: lane b's release target", out)
+        self.assertNotIn("targets", self.desk.settings()["lanes"]["b"])
+        out = self.hansa("lane", "target", "b", "test", "./install.sh /home/maplebox/test")
         self.assertIn("Warning: lane b's release target test holds \"maplebox\"", out)
         self.assertIn("test", self.desk.settings()["lanes"]["b"]["targets"])
         said = self.refused("release", "a", "test")  # and refused at release time, as before
@@ -33081,7 +33162,10 @@ def save():'''))
                     if row == 1:
                         warning(c, command, script)
                         c.assertIn(path, c.hansa("lane", "target", "a", "default", command))
-                        c.assertIn(path, c.hansa("lane", "add", "b", "--like", "a"))
+                        out = c.hansa("lane", "add", "b", "--like", "a")
+                        c.assertNotIn("Warning: lane b's release target", out)
+                        c.assertNotIn("targets", c.desk.settings()["lanes"]["b"])
+                        c.assertIn(path, c.hansa("lane", "target", "b", "default", command))
                     elif row == 2:
                         for cmd in (path + " prod", "$HOME/ops/deploy.sh prod", "${HOME}/ops/deploy.sh prod",
                                     "../ops/deploy.sh prod", "bash -c '~/ops/deploy.sh'",
