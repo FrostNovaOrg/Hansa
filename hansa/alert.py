@@ -1,4 +1,15 @@
-"""Alerts: the principal's own command, which hansa runs when something waits for the principal.
+"""Alerts: phone pushes through Bark and the principal's own alert command.
+
+On the page, open Settings, Alerts. For an iPhone, copy the device key from the Bark app (not the whole URL),
+paste it into Bark device key and press Save key. Turn on Bark and Save settings. Keep the default server
+https://api.day.app, or enter your own HTTPS Bark server. Only the principal can save the switch, server and key;
+the key stays under the desk's secrets/, never in settings or page replies. Clear key removes it.
+With Bark on and a key saved, hansa serve sends alerts even if the alert command is blank. The desk's name and
+alert texts leave this machine for the Bark server and Apple's push service; both can read them.
+One-time release codes never go to Bark: answer its release alerts on the page. Only the alert command gets codes.
+When both channels are set up, each gathered batch goes to both side by side, with separate deadlines and results.
+A slow or failed channel does not delay the other's send, change its result, or send it a failure alert.
+Bark's last result (sent or its reason) appears in hansa status beside the command's failure, if any.
 
 The principal sets one command line on the page (settings `alert`, which only the page saves: desk.PRINCIPAL_ONLY);
 the page records that it saved it, and when. Beside it, `alert_language` selects "en" (the default) or "zh".
@@ -16,7 +27,7 @@ when hansa serve has finished no round for STUCK_ALERT seconds, and when what ha
 cannot reach it (kind `coordinator`, below); not for ordinary task events, which go to the
 coordinator. The coordinator sends none: no hansa command does.
 
-The `coordinator` alert has three cases, each after the minutes the principal sets on the page (settings
+The `coordinator` alert has four cases, each after the minutes the principal sets on the page (settings
 `coordinator_alert`, desk.COORDINATOR_ALERT; 0 turns a case off):
     no session listens   something a follower would post (notify._item) has waited no_session_min in the event log
                          while the desk has no live follower: hansa serve sends it once (unheard_check), and again only
@@ -32,7 +43,9 @@ The `coordinator` alert has three cases, each after the minutes the principal se
 The follower watches its inbox's refusals and the last three (notify.Watch, notify.Turns), and asks the desk to queue
 them (from_follower).
 
-Alerts are queued in .hansa/alerts.json (any hansa process may queue one) and sent by hansa serve's alert thread:
+Alerts are queued only while a channel is set up, in .hansa/alerts.json (any hansa process may queue one), and sent
+by hansa serve's alert thread. Gathering, one run at a time and the hourly limit apply to the whole batch.
+The alert command runs:
 as the desk's account, outside the sandbox, in a folder of its own under the desk's secrets/alert-runs (run_dir),
 with hansa's own environment (not a lane's env),
 the kinds in HANSA_ALERT_KIND (comma-separated when several go out together), the level in HANSA_ALERT_LEVEL,
@@ -47,10 +60,13 @@ most MOST_RUNS in an hour: beyond that, what comes waits and goes out in one run
 line saying how many were held back. An entry of the queue that cannot be read is dropped, and recorded once
 (event alert_dropped); the others go. The command's own exit ends its run, even when it leaves a child behind;
 only at the time limit is its process group killed. A run
-that fails or times out is recorded (event alert_failed, and .hansa/alert-last.json, which hansa status reads);
-there is no retry: the next alert tries again. A
+that fails or times out is recorded (event alert_failed with channel command, and .hansa/alert-last.json,
+which hansa status reads); the command is never retried. Bark records its own last result in
+.hansa/alert-bark-last.json, and alert_failed with channel bark on failure. Bark has its own 30-second deadline,
+including alert_http's at most three tries; the alert run adds no retries. A
 release_waiting alert queues only its release ID, request time and text without a code. Just before sending,
-the text is rebuilt in memory with a new code (release.new_code), only while that request still waits. Neither
+the command's text is rebuilt in memory with a new code (release.new_code), only while that request still waits
+and a command gets the batch. Bark gets the gathered text without codes; Bark alone makes no code. Neither
 the code nor what the command printed for such an alert is written to a file (only how it ended is kept). A phone
 shows the first hundred characters or so, so the code and what to do with it come right after the desk's name:
 "[hansa] desk NAME: release #1 (lane a, target staging) · code K7P3QX: to release it, give this code to the coordinator
@@ -66,6 +82,7 @@ description, if any, kept in the request as it was when asked, followed by the u
 from __future__ import annotations
 
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import json
 import math
@@ -129,6 +146,17 @@ def command(s: dict) -> str:
     """The principal's alert command line; '' when none is set."""
     a = s.get("alert")
     return a["command"].strip() if isinstance(a, dict) and isinstance(a.get("command"), str) else ""
+
+
+def bark_ready(desk: Desk, s: dict) -> bool:
+    from . import alert_bark
+    return bool(s.get("alert_bark", {}).get("on") and alert_bark.has_key(desk))
+
+
+def configured(desk: Desk, s: dict | None = None) -> bool:
+    """Whether any channel can take alerts; Bark needs both its switch and key."""
+    s = desk.settings() if s is None else s
+    return bool(command(s)) or bark_ready(desk, s)
 
 
 def chinese(desk: Desk) -> bool:
@@ -197,11 +225,11 @@ def _clean(desk: Desk) -> list:
 
 def add(desk: Desk, kind: str, text: str, release=None, asked=None, ask=None, *, zh: str | None = None,
         level: str | None = None) -> bool:
-    """Queue code-free text for the next run; False when no alert command is set. release and asked identify
+    """Queue code-free text for the next run; False when no alert channel is set up. release and asked identify
     the waiting request whose text is rebuilt with a code at send time. ask: the to-do's ID, so a closed
     to-do can be left out when the gathered alerts go out. Keep both code-free wordings, so a saved language
     change also applies to alerts still gathering; only _with_codes adds a credential, in memory."""
-    if not command(desk.settings()):
+    if not configured(desk):
         return False
     with desk.lock():
         q = _clean(desk)
@@ -265,7 +293,7 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
     if kind == "release_asked" and fields.get("state") == "waiting" or kind == "release_waits":
         from . import release
         rid = fields.get("id")
-        if not command(desk.settings()):  # no alert command: no code; the page answers
+        if not configured(desk):
             return
         with desk.lock():
             r = release.get(desk, rid) or {}
@@ -407,15 +435,14 @@ def _runs(rec: dict, t: float) -> list:
     return [x for x in runs if isinstance(x, (int, float)) and t - HOUR < x <= t] if isinstance(runs, list) else []
 
 
-def _record(desk: Desk, result: dict, count: int, began: float) -> None:
+def _record(desk: Desk, result: dict, count: int) -> None:
     last = _last(desk)
-    rec = {"last": result, "failed": last.get("failed") if result["ok"] else result,
-           "runs": _runs(last, began) + [began]}
+    rec = {**last, "last": result, "failed": last.get("failed") if result["ok"] else result}
     write_json(last_file(desk), rec)
     if result["ok"]:
         desk.event("alert_sent", kinds=result["kinds"], alerts=count)
     else:
-        desk.event("alert_failed", kinds=result["kinds"], alerts=count, exit=result["exit"],
+        desk.event("alert_failed", channel="command", kinds=result["kinds"], alerts=count, exit=result["exit"],
                    timed_out=result["timed_out"], limit=result.get("limit"), tail=result["tail"],
                    **({"withheld": result["withheld"]} if result.get("withheld") else {}))
 
@@ -424,7 +451,8 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
              wait: bool = False, capped: bool = True) -> dict | None:
     """Send what is queued once it has gathered: when no alert came for `gather` seconds, or the first has waited
     `most_wait`; and, when capped, only if fewer than MOST_RUNS runs began in the last hour (else they wait, and go
-    out together when the hour frees a run). The result of the run; None when nothing went out."""
+    out together when the hour frees a run). Return the command's result when set, otherwise Bark's;
+    None when nothing went out. Each channel records its own result independently."""
     with _one_run(desk, wait) as mine:
         if not mine:
             return None
@@ -445,11 +473,12 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             closed = {a["id"] for a in desk.asks() if "id" in a and a.get("closed")}
             q = [x for x in _clean(desk) if x["kind"] != "ask" or x.get("ask") not in closed]
             write_json(queue_file(desk), [])
-        cmd = command(desk.settings())
+        s = desk.settings()
+        cmd, bark = command(s), bark_ready(desk, s)
         held_since = rec.get("held_since") if isinstance(rec.get("held_since"), (int, float)) else None
         if held_since:
             write_json(last_file(desk), {k: v for k, v in rec.items() if k != "held_since"})
-        if not cmd or not q:  # cleared since they were queued: nothing to send them with
+        if not (cmd or bark) or not q:  # cleared since they were queued: nothing to send them with
             return None
         held = len(q) if held_since else 0
         kinds = ",".join(dict.fromkeys(x["kind"] for x in q))
@@ -459,12 +488,37 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             translations = x.get("translations")
             if isinstance(translations, dict) and isinstance(translations.get(lang), str):
                 x["text"] = translations[lang]
-        codes = _with_codes(desk, q)
-        text = text_of(desk, q, held)
-        result = run(desk, cmd, kinds, text, timeout, codes=[x["code"] for x in codes], level=level)
-        _codes_went(desk, codes, text, result["ok"])
-        _record(desk, result, len(q), t)
-        return result
+        # Count the batch once, including Bark-only batches. Each channel records
+        # its own result as soon as it finishes, without waiting for its sibling.
+        write_json(last_file(desk), {**{k: v for k, v in rec.items() if k != "held_since"},
+                                     "runs": _runs(rec, t) + [t]})
+
+        def send_command():
+            items = [dict(x) for x in q]  # _with_codes must never alter Bark's batch
+            codes, text = [], ""
+            try:
+                codes = _with_codes(desk, items)
+                text = text_of(desk, items, held)
+                result = run(desk, cmd, kinds, text, timeout, codes=[x["code"] for x in codes], level=level)
+            except Exception:  # setup failures also belong only to this channel; never log a possible code
+                result = {"ok": False, "exit": None, "timed_out": False, "limit": timeout,
+                          "tail": [], "at": now(), "kinds": kinds}
+            _codes_went(desk, codes, text, result["ok"])
+            _record(desk, result, len(items))
+            return result
+
+        def send_bark():
+            from . import alert_bark
+            try:
+                why = alert_bark.send(desk, q, held)
+            except Exception:  # a removed key or local failure must not affect the command or expose secrets
+                why = alert_bark._record(desk, "network")
+            return {"ok": why == "sent", "why": why}
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hansa-alert-channel") as pool:
+            bark_run = pool.submit(send_bark) if bark else None
+            command_run = pool.submit(send_command) if cmd else None
+            return command_run.result() if command_run else bark_run.result()
 
 
 def _with_codes(desk: Desk, items: list) -> list:
@@ -503,9 +557,11 @@ def _codes_went(desk: Desk, codes: list, text: str, ok: bool) -> None:
 
 def test(desk: Desk, timeout: float = TIMEOUT) -> dict:
     """The page's test button: a test alert sent now, with anything already queued."""
-    if not command(desk.settings()):
-        return {"ok": False, "problems": ["no alert command is set; save one first"]}
-    add(desk, "test", "a test alert from the page: the alert command works", zh="来自网页的测试提醒：提醒命令正常")
+    if not configured(desk):
+        return {"ok": False, "problems": ["no alert channel is set up; save a command or turn on Bark with a key first"]}
+    cmd = command(desk.settings())
+    add(desk, "test", "a test alert from the page: the alert command works" if cmd else "a test alert from the page",
+        zh="来自网页的测试提醒：提醒命令正常" if cmd else "来自网页的测试提醒")
     result = send_due(desk, gather=0, timeout=timeout, wait=True, capped=False)  # the principal's own press
     return result or {"ok": False, "problems": ["the test alert was not sent"]}
 
@@ -595,7 +651,7 @@ def unheard_check(desk: Desk, t: float | None = None) -> dict:
                                            "line": _short(desk.redact(it[1]))})
         new = {"pos": pos, "waits": waits, **({"told": rec["told"]} if _at(rec.get("told")) else {})}
         items = _waiting(new)
-        if items and "told" not in new and t - items[0]["at"] >= mins * 60 and command(s) \
+        if items and "told" not in new and t - items[0]["at"] >= mins * 60 and configured(desk, s) \
                 and add(desk, "coordinator", unheard_text(desk, items, t), zh=unheard_text(desk, items, t, zh=True)):
             new["told"] = t
     if new != stored:
@@ -628,12 +684,13 @@ def unheard_text(desk: Desk, items: list, t: float, zh: bool = False) -> str:
             f"thing(s) wait for the coordinator, the oldest for {_mins(t - items[0]['at'])} min: {items[0]['line']}")
 
 
-def session_minutes(s: dict) -> dict:
+def session_minutes(desk: Desk) -> dict:
     """What a follower watches its session for (notify.Watch): inbox refusals and the second and third cases;
-    0 for off, all 0 when no alert command is set, so that it looks nothing up."""
+    0 for off, all 0 when no alert channel is set up, so that it looks nothing up."""
     from .desk import coordinator_alert_settings
+    s = desk.settings()
     mins = coordinator_alert_settings(s)
-    on = bool(command(s))
+    on = configured(desk, s)
     return {"no_session": mins["no_session_min"] if on else 0,
             "window": mins["window_min"] if on else 0, "review": mins["review_min"] if on else 0,
             "turn": mins["turn_min"] if on else 0}
@@ -737,7 +794,7 @@ def turn_text(req: dict, who: str, who_zh: str, t: float) -> tuple:
 
 def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
     """For hansa status: one line for each case of the `coordinator` alert that holds now, alerted or not (the second
-    and third as the followers last recorded them; they look only while an alert command is set)."""
+    and third as the followers last recorded them; they look only while an alert channel is set up)."""
     from . import notify
     from .desk import coordinator_alert_settings
     t = time.time() if t is None else t

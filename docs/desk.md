@@ -588,14 +588,34 @@ Other values are refused on save; an invalid value in `settings.json` reads as
 saved, it stays unset and the page still prefills it from its own language. This
 keeps an older page or a request for another setting from changing alert language.
 A saved language change also applies to alerts still gathering.
+
+To receive alerts on an iPhone, install Bark and copy its device key (not the
+whole device URL). On this page, in **Settings → Alerts → Bark**, paste it into
+**Bark device key** and press **Save key**. Turn on **Turn on Bark**, keep
+`https://api.day.app` or enter your own HTTPS Bark server, then **Save settings**.
+Key saving is separate from settings saving; **Clear key** removes the saved key.
+The page shows only whether a key is saved; its value stays in the desk's
+`secrets/`. Only the principal can change these settings or the key.
+The test-alert button sends through every channel that is set up.
+
+Bark works with the alert command left blank. With both set up, each gathered
+batch goes to both at the same time, with separate results and 30-second limits.
+A slow or failed channel does not delay the other's send or send a failure notice
+through it. Gathering for 20 seconds, one run at a time and at most 20 runs an
+hour apply to the batch. `hansa status` shows Bark's last result beside the alert
+command's failure, if any. One-time release codes go only to the alert command,
+never to Bark; answer Bark's waiting releases on the page.
+The desk's name and the alert texts leave this machine for the Bark server and
+Apple's push service. Both can read them; this channel does not encrypt the text
+against those services.
+
 Sandbox alerts explain which runs are held and how they resume in the selected
 language, and keep the sandbox's raw diagnostic alongside that explanation.
 The command receives `HANSA_ALERT_KIND` and `HANSA_ALERT_LEVEL`: `passive` for a
 successful release, `active` for a waiting release, a to-do, a failed, void,
 forbidden or stopped release and the test, and `urgent` for `server_stuck`,
 `coordinator`, `sandbox`, `disk` and `credit`. A batch takes the highest level;
-the Bark channel groundwork maps it to Bark's attention level (automatic delivery
-comes later). Release alerts start with the target description kept
+the Bark channel maps it to Bark's attention level. Release alerts start with the target description kept
 when the release was asked, even if the description changes later. See
 [alerts](releases.md#alerts) for command timing and one-time codes.
 Prices must be finite numbers, zero or more; zero and decimals are accepted.
@@ -1346,7 +1366,7 @@ of them has less free than the floor, it starts no new task, verification, try, 
 - `hansa explain server` lists each volume with its free space;
 - a queued task, merge or release says it waits for space;
 - the coordinator's session is told once when a volume goes under the floor and once when all are back over it,
-  and the principal's alert command (when one is set) runs once, with `HANSA_ALERT_KIND=disk`.
+  and every alert channel set up for the principal receives one disk alert (the command gets `HANSA_ALERT_KIND=disk`).
 
 It starts again by itself once every volume has the floor and 1 GB more free, so that it does not stop and start
 at every round around the line. A release asked meanwhile waits, approved, and goes once there is space.

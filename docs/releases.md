@@ -96,7 +96,7 @@ recorded as the principal's answer given through the coordinator (channel
 `code`); three wrong codes void it, and it lapses when the release is
 answered, stopped or no longer what was asked, after 24 hours, or when a new
 alert for the release brings a new one. With no alert command there is no
-code: the page alone answers. The principal's alert command must not keep the alert's
+code, even with Bark on: the page alone answers. The principal's alert command must not keep the alert's
 text anywhere the coordinator can read it (a file, a log, a chat history):
 the code in it approves a release. No lane may be named `yes` or `no`, as
 those words begin the answer. hansa serve runs the
@@ -499,7 +499,25 @@ saving is still allowed.
 
 ## Alerts
 
-Alerts reach the principal away from the page. The principal may set one
+Alerts reach the principal away from the page through Bark on an iPhone, an
+alert command, or both. To set up Bark, open **Settings → Alerts → Bark** on the
+page. Copy the device key from the Bark app (not the whole URL), paste it into
+**Bark device key** and press **Save key**. Turn on **Turn on Bark**, keep the
+default `https://api.day.app` or enter your own HTTPS server, then **Save settings**.
+**Clear key** removes the key; the page shows only whether one is saved.
+Only the principal can save the settings and key, which stays under `secrets/`.
+The desk's name and alert texts leave this machine for the Bark server and
+Apple's push service; both can read them. One-time release codes never go to
+Bark. Answer its waiting releases on the page; only an alert command receives
+codes, and Bark alone makes no code.
+
+Each gathered batch goes to every channel that is set up. Bark needs its switch
+on and a saved key; a command needs a nonblank command line. With both, the sends
+run side by side with independent deadlines and results. A slow or failed
+channel does not delay the other's send, change its result, or send it a failure
+notice. With neither, nothing is queued.
+
+The principal may also set one
 alert command line on the page (Settings, Alerts), such as a script that
 sends a phone message; the page records that it saved it, and when. Only the
 page sets it: no `hansa` command sets, changes or clears it, and `hansa lane
@@ -528,7 +546,7 @@ for `/work/shop/desk`, or `[hansa] desk desk: ...` for `/desk`. Spaces and
 non-ASCII letters stay as they are. Desks with the same last two folders have
 the same alert name. A new to-do reads `to-do #N for you: <text>`; the principal
 answers in the conversation. When the gathered alerts go out, to-dos already
-closed are left out. If nothing remains, no alert command runs. Closing a to-do
+closed are left out. If nothing remains, neither channel sends. Closing a to-do
 after its alert went out sends nothing more.
 
 The page prefills an unsaved `alert_language` from its own language; alerts stay
@@ -543,7 +561,7 @@ level, and `HANSA_ALERT_LEVEL` takes the highest in a batch:
 | `active` | A waiting release, a to-do, a failed, void, forbidden or stopped release, and the test |
 | `urgent` | `server_stuck`, `coordinator`, `sandbox`, `disk`, `credit` |
 
-Nothing else uses the level yet.
+Bark maps these to passive, active and time-sensitive notifications, respectively.
 
 For a release refused by the word scan, the alert gives only counts of hits
 and lines that could not be checked against patterns; the entries, lines and
@@ -562,19 +580,24 @@ already stopped waiting when its code was to be made) reads `release #1 of lane 
 (main at 08e2cfc99f) waits for your yes on the page: 8 commit(s), command:
 ...`. The cut at 1,000 characters never takes a code. It has 30 seconds; its own exit ends the run, even if it leaves a
 child running, and only at the limit is its process group killed. Alerts
-within 20 seconds of each other go out in one run, one run at a time, and at
-most 20 runs an hour: beyond that, alerts are held and go out together in one
+within 20 seconds of each other go out in one run to every channel that is set up,
+one batch at a time, and at most 20 runs an hour: beyond that, alerts are held and go out together in one
 run when the hour frees a run, with a line saying how many were held back
 (the page's test button is not held). A run that fails or times out is recorded
-(event `alert_failed`) and `hansa status` shows the last failure with its exit
+(event `alert_failed` with `channel: "command"`) and `hansa status` shows the last failure with its exit
 code and last lines (none for an alert that held a release's one-time code:
-then only how it ended is kept); there is no retry: the next alert tries again. The page
-has a button that sends a test alert; no coordinator command sends one.
+then only how it ended is kept); the command is never retried: the next alert tries again.
+Bark has a separate 30-second deadline including its transport's at most three
+tries; the batch never retries it. `hansa status` also shows Bark's last result,
+`sent` or the reason it could not send. A failed push records `alert_failed` with
+`channel: "bark"` and its reason. Neither channel carries the other's failure.
+The page has a button that sends a test alert through every channel that is set
+up; no coordinator command sends one.
 `hansa explain` says whether a command is set and what it is.
 
 The `coordinator` alert says that what hansa posts to the coordinator's session (see [hearing from
 hansa](desk.md#hearing-from-hansa)) cannot reach it. Its text names the desk, the session (its pid, and its name
-when known), the case, and what waits: how many things and the oldest, or the task. It has three cases, each after
+when known), the case, and what waits: how many things and the oldest, or the task. It has four cases, each after
 the minutes the principal sets on the page (Settings, Alerts: whole minutes from 0 to 1440, 0 turns that case off; no
 `hansa` command sets them):
 
@@ -597,22 +620,23 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   (done, not merged or closed), and the session is `idle` at a lookup after that. Once per task across the desk,
   however many followers watch it (a task that records no session goes to each); its next round may alert again.
   hansa does not post it again.
+- **Its turns fail** (30 minutes): API errors keep ending the session's turns.
+  Errors only the principal can fix alert at once. After an alert, a normal turn
+  sends one quiet recovery notice. This also works with Bark alone.
 
 The session's follower looks the last two up, at most once a minute counting its lookup of the session's name (one
 run of `claude agents --json` serves both), and only while one could hold: something was
 posted in the minutes of the second case or waits to be posted, or a task it posted has waited the minutes of the
-third. It looks nothing up in an idle round with nothing waiting, nor while no alert command is set, and what it has
+third. It looks nothing up in an idle round with nothing waiting, nor while no alert channel is set up, and what it has
 alerted stays alerted when it restarts on new code. `hansa status` shows a line while a case holds, such as
 `the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`.
 
-### HTTPS transport groundwork
-
-### Bark channel groundwork
+### Bark channel
 
 `hansa.alert_bark` supplies a built-in channel for the principal's Bark iPhone
-app. This is groundwork: the page has no Bark controls yet, and the alert queue
-does not automatically deliver to Bark. The existing alert command still gets
-its release codes as before. No coordinator command sets or tests Bark.
+app. The page's setup steps are above; `hansa serve` automatically delivers each
+gathered batch while Bark is on with a key. No coordinator command sets or tests
+Bark. The following details describe what is saved and sent.
 
 Desk settings hold `alert_bark: {"on": false, "server": "https://api.day.app"}`.
 Only the principal (`Desk.save_settings(..., by="page")`) changes these. An older
@@ -656,7 +680,8 @@ while Bark and Apple's push service add their own envelope.
 
 Send and test use `alert_http.send(..., deadline_s=30)` and return only a category.
 Each attempt records `alert_channel` with `channel: "bark"`, `ok` and `why`, and
-updates the last result. Local outcomes are `off`, `no_key`, `empty`,
+updates the last result. Failure also records `alert_failed` with that channel
+and reason. Local outcomes are `off`, `no_key`, `empty`,
 `refused_url` and `too_big`; otherwise the category is the transport's result.
 `hansa status` and its JSON/page API expose `alert_bark: {on, key_set, last}`;
 the command shows key presence and the last category, without the key or server.
@@ -668,8 +693,7 @@ the configured Bark server and Apple's push service can read the push text.
 ### HTTPS transport
 
 `hansa.alert_http.send(requests: list[dict], deadline_s: float = 30) -> list[dict]`
-is the transport for built-in push channels, currently Bark. Automatic delivery,
-page controls and ntfy come later.
+is the transport for built-in push channels, currently Bark. Bark delivery uses it automatically; ntfy is not implemented.
 
 Each request supplies `url`, a `json` object and a `headers` mapping. The transport
 POSTs UTF-8 JSON with `ensure_ascii=False` and

@@ -607,11 +607,13 @@ const T = ZH ? {
   releaseMailboxes:"新增行中的邮箱必须使用保留示例域名或列入允许名单（合并和发布时检查；默认关闭）",
   releaseMailboxAllow:"邮箱允许名单（每行一项，忽略大小写）：完整邮箱地址允许该地址；@域名允许该域名及其子域名",
   f_release:"发布命令",
-  alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调员叫停了发布、协调员向你提了请求、hansa serve 很久没跑完一轮、hansa 发给协调员会话的消息到不了它）由 hansa 运行，以这台机器的账号在沙箱外、在工作台 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，级别在 HANSA_ALERT_LEVEL，正文（按保存的提醒语言，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；20 秒内产生的提醒合并处理，只运行一次提醒命令（空＝不提醒）。协调员不能设置它，也不发提醒",
+  alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调员叫停了发布、协调员向你提了请求、hansa serve 很久没跑完一轮、hansa 发给协调员会话的消息到不了它）由 hansa 运行，以这台机器的账号在沙箱外、在工作台 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，级别在 HANSA_ALERT_LEVEL，正文（按保存的提醒语言，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；20 秒内产生的提醒合并处理，只运行一次提醒命令（空＝不运行提醒命令）。协调员不能设置它，也不发提醒",
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
+  barkOn:"开启 Bark", barkServer:"Bark 服务器（HTTPS）", barkKey:"Bark 设备密钥",
+  barkNote:"从 iPhone 的 Bark 应用复制设备密钥（不要粘贴整个网址），在这里保存密钥，开启 Bark 并保存设置。默认服务器为 https://api.day.app，也可使用自己的 HTTPS 服务器。工作台名称和提醒正文会发送到 Bark 服务器和 Apple 推送服务，两者都能读取；一次性发布码只发送给提醒命令，永远不会发送到 Bark。",
   alertKeep:"提醒命令不要把提醒的文字留在协调员能读到的地方（文件、日志或聊天记录）：其中的一次性码能批准发布。",
   alertOutside:"这个文件在工作台的 secrets/ 外，协调员可以修改它，一次性发布码会经过它；请把它放在 secrets/ 下。",
-  alertCoordinatorNote:"种类 coordinator：hansa 发给协调员会话的消息到不了它时提醒你：没有会话接收 hansa 消息，要发的消息等了这么久（hansa serve 提醒一次，有会话再次接收后才会再提醒）；会话停在权限对话框或问题上，发给它的消息未得到处理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，hansa 不再发给它）。0 到 1440 的整数分钟，0＝不提醒这一种；没有提醒命令时一种也不提醒。协调员不能改",
+  alertCoordinatorNote:"种类 coordinator：hansa 发给协调员会话的消息到不了它时提醒你：没有会话接收 hansa 消息，要发的消息等了这么久（hansa serve 提醒一次，有会话再次接收后才会再提醒）；会话停在权限对话框或问题上，发给它的消息未得到处理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，hansa 不再发给它）。0 到 1440 的整数分钟，0＝不提醒这一种；没有可用的提醒渠道时一种也不提醒。协调员不能改",
   laneTargets:"发布目标：基础分支发出去的各种方式，每个发布目标有自己的命令、时限（分钟）和必须先发布的发布目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 发布目标会在该提交的独立副本中运行，不占用仓库",
   laneMergeCheck:"合并检查所用的命令：合并前由 hansa 在把这件任务并上基础分支后跑，代替检查；每件改了东西的任务合并前都跑，任务做完后不跑（空＝合并检查运行工作线检查）", mergeTimeout:"合并检查最长分钟数（空＝同每件任务最长分钟数）", f_merge_check:"合并检查"
 } : {
@@ -762,11 +764,13 @@ const T = ZH ? {
   releaseMailboxes:"Require reserved example domains or allowlisted mailboxes in added lines (checked at merges and releases; off by default)",
   releaseMailboxAllow:"Mailbox allowlist (one entry per line, ignoring case): a full address allows that address; @domain allows the domain and its subdomains",
   f_release:"release",
-  alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time, what hansa posts to the coordinator's session cannot reach it), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND and its level in HANSA_ALERT_LEVEL, the text (in the saved alert language, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alerts). The coordinator cannot set it and sends no alerts",
+  alertCmd:"Alert command: hansa runs it when something waits for you (a release waits for your yes, a release ends, the coordinator stops a release, the coordinator files a request, hansa serve finishes no round for a long time, what hansa posts to the coordinator's session cannot reach it), as this machine's account, outside the sandbox, in a temporary folder of its own under the desk's secrets/alert-runs (removed when it ends); the kind of alert is in HANSA_ALERT_KIND and its level in HANSA_ALERT_LEVEL, the text (in the saved alert language, keys removed, about 1,000 characters at most) on standard input; it has 30 seconds; alerts within 20 seconds of each other go out in one run (blank = no alert command). The coordinator cannot set it and sends no alerts",
   alertSavedAt:t => `saved on this page ${t}`, alertTest:"Send a test alert", alertTesting:"sending…", alertTestOk:"test alert sent", alertTestBad:"test alert failed: ",
+  barkOn:"Turn on Bark", barkServer:"Bark server (HTTPS)", barkKey:"Bark device key",
+  barkNote:"Copy the device key from the Bark app on your iPhone (not its whole URL), save the key here, turn on Bark and Save settings. The default server is https://api.day.app; you may use your own HTTPS server. The desk name and alert texts leave this machine for the Bark server and Apple's push service; both can read them. One-time release codes go only to the alert command, never to Bark.",
   alertKeep:"Your alert command must not keep the alert's text anywhere the coordinator can read it (a file, a log, a chat history): the one-time code in it approves a release.",
   alertOutside:"This file is outside the desk's secrets/: the coordinator can change it, and one-time release codes pass through it; keep it under secrets/.",
-  alertCoordinatorNote:"Alerts of kind coordinator, when what hansa posts to the coordinator's session cannot reach it: no session hears from hansa while what it would post waits this long (hansa serve alerts once, and again only after a session has heard from hansa since); the session waits on a permission dialog or a question with what was posted to it unanswered (once per stretch of waiting); a task posted to it has waited for review this long while the session is idle (once per task; hansa does not post it again). Whole minutes from 0 to 1440; 0 turns that one off; with no alert command, none goes out. The coordinator cannot change them",
+  alertCoordinatorNote:"Alerts of kind coordinator, when what hansa posts to the coordinator's session cannot reach it: no session hears from hansa while what it would post waits this long (hansa serve alerts once, and again only after a session has heard from hansa since); the session waits on a permission dialog or a question with what was posted to it unanswered (once per stretch of waiting); a task posted to it has waited for review this long while the session is idle (once per task; hansa does not post it again). Whole minutes from 0 to 1440; 0 turns that one off; with no alert channel set up, none goes out. The coordinator cannot change them",
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
@@ -1717,6 +1721,7 @@ let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, REV = null, LANE_C
 // Drafts live only in this page's memory. In particular, keys never enter browser storage or settings JSON.
 let settingsBaseline = null, settingsLoading = null, settingsSaving = false, settingsGroup = "providers", settingsEpoch = 0;
 let settingsMessage = "", settingsProblems = [], KEY_DRAFTS = {}, newProviderName = "", newPriceName = "";
+let BARK_KEY_SET = false, BARK_KEY_DRAFT = "";
 let settingsRebase = "", keyProblemProvider = "";
 let settingsPending = "save", settingsFailure = "", fieldRecords = [];
 let settingsForm, settingsSaveButton, settingsDiscardButton, settingsBadge, settingsSaveState;
@@ -1733,7 +1738,7 @@ const GROUP_KEYS = {
   providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact"], lanes:[],
   security:["workers_may_not_read", "workers_may_not_read_added"],
   releases:["releases_without_asking", "release_direct", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow"],
-  alerts:["alert", "alert_language", "coordinator_alert"], prices:["prices"]
+  alerts:["alert", "alert_language", "alert_bark", "coordinator_alert"], prices:["prices"]
 };
 // Object order and optional blank fields do not change a setting's value. Array order still matters.
 function settingValue(value) {
@@ -1763,14 +1768,15 @@ function groupDirty(key) {
   const base = JSON.parse(settingsBaseline);
   return (GROUP_KEYS[key] || []).some(k => settingText(S[k]) !== settingText(base[k]))
     || (key === "providers" && (Object.values(KEY_DRAFTS).some(Boolean) || !!newProviderName))
+    || (key === "alerts" && !!BARK_KEY_DRAFT)
     || (key === "prices" && !!newPriceName);
 }
 function settingsDirty() {
   return !!S && ((settingsBaseline !== null && settingText(S) !== settingsBaseline)
-    || Object.values(KEY_DRAFTS).some(value => value !== "") || !!newProviderName || !!newPriceName);
+    || Object.values(KEY_DRAFTS).some(value => value !== "") || !!BARK_KEY_DRAFT || !!newProviderName || !!newPriceName);
 }
 function refreshSettingsState() {
-  const dirty = settingsDirty(), pendingKeys = Object.values(KEY_DRAFTS).some(Boolean);
+  const dirty = settingsDirty(), pendingKeys = Object.values(KEY_DRAFTS).some(Boolean) || !!BARK_KEY_DRAFT;
   const pending = settingsPending === "reload" ? T.reloading : settingsPending === "key" ? T.keySaving : T.saving;
   const tone = settingsSaving ? "pending" : settingsProblems.length ? "error" : dirty ? "dirty" : settingsMessage ? "success" : "idle";
   const symbol = {pending:"pending", error:"error", dirty:"edit", success:"check", idle:"check"}[tone];
@@ -1854,9 +1860,11 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   CREDIT_RESTS = r.provider_credit || {};
   RELEASE_UNMATCHED = r.release_unmatched || []; RELEASE_LAST = r.release_last || {}; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
+  BARK_KEY_SET = !!r.alert_bark_key_set;
   S.alert = S.alert || {command:""}; S.coordinator_alert = S.coordinator_alert || {}; S.coordinator_compact = S.coordinator_compact || {};
+  S.alert_bark = S.alert_bark || {on:false, server:"https://api.day.app"};
   if (!r.alert_language_saved) S.alert_language = ZH ? "zh" : "en";
-  if (!keepKeys) KEY_DRAFTS = {};
+  if (!keepKeys) { KEY_DRAFTS = {}; BARK_KEY_DRAFT = ""; }
   newProviderName = ""; newPriceName = ""; settingsMessage = ""; settingsFailure = ""; settingsRebase = ""; keyProblemProvider = "";
   settingsBaseline = settingText(S);
   forbiddenSeenEntries = new Set(S.release_forbidden || []);
@@ -1948,6 +1956,21 @@ async function topUpProvider(name) {
   } catch (e) { err(e); }
   finally { settingsSaving = false; refreshSettingsState(); }
 }
+async function saveBarkKey(clear = false) {
+  if (settingsSaving || (!clear && !BARK_KEY_DRAFT.trim())) return;
+  const value = clear ? "" : BARK_KEY_DRAFT;
+  settingsEpoch++;
+  settingsPending = "key"; settingsSaving = true; refreshSettingsState();
+  try {
+    const r = await api("/api/alert/bark/key", {key:value});
+    if (r.ok) {
+      BARK_KEY_SET = !!value.trim(); BARK_KEY_DRAFT = "";
+      settingsMessage = clear ? T.keyCleared : T.keySaved; settingsFailure = "";
+      renderSettings();
+    } else { settingsFailure = "key"; renderSettings(r.problems || [T.problems]); }
+  } catch (e) { settingsFailure = "key"; renderSettings([String(e.message || e)]); }
+  finally { settingsSaving = false; refreshSettingsState(); }
+}
 const help = (text, title = T.learnMore) => h("details", {class:"help"}, h("summary", {}, title), h("p", {}, text));
 function controlMeta(obj, key) {
   if (!S) return null;
@@ -1957,6 +1980,7 @@ function controlMeta(obj, key) {
   if (obj === S.coordinator_compact) return prefix("coordinator", "coordinator_compact:");
   if (obj === S.coordinator_alert) return {group:"alerts", matches:p => p.startsWith("coordinator_alert") && (p.includes(`(${key})`) || p.startsWith("coordinator_alert must"))};
   if (obj === S.alert) return prefix("alerts", "the alert command");
+  if (obj === S.alert_bark) return prefix("alerts", key === "server" ? "alert_bark.server" : "alert_bark");
   if (obj === S.coordinator) return {group:"coordinator", matches:p => p.startsWith("coordinator:") && p.includes(key)};
   const provider = Object.entries(S.providers).find(([, value]) => value === obj);
   if (provider) return prefix("providers", `provider ${provider[0]}: ${key === "base_url" ? "the endpoint address" : key}`);
@@ -1976,7 +2000,7 @@ function problemTarget(problem) {
   const record = fieldRecords.find(r => r.matches(problem));
   if (record) return record;
   const group = /^(provider |at least one provider)/.test(problem) ? "providers"
-    : /^(coordinator_alert|alert_language|the alert command)/.test(problem) ? "alerts"
+    : /^(coordinator_alert|alert_language|alert_bark|the alert command)/.test(problem) ? "alerts"
     : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
     : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
     : /^(release|the releases without asking|the words no release)/.test(problem) ? "releases" : /^price/.test(problem) ? "prices" : /^lane/.test(problem) ? "lanes" : "";
@@ -2113,11 +2137,12 @@ function pick(obj, key, options, labels) {
    of the coordinator alert's three cases (blank: the default) */
 function alertSection() {
   S.alert = S.alert || {command:""};
+  S.alert_bark = S.alert_bark || {on:false, server:"https://api.day.app"};
   const said = h("span", {});
   const test = h("button", {onclick: async () => { test.disabled = true; said.textContent = T.alertTesting; said.className = "muted";
     try { const r = await api("/api/alert/test", {});
       said.textContent = r.ok ? T.alertTestOk : T.alertTestBad + ((r.problems || []).join("; ")
-        || (r.timed_out ? "timeout" : `exit ${r.exit}`) + ((r.tail || []).length ? ": " + r.tail.join(" | ") : r.withheld ? ": " + r.withheld : ""));
+        || (r.why || (r.timed_out ? "timeout" : `exit ${r.exit}`)) + ((r.tail || []).length ? ": " + r.tail.join(" | ") : r.withheld ? ": " + r.withheld : ""));
       said.className = r.ok ? "ok" : "bad"; } catch (e) { err(e); }
     test.disabled = false; }}, T.alertTest);
   S.coordinator_alert = S.coordinator_alert || {};
@@ -2129,6 +2154,15 @@ function alertSection() {
     h("p", {class:"field-note"}, T.alertKeep),
     ALERT_OUTSIDE.map(f => h("div", {class:"warn"}, `${f.path}: ${T.alertOutside}`)),
     h("div", {class:"row"}, test, said)),
+    section("Bark",
+      fields(field(T.barkOn, bind(S.alert_bark, "on", "bool")),
+        field(T.barkServer, bind(S.alert_bark, "server")),
+        field(T.barkKey, h("input", {type:"password", autocomplete:"off", "aria-label":T.barkKey, value:BARK_KEY_DRAFT,
+          oninput:e => { BARK_KEY_DRAFT = e.target.value; refreshSettingsState(); }}))),
+      h("p", {class:"field-note"}, BARK_KEY_SET ? T.keySet : T.keyMissing),
+      h("div", {class:"row"}, h("button", {onclick:() => saveBarkKey()}, T.saveKey),
+        h("button", {onclick:() => saveBarkKey(true)}, T.clearKey)),
+      help(T.barkNote)),
     section(T.alertTiming, fields(
       field(T.noSessionShort, bind(S.coordinator_alert, "no_session_min", "number")),
       field(T.windowShort, bind(S.coordinator_alert, "window_min", "number")),

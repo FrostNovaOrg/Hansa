@@ -1,4 +1,4 @@
-"""Bark channel groundwork. The page and automatic alert delivery do not call it yet.
+"""Bark push channel for the principal, delivered alongside the alert command.
 
 send takes a gathered, code-free queue batch, before alert._with_codes. There is no
 public key reader: consumers get only has_key; sending and Desk's redaction read it.
@@ -95,6 +95,8 @@ def _record(desk: Desk, why: str) -> str:
     with desk.lock():
         write_json(desk.state_dir / "alert-bark-last.json", {"at": now(), "ok": why == "sent", "why": why})
         desk.event("alert_channel", channel="bark", ok=why == "sent", why=why)
+        if why != "sent":
+            desk.event("alert_failed", channel="bark", why=why)
     return why
 
 
