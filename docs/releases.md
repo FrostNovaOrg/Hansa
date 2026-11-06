@@ -565,3 +565,52 @@ posted in the minutes of the second case or waits to be posted, or a task it pos
 third. It looks nothing up in an idle round with nothing waiting, nor while no alert command is set, and what it has
 alerted stays alerted when it restarts on new code. `hansa status` shows a line while a case holds, such as
 `the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`.
+
+### HTTPS transport groundwork
+
+`hansa.alert_http.send(requests: list[dict], deadline_s: float = 30) -> list[dict]`
+is the transport for future built-in push channels. Only its tests call it today;
+Bark and ntfy channels, settings, status and event integration come later. The
+existing alert command and page are unchanged.
+
+Each request supplies `url`, a `json` object and a `headers` mapping. The transport
+POSTs UTF-8 JSON with `ensure_ascii=False` and
+`Content-Type: application/json; charset=utf-8`, overriding any supplied content
+type. Results keep request order and contain only `ok`, `status` (an HTTP integer
+or `None`), `tries` (0–3) and `why`. The fixed categories are `sent`, `refused_url`,
+`redirect`, `timeout`, `network`, `tls`, `http_429`, `http_4xx`, `http_5xx`,
+`too_big` and `deadline`. No result or log includes a URL, header value, request
+or response body, or exception text.
+
+One standalone child runs this module with `sys.executable -I`, avoiding caller
+import hooks and an import of the rest of hansa. Requests arrive on stdin, never
+on the command line. Each request has its own thread; completed results and
+attempt counts stream back immediately. The parent bounds stdin transfer and
+waiting by the shared deadline, then sends SIGKILL to the child's new process
+group and reaps it. Completed results survive; unfinished requests return
+`deadline`. Child stderr is discarded to keep exception details private.
+
+Only HTTPS URLs without userinfo, fragments or control characters are accepted;
+header names and values containing CR or LF are refused before a connection.
+JSON bodies larger than 64 KiB are also refused before sending (`too_big`, zero
+tries). These checks prevent request splitting and accidental disclosure to a
+different destination; keep them when adding channels. TLS always uses Python's
+verified default context. urllib keeps its default proxy handlers, including
+environment and macOS system settings and `no_proxy`; there is no independent
+DNS lookup or address-range restriction, so proxy setups using 198.18.x.x work.
+
+A try has a socket timeout of at most five seconds, shortened by the remaining
+deadline. There are at most three tries with backoff of one then three seconds.
+Connection failures and timeouts retry, as do 429 and 500/502/503/504. A 429 uses
+`Retry-After` in integer seconds when the wait fits before the deadline, otherwise
+normal backoff. Redirects are never followed or retried. TLS failures and other
+4xx/5xx stop immediately; 413 is `too_big`. At most 16 KiB of each response is
+read and discarded, including error responses; a failure discarding an already
+acknowledged response does not resend it. Each try builds a fresh urllib request
+so proxy-handler mutations cannot change later tries from HTTPS to HTTP.
+
+`AlertHTTPTest` in `tests/test_hansa.py` checks these rules with fake openers and
+responses, plus real isolated children with sleeping fakes for deadline and
+concurrency checks. Keep the tests while channels depend on this transport;
+they prevent retry, proxy, deadline and secret-disclosure regressions without
+using a network service.
