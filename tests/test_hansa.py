@@ -2,6 +2,7 @@
 import contextlib
 import ast
 import csv
+import email.message
 import errno
 import fcntl
 import functools
@@ -15,6 +16,7 @@ import shlex
 import shutil
 import signal
 import socket
+import ssl
 import stat
 import struct
 import subprocess
@@ -34,7 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import hansa  # noqa: E402
-from hansa import account, cli, cost, menu, notify, plugin, up, views  # noqa: E402
+from hansa import account, alert_http, cli, cost, menu, notify, plugin, up, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, read_json, validate, write_json, write_problems  # noqa: E402
 from hansa.run import (Dispatcher, provider_problem, text_only,  # noqa: E402
@@ -45152,6 +45154,406 @@ class WorkflowTest(unittest.TestCase):
                                 "python3 -m unittest -v contrib.codex.tests",
                                 "claude plugin validate hansa/mod", "claude plugin test hansa/mod"):
                     self.assertIn(command, job)
+
+
+class AlertHTTPTest(unittest.TestCase):
+    """Push transport rules with fake openers, including fakes inside a real isolated child."""
+
+    class Clock:
+        def __init__(self):
+            self.now = 100.0
+            self.sleeps = []
+
+        def __call__(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    class Response:
+        def __init__(self, code=204, headers=None):
+            self.code, self.headers = code, headers or {}
+            self.reads, self.closed = [], False
+
+        def read(self, size):
+            self.reads.append(size)
+            return (b"response-body-secret" + b"x" * 32000)[:size]
+
+        def close(self):
+            self.closed = True
+
+    class Opener:
+        def __init__(self, *answers):
+            self.answers, self.calls = list(answers), []
+
+        def open(self, request, timeout):
+            self.calls.append((request, timeout))
+            answer = self.answers.pop(0)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+    def setUp(self):
+        self.clock = self.Clock()
+        self.request = {"url": "https://push.example.test/url-secret?key=query-secret",
+                        "json": {"text": "body-secret 中文"}, "headers": {"Authorization": "header-secret"}}
+
+    def deliver(self, opener, request=None, seconds=30):
+        return alert_http._send_one(self.request if request is None else request, self.clock() + seconds,
+                                    opener=opener, clock=self.clock, sleep=self.clock.sleep)
+
+    def result(self, why, status=None, tries=1):
+        return {"ok": why == "sent", "status": status, "tries": tries, "why": why}
+
+    def test_https_2xx_sends_utf8_json_once(self):
+        for status in (200, 201, 204, 299):
+            with self.subTest(status=status):
+                opener = self.Opener(self.Response(status))
+                self.assertEqual(self.deliver(opener), self.result("sent", status))
+                self.assertEqual(len(opener.calls), 1)
+                request, timeout = opener.calls[0]
+                self.assertEqual(timeout, 5)
+                self.assertEqual(request.get_method(), "POST")
+                self.assertEqual(request.data, json.dumps(self.request["json"], ensure_ascii=False).encode("utf-8"))
+                self.assertIn("中文".encode("utf-8"), request.data)
+                self.assertEqual(request.get_header("Content-type"), "application/json; charset=utf-8")
+                self.assertEqual(request.get_header("Authorization"), "header-secret")
+        request = dict(self.request, headers={"content-TYPE": "text/plain"})
+        opener = self.Opener(self.Response())
+        self.deliver(opener, request)
+        self.assertEqual(opener.calls[0][0].get_header("Content-type"), "application/json; charset=utf-8")
+
+    def test_refuses_unsafe_urls_and_headers_before_connection(self):
+        urls = ["http://push.example.test", "https://user:password@push.example.test",
+                "https://user@push.example.test", "https://push.example.test/#fragment",
+                "https://push.example.test/#", "https://[broken", "https://push.example.test:bad", "https://"]
+        urls += ["https://push.example.test/" + chr(c) + "secret" for c in list(range(32)) + list(range(127, 160))]
+        requests = [dict(self.request, url=url) for url in urls]
+        requests += [dict(self.request, headers={name: value}) for name, value in
+                     (("Bad\rName", "secret"), ("Bad\nName", "secret"), ("X-Key", "secret\rvalue"),
+                      ("X-Key", "secret\nvalue"))]
+        with unittest.mock.patch.object(alert_http, "_make_opener") as factory:
+            for request in requests:
+                with self.subTest(request=request):
+                    self.assertEqual(alert_http._send_one(request, self.clock() + 30),
+                                     self.result("refused_url", tries=0))
+            factory.assert_not_called()
+
+    def test_redirects_are_not_followed_or_retried(self):
+        for status in (300, 301, 302, 303, 304, 307, 308, 399):
+            with self.subTest(status=status):
+                opener = self.Opener(self.Response(status, {"Location": "https://elsewhere.test/location-secret"}))
+                self.assertEqual(self.deliver(opener), self.result("redirect", status))
+                self.assertEqual(len(opener.calls), 1)
+        # Exercise urllib's real redirect/error handlers, with only the socket-facing handler replaced.
+        def response(handler, request):
+            headers = email.message.Message()
+            headers["Location"] = "https://elsewhere.test/location-secret"
+            reply = urllib.response.addinfourl(io.BytesIO(b"response-body-secret"),
+                                              headers, request.full_url, 302)
+            reply.msg = "fixture"
+            return reply
+        with unittest.mock.patch.object(urllib.request.HTTPSHandler, "https_open", autospec=True,
+                                        side_effect=response) as opening:
+            self.assertEqual(self.deliver(alert_http._make_opener()), self.result("redirect", 302))
+            self.assertEqual(opening.call_count, 1)
+
+    def test_tls_failures_are_not_retried(self):
+        for error in (ssl.SSLCertVerificationError("bad certificate secret"),
+                      ssl.CertificateError("wrong host secret"), ssl.SSLError("TLS secret")):
+            for wrapped in (False, True):
+                with self.subTest(error=type(error), wrapped=wrapped):
+                    opener = self.Opener(urllib.error.URLError(error) if wrapped else error)
+                    self.assertEqual(self.deliver(opener), self.result("tls"))
+                    self.assertEqual(len(opener.calls), 1)
+        self.assertEqual(self.clock.sleeps, [])
+
+    def test_network_failures_retry_three_times_with_backoff(self):
+        for error in (ConnectionRefusedError("refused secret"), socket.gaierror("DNS secret"),
+                      ConnectionResetError("reset secret")):
+            for wrapped in (False, True):
+                with self.subTest(error=type(error), wrapped=wrapped):
+                    self.clock = self.Clock()
+                    failure = urllib.error.URLError(error) if wrapped else error
+                    opener = self.Opener(failure, failure, failure)
+                    self.assertEqual(self.deliver(opener), self.result("network", tries=3))
+                    self.assertEqual([timeout for _, timeout in opener.calls], [5, 5, 5])
+                    self.assertEqual(self.clock.sleeps, [1, 3])
+        opener = self.Opener(urllib.error.URLError("exception-secret"), self.Response(200))
+        self.assertEqual(self.deliver(opener), self.result("sent", 200, 2))
+
+    def test_five_second_timeouts_are_retried_and_bounded_by_deadline(self):
+        for error in (socket.timeout("timeout secret"), urllib.error.URLError(socket.timeout("timeout secret"))):
+            self.clock = self.Clock()
+            opener = self.Opener(error, error, error)
+            self.assertEqual(self.deliver(opener), self.result("timeout", tries=3))
+            self.assertEqual([timeout for _, timeout in opener.calls], [5, 5, 5])
+            self.assertEqual(self.clock.sleeps, [1, 3])
+        def timed_out(request, timeout):
+            self.clock.now += timeout
+            raise socket.timeout("timeout secret")
+        self.clock = self.Clock()
+        opener = unittest.mock.Mock()
+        opener.open.side_effect = timed_out
+        self.assertEqual(self.deliver(opener, seconds=8), self.result("deadline", tries=2))
+        self.assertEqual([call.kwargs["timeout"] for call in opener.open.call_args_list], [5, 2])
+        self.assertEqual(self.clock(), 108)
+
+    def test_429_uses_seconds_retry_after_when_it_fits_else_backoff(self):
+        for value, sleeps in (("2", [2, 2]), (" 2 ", [2, 2]), ("0", [0, 0]), ("999", [1, 3]),
+                              ("30", [1, 3]), ("Wed, 21 Oct 2030 07:28:00 GMT", [1, 3]),
+                              ("-1", [1, 3]), ("nan", [1, 3]), ("２", [1, 3])):
+            with self.subTest(value=value):
+                self.clock = self.Clock()
+                opener = self.Opener(*(self.Response(429, {"Retry-After": value}) for _ in range(3)))
+                self.assertEqual(self.deliver(opener), self.result("http_429", 429, 3))
+                self.assertEqual(self.clock.sleeps, sleeps)
+        opener = self.Opener(self.Response(429, {"Retry-After": "2"}), self.Response())
+        self.assertEqual(self.deliver(opener), self.result("sent", 204, 2))
+
+    def test_selected_5xx_retry_three_times(self):
+        for status in (500, 502, 503, 504):
+            with self.subTest(status=status):
+                self.clock = self.Clock()
+                opener = self.Opener(*(self.Response(status) for _ in range(3)))
+                self.assertEqual(self.deliver(opener), self.result("http_5xx", status, 3))
+                self.assertEqual(self.clock.sleeps, [1, 3])
+        opener = self.Opener(self.Response(503), self.Response(201))
+        self.assertEqual(self.deliver(opener), self.result("sent", 201, 2))
+
+    def test_other_4xx_including_413_and_other_5xx_are_not_retried(self):
+        for status in list(range(400, 429)) + list(range(430, 500)) + [501, 505, 599]:
+            with self.subTest(status=status):
+                opener = self.Opener(self.Response(status))
+                why = "too_big" if status == 413 else "http_4xx" if status < 500 else "http_5xx"
+                self.assertEqual(self.deliver(opener), self.result(why, status))
+                self.assertEqual(len(opener.calls), 1)
+        self.assertEqual(self.clock.sleeps, [])
+
+    def test_request_body_limit_is_64_kib_of_utf8_before_sending(self):
+        overhead = len(json.dumps({"text": ""}).encode("utf-8"))
+        opener = self.Opener(self.Response())
+        self.assertEqual(self.deliver(opener, dict(self.request, json={"text": "x" * (65536 - overhead)})),
+                         self.result("sent", 204))
+        self.assertEqual(len(opener.calls[0][0].data), 65536)
+        for text in ("x" * (65537 - overhead), "中" * 30000):
+            opener = self.Opener()
+            self.assertEqual(self.deliver(opener, dict(self.request, json={"text": text})),
+                             self.result("too_big", tries=0))
+            self.assertEqual(opener.calls, [])
+
+    def test_response_reads_at_most_16_kib_then_closes_including_http_errors(self):
+        for status in (204, 302, 400, 413, 429, 503):
+            with self.subTest(status=status):
+                responses = [self.Response(status) for _ in range(3 if status in (429, 503) else 1)]
+                errors = [urllib.error.HTTPError(self.request["url"], status, "exception-secret", {}, r)
+                          for r in responses]
+                result = self.deliver(self.Opener(*(responses if status == 204 else errors)))
+                why = {204: "sent", 302: "redirect", 400: "http_4xx", 413: "too_big",
+                       429: "http_429", 503: "http_5xx"}[status]
+                self.assertEqual(result, self.result(why, status, len(responses)))
+                for response in responses:
+                    self.assertEqual(response.reads, [16384])
+                    self.assertTrue(response.closed)
+
+    def test_failure_discarding_a_body_does_not_retry_an_acknowledged_post_or_redirect(self):
+        for status in (200, 302, 400, 413):
+            with self.subTest(status=status):
+                response = self.Response(status)
+                response.read = unittest.mock.Mock(side_effect=ConnectionResetError("response-body-secret"))
+                opener = self.Opener(response)
+                why = {200: "sent", 302: "redirect", 400: "http_4xx", 413: "too_big"}[status]
+                self.assertEqual(self.deliver(opener), self.result(why, status))
+                self.assertEqual(len(opener.calls), 1)
+                self.assertTrue(response.closed)
+
+    def test_default_opener_keeps_verified_tls_proxies_no_proxy_and_proxy_dns_ranges(self):
+        routes = []
+        def response(handler, request):
+            routes.append((request.host, request._tunnel_host))
+            reply = urllib.response.addinfourl(io.BytesIO(b""), {}, request.full_url, 204)
+            reply.msg = "fixture"
+            return reply
+        with unittest.mock.patch.dict(os.environ, {"https_proxy": "http://proxy.example.test:8123",
+                                                   "no_proxy": "direct.example.test"}, clear=True), \
+                unittest.mock.patch.object(urllib.request.HTTPSHandler, "https_open", autospec=True,
+                                           side_effect=response), \
+                unittest.mock.patch("socket.getaddrinfo", side_effect=AssertionError("no independent DNS")):
+            opener = alert_http._make_opener()
+            self.assertTrue(any(isinstance(h, urllib.request.ProxyHandler) for h in opener.handlers))
+            context = next(h._context for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler))
+            self.assertTrue(context.check_hostname)
+            self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+            for url in ("https://198.18.0.2/push", "https://direct.example.test/push"):
+                self.assertEqual(self.deliver(opener, dict(self.request, url=url)), self.result("sent", 204))
+        self.assertEqual(routes, [("proxy.example.test:8123", "198.18.0.2"), ("direct.example.test", None)])
+
+    def test_results_and_logs_never_contain_request_response_or_exception_secrets(self):
+        output, errors = io.StringIO(), io.StringIO()
+        results = []
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors), \
+                unittest.mock.patch("logging.Logger._log") as logging:
+            for answer in (self.Response(200), self.Response(302, {"Location": "location-secret"}),
+                           urllib.error.URLError("exception-secret url-secret header-secret body-secret"),
+                           ssl.SSLError("exception-secret"), ValueError("exception-secret")):
+                results.append(self.deliver(self.Opener(answer, answer, answer)))
+            logging.assert_not_called()
+        visible = json.dumps(results) + output.getvalue() + errors.getvalue()
+        for secret in (self.request["url"], "url-secret", "query-secret", "header-secret", "body-secret",
+                       "response-body-secret", "exception-secret", "location-secret"):
+            self.assertNotIn(secret, visible)
+        self.assertEqual(output.getvalue() + errors.getvalue(), "")
+
+    def test_retries_rebuild_requests_to_preserve_https_through_proxy(self):
+        routes = []
+        def response(handler, request):
+            routes.append((request.type, request.host, request._tunnel_host, request.selector))
+            status = 204 if len(routes) == 3 else 503
+            reply = urllib.response.addinfourl(io.BytesIO(b""), {}, request.full_url, status)
+            reply.msg = "fixture"
+            return reply
+        with unittest.mock.patch.dict(os.environ, {"https_proxy": "http://proxy.example.test:8123",
+                                                   "no_proxy": ""}, clear=True), \
+                unittest.mock.patch.object(urllib.request.HTTPSHandler, "https_open", autospec=True,
+                                           side_effect=response), \
+                unittest.mock.patch.object(urllib.request.HTTPHandler, "http_open", autospec=True,
+                                           side_effect=AssertionError("HTTPS retry used plain HTTP")) as plain:
+            self.assertEqual(self.deliver(alert_http._make_opener()), self.result("sent", 204, 3))
+            plain.assert_not_called()
+        self.assertEqual(routes, [("https", "proxy.example.test:8123", "push.example.test",
+                                   "/url-secret?key=query-secret")] * 3)
+        self.assertEqual(self.clock.sleeps, [1, 3])
+
+    def child_helper(self, folder, source):
+        helper = Path(folder) / "fake_alert_helper.py"
+        helper.write_text("import importlib.util, io, json, os, sys, threading, time\n"
+                          "from pathlib import Path\n"
+                          f"spec = importlib.util.spec_from_file_location('transport', {alert_http.__file__!r})\n"
+                          "transport = importlib.util.module_from_spec(spec)\n"
+                          "spec.loader.exec_module(transport)\n" + textwrap.dedent(source), encoding="utf-8")
+        return unittest.mock.patch.object(alert_http, "_HELPER", helper)
+
+    def test_deadline_kills_hanging_child_group_and_preserves_parallel_completed_result(self):
+        with tempfile.TemporaryDirectory() as folder:
+            started = Path(folder) / "started"
+            source = f'''
+                ready = threading.Event()
+                class Reply:
+                    code, headers = 201, {{}}
+                    def read(self, size): return b"response-body-secret"
+                    def close(self): pass
+                class Opener:
+                    def open(self, request, timeout):
+                        if "/slow" in request.full_url:
+                            Path({str(started)!r}).write_text(str(os.getpid()))
+                            ready.set()
+                            time.sleep(60)
+                        assert ready.wait(10), "slow request never started"
+                        return Reply()
+                transport._make_opener = Opener
+                transport._main()
+            '''
+            requests = [dict(self.request, url="https://push.example.test/slow"), self.request]
+            with self.child_helper(folder, source), \
+                    unittest.mock.patch.object(alert_http.os, "killpg", wraps=os.killpg) as kill, \
+                    unittest.mock.patch.object(alert_http.subprocess, "Popen", wraps=subprocess.Popen) as popen:
+                before = time.monotonic()
+                results = alert_http.send(requests, deadline_s=2)
+                elapsed = time.monotonic() - before
+            self.assertLess(elapsed, 4, "deadline exceeded its two-second cleanup allowance")
+            self.assertTrue(started.exists(), "the fake must actually enter its hanging open")
+            pid = int(started.read_text())
+            kill.assert_called_once_with(pid, signal.SIGKILL)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+            self.assertEqual(results, [self.result("deadline"), self.result("sent", 201)])
+            argv = popen.call_args.args[0]
+            self.assertEqual(argv[:2], [sys.executable, "-I"])
+            self.assertEqual(len(argv), 3)
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
+            self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.PIPE)
+            self.assertEqual(popen.call_args.kwargs["stderr"], subprocess.DEVNULL)
+            for secret in (self.request["url"], "header-secret", "body-secret"):
+                self.assertNotIn(secret, json.dumps(argv) + json.dumps(results))
+
+    def test_deadline_includes_stdin_transfer_to_a_child_that_never_reads(self):
+        with tempfile.TemporaryDirectory() as folder:
+            marker = Path(folder) / "started"
+            source = f"Path({str(marker)!r}).write_text('ready')\ntime.sleep(60)\n"
+            with self.child_helper(folder, source):
+                before = time.monotonic()
+                results = alert_http.send([dict(self.request, json={"text": "x" * 500000})], deadline_s=2)
+                elapsed = time.monotonic() - before
+            self.assertTrue(marker.exists())
+            self.assertLess(elapsed, 4)
+            self.assertEqual(results, [self.result("deadline", tries=0)])
+
+    def test_public_send_uses_real_helper_for_preflight_and_empty_or_expired_batches(self):
+        requests = [dict(self.request, url="http://push.example.test"),
+                    dict(self.request, json={"text": "x" * 65536})]
+        self.assertEqual(alert_http.send(requests), [self.result("refused_url", tries=0),
+                                                     self.result("too_big", tries=0)])
+        with unittest.mock.patch.object(alert_http.subprocess, "Popen") as popen:
+            self.assertEqual(alert_http.send([]), [])
+            self.assertEqual(alert_http.send([self.request], deadline_s=0), [self.result("deadline", tries=0)])
+            popen.assert_not_called()
+
+    def test_public_send_refuses_unserializable_requests_without_blocking_valid_requests(self):
+        circular = {}
+        circular["self"] = circular
+        bodies = [{"t": b"bytes"}, {"t": "a\ud800b"}, {"t": {"set"}}, circular, {"t": float("nan")}]
+        requests = [self.request] + [dict(self.request, json=body) for body in bodies] + [self.request]
+        with tempfile.TemporaryDirectory() as folder:
+            source = '''
+                class Reply:
+                    code, headers = 204, {}
+                    def read(self, size): return b"response-body-secret"
+                    def close(self): pass
+                class Opener:
+                    def open(self, request, timeout):
+                        assert json.loads(request.data) == {"text": "body-secret 中文"}
+                        assert request.get_header("Authorization") == "header-secret"
+                        return Reply()
+                transport._make_opener = Opener
+                transport._main()
+            '''
+            output, errors = io.StringIO(), io.StringIO()
+            with self.child_helper(folder, source), contextlib.redirect_stdout(output), \
+                    contextlib.redirect_stderr(errors), unittest.mock.patch("logging.Logger._log") as logging:
+                results = alert_http.send(requests)
+                logging.assert_not_called()
+            self.assertEqual(results, [self.result("sent", 204)] +
+                             [self.result("refused_url", tries=0)] * len(bodies) + [self.result("sent", 204)])
+            self.assertEqual(output.getvalue() + errors.getvalue(), "")
+        with unittest.mock.patch.object(alert_http.subprocess, "Popen", side_effect=OSError("exception-secret")):
+            self.assertEqual(alert_http.send([requests[1], self.request]),
+                             [self.result("refused_url", tries=0), self.result("network", tries=0)])
+
+    def test_public_send_sanitizes_child_protocol_and_discards_child_stderr(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = '''
+                given = json.load(sys.stdin)
+                print(given["requests"][0]["url"], file=sys.stderr)
+                print("invalid response-body-secret")
+                print(json.dumps({"index": 0, "tries": 1, "why": "sent", "status": 200, "ok": "header-secret",
+                                  "body": "body-secret", "url": given["requests"][0]["url"],
+                                  "headers": given["requests"][0]["headers"]}))
+                print(json.dumps({"index": 1, "tries": 1, "why": "exception-secret", "status": 400}))
+                print(json.dumps({"index": 1, "tries": 1, "why": "network", "status": "header-secret"}))
+                for index, tries in ((True, 1), (-1, 1), (2, 1), (1, "body-secret"), (1, True), (1, 4)):
+                    print(json.dumps({"index": index, "tries": tries, "why": "network", "status": 400}))
+                print('{"index": 1', end='', flush=True)
+            '''
+            output, errors = io.StringIO(), io.StringIO()
+            with self.child_helper(folder, source), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors), \
+                    unittest.mock.patch.object(alert_http.subprocess, "Popen", wraps=subprocess.Popen) as popen:
+                results = alert_http.send([self.request, self.request])
+            self.assertEqual(popen.call_args.kwargs["stderr"], subprocess.DEVNULL)
+            self.assertEqual(results, [self.result("sent", 200), self.result("deadline", tries=0)])
+            self.assertEqual(output.getvalue() + errors.getvalue(), "")
+        with unittest.mock.patch.object(alert_http.subprocess, "Popen", side_effect=OSError("exception-secret")):
+            self.assertEqual(alert_http.send([self.request]), [self.result("network", tries=0)])
 
 
 class ParallelRunnerTest(unittest.TestCase):
