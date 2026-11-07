@@ -420,7 +420,7 @@ def main():
     parser.add_argument("--jobs", type=positive, default=max(1, min(8, (os.cpu_count() or 1) // 2)))
     parser.add_argument("--slowest", type=int, default=0, metavar="K")
     # hansa's tests, documentation links, then the optional Codex adapter's.
-    parser.add_argument("names", nargs="*", default=["tests.test_hansa", "tests.test_docs",
+    parser.add_argument("names", nargs="*", default=["tests.test_hansa", "tests.test_push_services", "tests.test_docs",
                                                     "contrib.codex.tests"])
     args = parser.parse_args()
     if args.slowest < 0:

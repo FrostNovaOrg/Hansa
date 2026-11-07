@@ -7,10 +7,12 @@ protocol contains indices, attempt counts and fixed result fields, never secrets
 from __future__ import annotations
 
 import contextlib
+from decimal import Decimal, InvalidOperation
 import json
 import math
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import ssl
@@ -31,11 +33,23 @@ _TRY_TIMEOUT = 5
 _BACKOFF = (1, 3)
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
 _CATEGORIES = frozenset({"sent", "refused_url", "redirect", "timeout", "network", "tls",
-                         "http_429", "http_4xx", "http_5xx", "too_big", "deadline"})
+                         "http_429", "http_4xx", "http_5xx", "too_big", "deadline", "refused_by_service"})
 
 
-def _result(why, status=None, tries=0):
-    return {"ok": why == "sent", "status": status, "tries": tries, "why": why}
+def safe_code(value):
+    """A service code is a scalar, never an error message or nested response."""
+    if type(value) is int or type(value) is float and math.isfinite(value):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,40}", value):
+        return value
+    return None
+
+
+def _result(why, status=None, tries=0, code=None):
+    result = {"ok": why == "sent", "status": status, "tries": tries, "why": why}
+    if why != "sent" and safe_code(code) is not None:
+        result["code"] = code
+    return result
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -50,6 +64,22 @@ def _make_opener():
         _NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
 
 
+def _valid_check(check):
+    if not isinstance(check, dict) or set(check) - {"status", "field", "equals", "text"}:
+        return False
+    if "status" in check and (type(check["status"]) is not int or not 200 <= check["status"] < 300):
+        return False
+    if ("field" in check) != ("equals" in check):
+        return False
+    if "field" in check:
+        expected = check["equals"]
+        if not isinstance(check["field"], str) or not check["field"]:
+            return False
+        if not (expected is True or type(expected) is int or type(expected) is float and math.isfinite(expected)):
+            return False
+    return "text" not in check or isinstance(check["text"], str) and "field" not in check
+
+
 def _prepare(given):
     """Refuse unsafe inputs before urllib can normalize a URL or open a connection.
 
@@ -57,7 +87,11 @@ def _prepare(given):
     controls, and redirects or userinfo could send a push secret elsewhere.
     """
     try:
-        url, body, headers = given["url"], given["json"], given.get("headers", {})
+        url, headers = given["url"], given.get("headers", {})
+        if ("json" in given) == ("form" in given):
+            return _result("refused_url")
+        form = "form" in given
+        body = given["form" if form else "json"]
         if (not isinstance(url, str) or any(unicodedata.category(c) == "Cc" for c in url)
                 or "#" in url):
             return _result("refused_url")
@@ -72,14 +106,60 @@ def _prepare(given):
             if (not isinstance(name, str) or not isinstance(value, str)
                     or any(c in name or c in value for c in "\r\n")):
                 return _result("refused_url")
-        data = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        check = given.get("success", {})
+        if (not _valid_check(check)
+                or ("error_field" in given and not isinstance(given["error_field"], str))):
+            return _result("refused_url")
+        if form:
+            if any(not isinstance(k, str) or not isinstance(v, str) for k, v in body.items()):
+                return _result("refused_url")
+            data = urllib.parse.urlencode(body, encoding="utf-8", errors="strict").encode("ascii")
+        else:
+            data = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
         if len(data) > _BODY_LIMIT:
             return _result("too_big")
         headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
-        headers["Content-Type"] = "application/json; charset=utf-8"
+        headers["Content-Type"] = ("application/x-www-form-urlencoded" if form else "application/json") + "; charset=utf-8"
         return urllib.request.Request(url, data=data, headers=headers, method="POST")
     except (KeyError, TypeError, ValueError, UnicodeError):
         return _result("refused_url")
+
+
+def _answer(given, status, why, body):
+    """Check acknowledgements here in the child; only a bounded code may leave."""
+    check = given.get("success", {})
+    parsed = None
+    # A full read buffer may be only a prefix. Keep the existing read bound,
+    # but never accept that prefix as a whole-body/JSON acknowledgement.
+    complete = body is not None and len(body) < _RESPONSE_LIMIT
+    if complete:
+        try:
+            parsed = json.loads(body)
+        except (ValueError, UnicodeError, RecursionError):
+            pass
+    matches = True
+    if "text" in check:
+        matches = complete and body == check["text"].encode("utf-8")
+    elif "field" in check:
+        actual = parsed.get(check["field"]) if isinstance(parsed, dict) else None
+        expected = check["equals"]
+        if expected is True:
+            matches = actual is True
+        else:
+            matches = False
+            if type(actual) in (int, float, str):
+                try:
+                    number = Decimal(str(actual))
+                    matches = number.is_finite() and number == Decimal(str(expected))
+                except InvalidOperation:
+                    pass
+    if why == "sent" and (not matches or "status" in check and check["status"] != status):
+        why = "refused_by_service"
+    code = None
+    if why != "sent" and isinstance(parsed, dict):
+        field = given.get("error_field", check.get("field"))
+        code = safe_code(parsed.get(field))
+    return why, code
 
 
 def _status_category(status):
@@ -102,15 +182,15 @@ def _send_one(given, deadline, *, opener=None, clock=time.monotonic, sleep=time.
     request = _prepare(given)
     if isinstance(request, dict):
         return request
-    tries, status = 0, None
+    tries, status, code = 0, None, None
     try:
         opener = opener if opener is not None else _make_opener()
         while tries < 3:
             remaining = deadline - clock()
             if remaining <= 0:
-                return _result("deadline", status, tries)
+                return _result("deadline", status, tries, code)
             tries += 1
-            status, retry_after = None, None
+            status, retry_after, code = None, None, None
             if progress is not None:
                 progress(tries)
             try:
@@ -130,8 +210,10 @@ def _send_one(given, deadline, *, opener=None, clock=time.monotonic, sleep=time.
                         retry_after = response.headers.get("Retry-After", "").strip()
                     # The status already acknowledges the POST. Failure while
                     # discarding its body must not resend it or retry a redirect.
+                    body = None
                     with contextlib.suppress(OSError):
-                        response.read(_RESPONSE_LIMIT)
+                        body = response.read(_RESPONSE_LIMIT)
+                    why, code = _answer(given, status, why, body)
                 retry = status in _RETRY_STATUSES
             except (urllib.error.URLError, OSError) as error:
                 reason = error.reason if isinstance(error, urllib.error.URLError) else error
@@ -144,7 +226,7 @@ def _send_one(given, deadline, *, opener=None, clock=time.monotonic, sleep=time.
             except (ValueError, UnicodeError):
                 return _result("refused_url", status, tries)
             if not retry or tries == 3:
-                return _result(why, status, tries)
+                return _result(why, status, tries, code)
             remaining = deadline - clock()
             delay = _BACKOFF[tries - 1]
             # Retry-After's HTTP-date form is deliberately unsupported. Ignore a
@@ -191,13 +273,13 @@ def _collect(output, results):
                 continue
             why, status = row["why"], row["status"]
             if (why in _CATEGORIES and (status is None or type(status) is int and 100 <= status < 600)):
-                results[index] = _result(why, status, tries)
+                results[index] = _result(why, status, tries, row.get("code"))
         except (ValueError, TypeError, KeyError):
             pass  # a partial line at SIGKILL cannot hide earlier completed requests
 
 
 def send(requests: list[dict], deadline_s: float = 30) -> list[dict]:
-    """POST UTF-8 JSON in one isolated child; return ordered, secret-free results.
+    """POST UTF-8 JSON or form data in one isolated child; return scalar results.
 
     The deadline includes child startup, stdin transfer, all tries and backoff.
     A killed child's completed results survive; unfinished entries say deadline.

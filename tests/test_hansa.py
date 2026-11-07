@@ -46455,17 +46455,45 @@ class AlertBarkTest(unittest.TestCase):
         self.assertEqual(alert_bark.test(self.desk), "too_big")
         self.http.assert_not_called()
 
+    def test_bark_pasted_addresses_save_only_server_and_key(self):
+        for index, address in enumerate((
+                "https://api.day.app/key?x=1", "https://api.day.app/key?",
+                "https://api.day.app/key#", "https://api.day.app/key#x",
+                "https://api.day.app/key/title/body", "https://api.day.app/key\n",
+                " \t\nhttps://api.day.app/key\r\n ",
+                "curl -X GET 'https://api.day.app/key/title/body?group=example&ttl=600'",
+                "Use https://api.day.app/key for phone alerts.")):
+            for service in ("bark", "recognize"):
+                with self.subTest(address=address, service=service), unittest.mock.patch.object(
+                        self, "desk", init_desk(self.tmp / f"accepted-{index}-{service}")):
+                    result = save_from_page(self.desk, {"settings": self.desk.settings(),
+                        "alert_push_changes": [{"service": service, "address": address}]})
+                    self.assertTrue(result["ok"], result)
+                    [entry] = self.desk.settings()["alert_push"]
+                    self.assertEqual(entry["service"], "bark")
+                    self.assertEqual(alert_push._read(self.desk, entry["id"]), "https://api.day.app/key")
+        self.http.assert_not_called()
+
     def test_bark_unsafe_addresses_and_invalid_push_edits_write_nothing(self):
         before = self.snapshot()
-        for address in ("http://api.day.app/key", "https://u:p@api.day.app/key", "https://api.day.app/key?x=1",
-                        "https://api.day.app/key?", "https://api.day.app/key#", "https://api.day.app/",
-                        "https://api.day.app//", "https://api.day.app/../", "https://api.day.app/key#x",
-                        "https://api.day.app/key\n", "https://api.day.app/key\x00", "https://api.day.app/key\\other",
-                        "https://api.day.app:bad/key", "https://[bad/key", "", None):
-            with self.subTest(address=address):
+        for index, address in enumerate((
+                "http://api.day.app/key", "https://u:p@api.day.app/key", "https://api.day.app/",
+                "https://api.day.app//", "https://api.day.app/../", "https://api.day.app/key/../body",
+                "https://api.day.app/key/./body", "https://api.day.app/key/%2e%2e/body",
+                "https://api.day.app/key\x00", "https://api.day.app/key\\other",
+                "https://api.day.app/key?x=\\other", "https://api.day.app/key#\\other",
+                "\x00Use https://api.day.app/key for alerts.",
+                "Use https://api.day.app/key for alerts.\x00",
+                "Use https://api.day.app/key\v for alerts.",
+                "https://api.day.app/key https://api.day.app/other",
+                "curl 'https://api.day.app/key' 'https://api.day.app/other'",
+                "https://api.day.app:bad/key", "https://[bad/key", "", None)):
+            with self.subTest(address=address), unittest.mock.patch.object(
+                    self, "desk", init_desk(self.tmp / f"unsafe-{index}")):
+                row_before = self.snapshot()
                 self.assertFalse(save_from_page(self.desk, {"settings": self.desk.settings(),
                     "alert_push_changes": [{"service": "bark", "address": address}]})["ok"])
-                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(self.snapshot(), row_before)
         for edit in (None, [], {"address": "fixture-key", "on": "yes"}, {"address": "fixture-key", "on": 1},
                      {"key": self.key}):
             with self.subTest(edit=edit):
@@ -46690,7 +46718,7 @@ class AlertPushPageTest(unittest.TestCase):
     def test_push_page_service_address_refusals_use_the_pages_language(self):
         for address, service in (("http://api.day.app/fixture-key", "bark"),
                                  ("https://api.day.app/bad.key!", "bark"),
-                                 ("https://api.day.app/fixture-key?query=private-fixture", "bark"),
+                                 ("http://api.day.app/fixture-key?query=private-fixture", "bark"),
                                  ("https://[broken", "recognize")):
             for language in ("en", "zh"):
                 with self.subTest(address=address, language=language):
@@ -47301,11 +47329,17 @@ class AlertPushTest(unittest.TestCase):
                 self.assertEqual(desk.settings_rev(), revision)
 
     def test_whole_bark_addresses_and_bare_key(self):
-        for address, service, saved in (
+        for index, (address, service, saved) in enumerate((
                 ("https://api.day.app/KEY/示例文字", "recognize", "https://api.day.app/KEY"),
+                ("https://api.day.app/KEY?", "bark", "https://api.day.app/KEY"),
+                ("https://api.day.app/KEY?group=fixture", "bark", "https://api.day.app/KEY"),
+                ("https://api.day.app/KEY#", "bark", "https://api.day.app/KEY"),
+                ("https://api.day.app/KEY\n", "bark", "https://api.day.app/KEY"),
+                ("https://api.day.app/KEY/a text", "bark", "https://api.day.app/KEY"),
                 ("KEY", "recognize", "https://api.day.app/KEY"),
-                ("https://bark.example.com/KEY/", "bark", "https://bark.example.com/KEY")):
-            with self.subTest(address=address):
+                ("https://bark.example.com/KEY/", "bark", "https://bark.example.com/KEY"))):
+            with self.subTest(address=address), unittest.mock.patch.object(
+                    self, "desk", init_desk(self.tmp / f"whole-{index}")):
                 result = self.save([{"address": address, "service": service, "name": "phone"}])
                 self.assertTrue(result["ok"], result)
                 entry = self.desk.settings()["alert_push"][-1]
@@ -47494,18 +47528,16 @@ class AlertPushTest(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
 
     def test_unsafe_and_unrecognized_addresses_save_nothing(self):
-        for address, service in (
+        for index, (address, service) in enumerate((
                 ("https://bark.example.com/KEY/", "recognize"),
                 ("http://api.day.app/KEY", "recognize"), ("https://u:p@api.day.app/KEY", "bark"),
-                ("https://api.day.app/KEY#", "bark"), ("https://api.day.app/KEY?", "bark"),
-                ("https://api.day.app/KEY?group=fixture", "bark"),
-                ("https://api.day.app/KEY\n", "bark"), ("https://api.day.app/KEY\x00", "bark"),
-                ("https://api.day.app/KEY/a text", "bark"), ("K EY", "recognize"),
+                ("https://api.day.app/KEY\x00", "bark"), ("K EY", "recognize"),
                 ("https://api.day.app/KEY\\x", "bark"), ("https://[bad/KEY", "recognize"),
                 ("https://api.day.app:bad/KEY", "bark"), ("https://api.day.app/", "bark"),
                 ("https://api.day.app/%2fKEY", "bark"), ("https://api.day.app/%0aKEY", "bark"),
-                ("https://api.day.app/KEY", "unknown"), (None, "bark")):
-            with self.subTest(address=address, service=service):
+                ("https://api.day.app/KEY", "unknown"), (None, "bark"))):
+            with self.subTest(address=address, service=service), unittest.mock.patch.object(
+                    self, "desk", init_desk(self.tmp / f"unsafe-{index}")):
                 before = self.snapshot()
                 result = self.save([{"address": address, "service": service}])
                 self.assertFalse(result["ok"])
@@ -47571,7 +47603,7 @@ class AlertPushTest(unittest.TestCase):
         self.assertEqual((entry["service"], entry["on"], entry["name"]), ("bark", False, "my phone"))
         self.assertEqual(entry["address"], "api.day.app/…ce")
         self.assertIsNone(entry["last"])
-        [service] = reply["alert_push_services"]
+        [service] = [s for s in reply["alert_push_services"] if s["id"] == "bark"]
         self.assertEqual(service["id"], "bark")
         self.assertEqual(set(service["name"]), {"en", "zh"})
         self.assertIn("home screen", service["hint"]["en"])

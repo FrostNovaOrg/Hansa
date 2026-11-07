@@ -500,7 +500,10 @@ saving is still allowed.
 ## Alerts
 
 Alerts reach phones and chats through push addresses, alongside the principal's
-alert command. To add a push address:
+alert command. Supported phone services are Bark, ntfy, Gotify, PushDeer and
+Server酱 (WeChat). See
+[phone push setup, privacy, levels, limits and error codes](push-services.md)
+for what to paste from each app. To add a push address:
 
 1. Open **Settings → Alerts → Push addresses → Add an address** on the page.
 2. Paste the whole address from your push app or service. Leave **Recognize it**
@@ -513,11 +516,17 @@ alert command. To add a push address:
 
 For Bark, install and open the Bark app on your iPhone. Copy the whole address
 shown on the Bark app's home screen and paste it into **Add an address**.
-Hansa retains the server and device key and drops example text after the key.
+A copied command such as
+`curl -X GET 'https://api.day.app/KEY/title/body?group=example&ttl=600'`
+also works when the pasted text contains exactly one HTTPS address. Hansa
+retains only the server and device key, dropping example text after the key
+and Bark's query parameters.
 If a self-hosted address cannot be recognized, choose **Bark** and save again.
+
 To replace an address or extra secret, paste the new value into the saved
 entry; leave either field empty to keep its saved value. Switch off, rename
 or remove entries, then **Save settings**. Only the principal changes addresses.
+
 Each address (and an extra signing secret or access token when needed) is kept
 in a separate 0600 secret file under the desk's 0700 `secrets/` folder. Metadata
 alone enters settings; history records changes without credentials. The page
@@ -579,6 +588,9 @@ level, and `HANSA_ALERT_LEVEL` takes the highest in a batch:
 | `urgent` | `server_stuck`, `coordinator`, `sandbox`, `disk`, `credit` |
 
 Bark maps these to passive, active and time-sensitive notifications, respectively.
+ntfy uses priorities 2, 3 and 4; Gotify uses 2, 5 and 8. PushDeer and Server酱
+have no levels: urgent batches start with `Urgent: ` or `紧急：` in the
+principal's alert language. These markers do not change the phone's settings.
 
 For a release refused by the word scan, the alert gives only counts of hits
 and lines that could not be checked against patterns; the entries, lines and
@@ -604,7 +616,7 @@ run when the hour frees a run, with a line saying how many were held back
 (event `alert_failed` with `channel: "command"`) and `hansa status` shows the last failure with its exit
 code and last lines (none for an alert that held a release's one-time code:
 then only how it ended is kept); the command is never retried: the next alert tries again.
-Bark has a separate 30-second deadline including its transport's at most three
+Each phone push service has a separate 30-second deadline including its transport's at most three
 tries; the batch never retries it. `hansa status` shows each push entry's last result,
 `sent` or the reason it could not send. A failed push records `alert_failed` with
 `channel: "push"`, the entry's `id`, `service` and reason, never its address. Neither channel carries the other's failure.
@@ -676,9 +688,15 @@ IDs are stable, unique lowercase letters/digits, hyphens or underscores (up to
 64 characters). Addresses are stored atomically in
 `secrets/alert-push-ID.address`; an optional extra secret goes in
 `secrets/alert-push-ID.secret`, both mode 0600 under 0700 `secrets/`.
-`Desk.keys` includes whole addresses and service-defined secret parts for
-redaction and refusal of a task's change that contains them. Saving scrubs them
-from files covered by `Desk.scrub`; the append-only event log is not rewritten.
+`Desk.keys` includes whole addresses and secret parts extracted only by each
+entry's recorded service for redaction and refusal of a task's change that
+contains them. Saving scrubs them from files covered by `Desk.scrub`; the
+append-only event log is not rewritten. Only the recorded service checks,
+masks and sends a saved entry. Recognition asks all services only before an
+address is saved. An orphan secret file, or one whose metadata cannot be read,
+still has its whole value protected, without guessing a service to extract
+parts. Keep this separation while services share address paths: an ordinary
+word such as `message` must not become a secret through another service's parser.
 Settings history records secret changes with values withheld.
 
 On first access an old `alert_bark` setting and
@@ -700,7 +718,7 @@ The page interface, for use on the page, Settings, Alerts:
 
 - `GET /api/settings` returns metadata in `settings.alert_push`, and the public
   entries in top-level `alert_push`: `id`, `service`, `name`, `on`, `address`
-  (hidden), `address_set`, `secret_set`, `last` (`{at, ok, why}` or null).
+  (hidden), `address_set`, `secret_set`, `last` (`{at, ok, why, code?}` or null).
   `alert_push_services` lists `{id, name: {en, zh}, hint: {en, zh}, extra_secret}`.
   Names are redacted in both lists if a saved key was pasted into one.
 - `POST /api/settings` accepts `settings`, `rev` and optional top-level
@@ -735,15 +753,31 @@ its id, English/Chinese names and paste hints, whether it takes an extra secret,
 address recognition and normalization, secret-part extraction and masking,
 byte limit, level mapping, deadline, and a builder of HTTPS requests for a
 code-free batch. Adding a service means adding its definition to the registry
-and its tests. Requests pass through `alert_http.send`; response-body checks
-are left to a later transport change. Other services are not implemented yet.
+and its tests. Requests pass through `alert_http.send`, including response
+checks in its isolated child. A definition may also supply
+`validate(address, secret)` to check the completed pair before saving or sending:
+ntfy requires a token for topics shorter than eight characters, and Gotify
+requires an application token. Keep these checks while redaction ignores short
+strings and tokens can be pasted separately from addresses.
 
-Bark recognizes `api.day.app` and bare device keys automatically. A different
+Bark recognizes `api.day.app` and ordinary bare device keys automatically;
+`SCT…` and `sctp<uid>t…` keys belong only to Server酱. ntfy recognizes
+`ntfy.sh`, PushDeer recognizes `api2.pushdeer.com`, and Server酱 recognizes its
+two official address forms. Gotify is always chosen. Bare PushDeer keys require
+choosing PushDeer, and self-hosted servers require choosing their service.
+See [the service guide](push-services.md) for request contents and limits.
+
+For Bark, a different
 host requires the explicit `bark` service. Its HTTPS address must have a key as
-the first path component; later example text is discarded. HTTP, userinfo,
-queries, fragments, backslashes, spaces and controls are refused before saving
-or sending. Keep these checks while principals can paste addresses: URL parsers
-can silently discard controls or redirect credentials to a different host.
+the first path component; later example text, query parameters and fragments
+are discarded. Pasted text or a copied command with exactly one HTTPS address
+supplies that address; surrounding spaces and line breaks, and tabs, CR and LF
+in the paste, are tolerated. Multiple HTTPS addresses, HTTP, userinfo,
+backslashes, spaces in the address, and dot path components (including encoded
+ones) are refused before saving or sending. Other control characters anywhere
+in the paste are refused. Keep these checks while principals can paste
+addresses: URL parsers can silently discard controls or redirect credentials
+to a different host.
 
 Bark sends one JSON POST to the origin's `/push` with `device_key`. The title
 and group are the desk name and the body is alert text without the command's
@@ -755,7 +789,8 @@ with `…`. Fixed fields that cannot fit give `too_big` without a request.
 Keep this bound while Bark and Apple's push service add their own envelope.
 Bark does not implement encryption against its server or Apple's service.
 
-Each entry has `.hansa/alert-push-ID-last.json` with `{at, ok, why}`.
+Each entry has `.hansa/alert-push-ID-last.json` with `{at, ok, why}` and an
+optional safe service `code` on failure.
 Each attempt records `alert_channel` with `channel: "push"`, `id`, `service`,
 `ok`, `why`; failure also records `alert_failed` with the id, service and
 reason. No address, request or exception text is logged. `hansa status` shows
@@ -764,15 +799,36 @@ one line per entry with service, hidden address, on/off and last result.
 ### HTTPS transport
 
 `hansa.alert_http.send(requests: list[dict], deadline_s: float = 30) -> list[dict]`
-is the transport for built-in push channels, currently Bark. Bark delivery uses it automatically; ntfy is not implemented.
+is the transport for built-in push channels.
 
-Each request supplies `url`, a `json` object and a `headers` mapping. The transport
-POSTs UTF-8 JSON with `ensure_ascii=False` and
-`Content-Type: application/json; charset=utf-8`, overriding any supplied content
-type. Results keep request order and contain only `ok`, `status` (an HTTP integer
-or `None`), `tries` (0–3) and `why`. The fixed categories are `sent`, `refused_url`,
+Each request supplies `url`, exactly one of a `json` object or a `form` mapping
+of text fields, and an optional `headers` mapping. The transport POSTs UTF-8
+JSON with `ensure_ascii=False` and `Content-Type: application/json; charset=utf-8`,
+or UTF-8 form fields with `application/x-www-form-urlencoded; charset=utf-8`,
+overriding any supplied content type. The encoded body has the same 64 KiB limit
+and URL/header checks for either format.
+
+An optional `success` mapping describes the acknowledgement: `{field: "code",
+equals: 0}` checks a top-level JSON field, `{field: "ok", equals: true}` checks
+the JSON boolean, and `{text: "success"}` checks the exact whole response body.
+A numeric expectation also accepts a numeric string such as `"0"`; booleans
+do not count as numbers. An optional `status: 200` within that mapping restricts
+success to HTTP 200. Without `success`, the existing HTTP 2xx rule applies.
+An optional `error_field` names the JSON field holding the service's error code;
+it defaults to the success field. This also extracts a code on non-2xx replies
+without changing their HTTP category. A 2xx reply that fails its check, including
+invalid JSON when JSON was expected, is `refused_by_service` and is never retried.
+Only the child inspects response bodies, up to the existing 16 KiB read bound.
+An unreadable response or one filling that entire bound cannot satisfy a body
+check, since hansa cannot know it received the whole answer; it yields no code.
+
+Results keep request order and contain only `ok`, `status` (an HTTP integer
+or `None`), `tries` (0–3), `why`, and an optional `code` on failure. A code is a
+finite number or an ASCII word of at most 40 letters, digits, underscores or
+hyphens. Both child and parent enforce this bound; no other body content crosses.
+The fixed categories are `sent`, `refused_url`,
 `redirect`, `timeout`, `network`, `tls`, `http_429`, `http_4xx`, `http_5xx`,
-`too_big` and `deadline`. No result or log includes a URL, header value, request
+`too_big`, `deadline` and `refused_by_service`. No result or log includes a URL, header value, request
 or response body, or exception text.
 
 One standalone child runs this module with `sys.executable -I`, avoiding caller
@@ -785,7 +841,7 @@ group and reaps it. Completed results survive; unfinished requests return
 
 Only HTTPS URLs without userinfo, fragments or control characters are accepted;
 header names and values containing CR or LF are refused before a connection.
-JSON bodies larger than 64 KiB are also refused before sending (`too_big`, zero
+Encoded JSON or form bodies larger than 64 KiB are also refused before sending (`too_big`, zero
 tries). Requests that cannot be serialized as UTF-8 JSON, including byte values,
 circular objects and lone surrogates, return `refused_url` with zero tries;
 other requests in the batch still run. These checks prevent request splitting
@@ -801,8 +857,8 @@ Connection failures and timeouts retry, as do 429 and 500/502/503/504. A 429 use
 `Retry-After` in integer seconds when the wait fits before the deadline, otherwise
 normal backoff. Redirects are never followed or retried. TLS failures and other
 4xx/5xx stop immediately; 413 is `too_big`. At most 16 KiB of each response is
-read and discarded, including error responses; a failure discarding an already
-acknowledged response does not resend it. Each try builds a fresh urllib request
+read, checked when requested, then discarded, including error responses; a read
+failure after the status arrives does not resend it. Each try builds a fresh urllib request
 so proxy-handler mutations cannot change later tries from HTTPS to HTTP.
 
 `AlertHTTPTest` in `tests/test_hansa.py` checks these rules with fake openers and
@@ -810,3 +866,6 @@ responses, plus real isolated children with sleeping fakes for deadline and
 concurrency checks. Keep the tests while channels depend on this transport;
 they prevent retry, proxy, deadline and secret-disclosure regressions without
 using a network service.
+`tests/test_push_services.py` adds phone-service recognition, limits, secret
+handling and urgent markers, plus form and acknowledgement checks inside real
+isolated children with fake openers. It runs in the default parallel check too.
