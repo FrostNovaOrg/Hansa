@@ -46780,6 +46780,8 @@ class AlertPushTest(unittest.TestCase):
     def test_whole_bark_addresses_and_bare_key(self):
         for address, service, saved in (
                 ("https://api.day.app/KEY/示例文字", "recognize", "https://api.day.app/KEY"),
+                ("https://api.day.app/KEY?", "bark", "https://api.day.app/KEY"),
+                ("https://api.day.app/KEY?group=fixture", "bark", "https://api.day.app/KEY"),
                 ("KEY", "recognize", "https://api.day.app/KEY"),
                 ("https://bark.example.com/KEY/", "bark", "https://bark.example.com/KEY")):
             with self.subTest(address=address):
@@ -46797,8 +46799,7 @@ class AlertPushTest(unittest.TestCase):
         for address, service in (
                 ("https://bark.example.com/KEY/", "recognize"),
                 ("http://api.day.app/KEY", "recognize"), ("https://u:p@api.day.app/KEY", "bark"),
-                ("https://api.day.app/KEY#", "bark"), ("https://api.day.app/KEY?", "bark"),
-                ("https://api.day.app/KEY?group=fixture", "bark"),
+                ("https://api.day.app/KEY#", "bark"),
                 ("https://api.day.app/KEY\n", "bark"), ("https://api.day.app/KEY\x00", "bark"),
                 ("https://api.day.app/KEY/a text", "bark"), ("K EY", "recognize"),
                 ("https://api.day.app/KEY\\x", "bark"), ("https://[bad/KEY", "recognize"),
@@ -46871,7 +46872,7 @@ class AlertPushTest(unittest.TestCase):
         self.assertEqual((entry["service"], entry["on"], entry["name"]), ("bark", False, "my phone"))
         self.assertEqual(entry["address"], "api.day.app/…ce")
         self.assertIsNone(entry["last"])
-        [service] = reply["alert_push_services"]
+        [service] = [s for s in reply["alert_push_services"] if s["id"] == "bark"]
         self.assertEqual(service["id"], "bark")
         self.assertEqual(set(service["name"]), {"en", "zh"})
         self.assertIn("home screen", service["hint"]["en"])
