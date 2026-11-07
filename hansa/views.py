@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_bark, alert_push, build, cost, disk, gaps, goals, installed, installed_text, memory, notify, plugin, release, up
+from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, installed, installed_text, memory, notify, plugin, release, up
 from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG)
 from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
@@ -933,8 +933,6 @@ def status(desk: Desk) -> dict:
         "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
         "alert_push": alert_push.public(desk, s),
-        "alert_bark": {"on": alert_bark.projection(desk)["on"], "key_set": alert_bark.has_key(desk),
-                       "last": alert_bark.last_result(desk)},
         "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
         "merge_targets": [why for n, ln in sorted(s["lanes"].items()) if (why := merge_targets_problem(n, ln))],
         "shared_writes": shared_writes(desk.root, s),  # write-list folders another listed desk's lanes write too

@@ -95,46 +95,8 @@ def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
 NOT_FROM_PAGE = ("lanes", "concurrency", "disk_floor", "memory_floor", "bench")
 
 
-BARK_NO_KEY = ("Bark cannot be switched on without a device key: paste the key from the Bark app, "
-               "then save (nothing was changed)")
-
-
-def _bark_key_change(desk: Desk, body: dict, config) -> list:
-    """Translate the old page's fields into edits of the first Bark address."""
-    from . import alert_bark, alert_push
-    from .desk import key_problem
-    value, remove = body.get("alert_bark_key", ""), body.get("alert_bark_key_remove", False)
-    if not isinstance(value, str) or type(remove) is not bool:
-        raise ValueError("the Bark device key must be text, and its removal true or false")
-    if "://" not in value:
-        value = value.strip()
-    if value and not remove and (problem := key_problem(value)):
-        raise ValueError("the Bark device key: " + problem)
-    old = alert_bark.projection(desk)
-    if issues := alert_bark.problems(config):
-        raise ValueError(issues[0])
-    entry = alert_bark.first(desk)
-    on = config.get("on", False)
-    if remove:
-        return [{"id": entry["id"], "remove": True}] if entry else []
-    if on and not old["on"] and not (value or (alert_bark.has_key(desk) and not remove)):
-        raise ValueError(BARK_NO_KEY)
-    server = config.get("server", alert_bark.DEFAULT_SERVER).rstrip("/")
-    if not entry and not value:
-        return []
-    edit = {"id": entry["id"]} if entry else {"service": "bark"}
-    edit["on"] = on
-    if value:
-        edit["address"] = value if "://" in value else server + "/" + value
-    elif entry and server != old["server"]:
-        saved = alert_push._read(desk, entry["id"])
-        if saved:
-            edit["address"] = server + "/" + saved.rsplit("/", 1)[-1]
-    return [edit] if value or config != old else []
-
-
 def _save_settings(desk: Desk, body: dict) -> dict:
-    from . import alert_bark, alert_push
+    from . import alert_push
     new = body.get("settings")
     with desk.lock():
         on_disk = desk.settings()
@@ -145,15 +107,12 @@ def _save_settings(desk: Desk, body: dict) -> dict:
         problems = []
         if isinstance(new, dict):
             new = {**new, **{k: on_disk[k] for k in NOT_FROM_PAGE if k in on_disk}}
-            legacy = new.pop("alert_bark", alert_bark.projection(desk))
             new.setdefault("alert_push", on_disk["alert_push"])
             try:
                 changes = body.get("alert_push_changes", [])
-                legacy_changes = _bark_key_change(desk, body, legacy)
                 if not isinstance(changes, list):
                     raise ValueError("push changes must be a list")
-                # Ignore an unchanged old-page projection when the new API edits entries.
-                value, writes, removes = alert_push.prepare(desk, new, changes + legacy_changes, by="page")
+                value, writes, removes = alert_push.prepare(desk, new, changes, by="page")
                 new["alert_push"] = value
                 old_ids = {e["id"] for e in alert_push.entries(on_disk)}
                 removes += list(old_ids - {e["id"] for e in value})
@@ -181,13 +140,6 @@ def _push_test(desk: Desk, body: dict) -> dict:
         return {"ok": False, "why": "no_address", "last": None}
     why = alert_push.test(desk, id)
     return {"ok": why == "sent", "why": why, "last": alert_push.last_result(desk, id)}
-
-
-def _bark_test(desk: Desk) -> dict:
-    """One test push with the saved key and server (alert_bark.test); only its category and the last result."""
-    from . import alert_bark
-    why = alert_bark.test(desk)
-    return {"ok": why == "sent", "why": why, "last": alert_bark.last_result(desk)}
 
 
 def _top_up_provider(desk: Desk, name: str) -> dict:
@@ -383,8 +335,6 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     return self._send(200, alert.test(desk))
                 if path == "/api/alert/push-test":
                     return self._send(200, _push_test(desk, body))
-                if path == "/api/alert/bark-test":  # the principal's Test of the Bark channel: one push, its category
-                    return self._send(200, _bark_test(desk))
                 return self._send(404, {"error": "not found"})
             except SettingsError as e:
                 return self._settings_unavailable(e)
