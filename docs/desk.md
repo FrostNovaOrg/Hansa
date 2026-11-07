@@ -591,7 +591,7 @@ Settings history records both setting and clearing the name. An older page or
 command that omits the field keeps the saved name.
 
 An empty or unset name uses the last two folders of the desk's path, such as
-`advisor/desk`. A name written by hand is used only if it is a string that passes
+`shop/desk`. A name written by hand is used only if it is a string that passes
 the same character and saved-key checks as a save; otherwise the folders are used.
 If settings cannot be parsed, the desk list still shows its server, page address
 and counts with the folder-based name. The name is used in alert headers, push titles and groups, the

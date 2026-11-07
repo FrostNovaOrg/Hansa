@@ -57,7 +57,7 @@ class _PushServicesCase(unittest.TestCase):
                                      "XDG_STATE_HOME": str(self.tmp / "state")})
         env.start()
         self.addCleanup(env.stop)
-        self.desk = init_desk(self.tmp / "advisor" / "desk")
+        self.desk = init_desk(self.tmp / "shop" / "desk")
 
     def save(self, address, service="recognize", **fields):
         alert_push.change(self.desk, [{"address": address, "service": service, **fields}], by="page")
