@@ -4110,6 +4110,9 @@ class CoordinatorUpTest(unittest.TestCase):
 
     def test_the_launcher_gives_its_session_hansas_status_line_and_nothing_else_of_the_mod(self):
         from hansa import up
+        # The mod refuses group-writable parents; keep the test's desk private even with a 0002 umask.
+        self.desk.root.chmod(0o700)
+        self.desk.state_dir.chmod(0o700)
         folder = self.desk.mod_dir
         words = self.launch("claude", "--name", "desk b", "--effort", "high", version="2.1.306",
                             env={"HANSA_MOD_SETTINGS": "/elsewhere/settings.json", "HANSA_MOD_CLEAR_DAILY": "04-09"})
