@@ -950,7 +950,7 @@ test('a session the launcher started (line only): the line, no idle compaction a
   expect(calls.logs).toEqual([])
 })
 
-test('no summary handed over (a Claude Code too old for the line): no line, and nothing else changes', async ($, on) => {
+test('no summary handed over (hansa serve has written none yet): no line, and nothing else changes', async ($, on) => {
   const tokens = { value: 450_000 }
   const { clock, calls } = setup(on, tokens)
   await $.session.start(STARTED)

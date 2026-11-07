@@ -1485,12 +1485,12 @@ def cmd_notify_launch(a):
     # hansa's status line and nothing else of the mod (no idle compaction, no daily clear), for this start only;
     # preparing it never stops the session, and what it did not do is said in one line
     env = {k: v for k, v in os.environ.items() if not k.startswith("HANSA_MOD_")}
-    mod = plugin.plan(desk, a.rest[0])
-    shown = mod["on"] and mod["line"]
+    mod = plugin.plan(desk, a.rest[0])  # a copy only on a Claude Code new enough for the mod (plugin.MOD_NEEDS)
+    shown = mod["on"]
     if shown:
         env.update(plugin.line_env(desk, plugin.given_effort(a.rest[1:]), desk.settings().get("alert_language"),
                                    only=True))
-    for line in [plugin.left_text(mod)] + plugin.line_lines(mod, launcher=True):
+    for line in [plugin.left_text(mod)] + plugin.mod_lines(mod):
         if line:
             print(f"hansa: {line}", file=sys.stderr)
     argv = [a.rest[0], *(["--plugin-dir", mod["copy"]] if shown else []), *_notified(desk, a.rest),
@@ -1815,9 +1815,9 @@ def cmd_coordinator(a):
         env["HANSA_MOD_SETTINGS"] = str(desk.settings_path)
         if clear:  # the mod clears the session in this window; without the mod nothing does
             env["HANSA_MOD_CLEAR_DAILY"] = clear
-        if mod["line"]:  # its status line, from what hansa serve writes (plugin.summary)
-            env.update(plugin.line_env(desk, plugin.given_effort(["--effort", effort, *rest] if effort else rest),
-                                       plan.get("language")))
+        # its status line, from what hansa serve writes (plugin.summary)
+        env.update(plugin.line_env(desk, plugin.given_effort(["--effort", effort, *rest] if effort else rest),
+                                   plan.get("language")))
     for line in [plugin.left_text(mod)] + plugin.start_lines(mod, clear):
         if line:
             print(f"hansa: {line}", file=sys.stderr)

@@ -69,7 +69,7 @@ with open({str(self.calls)!r}, 'a') as out:
         path.chmod(0o755)
         return path
 
-    def claude(self, version="2.1.290", login=0, path=None):
+    def claude(self, version="2.1.306", login=0, path=None):
         return self.tool("claude", f"""
             if sys.argv[1:] == ['auth', 'status']:
                 print('private auth stdout')
@@ -144,7 +144,7 @@ with open({str(self.calls)!r}, 'a') as out:
                     self.assertEqual(rows[label]["state"], "note" if label == "tmux" else "fails")
                     self.assertEqual(rows[label]["fix"], prefix + package)
                 self.assertIn("hansa up", rows["tmux"]["need"])
-                self.assertEqual(rows["Claude Code"]["fix"], "npm install -g @anthropic-ai/claude-code@2.1.290")
+                self.assertEqual(rows["Claude Code"]["fix"], "npm install -g @anthropic-ai/claude-code@2.1.306")
                 self.assertEqual(rows["srt"]["fix"], "npm install -g @anthropic-ai/sandbox-runtime@0.0.79")
                 self.assertEqual(rows["srt"]["state"], "fails")
                 self.assertEqual(rows["Claude login"]["state"], "fails")
@@ -187,7 +187,7 @@ with open({str(self.calls)!r}, 'a') as out:
         self.assertIn("更新", row["fix"])
 
     def test_old_unknown_and_new_versions(self):
-        for tool, label, versions in (("claude", "Claude Code", ("2.1.289", "unknown", "2.1.290", "2.2.0")),
+        for tool, label, versions in (("claude", "Claude Code", ("2.1.305", "unknown", "2.1.306", "2.2.0")),
                                       ("node", "Node", ("v22.11.0", "unknown", "v22.12.0", "v24.22.0"))):
             for index, version in enumerate(versions):
                 with self.subTest(tool=tool, version=version):

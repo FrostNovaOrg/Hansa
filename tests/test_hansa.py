@@ -3467,6 +3467,8 @@ class CoordinatorUpTest(unittest.TestCase):
         for words in ("hansa notify off", "edits to it are lost", "not started by `hansa coordinator`",
                       "scout, reviewer, operator", "the coordinator's mod", "make a task"):
             self.assertIn(words, header)
+        # the line is the one part of the mod a session hansa up starts has (the launcher's copy)
+        self.assertIn("but for hansa's status line when `hansa up` started it", " ".join(header.split()))
         self.assertTrue(header.endswith(
             "\n>\n> This card is for the session that coordinates that desk: the one hansa posts its notices to. "
             "Any other session started in this folder or below it, such as a worker a script starts or a session "
@@ -4127,15 +4129,18 @@ class CoordinatorUpTest(unittest.TestCase):
         rec = up.read_coordinator(self.desk)
         self.assertNotIn("--plugin-dir", rec["argv"])
         self.assertNotIn(str(copy), json.dumps(rec))
-        # a Claude Code too old for the line, or one that says no version: no line, one line says so, the rest as is
-        for version, says in (("2.1.300", "Claude Code 2.1.300 is older than 2.1.306 (claude update)"),
+        # a Claude Code too old for the mod (2.1.306: an event its hooks module names that the engine does not know
+        # would fail the whole module), or one that says no version: no mod and no copy of it prepared (the earlier
+        # one is left as it is); one line says the mod was not loaded, and why; the rest as is
+        for version, says in (("2.1.305", "Claude Code 2.1.305 is older than 2.1.306 (claude update)"),
                               ("2.1.289", "Claude Code 2.1.289 is older than 2.1.290 (claude update)"),
                               ("", "hansa could not tell which Claude Code this is from claude --version")):
             words = self.launch("claude", "--name", "desk b", version=version)
             self.assertNotIn("--plugin-dir", words)
+            self.assertEqual(list(folder.glob("plugin*")), [copy])
             self.assertFalse([k for k in self.launched["env"] if k.startswith("HANSA_MOD")])
             self.assertEqual(self.launched["said"],
-                             f"hansa: hansa did not pin its status line under the prompt, because {says}.")
+                             f"hansa: hansa did not load the coordinator's mod, because {says}. More: hansa help inbox")
             self.assertEqual(words[words.index("--disallowedTools") + 1:words.index("--settings")], rules)
 
     def test_a_session_started_recorded_again_and_started_again_carries_one_copy_of_the_hooks(self):
@@ -20314,15 +20319,27 @@ def save():'''))
             self.assertIn(f"hansa did not load the coordinator's mod, because {says}; --autocompact options of its "
                           "command line: none", self.mod_line())
         self.assertFalse(list(self.desk.mod_dir.glob("plugin*")))
-        argv, env, said = self.start_with_mod(version="2.1.290")
-        self.assertIn("--plugin-dir", argv)
-        self.assertIn("--autocompact", argv)
-        # the mod and --autocompact, but no status line, which needs 2.1.306 ($.ui.status): one line says so
-        self.assertNotIn("HANSA_MOD_SUMMARY", env)
-        self.assertEqual(said, "hansa: hansa did not pin its status line under the prompt, because Claude Code "
-                               "2.1.290 is older than 2.1.306 (claude update).")
+        # older than 2.1.306, whose hooks module names events an older engine does not know (which fails the whole
+        # module): --autocompact (2.1.290) but no mod, no copy of it, and one line says so, and to update
+        for version in ("2.1.290", "2.1.305"):
+            argv, env, said = self.start_with_mod(version=version)
+            self.assertNotIn("--plugin-dir", argv)
+            self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")
+            self.assertFalse([k for k in env if k.startswith("HANSA_MOD")])
+            self.assertFalse(list(self.desk.mod_dir.glob("plugin*")))
+            self.assertEqual(said, f"hansa: hansa did not load the coordinator's mod, because Claude Code {version} is "
+                                   "older than 2.1.306 (claude update). More: hansa help inbox")
+            rec = self.mod_record()
+            self.assertEqual((rec["loaded"], rec["autocompact_options"]), (False, ["--autocompact", "550000"]))
+            self.assertIn(f"hansa did not load the coordinator's mod, because Claude Code {version} is older than "
+                          "2.1.306; --autocompact options of its command line: --autocompact 550000.", self.mod_line())
+        argv, env, said = self.start_with_mod("--clear-daily", "04-09", version="2.1.305")
+        self.assertEqual(self.mod_said.splitlines()[1:],
+                         ["hansa: hansa did not hand over the daily clear 04-09, because hansa did not load the "
+                          "coordinator's mod (Claude Code 2.1.305 is older than 2.1.306): the session is not cleared."])
         argv, env, said = self.start_with_mod(version="2.1.306")
         self.assertNotIn("did not", said)
+        self.assertIn("--plugin-dir", argv)
         self.assertEqual(env["HANSA_MOD_SUMMARY"], str(self.desk.root / "statusline.json"))
         # the version probe waits 10 seconds at most
         with unittest.mock.patch.object(plugin.subprocess, "run",
@@ -39464,6 +39481,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             printed = self.hansa("status")
             self.assertIn("started outside hansa coordinator", status["mod_line"])
             self.assertIn("coordinator's mod and the daily clear are not in it", status["mod_line"])
+            self.assertIn("but for hansa's status line when hansa up started it", status["mod_line"])
             self.assertIn(status["mod_line"], printed)
             self.assertNotIn(previous, printed)
             self.assertNotIn("--autocompact options", printed)

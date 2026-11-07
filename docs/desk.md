@@ -1391,8 +1391,9 @@ coordinator's model and effort; the coordinator cannot change them:
 Both take 100,000 to 1,000,000 tokens. A new turn cancels the wait; after a compact (done, skipped or refused) the
 mod asks again only after a new turn. It reads the first in the desk's settings file at each decision (a turn or a
 wait ends): a missing value is its default, a file it cannot read or parse means no idle compact. The second applies
-from the next start. The mod needs Claude Code 2.1.290 or later; `--autocompact` is given
-whenever Claude Code is new enough, whether or not the mod loads. When hansa skips it, the start, `hansa status` and
+from the next start. The mod needs Claude Code 2.1.306 or later, and `--autocompact` 2.1.290 or later; `--autocompact`
+is given whenever Claude Code is new enough, whether or not the mod loads. On a Claude Code older than 2.1.306 the
+start says that hansa did not load the coordinator's mod, with the version, 2.1.306 and `claude update`. When hansa skips it, the start, `hansa status` and
 the page say why. A session whose settings turn hooks off runs without the mod's rules, and hansa cannot see that;
 Claude Code's own auto-compact still applies to it.
 
@@ -1435,16 +1436,19 @@ short words only, and the time it was written; never a release's one-time code, 
 token, or a task's title or text. It is outside `.hansa/` and `secrets/`, which the session is denied Read on, so the
 mod reads it whether or not Claude Code holds a mod's file reads to those rules; the session may read it (it holds
 nothing `hansa status` does not show) but not change it. The mod reads it again every 15 seconds and when a turn
-ends. When it is missing, or older than two minutes, the line says only that `hansa serve` is not running (or its
-rounds are stuck), and for how many minutes it has not written. The words are in the principal's alert language
+ends. When it is older than two minutes, the line says only that `hansa serve` is not running (or its rounds are
+stuck), and for how many minutes it has not written; when it is missing, that `hansa serve` is not running and has
+written nothing yet, with no minutes. The words are in the principal's alert language
 (`alert_language`, English or Chinese, on the page).
 
 A session `hansa up` starts through its launcher (one recorded with `hansa notify on`) gets the line too, and nothing
 else of the mod: no idle compaction and no daily clear, which stay with sessions `hansa coordinator` starts. Its deny
 rules and turn hooks are as before.
 
-The line needs Claude Code 2.1.306 or later, the oldest release checked to have what it uses; the mod itself needs
-2.1.290. On an older one there is no line, the rest of the mod is as before, and the start says so in one line.
+The line comes with the mod: both need Claude Code 2.1.306 or later, the oldest release checked to have what the
+mod's hooks use (an event the engine does not know would keep the whole mod from loading). On an older one neither
+`hansa coordinator` nor the launcher loads the mod or prepares a copy of it, and the start says that hansa did not
+load the coordinator's mod, why, and to run `claude update`.
 
 ## Merge checks
 

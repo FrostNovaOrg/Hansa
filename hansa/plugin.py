@@ -11,10 +11,11 @@ on the page (desk.COMPACT_DEFAULTS). Below idle_at, Claude Code's own idle compa
 session left idle long; hansa neither sets nor reads it. With a window, the mod also clears the session once in each
 window, when it has been idle for 5 minutes (hooks/register.js says when exactly).
 
-It needs Claude Code NEEDS or later (mods, and --autocompact, on any endpoint). On an older one the session starts
-without the mod and without --autocompact, and the start says so. --autocompact is given whenever Claude Code is new
-enough, whether or not the mod loads. Preparing the mod (the version probe, the copy, the start's record) never stops
-the session: a step that fails leaves the mod off, and the start says what failed. hansa reads none of the mod's
+It needs Claude Code MOD_NEEDS or later, and --autocompact NEEDS or later (on any endpoint). On an older one the
+session starts without the mod (and, below NEEDS, without --autocompact), and the start says so and to run claude
+update. --autocompact is given whenever Claude Code is new enough, whether or not the mod loads. Preparing the mod
+(the version probe, the copy, the start's record) never stops the session: a step that fails leaves the mod off, and
+the start says what failed. hansa reads none of the mod's
 files, and the mod writes none.
 
 The status line: the mod pins one line of hansa's own under the prompt with Claude Code's $.ui.status (one per
@@ -29,11 +30,11 @@ Its figures come from summary(), which hansa serve writes at each round into SUM
 short words, the time it was written, and nothing secret. Outside .hansa/ and secrets/, which the session is denied
 Read on: Claude Code does not say whether a mod's $.fs is held to the session's permission rules, so the summary is
 where either way it can be read (the session may read it, not change it). The mod reads it every 15 seconds and when
-a turn ends; missing or older than two minutes, the line says hansa serve is not running. In the alert language. It
-needs Claude Code LINE_NEEDS or later: on an older one hansa hands over no summary, so there is no line, the rest of
-the mod is as above, and the start says so in one line (line_lines). A session hansa up starts through its launcher
-(`hansa notify-launch`) gets a copy of the mod with HANSA_MOD_LINE_ONLY=1: the line and nothing else, no idle
-compaction and no daily clear; its deny rules and turn hooks are as before.
+a turn ends; missing or older than two minutes, the line says hansa serve is not running. In the alert language. The
+line comes with the mod whenever it loads (MOD_NEEDS is the line's floor too). A session hansa up starts through its
+launcher (`hansa notify-launch`) gets a copy of the mod with HANSA_MOD_LINE_ONLY=1, prepared only on a Claude Code of
+MOD_NEEDS or later: the line and nothing else, no idle compaction and no daily clear; its deny rules and turn hooks
+are as before. Below it, the launcher's start says it did not load the mod, as hansa coordinator's does (mod_lines).
 
 Where things are kept:
     plugin-XXXXXX/   the copy --plugin-dir loads (home), made new at each start in a folder hansa creates, readable and
@@ -71,16 +72,16 @@ from . import account, up
 from .desk import Desk, compact_settings, now, write_json
 
 MOD = Path(__file__).with_name("mod")
-NEEDS = (2, 1, 290)  # Claude Code's version the mod and --autocompact need, on a compatible endpoint too
+NEEDS = (2, 1, 290)  # Claude Code's version --autocompact needs, on a compatible endpoint too
+# The oldest Claude Code checked to have what the mod's hooks module uses ($.ui.status, $.session.model, turn.step):
+# an event name the engine does not know fails the whole module, so below it the mod is not loaded at all
+MOD_NEEDS = (2, 1, 306)
 NOT_COPIED = ("tests",)  # in hansa/mod but not in the copy: the mod's own tests
 # Written into a plugin's folder by Claude Code when it loads it: never copied from hansa/mod
 CLAUDE_WRITES = (".claude-plugin/types", "tsconfig.json")
 HELP = "More: hansa help inbox"
 WINDOW = re.compile(r"^([0-9]{1,2})-([0-9]{1,2})$")
 MISSED = 2  # this many windows ended without a clear: the clear's line is a warning
-# The oldest Claude Code checked to have what the status line uses ($.ui.status, $.session.model, turn.step); the
-# releases between NEEDS and it could not be checked. Remove once NEEDS reaches it
-LINE_NEEDS = (2, 1, 306)
 SUMMARY = "statusline.json"  # in the desk's folder: what hansa serve writes for the line (summary)
 # The thresholds' names, the same in hansa status, the page and the docs
 WORDS = {"idle_at": ("compact when idle at", "tokens"), "working_at": ("compact while working at", "tokens")}
@@ -192,47 +193,39 @@ def version(claude: str) -> str:
     return ".".join(m.groups()) if m and r.returncode == 0 else ""
 
 
-def _needed() -> str:
-    return ".".join(map(str, NEEDS))
-
-
-def version_problem(v: str) -> str:
-    """Why this Claude Code cannot run the mod or take --autocompact; '' when it can."""
+def version_problem(v: str, needs: tuple = NEEDS) -> str:
+    """Why this Claude Code is older than needs (--autocompact's, by default; MOD_NEEDS for the mod); '' when it is
+    not."""
     if not v:
         return "hansa could not tell which Claude Code this is from claude --version"
-    if tuple(int(x) for x in v.split(".")) < NEEDS:
-        return f"Claude Code {v} is older than {_needed()}"
+    if tuple(int(x) for x in v.split(".")) < needs:
+        return f"Claude Code {v} is older than {'.'.join(map(str, needs))}"
     return ""
-
-
-def line_problem(v: str) -> str:
-    """Why this Claude Code shows no status line from the mod; '' when it does."""
-    return version_problem(v) or (f"Claude Code {v} is older than {'.'.join(map(str, LINE_NEEDS))}"
-                                  if tuple(int(x) for x in v.split(".")) < LINE_NEEDS else "")
 
 
 def failed(mod: dict, step: str, e) -> dict:
     """A step of preparing the mod failed: the session starts without the mod (--autocompact as it was)."""
     said = f"{type(e).__name__}: {e}" if isinstance(e, BaseException) else str(e)
-    return {**mod, "on": False, "line": False, "failed": True,
+    return {**mod, "on": False, "failed": True,
             "why": f"{step} failed ({' '.join(said.split())[:300]})"}
 
 
 def plan(desk: Desk, claude: str) -> dict:
     """Whether this start loads the mod and passes --autocompact, and why not: {on, autocompact, why, version, left}
-    (left: earlier copies that could not be removed); with the mod on, its copy: {copy}; line, whether the mod pins
-    its status line (LINE_NEEDS), and line_why, why not. --autocompact whenever this Claude Code is new enough. Never
-    raises: a step that fails leaves the mod off (failed)."""
-    out = {"on": False, "autocompact": False, "version": "", "left": [], "line": False}
+    (left: earlier copies that could not be removed); with the mod on, its copy: {copy}, made only then; old, when
+    the why is a Claude Code to update. --autocompact whenever this Claude Code is new enough (NEEDS), the mod and its
+    line from MOD_NEEDS. Never raises: a step that fails leaves the mod off (failed)."""
+    out = {"on": False, "autocompact": False, "version": "", "left": []}
     step = "asking Claude Code its version (claude --version)"
     try:
         out["version"] = v = version(claude)
         old = version_problem(v)
         if old:
-            return {**out, "why": old}
+            return {**out, "why": old, "old": bool(v)}
         out["autocompact"] = True
-        out["line_why"] = line_problem(v)
-        out["line"] = not out["line_why"]
+        old = version_problem(v, MOD_NEEDS)
+        if old:
+            return {**out, "why": old, "old": True}
         step = "finding the folder for the mod's copy (the home folder)"
         d = home(desk)
         step = f"making the mod's folder {d}"
@@ -319,25 +312,19 @@ def record(desk: Desk, rec: dict) -> str:
         return unrecorded_text(desk.mod_dir / "start.json", e)
 
 
+def mod_lines(p: dict) -> list:
+    """What a start says of the mod when it did not load it, and why: one line, or none. The launcher's start says
+    this alone."""
+    update = " (claude update)" if p.get("old") else ""
+    return [f"hansa did not load the coordinator's mod, because {p['why']}{update}. {HELP}"] if not p["on"] else []
+
+
 def start_lines(p: dict, clear: str = "") -> list:
     """What the start says hansa did not do, and why: a line each for the mod, --autocompact and the daily clear."""
-    old = p.get("version") and not p["autocompact"] and not p.get("failed")  # a Claude Code to update
-    return ([f"hansa did not load the coordinator's mod, because {p['why']}{' (claude update)' if old else ''}. {HELP}"]
-            if not p["on"] else []) + ([f"hansa did not pass --autocompact, because {p['why']}."]
-                                       if not p["autocompact"] else []) + (
+    return mod_lines(p) + ([f"hansa did not pass --autocompact, because {p['why']}."]
+                           if not p["autocompact"] else []) + (
         [f"hansa did not hand over the daily clear {clear}, because hansa did not load the coordinator's mod "
-         f"({p['why']}): the session is not cleared."] if clear and not p["on"] else []) + line_lines(p)
-
-
-def line_lines(p: dict, launcher: bool = False) -> list:
-    """What a start says of hansa's status line when it does not pin it: one line, or none. hansa coordinator's start
-    says so only of a mod it loaded (the line on the mod says the rest); the launcher's, of either."""
-    if p["on"] and p.get("line") or not p["on"] and not launcher:
-        return []
-    why = p.get("line_why") if p["on"] else p["why"]
-    update = " (claude update)" if p["on"] or (p.get("version") and not p["autocompact"] and not p.get("failed")) \
-        else ""
-    return [f"hansa did not pin its status line under the prompt, because {why}{update}."]
+         f"({p['why']}): the session is not cleared."] if clear and not p["on"] else [])
 
 
 # -- the clears, recorded by the SessionStart hook for /clear -------------------------------------------------------

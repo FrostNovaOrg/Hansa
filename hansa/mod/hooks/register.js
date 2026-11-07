@@ -21,7 +21,7 @@
 // window it is still to clear in, idle compaction waits for the clear; outside one, or once cleared, it is as above.
 // hansa's SessionStart hook for clear then prints hansa status into the fresh context, and records the clear.
 //
-// The status line: when hansa gives it HANSA_MOD_SUMMARY (Claude Code new enough: plugin.py, LINE_NEEDS), it pins one
+// The status line: when hansa gives it HANSA_MOD_SUMMARY (whenever it loads the mod: plugin.py MOD_NEEDS), it pins one
 // line under the prompt with $.ui.status, for the person at the terminal (the model never reads it), beside a status
 // line of the person's own, which it leaves as it is. It reads the summary hansa serve writes at each round (plugin.py:
 // summary) every LINE_MS and when a turn of the main conversation ends: hansa and the desk's name; the session's model
@@ -297,7 +297,7 @@ function lineText(sum, now, model, effort, given) {
 async function refresh($, st) {
   try {
     const path = await $.env.get('HANSA_MOD_SUMMARY')
-    if (!path) return // no line: hansa gave none (a Claude Code too old for it: plugin.py, LINE_NEEDS)
+    if (!path) return // no line: hansa gave none (a start that did not hand one over)
     let sum = null
     try {
       sum = summaryOf(JSON.parse(await $.fs.read(path)))
