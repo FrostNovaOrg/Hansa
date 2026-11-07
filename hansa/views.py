@@ -511,12 +511,19 @@ def web_address(desk: Desk) -> tuple:
     return host, port
 
 
+def page_address(host: str, port) -> str:
+    """The page's address without its key, as hansa status gives it: a server listening on every address
+    (0.0.0.0, ::) at 127.0.0.1 (or ::1)."""
+    every = host in ("0.0.0.0", "", "::")
+    host = ("[::1]" if host == "::" else "127.0.0.1") if every else host
+    return f"http://{host}:{port}/"
+
+
 def page_text(page: dict) -> str:
     """Where the desk's web page is, and whether it is served now, for hansa status and hansa explain. A server
     listening on every address (0.0.0.0, ::) is given at 127.0.0.1 (or ::1), an address one can open."""
     every = page["host"] in ("0.0.0.0", "", "::")
-    host = ("[::1]" if page["host"] == "::" else "127.0.0.1") if every else page["host"]
-    at = f"http://{host}:{page['port']}/" + (" (it listens on every address)" if every else "")
+    at = page_address(page["host"], page["port"]) + (" (it listens on every address)" if every else "")
     if page["up"] and not page.get("answers", True):
         return (f"web page: {at}, but hansa serve is not answering now (its process is stopped or stuck: "
                 "hansa status says more), so neither is the page")

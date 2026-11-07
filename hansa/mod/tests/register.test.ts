@@ -17,13 +17,14 @@ const HELD = 'called from a classic.Stop hook, it would wait on the turn this ho
 // Claude Code beneath the mod: a context whose size the test sets, the desk's settings file in memory, and what the
 // mod asked of it and logged. now: when the test starts; clear: the window hansa hands over, if any
 function setup(on, tokens: { value: number }, thresholds: Record<string, unknown> = {},
-  { now = 1_760_000_000_000, clear = undefined as string | undefined } = {}) {
+  { now = 1_760_000_000_000, clear = undefined as string | undefined, env = {} as Record<string, string> } = {}) {
   const clock = mock.clock(on, { now })
-  mock.env(on, { HANSA_MOD_SETTINGS: SETTINGS, ...(clear === undefined ? {} : { HANSA_MOD_CLEAR_DAILY: clear }) })
+  mock.env(on, { HANSA_MOD_SETTINGS: SETTINGS, ...(clear === undefined ? {} : { HANSA_MOD_CLEAR_DAILY: clear }), ...env })
   const files: Record<string, string> = { [SETTINGS]: desk(thresholds) }
   const calls = { compact: 0, refuse: '', skip: '', shrinks: true, reads: 0, writes: 0, logs: [] as string[],
     clears: [] as { command: string, args?: string, at: number }[], clearFails: 0,
-    during: null as null | (($) => Promise<unknown>), usage: null as null | (() => Promise<unknown>) }
+    during: null as null | (($) => Promise<unknown>), usage: null as null | (() => Promise<unknown>),
+    lines: [] as (string | undefined)[], model: 'Opus 5.5', steps: [] as Record<string, unknown>[] }
   on('fs.read', async ($, e) => {
     calls.reads += 1 // one each decision
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
@@ -60,6 +61,15 @@ function setup(on, tokens: { value: number }, thresholds: Record<string, unknown
   on('turn.start', async ($, e) => ({ turnId: e.turnId }))
   on('classic.Stop', async () => ({}))
   on('turn.complete', async ($, e) => ({ text: e.answer }))
+  on('ui.status', async ($, e) => {
+    calls.lines.push(e.text)
+    return { value: undefined }
+  })
+  on('session.model', async () => ({ value: calls.model }))
+  on('turn.step', async function* ($, e) { // the request as it went out
+    calls.steps.push(e)
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
+  })
   on('ui.log', async ($, e) => {
     calls.logs.push(JSON.stringify(e))
     return { value: undefined }
@@ -753,5 +763,199 @@ test('a second Stop with no new turn, a minute on above idle_at: the compact run
   await held($, stopped())
   expect(calls.compact).toBe(0) // not under the hook
   await clock.settle()
+  expect(calls.compact).toBe(1)
+})
+
+// -- the status line: one line from the summary hansa serve writes, every 15 seconds and when a turn ends ------------
+
+const SUMMARY = '/desk/statusline.json'
+const NOW = 1_760_000_000_000
+// What hansa hands over for the line (plugin.py: line_env): the start's effort, the desk's name, the alert language
+const LINE_ENV = { HANSA_MOD_SUMMARY: SUMMARY, HANSA_MOD_DESK: 'shop/desk', HANSA_MOD_LANGUAGE: 'en',
+  HANSA_MOD_EFFORT: 'max' }
+// A quiet desk, as hansa serve writes it (plugin.py: summary)
+const QUIET = { desk: 'shop/desk', language: 'en', page: 'http://127.0.0.1:8765/', paused: false, disk_low: false,
+  memory_low: false, api_errors_since: null, push_failed: [], no_channel: false, releases: 0, todos: 0, running: 0,
+  queued: 0, review: 0, failed_24h: 0, usd_24h: 3.4 }
+
+// A session with the line: the summary written at `written` (ms; null: none), as the test gives it
+async function lined($, on, summary: Record<string, unknown> | null, { env = {} as Record<string, string>,
+  written = undefined as number | undefined, tokens = { value: 150_000 }, clear = undefined as string | undefined,
+  now = NOW } = {}) {
+  const s = setup(on, tokens, {}, { now, clear, env: { ...LINE_ENV, ...env } })
+  const write = (x: Record<string, unknown> | null, at = s.clock.now()) => {
+    if (x === null) delete s.files[SUMMARY]
+    else s.files[SUMMARY] = JSON.stringify({ at: at / 1000, ...QUIET, ...x })
+  }
+  write(summary, written ?? now)
+  await $.session.start(STARTED)
+  const last = () => s.calls.lines[s.calls.lines.length - 1]
+  return { ...s, write, last }
+}
+
+test('a quiet desk: its name, the model and effort, idle, the 24 hours\' cost and the page\'s address', async ($, on) => {
+  const { last } = await lined($, on, {})
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 max · idle · 24 h $3 · page http://127.0.0.1:8765/')
+})
+
+test('in Chinese: what waits for the principal, then the work, the cost and the page', async ($, on) => {
+  const { last } = await lined($, on, { desk: '网店台子', language: 'zh', releases: 1, todos: 2, running: 2, queued: 1,
+    review: 1, usd_24h: 38.2 })
+  expect(last()).toBe('hansa 网店台子 · Opus 5.5 max · 等你：发布 1、待办 2 · 进行 2 · 排队 1 · 待审 1 · 24 小时 $38 · '
+    + '网页 http://127.0.0.1:8765/')
+})
+
+test('the order: what is wrong, what waits for the principal, the work, the cost, the page', async ($, on) => {
+  const since = new Date(2026, 10, 7, 14, 5).getTime()
+  const { last } = await lined($, on, { paused: true, disk_low: true, memory_low: true, api_errors_since: since / 1000,
+    push_failed: ['bark'], no_channel: true, releases: 2, todos: 1, running: 1, queued: 3, review: 2, failed_24h: 1 })
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 max · dispatch paused · disk under its floor · '
+    + 'memory under its floor · API errors since 14:05 · push failed: bark · no alert channel · '
+    + 'waiting for you: releases 2, to-dos 1 · running 1 · queued 3 · review 2 · failed 1 in 24 h · 24 h $3 · '
+    + 'page http://127.0.0.1:8765/')
+})
+
+test('each item only when it is not zero; idle only with nothing running or queued', async ($, on) => {
+  const { last, write, clock } = await lined($, on, { todos: 1, review: 1 })
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 max · waiting for you: to-dos 1 · idle · review 1 · 24 h $3 · '
+    + 'page http://127.0.0.1:8765/')
+  write({ queued: 1 })
+  await clock.advance(15_000)
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 max · queued 1 · 24 h $3 · page http://127.0.0.1:8765/')
+})
+
+test('the page\'s address never carries its key, whatever the summary holds', async ($, on) => {
+  const { last, write, clock } = await lined($, on, { page: 'http://127.0.0.1:8765/?t=secret-token' })
+  expect(last()).not.toContain('secret-token')
+  expect(last()).not.toContain('?t=')
+  write({ page: 'http://127.0.0.1:8765/#t=secret-token' })
+  await clock.advance(15_000)
+  expect(last()).not.toContain('secret-token')
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 max · idle · 24 h $3')
+})
+
+test('read again every 15 seconds, and when a turn ends', async ($, on) => {
+  const { last, write, clock, calls } = await lined($, on, {})
+  write({ running: 1 })
+  await clock.advance(14_000)
+  expect(last()).toContain('idle')
+  await clock.advance(1_000)
+  expect(last()).toContain('running 1')
+  write({ running: 2 })
+  const shown = calls.lines.length
+  await turn($, 't1')
+  expect(calls.lines.length).toBeGreaterThan(shown)
+  expect(last()).toContain('running 2')
+})
+
+test('/model changed during the session: the new model after the next refresh', async ($, on) => {
+  const { last, clock, calls } = await lined($, on, {})
+  expect(last()).toContain('· Opus 5.5 max ·')
+  calls.model = 'Sonnet 5.5'
+  await clock.advance(15_000)
+  expect(last()).toContain('· Sonnet 5.5 max ·')
+})
+
+test('the effort: the start\'s before the first request, then the latest request\'s, passed on unchanged', async ($, on) => {
+  const { last, clock, calls } = await lined($, on, {})
+  expect(last()).toContain('Opus 5.5 max ·')
+  const step = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', effort: 'high', messageCount: 1 })
+  for await (const _ of step) { /* the response */ }
+  await step.result
+  expect(calls.steps.map(e => e.effort)).toEqual(['high']) // unchanged on its way down
+  await clock.advance(15_000)
+  expect(last()).toContain('Opus 5.5 high ·')
+  const sub = $.turn.step({ turnId: 't1', index: 1, model: 'haiku', effort: 'low', messageCount: 1, agentId: 'a1' })
+  for await (const _ of sub) { /* a subagent's request: not the session's */ }
+  await clock.advance(15_000)
+  expect(last()).toContain('Opus 5.5 high ·')
+})
+
+test('the effort a Stop carries is the turn\'s', async ($, on) => {
+  const { last } = await lined($, on, {})
+  await $.turn.start({ text: 'work', turnId: 't1' })
+  await held($, stopped({ effort: { level: 'xhigh' } }))
+  await $.turn.complete(done('t1'))
+  expect(last()).toContain('Opus 5.5 xhigh ·')
+})
+
+test('no effort from the start and no request yet: none', async ($, on) => {
+  const { last } = await lined($, on, {}, { env: { HANSA_MOD_EFFORT: '' } })
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 · idle · 24 h $3 · page http://127.0.0.1:8765/')
+})
+
+test('hansa serve stopped: once the summary is older than two minutes, not running, with the minutes', async ($, on) => {
+  const { last, clock } = await lined($, on, {})
+  await clock.advance(2 * MIN)
+  expect(last()).toContain('idle') // two minutes old, not older
+  await clock.advance(15_000)
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 max · hansa serve not running (no update for 2 min)')
+  await clock.advance(3 * MIN)
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 max · hansa serve not running (no update for 5 min)')
+})
+
+test('stopped, in Chinese', async ($, on) => {
+  const { last } = await lined($, on, { desk: '网店台子', language: 'zh' }, { written: NOW - 5 * MIN - 1 })
+  expect(last()).toBe('hansa 网店台子 · Opus 5.5 max · 后台没在跑（5 分钟没更新）')
+})
+
+test('no summary, or one that is not one: not running, in the language hansa handed over', async ($, on) => {
+  const { last, files, clock } = await lined($, on, null, { env: { HANSA_MOD_LANGUAGE: 'zh' } })
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 max · 后台没在跑（还没有记录）')
+  for (const text of ['not json', '[]', '{"desk": "x"}']) {
+    files[SUMMARY] = text
+    await clock.advance(15_000)
+    expect(last()).toBe('hansa shop/desk · Opus 5.5 max · 后台没在跑（还没有记录）')
+  }
+})
+
+test('the language follows the alert language the summary gives', async ($, on) => {
+  const { last, write, clock } = await lined($, on, { language: 'zh' })
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 max · 空闲 · 24 小时 $3 · 网页 http://127.0.0.1:8765/')
+  write({ language: 'en' })
+  await clock.advance(15_000)
+  expect(last()).toBe('hansa shop/desk · Opus 5.5 max · idle · 24 h $3 · page http://127.0.0.1:8765/')
+})
+
+test('what the summary may hold beyond its fields is never shown', async ($, on) => {
+  const { calls } = await lined($, on, { code: '123456', key: 'sk-secret-1234', title: 'fix the login',
+    desk: 'shop/desk\u001b[2J', push_failed: ['bark\nhttps://api.day.app/KEY'] })
+  const shown = calls.lines.join('\n')
+  for (const x of ['123456', 'sk-secret', 'fix the login', 'api.day.app', '\u001b', '\n']) expect(shown).not.toContain(x)
+})
+
+test('a session hansa coordinator started: the line, and idle compaction and the daily clear as before', async ($, on) => {
+  const tokens = { value: 450_000 }
+  const { clock, calls, last } = await lined($, on, {}, { tokens, clear: '04-09', now: local(0, 3) })
+  expect(last()).toContain('idle')
+  await until(clock, 0, 4, 10)
+  await turn($, 't1')
+  await clock.advance(5 * MIN)
+  expect(calls.clears.length).toBe(1)
+  await clock.advance(MIN)
+  expect(calls.compact).toBe(1)
+})
+
+test('a session the launcher started (line only): the line, no idle compaction and no daily clear', async ($, on) => {
+  const tokens = { value: 450_000 }
+  const { clock, calls, last } = await lined($, on, {}, { tokens, clear: '04-09', now: local(0, 3),
+    env: { HANSA_MOD_LINE_ONLY: '1' } })
+  expect(last()).toContain('idle')
+  await until(clock, 0, 4, 10)
+  await turn($, 't1')
+  await until(clock, 1, 9)
+  expect(calls.clears).toEqual([])
+  expect(calls.compact).toBe(0)
+  expect(calls.reads).toBeGreaterThan(0)
+  expect(calls.logs).toEqual([])
+})
+
+test('no summary handed over (a Claude Code too old for the line): no line, and nothing else changes', async ($, on) => {
+  const tokens = { value: 450_000 }
+  const { clock, calls } = setup(on, tokens)
+  await $.session.start(STARTED)
+  await turn($, 't1')
+  await clock.advance(61_000)
+  expect(calls.lines).toEqual([])
   expect(calls.compact).toBe(1)
 })

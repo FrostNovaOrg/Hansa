@@ -13,6 +13,7 @@ Layout (everything under one directory):
     .hansa/settings-history.jsonl  append-only settings changes, with keys withheld (hansa explain history)
     asks.json            requests from agents to the principal
     PAUSED               present = no new work starts (holds the reason)
+    statusline.json      what hansa serve last counted, for the status line of the coordinator's session (plugin.py)
     .hansa/                 runtime state: provider cooling, heartbeat, web token and port, and runs/<id>/
                          (what a task's processes write, until hansa publishes it without keys);
                          releases.json and releases/<id>.log (hansa release: the requests, the
@@ -2445,7 +2446,7 @@ def other_desks(root) -> list:
 
 # The files and folders hansa keeps in a desk (the layout above), and the card
 DESK_LAYOUT = ("settings.json", "secrets", "lanes", "tasks", "worktrees", "notes", "events.jsonl", "asks.json",
-               "PAUSED", ".hansa", "CLAUDE.md")
+               "PAUSED", "statusline.json", ".hansa", "CLAUDE.md")
 
 
 def holding_desks_parts(root, repos) -> list:

@@ -123,7 +123,7 @@ is denied Read and Edit on each listed desk's `secrets/` and `.hansa/` too.
 A listed desk whose folder holds this desk, or one of its lanes' repositories,
 cannot be hidden whole: instead each file and folder hansa keeps there
 (`settings.json`, `secrets/`, `lanes/`, `tasks/`, `worktrees/`, `notes/`,
-`events.jsonl`, `asks.json`, `PAUSED`, `.hansa/`, `CLAUDE.md`) that holds
+`events.jsonl`, `asks.json`, `PAUSED`, `statusline.json`, `.hansa/`, `CLAUDE.md`) that holds
 neither is hidden from the runs, and the coordinator's session is denied Read
 and Edit on each. What holds this desk or the repository, and the rest of that
 folder, stays as it was. `hansa init` warns, naming the other desk, when it

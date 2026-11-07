@@ -33,6 +33,7 @@ desk/
 ├── events.jsonl           append-only record of everything that happened
 ├── asks.json              requests from the agents to the principal
 ├── PAUSED                 present: no new work starts
+├── statusline.json        what hansa serve last counted, for the status line of the coordinator's session
 └── .hansa/                runtime state: providers' rests, the heartbeat, the page's token and port, releases
 ```
 
