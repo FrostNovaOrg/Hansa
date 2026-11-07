@@ -46362,7 +46362,7 @@ class AlertBarkTest(unittest.TestCase):
             "CLAUDE_CONFIG_DIR": str(self.tmp / "conf"), "XDG_STATE_HOME": str(self.tmp / "state")})
         env.start()
         self.addCleanup(env.stop)
-        self.desk = init_desk(self.tmp / "advisor" / "desk")
+        self.desk = init_desk(self.tmp / "shop" / "desk")
         self.key = "bark-fixture-device-key"
         http = unittest.mock.patch.object(alert_http, "send", return_value=[
             {"ok": True, "why": "sent", "status": 200, "tries": 1}])
@@ -46402,7 +46402,7 @@ class AlertBarkTest(unittest.TestCase):
                 self.assertEqual(request["url"], "https://api.day.app/push")
                 payload = request["json"]
                 self.assertEqual((payload["title"], payload["group"], payload["device_key"]),
-                                 ("advisor/desk", "advisor/desk", self.key))
+                                 ("shop/desk", "shop/desk", self.key))
                 self.assertEqual(payload["level"], expected)
                 self.assertIn("release finished", payload["body"])
                 self.assertIn("disk needs space", payload["body"])
@@ -46464,7 +46464,7 @@ class AlertBarkTest(unittest.TestCase):
                 self.http.reset_mock()
                 self.assertEqual(alert_bark.send(self.desk, [{"kind": "ask", "text": text}]), "sent")
                 payload = self.pushed()["json"]
-                self.assertEqual(payload["title"], "advisor/desk")
+                self.assertEqual(payload["title"], "shop/desk")
                 self.assertEqual(payload["level"], "active")
                 self.assertTrue(payload["body"].endswith("…"))
                 self.assertTrue(" ".join(text.split()).startswith(payload["body"][:-1]))
@@ -46649,7 +46649,7 @@ class AlertPushPageTest(unittest.TestCase):
             "CLAUDE_CONFIG_DIR": str(self.tmp / "conf"), "XDG_STATE_HOME": str(self.tmp / "state")})
         env.start()
         self.addCleanup(env.stop)
-        self.desk = init_desk(self.tmp / "advisor" / "desk")
+        self.desk = init_desk(self.tmp / "shop" / "desk")
         http = unittest.mock.patch.object(alert_http, "send", return_value=[
             {"ok": True, "why": "sent", "status": 200, "tries": 1}])
         self.http = http.start()
@@ -47077,7 +47077,7 @@ class DeskNameSettingTest(unittest.TestCase):
         settings.pop("desk_name", None)  # a desk made before the setting existed
         write_json(self.desk.settings_path, settings)
         self.assertEqual(public_settings(self.desk)["settings"]["desk_name"], "")
-        self.assert_displays("advisor/desk")
+        self.assert_displays("shop/desk")
 
     def test_unicode_desk_name_reaches_every_display_and_settings_history(self):
         AlertBarkTest.configure(self, language="zh")
@@ -47137,7 +47137,7 @@ class DeskNameSettingTest(unittest.TestCase):
         AlertBarkTest.configure(self, language="zh")
         self.assertTrue(self.save_name("网店台子")["ok"])
         self.assertEqual(self.save_name(""), {"ok": True, "problems": []})
-        self.assert_displays("advisor/desk")
+        self.assert_displays("shop/desk")
         entry = [e for e in self.history_entries() if e["path"] == "desk_name"][-1]
         self.assertEqual((entry["by"], entry["old"], entry["new"]), ("principal", "网店台子", ""))
 
@@ -47187,14 +47187,14 @@ class DeskNameSettingTest(unittest.TestCase):
                                             capture_output=True, text=True, timeout=60)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     page = json.loads(result.stdout)
-                    self.assertEqual(page["before"], {"value": previous, "title": "Hansa · " + (previous or "advisor/desk"),
-                                                      "caption": previous or "advisor/desk"})
+                    self.assertEqual(page["before"], {"value": previous, "title": "Hansa · " + (previous or "shop/desk"),
+                                                      "caption": previous or "shop/desk"})
                     self.assertEqual(page["label"], "工作台名称" if lang == "zh" else "Desk name")
                     for word in (("40", "留空", "密钥", "设置历史") if lang == "zh" else
                                  ("40", "blank", "saved keys", "settings history")):
                         self.assertIn(word, page["note"])
                     self.assertEqual((page["dirty"], page["groupDirty"], page["group"]), (True, True, "lanes"))
-                    self.assertEqual(page["draftCaption"], previous or "advisor/desk")
+                    self.assertEqual(page["draftCaption"], previous or "shop/desk")
                     self.assertEqual(page["posted"]["settings"]["desk_name"], draft)
                     self.assertEqual(page["posted"]["rev"], replies["/api/settings"]["rev"])
                     self.assertTrue(save_from_page(self.desk, page["posted"])["ok"])
@@ -47209,9 +47209,9 @@ class DeskNameSettingTest(unittest.TestCase):
                 self.desk.settings_path.write_bytes(raw)
                 self.assertEqual(views.desks(), expected)
                 self.assertEqual(self.hansa("desks"), text)
-                for label in ("desk advisor/desk (", "server:", "page:", "tasks:", "principal:"):
+                for label in ("desk shop/desk (", "server:", "page:", "tasks:", "principal:"):
                     self.assertIn(label, text)
-                self.assertEqual(menu.rows()["desks"][0]["desk_name"], "advisor/desk")
+                self.assertEqual(menu.rows()["desks"][0]["desk_name"], "shop/desk")
                 self.assertEqual(self.desk.settings_path.read_bytes(), raw)
 
     hand_edited_invalid_names = (5, ["x"], None, {}, "   ", "名" * 41, "a\x1b[31mb", "a\nb", "a\tb",
@@ -47223,7 +47223,7 @@ class DeskNameSettingTest(unittest.TestCase):
         for name in self.hand_edited_invalid_names:
             with self.subTest(name=name):
                 write_json(self.desk.settings_path, {**settings, "desk_name": name})
-                self.assert_displays("advisor/desk")
+                self.assert_displays("shop/desk")
                 screen = menu.screen(menu.rows(), 0, set(), "en", 240, 24).removeprefix("\x1b[H\x1b[2J")
                 self.assertNotIn("\x1b", self.hansa("status") + self.hansa("desks")
                                  + screen)
@@ -47237,7 +47237,7 @@ class DeskNameSettingTest(unittest.TestCase):
         for key in ("provider-secret-key", self.key, "page-secret-key"):
             with self.subTest(key=key):
                 write_json(self.desk.settings_path, {**settings, "desk_name": "Desk " + key + " end"})
-                self.assert_displays("advisor/desk")
+                self.assert_displays("shop/desk")
 
     def test_saving_only_spaces_clears_the_name_and_records_history(self):
         AlertBarkTest.configure(self, language="zh")
@@ -47246,7 +47246,7 @@ class DeskNameSettingTest(unittest.TestCase):
         self.assertEqual(read_json(self.desk.settings_path)["desk_name"], "")
         entry = [e for e in self.history_entries() if e["path"] == "desk_name"][-1]
         self.assertEqual((entry["by"], entry["old"], entry["new"]), ("principal", "网店台子", ""))
-        self.assert_displays("advisor/desk")
+        self.assert_displays("shop/desk")
 
     def test_saving_a_padded_name_trims_before_storage_and_history(self):
         AlertBarkTest.configure(self, language="zh")
@@ -47294,8 +47294,8 @@ class DeskNameSettingTest(unittest.TestCase):
                                             capture_output=True, text=True, timeout=60)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     [page] = json.loads(result.stdout)
-                    self.assertEqual(page["title"], "Hansa · advisor/desk")
-                    self.assertEqual(page["caption"], "advisor/desk")
+                    self.assertEqual(page["title"], "Hansa · shop/desk")
+                    self.assertEqual(page["caption"], "shop/desk")
 
 
 class AlertPushTest(unittest.TestCase):
