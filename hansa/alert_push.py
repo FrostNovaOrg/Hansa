@@ -12,6 +12,18 @@ from .desk import Desk, KeyScrubError, now, read_json, write_json, write_text
 
 MAX_ENTRIES = 10
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+LEGACY_PROBLEM = ("Bark's saved key could not be moved; the principal should paste the Bark address again "
+                  "on the page (Settings, Alerts)")
+
+
+def migration_problem(desk):
+    return LEGACY_PROBLEM if ("alert_bark" in desk._saved_settings()
+                              or (desk.secrets_dir / "alert-bark.device-key").exists()) else ""
+
+
+def _remove_legacy_files(desk):
+    (desk.secrets_dir / "alert-bark.device-key").unlink(missing_ok=True)
+    (desk.state_dir / "alert-bark-last.json").unlink(missing_ok=True)
 
 
 def problems(value) -> list[str]:
@@ -110,24 +122,44 @@ def migrate(desk, loaded):
             return loaded
         new = {k: v for k, v in loaded.items() if k != "alert_bark"}
         config = loaded.get("alert_bark", {})
-        config = config if not bark_problems(config) else {}
-        key = old_key.read_text(encoding="utf-8").strip() if old_key.exists() else ""
-        value = list(new.get("alert_push", []))
-        if key and not any(e.get("id") == "legacy-bark" for e in value):
-            _, address = alert_services.parse(config.get("server", DEFAULT_SERVER).rstrip("/") + "/" + key, "bark")
+        try:
+            if bark_problems(config) or problems(new.get("alert_push", [])):
+                return loaded
+            key = old_key.read_text(encoding="utf-8").strip() if old_key.exists() else ""
+            value = list(new.get("alert_push", []))
+            existing = next((e for e in value if e["id"] == "legacy-bark"), None)
+            if key:
+                _, address = alert_services.parse(config.get("server", DEFAULT_SERVER).rstrip("/") + "/" + key, "bark")
+                # Full pasted URLs may have sample text after the key. A saved key
+                # is different: migration must preserve every character or stop.
+                if alert_services.SERVICES["bark"].secrets(address)[-1] != key:
+                    return loaded
+                if existing:
+                    if existing["service"] != "bark" or _read(desk, existing["id"]) != address:
+                        return loaded
+                elif len(value) >= MAX_ENTRIES:
+                    return loaded
+        except (ValueError, OSError, UnicodeError):
+            return loaded
+        created = key and not existing
+        if created:
             entry = {"id": "legacy-bark", "service": "bark", "on": config.get("on") is True, "name": ""}
-            if len(value) >= MAX_ENTRIES:
-                raise ValueError("cannot move Bark: alert_push already has 10 entries")
-            _write_secret(desk, entry["id"], address)
             value.insert(0, entry)
-            old_last = desk.state_dir / "alert-bark-last.json"
-            if old_last.exists():
-                write_json(_last_file(desk, entry["id"]), read_json(old_last, None))
         new["alert_push"] = value
-        write_json(desk.settings_path, new)
+        try:
+            if created:
+                _write_secret(desk, entry["id"], address)
+                old_last = desk.state_dir / "alert-bark-last.json"
+                if old_last.exists():
+                    write_json(_last_file(desk, entry["id"]), read_json(old_last, None))
+            write_json(desk.settings_path, new)
+        except OSError:
+            if created:
+                _file(desk, entry["id"]).unlink(missing_ok=True)
+                _last_file(desk, entry["id"]).unlink(missing_ok=True)
+            return loaded
         record(desk, loaded, new, "hansa", "moved Bark setting and key to push addresses")
-        old_key.unlink(missing_ok=True)
-        (desk.state_dir / "alert-bark-last.json").unlink(missing_ok=True)
+        _remove_legacy_files(desk)
         return new
 
 
@@ -206,6 +238,13 @@ def apply(desk, writes, removes):
     for id in removes:
         for path in (_file(desk, id), _file(desk, id, True), _last_file(desk, id)):
             path.unlink(missing_ok=True)
+    saved = desk._saved_settings()
+    bark_ids = {e["id"] for e in entries(saved) if e["service"] == "bark"}
+    if any(id in bark_ids and value and not extra for id, value, extra in writes):
+        # Only a saved Bark address supersedes an upgrade that could not move.
+        if "alert_bark" in saved:
+            write_json(desk.settings_path, {k: v for k, v in saved.items() if k != "alert_bark"})
+        _remove_legacy_files(desk)
     return failed
 
 
@@ -215,6 +254,14 @@ def check_scrub(failed):
         raise KeyScrubError("The push address was saved, but some files could not be scrubbed; save it again after fixing file permissions")
 
 
+def save(desk, settings, writes, removes):
+    """Save metadata first: a failed settings write must leave no private files."""
+    if issues := desk.save_settings(settings, by="page"):
+        return issues
+    check_scrub(apply(desk, writes, removes))
+    return []
+
+
 def change(desk, changes, *, by=""):
     with desk.lock():
         settings = desk.settings()
@@ -222,10 +269,8 @@ def change(desk, changes, *, by=""):
         settings["alert_push"] = value
         if issues := desk.save_settings(settings, by=by, dry=True):
             raise ValueError(issues[0])
-        failed = apply(desk, writes, removes)
-        if issues := desk.save_settings(settings, by=by):
+        if issues := save(desk, settings, writes, removes):
             raise ValueError(issues[0])
-        check_scrub(failed)
 
 
 def _last_file(desk, id):

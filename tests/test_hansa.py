@@ -36959,9 +36959,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         secret:!!field(root, "secret"), secretValue:field(root, "secret")?.value,
         secretType:field(root, "secret")?.attrs.type,
         service:field(root, "service")?.value,
+        serviceLine:root.kids.find(el => el.tag === "p" && el.className === "field-note")?.textContent,
         options:field(root, "service")?.kids.map(el => ({value:el.value, text:el.textContent})),
         on:field(root, "on")?.checked, switchRole:field(root, "on")?.attrs.role,
         name:field(root, "name")?.value,
+        nameLabel:field(root, "name")?.attrs["aria-label"],
         last:find(el => "data-push-last" in el.attrs, root)?.textContent});
       return {text:block().textContent, entries:cards().map(describe), add:add ? describe(add) : null,
         alertsIndex:ids["#tab-settings"].textContent.indexOf(run("T.alertCommandTitle")) <
@@ -42509,7 +42511,8 @@ else:
         from hansa import alert
         self.assertFalse(hasattr(alert, "bark_ready"))
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
-        self.assertNotIn("bark", ui.lower())
+        for retired in ("alert_bark", "/api/alert/bark", "bark-key"):
+            self.assertNotIn(retired, ui.lower())
         self.assertEqual(ui.count("function pushSection("), 1)
         self.assertEqual(ui.count("pushSection()"), 2)
 
@@ -46506,6 +46509,72 @@ class AlertPushPageTest(unittest.TestCase):
             self.assertEqual(shown["after"]["add"]["address"], address)
             self.assertTrue(shown["dirty"])
 
+    def test_push_page_service_and_name_without_an_address_do_not_block_other_saves(self):
+        for language in ("en", "zh"):
+            for name in ("", "My phone"):
+                with self.subTest(language=language, name=name):
+                    draft = [{"service": "bark", "name": name}]
+                    self.assertFalse(self.page(draft, language)["dirty"])
+                    shown = self.page(draft + [{"turn_min": "45"}, {"save": True}], language)
+                    self.assertEqual(shown["posted"]["alert_push_changes"], [])
+                    result = save_from_page(self.desk, shown["posted"])
+                    self.assertTrue(result["ok"], result)
+                    self.assertEqual(self.desk.settings()["coordinator_alert"]["turn_min"], 45)
+                    self.assertEqual(self.desk.settings()["alert_push"], [])
+
+    def test_push_page_service_address_refusals_use_the_pages_language(self):
+        for address, service in (("http://api.day.app/fixture-key", "bark"),
+                                 ("https://api.day.app/bad.key!", "bark"),
+                                 ("https://api.day.app/fixture-key?query=private-fixture", "bark"),
+                                 ("https://[broken", "recognize")):
+            for language in ("en", "zh"):
+                with self.subTest(address=address, language=language):
+                    draft = [{"service": service, "address": address}]
+                    posted = self.page(draft + [{"save": True}], language)["posted"]
+                    refusal = save_from_page(self.desk, posted)
+                    self.assertFalse(refusal["ok"])
+                    shown = self.page(draft + [{"reply": refusal, "save": True}], language)
+                    message = " ".join(shown["problems"])
+                    if language == "zh":
+                        self.assertRegex(message, r"[一-鿿]")
+                        self.assertNotIn("Bark needs", message)
+                    else:
+                        self.assertIn("address", message)
+                    self.assertIn(message, shown["settings"])
+                    self.assertEqual(shown["after"]["add"]["address"], address)
+                    self.assertTrue(shown["dirty"])
+
+    def test_push_page_add_name_is_optional_localized_and_saved(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.page([{"address": "https://api.day.app/" + self.KEY,
+                                    "name": "My phone"}, {"save": True}], language)
+                self.assertEqual(shown["before"]["add"]["name"], "")
+                self.assertEqual(shown["before"]["add"]["nameLabel"],
+                                 "名称（选填）" if language == "zh" else "Name (optional)")
+                self.assertEqual(shown["posted"]["alert_push_changes"][0]["name"], "My phone")
+                self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+                self.assertEqual(self.page(language=language)["before"]["entries"][-1]["name"], "My phone")
+
+    def test_push_page_named_entries_keep_a_separate_service_line(self):
+        self.add(name="My phone")
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                [entry] = self.page(language=language)["before"]["entries"]
+                self.assertEqual(entry["name"], "My phone")
+                self.assertEqual(entry["serviceLine"], "Bark")
+
+    def test_push_page_localizes_deferred_bark_upgrade_problem(self):
+        settings = self.desk.settings()
+        settings["alert_bark"] = {"on": True}
+        write_json(self.desk.settings_path, settings)
+        (self.desk.secrets_dir / "alert-bark.device-key").write_text("bark.key!value\n")
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.page(language=language)
+                self.assertIn(shown["labels"]["pushLegacyProblem"], shown["problems"])
+                self.assertNotIn("bark.key!value", json.dumps(shown))
+
     def test_push_page_uses_reply_services_hints_and_extra_secret_for_add_and_replace(self):
         from hansa import alert_services
         class FutureService(alert_bark.Bark):
@@ -46821,6 +46890,183 @@ class AlertPushTest(unittest.TestCase):
                 self.assertEqual(request["json"]["device_key"], "KEY")
                 self.assertEqual(request["url"], saved.rsplit("/", 1)[0] + "/push")
 
+    def test_unmovable_legacy_bark_stays_private_and_recovers_only_after_a_bark_address_save(self):
+        from hansa import alert
+        for case, key, count in (("punctuation", "bark.key!value", 0),
+                                 ("slash", "abc/defg123", 0), ("full", "leftover-key", 10),
+                                 ("full-leftover", "leftover-key", 10)):
+            with self.subTest(case=case):
+                desk = init_desk(self.tmp / case)
+                settings = desk.settings()
+                settings["alert_push"] = [{"id": f"phone-{n}", "service": "bark", "on": True}
+                                          for n in range(count)]
+                if case != "full-leftover":
+                    settings["alert_bark"] = {"on": True, "server": "https://bark.example"}
+                write_json(desk.settings_path, settings)
+                for entry in settings["alert_push"]:
+                    alert_push._write_secret(desk, entry["id"], "https://api.day.app/fixture-" + entry["id"])
+                addresses_before = {p.name: p.read_bytes() for p in desk.secrets_dir.glob("alert-push-*.address")}
+                legacy = desk.secrets_dir / "alert-bark.device-key"
+                legacy.write_text(key + "\n")
+                last = desk.state_dir / "alert-bark-last.json"
+                write_json(last, {"at": now(), "ok": True, "why": "sent"})
+                before, key_before = desk.settings_path.read_bytes(), legacy.read_bytes()
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    main(["--desk", str(desk.root), "status"])
+                reply = public_settings(desk)
+                for problem in (out.getvalue(), " ".join(reply["problems"])):
+                    self.assertIn("Bark", problem)
+                    self.assertIn("could not be moved", problem)
+                    self.assertIn("paste", problem)
+                    self.assertIn("page", problem)
+                    self.assertNotIn(key, problem)
+                self.assertEqual(desk.settings_path.read_bytes(), before)
+                self.assertEqual(legacy.read_bytes(), key_before)
+                self.assertEqual(desk.settings()["alert_push"], settings["alert_push"])
+                self.assertEqual({p.name: p.read_bytes() for p in desk.secrets_dir.glob("alert-push-*.address")},
+                                 addresses_before)
+                self.http.reset_mock()
+                self.assertEqual(alert.configured(desk), bool(count))
+                self.assertEqual(alert.add(desk, "ask", "answer the request"), bool(count))
+                alert.send_due(desk, gather=0)
+                self.assertEqual(self.http.call_count, count)
+                self.assertEqual({call.args[0][0]["json"]["device_key"] for call in self.http.call_args_list},
+                                 {"fixture-" + e["id"] for e in settings["alert_push"]})
+                # An unrelated save must not retire the only copy of the old setting.
+                reply["settings"]["cool_minutes"] = 42
+                self.assertTrue(save_from_page(desk, reply)["ok"])
+                self.assertEqual(read_json(desk.settings_path, {}).get("alert_bark"), settings.get("alert_bark"))
+                self.assertEqual(legacy.read_bytes(), key_before)
+                self.assertTrue(public_settings(desk)["problems"])
+                # Make room when full, and paste the principal's chosen address.
+                edit = {"service": "bark", "address": "https://api.day.app/new-fixture-key"}
+                if count:
+                    edit["id"] = "phone-0"
+                loaded = public_settings(desk)
+                result = save_from_page(desk, {**loaded, "alert_push_changes": [edit]})
+                self.assertTrue(result["ok"], result)
+                self.assertFalse(legacy.exists())
+                self.assertFalse(last.exists())
+                self.assertNotIn("alert_bark", read_json(desk.settings_path, {}))
+                self.assertEqual(public_settings(desk)["problems"], [])
+                entry = next(e for e in alert_push.enabled(desk, desk.settings())
+                             if not count or e["id"] == "phone-0")
+                self.assertEqual(alert_push.test(desk, entry["id"]), "sent")
+                self.assertEqual(self.http.call_args.args[0][0]["json"]["device_key"], "new-fixture-key")
+
+    def test_failed_settings_write_leaves_no_unlisted_push_address(self):
+        for via in ("page", "change"):
+            for failure in ("problem", "exception"):
+                with self.subTest(via=via, failure=failure):
+                    before = self.snapshot()
+                    def fail(settings, **kwargs):
+                        if kwargs.get("dry"):
+                            return []
+                        if failure == "exception":
+                            raise OSError("fixture settings write failed")
+                        return ["fixture settings write failed"]
+                    with unittest.mock.patch.object(self.desk, "save_settings", side_effect=fail):
+                        edit = [{"address": "https://api.day.app/orphan-fixture-key"}]
+                        if failure == "exception" or via == "change":
+                            with self.assertRaises((ValueError, OSError)):
+                                if via == "page":
+                                    self.save(edit)
+                                else:
+                                    alert_push.change(self.desk, edit, by="page")
+                        else:
+                            self.assertFalse(self.save(edit)["ok"])
+                    self.assertEqual(list(self.desk.secrets_dir.glob("alert-push-*")), [])
+                    self.assertEqual(self.snapshot(), before)
+
+    def test_failed_upgrade_settings_write_cleans_up_new_files_and_keeps_legacy(self):
+        settings = self.desk.settings()
+        settings["alert_bark"] = {"on": True}
+        write_json(self.desk.settings_path, settings)
+        legacy = self.desk.secrets_dir / "alert-bark.device-key"
+        legacy.write_text("legacy-settings-write-key\n")
+        write_json(self.desk.state_dir / "alert-bark-last.json", {"at": now(), "ok": True, "why": "sent"})
+        before = self.snapshot()
+        real_write = alert_push.write_json
+        def fail(path, value):
+            if path == self.desk.settings_path:
+                raise OSError("fixture settings write failed")
+            return real_write(path, value)
+        with unittest.mock.patch.object(alert_push, "write_json", side_effect=fail):
+            reply = public_settings(self.desk)
+            self.assertEqual(reply["settings"]["alert_push"], [])
+            self.assertTrue(any("could not be moved" in p for p in reply["problems"]))
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(list(self.desk.secrets_dir.glob("alert-push-*")), [])
+
+    def test_failed_upgrade_keeps_invalid_configuration_and_conflicting_entry(self):
+        for config, value in (({"on": True, "server": "http://bark.example"}, []),
+                              ({"on": True}, [{"id": "legacy-bark", "service": "bark", "on": False}]),
+                              ({"on": True}, "invalid")):
+            with self.subTest(config=config, value=value):
+                settings = self.desk.settings()
+                settings.update(alert_bark=config, alert_push=value)
+                write_json(self.desk.settings_path, settings)
+                (self.desk.secrets_dir / "alert-bark.device-key").write_text("legacy-fixture-key\n")
+                before = self.snapshot()
+                self.desk.settings()
+                self.assertEqual(self.snapshot(), before)
+                self.assertTrue(alert_push.migration_problem(self.desk))
+
+    def test_upgrade_finishes_an_already_moved_matching_entry_without_duplicating_it(self):
+        self.assertTrue(self.save([{"address": "https://api.day.app/legacy-fixture-key"}])["ok"])
+        settings = self.desk.settings()
+        [entry] = settings["alert_push"]
+        alert_push._file(self.desk, entry["id"]).rename(alert_push._file(self.desk, "legacy-bark"))
+        entry["id"] = "legacy-bark"
+        settings["alert_bark"] = {"on": True}
+        write_json(self.desk.settings_path, settings)
+        legacy = self.desk.secrets_dir / "alert-bark.device-key"
+        legacy.write_text("legacy-fixture-key\n")
+        self.assertEqual(self.desk.settings()["alert_push"], [entry])
+        self.assertFalse(legacy.exists())
+        self.assertNotIn("alert_bark", read_json(self.desk.settings_path, {}))
+
+    def test_old_page_bark_setting_is_ignored_while_other_edits_save(self):
+        for retired in ({"on": True, "server": "https://unused.example"}, "bad", None):
+            with self.subTest(retired=retired):
+                loaded = public_settings(self.desk)
+                loaded["settings"].pop("alert_push")
+                loaded["settings"].update(alert_bark=retired, cool_minutes=42)
+                result = save_from_page(self.desk, loaded)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(self.desk.settings()["cool_minutes"], 42)
+                self.assertEqual(self.desk.settings()["alert_push"], [])
+                self.assertNotIn("alert_bark", read_json(self.desk.settings_path, {}))
+                self.assertFalse((self.desk.secrets_dir / "alert-bark.device-key").exists())
+
+    def test_settings_reply_redacts_push_names_in_both_lists(self):
+        key = "private-name-fixture-key"
+        self.assertTrue(self.save([{"address": "https://api.day.app/" + key}])["ok"])
+        settings = self.desk.settings()
+        settings["alert_push"][0]["name"] = "phone " + key
+        write_json(self.desk.settings_path, settings)
+        reply = public_settings(self.desk)
+        for entries in (reply["settings"]["alert_push"], reply["alert_push"]):
+            self.assertNotIn(key, entries[0]["name"])
+            self.assertIn("[key of ", entries[0]["name"])
+        self.assertNotIn(key, json.dumps(reply))
+
+    def test_service_address_refusal_does_not_expose_its_parser_exception(self):
+        from hansa import alert_services
+        class RefusingService(alert_bark.Bark):
+            id = "refusing"
+            def normalize(self, value):
+                raise ValueError("private parser details: " + value)
+        address = "https://fixture.example/private-refused-key"
+        before = self.snapshot()
+        with unittest.mock.patch.dict(alert_services.SERVICES, refusing=RefusingService()):
+            result = self.save([{"service": "refusing", "address": address}])
+        self.assertFalse(result["ok"])
+        self.assertIn("does not accept", " ".join(result["problems"]))
+        self.assertNotIn("private", json.dumps(result))
+        self.assertEqual(self.snapshot(), before)
+
     def test_unsafe_and_unrecognized_addresses_save_nothing(self):
         for address, service in (
                 ("https://bark.example.com/KEY/", "recognize"),
@@ -46993,16 +47239,24 @@ class AlertPushTest(unittest.TestCase):
         from hansa import alert
         self.assertTrue(self.save([{"address": "first-fixture-device"}, {"address": "second-fixture-device"}])["ok"])
         first, second = self.desk.settings()["alert_push"]
+        started = {key: threading.Event() for key in ("first-fixture-device", "second-fixture-device")}
+        saw_peer, deadlines = {}, {}
         def sender(requests, deadline_s):
-            self.assertEqual(deadline_s, 30)
-            if requests[0]["json"]["device_key"] == "first-fixture-device":
-                self.soon(lambda: alert_push.last_result(self.desk, second["id"]), timeout=10)
+            key = requests[0]["json"]["device_key"]
+            peer = next(other for other in started if other != key)
+            deadlines[key] = deadline_s
+            started[key].set()
+            saw_peer[key] = started[peer].wait(10)
+            if key == "first-fixture-device":
                 raise OSError("https://api.day.app/first-fixture-device must never be logged")
             return [{"why": "sent"}]
         self.http.side_effect = sender
         self.assertTrue(alert.add(self.desk, "ask", "answer the request"))
         alert.send_due(self.desk, gather=0)
         self.assertEqual(self.http.call_count, 2)
+        # Assert outside send: its exception handler cannot swallow a failed guard.
+        self.assertEqual(saw_peer, dict.fromkeys(started, True))
+        self.assertEqual(deadlines, dict.fromkeys(started, 30))
         self.assertEqual(alert_push.last_result(self.desk, first["id"])["why"], "network")
         self.assertEqual(alert_push.last_result(self.desk, second["id"])["why"], "sent")
         failures = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines()) if e["event"] == "alert_failed"]
