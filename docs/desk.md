@@ -590,12 +590,30 @@ keeps an older page or a request for another setting from changing alert languag
 A saved language change also applies to alerts still gathering.
 
 Push addresses send alerts to phones and chats through push apps such as Bark.
-Set them up on the page, Settings, Alerts. There may be up to ten entries, each
-with a service, an on/off switch and an optional name. For Bark, paste the whole
-address on the app's home screen, such as `https://api.day.app/KEY/示例文字`:
-hansa keeps the server and key and drops the example text. A bare key uses
-`https://api.day.app`; a self-hosted address needs Bark chosen explicitly,
-since other services' addresses can look alike. Only Bark is available today.
+There may be up to ten entries, each with a service, an on/off switch and an
+optional name. To add one:
+
+1. Open **Settings → Alerts → Push addresses → Add an address**.
+2. Paste the whole address from the push app or service. Leave the service at
+   **Recognize it**, or choose the service's name. Each service's hint on the
+   page says what to paste. An extra secret field appears only for a service
+   that takes one.
+3. Give it a name if you like, then press **Save settings**. The entry now shows
+   only the hidden address, with its key concealed.
+4. Press **Send a test push** on that entry. Its last result shows sent and the
+   time, or what went wrong. A test sends even when the entry is switched off.
+
+For Bark, install Bark from the App Store on your iPhone and open it. Copy the
+whole address shown on the Bark app's home screen, for example
+`https://api.day.app/KEY/示例文字`, and paste it into **Add an address** above.
+Hansa keeps the server and key and drops the example text. If **Recognize it**
+cannot identify a self-hosted address, choose **Bark** and save again.
+
+To replace a saved address or extra secret, paste the new value into that
+entry. Leave either field empty to keep its saved value. Switch an entry off,
+rename it or press **Remove**, then **Save settings**. Until saved, address and
+secret changes and removals show the ordinary unsaved-changes note. Provider
+keys still use their own **Save key** buttons.
 
 Only the principal's page save adds, changes or removes push addresses. Settings
 (`alert_push`) keep metadata; each address is a secret in a separate 0600 file

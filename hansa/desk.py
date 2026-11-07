@@ -2738,11 +2738,6 @@ class Desk:
             language_given = isinstance(new, dict) and "alert_language" in new
             mailbox_key = ""
             if isinstance(new, dict):
-                # The old page's Bark view is read-only outside its web adapter.
-                # Accept an unchanged projection on an unrelated settings save.
-                from .alert_bark import projection
-                if "alert_bark" in new and new["alert_bark"] == projection(self):
-                    new = {k: v for k, v in new.items() if k != "alert_bark"}
                 new = current_settings(new)
                 # Older pages omit this field: an unrelated save must keep the principal's choice.
                 new.setdefault("alert_language", old["alert_language"])
@@ -3254,7 +3249,6 @@ def release_last(desk: Desk) -> dict:
 def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
     from .run import credit_text
-    from . import alert_bark
     desk.settings()  # finish any legacy upgrade before obtaining the revision
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
@@ -3277,12 +3271,8 @@ def public_settings(desk: Desk) -> dict:
                  for observed in [listed_as(s.get("lanes", {}).get(lane), target)]
                  for why in [listed_mismatch(s, x, now_as=observed)] if why]
     from . import alert_push, alert_services
-    s["alert_bark"] = alert_bark.projection(desk)  # temporary interface for the existing page
     return {"settings": s, "alert_push": alert_push.public(desk), "alert_push_services": alert_services.public(), "alert_language_saved": "alert_language" in desk._saved_settings(),
-            # whether a Bark device key is saved, never the key, and the channel's last push
-            "alert_bark_key_set": alert_bark.has_key(desk), "alert_bark_last": alert_bark.last_result(desk),
-            "keys": keys, "problems": validate({k: v for k, v in s.items() if k != "alert_bark"}, desk.root,
-                                               page=True, mailbox_key=mailbox_key), "rev": rev,
+            "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),

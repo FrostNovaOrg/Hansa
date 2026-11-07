@@ -6212,8 +6212,8 @@ def save():'''))
         self.assertEqual(self.desk.save_settings(old, by="page"), [])
         saved = json.loads(self.desk.settings_path.read_text())
         self.assertNotIn("alert_bark", saved)
-        self.assertIn("alert_bark", current)  # derived for the page's current Bark block
-        self.assertEqual(saved, {k: v for k, v in current.items() if k != "alert_bark"})
+        self.assertNotIn("alert_bark", current)
+        self.assertEqual(saved, current)
 
     def test_historical_task_metadata_and_events_render_without_live_features(self):
         from hansa import web
@@ -36942,42 +36942,50 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     await vm.runInContext("saveSettings()", ctx);
     console.log(JSON.stringify({before, options, dirty, group, posted})); return;
   }
-  if (ask === "bark") {
-    // given.barkSteps, in order: {key}, {on}, {server}, {turn_min} typed or ticked; {remove}, {save}, {test} pressed;
-    // {reply}: what the next settings save is told. Prints the Bark block's text and controls, the save bar's note, the
-    // coordinator alert's turns field, what was posted and the page's labels.
+  if (ask === "push") {
     const run = code => vm.runInContext(code, ctx);
-    const find = pred => { let found = null; walk(ids["#tab-settings"], el => { if (!found && pred(el)) found = el; }); return found; };
-    const block = () => find(el => el.tag === "section" && el.kids[0]?.textContent === run("T.barkTitle"));
-    const inBlock = pred => { let found = null; walk(block(), el => { if (!found && pred(el)) found = el; }); return found; };
-    const shown = () => { const b = block(); if (!b) throw new Error("Bark block missing");
-      const key = inBlock(el => "data-bark-key" in el.attrs), on = inBlock(el => el.attrs.id === "alert-bark-on");
-      const state = inBlock(el => "data-bark-key-state" in el.attrs);
-      return {text:b.textContent, keyType:key.attrs.type, keyValue:key.value, keyDisabled:key.disabled,
-        on:on.checked, switchType:on.attrs.type, state:state ? state.textContent : null,
-        remove:inBlock(el => "data-bark-remove" in el.attrs)?.textContent ?? null,
-        last:inBlock(el => "data-bark-last" in el.attrs).textContent,
-        help:inBlock(el => "data-bark-help" in el.attrs).textContent,
-        alertsIndex:ids["#tab-settings"].textContent.indexOf(run("T.alertCommandTitle")) <
-          ids["#tab-settings"].textContent.indexOf(run("T.barkTitle")),
-        saveState:run("settingsSaveState ? settingsSaveState.textContent : null"),
-        turnLabel:turnLabel()?.textContent ?? null, turnMin:turnInput()?.value ?? null};
-    };
+    const find = (pred, root = ids["#tab-settings"]) => { let found = null;
+      walk(root, el => { if (!found && pred(el)) found = el; }); return found; };
+    const block = () => find(el => "data-push" in el.attrs);
+    const cards = () => { const out = []; walk(block(), el => { if ("data-push-id" in el.attrs) out.push(el); }); return out; };
+    const field = (root, key) => find(el => el.attrs["data-push-field"] === key, root);
     const turnLabel = () => find(el => el.tag === "label" && el.textContent === run("T.turnShort"));
     const turnInput = () => turnLabel() && ids["#" + turnLabel().attrs.for];
+    const shown = () => {
+      if (!block()) throw new Error("Push addresses block missing");
+      const add = find(el => "data-push-add" in el.attrs, block());
+      const describe = root => ({text:root.textContent,
+        address:field(root, "address")?.value, addressType:field(root, "address")?.attrs.type,
+        secret:!!field(root, "secret"), secretValue:field(root, "secret")?.value,
+        secretType:field(root, "secret")?.attrs.type,
+        service:field(root, "service")?.value,
+        options:field(root, "service")?.kids.map(el => ({value:el.value, text:el.textContent})),
+        on:field(root, "on")?.checked, switchRole:field(root, "on")?.attrs.role,
+        name:field(root, "name")?.value,
+        last:find(el => "data-push-last" in el.attrs, root)?.textContent});
+      return {text:block().textContent, entries:cards().map(describe), add:add ? describe(add) : null,
+        alertsIndex:ids["#tab-settings"].textContent.indexOf(run("T.alertCommandTitle")) <
+          ids["#tab-settings"].textContent.indexOf(run("T.pushTitle")),
+        saveState:run("settingsSaveState.textContent"), badge:run("settingsBadge.textContent"),
+        turnLabel:turnLabel()?.textContent, turnMin:turnInput()?.value};
+    };
     const before = shown();
-    for (const step of given.barkSteps || []) {
+    for (const step of given.pushSteps || []) {
       if ("reply" in step) settingsPostReply = step.reply;
-      if ("key" in step) { const el = inBlock(el => "data-bark-key" in el.attrs); el.value = step.key; el.on.input({target:el}); }
-      if ("server" in step) { const el = inBlock(el => el.tag === "input" && el.attrs.placeholder === "https://api.day.app");
-        el.value = step.server; el.on.input({target:el}); }
-      if ("on" in step) { const el = inBlock(el => el.attrs.id === "alert-bark-on"); el.checked = step.on; el.on.change({target:el}); }
+      if ("refreshReply" in step) given["/api/settings"] = step.refreshReply;
+      for (const key of ["service", "address", "secret", "name", "on"]) {
+        if (!(key in step)) continue;
+        const root = "entry" in step ? cards()[step.entry] : find(el => "data-push-add" in el.attrs, block());
+        const el = field(root, key); if (!el) throw new Error("push field missing: " + key);
+        if (key === "on") el.checked = step[key]; else el.value = step[key];
+        el.on[key === "service" || key === "on" ? "change" : "input"]({target:el});
+      }
       if ("turn_min" in step) { const el = turnInput(); el.value = step.turn_min; el.on.input({target:el}); }
-      if (step.remove) inBlock(el => "data-bark-remove" in el.attrs).on.click();
+      if (step.remove) find(el => "data-push-remove" in el.attrs, cards()[step.entry]).on.click();
       if (step.save) await run("saveSettings()");
-      if (step.test) await inBlock(el => "data-bark-test" in el.attrs).on.click();
+      if (step.test) await find(el => "data-push-test" in el.attrs, cards()[step.entry]).on.click();
     }
-    const labels = Object.fromEntries(Object.entries(run("T")).filter(([k]) => k.startsWith("bark"))
+    const labels = Object.fromEntries(Object.entries(run("T")).filter(([k]) => k.startsWith("push"))
       .map(([k, v]) => [k, typeof v === "function" ? v("WHAT", "WHEN") : v]));
     console.log(JSON.stringify({before, after:shown(), posted, posts:apiPosts.filter(p => p.path !== "/api/settings"),
       settingsPosts:settingsPostCount, problems:run("settingsProblems"), dirty:run("settingsDirty()"),
@@ -42264,8 +42272,8 @@ else:
 
     def bark_fake(self, why="sent"):
         """The real Bark sender with a fake transport: no network, including in follower tests."""
-        alert_bark.save_key(self.desk, "fixture-bark-device-key", by="page")  # the key first: on without one is refused
-        self.assertTrue(self.page_save(lambda s: s.update(alert_bark={"on": True}))["ok"])
+        alert_push.change(self.desk, [{"address": "https://api.day.app/fixture-bark-device-key"}], by="page")
+        self.assertTrue(self.page_save(lambda s: s["alert_push"][0].update(on=True))["ok"])
         http = unittest.mock.patch.object(alert_http, "send", return_value=[
             {"ok": why == "sent", "why": why, "status": 200 if why == "sent" else None, "tries": 3}])
         sender = unittest.mock.patch.object(alert_push, "send", wraps=alert_push.send)
@@ -42375,7 +42383,7 @@ else:
                 # a key while switching (the page refuses on without one), then the key the case asks for:
                 # on with no key is a key file gone missing since
                 alert_bark.save_key(self.desk, "fixture-bark-key", by="page")
-                self.assertTrue(self.page_save(lambda s: s.update(alert_bark={"on": on}))["ok"])
+                self.assertTrue(self.page_save(lambda s: s["alert_push"][0].update(on=on))["ok"])
                 alert_bark.save_key(self.desk, "fixture-bark-key" if key else "", by="page")
                 self.assertFalse(alert.add(self.desk, "disk", "Low disk"))
                 self.assertEqual(alert.queued(self.desk), [])
@@ -42478,24 +42486,32 @@ else:
                     self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
                 sender.assert_called_once()
 
-    def test_bark_page_has_one_way_to_save_the_key_the_settings_save(self):
+    def test_push_page_has_one_settings_save_and_no_retired_bark_endpoints(self):
         from hansa import web
         with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
                 unittest.mock.patch.object(web.threading, "Thread"):
             start_web(self.desk, "127.0.0.1", 0)
         page = object.__new__(server.call_args.args[1])
-        page.path = "/api/alert/bark/key"  # the separate key endpoint the page once had
-        data = json.dumps({"key": "fixture-bark-key"}).encode()
-        page.headers = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1",
-                        "Content-Length": str(len(data))}
-        page.rfile, page._send = io.BytesIO(data), unittest.mock.Mock()
-        page.do_POST()
-        self.assertEqual(page._send.call_args.args[0], 404)
-        self.assertFalse(public_settings(self.desk)["alert_bark_key_set"])
+        for path in ("/api/alert/bark/key", "/api/alert/bark-test"):
+            page.path = path
+            data = b"{}"
+            page.headers = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1",
+                            "Content-Length": str(len(data))}
+            page.rfile, page._send = io.BytesIO(data), unittest.mock.Mock()
+            page.do_POST()
+            self.assertEqual(page._send.call_args.args[0], 404)
+        reply = public_settings(self.desk)
+        self.assertEqual(reply["alert_push"], [])
+        for key in ("alert_bark_key_set", "alert_bark_last"):
+            self.assertNotIn(key, reply)
+        self.assertNotIn("alert_bark", reply["settings"])
+        self.assertNotIn("alert_bark", views.status(self.desk))
+        from hansa import alert
+        self.assertFalse(hasattr(alert, "bark_ready"))
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
-        self.assertNotIn("/api/alert/bark/key", ui)
-        self.assertEqual(ui.count("function barkSection("), 1)
-        self.assertEqual(ui.count("barkSection()"), 2)  # its definition and its one use
+        self.assertNotIn("bark", ui.lower())
+        self.assertEqual(ui.count("function pushSection("), 1)
+        self.assertEqual(ui.count("pushSection()"), 2)
 
     def test_alert_language_is_validated_recorded_and_principal_only(self):
         self.assertEqual(self.desk.settings()["alert_language"], "en")
@@ -46166,8 +46182,12 @@ class AlertBarkTest(unittest.TestCase):
 
     def configure(self, *, language="en", server="https://api.day.app", on=True):
         settings = self.desk.settings()
-        settings.update(alert_language=language, alert_bark={"on": on, "server": server})
-        self.assertTrue(save_from_page(self.desk, {"settings": settings, "alert_bark_key": self.key})["ok"])
+        settings["alert_language"] = language
+        entries = settings["alert_push"]
+        edit = {"address": server.rstrip("/") + "/" + self.key, "service": "bark", "on": on}
+        if entries:
+            edit["id"] = entries[0]["id"]
+        self.assertTrue(save_from_page(self.desk, {"settings": settings, "alert_push_changes": [edit]})["ok"])
 
     def pushed(self):
         self.http.assert_called_once()
@@ -46267,23 +46287,22 @@ class AlertBarkTest(unittest.TestCase):
         self.assertEqual(alert_bark.test(self.desk), "too_big")
         self.http.assert_not_called()
 
-    def test_bark_unsafe_servers_and_invalid_settings_write_nothing(self):
+    def test_bark_unsafe_addresses_and_invalid_push_edits_write_nothing(self):
         before = self.snapshot()
-        for server in ("http://api.day.app", "https://u:p@api.day.app", "https://api.day.app?x=1",
-                       "https://api.day.app?", "https://api.day.app#", "https://api.day.app/push",
-                       "https://api.day.app//", "https://api.day.app/../", "https://api.day.app/#x",
-                       "https://api.day.app\n", "https://api.day.app\x00", "https://api.day.app\\other",
-                       "https://api.day.app:bad", "https://[bad", "", None):
-            with self.subTest(server=server):
-                settings = self.desk.settings()
-                settings["alert_bark"] = {"on": True, "server": server}
-                self.assertFalse(save_from_page(self.desk, {"settings": settings})["ok"])
+        for address in ("http://api.day.app/key", "https://u:p@api.day.app/key", "https://api.day.app/key?x=1",
+                        "https://api.day.app/key?", "https://api.day.app/key#", "https://api.day.app/",
+                        "https://api.day.app//", "https://api.day.app/../", "https://api.day.app/key#x",
+                        "https://api.day.app/key\n", "https://api.day.app/key\x00", "https://api.day.app/key\\other",
+                        "https://api.day.app:bad/key", "https://[bad/key", "", None):
+            with self.subTest(address=address):
+                self.assertFalse(save_from_page(self.desk, {"settings": self.desk.settings(),
+                    "alert_push_changes": [{"service": "bark", "address": address}]})["ok"])
                 self.assertEqual(self.snapshot(), before)
-        for config in (None, [], {"on": "yes"}, {"on": 1}, {"key": self.key}):
-            with self.subTest(config=config):
-                settings = self.desk.settings()
-                settings["alert_bark"] = config
-                self.assertFalse(save_from_page(self.desk, {"settings": settings})["ok"])
+        for edit in (None, [], {"address": "fixture-key", "on": "yes"}, {"address": "fixture-key", "on": 1},
+                     {"key": self.key}):
+            with self.subTest(edit=edit):
+                self.assertFalse(save_from_page(self.desk, {"settings": self.desk.settings(),
+                    "alert_push_changes": [edit]})["ok"])
                 self.assertEqual(self.snapshot(), before)
         self.http.assert_not_called()
 
@@ -46361,7 +46380,7 @@ class AlertBarkTest(unittest.TestCase):
         self.assertEqual({k: event[k] for k in ("channel", "ok", "why")},
                          {"channel": "push", "ok": False, "why": "network"})
         status = views.status(self.desk)
-        self.assertEqual(status["alert_bark"]["last"], last)
+        self.assertEqual(status["alert_push"][0]["last"], last)
         self.assertIn("network", views.status_text(status))
         for text in (json.dumps(last), json.dumps(event), json.dumps(status)):
             self.assertNotIn(self.key, text)
@@ -46398,13 +46417,12 @@ class AlertBarkTest(unittest.TestCase):
         self.http.assert_not_called()
 
 
-class AlertBarkPageTest(unittest.TestCase):
-    """The Bark block of Settings, Alerts: the page as the principal uses it (PAGE_HARNESS), what it posts saved by the
-    page's own settings save, and the channel's test through the real request handler; alert_http.send is a fake."""
+class AlertPushPageTest(unittest.TestCase):
+    """The real page's push controls and settings posts; delivery is faked, never paid or external."""
     PAGE_HARNESS = DeskTest.PAGE_HARNESS
     web_request = DeskTest.web_request
     page_save = DeskTest.page_save
-    KEY = "barkPageKey12345"
+    KEY = "pushPageKey12345"
 
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
@@ -46420,187 +46438,241 @@ class AlertBarkPageTest(unittest.TestCase):
         self.http = http.start()
         self.addCleanup(http.stop)
 
-    def key_file(self):
-        entry = alert_bark.first(self.desk)
-        return alert_push._file(self.desk, entry["id"]) if entry else self.desk.secrets_dir / "no-bark-address"
-
     def page(self, steps=(), language="en", extra=None):
         if not shutil.which("node"):
             self.skipTest("needs node to run the page's script")
-        harness = self.tmp / "bark-page.js"
+        harness = self.tmp / "push-page.js"
         harness.write_text(self.PAGE_HARNESS)
-        given = {"/api/settings": public_settings(self.desk), "barkSteps": list(steps), **(extra or {})}
-        result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"), "bark",
+        given = {"/api/settings": public_settings(self.desk), "pushSteps": list(steps), **(extra or {})}
+        result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"), "push",
                                  "zh-CN" if language == "zh" else "en"],
                                 input=json.dumps(given), capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
-    def no_key_anywhere(self, *texts):
-        from hansa import history
-        for text in texts:
-            self.assertNotIn(self.KEY, text if isinstance(text, str) else json.dumps(text, ensure_ascii=False))
-        for path in (self.desk.settings_path, self.desk.events_path):
-            if path.exists():
-                self.assertNotIn(self.KEY, path.read_text(encoding="utf-8"))
-        self.assertNotIn(self.KEY, json.dumps(history.read(self.desk), ensure_ascii=False))
+    def add(self, **edit):
+        alert_push.change(self.desk, [{"address": "https://api.day.app/" + self.KEY, **edit}], by="page")
+        return self.desk.settings()["alert_push"][-1]
 
-    def test_bark_page_save_with_a_key_goes_to_the_channel_and_shows_only_saved(self):
-        for language, saved in (("en", "saved"), ("zh", "已保存")):
+    def test_push_page_lists_upgraded_bark_with_hidden_address_switch_and_last_result(self):
+        settings = self.desk.settings()
+        settings.pop("alert_push")
+        settings["alert_bark"] = {"on": True}
+        write_json(self.desk.settings_path, settings)
+        self.desk.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.desk.secrets_dir / "alert-bark.device-key").write_text(self.KEY)
+        write_json(self.desk.state_dir / "alert-bark-last.json", {"at": time.time() - 60, "ok": True, "why": "sent"})
+        for language in ("en", "zh"):
+            shown = self.page(language=language)
+            [entry] = shown["before"]["entries"]
+            self.assertTrue(shown["before"]["alertsIndex"])
+            self.assertTrue(entry["on"])
+            self.assertEqual(entry["switchRole"], "switch")
+            self.assertIn("Bark", entry["text"])
+            self.assertIn(public_settings(self.desk)["alert_push"][0]["address"], entry["text"])
+            self.assertIn(shown["labels"]["pushSent"], entry["last"])
+            self.assertRegex(entry["last"], r"\d")
+            self.assertNotIn(self.KEY, json.dumps(shown))
+            self.assertEqual(entry["address"], "")
+
+    def test_push_page_recognizes_a_pasted_bark_address_on_save_and_clears_the_input(self):
+        for language in ("en", "zh"):
             with self.subTest(language=language):
-                if alert_bark.has_key(self.desk):
-                    alert_bark.remove_key(self.desk, by="page")
-                shown = self.page([{"key": " " + self.KEY + " "}, {"on": True}, {"save": True}], language)
-                self.assertTrue(shown["before"]["alertsIndex"], "the Bark block follows the alert command")
-                self.assertEqual((shown["before"]["keyType"], shown["before"]["switchType"]), ("password", "checkbox"))
-                posted = shown["posted"]
-                self.assertEqual(posted["alert_bark_key"], self.KEY)
-                self.assertNotIn(self.KEY, json.dumps(posted["settings"]))
-                told = save_from_page(self.desk, posted)
-                self.assertEqual(told, {"ok": True, "problems": []})
-                self.assertTrue(alert_bark.has_key(self.desk))
-                self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
-                self.assertEqual(alert_bark.projection(self.desk), {"on": True, "server": "https://api.day.app"})
+                address = "https://api.day.app/" + self.KEY + "/示例文字"
+                shown = self.page([{"address": address}, {"save": True}], language)
+                self.assertEqual(shown["before"]["add"]["options"][0],
+                                 {"value": "recognize", "text": shown["labels"]["pushRecognize"]})
+                [edit] = shown["posted"]["alert_push_changes"]
+                self.assertEqual((edit["address"], edit["service"]), (address, "recognize"))
+                self.assertNotIn(self.KEY, json.dumps(shown["posted"]["settings"]))
+                self.assertEqual(shown["after"]["add"]["address"], "")
+                self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
                 again = self.page(language=language)
-                self.assertEqual(again["before"]["state"], saved)
-                self.assertEqual(again["before"]["keyValue"], "")
-                self.assertTrue(again["before"]["on"])
-                self.no_key_anywhere(told, public_settings(self.desk), again, self.web_request(
-                    "/api/settings", headers={"Authorization": "Bearer " + self.desk.web_token()})[1])
+                self.assertNotIn(self.KEY, json.dumps(again))
+                self.assertEqual(again["before"]["entries"][-1]["service"], "bark")
+                self.assertTrue(again["before"]["entries"][-1]["on"])
 
-    def test_bark_page_save_with_the_key_left_blank_keeps_the_saved_key(self):
-        alert_bark.save_key(self.desk, self.KEY, by="page")
-        shown = self.page([{"server": "https://bark.example.org"}, {"save": True}])
-        self.assertEqual(shown["before"]["state"], "saved")
-        self.assertNotIn("alert_bark_key", shown["posted"])
-        self.assertNotIn("alert_bark_key_remove", shown["posted"])
-        self.assertEqual(save_from_page(self.desk, shown["posted"]), {"ok": True, "problems": []})
-        self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
-        self.assertEqual(alert_bark.projection(self.desk)["server"], "https://bark.example.org")
-        # a blank or spaces-only key from any page keeps it too
-        loaded = public_settings(self.desk)
-        self.assertTrue(save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"],
-                                                   "alert_bark_key": "   "})["ok"])
-        self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
+    def test_push_page_unrecognized_address_refusal_asks_to_choose_in_both_languages(self):
+        address = "https://unknown.example/private-fixture"
+        shown = self.page([{"address": address}, {"save": True}])
+        before = self.desk.settings_path.read_bytes()
+        refusal = save_from_page(self.desk, shown["posted"])
+        self.assertFalse(refusal["ok"])
+        self.assertEqual(before, self.desk.settings_path.read_bytes())
+        for language in ("en", "zh"):
+            shown = self.page([{"address": address}, {"reply": refusal, "save": True}], language)
+            self.assertIn(shown["labels"]["pushChooseService"], shown["problems"])
+            self.assertIn(shown["labels"]["pushChooseService"], shown["settings"])
+            self.assertEqual(shown["after"]["add"]["address"], address)
+            self.assertTrue(shown["dirty"])
 
-    def test_bark_page_remove_takes_the_key_away_and_switches_bark_off(self):
-        alert_bark.save_key(self.desk, self.KEY, by="page")
-        self.assertTrue(self.page_save(lambda s: s.update(alert_bark={"on": True, "server": "https://api.day.app"}))["ok"])
-        for language, removing in (("en", "the key is removed"), ("zh", "删除密钥")):
-            with self.subTest(language=language):
-                shown = self.page([{"remove": True}], language)
-                self.assertIn(removing, shown["after"]["text"])
-                self.assertFalse(shown["after"]["on"])
-                self.assertTrue(shown["dirty"])
-                self.assertEqual(shown["settingsPosts"], 0, "removal waits for the settings save")
-        shown = self.page([{"remove": True}, {"save": True}])
-        self.assertIs(shown["posted"]["alert_bark_key_remove"], True)
-        self.assertFalse(shown["posted"]["settings"]["alert_bark"]["on"])
-        self.assertEqual(save_from_page(self.desk, shown["posted"]), {"ok": True, "problems": []})
-        self.assertFalse(alert_bark.has_key(self.desk))
-        self.assertFalse(self.key_file().exists())
-        self.assertFalse(alert_bark.projection(self.desk)["on"])
-        self.assertEqual(self.page()["before"]["state"], "not saved")
-        # an older or hand-made body asking removal with the switch on still ends off
-        alert_bark.save_key(self.desk, self.KEY, by="page")
-        loaded = public_settings(self.desk)
-        loaded["settings"]["alert_bark"]["on"] = True
-        told = save_from_page(self.desk, {**loaded, "alert_bark_key_remove": True})
-        self.assertTrue(told["ok"], told)
-        self.assertFalse(alert_bark.has_key(self.desk))
-        self.assertFalse(alert_bark.projection(self.desk)["on"])
+    def test_push_page_uses_reply_services_hints_and_extra_secret_for_add_and_replace(self):
+        from hansa import alert_services
+        class FutureService(alert_bark.Bark):
+            id = "fixture"
+            names = {"en": "Future phone", "zh": "未来手机"}
+            hints = {"en": "Paste your future address.", "zh": "粘贴未来地址。"}
+            extra_secret = True
+        with unittest.mock.patch.dict(alert_services.SERVICES, {"fixture": FutureService()}):
+            entry = self.add(service="fixture", secret="fixture-extra-secret")
+            for language in ("en", "zh"):
+                reply = public_settings(self.desk)
+                shown = self.page(language=language)
+                options = shown["before"]["add"]["options"]
+                self.assertEqual([o["value"] for o in options], ["recognize"] + [s["id"] for s in reply["alert_push_services"]])
+                self.assertEqual([o["text"] for o in options][1:], [s["name"][language] for s in reply["alert_push_services"]])
+                self.assertIn(shown["labels"]["pushGeneralHint"], shown["before"]["add"]["text"])
+                self.assertFalse(shown["before"]["add"]["secret"])
+                self.assertTrue(shown["before"]["entries"][0]["secret"])
+                shown = self.page([{"service": "fixture", "secret": "new-extra"}], language)
+                self.assertTrue(shown["after"]["add"]["secret"])
+                self.assertEqual(shown["after"]["add"]["secretType"], "password")
+                self.assertIn(FutureService.hints[language], shown["after"]["add"]["text"])
+                shown = self.page([{"service": "fixture", "secret": "new-extra"}, {"service": "bark"}], language)
+                self.assertFalse(shown["after"]["add"]["secret"])
+                self.assertNotIn("new-extra", json.dumps(shown["after"]))
+                shown = self.page([{"entry": 0, "name": "kept address " + language}, {"save": True}], language)
+                [edit] = shown["posted"]["alert_push_changes"]
+                self.assertNotIn("address", edit)
+                self.assertNotIn("secret", edit)
+                self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+                self.assertEqual(alert_push._read(self.desk, entry["id"], True), "fixture-extra-secret")
+                shown = self.page([{"entry": 0, "address": "https://api.day.app/replacement-fixture",
+                                    "secret": "replacement-extra"}, {"save": True}], language)
+                self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+                self.assertEqual(alert_push._read(self.desk, entry["id"]), "https://api.day.app/replacement-fixture")
+                self.assertEqual(alert_push._read(self.desk, entry["id"], True), "replacement-extra")
+                # Reset for the next language's blank replacement check.
+                alert_push.change(self.desk, [{"id": entry["id"], "secret": "fixture-extra-secret"}], by="page")
+            shown = self.page([{"entry": 0, "service": "bark", "address": "https://api.day.app/switched-fixture"}, {"save": True}])
+            self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+            self.assertFalse(self.page()["before"]["entries"][0]["secret"])
+            self.assertEqual(self.desk.settings()["alert_push"][0]["service"], "bark")
+            self.assertEqual(alert_push._read(self.desk, entry["id"], True), "")
 
-    def test_bark_page_switch_on_without_a_key_is_refused_and_changes_nothing(self):
-        for language, words in (("en", "cannot be switched on without a device key"), ("zh", "没有设备密钥，不能打开 Bark")):
-            with self.subTest(language=language):
-                shown = self.page([{"on": True}, {"save": True}], language)
-                self.assertEqual(shown["settingsPosts"], 0)
-                self.assertTrue(any(words in p for p in shown["problems"]), shown["problems"])
-                self.assertIn(words, shown["settings"])
-        before = {str(p): p.read_bytes() for p in self.desk.root.rglob("*") if p.is_file()}
-        told = self.page_save(lambda s: s.update(alert_bark={"on": True, "server": "https://api.day.app"},
-                                                cool_minutes=7))
-        self.assertFalse(told["ok"])
-        self.assertTrue(any("without a device key" in p and "nothing was changed" in p for p in told["problems"]))
-        self.assertEqual({str(p): p.read_bytes() for p in self.desk.root.rglob("*") if p.is_file()}, before)
-        # removing the key while switching on is refused the same way
-        alert_bark.save_key(self.desk, self.KEY, by="page")
-        loaded = public_settings(self.desk)
-        loaded["settings"]["alert_bark"]["on"] = True
-        told = save_from_page(self.desk, {**loaded, "alert_bark_key": "", "alert_bark_key_remove": False})
-        self.assertTrue(told["ok"], "a saved key lets the switch go on")
-        # a stale page's key is refused with its settings, and a bad key leaves the settings as they were
-        stale = public_settings(self.desk)
-        self.assertTrue(self.page_save(lambda s: s.update(cool_minutes=8))["ok"])
-        told = save_from_page(self.desk, {**stale, "alert_bark_key": "anotherBarkKey987"})
-        self.assertTrue(told["problems"][0].startswith("the settings changed since this page loaded them"))
-        self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
-        loaded = public_settings(self.desk)
-        loaded["settings"]["cool_minutes"] = 9
-        told = save_from_page(self.desk, {**loaded, "alert_bark_key": "short"})
-        self.assertEqual(told["ok"], False)
-        self.assertTrue(told["problems"][0].startswith("the Bark device key"))
-        self.assertEqual(self.desk.settings()["cool_minutes"], 8)
-        self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
+    def test_push_page_switch_rename_and_remove_wait_for_save_and_survive_reload(self):
+        first = self.add()
+        second = self.add(name="spare phone")
+        for language in ("en", "zh"):
+            shown = self.page([{"entry": 0, "on": False, "name": "my phone"}, {"entry": 1, "remove": True}], language)
+            self.assertEqual(shown["settingsPosts"], 0)
+            self.assertTrue(shown["dirty"])
+            self.assertIn(shown["labels"]["pushRemoving"], shown["after"]["entries"][1]["text"])
+            self.assertTrue(self.desk.settings()["alert_push"][0]["on"])
+        shown = self.page([{"entry": 0, "on": False, "name": "my phone"}, {"entry": 1, "remove": True}, {"save": True}])
+        self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+        [saved] = self.desk.settings()["alert_push"]
+        self.assertEqual((saved["id"], saved["on"], saved["name"]), (first["id"], False, "my phone"))
+        self.assertFalse(alert_push._file(self.desk, second["id"]).exists())
+        [again] = self.page()["before"]["entries"]
+        self.assertEqual((again["on"], again["name"]), (False, "my phone"))
+        self.assertIn("my phone", again["text"])
 
-    def test_bark_page_test_pushes_once_through_the_channel_and_shows_its_result(self):
-        alert_bark.save_key(self.desk, self.KEY, by="page")
+    def test_push_page_test_an_off_entry_sends_once_and_shows_plain_results(self):
+        entry = self.add(on=False)
         auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
-        code, body, _ = self.web_request("/api/alert/bark-test", method="POST", headers=auth, data=b"{}")
-        self.assertEqual(code, 200)
-        self.http.assert_called_once()
-        self.assertEqual(self.http.call_args.args[0][0]["json"]["device_key"], self.KEY)
-        self.assertEqual((body["ok"], body["why"], body["last"]["why"]), (True, "sent", "sent"))
-        self.no_key_anywhere(body)
-        self.http.reset_mock(return_value=True)
+        def test_push():
+            code, result, _ = self.web_request("/api/alert/push-test", method="POST", headers=auth,
+                                               data=json.dumps({"id": entry["id"]}).encode())
+            self.assertEqual(code, 200)
+            self.http.assert_called_once()
+            self.assertFalse(self.desk.settings()["alert_push"][0]["on"])
+            return result
+        sent = test_push()
+        self.http.reset_mock()
         self.http.return_value = [{"ok": False, "why": "http_4xx", "status": 400, "tries": 1}]
-        code, failed, _ = self.web_request("/api/alert/bark-test", method="POST", headers=auth, data=b"{}")
-        self.http.assert_called_once()
-        self.assertEqual((failed["ok"], failed["why"]), (False, "http_4xx"))
-        for language, sent, reason, last in (("en", "sent", "check the device key", "Last push: sent"),
-                                             ("zh", "已发出", "请检查设备密钥", "上次推送：已发出")):
-            with self.subTest(language=language):
-                shown = self.page([{"test": True}], language, {"/api/alert/bark-test": body})
-                self.assertEqual([p["path"] for p in shown["posts"]], ["/api/alert/bark-test"])
-                self.assertIn(sent, shown["after"]["text"])
-                self.assertIn(last, shown["after"]["last"])
-                shown = self.page([{"test": True}], language, {"/api/alert/bark-test": failed})
-                self.assertIn(reason, shown["after"]["text"])
-                self.assertNotIn("http_4xx", shown["after"]["text"])
+        failed = test_push()
+        for language in ("en", "zh"):
+            for result in (sent, failed):
+                shown = self.page([{"entry": 0, "test": True}], language, {"/api/alert/push-test": result})
+                self.assertEqual(shown["posts"], [{"path": "/api/alert/push-test", "body": {"id": entry["id"]}}])
+                last = shown["after"]["entries"][0]["last"]
+                words = shown["labels"]["pushSent"] if result["ok"] else shown["labels"]["pushWhy"]["http_4xx"]
+                self.assertIn(words, last)
+                self.assertNotIn("http_4xx", last)
+                self.assertRegex(last, r"\d")
+                self.assertNotIn(self.KEY, json.dumps(shown))
+        # The saved result arrives on a new page too.
+        self.assertIn(self.page()["labels"]["pushWhy"]["http_4xx"], self.page()["before"]["entries"][0]["last"])
 
-    def test_bark_page_labels_and_help_in_both_languages(self):
+    def test_push_page_address_secret_and_removal_drafts_use_the_ordinary_save_note(self):
+        self.add()
+        reply = public_settings(self.desk)
+        reply["alert_push_services"].append({"id": "future", "name": {"en": "Future", "zh": "未来"},
+                                           "hint": {"en": "Paste an address.", "zh": "粘贴地址。"}, "extra_secret": True})
+        for language, note, provider in (("en", "Changes stay in this page until you save them.", "separately under Providers"),
+                                         ("zh", "修改仅保留在当前页面，保存后才会生效。", "请在模型服务商中单独保存")):
+            for steps in ([{"address": "https://api.day.app/unsaved-fixture"}],
+                          [{"service": "future", "secret": "unsaved-secret"}],
+                          [{"entry": 0, "address": "https://api.day.app/replaced-fixture"}],
+                          [{"entry": 0, "remove": True}]):
+                shown = self.page(steps, language, {"/api/settings": reply})
+                self.assertTrue(shown["dirty"])
+                self.assertIn(note, shown["after"]["saveState"])
+                self.assertNotIn(provider, shown["after"]["saveState"])
+
+    def test_push_page_all_labels_and_privacy_note_in_both_languages(self):
         en, zh = self.page()["labels"], self.page(language="zh")["labels"]
         self.assertEqual(set(en), set(zh))
-        self.assertEqual(set(en["barkWhy"]), set(zh["barkWhy"]))
-        self.assertTrue(set(en["barkWhy"]) >= {"off", "no_key", "refused_url", "network", "timeout", "http_4xx", "too_big"})
-        flat = lambda d: [x for v in d.values() for x in (flat(v) if isinstance(v, dict) else v if isinstance(v, list) else [v])]
+        self.assertEqual(set(en["pushWhy"]), set(zh["pushWhy"]))
+        flat = lambda d: [x for v in d.values() for x in (flat(v) if isinstance(v, dict) else [v])]
         for one, other in zip(flat(en), flat(zh)):
             self.assertNotEqual(one, other)
             self.assertRegex(other, r"[一-鿿]")
-        for language, words in (("en", ["App Store", "right after the server's address", "switch Bark on",
-                                        "can be read by that server", "Release codes never go to Bark"]),
-                                ("zh", ["App Store", "紧跟在服务器地址后面", "打开 Bark", "那台服务器能读到",
-                                        "发布码从不发到 Bark"])):
-            with self.subTest(language=language):
-                shown = self.page(language=language)["before"]
-                for word in words:
-                    self.assertIn(word, shown["help"])
-                if language == "zh":  # the page's own words: no English beyond names and the example address
-                    allowed = {"Bark", "iPhone", "App", "Store", "https", "api", "day", "app", "AbCd1234Ef", "TLS", "hansa"}
-                    self.assertFalse(set(re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", shown["text"])) - allowed, shown["text"])
+        for language, words in (("en", ["desk's name", "alert texts", "Apple", "Google", "release codes never", "on this page"]),
+                                ("zh", ["工作台名称", "提醒正文", "苹果", "谷歌", "发布码从不", "这个网页"])):
+            shown = self.page(language=language)["before"]["text"]
+            for word in words:
+                self.assertIn(word, shown)
 
-    def test_bark_page_block_fits_a_390_px_screen(self):
-        # PAGE_HARNESS has no layout engine: guard the rules that keep the block inside 390 px (seen on the bench).
+    def test_push_page_stale_reload_keeps_pasted_address_and_accepts_other_tabs_metadata(self):
+        entry = self.add()
+        loaded = public_settings(self.desk)
+        alert_push.change(self.desk, [{"id": entry["id"], "on": False, "name": "Other phone"}], by="page")
+        refreshed = public_settings(self.desk)
+        shown = self.page([
+            {"entry": 0, "address": "https://api.day.app/local-replacement-fixture"},
+            {"refreshReply": refreshed, "reply": {"ok": False, "problems": [
+                "the settings changed since this page loaded them (another tab or a command)"]}, "save": True},
+            {"reply": {"ok": True, "problems": []}, "save": True}], extra={"/api/settings": loaded})
+        [edit] = shown["posted"]["alert_push_changes"]
+        self.assertEqual(edit["address"], "https://api.day.app/local-replacement-fixture")
+        self.assertNotIn("on", edit)
+        self.assertNotIn("name", edit)
+        self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+        self.assertEqual((self.desk.settings()["alert_push"][0]["on"],
+                          self.desk.settings()["alert_push"][0]["name"]), (False, "Other phone"))
+
+    def test_push_page_help_explains_the_whole_bark_address_and_service_hints(self):
+        from hansa import alert
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["help", "alerts"])
+        for text in (alert.__doc__, out.getvalue(),
+                     (Path(__file__).resolve().parent.parent / "docs" / "desk.md").read_text()):
+            for words in ("Add an address", "Recognize it", "Save settings", "Send a test push",
+                          "whole address", "Bark", "home screen", "service's hint"):
+                self.assertIn(words, text)
+
+    def test_push_page_ten_entry_limit_and_undo_removal(self):
+        for _ in range(10):
+            self.add()
+        for language in ("en", "zh"):
+            shown = self.page(language=language)
+            self.assertIsNone(shown["before"]["add"])
+            self.assertIn(shown["labels"]["pushLimit"], shown["before"]["text"])
+            shown = self.page([{"entry": 0, "remove": True}, {"entry": 0, "remove": True}], language)
+            self.assertFalse(shown["dirty"])
+            self.assertEqual(len(shown["after"]["entries"]), 10)
+
+    def test_push_page_block_fits_a_390_px_screen(self):
+        # No layout engine in PAGE_HARNESS; the bench also measures actual Chromium layout at 390 px.
         css = (Path(hansa.__file__).parent / "ui.html").read_text()
-        self.assertRegex(css, r"section\.bark \{[^}]*overflow-wrap:anywhere")
-        self.assertRegex(css, r"\.bark-key \.password-control \{[^}]*flex:1 1 160px")
+        self.assertRegex(css, r"section\.push-addresses \{[^}]*overflow-wrap:anywhere")
+        self.assertRegex(css, r"\.push-addresses \.password-control \{[^}]*min-width:0")
         self.assertRegex(css, r"\.row \{[^}]*flex-wrap:wrap")
-        shown = self.page()["before"]
-        self.assertIn("https://api.day.app", shown["text"])
-        script = css[css.index("function barkSection"):css.index("function barkSection") + 4000]
-        self.assertNotRegex(script, r"width:\s*\d{3,}px")
-        self.assertEqual(script.count(', "", "", true)') + script.count('T.barkServerHint, "", true)')
-                         + script.count('T.barkKeyHint, "", true)'), 3, "every Bark field spans the row")
+        self.add(name="phone" * 20)
+        self.assertIn("api.day.app/…45", self.page()["before"]["entries"][0]["text"])
 
     def test_page_turn_min_field_saves_reloads_and_refuses_out_of_range_in_both_languages(self):
         if not shutil.which("node"):
@@ -46640,51 +46712,6 @@ class AlertBarkPageTest(unittest.TestCase):
                 self.assertTrue(any("(review_min) must be a whole number from 0 (off) to 1440" in p
                                     for p in save_from_page(self.desk, other)["problems"]))
 
-    def test_bark_page_a_bark_key_draft_says_save_settings_saves_it_not_providers(self):
-        providers = {"en": "Save them separately under Providers", "zh": "请在模型服务商中单独保存"}
-        ordinary = {"en": "Save settings saves it", "zh": "点“保存设置”即可保存"}
-        alert_bark.save_key(self.desk, self.KEY, by="page")
-        for language in ("en", "zh"):
-            for step in ({"key": "anotherBarkKey987"}, {"remove": True}):
-                with self.subTest(language=language, step=list(step)):
-                    shown = self.page([step], language)
-                    self.assertTrue(shown["dirty"])
-                    self.assertNotIn(providers[language], shown["after"]["saveState"])
-                    self.assertIn(ordinary[language], shown["after"]["saveState"])
-        # with no draft, no note of keys at all
-        for language in ("en", "zh"):
-            got = self.page([], language)
-            self.assertNotIn(providers[language], got["before"]["saveState"])
-
-    def test_bark_page_shows_the_last_push_from_the_settings_reply(self):
-        alert_bark.save_key(self.desk, self.KEY, by="page")
-        write_json(alert_push._last_file(self.desk, alert_bark.first(self.desk)["id"]), {"at": time.time() - 60, "ok": False,
-                                                                   "why": "timeout"})
-        code, reply, _ = self.web_request("/api/settings", headers={"Authorization": "Bearer " + self.desk.web_token()})
-        self.assertEqual(code, 200)
-        self.assertEqual(reply["alert_bark_last"]["why"], "timeout")
-        for language, words in (("en", "Last push"), ("zh", "上次推送")):
-            with self.subTest(language=language):
-                shown = self.page(language=language, extra={"/api/settings": reply})
-                self.assertIn(words, shown["before"]["last"])
-                self.assertIn(shown["labels"]["barkWhy"]["timeout"], shown["before"]["last"])
-
-    def test_saving_the_bark_key_scrubs_it_from_files_hansa_wrote(self):
-        self.desk.add_ask(f"the principal's Bark key is {self.KEY}")
-        log = self.desk.lanes_dir / "x" / "try.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(f"pasted {self.KEY} here\n")
-        loaded = public_settings(self.desk)
-        told = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"],
-                                          "alert_bark_key": self.KEY})
-        self.assertEqual(told, {"ok": True, "problems": []})
-        self.assertTrue(self.key_file().read_text().strip().endswith("/" + self.KEY))
-        for path in (self.desk.asks_path, log):
-            text = path.read_text()
-            self.assertNotIn(self.KEY, text)
-            self.assertIn("[key of push]", text)
-        self.assertIn("the principal's Bark key is [key of push]", json.dumps(self.desk.asks()))
-
     def test_explain_says_which_alert_channels_are_set_up(self):
         def explained():
             out = io.StringIO()
@@ -46694,7 +46721,7 @@ class AlertBarkPageTest(unittest.TestCase):
         self.assertIn("No push addresses are set up", explained())
         alert_bark.save_key(self.desk, self.KEY, by="page")
         self.assertIn("off)", explained())
-        self.assertTrue(self.page_save(lambda s: s.update(alert_bark={"on": True, "server": "https://api.day.app"}))["ok"])
+        self.assertTrue(self.page_save(lambda s: s["alert_push"][0].update(on=True))["ok"])
         line = explained()
         self.assertIn("no alert command is set", line)
         self.assertIn("on)", line)
@@ -46715,16 +46742,17 @@ class AlertBarkPageTest(unittest.TestCase):
                 s = json.loads(self.desk.settings_path.read_text())
                 s["alert_push"] = bad
                 self.desk.settings_path.write_text(json.dumps(s))
-                self.assertFalse(alert.bark_ready(self.desk, self.desk.settings()))
+                self.assertEqual(alert_push.enabled(self.desk, self.desk.settings()), [])
                 self.assertTrue(alert.configured(self.desk))  # the command still is
-                self.assertIn("alert_bark", views.status(self.desk))
-                self.assertFalse(views.status(self.desk)["alert_bark"]["on"])
+                self.assertNotIn("alert_bark", views.status(self.desk))
+                self.assertEqual(views.status(self.desk)["alert_push"], [])
                 out.unlink(missing_ok=True)
                 alert.add(self.desk, "ask", f"a to-do {bad!r}")
                 result = alert.send_due(self.desk, gather=0, most_wait=0, wait=True, capped=False)
                 self.assertTrue(result and result.get("ok"), result)
                 self.assertIn(f"a to-do {bad!r}", out.read_text())
                 self.http.assert_not_called()
+
 
 class AlertPushTest(unittest.TestCase):
     """Push addresses through real saves, gates and delivery, with no network."""
@@ -46936,22 +46964,19 @@ class AlertPushTest(unittest.TestCase):
         self.assertTrue(self.desk.save_settings(settings, by="page"))
         self.assertEqual(self.snapshot(), before)
 
-    def test_legacy_page_fields_only_change_and_test_the_first_bark_entry(self):
+    def test_page_edits_and_tests_only_the_selected_entry(self):
         self.assertTrue(self.save([{"address": "fixture-first-device"}, {"address": "fixture-second-device"}])["ok"])
         first, second = self.desk.settings()["alert_push"]
-        loaded = public_settings(self.desk)
-        loaded["settings"]["alert_bark"]["server"] = "https://bark.example"
-        loaded["settings"]["alert_bark"]["on"] = False
-        self.assertTrue(save_from_page(self.desk, {**loaded, "alert_bark_key":
-            "https://bark.example/fixture-replacement-device/示例文字"})["ok"])
+        self.assertTrue(self.save([{"id": first["id"], "on": False,
+            "address": "https://bark.example/fixture-replacement-device/示例文字"}])["ok"])
         self.assertEqual(alert_push._read(self.desk, first["id"]), "https://bark.example/fixture-replacement-device")
         self.assertEqual(alert_push._read(self.desk, second["id"]), "https://api.day.app/fixture-second-device")
         auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
-        code, result, _ = self.web_request("/api/alert/bark-test", method="POST", headers=auth, data=b"{}")
+        code, result, _ = self.web_request("/api/alert/push-test", method="POST", headers=auth,
+                                          data=json.dumps({"id": first["id"]}).encode())
         self.assertEqual((code, result["ok"]), (200, True))
         self.assertEqual(self.http.call_args.args[0][0]["json"]["device_key"], "fixture-replacement-device")
-        loaded = public_settings(self.desk)
-        self.assertTrue(save_from_page(self.desk, {**loaded, "alert_bark_key_remove": True})["ok"])
+        self.assertTrue(self.save([{"id": first["id"], "remove": True}])["ok"])
         self.assertFalse(alert_push._file(self.desk, first["id"]).exists())
         self.assertEqual(self.desk.settings()["alert_push"], [second])
 
@@ -47004,7 +47029,7 @@ class AlertPushTest(unittest.TestCase):
             self.assertTrue(self.save([{"service": "fixture", "address": "fixture-device", "secret": secret}])["ok"])
             [entry] = self.desk.settings()["alert_push"]
             self.assertTrue(alert.configured(self.desk))
-            self.assertFalse(alert.bark_ready(self.desk, self.desk.settings()))
+            self.assertEqual(alert_push.enabled(self.desk, self.desk.settings()), [entry])
             path = alert_push._file(self.desk, entry["id"], True)
             self.assertEqual(path.read_text().strip(), secret)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
