@@ -3526,7 +3526,7 @@ class CoordinatorUpTest(unittest.TestCase):
                 self.assertNotIn("none of the deny rules", line)
                 for words in ("from the desk's .claude/settings.json", "no pushing or publishing",
                               "no reading of the desk's secrets/ and .hansa/", "no editing of the desk's "
-                              "settings.json, secrets/, tasks/, .hansa/, events.jsonl and lanes/", "The rest",
+                              "settings.json, secrets/, tasks/, .hansa/, events.jsonl, lanes/ and statusline.json", "The rest",
                               "logins and keys", "but notes/ and worktrees/", "come when hansa up starts it"):
                     self.assertIn(words, line)
 
@@ -4063,6 +4063,7 @@ class CoordinatorUpTest(unittest.TestCase):
         with unittest.mock.patch.object(notify, "socket_path", return_value=sock), \
                 unittest.mock.patch.object(notify, "start", lambda desk, sess, s, **k: ran.append((sess, s, k))), \
                 unittest.mock.patch.object(up, "record_tmux", return_value={"server": ["-L", "x"], "session": "s"}), \
+                unittest.mock.patch.object(plugin, "version", return_value=""), \
                 unittest.mock.patch("os.execvpe", lambda prog, argv, env: started.update(prog=prog, argv=argv)):
             self.say("notify-launch", "claude", "--name", "desk b", "--continue")
         me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
@@ -4090,16 +4091,52 @@ class CoordinatorUpTest(unittest.TestCase):
         pid = json.loads((self.desk.state_dir / "coordinator-start.json").read_text())["session"]["pid"]
         check_turn_hooks(self, words, self.desk, pid)
 
-    def launch(self, *words) -> list:
-        """hansa notify-launch with these words, exec faked: claude's words."""
+    def launch(self, *words, version="", env=None) -> list:
+        """hansa notify-launch with these words, exec faked, as Claude Code `version` ('': it says none): claude's
+        words; its environment and what it said in self.launched."""
         from hansa import up
-        started = {}
+        started, said = {}, io.StringIO()
         with unittest.mock.patch.object(notify, "socket_path", return_value=str(self.tmp / "c.sock")), \
                 unittest.mock.patch.object(notify, "start", return_value="started"), \
                 unittest.mock.patch.object(up, "record_tmux", return_value={}), \
-                unittest.mock.patch("os.execvpe", lambda prog, argv, env: started.update(argv=argv)):
+                unittest.mock.patch.object(plugin, "version", return_value=version), \
+                unittest.mock.patch.dict(os.environ, env or {}), contextlib.redirect_stderr(said), \
+                unittest.mock.patch("os.execvpe", lambda prog, argv, e: started.update(argv=argv, env=e)):
             self.say("notify-launch", *words)
+        self.launched = {"env": started["env"], "said": " ".join(said.getvalue().split())}
         return started["argv"]
+
+    def test_the_launcher_gives_its_session_hansas_status_line_and_nothing_else_of_the_mod(self):
+        from hansa import up
+        folder = self.desk.mod_dir
+        words = self.launch("claude", "--name", "desk b", "--effort", "high", version="2.1.306",
+                            env={"HANSA_MOD_SETTINGS": "/elsewhere/settings.json", "HANSA_MOD_CLEAR_DAILY": "04-09"})
+        [copy] = folder.glob("plugin*")
+        self.assertEqual(words[:3], ["claude", "--plugin-dir", str(copy)])  # for this start only
+        env = {k: v for k, v in self.launched["env"].items() if k.startswith("HANSA_MOD")}
+        # the line alone: no settings file for idle compaction and no window for the daily clear, not even an outer
+        # session's
+        self.assertEqual(env, {"HANSA_MOD_SUMMARY": str(self.desk.root / "statusline.json"),
+                               "HANSA_MOD_DESK": "/".join(self.desk.root.parts[-2:]), "HANSA_MOD_LANGUAGE": "en",
+                               "HANSA_MOD_EFFORT": "high", "HANSA_MOD_LINE_ONLY": "1"})
+        self.assertNotIn("did not", self.launched["said"])
+        # what it did before stays: the deny rules, the turn hooks, and the record without the mod's folder
+        rules = cli.launch_rules(self.desk, str(self.tmp))
+        self.assertEqual(words[words.index("--disallowedTools") + 1:words.index("--settings")], rules)
+        self.assertEqual(json.loads(words[words.index("--settings") + 1])["hooks"].keys(), {"Stop", "StopFailure"})
+        rec = up.read_coordinator(self.desk)
+        self.assertNotIn("--plugin-dir", rec["argv"])
+        self.assertNotIn(str(copy), json.dumps(rec))
+        # a Claude Code too old for the line, or one that says no version: no line, one line says so, the rest as is
+        for version, says in (("2.1.300", "Claude Code 2.1.300 is older than 2.1.306 (claude update)"),
+                              ("2.1.289", "Claude Code 2.1.289 is older than 2.1.290 (claude update)"),
+                              ("", "hansa could not tell which Claude Code this is from claude --version")):
+            words = self.launch("claude", "--name", "desk b", version=version)
+            self.assertNotIn("--plugin-dir", words)
+            self.assertFalse([k for k in self.launched["env"] if k.startswith("HANSA_MOD")])
+            self.assertEqual(self.launched["said"],
+                             f"hansa: hansa did not pin its status line under the prompt, because {says}.")
+            self.assertEqual(words[words.index("--disallowedTools") + 1:words.index("--settings")], rules)
 
     def test_a_session_started_recorded_again_and_started_again_carries_one_copy_of_the_hooks(self):
         from hansa import up
@@ -20061,7 +20098,7 @@ def save():'''))
 
     # -- the coordinator's mod (hansa/plugin.py, hansa/mod/) ------------------------------------------------------
 
-    def versioned_claude(self, version="2.1.296"):
+    def versioned_claude(self, version="2.1.306"):
         """A stand-in claude that answers --version as Claude Code does ('': it says no version)."""
         f = self.tmp / f"claude-{version or 'unknown'}"
         f.write_text("#!/bin/sh\n" + (f'[ "$1" = "--version" ] && echo "{version} (Claude Code)" && exit 0\n'
@@ -20069,7 +20106,7 @@ def save():'''))
         f.chmod(0o755)
         return f
 
-    def start_with_mod(self, *extra, version="2.1.296", env=None):
+    def start_with_mod(self, *extra, version="2.1.306", env=None):
         """Start the coordinator in this process, catching the claude it would become: (argv, env, what it said). The
         folders above the test's own are root's, as outside the sandbox (root_above)."""
         started, said = {}, io.StringIO()
@@ -20116,10 +20153,11 @@ def save():'''))
             self.assertEqual(stat.S_IMODE(os.stat(f).st_mode), 0o700 if f.is_dir() else 0o600, f)
             self.assertEqual(os.stat(f).st_uid, os.getuid())
         # what the mod is given in the session's environment: the desk's own settings file, the one the page saves,
-        # and nothing else of hansa's; no plugin folders in the environment (a claude the session starts would
+        # and what its status line reads (plugin.line_env), and nothing else of hansa's; no plugin folders in the environment (a claude the session starts would
         # inherit them), nothing in a settings file, no second copy of the thresholds
         self.assertEqual(env["HANSA_MOD_SETTINGS"], str(self.desk.settings_path))
-        self.assertEqual([k for k in env if k.startswith("HANSA_MOD")], ["HANSA_MOD_SETTINGS"])
+        self.assertEqual(sorted(k for k in env if k.startswith("HANSA_MOD")), ["HANSA_MOD_DESK", "HANSA_MOD_EFFORT",
+                         "HANSA_MOD_LANGUAGE", "HANSA_MOD_SETTINGS", "HANSA_MOD_SUMMARY"])
         self.assertEqual(sorted(p.name for p in self.desk.mod_dir.iterdir()), sorted([copy.name, "start.json"]))
         self.assertNotIn("CLAUDE_CODE_PLUGIN_DIRS", env)
         self.assertFalse({"enabledPlugins", "env", "autoCompactWindow"} & set(json.loads(argv[argv.index("--settings") + 1])))
@@ -20130,7 +20168,7 @@ def save():'''))
         rec = self.mod_record()
         self.assertEqual({k: rec[k] for k in ("loaded", "autocompact_options", "why", "version", "root")},
                          {"loaded": True, "autocompact_options": ["--autocompact", "550000"], "why": "",
-                          "version": "2.1.296", "root": False})
+                          "version": "2.1.306", "root": False})
         self.assertEqual(rec["start"], json.loads((self.desk.state_dir / "coordinator.json").read_text())["at"])
         # each start: a new copy in a new folder; the earlier copy is removed, what Claude Code wrote there with it
         (copy / ".claude-plugin" / "types").mkdir()
@@ -20240,8 +20278,8 @@ def save():'''))
             self.assertTrue((mod / rel).is_file(), rel)
         with (mod / "hooks" / "register.js").open("a") as f:
             f.write("// as installed\n")  # so the copy shows which mod it was made from
-        show = self.tmp / "argv-claude"  # Claude Code 2.1.296; the session: its options, one per line
-        show.write_text('#!/bin/sh\n[ "$1" = "--version" ] && echo "2.1.296 (Claude Code)" && exit 0\n'
+        show = self.tmp / "argv-claude"  # Claude Code 2.1.306; the session: its options, one per line
+        show.write_text('#!/bin/sh\n[ "$1" = "--version" ] && echo "2.1.306 (Claude Code)" && exit 0\n'
                         'for x in "$@"; do echo "$x"; done\nsleep 1\n')
         show.chmod(0o755)
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE", "PYTHONPATH")}
@@ -20276,15 +20314,124 @@ def save():'''))
             self.assertIn(f"hansa did not load the coordinator's mod, because {says}; --autocompact options of its "
                           "command line: none", self.mod_line())
         self.assertFalse(list(self.desk.mod_dir.glob("plugin*")))
-        argv, _, said = self.start_with_mod(version="2.1.290")
+        argv, env, said = self.start_with_mod(version="2.1.290")
         self.assertIn("--plugin-dir", argv)
         self.assertIn("--autocompact", argv)
+        # the mod and --autocompact, but no status line, which needs 2.1.306 ($.ui.status): one line says so
+        self.assertNotIn("HANSA_MOD_SUMMARY", env)
+        self.assertEqual(said, "hansa: hansa did not pin its status line under the prompt, because Claude Code "
+                               "2.1.290 is older than 2.1.306 (claude update).")
+        argv, env, said = self.start_with_mod(version="2.1.306")
         self.assertNotIn("did not", said)
+        self.assertEqual(env["HANSA_MOD_SUMMARY"], str(self.desk.root / "statusline.json"))
         # the version probe waits 10 seconds at most
         with unittest.mock.patch.object(plugin.subprocess, "run",
                                         side_effect=subprocess.TimeoutExpired("claude", 10)) as ran:
             self.assertEqual(plugin.version("claude"), "")
         self.assertEqual(ran.call_args.kwargs["timeout"], 10)
+
+    # -- the status line's summary, which hansa serve writes at each round (plugin.summary) --------------------------
+
+    def summary_desk(self):
+        """A desk with one of each thing the line counts, and a secret of each kind beside them: a release waiting with
+        a one-time code, a provider key, a push address with its key, the page's token, the tasks' titles."""
+        from hansa import release
+        t = time.time()
+        for title, fields in (("Title running", {"state": "running", "started": t}),
+                              ("Title merging", {"state": "merging"}),
+                              ("Title queued one", {}), ("Title queued two", {}),
+                              ("Title review", {"state": "done", "finished": t}),
+                              ("Title verify", {"state": "done", "kind": "verify", "finished": t}),
+                              ("Title failed now", {"state": "failed", "finished": t - 60}),
+                              ("Title failed old", {"state": "failed", "finished": t - 2 * 86400}),
+                              ("Title merged", {"state": "merged", "finished": t})):
+            tid = self.desk.new_task(title)
+            if fields:
+                self.desk.update(tid, **fields)
+        release._write(self.desk, [{"id": 1, "state": "waiting", "code": "493817", "lane": "a"},
+                                   {"id": 2, "state": "waiting", "lane": "a"}, {"id": 3, "state": "merged"}])
+        self.desk.add_ask("Ask text one")
+        self.desk.add_ask("Ask text two")
+        asks = read_json(self.desk.asks_path, [])
+        asks[0]["closed"] = t
+        write_json(self.desk.asks_path, asks)
+        (self.desk.secrets_dir / "claude.key").write_text("sk-provider-key-123456")
+        alert_push.change(self.desk, [{"address": "https://api.day.app/fixture-push-key-7788"}], by="page")
+        [entry] = alert_push.entries(self.desk.settings())
+        alert_push.record(self.desk, entry, "http_5xx")
+        self.desk.web_token()
+        (self.desk.state_dir / "web-port").write_text("8790")
+        (self.desk.state_dir / "web-host").write_text("0.0.0.0")
+        return t
+
+    def test_the_status_lines_summary_counts_what_status_shows_in_short_words(self):
+        from hansa import disk, memory
+        t = self.summary_desk()
+        self.desk.pause("for the test")
+        s = self.desk.settings()
+        s["alert_language"] = "zh"
+        self.assertEqual(self.desk.save_settings(s, by="page"), [])
+        rows = [{"usd": 12.6}, {"usd": None}, {"usd": 25.5}]
+        turns = [{"coordinator": {"turn": {"since": t - 600}}}, {"coordinator": {"turn": {"since": t - 300}}}, {}]
+        with unittest.mock.patch.object(disk, "held", return_value=["/"]), \
+                unittest.mock.patch.object(memory, "held", return_value=True), \
+                unittest.mock.patch.object(notify, "live_records", return_value=turns), \
+                unittest.mock.patch.object(cost, "worker_rows", return_value=rows):
+            got = plugin.summary(self.desk, t=t)
+        self.assertEqual(got, {
+            "at": t, "desk": "/".join(self.desk.root.parts[-2:]), "language": "zh", "page": "http://127.0.0.1:8790/",
+            "paused": True, "disk_low": True, "memory_low": True, "api_errors_since": t - 600,
+            "push_failed": ["bark"], "no_channel": False, "releases": 2, "todos": 1, "running": 2, "queued": 2,
+            "review": 1, "failed_24h": 1, "usd_24h": 38})
+        # a quiet desk: nothing wrong, nothing waiting, no channel set up, the last 24 h's worth from hansa cost
+        quiet = init_desk(self.tmp / "quiet", str(self.repo))
+        got = plugin.summary(quiet)
+        self.assertLessEqual(abs(got.pop("at") - time.time()), 60)
+        self.assertEqual(got, {"desk": "/".join(quiet.root.parts[-2:]), "language": "en",
+                               "page": "http://127.0.0.1:8765/", "paused": False, "disk_low": False,
+                               "memory_low": False, "api_errors_since": None, "push_failed": [], "no_channel": True,
+                               "releases": 0, "todos": 0, "running": 0, "queued": 0, "review": 0, "failed_24h": 0,
+                               "usd_24h": 0})
+
+    def test_the_status_lines_summary_says_a_failed_alert_command_until_a_later_run_goes_out(self):
+        from hansa import alert
+        s = self.desk.settings()
+        s["alert"] = {"command": "true"}
+        self.assertEqual(self.desk.save_settings(s, by="page"), [])
+        write_json(alert.last_file(self.desk), {"failed": {"at": 100, "exit": 1}, "last": {"at": 50, "ok": True}})
+        self.assertEqual(plugin.summary(self.desk)["push_failed"], ["command"])
+        write_json(alert.last_file(self.desk), {"failed": {"at": 100, "exit": 1}, "last": {"at": 200, "ok": True}})
+        self.assertEqual(plugin.summary(self.desk)["push_failed"], [])
+
+    def test_the_status_lines_summary_holds_no_code_key_token_address_or_title(self):
+        self.summary_desk()
+        plugin.write_summary(self.desk)
+        path = self.desk.root / "statusline.json"
+        self.assertEqual(plugin.summary_path(self.desk), path)
+        text = path.read_text()
+        for secret in ("493817", "sk-provider-key-123456", "fixture-push-key-7788", "api.day.app",
+                       self.desk.web_token(), "?t=", "Title", "Ask text"):
+            self.assertNotIn(secret, text)
+        self.assertEqual(json.loads(text)["page"], "http://127.0.0.1:8790/")
+
+    def test_hansa_serve_writes_the_status_lines_summary_at_each_round_with_the_time(self):
+        path = self.desk.root / "statusline.json"
+        self.assertFalse(path.exists())
+        Dispatcher(self.desk).tick()
+        first = json.loads(path.read_text())
+        self.assertLessEqual(abs(first["at"] - time.time()), 60)
+        self.desk.add_ask("Ask text")
+        self.desk.pause("for the test")  # a paused desk's round stops before it starts work: written all the same
+        Dispatcher(self.desk).tick()
+        again = json.loads(path.read_text())
+        self.assertGreaterEqual(again["at"], first["at"])
+        self.assertEqual((again["todos"], again["paused"]), (1, True))
+        # outside .hansa/ and secrets/, which the coordinator's session may not read; and not its to change
+        rules = cli.permissions(self.desk)
+        r = str(self.desk.root).lstrip("/")
+        self.assertNotIn(f"Read(//{r}/statusline.json)", rules["deny"])
+        self.assertIn(f"Edit(//{r}/statusline.json)", rules["deny"])
+        self.assertIn(f"Edit(//{r}/statusline.json)", cli.launch_rules(self.desk, str(self.tmp)))
 
     def test_the_fake_worker_asked_its_version_writes_nothing_where_it_is_asked(self):
         # hansa asks claude --version from the folder it runs in, a checkout when the coordinator starts as root:
@@ -20345,7 +20492,7 @@ def save():'''))
             broken("the version probe", "asking Claude Code its version (claude --version) failed (RuntimeError: "
                    "it hung up)", autocompact=False)
         odd = self.tmp / "claude-odd"  # its --version prints what is not UTF-8: no version to be had
-        odd.write_bytes(b"#!/bin/sh\nprintf '\\377\\376 2.1.296'\n")
+        odd.write_bytes(b"#!/bin/sh\nprintf '\\377\\376 2.1.306'\n")
         odd.chmod(0o755)
         broken("a version that is not UTF-8", "hansa could not tell which Claude Code this is", autocompact=False,
                failed=False, env={"HANSA_CLAUDE": str(odd)})
@@ -20512,7 +20659,7 @@ def save():'''))
                                            "console.log(JSON.stringify({nulls, text: ids['#state-list'].textContent, "
                                            "warn: ids['#state'].className, settings: ids['#tab-settings'].textContent}));")
         for version, says, zh, warn in (
-                ("2.1.296", self.MOD_LOADED, "hansa 加载了协调员的 mod；命令行里的 --autocompact 选项：--autocompact 550000",
+                ("2.1.306", self.MOD_LOADED, "hansa 加载了协调员的 mod；命令行里的 --autocompact 选项：--autocompact 550000",
                  "muted"),
                 ("2.1.200", "hansa did not load the coordinator's mod, because Claude Code 2.1.200 is older than 2.1.290; "
                  "--autocompact options of its command line: none",
@@ -20558,7 +20705,8 @@ def save():'''))
     def test_the_start_record_holds_the_daily_clears_window_and_the_mod_gets_it(self):
         argv, env, said = self.start_with_mod("--clear-daily", "22-03", "--permission-mode", "dontAsk")
         self.assertEqual(env["HANSA_MOD_CLEAR_DAILY"], "22-03")
-        self.assertEqual(sorted(k for k in env if k.startswith("HANSA_MOD")), ["HANSA_MOD_CLEAR_DAILY", "HANSA_MOD_SETTINGS"])
+        self.assertEqual(sorted(k for k in env if k.startswith("HANSA_MOD")),
+                         sorted(["HANSA_MOD_CLEAR_DAILY", "HANSA_MOD_SETTINGS", *plugin.line_env(self.desk, "", "en")]))
         self.assertFalse({"--clear-daily", "22-03"} & set(argv))
         self.assertIn("dontAsk", argv)
         self.assertNotIn("did not", said)
@@ -20981,7 +21129,7 @@ def save():'''))
         root_home.mkdir()
         desk_side = (str(self.desk.root), str(self.repo.resolve()))  # the account's; everything else stands for root's
 
-        def start(version="2.1.296", *extra):
+        def start(version="2.1.306", *extra):
             said = io.StringIO()
             with contextlib.redirect_stderr(said):
                 started = self.coordinator_as_root({"HANSA_CLAUDE": str(self.versioned_claude(version)),
@@ -21013,7 +21161,7 @@ def save():'''))
             self.assertIn("compact when idle at 300,000 tokens", views.status(self.desk)["compact_line"])
             # its daily clear: handed to its mod as to any; its hook after a clear prints status and records nothing,
             # so status does not know when it was last cleared
-            argv, env, said = start("2.1.296", "--clear-daily", "04-09")
+            argv, env, said = start("2.1.306", "--clear-daily", "04-09")
             self.assertEqual(env["HANSA_MOD_CLEAR_DAILY"], "04-09")
             hook = json.loads(argv[argv.index("--settings") + 1])["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             self.assertEqual(shlex.split(hook)[-1], "status")
@@ -21023,7 +21171,7 @@ def save():'''))
             self.assertEqual(views.status(self.desk)["clear_line"], "daily clear 04-09: the last clear is not known "
                              "(hansa records no clear of root's session on this desk).")
             # root's own --autocompact, after hansa's: the record and status quote them all, as given
-            start("2.1.296", "--autocompact", "600000", "--autocompact=700000")
+            start("2.1.306", "--autocompact", "600000", "--autocompact=700000")
             self.assertEqual(self.mod_record()["autocompact_options"],
                              ["--autocompact", "550000", "--autocompact", "600000", "--autocompact=700000"])
             self.assertIn("--autocompact options of its command line: --autocompact 550000 --autocompact 600000 "

@@ -6510,13 +6510,17 @@ class Dispatcher:
         with serve_step():
             self.tries(s, starting=not low)
         from .release import tick as releases
+        seen = []  # the releases as the releases' round last read them: the summary below counts them
         with serve_step():  # before merge checks: a yes waits for none only queued
             releases(desk, s, self.release_procs, starting=not low, tasks=self.tasks, pending=self.pending_stops,
-                     watch_procs=self.release_watch_procs)
+                     watch_procs=self.release_watch_procs, seen=seen)
         with serve_step():
             self.merge_checks(s, starting=not low)
         with serve_step():
             beat(desk)  # what came before can take long: stopping a worker waits for its group, finishing sweeps
+        with serve_step():  # what the status line of the coordinator's session shows (plugin.summary)
+            from . import plugin
+            plugin.write_summary(desk, s, self.tasks(), seen[1] if seen and seen[0] == desk.writes else None)
         if desk.paused() or low:  # disk or memory under its floor: existing work goes on
             return
         running = [m for m in self.tasks() if lane_occupied(m)]

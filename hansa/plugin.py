@@ -2,8 +2,8 @@
 
 `hansa coordinator` starts the session with `--plugin-dir <a copy of hansa/mod>` and `--autocompact <working_at>`,
 both for that start only; hansa sets no environment variable but HANSA_MOD_SETTINGS, the path of the desk's own
-settings file, and HANSA_MOD_CLEAR_DAILY, the window of `--clear-daily HH-HH` when the start gives one, and changes no
-settings file, so no worker or `claude` the session starts gets it from hansa. The mod compacts the context once a turn has ended and the session is idle, at idle_at tokens after a minute
+settings file, HANSA_MOD_CLEAR_DAILY, the window of `--clear-daily HH-HH` when the start gives one, and those of the
+status line (line_env), and changes no settings file, so no worker or `claude` the session starts gets it from hansa. The mod compacts the context once a turn has ended and the session is idle, at idle_at tokens after a minute
 (hooks/register.js says when exactly): it reads idle_at in the desk's settings file, the one the page saves, at each
 decision, so a change there needs nothing kept in step. While the session works, Claude Code's own auto-compact
 compacts it, at the window --autocompact gives (working_at, read when the session starts). Both are the principal's,
@@ -17,6 +17,24 @@ enough, whether or not the mod loads. Preparing the mod (the version probe, the 
 the session: a step that fails leaves the mod off, and the start says what failed. hansa reads none of the mod's
 files, and the mod writes none.
 
+The status line: the mod pins one line of hansa's own under the prompt with Claude Code's $.ui.status (one per
+plugin, beside the engine's own pinned notices). Only the person at the terminal sees it, never the model; it does
+not touch the statusLine command of a person's own settings, which stays as it is (hansa gives no statusLine). It
+shows hansa and the desk's name (alert.desk_name); the session's model as /model shows it ($.session.model) and the
+effort of the main loop's latest model request (turn.step, observed and passed on unchanged; or a Stop's effort),
+before the first request the --effort the start gave (HANSA_MOD_EFFORT); then, each only when not zero, what is wrong,
+what waits for the principal, the work and the workers' worth in the last 24 h; last the page's address without its
+key, which approves releases and which the coordinator could read off its own terminal (hansa web prints the link).
+Its figures come from summary(), which hansa serve writes at each round into SUMMARY in the desk's folder: counts and
+short words, the time it was written, and nothing secret. Outside .hansa/ and secrets/, which the session is denied
+Read on: Claude Code does not say whether a mod's $.fs is held to the session's permission rules, so the summary is
+where either way it can be read (the session may read it, not change it). The mod reads it every 15 seconds and when
+a turn ends; missing or older than two minutes, the line says hansa serve is not running. In the alert language. It
+needs Claude Code LINE_NEEDS or later: on an older one hansa hands over no summary, so there is no line, the rest of
+the mod is as above, and the start says so in one line (line_lines). A session hansa up starts through its launcher
+(`hansa notify-launch`) gets a copy of the mod with HANSA_MOD_LINE_ONLY=1: the line and nothing else, no idle
+compaction and no daily clear; its deny rules and turn hooks are as before.
+
 Where things are kept:
     plugin-XXXXXX/   the copy --plugin-dir loads (home), made new at each start in a folder hansa creates, readable and
                      writable only by whoever runs the session; the earlier copies are removed. home is the desk's
@@ -29,6 +47,7 @@ Where things are kept:
     cleared.json     beside it, written by the desk's owner from the session's SessionStart hook for /clear: when the
                      session was last cleared (the daily clear or anyone's), tied to the start as start.json is, and
                      removed with it. Root's session on an account's desk records none
+    statusline.json  in the desk's folder, written by hansa serve at each round: the status line's summary
 
 Of a running session, status and the page say only what those records hold, and nothing of what Claude Code or the
 mod make of it; the thresholds, as the desk's settings.
@@ -59,6 +78,10 @@ CLAUDE_WRITES = (".claude-plugin/types", "tsconfig.json")
 HELP = "More: hansa help inbox"
 WINDOW = re.compile(r"^([0-9]{1,2})-([0-9]{1,2})$")
 MISSED = 2  # this many windows ended without a clear: the clear's line is a warning
+# The oldest Claude Code checked to have what the status line uses ($.ui.status, $.session.model, turn.step); the
+# releases between NEEDS and it could not be checked. Remove once NEEDS reaches it
+LINE_NEEDS = (2, 1, 306)
+SUMMARY = "statusline.json"  # in the desk's folder: what hansa serve writes for the line (summary)
 # The thresholds' names, the same in hansa status, the page and the docs
 WORDS = {"idle_at": ("compact when idle at", "tokens"), "working_at": ("compact while working at", "tokens")}
 
@@ -182,17 +205,25 @@ def version_problem(v: str) -> str:
     return ""
 
 
+def line_problem(v: str) -> str:
+    """Why this Claude Code shows no status line from the mod; '' when it does."""
+    return version_problem(v) or (f"Claude Code {v} is older than {'.'.join(map(str, LINE_NEEDS))}"
+                                  if tuple(int(x) for x in v.split(".")) < LINE_NEEDS else "")
+
+
 def failed(mod: dict, step: str, e) -> dict:
     """A step of preparing the mod failed: the session starts without the mod (--autocompact as it was)."""
     said = f"{type(e).__name__}: {e}" if isinstance(e, BaseException) else str(e)
-    return {**mod, "on": False, "failed": True, "why": f"{step} failed ({' '.join(said.split())[:300]})"}
+    return {**mod, "on": False, "line": False, "failed": True,
+            "why": f"{step} failed ({' '.join(said.split())[:300]})"}
 
 
 def plan(desk: Desk, claude: str) -> dict:
     """Whether this start loads the mod and passes --autocompact, and why not: {on, autocompact, why, version, left}
-    (left: earlier copies that could not be removed); with the mod on, its copy: {copy}. --autocompact whenever this
-    Claude Code is new enough. Never raises: a step that fails leaves the mod off (failed)."""
-    out = {"on": False, "autocompact": False, "version": "", "left": []}
+    (left: earlier copies that could not be removed); with the mod on, its copy: {copy}; line, whether the mod pins
+    its status line (LINE_NEEDS), and line_why, why not. --autocompact whenever this Claude Code is new enough. Never
+    raises: a step that fails leaves the mod off (failed)."""
+    out = {"on": False, "autocompact": False, "version": "", "left": [], "line": False}
     step = "asking Claude Code its version (claude --version)"
     try:
         out["version"] = v = version(claude)
@@ -200,6 +231,8 @@ def plan(desk: Desk, claude: str) -> dict:
         if old:
             return {**out, "why": old}
         out["autocompact"] = True
+        out["line_why"] = line_problem(v)
+        out["line"] = not out["line_why"]
         step = "finding the folder for the mod's copy (the home folder)"
         d = home(desk)
         step = f"making the mod's folder {d}"
@@ -293,7 +326,18 @@ def start_lines(p: dict, clear: str = "") -> list:
             if not p["on"] else []) + ([f"hansa did not pass --autocompact, because {p['why']}."]
                                        if not p["autocompact"] else []) + (
         [f"hansa did not hand over the daily clear {clear}, because hansa did not load the coordinator's mod "
-         f"({p['why']}): the session is not cleared."] if clear and not p["on"] else [])
+         f"({p['why']}): the session is not cleared."] if clear and not p["on"] else []) + line_lines(p)
+
+
+def line_lines(p: dict, launcher: bool = False) -> list:
+    """What a start says of hansa's status line when it does not pin it: one line, or none. hansa coordinator's start
+    says so only of a mod it loaded (the line on the mod says the rest); the launcher's, of either."""
+    if p["on"] and p.get("line") or not p["on"] and not launcher:
+        return []
+    why = p.get("line_why") if p["on"] else p["why"]
+    update = " (claude update)" if p["on"] or (p.get("version") and not p["autocompact"] and not p.get("failed")) \
+        else ""
+    return [f"hansa did not pin its status line under the prompt, because {why}{update}."]
 
 
 # -- the clears, recorded by the SessionStart hook for /clear -------------------------------------------------------
@@ -385,7 +429,8 @@ def status_line(st: dict) -> str:
     nothing else."""
     if st.get("kind") == "notify":
         return ("the recorded session was started outside hansa coordinator; "
-                "the coordinator's mod and the daily clear are not in it.")
+                "the coordinator's mod and the daily clear are not in it, but for hansa's status line when hansa up "
+                "started it.")
     if st["loaded"] is None:
         mod = "whether hansa loaded the coordinator's mod: not known"
     elif st["loaded"]:
@@ -424,3 +469,84 @@ def settings_line(s: dict) -> str:
     idle, working = (f"{WORDS[k][0]} {v[k]:,} {WORDS[k][1]}" for k in WORDS)
     return (f"coordinator's compaction, the desk's settings: {idle} (the mod reads it); {working} (hansa passes it "
             "as --autocompact at a start)")
+
+
+# -- the status line: the summary hansa serve keeps, and what a start hands the mod ------------------------------------
+def summary_path(desk: Desk) -> Path:
+    """Where hansa serve keeps the line's summary: in the desk's folder, outside .hansa/ and secrets/, which the
+    coordinator's session is denied Read on, so the mod reads it whether or not its $.fs is held to those rules."""
+    return desk.root / SUMMARY
+
+
+def _count(x) -> int:
+    return x if isinstance(x, int) and not isinstance(x, bool) and x >= 0 else 0
+
+
+def summary(desk: Desk, s: dict | None = None, tasks: list | None = None, releases: list | None = None,
+            t: float | None = None) -> dict:
+    """What hansa status shows, in counts and short words, for the mod's line: never a release's code, a key, the
+    page's token, a push address, or a task's title or text. at: when it was written (seconds). s, tasks, releases:
+    as the caller read them already (hansa serve's round)."""
+    from . import alert, alert_push, cost, disk, memory, notify, release, views
+    t = time.time() if t is None else t
+    s = desk.settings() if s is None else s
+    tasks = desk.tasks() if tasks is None else tasks
+    day = t - 86400  # the last 24 h, as hansa status counts them
+    since = []  # when each session's stretch of turns ending in API errors began (alert.coordinator_lines)
+    for r in notify.live_records(desk):
+        holds = r.get("coordinator") if isinstance(r.get("coordinator"), dict) else {}
+        turn = holds.get("turn") if isinstance(holds.get("turn"), dict) else {}
+        if _number(turn.get("since")) and turn["since"] > 0:
+            since.append(turn["since"])
+    failed = []  # the channels whose last push failed, by service: never the address
+    for e in alert_push.enabled(desk, s):
+        last = alert_push.last_result(desk, e["id"]) or {}
+        if last.get("ok") is False and isinstance(e.get("service"), str):
+            failed.append(e["service"])
+    rec = alert._last(desk)  # the alert command's last failed run, unless a later one went out
+    f, ok = rec.get("failed"), rec.get("last") if isinstance(rec.get("last"), dict) else {}
+    if alert.command(s) and isinstance(f, dict) and not (ok.get("ok") and (ok.get("at") or 0) > (f.get("at") or 0)):
+        failed.append("command")
+    rows = cost.worker_rows(desk, day, s, tasks)
+    return {"at": t, "desk": _escaped(alert.desk_name(desk))[:80],
+            "language": "zh" if s.get("alert_language") == "zh" else "en",
+            "page": views.page_address(*views.web_address(desk)),
+            "paused": bool(desk.paused()), "disk_low": bool(disk.held(desk)), "memory_low": bool(memory.held(desk)),
+            "api_errors_since": min(since) if since else None,
+            "push_failed": sorted({_escaped(x)[:20] for x in failed}),
+            "no_channel": not alert.configured(desk, s),
+            "releases": sum(r.get("state") == "waiting" for r in (release.releases(desk) if releases is None
+                                                                  else releases)),
+            "todos": sum(not a.get("closed") for a in desk.asks()),
+            "running": sum(m["state"] in ("running", "merging") for m in tasks),
+            "queued": sum(m["state"] == "queued" for m in tasks),
+            "review": sum(m["state"] == "done" and m.get("kind") != "verify" for m in tasks),
+            "failed_24h": sum(m["state"] == "failed" and _number(m.get("finished")) and m["finished"] >= day
+                              for m in tasks),
+            "usd_24h": int(round(sum(r["usd"] for r in rows if r["usd"] is not None)))}
+
+
+def write_summary(desk: Desk, s: dict | None = None, tasks: list | None = None, releases: list | None = None) -> None:
+    """hansa serve, at each round: the line's summary, replaced whole."""
+    write_json(summary_path(desk), summary(desk, s, tasks, releases))
+
+
+def given_effort(words: list) -> str:
+    """The effort a command line gives claude (--effort X, --effort=X); '' for none."""
+    out = ""
+    for i, w in enumerate(words):
+        if w == "--effort" and i + 1 < len(words):
+            out = words[i + 1]
+        elif w.startswith("--effort="):
+            out = w.partition("=")[2]
+    return out
+
+
+def line_env(desk: Desk, effort: str, language, only: bool = False) -> dict:
+    """What a start hands the mod for its line, in the environment: the summary's path, the desk's name and the
+    alert language (the desk's settings', read by the desk's owner) until the summary has them, the effort the start
+    gave; only, the launcher's start: the line and nothing else of the mod."""
+    from . import alert
+    return {"HANSA_MOD_SUMMARY": str(summary_path(desk)), "HANSA_MOD_DESK": alert.desk_name(desk),
+            "HANSA_MOD_LANGUAGE": "zh" if language == "zh" else "en", "HANSA_MOD_EFFORT": effort,
+            **({"HANSA_MOD_LINE_ONLY": "1"} if only else {})}

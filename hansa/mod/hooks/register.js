@@ -20,10 +20,22 @@
 // has just been told what to do, and a reload of the mod, which forgets what it knew, does not clear twice. Inside a
 // window it is still to clear in, idle compaction waits for the clear; outside one, or once cleared, it is as above.
 // hansa's SessionStart hook for clear then prints hansa status into the fresh context, and records the clear.
+//
+// The status line: when hansa gives it HANSA_MOD_SUMMARY (Claude Code new enough: plugin.py, LINE_NEEDS), it pins one
+// line under the prompt with $.ui.status, for the person at the terminal (the model never reads it), beside a status
+// line of the person's own, which it leaves as it is. It reads the summary hansa serve writes at each round (plugin.py:
+// summary) every LINE_MS and when a turn of the main conversation ends: hansa and the desk's name; the session's model
+// as /model shows it, and the effort of the latest model request (before the first, the one the start gave,
+// HANSA_MOD_EFFORT); then what is wrong, what waits for the principal, the work and the last 24 h's cost; last, the
+// page's address, never its key. A summary missing or older than STALE_MS: hansa serve is not running. Words in the
+// alert language (the summary's; HANSA_MOD_LANGUAGE until there is one). With HANSA_MOD_LINE_ONLY=1 (a session hansa
+// up starts through hansa notify-launch) the line is all it does: no idle compaction and no daily clear.
 
 const IDLE_MS = 60_000 // shorter than the prompt cache's lifetime
 const MINUTE_MS = 60_000
 const CLEAR_IDLE_MS = 5 * MINUTE_MS
+const LINE_MS = 15_000 // how often the line reads the summary again
+const STALE_MS = 2 * MINUTE_MS // a summary older than this: hansa serve is not running (or its rounds are stuck)
 // The threshold's default and range, as hansa's (desk.py: COMPACT_DEFAULTS, COMPACT_MOST)
 const THRESHOLDS = {
   idle_at: [400_000, 100_000, 1_000_000],
@@ -42,6 +54,8 @@ function fresh() {
     cleared: null, // when the window last cleared in opened (ms)
     clearing: false, // a clear was asked for and has not returned
     clearFailed: false, // a clear failed since the last turn started: no other until another starts
+    lined: false, // the line's refresh was set going (or there is no line)
+    effort: undefined, // the effort of the main loop's latest model request ('' for none); undefined before one
   }
 }
 
@@ -171,6 +185,7 @@ async function check($, st) {
   if (!idle(st) || st.clearing) return
   const tried = st.tried
   try {
+    if (await $.env.get('HANSA_MOD_LINE_ONLY') === '1') return // the launcher's session: the line alone
     const win = st.clearFailed ? null : window(await $.env.get('HANSA_MOD_CLEAR_DAILY'))
     if (tried && !win) return
     const t = tried ? null : await thresholds($)
@@ -201,17 +216,142 @@ async function ended($, st, stop = false) {
   st.pending = $.clock.after(0, () => check($, st))
 }
 
+// -- the status line -------------------------------------------------------------------------------------------------
+
+const WORDS = {
+  en: {
+    none: 'hansa serve not running (it has written nothing yet)',
+    stale: m => `hansa serve not running (no update for ${m} min)`,
+    paused: 'dispatch paused', disk: 'disk under its floor', memory: 'memory under its floor',
+    api: at => `API errors since ${at}`, push: s => `push failed: ${s}`, noChannel: 'no alert channel',
+    waiting: parts => `waiting for you: ${parts.join(', ')}`, releases: n => `releases ${n}`, todos: n => `to-dos ${n}`,
+    idle: 'idle', running: n => `running ${n}`, queued: n => `queued ${n}`, review: n => `review ${n}`,
+    failed: n => `failed ${n} in 24 h`, cost: d => `24 h $${d}`, page: a => `page ${a}`,
+  },
+  zh: {
+    none: '后台没在跑（还没有记录）',
+    stale: m => `后台没在跑（${m} 分钟没更新）`,
+    paused: '派发已暂停', disk: '磁盘空间低于下限', memory: '内存低于下限',
+    api: at => `API 出错（自 ${at}）`, push: s => `推送失败：${s}`, noChannel: '没有提醒渠道',
+    waiting: parts => `等你：${parts.join('、')}`, releases: n => `发布 ${n}`, todos: n => `待办 ${n}`,
+    idle: '空闲', running: n => `进行 ${n}`, queued: n => `排队 ${n}`, review: n => `待审 ${n}`,
+    failed: n => `24 小时失败 ${n}`, cost: d => `24 小时 $${d}`, page: a => `网页 ${a}`,
+  },
+}
+
+// Text from a file or the engine, as one short line: no control characters
+function plain(x, most = 80) {
+  return String(x ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, most)
+}
+
+const count = x => Number.isInteger(x) && x > 0 ? x : 0
+
+// The summary as the line uses it, each field of its kind; null when it is not one (no time it was written)
+function summaryOf(x) {
+  if (!x || typeof x !== 'object' || Array.isArray(x) || !Number.isFinite(x.at)) return null
+  const page = typeof x.page === 'string' && /^https?:\/\/[^\s?#]+$/.test(x.page) ? x.page : '' // never a key
+  return {
+    at: x.at * 1000, desk: plain(x.desk), language: x.language === 'zh' || x.language === 'en' ? x.language : '',
+    page: plain(page, 200), paused: x.paused === true, disk: x.disk_low === true, memory: x.memory_low === true,
+    api: Number.isFinite(x.api_errors_since) && x.api_errors_since > 0 ? x.api_errors_since * 1000 : null,
+    push: Array.isArray(x.push_failed) // a service's name, never more: an address may hold its key
+      ? x.push_failed.filter(s => typeof s === 'string' && /^[A-Za-z0-9_-]{1,20}$/.test(s)).slice(0, 5) : [],
+    noChannel: x.no_channel === true, releases: count(x.releases), todos: count(x.todos), running: count(x.running),
+    queued: count(x.queued), review: count(x.review), failed: count(x.failed_24h),
+    usd: Number.isFinite(x.usd_24h) && x.usd_24h > 0 ? Math.round(x.usd_24h) : 0,
+  }
+}
+
+const hhmm = ms => {
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+// The line, from the summary (null: none, or not one), the time now (ms), the model and effort, and what the start
+// handed over: { desk, language }
+function lineText(sum, now, model, effort, given) {
+  const w = WORDS[(sum && sum.language) || (given.language === 'zh' ? 'zh' : 'en')]
+  const head = [`hansa ${(sum && sum.desk) || plain(given.desk) || '?'}`]
+  const who = [plain(model, 60), plain(effort, 20)].filter(Boolean).join(' ')
+  if (who) head.push(who)
+  if (!sum) return [...head, w.none].join(' · ')
+  const age = now - sum.at
+  if (age > STALE_MS) return [...head, w.stale(Math.floor(age / MINUTE_MS))].join(' · ')
+  const out = [...head]
+  if (sum.paused) out.push(w.paused)
+  if (sum.disk) out.push(w.disk)
+  if (sum.memory) out.push(w.memory)
+  if (sum.api !== null) out.push(w.api(hhmm(sum.api)))
+  if (sum.push.length) out.push(w.push(sum.push.join(', ')))
+  if (sum.noChannel) out.push(w.noChannel)
+  const waits = [sum.releases && w.releases(sum.releases), sum.todos && w.todos(sum.todos)].filter(Boolean)
+  if (waits.length) out.push(w.waiting(waits))
+  if (!sum.running && !sum.queued) out.push(w.idle)
+  for (const k of ['running', 'queued', 'review', 'failed']) if (sum[k]) out.push(w[k](sum[k]))
+  out.push(w.cost(sum.usd))
+  if (sum.page) out.push(w.page(sum.page))
+  return out.join(' · ')
+}
+
+// Read the summary and pin the line again. Never fails: what went wrong leaves the line as it was
+async function refresh($, st) {
+  try {
+    const path = await $.env.get('HANSA_MOD_SUMMARY')
+    if (!path) return // no line: hansa gave none (a Claude Code too old for it: plugin.py, LINE_NEEDS)
+    let sum = null
+    try {
+      sum = summaryOf(JSON.parse(await $.fs.read(path)))
+    } catch {
+      sum = null // missing or unreadable: as if hansa serve never wrote it; what the read said is not repeated
+    }
+    let model = ''
+    try {
+      model = await $.session.model()
+    } catch {
+      model = ''
+    }
+    const effort = st.effort !== undefined ? st.effort : await $.env.get('HANSA_MOD_EFFORT')
+    const given = { desk: await $.env.get('HANSA_MOD_DESK'), language: await $.env.get('HANSA_MOD_LANGUAGE') }
+    $.ui.status(lineText(sum, await $.clock.now(), model, effort, given))
+  } catch {
+    // the line stays as it was
+  }
+}
+
+// Once per loaded copy of the mod (a session's start, or the first hook after a reload): the line now, and every
+// LINE_MS after
+async function lineStart($, st) {
+  if (st.lined) return
+  st.lined = true
+  try {
+    if (!(await $.env.get('HANSA_MOD_SUMMARY'))) return
+    $.clock.every(LINE_MS, () => refresh($, st))
+    await refresh($, st)
+  } catch {
+    // no line
+  }
+}
+
 export function register(on) {
   const st = fresh()
 
   on('session.start', async ($, e, next) => {
     await born($, st)
-    return next(e)
+    const result = await next(e)
+    await lineStart($, st)
+    return result
+  })
+
+  // The effort of the main loop's latest model request, as it goes out: observed, passed on unchanged
+  on('turn.step', async function* ($, e, next) {
+    if (!e.agentId) st.effort = e.effort === undefined ? '' : String(e.effort)
+    return yield* next(e)
   })
 
   // A new turn (a message, hansa's post, a background task's report, ...): no compact until it ends
   on('turn.start', async ($, e, next) => {
     await born($, st) // a reload of the mod that came with no session.start: made now
+    await lineStart($, st)
     st.busy = true
     st.answered = false
     st.tried = false
@@ -225,6 +365,7 @@ export function register(on) {
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
     if (e.agent_id) return result
+    if (e.effort && typeof e.effort.level === 'string') st.effort = e.effort.level // the turn's, as hooks give it
     st.stop = { background: (e.background_tasks || []).length, crons: (e.session_crons || []).length }
     if (st.stop.background || st.stop.crons) { // the session waits for work of its own: not idle
       st.since = null
@@ -239,6 +380,8 @@ export function register(on) {
     st.busy = false
     st.answered = e.reason === 'answer' // interrupted, refused or failed: no compact
     await ended($, st)
+    await lineStart($, st)
+    await refresh($, st) // the line, as the turn ends
     return result
   })
 }

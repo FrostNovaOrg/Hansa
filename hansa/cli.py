@@ -195,7 +195,7 @@ def permissions(desk: Desk) -> dict:
     r = str(desk.root).lstrip("/")
     # lane briefs change through `hansa lane brief`: on a server the coordinator's own tools run as root
     guarded = [f"//{r}/settings.json", f"//{r}/secrets/**", f"//{r}/tasks/**", f"//{r}/.hansa/**", f"//{r}/events.jsonl",
-               f"//{r}/lanes/**"]
+               f"//{r}/lanes/**", f"//{r}/statusline.json"]
     # an Edit rule covers every file-editing tool (Write too); //path is absolute. Claude Code allows a write only
     # when every path it resolves to matches, so a link at notes/ leads nowhere without asking; the denials still win.
     # A desk reached through a link (/tmp on macOS is /private/tmp) gets the rule for each spelling: a path written
@@ -234,7 +234,7 @@ def no_publish_rules() -> list:
 # there, made or not yet. Not notes/ (the coordinator's), nor worktrees/ (the lanes' checkouts, as their repositories:
 # a commit made there directly is shown to the principal with the release that sends it)
 DESK_FILES = ("settings.json", "secrets", "tasks", "lanes", ".hansa", "events.jsonl", "asks.json", "PAUSED",
-              "CLAUDE.md", "CLAUDE.local.md", ".claude")
+              "statusline.json", "CLAUDE.md", "CLAUDE.local.md", ".claude")
 
 
 def launch_rules(desk: Desk, home: str) -> list:
@@ -1482,10 +1482,22 @@ def cmd_notify_launch(a):
         print(f"hansa: hansa up will not start this session again after a restart: {unrecorded}; nothing was "
               "recorded", file=sys.stderr)
     words = up.with_rules(a.rest[1:], rules)
-    argv = [a.rest[0], *_notified(desk, a.rest), *(up.with_settings(words, settings) if settings else words)]
+    # hansa's status line and nothing else of the mod (no idle compaction, no daily clear), for this start only;
+    # preparing it never stops the session, and what it did not do is said in one line
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HANSA_MOD_")}
+    mod = plugin.plan(desk, a.rest[0])
+    shown = mod["on"] and mod["line"]
+    if shown:
+        env.update(plugin.line_env(desk, plugin.given_effort(a.rest[1:]), desk.settings().get("alert_language"),
+                                   only=True))
+    for line in [plugin.left_text(mod)] + plugin.line_lines(mod, launcher=True):
+        if line:
+            print(f"hansa: {line}", file=sys.stderr)
+    argv = [a.rest[0], *(["--plugin-dir", mod["copy"]] if shown else []), *_notified(desk, a.rest),
+            *(up.with_settings(words, settings) if settings else words)]
     up.forget_turns(desk, os.getpid())  # a dead session's record, whose pid this one got, is not this one's
     try:
-        os.execvpe(argv[0], argv, os.environ)
+        os.execvpe(argv[0], argv, env)
     except OSError as e:
         raise SystemExit(f"hansa: {argv[0]} did not start: {e}")
 
@@ -1746,7 +1758,9 @@ def cmd_coordinator(a):
                          "(letters, digits and ._:-/[], not starting with -)")
     if effort not in EFFORTS:
         raise SystemExit(f"hansa: the coordinator's effort {effort!r} is not one of {', '.join(EFFORTS[1:])}")
-    env = {k: v for k, v in without_session(os.environ).items() if not k.startswith("ANTHROPIC_")}
+    # nor what a start hands hansa's mod: only this start's (a session started from another's shell has them)
+    env = {k: v for k, v in without_session(os.environ).items()
+           if not k.startswith("ANTHROPIC_") and not k.startswith("HANSA_MOD_")}
     # only the variables provider_env sets for the provider, by name: others (HOME, PATH, and CLAUDE_*
     # ones that change how Claude Code runs commands) are not the desk owner's to set for root
     given = plan.get("env") if isinstance(plan.get("env"), dict) else {}
@@ -1801,6 +1815,9 @@ def cmd_coordinator(a):
         env["HANSA_MOD_SETTINGS"] = str(desk.settings_path)
         if clear:  # the mod clears the session in this window; without the mod nothing does
             env["HANSA_MOD_CLEAR_DAILY"] = clear
+        if mod["line"]:  # its status line, from what hansa serve writes (plugin.summary)
+            env.update(plugin.line_env(desk, plugin.given_effort(["--effort", effort, *rest] if effort else rest),
+                                       plan.get("language")))
     for line in [plugin.left_text(mod)] + plugin.start_lines(mod, clear):
         if line:
             print(f"hansa: {line}", file=sys.stderr)
@@ -1967,7 +1984,8 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
     return {"repos": sorted({ln["repo"] for ln in s["lanes"].values()}), "model": co.get("model") or p["model"],
             "effort": co.get("effort") or "", "env": provider_env(desk, co["provider"], p, run=False),
             "no_read": kept, "no_read_refused": unkept,
-            "compact": {"working_at": compact_settings(s)["working_at"]}, "started": started}
+            "compact": {"working_at": compact_settings(s)["working_at"]}, "started": started,
+            "language": s.get("alert_language")}  # the status line's, until hansa serve's summary gives it
 
 
 def _record_roots_mod(theirs: str, desk: Desk, rec: dict) -> str:

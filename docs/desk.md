@@ -969,7 +969,8 @@ from its next start, and until then `hansa help card` prints the card. Above
 the card the copy has hansa's header: hansa wrote it for this desk, rewrites
 it, and removes it, so edits to it are lost; and the session was not started
 by `hansa coordinator`, so the helpers (scout, reviewer, operator) and the
-coordinator's mod are not in it, and where the card says to ask a helper it
+coordinator's mod are not in it, but for hansa's status line when `hansa up`
+started it, and where the card says to ask a helper it
 makes a task. The header also says the card is for the session that coordinates
 that desk, the one hansa posts its notices to, and any other session started
 in that folder or below it, such as a worker a script starts or a session for
@@ -1378,7 +1379,8 @@ headings. It does not `mv`, `cp` or `sed` them: a shell command there asks.
 ### Compaction
 
 `hansa coordinator` loads hansa's mod, a Claude Code plugin, into the coordinator's session only (workers,
-verifications never get it). The principal sets two values on the page, next to the
+verifications never get it; a session `hansa up` starts through its launcher gets only its
+[status line](#the-status-line)). The principal sets two values on the page, next to the
 coordinator's model and effort; the coordinator cannot change them:
 
 - **Compact when idle at** (default 400,000 tokens): once a turn has ended with an answer and the session is idle
@@ -1398,6 +1400,51 @@ Below **compact when idle at**, what compacts an idle session is Claude Code's o
 2.1.299 or later): a conversation of 200,000 tokens or more left idle about 54 minutes is compacted before its
 one-hour prompt cache lapses. `"idleCompaction": false` in Claude Code's settings, or its `/config`, turns it off.
 hansa neither sets nor reads it.
+
+### The status line
+
+hansa's mod pins one line of hansa's own under the prompt of the coordinator's session, with Claude Code's
+`$.ui.status`, so whoever watches that terminal sees the desk's state at a glance. Only the person at the terminal
+sees it: it is not in the conversation, and the model never reads it. It sits beside Claude Code's own pinned notices
+and leaves the `statusLine` command in a person's own settings as it is: hansa passes no `statusLine` and changes no
+settings file.
+
+```
+hansa shop/desk · Opus 5.5 max · waiting for you: releases 1, to-dos 2 · running 2 · queued 1 · review 1 · 24 h $38 · page http://127.0.0.1:8765/
+hansa 网店台子 · Opus 5.5 max · 后台没在跑（5 分钟没更新）
+```
+
+In order, each item only when it is not zero:
+
+- `hansa` and the desk's name, as alerts give it;
+- the session's model, as `/model` shows it, and the effort of its latest model request (before the first, the
+  `--effort` the start gave, if any);
+- what is wrong: dispatch paused, free space or memory under its floor, the coordinator's turns ending in API
+  errors and since when, the last push to an alert channel failed (by service: `bark`, or `command` for the alert
+  command), no alert channel set up;
+- what waits for the principal: releases waiting for their yes, open to-dos;
+- the work: running (merge checks too), queued, waiting for review, failed in the last 24 hours; `idle` when nothing
+  runs or waits in the queue;
+- the workers' worth in the last 24 hours, as `hansa status` gives it, rounded to dollars;
+- the page's address, as `hansa status` gives it, without its key. The key approves releases and the coordinator can
+  read its own terminal, so it is never on the line: `hansa web`, run in a terminal of the principal's own, prints
+  the full link.
+
+The figures come from `statusline.json` in the desk's folder, which `hansa serve` writes at each round: counts and
+short words only, and the time it was written; never a release's one-time code, a key, a push address, the page's
+token, or a task's title or text. It is outside `.hansa/` and `secrets/`, which the session is denied Read on, so the
+mod reads it whether or not Claude Code holds a mod's file reads to those rules; the session may read it (it holds
+nothing `hansa status` does not show) but not change it. The mod reads it again every 15 seconds and when a turn
+ends. When it is missing, or older than two minutes, the line says only that `hansa serve` is not running (or its
+rounds are stuck), and for how many minutes it has not written. The words are in the principal's alert language
+(`alert_language`, English or Chinese, on the page).
+
+A session `hansa up` starts through its launcher (one recorded with `hansa notify on`) gets the line too, and nothing
+else of the mod: no idle compaction and no daily clear, which stay with sessions `hansa coordinator` starts. Its deny
+rules and turn hooks are as before.
+
+The line needs Claude Code 2.1.306 or later, the oldest release checked to have what it uses; the mod itself needs
+2.1.290. On an older one there is no line, the rest of the mod is as before, and the start says so in one line.
 
 ## Merge checks
 

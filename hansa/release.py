@@ -1839,15 +1839,18 @@ def _after_merges(desk: Desk, s: dict, tasks, rs) -> None:
                            merges=merges_text(batch["merges"], batch["merges_count"]))
 
 
-def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pending=None, watch_procs=None) -> None:
+def tick(desk: Desk, s: dict, procs: dict, starting: bool = True, tasks=None, pending=None, watch_procs=None,
+         seen=None) -> None:
     """hansa serve's round for releases: finish those that ended, stop those over their time limit, take
     over or finish those an earlier server left, and start approved ones, one per repository, none where a
     merge check runs (also while dispatch is paused: the principal said yes, and they use no provider). A release
     asked to stop gets TERM, then KILL after STOP_GRACE seconds, and is finished once nothing of it runs. What a
     running release's command starts is recorded each round, and what of it still runs is stopped at its end. None
     starts while starting is False (free space under the floor): an approved one waits, and goes once there is space.
-    tasks: what gives the desk's tasks as this round read them (Dispatcher.tasks); else they are read here."""
-    read = []
+    tasks: what gives the desk's tasks as this round read them (Dispatcher.tasks); else they are read here. seen: a
+    list this fills with the releases as last read, and the Desk.writes they were read at, for the round's later
+    steps (the status line's summary)."""
+    read = [] if seen is None else seen
     pending = {} if pending is None else pending
     watch_procs = {} if watch_procs is None else watch_procs
 
