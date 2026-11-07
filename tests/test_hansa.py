@@ -4110,13 +4110,14 @@ class CoordinatorUpTest(unittest.TestCase):
 
     def test_the_launcher_gives_its_session_hansas_status_line_and_nothing_else_of_the_mod(self):
         from hansa import up
-        # The mod refuses group-writable parents; keep the test's desk private even with a 0002 umask.
-        self.desk.root.chmod(0o700)
-        self.desk.state_dir.chmod(0o700)
-        folder = self.desk.mod_dir
-        words = self.launch("claude", "--name", "desk b", "--effort", "high", version="2.1.306",
-                            env={"HANSA_MOD_SETTINGS": "/elsewhere/settings.json", "HANSA_MOD_CLEAR_DAILY": "04-09"})
-        [copy] = folder.glob("plugin*")
+        # Account selection and ancestor permissions have tests of their own; make this copy in our own folder.
+        with unittest.mock.patch.object(plugin, "home", return_value=self.tmp / "mod"), \
+                unittest.mock.patch.object(plugin, "folder_problem", return_value=""):
+            words = self.launch("claude", "--name", "desk b", "--effort", "high", version="2.1.306",
+                                env={"HANSA_MOD_SETTINGS": "/elsewhere/settings.json", "HANSA_MOD_CLEAR_DAILY": "04-09"})
+        copy = Path(words[words.index("--plugin-dir") + 1])
+        folder = copy.parent
+        self.assertTrue(copy.is_dir())
         self.assertEqual(words[:3], ["claude", "--plugin-dir", str(copy)])  # for this start only
         env = {k: v for k, v in self.launched["env"].items() if k.startswith("HANSA_MOD")}
         # the line alone: no settings file for idle compaction and no window for the daily clear, not even an outer
