@@ -11,6 +11,13 @@ MAX_BYTES = 3500
 LEVELS = {"passive": "passive", "active": "active", "urgent": "timeSensitive"}
 
 
+def _pasted_address(value):
+    if value.startswith("https://"):
+        return value
+    addresses = re.findall(r"https://[^\s'\"<>`]+", value)
+    return addresses[0] if len(addresses) == 1 else value
+
+
 def problems(config) -> list[str]:
     if (not isinstance(config, dict) or set(config) - {"on", "server"}
             or type(config.get("on", False)) is not bool):
@@ -35,14 +42,18 @@ class Bark:
     levels = LEVELS
 
     def recognizes(self, value):
-        return bool(re.fullmatch(r"[A-Za-z0-9_-]+", value) or urlsplit(value).hostname == "api.day.app")
+        value = _pasted_address(value)
+        serverchan = value.startswith("SCT") or re.match(r"sctp\d+t", value)
+        return bool(not serverchan and re.fullmatch(r"[A-Za-z0-9_-]+", value)
+                    or urlsplit(value).hostname == "api.day.app")
 
     def normalize(self, value):
+        value = _pasted_address(value)
         # Check original spelling before urlsplit strips controls. Keep this rule
         # while addresses can contain credentials: normalization must not reroute them.
         if (not value or any(c.isspace() or unicodedata.category(c) == "Cc" for c in value)
-                or any(c in value for c in "?#\\")):
-            raise ValueError("Bark needs an HTTPS address without spaces, controls, userinfo, query or fragment")
+                or any(c in value for c in "#\\")):
+            raise ValueError("Bark needs an HTTPS address without spaces, controls, userinfo or fragment")
         if re.fullmatch(r"[A-Za-z0-9_-]+", value):
             value = DEFAULT_SERVER + "/" + value
         try:

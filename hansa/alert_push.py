@@ -183,6 +183,17 @@ def prepare(desk, settings, changes, *, by=""):
             writes.append((entry["id"], secret, True))
     if issue := problems(value):
         raise ValueError(issue[0])
+    # Check the completed pair, including a retained token on an existing entry.
+    # Keep this before writes: short ntfy topics need authenticated access, and
+    # Gotify's token may have been pasted separately from its server address.
+    pending = {(id, extra): text for id, text, extra in writes}
+    for entry in value:
+        service = alert_services.SERVICES[entry["service"]]
+        validate = getattr(service, "validate", None)
+        if validate and any(id == entry["id"] for id, _, _ in writes):
+            address = pending.get((entry["id"], False), _read(desk, entry["id"]))
+            secret = pending.get((entry["id"], True), _read(desk, entry["id"], True))
+            validate(address, secret)
     # A name must never become another copy of a pasted credential in settings.
     private = []
     for id, address, extra in writes:
@@ -235,8 +246,12 @@ def _last_file(desk, id):
 
 def last_result(desk, id):
     value = read_json(_last_file(desk, id), None)
-    return ({k: value[k] for k in ("at", "ok", "why")} if isinstance(value, dict)
-            and set(value) >= {"at", "ok", "why"} else None)
+    if not isinstance(value, dict) or not set(value) >= {"at", "ok", "why"}:
+        return None
+    result = {k: value[k] for k in ("at", "ok", "why")}
+    if alert_http.safe_code(value.get("code")) is not None:
+        result["code"] = value["code"]
+    return result
 
 
 def public(desk, settings=None):
@@ -253,13 +268,16 @@ def public(desk, settings=None):
     return out
 
 
-def record(desk, entry, why):
+def record(desk, entry, why, code=None):
     # Neither service builders nor transport exceptions may add arbitrary text.
     allowed = {"off", "no_address", "empty", "too_big", "refused_url", "sent", "network", "timeout", "tls",
-               "redirect", "http_429", "http_4xx", "http_5xx", "deadline"}
+               "redirect", "http_429", "http_4xx", "http_5xx", "deadline", "refused_by_service"}
     why = why if isinstance(why, str) and why in allowed else "network"
     with desk.lock():
-        write_json(_last_file(desk, entry["id"]), {"at": now(), "ok": why == "sent", "why": why})
+        last = {"at": now(), "ok": why == "sent", "why": why}
+        if why != "sent" and alert_http.safe_code(code) is not None:
+            last["code"] = code
+        write_json(_last_file(desk, entry["id"]), last)
         fields = {"channel": "push", "id": entry["id"], "service": entry["service"], "why": why}
         desk.event("alert_channel", **fields, ok=why == "sent")
         if why != "sent":
@@ -279,17 +297,22 @@ def send(desk, entry, items, held=0, *, testing=False):
         service = alert_services.SERVICES[entry["service"]]
         try:
             address = service.normalize(address)
+            validate = getattr(service, "validate", None)
+            if validate:
+                validate(address, _read(desk, entry["id"], True))
         except ValueError:
             return record(desk, entry, "refused_url")
         title, body = _text(desk, items, held)
         level = max((x.get("level", alert.level_of(x["kind"])) for x in items), key=alert.LEVELS.index)
+        if not service.levels:
+            title = urgent_marker(title, level, chinese=alert.chinese(desk))
         try:
             requests = service.requests(address, _read(desk, entry["id"], True), title, body, level)
         except ValueError:
             return record(desk, entry, "too_big")
         results = alert_http.send(requests, deadline_s=service.deadline_s)
-        why = next((r["why"] for r in results if r["why"] != "sent"), "sent")
-        return record(desk, entry, why)
+        failure = next((r for r in results if r["why"] != "sent"), None)
+        return record(desk, entry, failure["why"], failure.get("code")) if failure else record(desk, entry, "sent")
     except Exception:
         return record(desk, entry, "network")
 
@@ -300,6 +323,11 @@ def test(desk, id):
         return "no_address"
     return send(desk, entry, [{"kind": "test", "level": "active", "text": "a test alert from hansa",
                              "translations": {"en": "a test alert from hansa", "zh": "来自 hansa 的测试提醒"}}], testing=True)
+
+
+def urgent_marker(text, level, *, chinese=False):
+    """Shared by every service without levels, including future chat channels."""
+    return (("紧急：" if chinese else "Urgent: ") + text) if level == "urgent" else text
 
 
 def _text(desk: Desk, items: list[dict], held: int) -> tuple[str, str]:

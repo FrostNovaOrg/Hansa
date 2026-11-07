@@ -6,8 +6,9 @@ and requests(address, secret, title, body, level). Requests use alert_http.send'
 private interface; no response bodies or credentials cross into public results.
 """
 from .alert_bark import Bark
+from .alert_phone import Gotify, Ntfy, PushDeer, ServerChan
 
-SERVICES = {service.id: service for service in (Bark(),)}
+SERVICES = {service.id: service for service in (Bark(), Ntfy(), Gotify(), PushDeer(), ServerChan())}
 
 
 def parse(value: str, service: str = "recognize") -> tuple[str, str]:
