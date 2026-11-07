@@ -943,9 +943,14 @@ test('a session the launcher started (line only): the line, no idle compaction a
   expect(last()).toContain('idle')
   await until(clock, 0, 4, 10)
   await turn($, 't1')
-  await until(clock, 1, 9)
+  // The coordinator's session clears here and compacts a minute later (the test above). No later moment matters: the
+  // mod sets no timer in this session, so only the line's refreshes run while the clock moves, and they act on nothing
+  await clock.advance(5 * MIN)
   expect(calls.clears).toEqual([])
+  await clock.advance(MIN)
   expect(calls.compact).toBe(0)
+  expect(calls.clears).toEqual([])
+  expect(last()).toContain('hansa shop/desk') // still shown (the summary, from 03:00, is stale by now)
   expect(calls.reads).toBeGreaterThan(0)
   expect(calls.logs).toEqual([])
 })
