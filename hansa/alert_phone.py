@@ -77,7 +77,7 @@ class Ntfy:
 
     def normalize(self, value):
         parsed = _url(value, "ntfy")
-        topic = unquote(parsed.path[1:], errors="strict")
+        topic = unquote(parsed.path[1:].removesuffix("/"), errors="strict")
         if parsed.query or "?" in value:
             raise ValueError("paste the ntfy topic address without a query")
         _key(topic, "ntfy topic address")

@@ -500,9 +500,10 @@ saving is still allowed.
 ## Alerts
 
 Alerts reach phones and chats through push addresses, alongside the principal's
-alert command. Supported phone services are Bark, ntfy, Gotify, PushDeer and
-Server酱 (WeChat). See
-[phone push setup, privacy, levels, limits and error codes](push-services.md)
+alert command. Supported services are Bark, ntfy, Gotify, PushDeer, Server酱
+(WeChat), WeCom, DingTalk, Feishu/Lark, Telegram, Discord, Slack and a chosen
+JSON webhook. See
+[push setup, privacy, levels, limits and error codes](push-services.md)
 for what to paste from each app. To add a push address:
 
 1. Open **Settings → Alerts → Push addresses → Add an address** on the page.
@@ -588,9 +589,12 @@ level, and `HANSA_ALERT_LEVEL` takes the highest in a batch:
 | `urgent` | `server_stuck`, `coordinator`, `sandbox`, `disk`, `credit` |
 
 Bark maps these to passive, active and time-sensitive notifications, respectively.
-ntfy uses priorities 2, 3 and 4; Gotify uses 2, 5 and 8. PushDeer and Server酱
-have no levels: urgent batches start with `Urgent: ` or `紧急：` in the
-principal's alert language. These markers do not change the phone's settings.
+ntfy uses priorities 2, 3 and 4; Gotify uses 2, 5 and 8. Telegram and Discord
+silence passive batches and otherwise use normal notifications. For them and
+services without levels (PushDeer, Server酱, WeCom, DingTalk, Feishu/Lark and
+Slack), urgent batches start with `Urgent: ` or `紧急：` in the principal's
+alert language. These markers do not change the phone's settings. The JSON
+webhook sends the level as a field.
 
 For a release refused by the word scan, the alert gives only counts of hits
 and lines that could not be checked against patterns; the entries, lines and
@@ -616,7 +620,7 @@ run when the hour frees a run, with a line saying how many were held back
 (event `alert_failed` with `channel: "command"`) and `hansa status` shows the last failure with its exit
 code and last lines (none for an alert that held a release's one-time code:
 then only how it ended is kept); the command is never retried: the next alert tries again.
-Each phone push service has a separate 30-second deadline including its transport's at most three
+Each push service has a separate 30-second deadline including its transport's at most three
 tries; the batch never retries it. `hansa status` shows each push entry's last result,
 `sent` or the reason it could not send. A failed push records `alert_failed` with
 `channel: "push"`, the entry's `id`, `service` and reason, never its address. Neither channel carries the other's failure.
@@ -689,8 +693,9 @@ IDs are stable, unique lowercase letters/digits, hyphens or underscores (up to
 `secrets/alert-push-ID.address`; an optional extra secret goes in
 `secrets/alert-push-ID.secret`, both mode 0600 under 0700 `secrets/`.
 `Desk.keys` includes whole addresses and secret parts extracted only by each
-entry's recorded service for redaction and refusal of a task's change that
-contains them. Saving scrubs them from files covered by `Desk.scrub`; the
+entry's recorded service, when at least eight characters long, for redaction
+and refusal of a task's change that contains them. Saving scrubs those values
+from files covered by `Desk.scrub`; the
 append-only event log is not rewritten. Only the recorded service checks,
 masks and sends a saved entry. Recognition asks all services only before an
 address is saved. An orphan secret file, or one whose metadata cannot be read,
@@ -757,8 +762,10 @@ and its tests. Requests pass through `alert_http.send`, including response
 checks in its isolated child. A definition may also supply
 `validate(address, secret)` to check the completed pair before saving or sending:
 ntfy requires a token for topics shorter than eight characters, and Gotify
-requires an application token. Keep these checks while redaction ignores short
-strings and tokens can be pasted separately from addresses.
+requires an application token. Keep these checks while topics need protected
+access and tokens can be pasted separately from addresses. Redaction and file
+scrubbing deliberately ignore secret parts shorter than eight characters to
+avoid changing ordinary task text; ntfy therefore requires a token for a short topic.
 
 Bark recognizes `api.day.app` and ordinary bare device keys automatically;
 `SCT…` and `sctp<uid>t…` keys belong only to Server酱. ntfy recognizes
@@ -766,6 +773,10 @@ Bark recognizes `api.day.app` and ordinary bare device keys automatically;
 two official address forms. Gotify is always chosen. Bare PushDeer keys require
 choosing PushDeer, and self-hosted servers require choosing their service.
 See [the service guide](push-services.md) for request contents and limits.
+WeCom, DingTalk (including `oapi.dingtalk.io`), Feishu/Lark, Discord and Slack
+recognize their official hosts and endpoint paths; Telegram recognizes its
+official host and validates the sendMessage address. The JSON webhook accepts
+any HTTPS address only when chosen explicitly.
 
 For Bark, a different
 host requires the explicit `bark` service. Its HTTPS address must have a key as
@@ -815,7 +826,9 @@ A numeric expectation also accepts a numeric string such as `"0"`; booleans
 do not count as numbers. An optional `status: 200` within that mapping restricts
 success to HTTP 200. Without `success`, the existing HTTP 2xx rule applies.
 An optional `error_field` names the JSON field holding the service's error code;
-it defaults to the success field. This also extracts a code on non-2xx replies
+it defaults to the success field. For a whole-body text check, a failed reply
+can instead supply its entire bounded ASCII word as the code (Slack).
+This also extracts a code on non-2xx replies
 without changing their HTTP category. A 2xx reply that fails its check, including
 invalid JSON when JSON was expected, is `refused_by_service` and is never retried.
 Only the child inspects response bodies, up to the existing 16 KiB read bound.
@@ -866,6 +879,7 @@ responses, plus real isolated children with sleeping fakes for deadline and
 concurrency checks. Keep the tests while channels depend on this transport;
 they prevent retry, proxy, deadline and secret-disclosure regressions without
 using a network service.
-`tests/test_push_services.py` adds phone-service recognition, limits, secret
-handling and urgent markers, plus form and acknowledgement checks inside real
-isolated children with fake openers. It runs in the default parallel check too.
+`tests/test_push_services.py` adds phone and chat recognition, fixed DingTalk
+and Feishu signing examples, limits, secret handling, silent delivery and urgent
+markers, plus form and acknowledgement checks inside real isolated children
+with fake openers. It runs in the default parallel check too.
