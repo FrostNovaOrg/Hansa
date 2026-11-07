@@ -46570,7 +46570,7 @@ class AlertPushPageTest(unittest.TestCase):
     def test_push_page_service_address_refusals_use_the_pages_language(self):
         for address, service in (("http://api.day.app/fixture-key", "bark"),
                                  ("https://api.day.app/bad.key!", "bark"),
-                                 ("https://api.day.app/fixture-key?query=private-fixture", "bark"),
+                                 ("http://api.day.app/fixture-key?query=private-fixture", "bark"),
                                  ("https://[broken", "recognize")):
             for language in ("en", "zh"):
                 with self.subTest(address=address, language=language):
