@@ -1,9 +1,18 @@
 """Alerts: push addresses and the principal's own alert command.
 
-Push addresses are set up on the page, Settings, Alerts. Each of at most ten entries has a service, an on/off
-switch and an optional name. Bark is the first service: paste the whole address on the Bark app's home screen,
-such as https://api.day.app/KEY/example. Hansa keeps the server and key and drops the example text. A bare key
-uses the official server; for a self-hosted address choose Bark explicitly, since services can look alike.
+To add a push address on the page:
+1. Open Settings, Alerts, Push addresses, then Add an address.
+2. Paste the whole address from your push app or service. Leave the service at Recognize it, or choose its name.
+   Each service's hint on the page says what to paste; an extra secret field appears only when it takes one.
+3. Optionally name it, then press Save settings. The saved entry shows only a hidden address.
+4. Press Send a test push on that entry. Its last result says sent with the time, or explains what went wrong.
+For Bark, install and open the Bark app on your iPhone, then paste the whole address shown on its home screen,
+such as https://api.day.app/KEY/example, into Add an address. Hansa keeps the server and key and drops the example
+text. Choose Bark explicitly for a self-hosted address if Recognize it asks you to choose a service.
+There may be up to ten entries. Each has an on/off switch and an optional name. To replace an address or extra
+secret, paste a new one into that entry; leaving either empty keeps the saved value. Switch, rename or Remove,
+then Save settings. A test uses the saved entry even when it is off. Unsaved addresses and secrets stay only
+in this page until saved or reloaded.
 Only the principal's page save changes addresses. Each whole address, including its key, stays in a 0600 file
 under the desk's 0700 secrets/ folder, with the same protection for an extra signing secret or access token.
 Settings hold only metadata; history records changes without credentials. Page replies and status hide secret
@@ -172,12 +181,6 @@ def command(s: dict) -> str:
     """The principal's alert command line; '' when none is set."""
     a = s.get("alert")
     return a["command"].strip() if isinstance(a, dict) and isinstance(a.get("command"), str) else ""
-
-
-def bark_ready(desk: Desk, s: dict) -> bool:
-    """Compatibility for callers asking whether any Bark entry is ready."""
-    from . import alert_push
-    return any(e["service"] == "bark" for e in alert_push.enabled(desk, s))
 
 
 def configured(desk: Desk, s: dict | None = None) -> bool:

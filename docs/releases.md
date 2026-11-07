@@ -500,10 +500,33 @@ saving is still allowed.
 ## Alerts
 
 Alerts reach phones and chats through push addresses, alongside the principal's
-alert command. Set them up on the page, Settings, Alerts. Supported phone
-services are Bark, ntfy, Gotify, PushDeer and Server酱 (WeChat). See
+alert command. Supported phone services are Bark, ntfy, Gotify, PushDeer and
+Server酱 (WeChat). See
 [phone push setup, privacy, levels, limits and error codes](push-services.md)
-for what to paste from each app. Only the principal changes addresses.
+for what to paste from each app. To add a push address:
+
+1. Open **Settings → Alerts → Push addresses → Add an address** on the page.
+2. Paste the whole address from your push app or service. Leave **Recognize it**
+   selected, or choose a service by name. Each service's hint on the page says
+   what to paste; an extra secret field appears only when it takes one.
+3. Optionally name the entry, then press **Save settings**. Only the hidden
+   address is shown after saving.
+4. Press **Send a test push** on the entry. It sends even while off, and its
+   last result shows sent with the time, or what went wrong.
+
+For Bark, install and open the Bark app on your iPhone. Copy the whole address
+shown on the Bark app's home screen and paste it into **Add an address**.
+A copied command such as
+`curl -X GET 'https://api.day.app/KEY/title/body?group=example&ttl=600'`
+also works when the pasted text contains exactly one HTTPS address. Hansa
+retains only the server and device key, dropping example text after the key
+and Bark's query parameters.
+If a self-hosted address cannot be recognized, choose **Bark** and save again.
+
+To replace an address or extra secret, paste the new value into the saved
+entry; leave either field empty to keep its saved value. Switch off, rename
+or remove entries, then **Save settings**. Only the principal changes addresses.
+
 Each address (and an extra signing secret or access token when needed) is kept
 in a separate 0600 secret file under the desk's 0700 `secrets/` folder. Metadata
 alone enters settings; history records changes without credentials. The page
@@ -696,13 +719,12 @@ The page interface, for use on the page, Settings, Alerts:
 - `POST /api/alert/push-test` with `{id}` sends exactly one saved entry a test
   batch now, even while off, without touching the queue. It returns
   `{ok, why, last}`. No coordinator command saves or tests an address.
-- The current page uses a compatibility view of the first Bark entry:
-  `settings.alert_bark: {on, server}`, `alert_bark_key_set`, `alert_bark_last`,
-  and the save's top-level `alert_bark_key` / `alert_bark_key_remove`.
-  A key or whole Bark address is accepted. A blank key preserves the address;
-  removal deletes the entry.
-  `POST /api/alert/bark-test` tests that first Bark entry. These fields are
-  projections; the old setting and key file are never written again.
+
+The page builds its service choices and paste hints from `alert_push_services`.
+Blank replacement address and extra secret fields omit those edits, preserving
+the saved values. Unrecognized addresses prompt the principal to choose a
+service in the page's language. The former Bark page fields and
+`/api/alert/bark-test` endpoint have been removed; use the push interface above.
 
 `hansa.alert_services.SERVICES` holds service definitions. A definition supplies
 its id, English/Chinese names and paste hints, whether it takes an extra secret,

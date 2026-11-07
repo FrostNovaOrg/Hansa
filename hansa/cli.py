@@ -58,7 +58,7 @@ TOPICS = {
                         "forbidden words, at a release, a merge and a title"),
     "release-files": ("releases.md", "Files a release runs outside the sandbox", "release_files: the files a "
                       "release runs outside the sandbox, and the verification a change to one needs"),
-    "alerts": ("releases.md", "Alerts", "the principal's alert command and Bark: what they receive, and when"),
+    "alerts": ("releases.md", "Alerts", "the principal's alert command and push addresses: what they receive, and when"),
     "time-limits": ("tasks.md", "Time limits, and work left running in the background", "a task's limits of turns "
                     "and minutes, and work a worker leaves running in the background"),
     "provider-limits": ("tasks.md", "Dropped connections and usage limits", "retries after a dropped connection, "
