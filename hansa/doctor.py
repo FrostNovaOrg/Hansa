@@ -16,7 +16,7 @@ from .menu import language
 
 
 PYTHON_MIN = (3, 9)
-CLAUDE_MIN = (2, 1, 290)
+CLAUDE_MIN = (2, 1, 306)
 NODE_MIN = (22, 12, 0)
 SRT_VERSION = "0.0.79"
 TIMEOUT = 15
