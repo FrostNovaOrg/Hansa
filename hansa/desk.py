@@ -592,7 +592,7 @@ def forbidden_exceptions_ok(exceptions) -> bool:
 def current_settings(settings: dict) -> dict:
     """Normalize defaults and ignore retired settings from older desks without changing the file."""
     s = copy.deepcopy(settings)
-    for key in ("design", "browser", "coordinator_read", "audits_cost"):
+    for key in ("design", "browser", "coordinator_read", "audits_cost", "alert_bark"):
         s.pop(key, None)
     co = s.get("coordinator")
     if isinstance(co, dict):
@@ -2813,7 +2813,11 @@ class Desk:
                 old = {k: v for k, v in old.items() if k != "alert_language"}
                 new = {k: v for k, v in new.items() if k != "alert_language"}
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
-            write_json(self.settings_path, new)
+            # A deferred Bark upgrade keeps its original setting until the
+            # principal saves a Bark address. Never apply an old page's value.
+            saved = self._saved_settings()
+            legacy = {"alert_bark": saved["alert_bark"]} if "alert_bark" in saved else {}
+            write_json(self.settings_path, {**new, **legacy})
             from .history import record
             record(self, old, new, by, command)
             if changed:
@@ -3271,8 +3275,13 @@ def public_settings(desk: Desk) -> dict:
                  for observed in [listed_as(s.get("lanes", {}).get(lane), target)]
                  for why in [listed_mismatch(s, x, now_as=observed)] if why]
     from . import alert_push, alert_services
+    problems = validate(s, desk.root, page=True, mailbox_key=mailbox_key)
+    if problem := alert_push.migration_problem(desk):
+        problems.append(problem)
+    for entry in alert_push.entries(s):
+        entry["name"] = desk.redact(entry.get("name", ""))
     return {"settings": s, "alert_push": alert_push.public(desk), "alert_push_services": alert_services.public(), "alert_language_saved": "alert_language" in desk._saved_settings(),
-            "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
+            "keys": keys, "problems": problems, "rev": rev,
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),

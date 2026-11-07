@@ -933,6 +933,7 @@ def status(desk: Desk) -> dict:
         "release_codes": bool(alert.command(s)),  # a waiting release's alert carries a one-time code
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
         "alert_push": alert_push.public(desk, s),
+        "alert_push_problem": alert_push.migration_problem(desk),
         "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
         "merge_targets": [why for n, ln in sorted(s["lanes"].items()) if (why := merge_targets_problem(n, ln))],
         "shared_writes": shared_writes(desk.root, s),  # write-list folders another listed desk's lanes write too
@@ -1037,6 +1038,7 @@ def status_text(st: dict) -> str:
         out += [f"and {len(st['goals']) - 5} more: hansa goal list"]
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
+    out += [st["alert_push_problem"]] if st.get("alert_push_problem") else []
     for entry in st.get("alert_push", []):
         last = entry["last"]
         out.append(f"Push {entry['service']} {entry['name'] or entry['id']}: {entry['address'] or 'no address'}"

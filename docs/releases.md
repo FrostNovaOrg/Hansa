@@ -687,6 +687,14 @@ server, key and on/off choice. Its previous last result moves too. The old
 setting, key file and result file are removed; settings history says that hansa
 moved them. Without a key, no entry is created. This is the sole automatic
 address change; otherwise only the principal's save changes addresses.
+If the key cannot be preserved exactly (including an old key containing `/`
+or punctuation), the saved configuration is invalid, or ten entries leave no
+room, hansa keeps the old setting and key file without sending to that key.
+`hansa status` and the page's settings problems ask the principal to paste the
+Bark address again on the page. Unrelated saves keep the old data; saving a
+Bark address removes the old setting, key and result files. Keep these checks
+while older desks can still have Bark settings: an upgrade must neither stop
+desk commands nor silently change a saved key.
 
 The page interface, for use on the page, Settings, Alerts:
 
@@ -694,6 +702,7 @@ The page interface, for use on the page, Settings, Alerts:
   entries in top-level `alert_push`: `id`, `service`, `name`, `on`, `address`
   (hidden), `address_set`, `secret_set`, `last` (`{at, ok, why}` or null).
   `alert_push_services` lists `{id, name: {en, zh}, hint: {en, zh}, extra_secret}`.
+  Names are redacted in both lists if a saved key was pasted into one.
 - `POST /api/settings` accepts `settings`, `rev` and optional top-level
   `alert_push_changes`, a list of edits. An add has `address`, optional
   `service` (`"recognize"` by default), `name` and `on` (true by default).
@@ -703,6 +712,11 @@ The page interface, for use on the page, Settings, Alerts:
   omission preserves it, and an empty value removes it. Changing service
   requires an address and clears the previous extra secret. The whole save
   is validated before writing, including the revision and the ten-entry cap.
+  Settings are saved before private files, so a failed settings write leaves
+  no unlisted address. An automatic upgrade instead removes its new address
+  and result files if its settings write fails, retaining the old Bark data.
+  A retired `settings.alert_bark` posted by an older page is ignored; other
+  edits still save, and nothing in that retired field is applied.
   No reply includes submitted credentials.
 - `POST /api/alert/push-test` with `{id}` sends exactly one saved entry a test
   batch now, even while off, without touching the queue. It returns
@@ -710,8 +724,10 @@ The page interface, for use on the page, Settings, Alerts:
 
 The page builds its service choices and paste hints from `alert_push_services`.
 Blank replacement address and extra secret fields omit those edits, preserving
-the saved values. Unrecognized addresses prompt the principal to choose a
-service in the page's language. The former Bark page fields and
+the saved values. An add draft containing only a service choice and optional
+name is ignored on save and does not mark the settings unsaved. Unrecognized
+addresses prompt the principal to choose a service; address refusals and
+upgrade problems appear in the page's language. The former Bark page fields and
 `/api/alert/bark-test` endpoint have been removed; use the push interface above.
 
 `hansa.alert_services.SERVICES` holds service definitions. A definition supplies
