@@ -1,7 +1,7 @@
 {
   "name": "hansa-coordinator",
   "version": "1.0.0",
-  "description": "hansa's mod for the coordinator's session: it compacts the context once the session is idle at hansa's thresholds, and clears the session once a day in the window hansa gives",
+  "description": "hansa's mod for the coordinator's session: it compacts the context once the session is idle at hansa's thresholds, clears the session once a day in the window hansa gives, and pins hansa's status line under the prompt",
   "author": {
     "name": "hansa"
   }
