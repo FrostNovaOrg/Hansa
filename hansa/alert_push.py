@@ -86,7 +86,10 @@ def _write_secret(desk, id, value, extra=False):
 
 
 def keys(desk) -> dict:
-    """Use each saved entry's service; retain whole orphan values without guessing."""
+    """Use the saved service, retaining values of at least eight characters.
+
+    Orphans keep their whole value without guessing another service's parts.
+    """
     try:
         saved = entries(desk._saved_settings())  # settings() can migrate and redact events here
     except SettingsError:
@@ -98,7 +101,7 @@ def keys(desk) -> dict:
             value = path.read_text(encoding="utf-8").strip()
         except OSError:
             continue
-        if not value:
+        if len(value) < 8:  # like Desk.keys: short strings match ordinary task text
             continue
         out[path.name] = value
         service = services.get(path)
@@ -106,7 +109,7 @@ def keys(desk) -> dict:
             try:
                 normalized = service.normalize(value)
                 for n, secret in enumerate(service.secrets(normalized)):
-                    if secret:
+                    if len(secret) >= 8:
                         out[f"{path.name}-{service.id}-{n}"] = secret
             except ValueError:
                 pass

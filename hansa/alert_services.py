@@ -2,13 +2,18 @@
 
 A service supplies id, names/hints (en/zh), extra_secret, deadline_s, max_bytes,
 levels, recognizes(value), normalize(value), secrets(address), hidden(address),
-and requests(address, secret, title, body, level). Requests use alert_http.send's
-private interface; no response bodies or credentials cross into public results.
+and requests(address, secret, title, body, level), with optional
+validate(address, secret) for the completed credential pair. Requests use
+alert_http.send's private interface; no response bodies or credentials cross
+into public results.
 """
 from .alert_bark import Bark
+from .alert_chat import DingTalk, Discord, Feishu, JsonWebhook, Slack, Telegram, WeCom
 from .alert_phone import Gotify, Ntfy, PushDeer, ServerChan
 
-SERVICES = {service.id: service for service in (Bark(), Ntfy(), Gotify(), PushDeer(), ServerChan())}
+SERVICES = {service.id: service for service in (
+    Bark(), Ntfy(), Gotify(), PushDeer(), ServerChan(),
+    WeCom(), DingTalk(), Feishu(), Telegram(), Discord(), Slack(), JsonWebhook())}
 
 
 def parse(value: str, service: str = "recognize") -> tuple[str, str]:

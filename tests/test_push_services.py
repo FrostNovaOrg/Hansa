@@ -1,4 +1,4 @@
-"""Phone push services and child-only HTTP acknowledgements, without a network."""
+"""Push services and child-only HTTP acknowledgements, without a network."""
 from contextlib import ExitStack
 import json
 import os
@@ -10,8 +10,9 @@ import tempfile
 import textwrap
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
-from hansa import alert_http, alert_push, alert_services, views
+from hansa import __version__, alert_chat, alert_http, alert_push, alert_services, views
 from hansa.cli import init_desk
 from hansa.desk import public_settings, read_json, write_json
 
@@ -29,7 +30,25 @@ SAVED_SERVICE_CASES = (
 )
 
 
-class PhoneServicesTest(unittest.TestCase):
+CHAT_SERVICE_CASES = (
+    ("wecom", "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=fixture-wecom-key", "fixture-wecom-key", "",
+     "qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…"),
+    ("dingtalk", "https://oapi.dingtalk.com/robot/send?access_token=fixture-dingtalk-token", "fixture-dingtalk-token",
+     "SECfixture-signing-secret", "oapi.dingtalk.com/robot/send?access_token=…"),
+    ("feishu", "https://open.feishu.cn/open-apis/bot/v2/hook/fixture-hook-id", "fixture-hook-id",
+     "fixture-feishu-signing-secret", "open.feishu.cn/open-apis/bot/v2/hook/…"),
+    ("telegram", "https://api.telegram.org/bot123456:fixture-telegram-token/sendMessage?chat_id=-100123456",
+     "123456:fixture-telegram-token", "", "api.telegram.org/bot…/sendMessage?chat_id=-100123456"),
+    ("discord", "https://discord.com/api/webhooks/123456/fixture-discord-token", "fixture-discord-token", "",
+     "discord.com/api/webhooks/123456/…"),
+    ("slack", "https://hooks.slack.com/services/T12345/B12345/fixture-slack-token",
+     "/services/T12345/B12345/fixture-slack-token", "", "hooks.slack.com/services/…"),
+    ("json", "https://home.example/automation/fixture-private-path?key=fixture-query-key",
+     "https://home.example/automation/fixture-private-path?key=fixture-query-key", "fixture-bearer-token", "home.example/…"),
+)
+
+
+class _PushServicesCase(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -57,6 +76,50 @@ class PhoneServicesTest(unittest.TestCase):
         self.assertEqual(sending.call_args.kwargs, {"deadline_s": 30})
         [request] = sending.call_args.args[0]
         return why, request
+
+
+class PhoneServicesTest(_PushServicesCase):
+    def test_secret_floor_applies_to_whole_values_and_parts_at_eight_characters(self):
+        self.save("https://ntfy.sh/abcdefg", secret="tk_12345")
+        self.save("https://ntfy.sh/abcdefgh", secret="tk_1234")
+        alert_push._write_secret(self.desk, "orphan-seven", "1234567")
+        alert_push._write_secret(self.desk, "orphan-eight", "12345678")
+        keys = set(alert_push.keys(self.desk).values())
+        for short in ("abcdefg", "tk_1234", "1234567"):
+            self.assertNotIn(short, keys)
+        for protected in ("abcdefgh", "tk_12345", "12345678"):
+            self.assertIn(protected, keys)
+
+    def test_ntfy_topic_trailing_slash_is_recognized_and_removed(self):
+        address = "https://ntfy.sh/hansa-alerts-7f3k/"
+        self.assertEqual(alert_services.parse(address), ("ntfy", address[:-1]))
+        entry = self.save(address)
+        self.assertEqual(self.deliver(entry)[1]["json"]["topic"], "hansa-alerts-7f3k")
+
+    def test_short_secrets_do_not_redact_scrub_or_damage_other_entries(self):
+        text = "abc parser and def utility"
+        tid = self.desk.new_task(text, title=text)
+        task = self.desk.tasks_dir / tid / "task.md"
+        note = self.desk.tasks_dir / tid / "note.md"
+        note.write_text(text, encoding="utf-8")
+        before = task.read_bytes(), note.read_bytes()
+        self.save("https://ntfy.sh/abc", secret="tk_fixture-access-token")
+        self.save("https://ntfy.sh/fixture-abc-other-topic", secret="def")
+        # The same floor covers unlisted files and separately stored secrets.
+        alert_push._write_secret(self.desk, "orphan", "ghi", extra=True)
+        keys = set(alert_push.keys(self.desk).values())
+        self.assertTrue(all(len(key) >= 8 for key in keys))
+        self.assertNotIn("abc", keys)
+        self.assertNotIn("def", keys)
+        self.assertNotIn("ghi", keys)
+        self.assertEqual((task.read_bytes(), note.read_bytes()), before)
+        self.assertEqual(self.desk.redact(text), text)
+        self.assertEqual(self.desk.keys_in(text), [])
+        other = "fixture-abc-other-topic"
+        self.assertNotIn(other, self.desk.redact(other))
+        self.assertEqual(self.desk.redact(other).count("[key of "), 1)
+        later = self.desk.new_task(text, title=text)
+        self.assertEqual((self.desk.tasks_dir / later / "task.md").read_text(), text + "\n")
 
     def test_ntfy_recognition_root_json_chinese_title_and_priorities(self):
         entry = self.save("https://ntfy.sh/hansa-alerts-7f3k")
@@ -228,7 +291,7 @@ class PhoneServicesTest(unittest.TestCase):
                     self.assertEqual(stat.S_IMODE(alert_push._file(self.desk, entry["id"], extra).stat().st_mode), 0o600)
 
     def test_saved_entries_use_only_the_recorded_service(self):
-        for n, (service, address, key, secret, mask) in enumerate(SAVED_SERVICE_CASES):
+        for n, (service, address, key, secret, mask) in enumerate(SAVED_SERVICE_CASES + CHAT_SERVICE_CASES):
             with self.subTest(service=service, address=address):
                 self.desk = init_desk(self.tmp / f"saved-{n}")
                 entry = self.save(address, service, **({"secret": secret} if secret else {}))
@@ -359,6 +422,223 @@ class PhoneServicesTest(unittest.TestCase):
                 alert_services.parse(address, "serverchan")
 
 
+class ChatServicesTest(_PushServicesCase):
+    def test_recognition_requests_and_registry_hints(self):
+        public = {row["id"]: row for row in alert_services.public()}
+        for service, address, _, secret, _ in CHAT_SERVICE_CASES:
+            with self.subTest(service=service):
+                if service == "json":
+                    with self.assertRaisesRegex(ValueError, "choose the push service"):
+                        alert_services.parse(address)
+                else:
+                    self.assertEqual(alert_services.parse(address), (service, address))
+                entry = self.save(address, service, **({"secret": secret} if secret else {}))
+                with patch.object(alert_push, "_text", return_value=("台面", "正文\n下一行")):
+                    why, request = self.deliver(entry)
+                self.assertEqual(why, "sent")
+                self.assertEqual(public[service]["extra_secret"], bool(secret))
+                payload = request["json"]
+                text = "台面\n正文\n下一行"
+                if service in ("wecom", "dingtalk"):
+                    self.assertEqual(payload, {"msgtype": "text", "text": {"content": text}})
+                    self.assertEqual(request["success"], {"field": "errcode", "equals": 0})
+                elif service == "feishu":
+                    self.assertEqual(payload["msg_type"], "text")
+                    self.assertEqual(payload["content"], {"text": text})
+                elif service == "telegram":
+                    self.assertEqual(payload, {"chat_id": "-100123456", "text": text, "disable_notification": False})
+                    self.assertEqual(request["url"], address.split("?", 1)[0])
+                elif service == "discord":
+                    self.assertEqual(payload, {"content": text})
+                elif service == "slack":
+                    self.assertEqual(payload, {"text": text})
+                    self.assertEqual(request["success"], {"status": 200, "text": "ok"})
+                else:
+                    self.assertEqual(payload, {"desk": "台面", "title": "台面", "text": "正文\n下一行", "level": "active"})
+                    self.assertEqual(request["headers"], {"Authorization": "Bearer " + secret})
+                if service != "dingtalk":
+                    self.assertEqual(request["url"], address.split("?", 1)[0] if service == "telegram" else address)
+
+    def test_international_bot_hosts_and_endpoint_recognition(self):
+        addresses = (("dingtalk", "https://oapi.dingtalk.io/robot/send?access_token=fixture-token"),
+                     ("feishu", "https://open.larksuite.com/open-apis/bot/v2/hook/fixture-hook"))
+        for service, address in addresses:
+            with self.subTest(service=service):
+                self.assertEqual(alert_services.parse(address), (service, address))
+                self.assertEqual(self.deliver(self.save(address))[1]["url"], address)
+        for address in ("https://qyapi.weixin.qq.com/other?key=fixture-key",
+                        "https://oapi.dingtalk.com/other?access_token=fixture-token",
+                        "https://open.feishu.cn/other/fixture-hook",
+                        "https://open.larksuite.com/other/fixture-hook",
+                        "https://discord.com/other/123/fixture-token",
+                        "https://hooks.slack.com/other/T123/B123/fixture-token",
+                        "https://home.example/anything"):
+            with self.subTest(address=address), self.assertRaisesRegex(ValueError, "choose the push service"):
+                alert_services.parse(address)
+        # Telegram recognizes the host, then validates the sendMessage endpoint.
+        with self.assertRaisesRegex(ValueError, "does not accept"):
+            alert_services.parse("https://api.telegram.org/bot123:fixture-token/getUpdates")
+
+    def test_bot_endpoints_require_complete_credentials_and_reject_query_extras(self):
+        bad = (("wecom", "https://qyapi.weixin.qq.com/cgi-bin/webhook/send"),
+               ("wecom", "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key="),
+               ("wecom", "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=K&key=OTHER"),
+               ("dingtalk", "https://oapi.dingtalk.com/robot/send?access_token=T&sign=old"),
+               ("feishu", CHAT_SERVICE_CASES[2][1] + "?secret=fixture"),
+               ("telegram", CHAT_SERVICE_CASES[3][1].split("?", 1)[0]),
+               ("telegram", CHAT_SERVICE_CASES[3][1] + "&parse_mode=HTML"),
+               ("discord", "https://discord.com/api/webhooks/123456/.."),
+               ("discord", "https://discord.com/api/webhooks/123456/."),
+               ("slack", CHAT_SERVICE_CASES[5][1] + "?"))
+        for service, address in bad:
+            with self.subTest(service=service, address=address), self.assertRaises(ValueError):
+                alert_services.parse(address, service)
+        address = CHAT_SERVICE_CASES[3][1].replace("-100123456", "@fixture_channel")
+        self.assertEqual(alert_services.parse(address), ("telegram", address))
+        definition = alert_services.SERVICES["telegram"]
+        [request] = definition.requests(address, "", "desk", "body", "active")
+        self.assertEqual(request["json"]["chat_id"], "@fixture_channel")
+        self.assertNotIn("@fixture_channel", definition.secrets(address))
+
+    def test_dingtalk_fixed_signature_and_unsigned_request(self):
+        address = CHAT_SERVICE_CASES[1][1]
+        definition = alert_services.SERVICES["dingtalk"]
+        with patch.object(alert_chat.time, "time", return_value=1700000000.123):
+            [request] = definition.requests(address, "SECfixture-signing-secret", "desk", "body", "active")
+        self.assertEqual(request["url"], address + "&timestamp=1700000000123&sign="
+                         "wx22JBUieV9bR%2Bp79tpZSAjMTFZrEUL7XidAHDr5GW0%3D")
+        [unsigned] = definition.requests(address, "", "desk", "body", "active")
+        self.assertEqual(unsigned["url"], address)
+        self.assertNotIn("timestamp", unsigned["json"])
+        self.assertNotIn("sign", unsigned["json"])
+        with patch.object(alert_chat.time, "time", return_value=1700000001.123):
+            [later] = definition.requests(address, "SECfixture-signing-secret", "desk", "body", "active")
+        self.assertIn("timestamp=1700000001123", later["url"])
+        self.assertNotEqual(later["url"].split("&sign=")[1], request["url"].split("&sign=")[1])
+
+    def test_feishu_fixed_signature_and_unsigned_request(self):
+        address = CHAT_SERVICE_CASES[2][1]
+        definition = alert_services.SERVICES["feishu"]
+        with patch.object(alert_chat.time, "time", return_value=1700000000.123):
+            [request] = definition.requests(address, "fixture-feishu-signing-secret", "desk", "body", "active")
+        self.assertEqual(request["json"], {"msg_type": "text", "content": {"text": "desk\nbody"},
+                                         "timestamp": "1700000000", "sign": "0awgJI8X4aWtM3EI2qIbWu1RV39l9bosNuMbjExSpks="})
+        self.assertEqual(request["url"], address)
+        [unsigned] = definition.requests(address, "", "desk", "body", "active")
+        self.assertEqual(unsigned["json"], {"msg_type": "text", "content": {"text": "desk\nbody"}})
+
+    def test_passive_telegram_and_discord_suppress_notifications(self):
+        for service, address, token, _, _ in CHAT_SERVICE_CASES[3:5]:
+            with self.subTest(service=service):
+                entry = self.save(address)
+                _, request = self.deliver(entry, "passive")
+                payload = request["json"]
+                if service == "telegram":
+                    self.assertIs(payload["disable_notification"], True)
+                else:
+                    self.assertEqual(payload["flags"], 4096)
+                    self.assertEqual(request["headers"]["User-Agent"],
+                                     f"DiscordBot (https://github.com/FrostNovaOrg/Hansa, {__version__})")
+                result = json.dumps(alert_push.last_result(self.desk, entry["id"]))
+                status = views.status(self.desk)
+                self.assertNotIn(token, result + json.dumps(status) + views.status_text(status))
+                self.assertNotIn(token, self.desk.events_path.read_text())
+                _, normal = self.deliver(entry, "active")
+                if service == "telegram":
+                    self.assertIs(normal["json"]["disable_notification"], False)
+                else:
+                    self.assertNotIn("flags", normal["json"])
+
+    def test_chat_urgent_markers_and_code_free_batches(self):
+        for service, address, _, secret, _ in CHAT_SERVICE_CASES:
+            entry = self.save(address, service, **({"secret": secret} if secret else {}))
+            for language, marker in (("en", "Urgent: "), ("zh", "紧急：")):
+                with self.subTest(service=service, language=language):
+                    _, request = self.deliver(entry, "urgent", language)
+                    payload = request["json"]
+                    text = (payload["text"]["content"] if service in ("wecom", "dingtalk") else
+                            payload["content"]["text"] if service == "feishu" else
+                            payload["content"] if service == "discord" else payload["text"])
+                    if service != "json":
+                        self.assertTrue(text.startswith(marker), payload)
+                    else:
+                        self.assertEqual(payload["level"], "urgent")
+                        self.assertEqual(payload["desk"], payload["title"])
+                        self.assertFalse(payload["title"].startswith(marker))
+            with patch.object(alert_http, "send", return_value=[{"why": "sent"}]) as sending:
+                self.assertEqual(alert_push.send(self.desk, entry, [{"kind": "release_waiting", "level": "active",
+                    "text": "release needs code OTPfixture-123", "code": "OTPfixture-123"}]), "sent")
+            sent = json.dumps(sending.call_args.args[0], ensure_ascii=False)
+            self.assertNotIn("OTPfixture-123", sent)
+            self.assertNotIn("needs code", sent)
+
+    def test_byte_character_and_complete_json_limits(self):
+        for service, address, _, secret, _ in CHAT_SERVICE_CASES[:-1]:
+            definition = alert_services.SERVICES[service]
+            for body in ("中文🙂" * 5000, "\n\"\\\t" * 7000):
+                with self.subTest(service=service, escaped=body.startswith("\n")):
+                    [request] = definition.requests(address, secret, "desk", body, "active")
+                    payload = request["json"]
+                    if service in ("wecom", "dingtalk"):
+                        text = payload["text"]["content"]
+                        self.assertLessEqual(len(text.encode("utf-8")), definition.max_bytes)
+                        self.assertEqual(text, ("desk\n" + body)[:len(text) - 1] + "…")
+                        # No split code point, and no unnecessary unused space.
+                        next_text = ("desk\n" + body)[:len(text)] + "…"
+                        self.assertGreater(len(next_text.encode("utf-8")), definition.max_bytes)
+                    elif service == "feishu":
+                        text = payload["content"]["text"]
+                        self.assertLessEqual(len(json.dumps(payload, ensure_ascii=False).encode("utf-8")), 20 * 1024)
+                    else:
+                        text = payload["content" if service == "discord" else "text"]
+                        self.assertEqual(len(text), {"telegram": 4096, "discord": 2000, "slack": 4000}[service])
+                    self.assertTrue(text.endswith("…"))
+            [short] = definition.requests(address, "", "desk", "body", "active")
+            self.assertIn("desk\\nbody", json.dumps(short["json"]))
+
+    def test_json_webhook_accepts_https_only_when_chosen_and_keeps_shape(self):
+        address = "https://automation.example:8443/hooks/send?key=fixture-key"
+        self.assertFalse(alert_services.SERVICES["json"].recognizes(address))
+        self.assertEqual(alert_services.parse(address, "json"), ("json", address))
+        definition = alert_services.SERVICES["json"]
+        for level in ("passive", "active", "urgent"):
+            for secret in ("", "fixture-token"):
+                with self.subTest(level=level, authenticated=bool(secret)):
+                    [request] = definition.requests(address, secret, "desk", "body", level)
+                    self.assertEqual(request["url"], address)
+                    self.assertEqual(request["json"], {"desk": "desk", "title": "desk", "text": "body", "level": level})
+                    self.assertEqual(request["headers"], {"Authorization": "Bearer fixture-token"} if secret else {})
+
+    def test_new_credentials_are_private_scrubbed_and_not_rerouted(self):
+        for n, (service, address, key, secret, mask) in enumerate(CHAT_SERVICE_CASES):
+            with self.subTest(service=service):
+                self.desk = init_desk(self.tmp / f"private-chat-{n}")
+                private = {address, key, secret} - {""}
+                tid = self.desk.new_task("\n".join(sorted(private)))
+                entry = self.save(address, service, **({"secret": secret} if secret else {}))
+                task = (self.desk.tasks_dir / tid / "task.md").read_text()
+                status = views.status(self.desk)
+                self.assertEqual(status["alert_push"][0]["address"], mask)
+                for value in private:
+                    self.assertIn(value, alert_push.keys(self.desk).values())
+                    self.assertNotIn(value, task)
+                    self.assertNotIn(value, self.desk.redact(value))
+                    self.assertNotIn(value, json.dumps(public_settings(self.desk)) + json.dumps(status)
+                                     + self.desk.settings_path.read_text() + self.desk.events_path.read_text())
+                if service == "telegram":
+                    self.assertIn("-100123456", mask)
+                for extra in ((False, True) if secret else (False,)):
+                    self.assertEqual(stat.S_IMODE(alert_push._file(self.desk, entry["id"], extra).stat().st_mode), 0o600)
+                for unsafe in (address.replace("https://", "http://"), address.replace("https://", "https://u:p@"),
+                               address + "#fragment", address + "\n", address + "\\evil"):
+                    with self.subTest(unsafe=repr(unsafe)), self.assertRaises(ValueError):
+                        alert_services.parse(unsafe, service)
+                if service != "json":
+                    foreign = address.replace(urlsplit(address).netloc, "other.example")
+                    with self.assertRaises(ValueError):
+                        alert_services.parse(foreign, service)
+
+
 class ChildAnswerTest(unittest.TestCase):
     """The real -I child prepares requests and parses responses using a fake opener."""
 
@@ -417,6 +697,53 @@ class ChildAnswerTest(unittest.TestCase):
     def request(self, body, **fields):
         return {"url": "https://push.example.test/send", "json": {"text": "request-secret"},
                 "fixture": {"body": body}, **fields}
+
+    def test_chat_service_acknowledgements_and_error_codes_in_child(self):
+        cases = (("wecom", 200, '{"errcode":0}', "sent", None),
+                 ("wecom", 200, '{"errcode":93000,"errmsg":"private reason"}', "refused_by_service", 93000),
+                 ("wecom", 200, '{"errcode":45009}', "refused_by_service", 45009),
+                 ("dingtalk", 200, '{"errcode":"0"}', "sent", None),
+                 ("dingtalk", 200, '{"errcode":310000}', "refused_by_service", 310000),
+                 ("dingtalk", 200, '{"errcode":400101}', "refused_by_service", 400101),
+                 ("dingtalk", 200, '{"errcode":410100}', "refused_by_service", 410100),
+                 ("feishu", 200, '{"code":0}', "sent", None),
+                 *(("feishu", 200, json.dumps({"code": code}), "refused_by_service", code)
+                   for code in (19021, 19022, 19024, 11232)),
+                 ("telegram", 200, '{"ok":true}', "sent", None),
+                 ("telegram", 200, '{"ok":false,"error_code":400}', "refused_by_service", 400),
+                 ("telegram", 403, '{"ok":false,"error_code":403}', "http_4xx", 403),
+                 ("discord", 204, '', "sent", None),
+                 ("discord", 404, '{"code":10015,"message":"Unknown Webhook"}', "http_4xx", None),
+                 ("slack", 200, 'ok', "sent", None),
+                 ("slack", 201, 'ok', "refused_by_service", "ok"),
+                 ("slack", 400, 'invalid_payload', "http_4xx", "invalid_payload"),
+                 ("slack", 404, 'channel_not_found', "http_4xx", "channel_not_found"),
+                 ("slack", 200, 'invalid_payload', "refused_by_service", "invalid_payload"),
+                 ("json", 200, 'anything', "sent", None),
+                 ("json", 204, '', "sent", None),
+                 ("json", 299, 'anything', "sent", None))
+        addresses = {service: address for service, address, _, _, _ in CHAT_SERVICE_CASES}
+        for service, status, body, why, code in cases:
+            with self.subTest(service=service, status=status, body=body):
+                definition = alert_services.SERVICES[service]
+                [request] = definition.requests(addresses[service], "", "desk", "body", "passive")
+                request["fixture"] = {"status": status, "body": body, "json": request["json"]}
+                if service == "discord":
+                    request["fixture"]["headers"] = {"User-agent": request["headers"]["User-Agent"]}
+                [result] = self.run_child([request])
+                expected = {"ok": why == "sent", "why": why, "status": status, "tries": 1}
+                if code is not None:
+                    expected["code"] = code
+                self.assertEqual(result, expected)
+
+    def test_slack_text_error_codes_are_whole_bounded_words_only(self):
+        bodies = ("invalid_payload\n", "private error message", "错", "a" * 41,
+                  "invalid_payload" + " " * alert_http._RESPONSE_LIMIT, "<script>")
+        requests = [dict(self.request(body, success={"text": "ok"}), url=f"https://push.example.test/{n}")
+                    for n, body in enumerate(bodies)]
+        for result in self.run_child(requests):
+            self.assertEqual(result["why"], "refused_by_service")
+            self.assertNotIn("code", result)
 
     def test_form_is_encoded_and_checked_in_child(self):
         form = {"pushkey": "key &+secret", "type": "text", "text": "中文题目\nbody & + = 🙂", "empty": ""}

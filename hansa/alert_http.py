@@ -1,7 +1,7 @@
 """Private HTTPS transport for push channels.
 
-Only send is a caller interface. The same file runs under Python -I as a child,
-without importing hansa, so request secrets travel only over stdin. Its stdout
+The caller interfaces are send and safe_code. The same file runs under Python -I
+as a child, without importing hansa, so request secrets travel only over stdin. Its stdout
 protocol contains indices, attempt counts and fixed result fields, never secrets.
 """
 from __future__ import annotations
@@ -159,6 +159,13 @@ def _answer(given, status, why, body):
     if why != "sent" and isinstance(parsed, dict):
         field = given.get("error_field", check.get("field"))
         code = safe_code(parsed.get(field))
+    elif why != "sent" and "text" in check and complete:
+        # Slack returns a single error word. Keep the whole-body and scalar
+        # bounds here while response text must never become a public message.
+        try:
+            code = safe_code(body.decode("utf-8"))
+        except UnicodeError:
+            pass
     return why, code
 
 
