@@ -16,6 +16,7 @@ a web page for the principal (the person directing the work), and task workers. 
   Workers try changes as their user would and report what a page or command showed before and after.
   They leave alone what the task says to leave.
   Leftover processes are also found by their working folder and stopped before the commit and check.
+- Workers and verifiers have auto memory off, whatever repository settings say; their CLAUDE.md still loads.
 - `hansa add --after T` queues work that starts only after T is merged into its lane's base.
   See [queuing after another task](docs/tasks.md#queuing-after-another-task).
 - When hansa cannot inspect a process, its task keeps running and its lane stays taken.
@@ -28,8 +29,11 @@ a web page for the principal (the person directing the work), and task workers. 
 - Session notifications bring results to the coordinator. `hansa ask` keeps the principal's to-dos;
   answers happen in conversation and the coordinator records the outcome. `hansa wait` waits
   for tasks only. See [task handling](docs/tasks.md).
+  `hansa notify on` returns only when its follower is ready to hear new events.
   Lines refused by the coordinator's session are posted once it accepts again.
   Continued refusals alert the principal.
+  When API errors keep ending turns, hansa reposts unhandled work and alerts after 30 minutes by default,
+  or at once for errors only the principal can fix; after an alert, a normal turn sends a recovery notice.
   Server startup writes missing events for saved task ends even after a long stop, without writing any twice.
 - `hansa goal` and `hansa decide` record the principal's goals and reasons for product choices.
   Tasks tie to goals.
@@ -48,6 +52,13 @@ a web page for the principal (the person directing the work), and task workers. 
 - Runs get private temporary storage; Linux lane commands normally use the desk's disk.
   Java and Maven receive temporary-directory and proxy settings; sandbox startup failures hold workers.
   See [the sandbox guide](docs/sandbox.md).
+- The optional macOS [VM bench](docs/bench.md) is off by default; `hansa bench build` prepares a fixed Debian image.
+  `hansa bench selftest` checks isolation and shutdown before `hansa bench on`; bench code upgrades need fresh acceptance.
+  With the bench on, workers use `hansa bench run` for Linux, browser and terminal checks, with output and artifacts.
+  Each hand-in starts fresh with only its own loopback, no downloads or host dependencies, and 4 GiB across
+  `/work`, `/out`, `/tmp` and `/dev/shm`. Timeouts keep output and files; teardown finishes before commit.
+  `hansa bench off` cancels hand-ins; failures leave task handling running. Valid artifacts return if others are rejected.
+  `hansa bench status` explains holds; `hansa serve` prints a bench failure reason only when it changes.
 
 ### Merging and checks
 
@@ -55,6 +66,7 @@ a web page for the principal (the person directing the work), and task workers. 
   changes absent from the task, or a separate command is needed, with its own limit or check lane.
 - Merges queue per repository and base. Compatible merges can share a check; a failed batch
   is checked again individually in its original order.
+- Lane copies omit release targets; merge lanes refuse target settings and releases and show how to remove old targets.
 - `hansa merge --recheck` checks again; `--despite-check` can override a check failure.
   Stored keys and conflict markers always block merging. Configured release files require
   a holding verification, including “holds, with notes”.
@@ -68,9 +80,10 @@ a web page for the principal (the person directing the work), and task workers. 
 
 - Named targets have commands, time limits and optional dependencies on another target releasing
   the same commit. Requests show outgoing changes and direct commits, which can require approval.
-- Approve on the page or pass the one-time code from the principal's alert through the coordinator.
+- Approve on the page or pass the one-time code from the principal's alert command through the coordinator.
   A target ticked on the page may run without asking, including after merges settle; changes
   to commands, inputs or permissions invalidate approval.
+  Settings shows each target's last release time and outcome; missing descriptions prompt `--about` there and in `hansa lane target`.
 - Release commands run outside the sandbox. Ordinary releases hold their repository; fixed-checkout
   targets let merges continue. Releases can be stopped; results return to the coordinator.
 - After a push, a target's `--watch` command follows CI without holding other work and posts whether it passed.
@@ -78,12 +91,22 @@ a web page for the principal (the person directing the work), and task workers. 
 - The principal sets the alert command. Alerts are grouped and rate-limited; closed to-dos are omitted
   and failures shown. Low disk space holds new work until space recovers, with a floor scaled to
   the volume. See [releases and alerts](docs/releases.md).
+- Alerts use English or Chinese, carry attention levels and keep the release's description.
+  Push addresses and the alert command send independently; codes are made only for the command as it sends.
+  Save up to ten private push addresses on the page; paste an address to recognize its service, or choose it.
+  Switch each on or off, send a test push and see its last result. A saved Bark key moves into the list.
+  Use Bark (also self-hosted), ntfy, Gotify, PushDeer, Server酱, WeCom, DingTalk, Feishu/Lark,
+  Telegram, Discord, Slack or a JSON webhook; bots support signing secrets. See [push services](docs/push-services.md).
+  Secret parts stay out of settings, events, status and the page and go only to their own service.
 - `hansa changelog` collects workers' release notes, missing notes and direct commits.
 
 ### The web page
 
 - English and Chinese views show the pipeline, active lanes, waiting decisions and searchable tasks.
   Task details show each step, reports, checks and verification. Notes and known gaps are readable.
+  Tabs wrap on phones and narrow windows so every tab stays visible.
+- Name the desk on the page; alerts, push titles, the page, `hansa status`, `hansa desks` and the menu use it.
+  Status, the desk list and the menu also show the folder.
 - The Goals tab shows each goal's decisions, its work's checks, merges and releases, what is missing and its cost.
   See [goals on the page](docs/desk.md#status-work-and-cost-on-the-web-page).
 - Work and cost includes a work calendar, lane timeline, outcomes, token usage and CSV export.
@@ -92,6 +115,7 @@ a web page for the principal (the person directing the work), and task workers. 
 - Settings group providers, coordinator, lanes, read restrictions, releases, alerts and prices.
   Lanes are read-only; dispatch controls are in Settings. Drafts survive tab changes and failed saves;
   concurrent settings changes are shown before another save.
+- `hansa explain history` and Settings show who changed each setting, when and old → new; filter by lane or provider. Keys stay hidden.
 - The page is compressed and cached by the browser when unchanged.
   Polls stay small and back off on connection loss.
   Reconnecting keeps the last received status visible.
@@ -118,6 +142,10 @@ a web page for the principal (the person directing the work), and task workers. 
   Hansa starts no second server when it cannot inspect the one holding the desk.
   A symbolic link to `bin/hansa` on PATH works. [Getting started](docs/getting-started.md) covers local and SSH use.
 - `hansa doctor` checks tools, login and sandbox operation, with fixes, JSON output and English or Chinese.
+- `hansa status` shows how the coordinator's last turn ended, or that its turns are not recorded.
+- Under the coordinator's prompt, hansa shows the desk name, model and effort, problems, waiting decisions, work,
+  24-hour cost and page address without its key, refreshed by `hansa serve`, also in `hansa up` sessions; a person's own line stays.
+- The mod and `hansa doctor` require Claude Code 2.1.306 or later; older starts suggest `claude update`. `--autocompact` is passed from 2.1.290.
 - [SETUP.md](SETUP.md) guides an AI agent through installing and setting up Hansa with you, one question at a time.
 
 ### The Codex adapter
@@ -127,6 +155,7 @@ a web page for the principal (the person directing the work), and task workers. 
   covers its own login and configuration, provider errors, login access inside its sandbox and tool-rule limits.
 - The adapter now runs the model set for its provider on the page; `HANSA_CODEX_MODEL` is only a fallback.
   Existing providers with placeholder model names must now name the Codex model.
+- Codex runs disable memories and external agent memory import.
 
 ## 0.4.0 — 2026-09-17
 
