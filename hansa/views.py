@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, installed, installed_text, memory, notify, plugin, release, up
 from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
-                   release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG)
+                   release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError)
 from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of,
                   credit_text, provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
@@ -853,14 +853,15 @@ def desks() -> dict:
             host, port = web_address(desk)
             host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
             code = read_json(desk.state_dir / "serve-code", {}) or {}
-            row.update(server=server["state"], address=f"http://{'[' + host + ']' if ':' in host else host}:{port}/",
+            row.update(desk_name=alert.desk_name(desk),
+                       server=server["state"], address=f"http://{'[' + host + ']' if ':' in host else host}:{port}/",
                        version=code.get("build") if server["state"] != "gone" and code.get("pid") == server["pid"] else None,
                        running=sum(m.get("state") == "running" for m in tasks),
                        waiting=sum(m.get("state") == "queued" for m in tasks),
                        review=sum(m.get("state") == "done" and m.get("kind") != "verify" for m in tasks),
                        releases=sum(r.get("state") == "waiting" for r in release.releases(desk)),
                        todos=sum(not a.get("closed") for a in desk.asks()))
-        except (OSError, UnicodeError):
+        except (OSError, UnicodeError, SettingsError):
             row.clear()
             row.update(desk=str(root), problem="folder cannot be read as a desk")
     return {"desks": rows, "problem": problem}
@@ -873,7 +874,7 @@ def desks_text(st: dict) -> str:
             blocks.append(f"desk {row['desk']}: {row['problem']}")
             continue
         server = "not running" if row["server"] == "gone" else f"running ({row['server']})"
-        blocks.append(f"desk {row['desk']}\n  server: {server}; hansa {row['version'] or 'unknown'}\n"
+        blocks.append(f"desk {row['desk_name']} ({row['desk']})\n  server: {server}; hansa {row['version'] or 'unknown'}\n"
                       f"  page: {row['address']}\n"
                       f"  tasks: {row['running']} running, {row['waiting']} waiting, {row['review']} waiting for review\n"
                       f"  principal: {row['releases']} releases, {row['todos']} to-dos waiting")
@@ -902,6 +903,7 @@ def status(desk: Desk) -> dict:
     looks = waiting_looks(desk, s, tasks, server) if queued else None  # once for all of them
     return {
         "desk": str(desk.root),
+        "desk_name": alert.desk_name(desk),
         "build": build(),
         "installed": installed(),  # when the code this runs was put in place
         "serve_code": serve_code(desk, server),  # hansa serve on older code than is installed: what to do
@@ -1026,7 +1028,7 @@ def todo_list(desk: Desk, page: int = 1, state: str = "") -> dict:
 
 
 def status_text(st: dict) -> str:
-    out = [f"desk {st['desk']}",
+    out = [f"desk {st['desk_name']} ({st['desk']})",
            ("PAUSED: " + st["paused"]) if st["paused"] else f"dispatch on, {st['concurrency']} at a time",
            server_text(st.get("server") or {"state": "up" if st["server_up"] else "gone"})]
     out = [" · ".join(out + [f"hansa {st['build']}", installed_text(st.get("installed") or 0) or "installed ?",

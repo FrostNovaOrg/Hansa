@@ -12,7 +12,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .. import menu, up
+from .. import alert, menu, up
 
 SAMPLE = Path(__file__).resolve().parent
 DEFAULT_DIR = "hansa-example"
@@ -117,7 +117,7 @@ def _list_desk(desk) -> None:
 
 def next_steps(root: Path, desk, lang: str) -> str:
     words = STEPS[lang]
-    name = "/".join(desk.root.parts[-2:])
+    name = alert.desk_name(desk)
     values = {"root": root, "name": name, "desk": shlex.quote(str(desk.root))}
     return "\n".join([words["made"].format(**values), "", words["next"],
                       f"  1. {words['run'].format(**values)}",

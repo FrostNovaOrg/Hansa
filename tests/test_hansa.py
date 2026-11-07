@@ -2232,7 +2232,8 @@ class DesksTest(unittest.TestCase):
                                   for p in self.tmp.rglob("*") if p.is_file()})
         rows = json.loads(raw)["desks"]
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0], {"desk": str(first.root), "server": "up", "version": "server-version",
+        self.assertEqual(rows[0], {"desk": str(first.root), "desk_name": f"{first.root.parent.name}/first",
+                                   "server": "up", "version": "server-version",
                                    "address": "http://127.0.0.1:9876/", "running": 1, "waiting": 1,
                                    "review": 1, "releases": 1, "todos": 1})
         self.assertIsNone(rows[1]["version"])
@@ -20611,7 +20612,7 @@ def save():'''))
         self.assertEqual(cleared["start"], started["start"])  # tied to this start
         self.assertLess(abs(cleared["at"] - time.time()), 60)
         self.assertEqual(printed[1:], self.status_lines())  # what hansa status prints, and nothing more
-        self.assertTrue(printed[0].startswith(f"desk {self.desk.root}"))
+        self.assertTrue(printed[0].startswith(f"desk {self.desk.root.parent.name}/{self.desk.root.name} ({self.desk.root})"))
         last = time.strftime("%m-%d %H:%M", time.localtime(cleared["at"]))
         self.assertIn(f"daily clear 04-09: last cleared {last}.", printed)
         self.assertEqual(self.mod_record(), started)  # a clear never changes the start's record
@@ -36932,6 +36933,22 @@ else if (ask === "settings-unavailable") vm.runInContext('show("settings")', ctx
   console.log(JSON.stringify(ids["#state"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {
+  if (ask === "desk-name-setting") {
+    const run = code => vm.runInContext(code, ctx);
+    await run("loadStatus()");
+    let input = null;
+    walk(ids["#tab-settings"], el => { if (el.tag === "input" && el._settingMeta?.matches("desk_name must")) input = el; });
+    if (!input) throw new Error("desk name field missing");
+    const before = {value:input.value, title:document.title,
+      caption:ids["#title"].kids.at(-1).kids.at(-1).textContent};
+    const label = descendants(ids["#tab-settings"], "label").find(el => el.attrs.for === input.id)?.textContent;
+    const note = ids["#" + input.attrs["aria-describedby"]]?.textContent;
+    input.value = given.deskNameDraft; input.on.input({target:input});
+    const dirty = run("settingsDirty()"), groupDirty = run("groupDirty('lanes')"), group = input._settingMeta.group;
+    const draftCaption = ids["#title"].kids.at(-1).kids.at(-1).textContent;
+    await run("saveSettings()");
+    console.log(JSON.stringify({before, label, note, dirty, groupDirty, group, draftCaption, posted})); return;
+  }
   if (ask === "alert-language") {
     let select = null;
     walk(ids["#tab-settings"], el => { if (el.tag === "select" && el._settingMeta?.matches('alert_language must be "en" or "zh"')) select = el; });
@@ -39004,7 +39021,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         if not shutil.which("node"):
             self.skipTest("needs node to run the page's script")
         st = self.picture_status()
-        st.update(desk="/home/shop/desk", paused="", server={"state": "up"}, mod=None, mod_line="", clear_line="",
+        st.update(desk="/home/shop/desk", desk_name=None, paused="", server={"state": "up"}, mod=None, mod_line="", clear_line="",
                   srt_missing="", serve_code="", alert_failed="", disk=None, memory=None,
                   no_read_stop="", no_read_left_out=[], unreached=[])
         st.update(status)
@@ -39204,7 +39221,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         for language in ("en", "zh"):
             for folder in ("/home/work/desk", "/home/other/desk", "/home/work/a < b & c"):
                 with self.subTest(language=language, folder=folder):
-                    status.update(desk=folder, asks=[], releases=[])
+                    status.update(desk=folder, desk_name=None, asks=[], releases=[])
                     [page] = self.page_header("desk-name", status, language)
                     name = "/".join(folder.split("/")[-2:])
                     self.assertEqual(page["title"], "Hansa · " + name)
@@ -39213,7 +39230,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_page_title_counts_waiting_releases_and_open_requests_on_each_refresh(self):
         status = views.status(self.desk)
-        status.update(desk="/home/work/desk", asks=[], releases=[], asks_closed=[{"id":3, "text":"closed"}])
+        status.update(desk="/home/work/desk", desk_name=None, asks=[], releases=[], asks_closed=[{"id":3, "text":"closed"}])
         for language in ("en", "zh"):
             pages = self.page_header("desk-count", status, language)
             self.assertEqual([p["title"] for p in pages], [
@@ -39222,7 +39239,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_page_status_summary_has_separate_parts_and_marks_only_bad_parts(self):
         status = views.status(self.desk)
-        status.update(desk="/home/work/desk", build="test-build", installed=1727778840, concurrency=3,
+        status.update(desk="/home/work/desk", desk_name=None, build="test-build", installed=1727778840, concurrency=3,
                       server_up=False, server={"state":"gone"}, paused="review queue", srt_missing="",
                       disk=None, no_read_stop="", no_read_left_out=[])
         for language in ("en", "zh"):
@@ -39251,7 +39268,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_summary_labels(self):
         status = views.status(self.desk)
-        status.update(desk="/home/work/desk", build="test-build")
+        status.update(desk="/home/work/desk", desk_name=None, build="test-build")
         for language, desk, version, current in (("en", "desk", "hansa", "now"),
                                                   ("zh", "工作台", "hansa 版本", "现在")):
             with self.subTest(language=language):
@@ -46821,6 +46838,267 @@ class AlertPushPageTest(unittest.TestCase):
                 self.assertTrue(result and result.get("ok"), result)
                 self.assertIn(f"a to-do {bad!r}", out.read_text())
                 self.http.assert_not_called()
+
+
+class DeskNameSettingTest(unittest.TestCase):
+    snapshot = AlertBarkTest.snapshot
+    hansa = DeskTest.hansa
+    history_entries = DeskTest.history_entries
+
+    def setUp(self):
+        AlertBarkTest.setUp(self)
+        self.assertEqual(up.list_desk(self.desk), "")
+
+    def save_name(self, name):
+        loaded = public_settings(self.desk)
+        loaded["settings"]["desk_name"] = name
+        return save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"]})
+
+    def assert_displays(self, name):
+        from hansa import alert, example
+        self.assertEqual(alert.desk_name(self.desk), name)
+        self.assertTrue(alert.text_of(self.desk, [{"text": "a request"}]).startswith(f"[hansa] 工作台 {name}:"))
+        [entry] = self.desk.settings()["alert_push"]
+        self.http.reset_mock()
+        self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
+        [request] = self.http.call_args.args[0]
+        self.assertEqual((request["json"]["title"], request["json"]["group"]), (name, name))
+        self.assertTrue(self.hansa("status").splitlines()[0].startswith(f"desk {name} ("))
+        self.assertEqual(views.status(self.desk)["desk_name"], name)
+        self.assertIn(f"desk {name} ({self.desk.root})", self.hansa("desks"))
+        [row] = json.loads(self.hansa("desks", "--json"))["desks"]
+        self.assertEqual((row["desk_name"], row["desk"]), (name, str(self.desk.root)))
+        state = menu.rows()
+        self.assertEqual(state["desks"][0]["desk_name"], name)
+        for lang in ("en", "zh"):
+            self.assertIn(f"{name} ({self.desk.root})", menu.screen(state, 0, set(), lang, 240, 24))
+            self.assertIn(name, example.next_steps(self.tmp, self.desk, lang))
+
+    def test_unset_desk_name_uses_last_two_folders_everywhere(self):
+        AlertBarkTest.configure(self, language="zh")
+        settings = self.desk.settings()
+        settings.pop("desk_name", None)  # a desk made before the setting existed
+        write_json(self.desk.settings_path, settings)
+        self.assertEqual(public_settings(self.desk)["settings"]["desk_name"], "")
+        self.assert_displays("advisor/desk")
+
+    def test_unicode_desk_name_reaches_every_display_and_settings_history(self):
+        AlertBarkTest.configure(self, language="zh")
+        self.assertEqual(self.save_name("网店台子"), {"ok": True, "problems": []})
+        self.assertEqual(read_json(self.desk.settings_path)["desk_name"], "网店台子")
+        entry = [e for e in self.history_entries() if e["path"] == "desk_name"][-1]
+        self.assertEqual((entry["by"], entry["old"], entry["new"]), ("principal", "", "网店台子"))
+        self.assert_displays("网店台子")
+
+    def test_invalid_desk_names_refuse_the_entire_save_without_writes(self):
+        for name in ("名" * 41, "a\nb", "a\rb", "a\u2028b", "a\u2029b", "a\x00b", "a\tb", "a\x1bb",
+                     "a\x7fb", "a\x85b", None, 1, [], {}):
+            with self.subTest(name=name):
+                loaded = public_settings(self.desk)
+                loaded["settings"].update(desk_name=name, cool_minutes=31)
+                before = self.snapshot()
+                result = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"]})
+                self.assertFalse(result["ok"])
+                self.assertTrue(any(p.startswith("desk_name must be at most 40") for p in result["problems"]))
+                self.assertEqual(self.snapshot(), before)
+
+    def test_desk_name_accepts_forty_unicode_characters(self):
+        for name in ("名" * 40, "🌏" * 40, "مكتب الاستشارات", "Desk <&> \"one\""):
+            with self.subTest(name=name):
+                self.assertTrue(self.save_name(name)["ok"])
+                self.assertEqual(Desk(self.desk.root).settings()["desk_name"], name)
+
+    def test_desk_name_refuses_saved_provider_push_and_page_keys(self):
+        (self.desk.secrets_dir / "example.key").write_text("provider-secret-key")
+        AlertBarkTest.configure(self)
+        # Include the page key as well as provider and push keys; use a short fixture so the length check
+        # alone cannot reject it. No error or history entry may repeat the key.
+        (self.desk.state_dir / "web-token").write_text("page-secret-key")
+        for key in ("provider-secret-key", self.key, "page-secret-key"):
+            with self.subTest(key=key):
+                before = self.snapshot()
+                result = self.save_name("Desk " + key + " end")
+                self.assertFalse(result["ok"])
+                self.assertIn("desk_name must not contain a saved key", result["problems"])
+                self.assertNotIn(key, json.dumps(result))
+                self.assertEqual(self.snapshot(), before)
+
+    def test_only_a_page_save_can_set_change_or_clear_the_desk_name(self):
+        for previous in ("", "网店台子"):
+            self.assertTrue(self.save_name(previous)["ok"])
+            for by in ("", "coordinator", "principal", "command"):
+                for name in ("Another desk", "" if previous else "New desk"):
+                    with self.subTest(previous=previous, by=by, name=name):
+                        settings = self.desk.settings()
+                        settings.update(desk_name=name, cool_minutes=31)
+                        before = self.snapshot()
+                        result = self.desk.save_settings(settings, by=by)
+                        self.assertTrue(any("desk_name is the principal's" in p for p in result))
+                        self.assertEqual(self.snapshot(), before)
+
+    def test_clearing_the_desk_name_restores_every_display_and_records_history(self):
+        AlertBarkTest.configure(self, language="zh")
+        self.assertTrue(self.save_name("网店台子")["ok"])
+        self.assertEqual(self.save_name(""), {"ok": True, "problems": []})
+        self.assert_displays("advisor/desk")
+        entry = [e for e in self.history_entries() if e["path"] == "desk_name"][-1]
+        self.assertEqual((entry["by"], entry["old"], entry["new"]), ("principal", "网店台子", ""))
+
+    def test_duplicate_desk_names_keep_the_folder_in_desks_and_the_menu(self):
+        second = init_desk(self.tmp / "another" / "desk")
+        self.assertEqual(up.list_desk(second), "")
+        for desk in (self.desk, second):
+            settings = desk.settings()
+            settings["desk_name"] = "网店台子"
+            self.assertTrue(save_from_page(desk, {"settings": settings})["ok"])
+        before = {str(p): p.read_bytes() for p in self.tmp.rglob("*") if p.is_file()}
+        text, state = self.hansa("desks"), menu.rows()
+        self.assertEqual([r["desk_name"] for r in state["desks"]], ["网店台子"] * 2)
+        for desk in (self.desk, second):
+            label = f"网店台子 ({desk.root})"
+            self.assertIn(label, text)
+            for lang in ("en", "zh"):
+                self.assertIn(label, menu.screen(state, 0, set(), lang, 240, 24))
+        self.assertEqual({str(p): p.read_bytes() for p in self.tmp.rglob("*") if p.is_file()}, before)
+
+    def test_saves_omitting_desk_name_keep_the_principals_choice(self):
+        self.assertTrue(self.save_name("网店台子")["ok"])
+        for by in ("page", "coordinator"):
+            with self.subTest(by=by):
+                settings = self.desk.settings()
+                del settings["desk_name"]
+                settings["cool_minutes"] += 1
+                before = len(self.history_entries())
+                result = save_from_page(self.desk, {"settings": settings}) if by == "page" else {
+                    "ok": not self.desk.save_settings(settings, by=by)}
+                self.assertTrue(result["ok"])
+                self.assertEqual(self.desk.settings()["desk_name"], "网店台子")
+                self.assertEqual([e["path"] for e in self.history_entries()[before:]], ["cool_minutes"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_desk_name_field_title_and_header_in_both_page_languages(self):
+        harness = self.tmp / "desk-name-page.js"
+        harness.write_text(DeskTest.PAGE_HARNESS)
+        for lang in ("en", "zh"):
+            for previous, draft in (("", "网店台子"), ("网店台子", ""), ("", "Named desk")):
+                with self.subTest(lang=lang, previous=previous, draft=draft):
+                    self.assertTrue(self.save_name(previous)["ok"])
+                    replies = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk),
+                               "/api/events": [], "deskNameDraft": draft}
+                    result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"),
+                                             "desk-name-setting", lang], input=json.dumps(replies),
+                                            capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    page = json.loads(result.stdout)
+                    self.assertEqual(page["before"], {"value": previous, "title": "Hansa · " + (previous or "advisor/desk"),
+                                                      "caption": previous or "advisor/desk"})
+                    self.assertEqual(page["label"], "工作台名称" if lang == "zh" else "Desk name")
+                    for word in (("40", "留空", "密钥", "设置历史") if lang == "zh" else
+                                 ("40", "blank", "saved keys", "settings history")):
+                        self.assertIn(word, page["note"])
+                    self.assertEqual((page["dirty"], page["groupDirty"], page["group"]), (True, True, "lanes"))
+                    self.assertEqual(page["draftCaption"], previous or "advisor/desk")
+                    self.assertEqual(page["posted"]["settings"]["desk_name"], draft)
+                    self.assertEqual(page["posted"]["rev"], replies["/api/settings"]["rev"])
+                    self.assertTrue(save_from_page(self.desk, page["posted"])["ok"])
+                    self.assertEqual(self.desk.settings()["desk_name"], draft)
+
+
+    def test_unreadable_settings_keep_the_desks_block_and_folder_name(self):
+        expected = views.desks()
+        text = self.hansa("desks")
+        for raw in (b'{"desk_name":', b'[]', b'null'):
+            with self.subTest(raw=raw):
+                self.desk.settings_path.write_bytes(raw)
+                self.assertEqual(views.desks(), expected)
+                self.assertEqual(self.hansa("desks"), text)
+                for label in ("desk advisor/desk (", "server:", "page:", "tasks:", "principal:"):
+                    self.assertIn(label, text)
+                self.assertEqual(menu.rows()["desks"][0]["desk_name"], "advisor/desk")
+                self.assertEqual(self.desk.settings_path.read_bytes(), raw)
+
+    hand_edited_invalid_names = (5, ["x"], None, {}, "   ", "名" * 41, "a\x1b[31mb", "a\nb", "a\tb",
+                                 "a\u2028b", "a\u202eb", "a\u200bb")
+
+    def test_hand_edited_invalid_desk_names_use_folders_everywhere(self):
+        AlertBarkTest.configure(self, language="zh")
+        settings = self.desk.settings()
+        for name in self.hand_edited_invalid_names:
+            with self.subTest(name=name):
+                write_json(self.desk.settings_path, {**settings, "desk_name": name})
+                self.assert_displays("advisor/desk")
+                screen = menu.screen(menu.rows(), 0, set(), "en", 240, 24).removeprefix("\x1b[H\x1b[2J")
+                self.assertNotIn("\x1b", self.hansa("status") + self.hansa("desks")
+                                 + screen)
+                self.assertEqual(read_json(self.desk.settings_path)["desk_name"], name)
+
+    def test_hand_edited_desk_names_holding_saved_keys_use_folders(self):
+        AlertBarkTest.configure(self, language="zh")
+        (self.desk.secrets_dir / "example.key").write_text("provider-secret-key")
+        (self.desk.state_dir / "web-token").write_text("page-secret-key")
+        settings = self.desk.settings()
+        for key in ("provider-secret-key", self.key, "page-secret-key"):
+            with self.subTest(key=key):
+                write_json(self.desk.settings_path, {**settings, "desk_name": "Desk " + key + " end"})
+                self.assert_displays("advisor/desk")
+
+    def test_saving_only_spaces_clears_the_name_and_records_history(self):
+        AlertBarkTest.configure(self, language="zh")
+        self.assertTrue(self.save_name("网店台子")["ok"])
+        self.assertTrue(self.save_name("   ")["ok"])
+        self.assertEqual(read_json(self.desk.settings_path)["desk_name"], "")
+        entry = [e for e in self.history_entries() if e["path"] == "desk_name"][-1]
+        self.assertEqual((entry["by"], entry["old"], entry["new"]), ("principal", "网店台子", ""))
+        self.assert_displays("advisor/desk")
+
+    def test_saving_a_padded_name_trims_before_storage_and_history(self):
+        AlertBarkTest.configure(self, language="zh")
+        for name in ("网店台子", "名" * 40):
+            with self.subTest(name=name):
+                self.assertTrue(self.save_name(" " + name + " ")["ok"])
+                self.assertEqual(read_json(self.desk.settings_path)["desk_name"], name)
+                entry = [e for e in self.history_entries() if e["path"] == "desk_name"][-1]
+                self.assertEqual((entry["by"], entry["new"]), ("principal", name))
+                self.assert_displays(name)
+
+    def test_format_characters_refuse_the_entire_save_without_writes(self):
+        for character in ("\u202e", "\u200b"):
+            for name in (character + "网店台子", "网店" + character + "台子", "网店台子" + character):
+                with self.subTest(name=name):
+                    loaded = public_settings(self.desk)
+                    loaded["settings"].update(desk_name=name, cool_minutes=31)
+                    before = self.snapshot()
+                    result = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"]})
+                    self.assertFalse(result["ok"])
+                    self.assertTrue(any(p.startswith("desk_name must be at most 40") for p in result["problems"]))
+                    self.assertEqual(self.snapshot(), before)
+
+    def test_trimming_does_not_hide_line_breaks_or_controls(self):
+        for character in ("\n", "\r", "\t", "\x85", "\u2028", "\u2029"):
+            for name in (character + "网店台子", "网店台子" + character):
+                with self.subTest(name=name):
+                    before = self.snapshot()
+                    self.assertFalse(self.save_name(name)["ok"])
+                    self.assertEqual(self.snapshot(), before)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_hand_edited_invalid_names_use_folders_in_both_page_languages(self):
+        harness = self.tmp / "desk-name-page.js"
+        harness.write_text(DeskTest.PAGE_HARNESS)
+        settings = self.desk.settings()
+        for name in self.hand_edited_invalid_names:
+            write_json(self.desk.settings_path, {**settings, "desk_name": name})
+            status = views.status(self.desk)
+            for lang in ("en", "zh"):
+                with self.subTest(name=name, lang=lang):
+                    replies = {"/api/status": status, "/api/events": []}
+                    result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"),
+                                             "desk-name", lang], input=json.dumps(replies),
+                                            capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    [page] = json.loads(result.stdout)
+                    self.assertEqual(page["title"], "Hansa · advisor/desk")
+                    self.assertEqual(page["caption"], "advisor/desk")
 
 
 class AlertPushTest(unittest.TestCase):

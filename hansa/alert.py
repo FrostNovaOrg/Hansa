@@ -131,7 +131,7 @@ import time
 from pathlib import Path
 
 from . import without_session
-from .desk import Desk, now, read_json, write_json
+from .desk import Desk, SettingsError, desk_name_problem, now, read_json, write_json
 
 KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "disk", "coordinator", "credit",
          "test")
@@ -364,7 +364,13 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
 
 # -- sending -----------------------------------------------------------------------------------------------------------
 def desk_name(desk: Desk) -> str:
-    """The desk's name in alert headers and channel titles/groups."""
+    """The saved display name, or the last two folders. Read without migrating settings: desk lists only read."""
+    try:
+        name = desk._saved_settings().get("desk_name", "")
+        if not desk_name_problem(name) and not desk.keys_in_desk_name(name) and name.strip():
+            return name.strip()
+    except (SettingsError, OSError, UnicodeError):
+        pass  # An unavailable or hand-edited setting must not break desk lists or put controls in headings.
     return "/".join(str(desk.root).split("/")[-2:]).lstrip("/") or "/"
 
 
