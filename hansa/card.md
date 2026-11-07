@@ -68,7 +68,7 @@ they show what is merged, missing evidence and released; `show` also gives the g
 | command | what it does |
 |---|---|
 | `hansa status` | whether `hansa serve` runs; when it is not running, `hansa up` starts it again as it last ran; what runs, waits (and why) or failed; lanes, providers, usage |
-| `hansa desks [--json]` | every desk on this account's list: server, page address without its key, server version, task counts and principal's waiting release/to-do counts; reads only. More: `hansa help bringing-up` |
+| `hansa desks [--json]` | every desk on this account's list: name and folder, server, page address without its key, server version, task counts and principal's waiting release/to-do counts; reads only. More: `hansa help bringing-up` |
 | `hansa add "<task>" [--lane L] [--effort E] [--model M] [--title T] [--max-turns N] [--file PATH] [--attach PATH] [--verify] [--verify-lane L] [--verify-effort E] [--verify-note "text"]` | queue a task |
 | `hansa show <id> [--full \| --report \| --check \| --check-log \| --merge-check-log]` | report, changes, refused calls, check (failing tests, last lines), next step |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base; `--new`: only what a follow-up added |

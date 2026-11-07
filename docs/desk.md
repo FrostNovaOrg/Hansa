@@ -579,6 +579,27 @@ The dispatch state loads when Settings opens and after either action. A failed
 press shows its error and keeps the displayed state and reason box. The header
 still reports when the desk is paused.
 The save bar applies to all editable settings groups.
+In **Settings → Lanes → General**, **Desk name** (`desk_name` in
+`settings.json`) lets the principal name the desk in any language, for example
+`网店台子`. Saving strips surrounding spaces; only spaces saves an empty name.
+It accepts at most 40 characters on one line, without control or Unicode format
+characters (including invisible direction overrides and zero-width spaces).
+A name containing a saved provider key, push secret or page key is
+refused before anything is saved, so a pasted key cannot become a public heading.
+Only the principal's save on the page changes it; commands cannot set it.
+Settings history records both setting and clearing the name. An older page or
+command that omits the field keeps the saved name.
+
+An empty or unset name uses the last two folders of the desk's path, such as
+`advisor/desk`. A name written by hand is used only if it is a string that passes
+the same character and saved-key checks as a save; otherwise the folders are used.
+If settings cannot be parsed, the desk list still shows its server, page address
+and counts with the folder-based name. The name is used in alert headers, push titles and groups, the
+page's browser title and header, and the first line of `hansa status`.
+`hansa desks` and `hansa menu` show both the name and folder, so desks with the
+same name remain distinguishable. Changing the name does not rename its folder
+or tmux server.
+
 In Alerts, beside the alert command, **Alert language** (`alert_language`) selects
 English (`en`, the default) or Chinese (`zh`). Before it has been saved, the select
 prefills from the page's language; alerts stay English until the principal saves
@@ -858,20 +879,20 @@ Each desk's runs are kept from the other listed desks and from the list itself
 ([sandbox.md](sandbox.md#what-workers-and-verifiers-may-touch)).
 
 `hansa desks` shows this account's whole list from any folder, including inside
-a desk. It writes nothing in any desk. Each block gives the folder, whether
+a desk. It writes nothing in any desk. Each block gives the name and folder, whether
 its server runs (including busy or stuck), the page address without its key,
 the running server's recorded hansa version, and counts only. A server without
 a matching version record shows `unknown`; a stopped server has no current
 version. For example:
 
 ```text
-desk /work/desk-one
+desk work/desk-one (/work/desk-one)
   server: running (up); hansa 1.2.3
   page: http://127.0.0.1:8766/
   tasks: 2 running, 3 waiting, 1 waiting for review
   principal: 1 releases, 2 to-dos waiting
 
-desk /work/desk-two
+desk work/desk-two (/work/desk-two)
   server: not running; hansa unknown
   page: http://127.0.0.1:8765/
   tasks: 0 running, 1 waiting, 0 waiting for review
@@ -885,7 +906,8 @@ to-dos count open requests. A stopped desk still shows its counts and its last
 page address (or the default before it has served). Missing or unreadable desk
 folders get one line each, and the other desks are still shown. A missing or
 empty list says `No desks listed`; an unreadable list gives the same reason as
-`hansa status`. `hansa desks --json` gives the same facts in `desks` and a
+`hansa status`. `hansa desks --json` gives the same facts, including `desk_name`
+and the full folder in `desk`, in `desks` and a
 list-level `problem` string. Neither format includes task titles, notes,
 reports, to-do texts, provider keys, release codes or the page's key.
 

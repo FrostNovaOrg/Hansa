@@ -117,7 +117,8 @@ class MenuTest(unittest.TestCase):
         self.assertEqual([first[k] for k in ("running", "review", "releases", "todos")], [2, 1, 1, 1])
         self.assertTrue(first["paused"])
         self.assertTrue(all(r["coordinator"] for r in state["desks"]))
-        self.assertNotIn("private", text)
+        for private in ("private task", "private todo", "private code", "private reason"):
+            self.assertNotIn(private, text)
         self.assertNotIn("[x]", text)
         self.assertEqual(before, [self.snapshot(d) for d in (self.first, self.second)])
         self.assertFalse(self.tmux_calls.exists())

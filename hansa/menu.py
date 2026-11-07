@@ -202,7 +202,9 @@ def screen(state, chosen, ticks, lang, width, height):
     lines = [words(lang, "title")]
     table = [words(lang, "headers").split("|")]
     for i, row in enumerate(state["desks"]):
-        name = "/".join(Path(row["desk"]).parts[-2:])
+        name = row.get("desk_name") or "/".join(Path(row["desk"]).parts[-2:])
+        if not row.get("problem"):
+            name = f"{name} ({row['desk']})"
         values = [(">" if i == chosen else " ") + ("[x]" if row["desk"] in ticks else "[ ]"), name]
         if row.get("problem"):
             values += [words(lang, "gone" if row["problem"] == "folder is gone" else "unreadable"), "", "", "", ""]
@@ -214,6 +216,9 @@ def screen(state, chosen, ticks, lang, width, height):
         table.append(values)
     sizes = [max(cells(cut(r[i], 200)) for r in table) for i in range(7)]
     rendered = ["  ".join(cut(v, 200) + " " * (sizes[i] - cells(cut(v, 200))) for i, v in enumerate(r)) for r in table]
+    for i, row in enumerate(state["desks"], 1):
+        if row.get("problem"):
+            rendered[i] = "  ".join(cut(v, 200) for v in table[i]).rstrip()
     tail = [state["problem"] or words(lang, "empty")] if state["problem"] or not state["desks"] else []
     tail += guide(state["desks"][chosen], lang) if state["desks"] else []
     tail += [words(lang, "keys1"), words(lang, "keys2")]
