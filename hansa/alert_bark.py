@@ -12,10 +12,14 @@ LEVELS = {"passive": "passive", "active": "active", "urgent": "timeSensitive"}
 
 
 def _pasted_address(value):
-    if value.startswith("https://"):
-        return value
+    # Inspect the whole paste before extracting a URL or letting urlsplit strip
+    # controls. Keep this while pasted text can contain device credentials.
+    if any(unicodedata.category(c) == "Cc" and c not in "\t\r\n" for c in value):
+        raise ValueError("Bark needs pasted text without control characters")
     addresses = re.findall(r"https://[^\s'\"<>`]+", value)
-    return addresses[0] if len(addresses) == 1 else value
+    if len(addresses) > 1:
+        raise ValueError("paste exactly one HTTPS address for Bark")
+    return addresses[0] if addresses else value
 
 
 def problems(config) -> list[str]:
@@ -49,18 +53,18 @@ class Bark:
 
     def normalize(self, value):
         value = _pasted_address(value)
-        # Check original spelling before urlsplit strips controls. Keep this rule
-        # while addresses can contain credentials: normalization must not reroute them.
-        if (not value or any(c.isspace() or unicodedata.category(c) == "Cc" for c in value)
-                or any(c in value for c in "#\\")):
-            raise ValueError("Bark needs an HTTPS address without spaces, controls, userinfo or fragment")
+        if not value or any(c.isspace() for c in value) or "\\" in value:
+            raise ValueError("Bark needs an HTTPS address without spaces, controls, userinfo or backslashes")
         if re.fullmatch(r"[A-Za-z0-9_-]+", value):
             value = DEFAULT_SERVER + "/" + value
         try:
             parsed = urlsplit(value)
             parsed.port
             key = unquote(parsed.path.split("/")[1], errors="strict")
+            # Dot segments can change which path contains the key; reject
+            # them while normalizing pasted example paths to credentials.
             if (parsed.scheme != "https" or not parsed.hostname or "@" in parsed.netloc
+                    or any(part in (".", "..") for part in unquote(parsed.path, errors="strict").split("/"))
                     or not re.fullmatch(r"[A-Za-z0-9_-]+", key)):
                 raise ValueError
         except (ValueError, IndexError, UnicodeError):
