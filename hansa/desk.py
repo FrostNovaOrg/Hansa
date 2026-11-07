@@ -88,7 +88,7 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow",
-                  "release_direct", "alert", "alert_language", "alert_push", "coordinator_compact", "coordinator_alert")
+                  "release_direct", "alert", "alert_language", "alert_push", "coordinator_compact", "coordinator_alert", "desk_name")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -262,6 +262,7 @@ COORDINATOR_ALERT_WHAT = {"no_session_min": "the minutes before an alert that no
 def default_settings() -> dict:
     return {
         "version": 1,
+        "desk_name": "",  # the principal's display name, on the page; blank uses the last two folders
         "concurrency": 1,
         # GB of free space under which hansa serve starts nothing new (hansa/disk.py); 0: off. The coordinator's
         # (hansa disk-floor), as concurrency is
@@ -592,7 +593,7 @@ def forbidden_exceptions_ok(exceptions) -> bool:
 def current_settings(settings: dict) -> dict:
     """Normalize defaults and ignore retired settings from older desks without changing the file."""
     s = copy.deepcopy(settings)
-    for key in ("design", "browser", "coordinator_read", "audits_cost"):
+    for key in ("design", "browser", "coordinator_read", "audits_cost", "alert_bark"):
         s.pop(key, None)
     co = s.get("coordinator")
     if isinstance(co, dict):
@@ -621,6 +622,14 @@ def work_lane_problem(s: dict, name, *, verifying: bool = False) -> str:
     return ""
 
 
+def desk_name_problem(name) -> str:
+    """The same character limits for page saves and names read for public headings."""
+    if (not isinstance(name, str) or len(name) > 40 or _has_control(name)
+            or any(unicodedata.category(c) == "Cf" for c in name)):
+        return "desk_name must be at most 40 characters on one line, without control or format characters"
+    return ""
+
+
 def validate(s: dict, root=None, page: bool = False, before: dict | None = None, mailbox_key: str = "") -> list:
     """Every problem with a settings object, in words; empty means valid. root: the desk's folder,
     which no lane's write list may reach into. page: the page's save, which cannot change lanes, so the refused
@@ -636,8 +645,11 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     known = {"version", "concurrency", "disk_floor", "memory_floor", "cool_minutes", "coordinator", "providers", "lanes", "prices",
              "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
              "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "release_direct", "alert", "coordinator_compact",
-             "coordinator_alert", "alert_language", "alert_push", "bench"}
+             "coordinator_alert", "alert_language", "alert_push", "bench", "desk_name"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
+    name_problem = desk_name_problem(s.get("desk_name", ""))
+    if name_problem:
+        p.append(name_problem)
     bench = s.get("bench", default_settings()["bench"])
     if (not isinstance(bench, dict) or set(bench) != set(default_settings()["bench"])
             or type(bench["enabled"]) is not bool or type(bench["generation"]) is not int
@@ -2739,9 +2751,13 @@ class Desk:
             mailbox_key = ""
             if isinstance(new, dict):
                 new = current_settings(new)
+                # Trim the page's input, but keep line breaks and controls for validation to refuse.
+                if by == "page" and isinstance(new.get("desk_name"), str) and not _has_control(new["desk_name"]):
+                    new["desk_name"] = new["desk_name"].strip()
                 # Older pages omit this field: an unrelated save must keep the principal's choice.
                 new.setdefault("alert_language", old["alert_language"])
                 new.setdefault("alert_push", old["alert_push"])
+                new.setdefault("desk_name", old["desk_name"])
                 if by == "page":
                     new["bench"] = old["bench"]
                 mailbox_key = mailbox_settings(new)
@@ -2793,6 +2809,7 @@ class Desk:
                         + self.keys_in_alert(old, new) + answer_names(old, new))
             from .alert_push import entries as push_entries, private_metadata_problems
             problems += private_metadata_problems(self, push_entries(new))
+            problems += self.keys_in_desk_name(new.get("desk_name", ""))
             lanes = new.get("lanes")
             for name, ln in (lanes.items() if isinstance(lanes, dict) else []):
                 if isinstance(ln, dict) and ln.get("merge_lane") and not (old["lanes"].get(name) or {}).get("merge_lane"):
@@ -2813,7 +2830,11 @@ class Desk:
                 old = {k: v for k, v in old.items() if k != "alert_language"}
                 new = {k: v for k, v in new.items() if k != "alert_language"}
             changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
-            write_json(self.settings_path, new)
+            # A deferred Bark upgrade keeps its original setting until the
+            # principal saves a Bark address. Never apply an old page's value.
+            saved = self._saved_settings()
+            legacy = {"alert_bark": saved["alert_bark"]} if "alert_bark" in saved else {}
+            write_json(self.settings_path, {**new, **legacy})
             from .history import record
             record(self, old, new, by, command)
             if changed:
@@ -2898,6 +2919,17 @@ class Desk:
         found = self.keys_in(cmd)
         return [f"the alert command holds the key of {', '.join(found)}, and it is stored and shown as written; have "
                 "the command read the key from a file instead"] if found else []
+
+    def keys_in_desk_name(self, name) -> list:
+        """Names go into public headings and push groups: keep saved keys out while names are published."""
+        if not isinstance(name, str) or not name:
+            return []
+        private = list(self.keys().values())
+        try:
+            private.append((self.state_dir / "web-token").read_text(encoding="utf-8").strip())
+        except FileNotFoundError:
+            pass
+        return ["desk_name must not contain a saved key"] if any(key and key in name for key in private) else []
 
     # -- keys -------------------------------------------------------------
     def key_file(self, provider: str) -> Path:
@@ -3271,8 +3303,13 @@ def public_settings(desk: Desk) -> dict:
                  for observed in [listed_as(s.get("lanes", {}).get(lane), target)]
                  for why in [listed_mismatch(s, x, now_as=observed)] if why]
     from . import alert_push, alert_services
+    problems = validate(s, desk.root, page=True, mailbox_key=mailbox_key)
+    if problem := alert_push.migration_problem(desk):
+        problems.append(problem)
+    for entry in alert_push.entries(s):
+        entry["name"] = desk.redact(entry.get("name", ""))
     return {"settings": s, "alert_push": alert_push.public(desk), "alert_push_services": alert_services.public(), "alert_language_saved": "alert_language" in desk._saved_settings(),
-            "keys": keys, "problems": validate(s, desk.root, page=True, mailbox_key=mailbox_key), "rev": rev,
+            "keys": keys, "problems": problems, "rev": rev,
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),

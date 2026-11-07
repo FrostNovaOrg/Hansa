@@ -121,9 +121,7 @@ def _save_settings(desk: Desk, body: dict) -> dict:
         if not problems:
             problems = desk.save_settings(new, by="page", rev=body.get("rev"), dry=True)
         if not problems:
-            failed = alert_push.apply(desk, writes, removes)
-            problems = desk.save_settings(new, by="page")
-            alert_push.check_scrub(failed)
+            problems = alert_push.save(desk, new, writes, removes)
     if not problems:
         for name in desk.settings()["lanes"]:
             brief = desk.lanes_dir / name / "brief.md"

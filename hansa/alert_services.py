@@ -26,7 +26,12 @@ def parse(value: str, service: str = "recognize") -> tuple[str, str]:
         definition = SERVICES.get(service)
         if definition is None:
             raise ValueError("unknown push service")
-    return definition.id, definition.normalize(value)
+    try:
+        return definition.id, definition.normalize(value)
+    except ValueError:
+        # A stable refusal lets every service use the page's language and keeps
+        # arbitrary parser exception text (possibly containing a key) private.
+        raise ValueError("this push service does not accept the address; check its hint and paste the whole address again") from None
 
 
 def public() -> list[dict]:

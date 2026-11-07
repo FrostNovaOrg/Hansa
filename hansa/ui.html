@@ -500,7 +500,9 @@ const T = ZH ? {
   keyTransport:"HTTP 会以未加密方式传送密钥。远程接口请使用 HTTPS；HTTP 仅适用于可信的本机适配器。",
   rest:"歇", toppedUp:"已充值", topUpsToConfirm:"等你确认充值",
   ready:"可用", notChecked:"尚未检查", checkFailed:"上次 Ping 未通过", lastCheck:"上次 Ping", addProvider:"加一家服务商", newName:"名字（小写字母、数字、-）", remove:"删除",
-  general:"总体", concurrency:"同时最多做几件", compactIdle:"空闲时压缩于（token）", compactWorking:"工作中压缩于（token）",
+  general:"总体", deskName:"工作台名称",
+  deskNameHint:"最多 40 个字符，任何语言均可；只用一行，不含控制字符、Unicode 格式字符或已保存的密钥。保存时去掉两端空格；留空或只填空格使用路径的最后两级文件夹。只有负责人在此保存才会更改，并记入设置历史。名称用于提醒、推送标题和分组、网页、status、工作台列表和菜单；列表和菜单同时显示文件夹，以区分同名工作台。",
+  concurrency:"同时最多做几件", compactIdle:"空闲时压缩于（token）", compactWorking:"工作中压缩于（token）",
   compactNote:"一轮以回答结束、会话空闲后，若上下文达到第一个数，协调员的 mod 在空闲一分钟后压缩它，这时整个上下文还在提示缓存里。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第二个数时压缩（hansa coordinator 用 --autocompact 传给它）。两个数都在 100,000 到 1,000,000 token 之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或第一个数不小于第二个数），那个压缩就不会发生：Claude Code 自己先压缩了。第二个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。第一个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第二个数从会话下次启动起生效。协调员不能改它们。Claude Code（2.1.299 或更新的版本）还会自己压缩一个有 200,000 token 或更多、空闲了约 54 分钟的对话；这一项 hansa 既不设置也不读取。mod 需要 Claude Code 2.1.290 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
   modStarted:t => `协调员会话 ${t} 启动：`, modOn:"hansa 加载了协调员的 mod", modOff:why => `hansa 没有加载协调员的 mod，因为：${why}`,
   modUnknown:"hansa 是否加载了协调员的 mod：不知道", modOptions:"命令行里的 --autocompact 选项：", notKnown:"不知道",
@@ -668,7 +670,9 @@ const T = ZH ? {
   keyTransport:"HTTP sends the key without encryption. Use HTTPS for remote endpoints; reserve HTTP for trusted local adapters.",
   rest:"rest", toppedUp:"Topped up", topUpsToConfirm:"Top-ups to confirm",
   ready:"ready", notChecked:"not checked yet", checkFailed:"last ping failed", lastCheck:"last ping", addProvider:"Add provider", newName:"name (a-z, 0-9, -)", remove:"Remove",
-  general:"General", concurrency:"Tasks at once", compactIdle:"Compact when idle at (tokens)", compactWorking:"Compact while working at (tokens)",
+  general:"General", deskName:"Desk name",
+  deskNameHint:"Up to 40 characters in any language, on one line, without control or Unicode format characters or saved keys. Saving trims surrounding spaces. Leave blank or use only spaces for the last two folders of the path. Only the principal can save it here; settings history records the change. Used in alerts, push titles and groups, the page, status, desk lists and the menu. Lists and the menu also show the folder to distinguish desks with the same name.",
+  concurrency:"Tasks at once", compactIdle:"Compact when idle at (tokens)", compactWorking:"Compact while working at (tokens)",
   compactNote:"Once a turn has ended with an answer and the session is idle, the coordinator's mod compacts it after a minute if its context is at or above the first figure, while the whole context is still in the prompt cache. A new turn cancels the wait. While it works nothing interrupts it: Claude Code's own auto-compact compacts it at the second (hansa coordinator gives it with --autocompact). Both figures take 100,000 to 1,000,000 tokens. The defaults suit a model with a 1M-token window. A figure at or near the model's window, or a first figure at or above the second, never comes: Claude Code compacts on its own first. A second figure above the model's window is taken as that window: Claude Code compacts at the model's own limit, as with no figure. A change to the first applies from the session's next decision (when a turn ends, or a wait ends); a change to the second from the session's next start. The coordinator cannot change them. Claude Code (2.1.299 or later) also compacts by itself a conversation of 200,000 tokens or more left idle about 54 minutes; hansa neither sets nor reads that. The mod needs Claude Code 2.1.290 or later; the status line at the top says whether the session was started with it, and why not.",
   repo:"Repository path", base:"Base branch", maxTurns:"Max turns per task (a circuit breaker, set high: reaching it means the task was too big or unclear, or got stuck)", timeout:"Max minutes per task (likewise a circuit breaker)",
   env:"Environment for workers (NAME=value per line; rarely needed, e.g. so workers find a tool you installed)",
@@ -811,6 +815,8 @@ Object.assign(T, ZH ? {
   pushTestHint:"测试使用这个地址已保存的设置，即使关闭了提醒也会发送。请先保存修改，再测试。",
   pushLast:(what, t) => `上次推送：${what}（${t}）`, pushLastNone:"还没有推送过。",
   pushChooseService:"无法识别这个地址，请选择推送服务，然后再次保存设置。",
+  pushBadAddress:"这个推送服务不接受此地址，请查看服务的提示，重新粘贴完整地址。",
+  pushLegacyProblem:"Bark 已保存的密钥无法迁移，请在本页的“提醒”设置中重新粘贴 Bark 地址。",
   pushPrivacy:"工作台名称和提醒正文会发送到每个地址的推送服务；手机应用还会转交给苹果或谷歌的推送服务。这些服务能读到内容。一次性发布码从不发送到推送地址；发布要在这个网页上回答。",
   pushLimit:"最多可以保存 10 个推送地址。请先删除一个，再添加新地址。", pushUnknown:"推送没有发出，请稍后再试。",
   pushWhy:{off:"这个地址的提醒已关闭", no_address:"没有保存推送地址", empty:"没有要发送的内容",
@@ -854,6 +860,8 @@ Object.assign(T, ZH ? {
   pushTestHint:"The test uses this address's saved settings, even when alerts are off. Save changes before testing.",
   pushLast:(what, t) => `Last push: ${what} (${t})`, pushLastNone:"No push yet.",
   pushChooseService:"This address was not recognized. Choose a push service, then save settings again.",
+  pushBadAddress:"This push service does not accept the address. Check its hint and paste the whole address again.",
+  pushLegacyProblem:"Bark's saved key could not be moved. Paste the Bark address again on this page under Alerts.",
   pushPrivacy:"The desk's name and alert texts go to each address's service; for phone apps, on to Apple's or Google's push service too. Those services can read the text. One-time release codes never go to a push address; releases are answered on this page.",
   pushLimit:"You can save up to 10 push addresses. Remove one before adding another.", pushUnknown:"The push was not sent. Try again later.",
   pushWhy:{off:"alerts to this address are off", no_address:"no push address is saved", empty:"there was nothing to send",
@@ -1562,7 +1570,7 @@ async function renderStatus(force) {
     return false;
   }
   const st = status.value, ev = events.status === "fulfilled" ? events.value : [];
-  const name = st.desk.split("/").filter(Boolean).slice(-2).join("/") || "/";
+  const name = st.desk_name || st.desk.split("/").filter(Boolean).slice(-2).join("/") || "/";
   const waiting = principalCount(st);
   document.title = (waiting ? `(${waiting}) ` : "") + "Hansa · " + name;
   deskCaption.textContent = name; deskCaption.setAttribute("title", name);
@@ -1773,14 +1781,19 @@ function pushChanges() {
     if (d.secret.trim()) edit.secret = d.secret.trim();
     if (Object.keys(edit).length > 1) changes.push(edit);
   }
-  if (PUSH_NEW.address.trim() || PUSH_NEW.secret.trim() || PUSH_NEW.name.trim() || PUSH_NEW.service !== "recognize") {
+  if (PUSH_NEW.address.trim() || PUSH_NEW.secret.trim()) {
     changes.push({service:PUSH_NEW.service, address:PUSH_NEW.address.trim(), name:PUSH_NEW.name.trim(),
       ...(PUSH_NEW.secret.trim() ? {secret:PUSH_NEW.secret.trim()} : {})});
   }
   return changes;
 }
 const pushDraftDirty = () => pushChanges().length > 0;
-const pushProblem = problem => problem === "choose the push service for this address" ? T.pushChooseService : problem;
+const pushProblem = problem => ({
+  "choose the push service for this address":T.pushChooseService,
+  "invalid push address":T.pushBadAddress,
+  "this push service does not accept the address; check its hint and paste the whole address again":T.pushBadAddress,
+  "Bark's saved key could not be moved; the principal should paste the Bark address again on the page (Settings, Alerts)":T.pushLegacyProblem
+}[problem] || problem);
 // Drafts live only in this page's memory. In particular, keys never enter browser storage or settings JSON.
 let settingsBaseline = null, settingsLoading = null, settingsSaving = false, settingsGroup = "providers", settingsEpoch = 0;
 let settingsMessage = "", settingsProblems = [], KEY_DRAFTS = {}, newProviderName = "", newPriceName = "";
@@ -1797,7 +1810,7 @@ const SETTINGS_GROUPS = [
 ];
 settingsGroup = keptChoice("sessionStorage", "hansa.settingsSection", SETTINGS_GROUPS.map(([key]) => key), settingsGroup);
 const GROUP_KEYS = {
-  providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact"], lanes:[],
+  providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact"], lanes:["desk_name"],
   security:["workers_may_not_read", "workers_may_not_read_added"],
   releases:["releases_without_asking", "release_direct", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow"],
   alerts:["alert", "alert_language", "coordinator_alert", "alert_push"], prices:["prices"]
@@ -2030,7 +2043,7 @@ function controlMeta(obj, key) {
   if (!S) return null;
   const prefix = (group, text) => ({group, matches:problem => problem.startsWith(text)});
   if (obj === S) return prefix(key.startsWith("release") ? "releases" : key === "alert_language" ? "alerts"
-    : key === "cool_minutes" ? "providers" : "coordinator", key);
+    : key === "desk_name" ? "lanes" : key === "cool_minutes" ? "providers" : "coordinator", key);
   if (obj === S.coordinator_compact) return prefix("coordinator", "coordinator_compact:");
   if (obj === S.coordinator_alert) return {group:"alerts", matches:p => p.startsWith("coordinator_alert") && (p.includes(`(${key})`) || p.startsWith("coordinator_alert must"))};
   if (obj === S.alert) return prefix("alerts", "the alert command");
@@ -2053,8 +2066,9 @@ function problemTarget(problem) {
   const record = fieldRecords.find(r => r.matches(problem));
   if (record) return record;
   const group = /^(provider |at least one provider)/.test(problem) ? "providers"
-    : /^(coordinator_alert|alert_language|the alert command|alert_push|push |a push |the extra push |this push )/.test(problem) || problem === T.pushChooseService ? "alerts"
-    : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
+    : /^(coordinator_alert|alert_language|the alert command|alert_push|push |a push |the extra push |this push )/.test(problem)
+      || [T.pushChooseService, T.pushBadAddress, T.pushLegacyProblem].includes(problem) ? "alerts"
+    : /^desk_name/.test(problem) ? "lanes" : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
     : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
     : /^(release|the releases without asking|the words no release)/.test(problem) ? "releases" : /^price/.test(problem) ? "prices" : /^lane/.test(problem) ? "lanes" : "";
   return group ? {group} : null;
@@ -2306,7 +2320,7 @@ function releaseTicks() {
   }));
 }
 function renderSettings(problems = settingsProblems) {
-  settingsProblems = problems || [];
+  settingsProblems = (problems || []).map(pushProblem);
   exceptionRefreshers = []; fieldRecords = [];
   const newProv = h("input", {value:newProviderName, placeholder:T.newName, "aria-label":T.providerName, maxlength:32,
     oninput:e => { newProviderName = e.target.value; refreshSettingsState(); }});
@@ -2353,7 +2367,8 @@ function renderSettings(problems = settingsProblems) {
         h("p", {class:"field-note"}, T.compactHint), help(T.compactNote))],
     lanes: [
       dispatchSection(),
-      section(T.general, h("p", {class:"field-note"}, T.runtimeReadOnly), fields(
+      section(T.general, fields(field(T.deskName, bind(S, "desk_name"), T.deskNameHint, "", true)),
+        h("p", {class:"field-note"}, T.runtimeReadOnly), fields(
         field(T.concurrency, h("div", {class:"readonly-value"}, S.concurrency), "", T.concurrencyNote),
         field(T.diskFloor, h("div", {class:"readonly-value"}, S.disk_floor ? `${S.disk_floor} GB` : T.diskFloorOff),
           DISK_FREE == null ? "" : `${T.diskFree} ${(DISK_FREE / 1e9).toFixed(1)} GB`, T.diskFloorNote))),
