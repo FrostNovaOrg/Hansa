@@ -688,9 +688,15 @@ IDs are stable, unique lowercase letters/digits, hyphens or underscores (up to
 64 characters). Addresses are stored atomically in
 `secrets/alert-push-ID.address`; an optional extra secret goes in
 `secrets/alert-push-ID.secret`, both mode 0600 under 0700 `secrets/`.
-`Desk.keys` includes whole addresses and service-defined secret parts for
-redaction and refusal of a task's change that contains them. Saving scrubs them
-from files covered by `Desk.scrub`; the append-only event log is not rewritten.
+`Desk.keys` includes whole addresses and secret parts extracted only by each
+entry's recorded service for redaction and refusal of a task's change that
+contains them. Saving scrubs them from files covered by `Desk.scrub`; the
+append-only event log is not rewritten. Only the recorded service checks,
+masks and sends a saved entry. Recognition asks all services only before an
+address is saved. An orphan secret file, or one whose metadata cannot be read,
+still has its whole value protected, without guessing a service to extract
+parts. Keep this separation while services share address paths: an ordinary
+word such as `message` must not become a secret through another service's parser.
 Settings history records secret changes with values withheld.
 
 On first access an old `alert_bark` setting and
@@ -763,11 +769,15 @@ See [the service guide](push-services.md) for request contents and limits.
 
 For Bark, a different
 host requires the explicit `bark` service. Its HTTPS address must have a key as
-the first path component; later example text and all query parameters are
-discarded. A copied command with exactly one HTTPS address supplies that address.
-HTTP, userinfo, fragments, backslashes, spaces and controls in the address are refused before saving
-or sending. Keep these checks while principals can paste addresses: URL parsers
-can silently discard controls or redirect credentials to a different host.
+the first path component; later example text, query parameters and fragments
+are discarded. Pasted text or a copied command with exactly one HTTPS address
+supplies that address; surrounding spaces and line breaks, and tabs, CR and LF
+in the paste, are tolerated. Multiple HTTPS addresses, HTTP, userinfo,
+backslashes, spaces in the address, and dot path components (including encoded
+ones) are refused before saving or sending. Other control characters anywhere
+in the paste are refused. Keep these checks while principals can paste
+addresses: URL parsers can silently discard controls or redirect credentials
+to a different host.
 
 Bark sends one JSON POST to the origin's `/push` with `device_key`. The title
 and group are the desk name and the body is alert text without the command's

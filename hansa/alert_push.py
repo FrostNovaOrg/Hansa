@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 from . import alert, alert_http, alert_services
-from .desk import Desk, KeyScrubError, now, read_json, write_json, write_text
+from .desk import Desk, KeyScrubError, SettingsError, now, read_json, write_json, write_text
 
 MAX_ENTRIES = 10
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
@@ -86,7 +86,12 @@ def _write_secret(desk, id, value, extra=False):
 
 
 def keys(desk) -> dict:
-    """Also cover an interrupted save's orphan files, without calling settings()."""
+    """Use each saved entry's service; retain whole orphan values without guessing."""
+    try:
+        saved = entries(desk._saved_settings())  # settings() can migrate and redact events here
+    except SettingsError:
+        saved = []  # keep whole private values even when metadata cannot be read
+    services = {_file(desk, e["id"]): alert_services.SERVICES[e["service"]] for e in saved}
     out = {}
     for path in sorted(desk.secrets_dir.glob("alert-push-*.*")):
         try:
@@ -96,16 +101,15 @@ def keys(desk) -> dict:
         if not value:
             continue
         out[path.name] = value
-        if path.suffix == ".address":
-            # Ask all definitions: the saved metadata may not yet have landed.
-            for service in alert_services.SERVICES.values():
-                try:
-                    normalized = service.normalize(value)
-                    for n, secret in enumerate(service.secrets(normalized)):
-                        if secret:
-                            out[f"{path.name}-{service.id}-{n}"] = secret
-                except ValueError:
-                    pass
+        service = services.get(path)
+        if service is not None:
+            try:
+                normalized = service.normalize(value)
+                for n, secret in enumerate(service.secrets(normalized)):
+                    if secret:
+                        out[f"{path.name}-{service.id}-{n}"] = secret
+            except ValueError:
+                pass
     return out
 
 

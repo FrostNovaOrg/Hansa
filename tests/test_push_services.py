@@ -1,4 +1,5 @@
 """Phone push services and child-only HTTP acknowledgements, without a network."""
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,19 @@ from unittest.mock import patch
 from hansa import alert_http, alert_push, alert_services, views
 from hansa.cli import init_desk
 from hansa.desk import public_settings, read_json, write_json
+
+
+SAVED_SERVICE_CASES = (
+    ("bark", "https://api.day.app/fixture-bark-key", "fixture-bark-key", "", "api.day.app/…ey"),
+    ("ntfy", "https://ntfy.sh/fixture-private-topic", "fixture-private-topic", "tk_fixture-token", "ntfy.sh/…"),
+    ("gotify", "https://gotify.example/message?token=fixture-gotify-token", "fixture-gotify-token", "",
+     "gotify.example/message"),
+    ("gotify", "https://gotify-extra.example", "fixture-gotify-extra-token", "fixture-gotify-extra-token",
+     "gotify-extra.example/message"),
+    ("pushdeer", "fixture-pushdeer-key", "fixture-pushdeer-key", "", "api2.pushdeer.com/message/push?pushkey=…"),
+    ("serverchan", "SCTfixture-send-key", "SCTfixture-send-key", "", "sctapi.ftqq.com/…"),
+    ("serverchan", "sctp123tfixture-third-key", "sctp123tfixture-third-key", "", "123.push.ft07.com/send/…"),
+)
 
 
 class PhoneServicesTest(unittest.TestCase):
@@ -117,8 +131,11 @@ class PhoneServicesTest(unittest.TestCase):
                 self.assertEqual(request["success"], {"status": 200, "field": "code", "equals": 0})
 
     def test_pushdeer_self_hosted_https_and_http_8800_refusal(self):
+        unsafe = "http://pushdeer.example.com:8800/message/push?pushkey=K"
         with self.assertRaisesRegex(ValueError, "HTTPS.*8800"):
-            self.save("http://pushdeer.example.com:8800/message/push?pushkey=K", "pushdeer")
+            alert_services.SERVICES["pushdeer"].normalize(unsafe)
+        with self.assertRaisesRegex(ValueError, "push service does not accept"):
+            self.save(unsafe, "pushdeer")
         entry = self.save("https://pushdeer.example.com:8443/message/push?pushkey=K", "pushdeer")
         _, request = self.deliver(entry)
         self.assertEqual(request["url"], "https://pushdeer.example.com:8443/message/push")
@@ -209,6 +226,102 @@ class PhoneServicesTest(unittest.TestCase):
                 self.assertNotIn(key, self.desk.events_path.read_text())
                 for extra in ((False, True) if secret else (False,)):
                     self.assertEqual(stat.S_IMODE(alert_push._file(self.desk, entry["id"], extra).stat().st_mode), 0o600)
+
+    def test_saved_entries_use_only_the_recorded_service(self):
+        for n, (service, address, key, secret, mask) in enumerate(SAVED_SERVICE_CASES):
+            with self.subTest(service=service, address=address):
+                self.desk = init_desk(self.tmp / f"saved-{n}")
+                entry = self.save(address, service, **({"secret": secret} if secret else {}))
+                with ExitStack() as stack:
+                    for definition in alert_services.SERVICES.values():
+                        # Saved entries must not be recognized again, even by their own service.
+                        stack.enter_context(patch.object(definition, "recognizes", side_effect=AssertionError("recognition of saved entry")))
+                        if definition.id != service:
+                            for method in ("normalize", "secrets", "hidden", "validate", "requests"):
+                                if hasattr(definition, method):
+                                    stack.enter_context(patch.object(definition, method, side_effect=AssertionError(
+                                        f"saved {service} entry reached {definition.id}.{method}")))
+                    self.assertIn(key, alert_push.keys(self.desk).values())
+                    self.assertNotIn(key, self.desk.redact(key))
+                    self.assertEqual(public_settings(self.desk)["alert_push"][0]["address"], mask)
+                    status = views.status(self.desk)
+                    self.assertEqual(status["alert_push"][0]["address"], mask)
+                    self.assertIn(mask, views.status_text(status))
+                    # Check a saved pair and scrub it again, using the recorded service.
+                    alert_push.change(self.desk, [{"id": entry["id"], "address": alert_push._read(self.desk, entry["id"])}], by="page")
+                    self.assertEqual(self.deliver(entry)[0], "sent")
+
+    def test_service_paths_stay_ordinary_text_in_tasks_attachments_and_names(self):
+        text = ("Fix the message queue and send phone messages via ntfy.sh, "
+                "api2.pushdeer.com, sctapi.ftqq.com and 123.push.ft07.com.")
+        tid = self.desk.new_task(text, title="Fix the message queue")
+        task = self.desk.tasks_dir / tid / "task.md"
+        note = self.desk.tasks_dir / tid / "note.md"
+        note.write_text(text, encoding="utf-8")
+        before = task.read_bytes(), note.read_bytes()
+        for service, address, _, secret, _ in SAVED_SERVICE_CASES:
+            entry = self.save(address, service, **({"secret": secret} if secret else {}))
+        self.assertEqual((task.read_bytes(), note.read_bytes()), before)
+        self.assertEqual(self.desk.redact(text), text)
+        self.assertEqual(self.desk.keys_in(text), [])
+        alert_push.change(self.desk, [{"id": entry["id"], "name": "phone messages"}], by="page")
+        self.assertEqual(public_settings(self.desk)["alert_push"][-1]["name"], "phone messages")
+        source = self.tmp / "message.txt"
+        source.write_text(text, encoding="utf-8")
+        result = subprocess.run([sys.executable, "-m", "hansa", "--desk", str(self.desk.root),
+                                 "add", text, "--attach", str(source)], capture_output=True, text=True,
+                                cwd=Path(__file__).resolve().parents[1], timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        added = self.desk.tasks()[-1]
+        self.assertEqual((self.desk.tasks_dir / added["id"] / "task.md").read_text(), text + "\n")
+        self.assertEqual((self.desk.attachment_dir(added["id"]) / source.name).read_bytes(), source.read_bytes())
+        self.assertEqual(self.desk.meta(tid)["title"], "Fix the message queue")
+
+    def test_own_secrets_still_scrub_redact_and_block_attachments(self):
+        private = {text for service, address, key, secret, _ in SAVED_SERVICE_CASES
+                   for text in (alert_services.SERVICES[service].normalize(address), key, secret) if text}
+        tid = self.desk.new_task("\n".join(sorted(private)))
+        expected = set()
+        for service, address, key, secret, _ in SAVED_SERVICE_CASES:
+            entry = self.save(address, service, **({"secret": secret} if secret else {}))
+            expected.update((alert_push._read(self.desk, entry["id"]), key))
+            if secret:
+                expected.add(secret)
+        task = (self.desk.tasks_dir / tid / "task.md").read_text()
+        for secret in private:
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, task)
+                self.assertNotIn(secret, self.desk.redact(secret))
+                source = self.tmp / "private.txt"
+                source.write_text(secret, encoding="utf-8")
+                with self.assertRaisesRegex(SystemExit, "holds the key"):
+                    self.desk.new_task("Read the attachment", attach=[str(source)])
+        self.assertEqual(set(alert_push.keys(self.desk).values()), expected)
+
+    def test_unlisted_or_invalid_addresses_do_not_guess_another_service(self):
+        address = "https://gotify.example/message?token=fixture-orphan-token"
+        for listed in (False, True):
+            with self.subTest(listed=listed):
+                self.desk = init_desk(self.tmp / f"unusable-{listed}")
+                entry = self.save("https://ntfy.sh/fixture-topic", "ntfy") if listed else {"id": "orphan"}
+                alert_push._write_secret(self.desk, entry["id"], address)
+                # Full file values remain private even when no service can extract their parts.
+                with patch.object(self.desk, "settings", side_effect=AssertionError("recursive settings load")):
+                    self.assertEqual(set(alert_push.keys(self.desk).values()), {address})
+                self.assertNotIn(address, self.desk.redact(address))
+                self.assertEqual(self.desk.redact("Fix the message queue"), "Fix the message queue")
+                if listed:
+                    with patch.object(alert_http, "send") as sending:
+                        self.assertEqual(alert_push.test(self.desk, entry["id"]), "refused_url")
+                    sending.assert_not_called()
+
+    def test_unreadable_metadata_keeps_whole_secret_files_without_guessing(self):
+        entry = self.save("https://gotify.example/message?token=fixture-gotify-token", "gotify")
+        address = alert_push._read(self.desk, entry["id"])
+        self.desk.settings_path.write_text("{", encoding="utf-8")
+        self.assertEqual(set(alert_push.keys(self.desk).values()), {address})
+        self.assertNotIn(address, self.desk.redact(address))
+        self.assertEqual(self.desk.redact("Fix the message queue"), "Fix the message queue")
 
     def test_refusal_code_persists_to_page_and_status_without_response(self):
         entry = self.save("fixture-pushdeer-key", "pushdeer")
