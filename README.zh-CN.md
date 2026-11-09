@@ -64,7 +64,7 @@ flowchart LR
 4. **协调员审查。** 改了代码的，另派一个工作智能体实际试一遍，看改动是否站得住（`hansa verify`）；协调员据此合并或返工。
 5. **由你发布。** Hansa 把改动合并进工作线的基础分支后就停下。只有你同意了，或者这个发布目标已事先批准，它才运行发布命令，比如部署。
 
-给开发者：更详细的流程图见[工作怎么流转（英文）](docs/concepts.md#how-work-moves)。
+给开发者：更详细的流程图见[工作怎么流转](docs/zh-CN/concepts.md#工作怎么流转)。
 
 ## 有意用多家模型
 
@@ -95,11 +95,11 @@ Hansa 运行的是你自己安装的 Claude Code，用你自己的账号或密�
 - **密钥不外露。** 密钥放在 `secrets/` 里，Hansa 所用的账号读得到，只发给对应的服务商。Hansa 会在可能显示密钥的地方把它隐去，含密钥的改动一律不合并，但看不到压缩文件里面的内容。[工作台（英文）](docs/desk.md#where-a-desks-files-are)
 - **网页默认不对外。** 它只监听本机，要用 `hansa web` 打印的地址里的令牌才能访问。`hansa serve --host` 可以开放给更大的范围，那时拿到这个地址的人就能批准发布。[令牌（英文）](docs/who-changes-what.md#a-claude-code-sessions-identity-and-the-pages-token)
 
-更多见[限制（英文）](docs/concepts.md#limits)。
+更多见[限制](docs/zh-CN/concepts.md#限制)。
 
 ## 文档
 
-用 Hansa 不需要读它的代码。[上手指南](docs/zh-CN/getting-started.md)已有中文版，其余文档目前是英文。
+用 Hansa 不需要读它的代码。[上手指南](docs/zh-CN/getting-started.md)、[概念](docs/zh-CN/concepts.md)和[工作台怎么运转](docs/zh-CN/principles.md)已有中文版，其余文档目前是英文。
 
 ### 从这里开始
 
@@ -107,8 +107,8 @@ Hansa 运行的是你自己安装的 Claude Code，用你自己的账号或密�
 |---|---|
 | [上手指南](docs/zh-CN/getting-started.md) | 安装、登录、新建工作台、经 SSH 打开网页、完成第一件任务 |
 | [SETUP.md（英文）](SETUP.md) | 写给智能体的安装说明，它会用你的语言陪你装好：对 Claude Code 说“读 SETUP.md，和我一起装好 Hansa” |
-| [概念（英文）](docs/concepts.md) | 关键术语、工作怎么流转、工作台的文件、macOS 与 Linux、限制、命令、升级 |
-| [工作台怎么运转（英文）](docs/principles.md) | Hansa 的运行规则、由什么来执行，以及各自防范的问题 |
+| [概念](docs/zh-CN/concepts.md) | 关键术语、工作怎么流转、工作台的文件、macOS 与 Linux、限制、命令、升级 |
+| [工作台怎么运转](docs/zh-CN/principles.md) | Hansa 的运行规则、由什么来执行，以及各自防范的问题 |
 | [推送服务（英文）](docs/push-services.md) | 把提醒发到手机和群聊：Bark、ntfy、Telegram、Slack、企业微信、钉钉、飞书等 |
 
 ### 参考

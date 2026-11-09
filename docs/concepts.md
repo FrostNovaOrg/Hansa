@@ -1,5 +1,7 @@
 # Concepts
 
+[简体中文](zh-CN/concepts.md)
+
 The [README](../README.md) has the overview.
 
 ## Key terms
