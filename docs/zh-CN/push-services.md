@@ -126,7 +126,7 @@ JSON 里的布尔值 `ok: true` 表示已发送。失败时 hansa 会保留 `err
 
 hansa 向该地址 POST JSON `{"content":"DESK\nBODY"}`，并带上 `User-Agent: DiscordBot (https://github.com/FrostNovaOrg/Hansa, VERSION)`，其中的版本号用 hansa 自己的版本；Discord 可能会拦下 urllib 默认的 User-Agent。被动提醒会加上 `"flags":4096`，以不发出推送通知。紧急文字用上面共用的标记，并使用普通通知。内容最多 **2,000 个字符**，超长时用 `…` 缩短；Discord 的 webhook 频率限制仍然有效。
 
-任何 HTTP 2xx 都表示已发送，包括 Discord 正常的 **204** 响应。**HTTP 404 表示 webhook 已不存在**：请创建一个新的，并替换保存的地址。它会在上次结果里显示为 `http_4xx`。
+任何 HTTP 2xx 都表示已发送，包括 Discord 正常的 **204** 响应。**HTTP 404 且 Discord code 为 10015 表示 webhook 已不存在**：请创建一个新的，并粘贴它的地址。上次结果保留 `http_4xx` 和 code **10015**；status 和网页会说明这个地址已不存在，并提示粘贴新地址。hansa 不保留 Discord 响应里的消息文字。
 
 官方资料：[执行 webhook（英文）](https://discord.com/developers/docs/resources/webhook#execute-webhook)和 [User-Agent（英文）](https://discord.com/developers/docs/reference#user-agent)。
 

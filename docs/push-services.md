@@ -316,8 +316,10 @@ the shared marker and normal notifications. Content is limited to
 **2,000 characters**, shortening with `…`; Discord's webhook rate limits apply.
 
 Any HTTP 2xx means sent, including Discord's normal **204** response.
-**HTTP 404 means the webhook is gone**: create a new one and replace its
-saved address. It appears as `http_4xx` in the last result.
+**HTTP 404 with Discord code 10015 means the webhook no longer exists**:
+create a new one and paste its address. The last result keeps `http_4xx` and
+code **10015**; status and the page explain that the address no longer exists
+and ask for a new address. Hansa does not retain Discord's response message.
 
 Official information: [execute webhook](https://discord.com/developers/docs/resources/webhook#execute-webhook)
 and [User-Agent](https://discord.com/developers/docs/reference#user-agent).

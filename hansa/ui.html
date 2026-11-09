@@ -818,6 +818,7 @@ Object.assign(T, ZH ? {
   pushBadAddress:"这个推送服务不接受此地址，请查看服务的提示，重新粘贴完整地址。",
   pushForeign:service => `这个地址像是 ${service} 的地址，请选择 ${service} 作为推送服务。`,
   pushLegacyProblem:"Bark 已保存的密钥无法迁移，请在本页的“提醒”设置中重新粘贴 Bark 地址。",
+  pushDiscordGone:"这个 webhook 地址已不存在，请粘贴新的地址",
   pushPrivacy:"工作台名称和提醒正文会发送到每个地址的推送服务；手机应用还会转交给苹果或谷歌的推送服务。这些服务能读到内容。一次性发布码从不发送到推送地址；发布要在这个网页上回答。",
   pushLimit:"最多可以保存 10 个推送地址。请先删除一个，再添加新地址。", pushUnknown:"推送没有发出，请稍后再试。",
   pushWhy:{off:"这个地址的提醒已关闭", no_address:"没有保存推送地址", empty:"没有要发送的内容",
@@ -864,6 +865,7 @@ Object.assign(T, ZH ? {
   pushBadAddress:"This push service does not accept the address. Check its hint and paste the whole address again.",
   pushForeign:service => `This address looks like a ${service} address. Choose ${service} as its push service.`,
   pushLegacyProblem:"Bark's saved key could not be moved. Paste the Bark address again on this page under Alerts.",
+  pushDiscordGone:"this webhook address no longer exists; paste a new address",
   pushPrivacy:"The desk's name and alert texts go to each address's service; for phone apps, on to Apple's or Google's push service too. Those services can read the text. One-time release codes never go to a push address; releases are answered on this page.",
   pushLimit:"You can save up to 10 push addresses. Remove one before adding another.", pushUnknown:"The push was not sent. Try again later.",
   pushWhy:{off:"alerts to this address are off", no_address:"no push address is saved", empty:"there was nothing to send",
@@ -2246,7 +2248,8 @@ function pushSection() {
   const word = text => text?.[ZH ? "zh" : "en"] || text?.en || "";
   const service = id => PUSH_SERVICES.find(s => s.id === id);
   const serviceName = id => word(service(id)?.name) || id;
-  const whyText = why => why === "sent" ? T.pushSent : T.pushWhy[why] || T.pushUnknown;
+  const whyText = (why, entry, code) => entry.service === "discord" && why === "http_4xx" && code === 10015
+    ? T.pushDiscordGone : why === "sent" ? T.pushSent : T.pushWhy[why] || T.pushUnknown;
   const editFields = (draft, fresh = false) => {
     const input = (key, label, hint = "", type = "text") => {
       const el = h("input", {type, value:draft[key], autocomplete:"off", "aria-label":label, "data-push-field":key,
@@ -2264,14 +2267,14 @@ function pushSection() {
   };
   const cards = PUSH_ENTRIES.map(entry => {
     const draft = pushDraft(entry);
-    const lastLine = () => entry.last ? T.pushLast(whyText(entry.last.why), when(entry.last.at)) : T.pushLastNone;
+    const lastLine = () => entry.last ? T.pushLast(whyText(entry.last.why, entry, entry.last.code), when(entry.last.at)) : T.pushLastNone;
     const last = h("p", {class:"field-note", "data-push-last":""}, lastLine());
     const said = h("span", {"aria-live":"polite"});
     const test = h("button", {type:"button", "data-push-test":"", onclick:async () => {
       test.disabled = true; said.textContent = T.pushTesting;
       try {
         const r = await api("/api/alert/push-test", {id:entry.id});
-        said.textContent = r.ok ? T.pushSent : T.pushTestBad + whyText(r.why);
+        said.textContent = r.ok ? T.pushSent : T.pushTestBad + whyText(r.why, entry, r.last?.code);
         said.className = r.ok ? "ok" : "bad";
         if (r.last) { entry.last = r.last; last.textContent = lastLine(); }
       } catch (e) { said.textContent = T.pushUnknown; said.className = "bad"; }

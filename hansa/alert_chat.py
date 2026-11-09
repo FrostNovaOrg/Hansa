@@ -168,7 +168,7 @@ class Discord(_Chat):
         payload = {"content": _characters(title + "\n" + body, 2000)}
         if level == "passive":
             payload["flags"] = 4096
-        return [{"url": address, "json": payload, "headers": {
+        return [{"url": address, "json": payload, "error_field": "code", "headers": {
             "User-Agent": f"DiscordBot (https://github.com/FrostNovaOrg/Hansa, {__version__})"}}]
 
 

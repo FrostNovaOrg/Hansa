@@ -806,7 +806,7 @@ class ChildAnswerTest(unittest.TestCase):
                  ("telegram", 200, '{"ok":false,"error_code":400}', "refused_by_service", 400),
                  ("telegram", 403, '{"ok":false,"error_code":403}', "http_4xx", 403),
                  ("discord", 204, '', "sent", None),
-                 ("discord", 404, '{"code":10015,"message":"Unknown Webhook"}', "http_4xx", None),
+                 ("discord", 404, '{"code":10015,"message":"Unknown Webhook"}', "http_4xx", 10015),
                  ("slack", 200, 'ok', "sent", None),
                  ("slack", 201, 'ok', "refused_by_service", "ok"),
                  ("slack", 400, 'invalid_payload', "http_4xx", "invalid_payload"),

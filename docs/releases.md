@@ -508,7 +508,7 @@ alert command. Supported services are Bark, ntfy, Gotify, PushDeer, Server酱
 (WeChat), WeCom, DingTalk, Feishu/Lark, Telegram, Discord, Slack and a chosen
 JSON webhook. See
 [push setup, privacy, levels, limits and error codes](push-services.md)
-for what to paste from each app. To add a push address:
+(`hansa help push-services`) for what to paste from each app. To add a push address:
 
 1. Open **Settings → Alerts → Push addresses → Add an address** on the page.
 2. Paste the whole address from your push app or service. Leave **Recognize it**
@@ -745,14 +745,16 @@ On first access an old `alert_bark` setting and
 `secrets/alert-bark.device-key` become the first Bark entry, preserving its
 server, key and on/off choice. Its previous last result moves too. The old
 setting, key file and result file are removed; settings history says that hansa
-moved them. Without a key, no entry is created. This is the sole automatic
-address change; otherwise only the principal's save changes addresses.
+moved them. Without a key file, no entry is created: even an invalid old setting
+is removed, with a settings-history entry and no migration problem. This is the
+sole automatic address change; otherwise only the principal's save changes addresses.
 If the key cannot be preserved exactly (including an old key containing `/`
 or punctuation), the saved configuration is invalid, or ten entries leave no
 room, hansa keeps the old setting and key file without sending to that key.
 `hansa status` and the page's settings problems ask the principal to paste the
 Bark address again on the page. Unrelated saves keep the old data; saving a
-Bark address removes the old setting, key and result files. Keep these checks
+Bark address removes the old setting, key and result files, recording the setting's
+removal in settings history as the principal's change. Keep these checks
 while older desks can still have Bark settings: an upgrade must neither stop
 desk commands nor silently change a saved key.
 

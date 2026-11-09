@@ -379,6 +379,7 @@ loads nothing.
 | `forbidden-words` | the word scan |
 | `release-files` | files a release runs unsandboxed |
 | `alerts` | the principal's alert command and push addresses |
+| `push-services` | push service setup, privacy, levels, limits and error codes |
 | `time-limits` | a run's limits, its report, background work |
 | `provider-limits` | dropped connections, usage limits |
 | `check-output` | a check's output |
