@@ -1,5 +1,9 @@
 # Java and Maven in a lane
 
+Automatic Maven proxy setup needs Maven 3.9 or newer, which reads `MAVEN_ARGS`.
+With older Maven, pass `-gs "$TMPDIR/hansa-maven-settings.xml"` explicitly to each
+`mvn` call that needs the sandbox's proxy, or upgrade Maven.
+
 **What hansa does by itself.** Before a lane's setup, check and merge check, and in
 front of each Bash command of a worker or verifier, hansa runs a short sh prelude
 inside the sandbox, after the lane's env is set:
@@ -8,7 +12,7 @@ inside the sandbox, after the lane's env is set:
   proxy, the prelude writes a Maven global settings file in the run's temporary
   folder naming that proxy for https and http (`localhost` and `127.0.0.1` left
   out with `nonProxyHosts`), and adds `-gs <that file>` to `MAVEN_ARGS`, which
-  Maven 3.9 reads. A global settings file, so a project's own
+  Maven 3.9 and newer read. A global settings file, so a project's own
   `~/.m2/settings.xml` (its mirrors, say) still applies where the sandbox lets
   Maven read it.
 - Java ignores `TMPDIR`, and on macOS the sandbox does not let it write its own

@@ -1,9 +1,26 @@
 # The Linux test bench
 
-The bench is off by default. It requires macOS and Lima 2.2.1. Its fixed Debian 13
-VM uses VZ, 2 CPUs, 2 GiB RAM and a 20 GiB disk, without host shares or application
-forwarding. Claude Code and Codex workers receive access and instructions when
-started while it is enabled. A worker started while it is off gets the bench folder
+The bench runs offline Linux server, browser and terminal checks handed in by
+workers on a Mac. It is optional and off by default. It needs macOS on Apple silicon,
+Lima 2.2.1 or newer, 2 CPUs, 2 GiB RAM and a 20 GiB VM disk. The first build needs
+downloads; worker checks run without external network access.
+
+To set it up for the first time, run these commands from the desk's folder, or
+give its path with the global `--desk` option:
+
+1. [Install Lima](https://lima-vm.io/docs/installation/) and make sure `limactl`
+   is on `hansa serve`'s `PATH`.
+2. Run `hansa bench build`. It prepares the VM and leaves the bench off.
+3. Run `hansa bench selftest`. Check that the saved acceptance `status` is
+   `passed`; `hansa bench selftest --json` gives the same result as JSON.
+   Failed or incomplete checks must be resolved before continuing.
+4. Run `hansa bench on` to enable worker hand-ins.
+5. Run `hansa bench status` to confirm it is on and see its build and acceptance.
+   Keep `hansa serve` running to handle hand-ins.
+
+Its fixed Debian 13 VM uses Apple's Virtualization framework (VZ), without host
+shares or application forwarding. Claude Code and Codex workers receive access
+and instructions when started while it is enabled. A worker started while it is off gets the bench folder
 and epoch if resumed after it is turned on, but its pinned system prompt still has
 no bench instructions. Codex's macOS-only sandbox guard still applies.
 
@@ -17,10 +34,12 @@ An upgrade that changes the bench's code needs a rebuild and a new selftest;
 the recipe covers guest files and the host broker, channel, snapshot, VM, probes and selftest.
 Serve treats stale or incomplete acceptance as off and reports the reason once;
 `status` also reports why an enabled bench is not in use. The
-shipped acceptance fixtures cover sandbox capabilities, account restrictions,
-the UID-first edge and detached descendants after completion, timeout, disconnect
-and gateway death. Missing evidence is incomplete; these isolation gates remain
-mandatory while guest execution is supported. Selftest runs shipped code while disabled,
+selftest checks local HTTP, headless Chromium, a terminal and tmux, sandbox filesystem
+and network restrictions, account restrictions, the firewall's UID rules and detached
+descendant cleanup after completion, timeout, disconnect and gateway death. It also
+checks disk, output and artifact limits, malformed requests, DHCP renewal, SSH host
+keys, queue cancellation, restart cleanup, idle stop and memory return.
+Missing evidence is incomplete. Selftest runs shipped code while disabled,
 records every probe and timing across two boots, and requires confirmed VM stop.
 Failed or incomplete results keep up to 4 KiB of evidence, with stored provider keys
 redacted before the cut; artifacts retain names and sizes, never bytes. Survivor
@@ -134,6 +153,6 @@ commit. Pending folder cleanup is retried after revoke completes, without waitin
 under the desk lock; the task cannot start again until its earlier cleanup finishes.
 A serve restart discards bench work; new submissions use a fresh epoch and
 must cross the stop-and-purge barrier. Uncertain cleanup closes the bench. A killed
-serve has no watchdog; restart it to recover. Security review and real-VM acceptance
-remain required before `hansa bench on`; a disabled build may be prepared first.
-Unit tests use fakes and cannot establish isolation.
+serve has no watchdog; restart it to recover. `hansa bench on` requires a ready
+build and complete passing selftest results for its current recipe and generation.
+The selftest exercises the real VM; unit tests use fakes and cannot establish isolation.

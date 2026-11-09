@@ -56,11 +56,18 @@ signal connection completion. The fixture retains the cancelled reply, thread
 join, stop/reset/start recovery and unchanged cancelled-run files checks. Events
 and joins wait for those conditions; 60 second bounds only guard against hangs.
 
-### Other shared patches audited
+<a name="other-shared-patches-audited"></a>
+
+### Shared patches and thread isolation
 
 Patching an attribute on an imported module, or on a class, affects other threads
-using that same object. Besides the four clock patch sites above, these are the
-shared standard-library targets in `tests/bench/` (grouped by file):
+using that same object. Before adding a patch, check which threads can call the
+target while it is active. Prefer a fake attached to the module under test or a
+particular instance. For shipped source run with `exec`, supply fake imports
+through that execution's own builtins, as `exec_probe` in `test_11.py` does.
+
+When changing these shared standard-library targets in `tests/bench/`, check
+their callers in background threads too (grouped by file):
 
 | File | Targets |
 | --- | --- |
@@ -81,7 +88,12 @@ notably `test_8.py` patches snapshot export, channel claim/read/reply and archiv
 delivery while running broker threads. Instance patches, such as a particular
 fake VM's `connect`, affect only callers using that instance.
 
-The remaining targets are unchanged: no equivalent clock-consumption or closed
-input race was established for them. In particular, the `test_6.py` stderr test
-intentionally intercepts its drain thread's select/read/join operations; that is
-a separate fixture from the lifecycle and DHCP clocks.
+Keep a shared patch active until every thread that uses it has finished. Use
+events, files or observable state to wait for readiness and completion, with
+timeouts to guard against hangs. If a shared patch is needed, exercise unrelated
+callers too when they could consume a fake clock or a finite response sequence.
+Check that they do not alter the fixture's state.
+
+Some patches must reach another thread: the `test_6.py` stderr fixture intercepts
+its drain thread's select/read/join operations. Keep that interception scoped to
+the fixture and wait for the drain thread before restoring the targets.

@@ -18,7 +18,7 @@ The CI baseline is explicit, so a fresh run selects the same direct tool release
 | Tool | Baseline | Requirement |
 |---|---|---|
 | Node | 24.22.0 in CI | srt 0.0.79 requires 22.12.0 or newer, on hansa serve's PATH |
-| srt (`@anthropic-ai/sandbox-runtime`) | 0.0.79 | Used for setups, checks and sandbox probes; real CI runs only on macOS, started by hand |
+| srt (`@anthropic-ai/sandbox-runtime`) | 0.0.79 | Used for setups, checks and sandbox probes; real CI checks run on macOS on pushes to `main` and manually started workflows; pull requests use Ubuntu with stand-ins |
 | Claude Code | 2.1.307 in CI | The coordinator plugin and its test kit require 2.1.306 or newer |
 | Codex CLI (optional adapter) | 0.160.0 installation example | Worker runs only on macOS; the adapter's automated suite uses fakes |
 
@@ -161,8 +161,9 @@ Measured 2026-10-23, srt 0.0.77, as lane checks (`hansa lane try`):
   Unix socket. A local server needs [`localhost`](#a-lanes-network-list), opening
   the machine's loopback; srt cannot open one port.
 
-So browser tests needing a local server go on Linux lanes; macOS lanes test
-built pages as files.
+Browser tests needing a local server can run on Linux lanes, or workers on a Mac
+can hand them in to the optional [Linux VM bench](bench.md) when enabled.
+Without the bench, macOS lanes can test built pages as files.
 
 ## Git's folders
 
