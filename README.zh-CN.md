@@ -7,7 +7,7 @@
 它跑在一台由你掌控、一直开着的机器上，比如家里的 Mac mini 或租来的 Linux 服务器；你在哪里都能用 SSH 连上它。它不是托管服务：工作台、密钥和登录信息都在那台机器上。
 
 - **状态**：Alpha 版，`0.5.0a1`，设置、命令和文件都还可能变。0.4 及以前，这个项目叫 Bellhop。
-- **运行环境**：macOS 或 Linux，需要 Python 3.9 以上、git 和 Claude Code；可以用 [`hansa doctor`](#快速开始) 检查这台机器是否满足。
+- **运行环境**：macOS 或 Linux，需要 Python 3.9 以上、git、Claude Code、Node 22.12.0 以上和 srt 0.0.79；可以用 [`hansa doctor`](#快速开始) 检查这些工具及其版本是否满足要求。
 - **使用方式**：`hansa` 菜单和命令，以及一个经 SSH 隧道（从你电脑到那台机器的私密连接）打开的网页。
 - **许可证**：MIT
 
@@ -92,7 +92,7 @@ Hansa 运行的是你自己安装的 Claude Code，用你自己的账号或密�
 - **工作智能体跑在操作系统的沙箱里。** 只能写工作线允许的位置，只能连工作线列出的主机，读不到工作台的密钥；你在工作线上允许的网页工具不受这份主机名单限制。[工作智能体与沙箱（英文）](docs/sandbox.md)
 - **协调员不在沙箱里。** 尚未获准的命令，Claude Code 都会先问你；另有规则禁止它读取密钥、直接改代码。禁止推送的规则只拦得住写明的那些写法，其余写法靠 Claude Code 先问你。[谁改什么（英文）](docs/who-changes-what.md)
 - **发布要等你**，或者用你事先批准的发布目标。发布在沙箱外运行，用的是工作台所在账号的登录信息。[发布与提醒（英文）](docs/releases.md)
-- **密钥不外露。** 密钥放在 `secrets/` 里，Hansa 所用的账号读得到，只发给对应的服务商。Hansa 会在可能显示密钥的地方把它隐去，含密钥的改动一律不合并，但看不到压缩文件里面的内容。[工作台（英文）](docs/desk.md#where-a-desks-files-are)
+- **密钥不外露。** 密钥放在 `secrets/` 里，Hansa 所用的账号读得到，只发给对应的服务商。Hansa 会把它认识的密钥在可能显示的地方隐去，含这类密钥的改动一律不合并，但看不到压缩文件里面的内容。密钥保存之前已经记入事件日志的文字会原样保留。[工作台（英文）](docs/desk.md#where-a-desks-files-are)
 - **网页默认不对外。** 它只监听本机，要用 `hansa web` 打印的地址里的令牌才能访问。`hansa serve --host` 可以开放给更大的范围，那时拿到这个地址的人就能批准发布。[令牌（英文）](docs/who-changes-what.md#a-claude-code-sessions-identity-and-the-pages-token)
 
 更多见[限制](docs/zh-CN/concepts.md#限制)。

@@ -98,15 +98,23 @@ hansa --desk ~/shop-desk lane set a setup "npm ci"
 hansa --desk ~/shop-desk lane set a network registry.npmjs.org
 ```
 
-`hansa lane try a` then runs the setup and check once in the lane's sandbox, with no worker. It runs through the
-desk's server, so run it right after step 5 starts the desk, and show the person its result. If it fails,
-`hansa lane try a --log` prints the whole output; explain the cause, and change the plan (rule 3) before trying again.
+`hansa --desk ~/shop-desk lane try a` then runs the setup and check once in the lane's sandbox, with no worker. It
+runs through the desk's server, so run it right after step 5 starts the desk, and show the person its result. If it
+fails, `hansa --desk ~/shop-desk lane try a --log` prints the whole output; explain the cause, and change the plan
+(rule 3) before trying again.
 "Could not run" means a problem with the machine's tools, not with the project; see
 [Finish the first task](docs/getting-started.md#finish-the-first-task) and the guide's table of problems.
 
 ### 5. Start the desk
 
-Ask the person to open a plain terminal of their own (not this session) and run, in the desk's folder:
+Ask the person to open a plain terminal of their own (not this session) and go to the desk's folder.
+
+With only an API endpoint (no subscription login), start the server first and set the provider on the page before
+the coordinator: run `hansa serve` in that terminal and keep it running; set the provider, model and key on the page
+from another terminal ([Open the principal's page](docs/getting-started.md#open-the-principals-page)); then run
+`hansa up`.
+
+With a subscription login, run:
 
 ```sh
 cd ~/shop-desk
@@ -123,8 +131,8 @@ To reach the coordinator, they use the `attach:` command `hansa up` prints. They
 folder-trust question. Ctrl+B then D leaves the coordinator running in the background. Without tmux only the server
 starts; see [Create and start the desk](docs/getting-started.md#create-and-start-the-desk).
 
-Once the server runs, do step 4's `hansa lane try a` and show its result. `hansa status` shows what the desk is
-doing.
+Once the server runs, do step 4's `hansa --desk ~/shop-desk lane try a` and show its result.
+`hansa --desk ~/shop-desk status` shows what the desk is doing.
 
 ### 6. Using it from elsewhere
 
