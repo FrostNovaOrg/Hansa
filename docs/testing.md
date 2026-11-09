@@ -21,6 +21,16 @@ A temporary Git repository with a missing file and a missing anchor proves that
 the checker reports both failures. Keep this check until a replacement provides
 the same coverage for local documentation links.
 
+`python3 -m unittest tests.test_docs` also checks every file under `docs/zh-CN/`
+against the English file at the same relative path under `docs/`. Each translation
+must have an English counterpart, the same heading levels in the same order,
+and exactly the same fenced code blocks in order (including commands, output,
+paths and fence markers). Mermaid blocks may translate their labels; only their
+count must match. Headings inside code examples do not count. Diagnostics name
+the file and the first differing heading or block. This prevents structural and
+command drift as translations grow; it does not check whether the wording is
+accurate or up to date. Keep it while paired English and Chinese docs are maintained.
+
 ## Runner output
 
 When `tests/run_parallel.py` reports failures or errors, its last line is

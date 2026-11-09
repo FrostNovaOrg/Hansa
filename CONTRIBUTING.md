@@ -12,6 +12,10 @@ follow [SECURITY.md](SECURITY.md).
 - Document each new check or rule in hansa with the kind of problem it guards against and when it may be removed. A check that would need a check of its own belongs in the tests instead.
 - Keep private identities, deployment details and real transcripts out of this repository. Supported tools, ordinary platform paths and invented protocol fixtures are fine.
 
+When changing an English doc that has a Chinese version under `docs/zh-CN/`,
+update both in the same change. The documentation test checks their structure
+and code blocks, not the wording; review the translation too.
+
 ## Tests
 
 ### Running the tests here
