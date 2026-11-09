@@ -42,6 +42,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The sandbox
 
+- Folders hansa makes for desks, new projects and the coordinator's mod are private whatever the umask.
+  For an existing folder others can write in, hansa gives the `chmod go-w` fix.
 - Worker commands run in an operating-system sandbox with lane-specific network hosts and write
   folders. Setup, checks and lane tries use srt; commands cannot fall back to running outside it.
 - Runs cannot read the desk's private files, other runs' temporary folders or common credentials.
@@ -96,9 +98,15 @@ a web page for the principal (the person directing the work), and task workers. 
   Push addresses and the alert command send independently; codes are made only for the command as it sends.
   Save up to ten private push addresses on the page; paste an address to recognize its service, or choose it.
   Switch each on or off, send a test push and see its last result. A saved Bark key moves into the list.
+  An old Bark setting with no key to move is cleared instead of reported.
   Use Bark (also self-hosted), ntfy, Gotify, PushDeer, Server酱, WeCom, DingTalk, Feishu/Lark,
   Telegram, Discord, Slack or a JSON webhook; bots support signing secrets. See [push services](docs/push-services.md).
+  Choosing Bark for another service's address is refused, naming that service.
   Secret parts stay out of settings, events, status and the page and go only to their own service.
+  They stay hidden through unreadable entries, saves cut short and address files saved by older versions.
+  An unreadable entry does not stop the others from sending.
+  Deleted Discord webhooks are named as such in `hansa status` and on the page.
+  `hansa help push-services` explains setup.
 - `hansa changelog` collects workers' release notes, missing notes and direct commits.
 
 ### The web page
@@ -136,6 +144,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The terminal menu and `hansa doctor`
 
+- `hansa init` and `hansa lane add` create a repository with an empty first commit for a new or empty project.
+  A folder already holding files is refused, with the commands to commit them.
 - In a terminal, `hansa` or `hansa up` outside a desk opens the desk menu: select desks to start,
   join a coordinator, open the page, pause dispatch or stop a server. `hansa desks` lists desk state;
   `hansa up --all` starts all listed desks, restoring recorded server and coordinator starts.
