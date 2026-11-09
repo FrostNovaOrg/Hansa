@@ -84,7 +84,7 @@ they show what is merged, missing evidence and released; `show` also gives the g
 | `hansa explain [lane L [--all] \| provider P \| server \| notify]` | settings and state, and where each comes from |
 | `hansa explain history [lane L \| provider P] [--last N]` | settings changes, newest first; more: `hansa help settings-changes` |
 | `hansa lane` | one line per lane |
-| `hansa lane add L --repo PATH [--check "<cmd>"] [--setup "<cmd>"] [...]` | a new lane on a git checkout |
+| `hansa lane add L --repo PATH [--check "<cmd>"] [--setup "<cmd>"] [...]` | a new lane; a new or empty project gets a repository and an empty first commit |
 | `hansa lane add L --like OTHER [...]` | a copy of lane OTHER: read the setup and check it copied |
 | `hansa lane set L FIELD [VALUE ...]` | change one field (`none`: empty; `--help` lists them) |
 | `hansa lane target L [NAME ["<command>" \| none] [...]]` | list, set or remove a release target |

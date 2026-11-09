@@ -86,18 +86,9 @@ starts nothing and calls no model.
 
 ## Create and start the desk
 
-`~/shop/repo` needs a commit before `hansa init` or `hansa lane add`.
-For an empty project (replace the author details):
-
-```sh
-mkdir -p ~/shop
-git init ~/shop/repo
-git -C ~/shop/repo config user.name "Your Name"
-git -C ~/shop/repo config user.email "you@example.com"
-git -C ~/shop/repo commit --allow-empty -m "Initial commit"
-```
-
-Then:
+For a new or empty project, `hansa init` makes the folder, a repository and
+an empty first commit. `hansa lane add --repo` does too. If the folder already
+has files, choose and commit them first.
 
 ```sh
 hansa init ~/shop/desk --repo ~/shop/repo
@@ -213,7 +204,7 @@ autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForw
 | What you see | Why | Fix |
 |---|---|---|
 | `No module named hansa` | Unreadable checkout | Ensure the desk account can read the checkout. |
-| Init refuses the repository | No commit | Make its first commit, then retry. |
+| Init refuses the repository | Files not committed, or a missing folder inside a checkout | Commit the files first, or use the existing checkout's path. |
 | Server runs, no coordinator | tmux absent | Install tmux and rerun `hansa up`, or run `hansa coordinator`. |
 | Coordinator cannot run allowed commands | Folder not trusted | Answer Claude Code's folder-trust question yes. |
 | Login fails | Wrong account or provider | Principal logs in as the desk account, or saves endpoint and key on the page. |
