@@ -1,5 +1,10 @@
 # The desk: files, keys and notes
 
+This reference covers the desk's [web page](#status-work-and-cost-on-the-web-page),
+[settings](#settings-on-the-web-page), [files](#a-desks-files),
+[backups and moves](#backing-up-and-moving-a-desk), and
+[notifications to the coordinator](#hearing-from-hansa).
+
 Without `--desk` or `HANSA_DESK`, hansa searches the current folder and then its
 parents for `settings.json` and a `tasks/` directory. If either cannot be
 looked at (for example, a run's sandbox closes an enclosing desk), it skips
@@ -55,8 +60,10 @@ invalid `days` query value (`invalid_query`, field `days`), malformed JSON
 defaults to 7 days, clamps integer values to 1–90 and accepts `all`; invalid event counts
 continue to use the default of 60. An empty POST body still means `{}`.
 
-The browser tab and the caption beside Hansa name the desk by its parent folder
-and its own folder, such as `work/desk`. The tab title is `Hansa · work/desk`,
+The browser tab and the caption beside Hansa use the
+[desk name saved by the principal](#settings-on-the-web-page). With no name set,
+they use its parent folder and its own folder, such as `work/desk`.
+The tab title is `Hansa · NAME`,
 prefixed with the number of releases waiting for approval, open to-dos and
 providers resting until a top-up is confirmed when that count is nonzero.
 It updates with each status refresh.
@@ -153,9 +160,10 @@ current blocking problem. A failed last check has a warning; a current problem
 and time remain visible. These labels do not change which providers can be
 scheduled; an unchecked provider can still be tried.
 
-The header shows the desk's last two path folders, such as `shop/desk`, under
-Hansa at every width. Long names are cut with an ellipsis; hovering shows the
-whole name. The summary stays one line high, on its own row in narrow windows.
+The header shows the saved desk name under Hansa at every width, or its last
+two path folders, such as `shop/desk`, when no name is set.
+Long names are cut with an ellipsis; hovering shows the whole name.
+The summary stays one line high, on its own row in narrow windows.
 It cycles through desk, dispatch, server, version, install time, current time
 and status notes, showing warnings first and keeping each group's order.
 Short items change about every four seconds. A long item rests briefly, moves
@@ -611,62 +619,40 @@ keeps an older page or a request for another setting from changing alert languag
 A saved language change also applies to alerts still gathering.
 
 Push addresses send alerts to phones and chats through push apps such as Bark.
-There may be up to ten entries, each with a service, an on/off switch and an
-optional name. To add one:
-
-1. Open **Settings → Alerts → Push addresses → Add an address**.
-2. Paste the whole address from the push app or service. Leave the service at
-   **Recognize it**, or choose the service's name. Each service's hint on the
-   page says what to paste. An extra secret field appears only for a service
-   that takes one.
-3. Give it a name if you like, then press **Save settings**. The entry now shows
-   only the hidden address, with its key concealed.
-4. Press **Send a test push** on that entry. Its last result shows sent and the
-   time, or what went wrong. A test sends even when the entry is switched off.
-
-For Bark, install Bark from the App Store on your iPhone and open it. Copy the
-whole address shown on the Bark app's home screen, for example
-`https://api.day.app/KEY/示例文字`, and paste it into **Add an address** above.
-Hansa keeps the server and key and drops the example text. If **Recognize it**
-cannot identify a self-hosted address, choose **Bark** and save again.
-
-To replace a saved address or extra secret, paste the new value into that
-entry. Leave either field empty to keep its saved value. Switch an entry off,
-rename it or press **Remove**, then **Save settings**. Until saved, address and
-secret changes and removals show the ordinary unsaved-changes note. Provider
-keys still use their own **Save key** buttons.
+Add, save and test up to ten entries in **Settings → Alerts → Push addresses**.
+See [push-address setup](releases.md#push-addresses-and-services) for the page's
+controls, and the [service guide](push-services.md), including
+[Bark](push-services.md#bark), for what to paste.
 
 Only the principal's page save adds, changes or removes push addresses. Settings
 (`alert_push`) keep metadata; each address is a secret in a separate 0600 file
 under the desk's 0700 `secrets/` folder. Services needing an extra signing secret
-or access token get the same protection. Credentials never enter settings,
-history values, events, status or replies. Status and the page show a hidden
-address and each entry's last result. A saved secret is scrubbed from files hansa
-already wrote and participates in redaction and the merge check for leaked keys.
-An existing Bark setting and key move automatically to the first push entry,
-keeping the old on/off choice; the old setting and key file are removed, and
-settings history records the move. Without a saved Bark key, no entry is added.
+or access token get the same protection. Hansa removes the keys it knows from
+new records and displayed text. Status and the page show a hidden address and
+each entry's last result. Saving a secret scrubs the task, request and try files
+covered by `Desk.scrub` and protects later merges. The append-only event log
+keeps text recorded before hansa knew the key; see the
+[redaction limits](releases.md#push-addresses-and-services).
+
+Hansa tries to move an old Bark setting and key to the first push entry,
+keeping the on/off choice. A successful move removes the old files and records
+the move in settings history. Without a saved key, no entry is added.
+If the move is refused, hansa keeps the old setting and key without sending to
+it. Status and the page ask the principal to paste and save the Bark address
+again in **Settings → Alerts**. See
+[Bark upgrade and repair](releases.md#push-addresses-and-services) for the
+refusal cases and what a repair removes.
 
 Every enabled entry with an address receives each gathered batch, even with the
-alert command blank. Sends run side by side with the command and each other,
-with separate results and deadlines (30 seconds for Bark). A slow or failed
-entry does not delay another's send or send a failure notice through it.
-Gathering for 20 seconds, one run at a time and at most 20 runs an hour apply
-to the batch. One-time release codes go only to the alert command, never to
-push addresses; answer their waiting releases on the page.
-The desk's name and alert texts leave this machine for each address's service
-and, for phone apps, on to Apple's or Google's push service. Those services
-can read them; this does not encrypt the text against those services.
+alert command blank. Sends run independently. One-time release codes go only
+to the alert command; answer push alerts about waiting releases on the page.
+See [alerts](releases.md#alerts) for gathering, deadlines, levels and failure
+records, and the [service guide](push-services.md) for what leaves this machine
+and who can read it.
 
 Sandbox alerts explain which runs are held and how they resume in the selected
 language, and keep the sandbox's raw diagnostic alongside that explanation.
-The command receives `HANSA_ALERT_KIND` and `HANSA_ALERT_LEVEL`: `passive` for a
-successful release, `active` for a waiting release, a to-do, a failed, void,
-forbidden or stopped release and the test, and `urgent` for `server_stuck`,
-`coordinator`, `sandbox`, `disk` and `credit`. A batch takes the highest level;
-the Bark channel maps it to Bark's attention level. Release alerts start with the target description kept
-when the release was asked, even if the description changes later. See
-[alerts](releases.md#alerts) for command timing and one-time codes.
+
 Prices must be finite numbers, zero or more; zero and decimals are accepted.
 NaN, infinity and numbers too large for floating-point calculations are refused;
 use a smaller price. A saved file containing such prices also requires repair
@@ -735,7 +721,8 @@ editing before that reply arrives, the reply leaves their new draft alone.
 
 In a terminal, `hansa` alone or `hansa menu` opens the principal's list of all
 this account's desks, even from inside a desk or with `--desk` or `HANSA_DESK`.
-Nothing starts when it opens. Each row shows the last two folders of the path,
+Nothing starts when it opens. Each row shows the saved desk name, or the last
+two folders of its path when no name is set, and the full path,
 server state (running, busy, stuck, stopped), whether the coordinator's session
 is open, whether dispatch is paused, running tasks and tasks awaiting review,
 and releases and to-dos waiting for you. It refreshes every five seconds.
@@ -822,9 +809,11 @@ Older records did not distinguish an explicit 8765 from the default: `hansa up`
 treats an unmarked record's 8765 as automatic, keeping other recorded ports
 explicit. New records distinguish both, including an explicit `--port 8765`.
 
-The record never includes `ANTHROPIC_*`, other key variables, values holding
-one of the desk's keys, or a Claude Code session's identity or messaging
-variables. hansa removes the session's identity before recording the start.
+The record excludes `ANTHROPIC_*`, other key variables, values holding a key
+hansa knows when saving, and Claude Code session identity or messaging variables.
+Hansa removes the session's identity before recording the start.
+See the [redaction limits](releases.md#push-addresses-and-services) for text
+recorded before a key was saved.
 The restarted server gets only `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM` and
 the recorded variables, plus tmux's own pane variables when in tmux. `USER` and
 `LOGNAME` come from the current account's password entry, regardless of the
@@ -944,9 +933,10 @@ the latest start wins.
 - Both save the session's process: its pid with its start time, as hansa tells
   sessions apart.
 
-The record never holds a key or a session's identity. The words that pick a
-conversation or give an inbox are left out with their values: `-c`,
-`--continue`, `-r`/`--resume`, `--session-id`, `--fork-session` and
+The record excludes keys hansa knows when saving and the session's identity;
+see the [redaction limits](releases.md#push-addresses-and-services).
+The words that pick a conversation or give an inbox are left out with their
+values: `-c`, `--continue`, `-r`/`--resume`, `--session-id`, `--fork-session` and
 `--messaging-socket-path`. So a session started with `--resume <its id>` or
 `--session-id <its id>` is recorded, and so is one `hansa up`'s launcher
 started (it carries its inbox) when it runs `hansa notify on`: it hears from
@@ -1149,12 +1139,15 @@ The [settings history](concepts.md#settings-history) is kept separately in
 `.hansa/settings-history.jsonl`; keep it when copying or restoring the desk.
 The event log is only appended to. Readers skip a damaged line, and the next event starts
 on a line of its own. Keys live
-in `secrets/` (mode 600); the OS account running hansa can read them. The worker
-or adapter receives the selected key in its environment for requests to the
-configured provider endpoint; a local adapter controls how it uses that key.
-Saved values are not returned to the page. hansa replaces a key with
+in `secrets/` (mode 0700), in files with mode 0600; the OS account running hansa
+can read them. The worker or adapter receives the selected key in its environment
+for requests to the configured provider endpoint; a local adapter controls how
+it uses that key.
+Saved values are not returned to the page. hansa replaces a known key with
 `[key of <provider>]` wherever it would otherwise show, and refuses to merge a
-change that holds one. The coordinator's permission rules are hansa's: they are
+change that holds one. Earlier event-log entries are not rewritten when a key
+is saved; see the [redaction limits](releases.md#push-addresses-and-services).
+The coordinator's permission rules are hansa's: they are
 in the desk's `.claude/settings.json` and come up to date whenever the
 coordinator starts. The principal's own rules go in `.claude/settings.local.json`.
 The coordinator creates and edits files under the desk's `notes/` without
@@ -1216,10 +1209,12 @@ Back up repositories as ordinary git repositories, branches included. First `han
 until `hansa status` shows nothing running, and quit the coordinator's session. There is no `hansa stop`: stop the server
 with `x` in `hansa menu`, Ctrl-C, or `kill PID`.
 
-Copy the desk with `cp -a` or `tar -p`: `secrets/` must stay mode 700, its files 600, and hansa does not repair them.
+Copy the desk with `cp -a` or `tar -p`: `secrets/` must stay mode 0700, its files 0600, and hansa does not repair them.
 Copy everything (settings, `tasks/`, `events.jsonl`, `asks.json`, `notes/`, `lanes/`, `PAUSED`, `.claude/`) except
 `worktrees/`, which hansa remakes, and `.hansa/`. From `.hansa/` keep `releases.json`, `releases/`, `attachments/`,
-`alerts.json`, `providers.json`, `settings-history.jsonl` and `claude-*/`; hansa rebuilds the rest.
+`alerts.json`, `providers.json`, `settings-history.jsonl`, `intent/` and `claude-*/`; hansa rebuilds the rest.
+The [intent records](tasks.md#goals-and-product-decisions) keep goals and decisions,
+including their reasons, replacements and outcomes.
 
 On the new machine, install the tools, run `hansa doctor`. Logins are per machine: run `claude auth login`. The
 coordinator's conversation stays behind. Changed paths: `hansa lane set` cannot change `repo`: edit it in
@@ -1303,25 +1298,12 @@ These lines come from hansa, not from the principal, and approve nothing. A
 session whose Claude Code settings hold or refuse messages from other sessions
 (`crossSessionInbound`) does not get them; only the principal can change that.
 
-When what hansa posts cannot reach the coordinator, the principal hears of it through their alert command or push addresses (kind
-`coordinator`, see [alerts](releases.md#alerts)): when no session hears from hansa while something waits for the
-coordinator (the session ended, or notifications were turned off), when the session waits on a permission dialog or
-a question with something posted to it, when a task posted to it waits for review while the session is idle, and
-when API errors keep ending the session's turns (after the principal's `turn_min`, 30 minutes by default, or at once
-for an error only the principal can fix, such as billing or the account; then once more when a turn ends normally).
-Before that, when an API error ends a turn hansa started, the follower posts again what it posted and the session has
-not handled yet, headed `Your last turn ended with an API error`: at 2, 10 and 30 minutes for errors waiting may cure
-(`rate_limit`, `overloaded`, `server_error`), once after 2 minutes for `authentication_failed`, once ending `go on`
-for `max_output_tokens`, and not at all, until a turn ends normally, for one only the principal can fix. `turn_min` 0
-turns those alerts off and leaves the reposts on. `hansa status` shows a line while such a stretch holds: the error,
-since when, how many reposts went and whether the principal was alerted. More: [alerts](releases.md#alerts).
-A running session whose inbox keeps refusing posts also alerts, once after the no-session minutes. A successful
-post ends that case; a later stretch of refusals counts from its own start. Only refusals while lines wait count, and
-a failed post an older hansa recorded (it dropped its lines) starts no stretch.
-The minutes before each are the principal's, on the page, and `hansa status` shows a line while one of them holds,
-such as `the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`. For the last two a
-session's follower runs `claude agents --json` only while something posted to it could still go unanswered, and at
-most once a minute counting every run, its lookup of the session's name included (one run gives both).
+The principal's `coordinator` alerts cover sessions that cannot hear hansa,
+including refused inbox posts, waits on a permission dialog or question,
+untouched review work and repeated API errors. The page sets the delays;
+`hansa status` shows cases that still hold. The follower can repost unhandled
+messages after an API error in a turn hansa started. See [alerts](releases.md#alerts)
+for the cases, timing, recovery notices and rules for reposting.
 
 ### The principal's to-dos
 
@@ -1432,8 +1414,9 @@ In order, each item only when it is not zero:
   the full link.
 
 The figures come from `statusline.json` in the desk's folder, which `hansa serve` writes at each round: counts and
-short words only, and the time it was written; never a release's one-time code, a key, a push address, the page's
-token, or a task's title or text. It is outside `.hansa/` and `secrets/`, which the session is denied Read on, so the
+short words only, and the time it was written; never a release's one-time code, a known key, a push address, the page's
+token, or a task's title or text. See the [redaction limits](releases.md#push-addresses-and-services).
+It is outside `.hansa/` and `secrets/`, which the session is denied Read on, so the
 mod reads it whether or not Claude Code holds a mod's file reads to those rules; the session may read it (it holds
 nothing `hansa status` does not show) but not change it. The mod reads it again every 15 seconds and when a turn
 ends. When it is older than two minutes, the line says only that `hansa serve` is not running (or its rounds are
@@ -1452,7 +1435,10 @@ load the coordinator's mod, why, and to run `claude update`.
 
 ## Merge checks
 
-For long merge checks and busy task lanes, add a merge lane with `hansa lane add m --like a` (the copy has no release targets: a merge lane releases nothing), give it its own caches through `write` and `env`, then set `hansa lane set m merge_lane true` (unset or false: ordinary). One per repository and base, it takes no work and uses its own worktree, sandbox, env, setup, merge command and limit, keeping the task lane free and its merge message and identity. The lane is chosen when the check starts; unmarking or removing it while queued restores the task lane. Merge checks still run in order per repository and base, taking a concurrency slot before new work. A starting check takes consecutive compatible queued merges up to this lane’s `merge_batch` (1–10, default 4; `hansa lane set m merge_batch N`, `none` restores the default). Setup and check run once on the last merge commit; each task keeps its own merge commit, message, identity and landing checks. A failed or stopped batch, moved base, landing refusal, or restart that cannot finish it returns its remaining members to their old places, each checked alone. See [merging](tasks.md#merging-the-merge-check-and-conflicts). With every slot busy, a merge check waits for the next task to end anywhere, and that task's lane waits about one merge check. Raising concurrency by one removes the wait if the machine can run a merge check beside the lanes' work.
+A dedicated merge lane keeps long merge checks off busy task lanes. Checks
+still take a concurrency slot and can gather compatible queued merges into a
+batch. See [merging](tasks.md#merging-the-merge-check-and-conflicts) for setup,
+batch limits, individual checks after a batch fails, and concurrency advice.
 
 `hansa lane set V verify_for x y` reserves V for verifications of the listed lanes; `none` unsets it.
 They must share V's repository; none may be V, a merge lane or a verify lane. V cannot be a merge lane.
