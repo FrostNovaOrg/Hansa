@@ -728,9 +728,16 @@ This protection covers the keys hansa knows. The append-only event log is not
 rewritten, so text recorded before a key was saved stays in earlier entries.
 Only the recorded service checks,
 masks and sends a saved entry. Recognition asks all services only before an
-address is saved. An orphan secret file, or one whose metadata cannot be read,
-still has its whole value protected, without guessing a service to extract
-parts. Keep this separation while services share address paths: an ordinary
+address is saved. A service switch cut short between the settings write and the
+address write leaves the old service's address behind: when the recorded
+service no longer accepts a saved address as its own saved form, `Desk.keys`
+takes its parts from the service whose saved form it still is, if any. An
+orphan secret file with no entry, or one whose metadata cannot be read, still
+has its whole value protected, without guessing a service to extract parts.
+An entry this hansa cannot read, written by hand or by a newer hansa with an
+unknown service, is left out alone: the other entries still hide, send and
+show, and the list's problem is still reported. Keep this separation while
+services share address paths: an ordinary
 word such as `message` must not become a secret through another service's parser.
 Settings history records secret changes with values withheld.
 
@@ -802,6 +809,11 @@ Bark recognizes `api.day.app` and ordinary bare device keys automatically;
 `ntfy.sh`, PushDeer recognizes `api2.pushdeer.com`, and Server酱 recognizes its
 two official address forms. Gotify is always chosen. Bare PushDeer keys require
 choosing PushDeer, and self-hosted servers require choosing their service.
+Choosing Bark for an address another service recognizes is refused, naming the
+service to choose instead: an official host or endpoint, or a Gotify
+`/message?token=…` or PushDeer `/message/push?pushkey=…` address. A saved Bark
+address and a self-hosted Bark server's address are Bark's own form and are
+accepted.
 See [the service guide](push-services.md) for request contents and limits.
 WeCom, DingTalk (including `oapi.dingtalk.io`), Feishu/Lark, Discord and Slack
 recognize their official hosts and endpoint paths; Telegram recognizes its

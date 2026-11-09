@@ -34,7 +34,10 @@ Install Bark and copy the address on its home screen, such as
 exactly one HTTPS address also works. Hansa keeps only the server and device
 key: example titles, bodies and query options such as `group` and `ttl` are
 discarded. A bare device key uses `api.day.app`. Choose **Bark** explicitly for
-a different server. There is no extra secret.
+a different server. If the address belongs to another service, such as a
+Gotify `/message?token=…` or PushDeer `/message/push?pushkey=…` address, hansa
+refuses the save and names that service; choose it instead. There is no extra
+secret.
 
 The device key is secret: someone with it can send to your device. Hansa sends
 the key, desk name and alert text to that Bark server's `/push` address, and the

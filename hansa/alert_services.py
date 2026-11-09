@@ -7,13 +7,47 @@ validate(address, secret) for the completed credential pair. Requests use
 alert_http.send's private interface; no response bodies or credentials cross
 into public results.
 """
-from .alert_bark import Bark
+from urllib.parse import urlsplit
+
+from .alert_bark import Bark, _pasted_address
 from .alert_chat import DingTalk, Discord, Feishu, JsonWebhook, Slack, Telegram, WeCom
 from .alert_phone import Gotify, Ntfy, PushDeer, ServerChan
 
 SERVICES = {service.id: service for service in (
     Bark(), Ntfy(), Gotify(), PushDeer(), ServerChan(),
     WeCom(), DingTalk(), Feishu(), Telegram(), Discord(), Slack(), JsonWebhook())}
+
+
+def _foreign_address(value: str):
+    """Another service whose own address this is, or None.
+
+    Bark takes the first path segment as its device key, so its loose grammar
+    also accepts another service's endpoint and hides the wrong part. The
+    JSON webhook accepts every address by design, so it names nothing here.
+    """
+    try:
+        path = urlsplit(value).path
+    except ValueError:
+        path = ""
+    for service in SERVICES.values():
+        if service.id in ("bark", "json"):
+            continue
+        try:
+            if service.recognizes(value):
+                return service
+        except ValueError:
+            continue
+    # A self-hosted Gotify or PushDeer server is not recognized by host, but
+    # its fixed endpoint and credential query are still its own address.
+    for service, endpoint in ((SERVICES["gotify"], "/message"), (SERVICES["pushdeer"], "/message/push")):
+        if path != endpoint:
+            continue
+        try:
+            service.normalize(value)
+        except ValueError:
+            continue
+        return service
+    return None
 
 
 def parse(value: str, service: str = "recognize") -> tuple[str, str]:
@@ -31,6 +65,27 @@ def parse(value: str, service: str = "recognize") -> tuple[str, str]:
         definition = SERVICES.get(service)
         if definition is None:
             raise ValueError("unknown push service")
+        if definition.id == "bark":
+            # Inspect the URL Bark would use, as a pasted command may hold one.
+            try:
+                address = _pasted_address(value)
+            except ValueError:
+                address = value
+            # A saved address is already Bark's own form, and a bare device key
+            # is its own short form; only another shape asks the other services
+            # whether it is theirs.
+            try:
+                own = definition.normalize(address) == address
+            except ValueError:
+                own = False
+            if not own:
+                try:
+                    own = definition.recognizes(address)
+                except ValueError:
+                    pass
+            if not own and (other := _foreign_address(address)) is not None:
+                name = other.names["en"]
+                raise ValueError(f"this address looks like a {name} address; choose {name} as the push service")
     try:
         return definition.id, definition.normalize(value)
     except ValueError:

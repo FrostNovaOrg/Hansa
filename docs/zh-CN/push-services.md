@@ -12,7 +12,7 @@ hansa 发送的是工作台名称和提醒正文，措辞由你保存的提醒�
 
 ## Bark
 
-安装 Bark，复制它首页上显示的地址，例如 `https://api.day.app/YOUR_DEVICE_KEY`。现成的 curl 命令也可以，只要其中恰好包含一个 HTTPS 地址。hansa 只保留服务器和设备密钥：命令里的示例标题、正文以及 `group`、`ttl` 之类的查询选项都会被丢弃。只给设备密钥时，使用 `api.day.app`。要换别的服务器，请手动选择 **Bark**。没有额外密钥。
+安装 Bark，复制它首页上显示的地址，例如 `https://api.day.app/YOUR_DEVICE_KEY`。现成的 curl 命令也可以，只要其中恰好包含一个 HTTPS 地址。hansa 只保留服务器和设备密钥：命令里的示例标题、正文以及 `group`、`ttl` 之类的查询选项都会被丢弃。只给设备密钥时，使用 `api.day.app`。要换别的服务器，请手动选择 **Bark**。如果这个地址其实属于别的服务，例如 Gotify 的 `/message?token=…` 或 PushDeer 的 `/message/push?pushkey=…` 地址，hansa 会拒绝保存并指出那个服务；请改选它。没有额外密钥。
 
 设备密钥是保密的：拿到它的人可以往你的设备发推送。hansa 把密钥、工作台名称和提醒正文发送到那台 Bark 服务器的 `/push` 地址，再由服务器通过苹果的推送服务发出通知。那台服务器和苹果都能读到这些内容。
 

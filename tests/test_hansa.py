@@ -46738,10 +46738,12 @@ class AlertPushPageTest(unittest.TestCase):
                     self.assertEqual(self.desk.settings()["alert_push"], [])
 
     def test_push_page_service_address_refusals_use_the_pages_language(self):
-        for address, service in (("http://api.day.app/fixture-key", "bark"),
-                                 ("https://api.day.app/bad.key!", "bark"),
-                                 ("http://api.day.app/fixture-key?query=private-fixture", "bark"),
-                                 ("https://[broken", "recognize")):
+        for address, service, named in (("http://api.day.app/fixture-key", "bark", ()),
+                                        ("https://api.day.app/bad.key!", "bark", ()),
+                                        ("http://api.day.app/fixture-key?query=private-fixture", "bark", ()),
+                                        ("https://[broken", "recognize", ()),
+                                        ("https://push.example.com/message?token=fixture-gotify-token",
+                                         "bark", ("Gotify",))):
             for language in ("en", "zh"):
                 with self.subTest(address=address, language=language):
                     draft = [{"service": service, "address": address}]
@@ -46755,6 +46757,8 @@ class AlertPushPageTest(unittest.TestCase):
                         self.assertNotIn("Bark needs", message)
                     else:
                         self.assertIn("address", message)
+                    for name in named:
+                        self.assertIn(name, message)
                     self.assertIn(message, shown["settings"])
                     self.assertEqual(shown["after"]["add"]["address"], address)
                     self.assertTrue(shown["dirty"])

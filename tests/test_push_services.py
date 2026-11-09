@@ -361,22 +361,71 @@ class PhoneServicesTest(_PushServicesCase):
                     self.desk.new_task("Read the attachment", attach=[str(source)])
         self.assertEqual(set(alert_push.keys(self.desk).values()), expected)
 
-    def test_unlisted_or_invalid_addresses_do_not_guess_another_service(self):
+    def test_only_unlisted_files_keep_whole_values_without_other_services(self):
         address = "https://gotify.example/message?token=fixture-orphan-token"
         for listed in (False, True):
             with self.subTest(listed=listed):
                 self.desk = init_desk(self.tmp / f"unusable-{listed}")
                 entry = self.save("https://ntfy.sh/fixture-topic", "ntfy") if listed else {"id": "orphan"}
                 alert_push._write_secret(self.desk, entry["id"], address)
-                # Full file values remain private even when no service can extract their parts.
+                # Full file values remain private. A listed entry whose recorded
+                # service no longer accepts the file keeps the parts of the
+                # service the address still is; an unlisted file has none to ask.
+                expected = {address, "fixture-orphan-token"} if listed else {address}
                 with patch.object(self.desk, "settings", side_effect=AssertionError("recursive settings load")):
-                    self.assertEqual(set(alert_push.keys(self.desk).values()), {address})
+                    self.assertEqual(set(alert_push.keys(self.desk).values()), expected)
                 self.assertNotIn(address, self.desk.redact(address))
                 self.assertEqual(self.desk.redact("Fix the message queue"), "Fix the message queue")
                 if listed:
                     with patch.object(alert_http, "send") as sending:
                         self.assertEqual(alert_push.test(self.desk, entry["id"]), "refused_url")
                     sending.assert_not_called()
+
+    def test_a_switch_cut_short_after_the_settings_write_hides_the_old_token(self):
+        address = "https://push.example.com/message?token=fixture-old-gotify-token"
+        entry = self.save(address, "gotify")
+        with patch.object(alert_push, "_write_secret", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                alert_push.change(self.desk, [{"id": entry["id"], "service": "bark",
+                                               "address": "https://api.day.app/fixture-bark-key"}], by="page")
+        # The settings write landed and the address write did not: the entry
+        # records Bark while its file still holds the Gotify address.
+        self.assertEqual(self.desk.settings()["alert_push"][0]["service"], "bark")
+        self.assertEqual(alert_push._read(self.desk, entry["id"]), address)
+        values = set(alert_push.keys(self.desk).values())
+        self.assertIn(address, values)
+        self.assertIn("fixture-old-gotify-token", values)
+        self.assertNotIn("fixture-old-gotify-token", self.desk.redact("fixture-old-gotify-token"))
+
+    def test_one_unreadable_entry_leaves_the_readable_ones_hiding_and_sending(self):
+        entry = self.save("https://api.day.app/fixture-bark-key", "bark")
+        settings = self.desk.settings()
+        settings["alert_push"].append({"id": "from-newer-hansa", "service": "no-such-service",
+                                       "on": True, "name": ""})
+        write_json(self.desk.settings_path, settings)
+        values = set(alert_push.keys(self.desk).values())
+        self.assertIn("fixture-bark-key", values)
+        self.assertIn("https://api.day.app/fixture-bark-key", values)
+        self.assertEqual([e["id"] for e in alert_push.enabled(self.desk, self.desk.settings())], [entry["id"]])
+        self.assertEqual([e["id"] for e in public_settings(self.desk)["alert_push"]], [entry["id"]])
+        with patch.object(alert_http, "send", return_value=[{"ok": True, "why": "sent", "status": 200, "tries": 1}]):
+            self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
+        # The unreadable entry is still a shown problem, and saving still refuses.
+        self.assertTrue(alert_push.problems(self.desk.settings()["alert_push"]))
+        with self.assertRaisesRegex(ValueError, "known service"):
+            alert_push.change(self.desk, [{"id": entry["id"], "name": "phone"}], by="page")
+
+    def test_bark_refuses_another_services_address_and_names_it(self):
+        for address, name in (("https://push.example.com/message?token=fixture-gotify-token", "Gotify"),
+                              ("https://api2.pushdeer.com/message/push?pushkey=fixture-pushdeer-key", "PushDeer")):
+            with self.subTest(address=address):
+                with self.assertRaisesRegex(ValueError, f"looks like a {name} address; choose {name}"):
+                    self.save(address, "bark")
+                self.assertEqual(self.desk.settings()["alert_push"], [])
+        # A self-hosted Bark server's address is still Bark's own.
+        entry = self.save("https://bark.example.org/fixture-bark-key", "bark")
+        self.assertIn("fixture-bark-key", alert_push.keys(self.desk).values())
+        self.assertEqual(public_settings(self.desk)["alert_push"][0]["id"], entry["id"])
 
     def test_unreadable_metadata_keeps_whole_secret_files_without_guessing(self):
         entry = self.save("https://gotify.example/message?token=fixture-gotify-token", "gotify")
