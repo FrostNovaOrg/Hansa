@@ -59,6 +59,7 @@ TOPICS = {
     "release-files": ("releases.md", "Files a release runs outside the sandbox", "release_files: the files a "
                       "release runs outside the sandbox, and the verification a change to one needs"),
     "alerts": ("releases.md", "Alerts", "the principal's alert command and push addresses: what they receive, and when"),
+    "push-services": ("push-services.md", None, "push service setup, privacy, levels, limits and error codes"),
     "time-limits": ("tasks.md", "Time limits, and work left running in the background", "a task's limits of turns "
                     "and minutes, and work a worker leaves running in the background"),
     "provider-limits": ("tasks.md", "Dropped connections and usage limits", "retries after a dropped connection, "

@@ -1055,6 +1055,8 @@ def status_text(st: dict) -> str:
                    + (f" · last {'ok' if last['ok'] else 'failed'}: {last['why']} at "
                       + time.strftime("%Y-%m-%d %H:%M", time.localtime(last["at"]))
                       + (f" · code {last['code']}" if "code" in last else "") if last else " · no push yet"))
+        if last and entry["service"] == "discord" and last["why"] == "http_4xx" and last.get("code") == 10015:
+            out[-1] += " · this webhook address no longer exists; paste a new address on the page (Settings, Alerts)"
     out += [st["disk"]["low_text"] + ". More: hansa help free-space"] if (st.get("disk") or {}).get("low_text") else []
     out += (st.get("disk") or {}).get("unknown") or []
     out += [st["memory"]["low_text"]] if (st.get("memory") or {}).get("low_text") else []

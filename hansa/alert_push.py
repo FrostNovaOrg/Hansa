@@ -183,31 +183,35 @@ def migrate(desk, loaded):
         if "alert_bark" not in loaded and not old_key.exists():
             return loaded
         new = {k: v for k, v in loaded.items() if k != "alert_bark"}
-        config = loaded.get("alert_bark", {})
-        try:
-            if bark_problems(config) or problems(new.get("alert_push", [])):
-                return loaded
-            key = old_key.read_text(encoding="utf-8").strip() if old_key.exists() else ""
-            value = list(new.get("alert_push", []))
-            existing = next((e for e in value if e["id"] == "legacy-bark"), None)
-            if key:
-                _, address = alert_services.parse(config.get("server", DEFAULT_SERVER).rstrip("/") + "/" + key, "bark")
-                # Full pasted URLs may have sample text after the key. A saved key
-                # is different: migration must preserve every character or stop.
-                if alert_services.SERVICES["bark"].secrets(address)[-1] != key:
+        created = False
+        # Without a key file there is nothing to migrate, even if the old
+        # setting was written by hand and is not a configuration we accept.
+        if old_key.exists():
+            config = loaded.get("alert_bark", {})
+            try:
+                if bark_problems(config) or problems(new.get("alert_push", [])):
                     return loaded
-                if existing:
-                    if existing["service"] != "bark" or _read(desk, existing["id"]) != address:
+                key = old_key.read_text(encoding="utf-8").strip()
+                value = list(new.get("alert_push", []))
+                existing = next((e for e in value if e["id"] == "legacy-bark"), None)
+                if key:
+                    _, address = alert_services.parse(config.get("server", DEFAULT_SERVER).rstrip("/") + "/" + key, "bark")
+                    # Full pasted URLs may have sample text after the key. A saved key
+                    # is different: migration must preserve every character or stop.
+                    if alert_services.SERVICES["bark"].secrets(address)[-1] != key:
                         return loaded
-                elif len(value) >= MAX_ENTRIES:
-                    return loaded
-        except (ValueError, OSError, UnicodeError):
-            return loaded
-        created = key and not existing
-        if created:
-            entry = {"id": "legacy-bark", "service": "bark", "on": config.get("on") is True, "name": ""}
-            value.insert(0, entry)
-        new["alert_push"] = value
+                    if existing:
+                        if existing["service"] != "bark" or _read(desk, existing["id"]) != address:
+                            return loaded
+                    elif len(value) >= MAX_ENTRIES:
+                        return loaded
+            except (ValueError, OSError, UnicodeError):
+                return loaded
+            created = key and not existing
+            if created:
+                entry = {"id": "legacy-bark", "service": "bark", "on": config.get("on") is True, "name": ""}
+                value.insert(0, entry)
+            new["alert_push"] = value
         try:
             if created:
                 _write_secret(desk, entry["id"], address)
@@ -316,7 +320,9 @@ def apply(desk, writes, removes):
     if any(id in bark_ids and value and not extra for id, value, extra in writes):
         # Only a saved Bark address supersedes an upgrade that could not move.
         if "alert_bark" in saved:
-            write_json(desk.settings_path, {k: v for k, v in saved.items() if k != "alert_bark"})
+            new = {k: v for k, v in saved.items() if k != "alert_bark"}
+            write_json(desk.settings_path, new)
+            record(desk, saved, new, "page")
         _remove_legacy_files(desk)
     return failed
 

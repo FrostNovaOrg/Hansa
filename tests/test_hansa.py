@@ -22238,7 +22238,7 @@ def save():'''))
         self.assertIn("no command or topic nosuch; hansa help topics lists the topics", str(e.exception.code))
         # alone: an index, not the card: every command, then every topic with what it holds
         index = self.hansa_out("help")
-        self.assertLessEqual(len(index.splitlines()), 41)  # includes the test-bench topic
+        self.assertLessEqual(len(index.splitlines()), 42)  # includes test-bench and push-services
         self.assertNotIn("# The card", index)
         for name in ("add", "merge", "lane (add, set, target, brief, remove, try)", "disk-floor", "coordinator",
                      "explain (history)"):
@@ -22332,6 +22332,9 @@ def save():'''))
         self.assertIn("### Sending a task back", merging)
         self.assertIn("says which round it is", " ".join(merging.split()))
         self.assertNotIn("## What work costs", merging)
+        self.assertEqual(cli.topic_text("push-services"),
+                         (top / "docs" / "push-services.md").read_text(encoding="utf-8").strip())
+        self.assertIn("`hansa help push-services`", self.hansa_out("help", "alerts"))
         # no topic can be taken for something else
         names = commands | lane_subs | targets | {"card", "topics"}
         for t in cli.TOPICS:
@@ -47408,6 +47411,52 @@ class AlertPushPageTest(unittest.TestCase):
         # The saved result arrives on a new page too.
         self.assertIn(self.page()["labels"]["pushWhy"]["http_4xx"], self.page()["before"]["entries"][0]["last"])
 
+    def test_deleted_discord_webhook_keeps_code_and_explains_replacement_in_status_and_page(self):
+        address = "https://discord.com/api/webhooks/123456/fixture-deleted-webhook-token"
+        entry = self.add(address=address, service="discord")
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        for service, code, gone in (("discord", 10015, True), ("discord", 50035, False),
+                                    ("json", 10015, False), ("discord", None, False)):
+            with self.subTest(service=service, code=code):
+                settings = self.desk.settings()
+                settings["alert_push"][0]["service"] = service
+                self.assertFalse(self.desk.save_settings(settings, by="page"))
+                result = {"ok": False, "why": "http_4xx", "status": 404, "tries": 1}
+                if code is not None:
+                    result["code"] = code
+                self.http.return_value = [result]
+                status, reply, _ = self.web_request("/api/alert/push-test", method="POST", headers=auth,
+                                                     data=json.dumps({"id": entry["id"]}).encode())
+                self.assertEqual(status, 200)
+                self.assertEqual(reply["last"].get("code"), code)
+                self.assertEqual(alert_push.last_result(self.desk, entry["id"]), reply["last"])
+                saved = read_json(alert_push._last_file(self.desk, entry["id"]), {})
+                self.assertEqual(saved.get("code"), code)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    main(["--desk", str(self.desk.root), "status"])
+                self.assertEqual("webhook address no longer exists" in out.getvalue(), gone)
+                if gone:
+                    for word in ("code 10015", "paste", "new", "page"):
+                        self.assertIn(word, out.getvalue())
+                for language, words in (("en", ("webhook address no longer exists", "paste", "new")),
+                                         ("zh", ("地址已不存在", "粘贴", "新"))):
+                    shown = self.page([{"entry": 0, "test": True}], language,
+                                      {"/api/alert/push-test": reply})
+                    for state in ("before", "after"):
+                        last = shown[state]["entries"][0]["last"]
+                        if gone:
+                            for word in words:
+                                self.assertIn(word, last)
+                        else:
+                            self.assertIn(shown["labels"]["pushWhy"]["http_4xx"], last)
+                    if gone:
+                        self.assertIn(shown["labels"]["pushTestBad"], shown["after"]["text"])
+                        test_note = shown["after"]["text"].split(shown["labels"]["pushTestBad"], 1)[1]
+                        for word in words:
+                            self.assertIn(word, test_note)
+                    self.assertNotIn(address, json.dumps(shown))
+
     def test_push_page_address_secret_and_removal_drafts_use_the_ordinary_save_note(self):
         self.add()
         reply = public_settings(self.desk)
@@ -47878,6 +47927,69 @@ class AlertPushTest(unittest.TestCase):
                 revision = desk.settings_rev()
                 self.assertEqual(desk.settings()["alert_push"], entries)
                 self.assertEqual(desk.settings_rev(), revision)
+
+    def test_invalid_legacy_bark_without_key_is_removed_with_history(self):
+        from hansa import history
+        for config in ({"on": True, "server": "http://bark.example"}, "invalid"):
+            for has_key in (False, True):
+                with self.subTest(config=config, has_key=has_key):
+                    desk = init_desk(self.tmp / f"invalid-legacy-{has_key}-{isinstance(config, dict)}")
+                    settings = desk.settings()
+                    settings["alert_bark"] = config
+                    write_json(desk.settings_path, settings)
+                    key_file = desk.secrets_dir / "alert-bark.device-key"
+                    if has_key:
+                        key_file.write_text("legacy-fixture-key\n")
+                    last_file = desk.state_dir / "alert-bark-last.json"
+                    write_json(last_file, {"at": now(), "ok": True, "why": "sent"})
+                    before = desk.settings_path.read_bytes()
+                    reply = public_settings(desk)
+                    saved = read_json(desk.settings_path, {})
+                    removed = [e for e in history.read(desk)["entries"] if e["path"].startswith("alert_bark")]
+                    if has_key:
+                        self.assertEqual(desk.settings_path.read_bytes(), before)
+                        self.assertEqual(key_file.read_text(), "legacy-fixture-key\n")
+                        self.assertTrue(last_file.exists())
+                        self.assertIn(alert_push.LEGACY_PROBLEM, reply["problems"])
+                        self.assertTrue(alert_push.migration_problem(desk))
+                        self.assertEqual(removed, [])
+                    else:
+                        self.assertEqual(saved, {k: v for k, v in settings.items() if k != "alert_bark"})
+                        self.assertFalse(last_file.exists())
+                        self.assertEqual(reply["problems"], [])
+                        self.assertFalse(alert_push.migration_problem(desk))
+                        self.assertTrue(removed)
+                        for change in removed:
+                            self.assertTrue(change["new_missing"])
+                            self.assertEqual(change["by"], "hansa")
+                            self.assertIn("moved Bark", change["command"])
+                        revision = desk.settings_rev()
+                        public_settings(desk)
+                        self.assertEqual(desk.settings_rev(), revision)
+                        self.assertEqual([e for e in history.read(desk)["entries"]
+                                          if e["path"].startswith("alert_bark")], removed)
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        main(["--desk", str(desk.root), "status"])
+                    self.assertEqual(alert_push.LEGACY_PROBLEM in out.getvalue(), has_key)
+
+    def test_bark_save_records_removal_of_legacy_setting(self):
+        from hansa import history
+        settings = self.desk.settings()
+        config = {"on": True, "server": "http://bark.example"}
+        settings["alert_bark"] = config
+        write_json(self.desk.settings_path, settings)
+        legacy = self.desk.secrets_dir / "alert-bark.device-key"
+        legacy.write_text("legacy-fixture-key\n")
+        self.assertTrue(self.save([{"address": "https://api.day.app/replacement-fixture-key"}])["ok"])
+        self.assertNotIn("alert_bark", read_json(self.desk.settings_path, {}))
+        self.assertFalse(legacy.exists())
+        removed = [e for e in history.read(self.desk)["entries"] if e["path"].startswith("alert_bark.")]
+        self.assertEqual({e["path"]: e["old"] for e in removed},
+                         {"alert_bark.on": True, "alert_bark.server": "http://bark.example"})
+        for change in removed:
+            self.assertEqual(change["by"], "principal")
+            self.assertTrue(change["new_missing"])
 
     def test_whole_bark_addresses_and_bare_key(self):
         for index, (address, service, saved) in enumerate((
