@@ -26,25 +26,44 @@ def _remove_legacy_files(desk):
     (desk.state_dir / "alert-bark-last.json").unlink(missing_ok=True)
 
 
+def _bad_entry(entry, ids) -> bool:
+    return (not isinstance(entry, dict) or set(entry) - {"id", "service", "on", "name"}
+            or not isinstance(entry.get("id"), str) or not ID.fullmatch(entry["id"])
+            or entry["id"] in ids or not isinstance(entry.get("service"), str)
+            or entry["service"] not in alert_services.SERVICES or type(entry.get("on")) is not bool
+            or not isinstance(entry.get("name", ""), str) or len(entry.get("name", "")) > 100
+            or any(ord(c) < 32 or ord(c) == 127 for c in entry.get("name", "")))
+
+
 def problems(value) -> list[str]:
     if not isinstance(value, list) or len(value) > MAX_ENTRIES:
         return ["alert_push must be a list of at most 10 push addresses"]
     ids = set()
     for entry in value:
-        if (not isinstance(entry, dict) or set(entry) - {"id", "service", "on", "name"}
-                or not isinstance(entry.get("id"), str) or not ID.fullmatch(entry["id"])
-                or entry["id"] in ids or not isinstance(entry.get("service"), str)
-                or entry["service"] not in alert_services.SERVICES or type(entry.get("on")) is not bool
-                or not isinstance(entry.get("name", ""), str) or len(entry.get("name", "")) > 100
-                or any(ord(c) < 32 or ord(c) == 127 for c in entry.get("name", ""))):
+        if _bad_entry(entry, ids):
             return ["alert_push entries need unique ids, a known service, on (boolean), and an optional name; no secrets"]
         ids.add(entry["id"])
     return []
 
 
 def entries(settings) -> list[dict]:
+    """The entries this hansa can read: one it cannot leaves the others working.
+
+    A list that is not a list of at most ten entries has nothing to select from.
+    An entry written by hand or by a newer hansa with a service this one does not
+    know is left out alone, so the readable entries still hide, send and show.
+    """
     value = settings.get("alert_push", [])
-    return value if not problems(value) else []
+    if not isinstance(value, list) or len(value) > MAX_ENTRIES:
+        return []
+    ids, readable, left_out = set(), [], False
+    for entry in value:
+        if _bad_entry(entry, ids):
+            left_out = True
+            continue
+        ids.add(entry["id"])
+        readable.append(entry)
+    return readable if left_out else value
 
 
 def private_metadata_problems(desk, value, private=()) -> list[str]:
@@ -85,10 +104,45 @@ def _write_secret(desk, id, value, extra=False):
     write_text(_file(desk, id, extra), value + "\n", mode=0o600, follow_symlinks=False)
 
 
+def _service_of_address(value, recorded):
+    """The service whose address this is, and the address to take its parts from.
+
+    A saved address is exactly what its recorded service's normalize returns.
+    A service switch cut short after the settings write leaves the previous
+    service's address behind, so the recorded service no longer accepts it:
+    take the parts of the service the value still is an address of. The generic
+    JSON webhook accepts every address and has no part secret of its own, so it
+    never claims one here; a switch to it that was cut short still hides the
+    previous service's parts. Failing that, a file the recorded service can
+    still normalize keeps its parts from that normalized form. Any other file
+    keeps its whole value only.
+    """
+    if recorded.id != "json":
+        try:
+            normalized = recorded.normalize(value)
+        except ValueError:
+            pass
+        else:
+            if normalized == value:
+                return recorded, normalized
+    other = alert_services.other_address(value, recorded)
+    if other is not None:
+        try:
+            return other, other.normalize(value)
+        except ValueError:
+            pass
+    try:
+        return recorded, recorded.normalize(value)
+    except ValueError:
+        return None, None
+
+
 def keys(desk) -> dict:
     """Use the saved service, retaining values of at least eight characters.
 
-    Orphans keep their whole value without guessing another service's parts.
+    An address left behind by a cut-short service switch has its parts taken
+    from the service it still is. Orphans keep their whole value without
+    guessing another service's parts.
     """
     try:
         saved = entries(desk._saved_settings())  # settings() can migrate and redact events here
@@ -106,8 +160,9 @@ def keys(desk) -> dict:
         out[path.name] = value
         service = services.get(path)
         if service is not None:
+            service, normalized = _service_of_address(value, service)
+        if service is not None:
             try:
-                normalized = service.normalize(value)
                 for n, secret in enumerate(service.secrets(normalized)):
                     if len(secret) >= 8:
                         out[f"{path.name}-{service.id}-{n}"] = secret

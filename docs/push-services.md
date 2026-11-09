@@ -34,7 +34,17 @@ Install Bark and copy the address on its home screen, such as
 exactly one HTTPS address also works. Hansa keeps only the server and device
 key: example titles, bodies and query options such as `group` and `ttl` are
 discarded. A bare device key uses `api.day.app`. Choose **Bark** explicitly for
-a different server. There is no extra secret.
+a different server. Hansa refuses a save and names the service to choose
+instead when an address belongs to another service and is not also Bark's own
+form: a Gotify `/message?token=…` or PushDeer `/message/push?pushkey=…`
+address, a Server酱 `SCT…`/`sctp<uid>t…` key or `.send` address, an ntfy address
+on `ntfy.sh` that is not exactly `https://ntfy.sh/TOPIC`, and Telegram
+`sendMessage`, WeCom, DingTalk, Feishu/Lark, Discord and Slack endpoint
+addresses. A plain `https://HOST/KEY` address (lowercase host, one key path, no
+query or fragment) is Bark's own form, so `https://ntfy.sh/TOPIC`,
+`https://api2.pushdeer.com/KEY` and `https://sctapi.ftqq.com/KEY` are accepted
+as Bark; so are a saved Bark address and a self-hosted Bark server's address.
+There is no extra secret.
 
 The device key is secret: someone with it can send to your device. Hansa sends
 the key, desk name and alert text to that Bark server's `/push` address, and the

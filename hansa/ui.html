@@ -816,6 +816,7 @@ Object.assign(T, ZH ? {
   pushLast:(what, t) => `上次推送：${what}（${t}）`, pushLastNone:"还没有推送过。",
   pushChooseService:"无法识别这个地址，请选择推送服务，然后再次保存设置。",
   pushBadAddress:"这个推送服务不接受此地址，请查看服务的提示，重新粘贴完整地址。",
+  pushForeign:service => `这个地址像是 ${service} 的地址，请选择 ${service} 作为推送服务。`,
   pushLegacyProblem:"Bark 已保存的密钥无法迁移，请在本页的“提醒”设置中重新粘贴 Bark 地址。",
   pushPrivacy:"工作台名称和提醒正文会发送到每个地址的推送服务；手机应用还会转交给苹果或谷歌的推送服务。这些服务能读到内容。一次性发布码从不发送到推送地址；发布要在这个网页上回答。",
   pushLimit:"最多可以保存 10 个推送地址。请先删除一个，再添加新地址。", pushUnknown:"推送没有发出，请稍后再试。",
@@ -861,6 +862,7 @@ Object.assign(T, ZH ? {
   pushLast:(what, t) => `Last push: ${what} (${t})`, pushLastNone:"No push yet.",
   pushChooseService:"This address was not recognized. Choose a push service, then save settings again.",
   pushBadAddress:"This push service does not accept the address. Check its hint and paste the whole address again.",
+  pushForeign:service => `This address looks like a ${service} address. Choose ${service} as its push service.`,
   pushLegacyProblem:"Bark's saved key could not be moved. Paste the Bark address again on this page under Alerts.",
   pushPrivacy:"The desk's name and alert texts go to each address's service; for phone apps, on to Apple's or Google's push service too. Those services can read the text. One-time release codes never go to a push address; releases are answered on this page.",
   pushLimit:"You can save up to 10 push addresses. Remove one before adding another.", pushUnknown:"The push was not sent. Try again later.",
@@ -1788,12 +1790,23 @@ function pushChanges() {
   return changes;
 }
 const pushDraftDirty = () => pushChanges().length > 0;
-const pushProblem = problem => ({
-  "choose the push service for this address":T.pushChooseService,
-  "invalid push address":T.pushBadAddress,
-  "this push service does not accept the address; check its hint and paste the whole address again":T.pushBadAddress,
-  "Bark's saved key could not be moved; the principal should paste the Bark address again on the page (Settings, Alerts)":T.pushLegacyProblem
-}[problem] || problem);
+const pushForeignProblem = problem =>
+  /^This address looks like a .+ address\. Choose .+ as its push service\.$/.test(problem)
+  || /^这个地址像是 .+ 的地址，请选择 .+ 作为推送服务。$/.test(problem);
+const pushProblem = problem => {
+  // The refusal names the service in English; show the page's name for it.
+  const foreign = /^this address looks like a (.+) address; choose .+ as the push service$/.exec(problem);
+  if (foreign) {
+    const known = PUSH_SERVICES.find(s => s.name.en === foreign[1]);
+    return T.pushForeign(known ? (known.name[ZH ? "zh" : "en"] || known.name.en) : foreign[1]);
+  }
+  return {
+    "choose the push service for this address":T.pushChooseService,
+    "invalid push address":T.pushBadAddress,
+    "this push service does not accept the address; check its hint and paste the whole address again":T.pushBadAddress,
+    "Bark's saved key could not be moved; the principal should paste the Bark address again on the page (Settings, Alerts)":T.pushLegacyProblem
+  }[problem] || problem;
+};
 // Drafts live only in this page's memory. In particular, keys never enter browser storage or settings JSON.
 let settingsBaseline = null, settingsLoading = null, settingsSaving = false, settingsGroup = "providers", settingsEpoch = 0;
 let settingsMessage = "", settingsProblems = [], KEY_DRAFTS = {}, newProviderName = "", newPriceName = "";
@@ -2067,7 +2080,8 @@ function problemTarget(problem) {
   if (record) return record;
   const group = /^(provider |at least one provider)/.test(problem) ? "providers"
     : /^(coordinator_alert|alert_language|the alert command|alert_push|push |a push |the extra push |this push )/.test(problem)
-      || [T.pushChooseService, T.pushBadAddress, T.pushLegacyProblem].includes(problem) ? "alerts"
+      || [T.pushChooseService, T.pushBadAddress, T.pushLegacyProblem].includes(problem)
+      || pushForeignProblem(problem) ? "alerts"
     : /^desk_name/.test(problem) ? "lanes" : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
     : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
     : /^(release|the releases without asking|the words no release)/.test(problem) ? "releases" : /^price/.test(problem) ? "prices" : /^lane/.test(problem) ? "lanes" : "";

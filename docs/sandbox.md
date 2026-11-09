@@ -482,8 +482,9 @@ verifiers are told to write such a line to a script file in their temporary fold
 
 ## Paths hansa refuses
 
-A repository for a lane needs a first commit: `hansa init` and `hansa lane add` refuse one without, in one
-line. They also refuse a desk or repository whose path holds a `)` followed later by a space or a comma
+`hansa init` and `hansa lane add --repo` make an empty first commit for a new or empty project; if it
+already has files or staged entries, commit those yourself first. They also refuse a desk or repository
+whose path holds a `)` followed later by a space or a comma
 (`Work (2024) x/desk`): Claude Code would split the rules hansa writes for it, and a rule meant to close a
 folder would leave it open. No run starts while such a rule would come out. Nor may the desk, the home folder
 or a lane's repository or worktree have one of `[ ] * ? \` in its path (or where its links lead): the

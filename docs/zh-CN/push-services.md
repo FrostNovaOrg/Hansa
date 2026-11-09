@@ -12,7 +12,7 @@ hansa 发送的是工作台名称和提醒正文，措辞由你保存的提醒�
 
 ## Bark
 
-安装 Bark，复制它首页上显示的地址，例如 `https://api.day.app/YOUR_DEVICE_KEY`。现成的 curl 命令也可以，只要其中恰好包含一个 HTTPS 地址。hansa 只保留服务器和设备密钥：命令里的示例标题、正文以及 `group`、`ttl` 之类的查询选项都会被丢弃。只给设备密钥时，使用 `api.day.app`。要换别的服务器，请手动选择 **Bark**。没有额外密钥。
+安装 Bark，复制它首页上显示的地址，例如 `https://api.day.app/YOUR_DEVICE_KEY`。现成的 curl 命令也可以，只要其中恰好包含一个 HTTPS 地址。hansa 只保留服务器和设备密钥：命令里的示例标题、正文以及 `group`、`ttl` 之类的查询选项都会被丢弃。只给设备密钥时，使用 `api.day.app`。要换别的服务器，请手动选择 **Bark**。如果地址属于别的服务，又不是 Bark 自己的形式，hansa 会拒绝保存并指出该选哪个服务：任意主机上的 Gotify `/message?token=…` 或 PushDeer `/message/push?pushkey=…` 地址，Server酱 的 `SCT…`/`sctp<uid>t…` 密钥或 `.send` 地址，`ntfy.sh` 上不是恰好 `https://ntfy.sh/TOPIC` 的 ntfy 地址，以及 Telegram 的 `sendMessage`、企业微信、钉钉、飞书/Lark、Discord 和 Slack 端点地址。小写主机、只有一段密钥路径、不带查询或片段的 `https://HOST/KEY` 地址是 Bark 自己的形式，所以 `https://ntfy.sh/TOPIC`、`https://api2.pushdeer.com/KEY` 和 `https://sctapi.ftqq.com/KEY` 会当作 Bark 接受；已保存的 Bark 地址和自建 Bark 服务器的地址也一样。没有额外密钥。
 
 设备密钥是保密的：拿到它的人可以往你的设备发推送。hansa 把密钥、工作台名称和提醒正文发送到那台 Bark 服务器的 `/push` 地址，再由服务器通过苹果的推送服务发出通知。那台服务器和苹果都能读到这些内容。
 
