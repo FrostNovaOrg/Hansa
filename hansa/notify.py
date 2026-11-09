@@ -49,7 +49,7 @@ import uuid
 from pathlib import Path
 
 from . import account, disk, session_value, without_session
-from .desk import Desk, event_record, lane_targets, now, read_json, write_json
+from .desk import Desk, event_record, lane_targets, mkdir_private, now, read_json, write_json
 from .run import alive, claude_bin, proc_start, rethink_text, server_state, srt_needed, srt_record
 
 LIVE_SECONDS = 30  # a follower not seen for this long is not live (it polls every second or two)
@@ -492,7 +492,7 @@ def _proc_gone(f) -> bool:
 
 
 def _write_record(desk: Desk, key: str, rec: dict) -> None:
-    register_dir(desk).mkdir(parents=True, exist_ok=True)
+    mkdir_private(register_dir(desk))
     write_json(register_dir(desk) / f"{key}.json", rec)
 
 
@@ -627,7 +627,7 @@ def private_dir(desk: Desk) -> Path:
         d = Path.home() / ".hansa" / "followers" / hashlib.sha1(str(desk.root).encode()).hexdigest()[:12]
     else:
         d = register_dir(desk)
-    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    mkdir_private(d)
     return d
 
 

@@ -518,7 +518,7 @@ def try_srt(desk: Desk, settings_file, tmp: str, cwd) -> str:
                 rec["said"] = str(e)[:300]
     else:
         rec["said"] = SRT_MISSING
-    desk.state_dir.mkdir(exist_ok=True)
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)
     write_json(desk.state_dir / "srt.json", rec)
     if not rec["ran"]:
         if not path:
@@ -848,7 +848,7 @@ def _hold_lane(desk: Desk, lane_name: str, entry: dict) -> bool:
         new = [lane_name, entry["why"]] not in told
         held = sandbox_held(desk)
         held.setdefault(lane_name, {})["work"] = entry
-        desk.state_dir.mkdir(exist_ok=True)
+        desk.state_dir.mkdir(mode=0o700, exist_ok=True)
         write_json(desk.state_dir / SANDBOX_HELD, {"lanes": held, "told": [*told, [lane_name, entry["why"]]] if new else told})
     return new
 
@@ -1838,7 +1838,7 @@ def check_git_settings(desk: Desk, wt: Path, line: str) -> None:
         with desk.lock():
             seen = read_json(desk.state_dir / "git-settings.json", {}) or {}
             first = seen.setdefault(str(common), {"worktree_config": on, "config_worktree": cw})
-            desk.state_dir.mkdir(exist_ok=True)
+            desk.state_dir.mkdir(mode=0o700, exist_ok=True)
             write_json(desk.state_dir / "git-settings.json", seen)
     if on and not first.get("worktree_config"):
         raise GitFolderChanged(wt, common / "config", "now turns extensions.worktreeConfig on, which hansa did not "
@@ -2000,7 +2000,7 @@ def _remember_git_file(desk: Desk, wt: Path, line) -> None:
             return
         else:
             del known[str(wt)]
-        desk.state_dir.mkdir(exist_ok=True)
+        desk.state_dir.mkdir(mode=0o700, exist_ok=True)
         write_json(desk.state_dir / "worktrees.json", known)
 
 
@@ -6406,7 +6406,7 @@ class Dispatcher:
         self.read = None  # what another process changed since the last round is read again
         s = desk.settings()
         with serve_step():
-            desk.state_dir.mkdir(exist_ok=True)
+            desk.state_dir.mkdir(mode=0o700, exist_ok=True)
             beat(desk)
         with serve_step():
             if not self.ends_recovered:
@@ -6639,7 +6639,7 @@ def _server_clock():
 
 def beat(desk: Desk) -> None:
     """hansa serve got through a round, or a step of one: the heartbeat server_state reads."""
-    desk.state_dir.mkdir(exist_ok=True)
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)
     record = {"at": now()}
     clock = _server_clock()
     if clock is not None:

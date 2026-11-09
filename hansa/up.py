@@ -254,7 +254,7 @@ def server_up(desk: Desk) -> bool:
         print("No recorded server start; using the defaults and this shell's launch settings.")
     cmd = serve_command(desk, rec)
     env = clean_env(desk, rec.get("env", {}) if rec else os.environ)
-    desk.state_dir.mkdir(exist_ok=True)
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)
     log = rotate_log(desk)
     watch, child = "", None
     try:
@@ -424,7 +424,7 @@ def record_turn(desk: Desk, pid: int, given: dict) -> None:
         since = old.get("failed_since") if fails > 0 and isinstance(old.get("failed_since"), (int, float)) else at
         rec = {"at": at, "ok": False, "error": given.get("error") or "unknown", "fails": max(fails, 0) + 1,
                "failed_since": since, "last_ok": last_ok}
-    desk.state_dir.mkdir(exist_ok=True)
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)
     turns_dir(desk).mkdir(exist_ok=True)
     write_json(path, rec)
 
@@ -551,7 +551,7 @@ def _keep(desk: Desk, rec: dict, why: str = "", unread: bool = False) -> str:
         return why
     rec = {"kind": "unrecorded", "why": why, "session": rec["session"]} if why else rec
     try:
-        desk.state_dir.mkdir(exist_ok=True)
+        desk.state_dir.mkdir(mode=0o700, exist_ok=True)
         write_json(desk.state_dir / COORDINATOR_START, {**rec, "at": now()})
     except OSError as e:
         return why or f"{COORDINATOR_START} could not be written: {e}"

@@ -261,7 +261,7 @@ def get(desk: Desk, rid) -> dict | None:
 
 
 def _write(desk: Desk, rs: list) -> None:
-    desk.state_dir.mkdir(exist_ok=True)
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)
     write_json(releases_file(desk), rs)
     desk.writes += 1
 

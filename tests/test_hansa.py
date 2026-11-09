@@ -808,6 +808,20 @@ def root_above(folder):
 
 
 @contextlib.contextmanager
+def unreadable_proc_root():
+    """An ordinary account's unreadable /proc/1/root, even in a bench PID namespace whose PID 1 is its own."""
+    def blocked(read):
+        def look(path, *args, **kwargs):
+            if str(path) == "/proc/1/root" or str(path).startswith("/proc/1/root/"):
+                raise PermissionError(13, "Permission denied", str(path))
+            return read(path, *args, **kwargs)
+        return look
+    with unittest.mock.patch("os.stat", blocked(os.stat)), \
+            unittest.mock.patch("os.path.realpath", blocked(os.path.realpath)):
+        yield
+
+
+@contextlib.contextmanager
 def partial_write(path, after=None):
     """Really write a prefix, then raise ENOSPC, through either a Path or a file descriptor."""
     path = Path(path)
@@ -7112,6 +7126,67 @@ def save():'''))
                     lane, said = self.start_empty_project(mode, repo, f"{mode}-missing", "--base", "start/here")
                     self.assert_empty_first_commit(repo, lane, said, "start/here")
 
+    def test_init_beside_a_new_project_makes_private_parents_under_a_group_umask(self):
+        old = os.umask(0o002)
+        try:
+            shop = self.tmp / "shop"
+            repo = shop / "repo"
+            root = shop / "desk"
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["init", str(root), "--repo", str(repo)])
+            desk = Desk(root)
+            with root_above(self.tmp), unittest.mock.patch.object(plugin, "version", return_value="2.1.306"):
+                plan = plugin.plan(desk, "claude")
+                self.assertEqual(plugin.folder_problem(desk.mod_dir), "")
+                self.assertTrue(plan["on"], plan)
+            for folder in (shop, repo, root):
+                self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700, folder)
+            self.assertTrue(desk.settings_path.is_file())
+            self.assertEqual(hansa.run.git("log", "-1", "--format=%s", cwd=repo), "Initial commit")
+        finally:
+            os.umask(old)
+
+    def test_init_inside_a_new_project_makes_private_parents_under_a_group_umask(self):
+        old = os.umask(0o002)
+        try:
+            repo = self.tmp / "p"
+            root = repo / "desk"
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["init", str(root), "--repo", str(repo)])
+            desk = Desk(root)
+            with root_above(self.tmp), unittest.mock.patch.object(plugin, "version", return_value="2.1.306"):
+                plan = plugin.plan(desk, "claude")
+                self.assertEqual(plugin.folder_problem(desk.mod_dir), "")
+                self.assertTrue(plan["on"], plan)
+            for folder in (repo, root):
+                self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700, folder)
+            self.assertTrue(desk.settings_path.is_file())
+            self.assertEqual(hansa.run.git("log", "-1", "--format=%s", cwd=repo), "Initial commit")
+        finally:
+            os.umask(old)
+
+    def test_init_and_lane_add_keep_existing_project_modes_and_make_missing_folders_private(self):
+        old = os.umask(0o002)
+        try:
+            for command in ("init", "add"):
+                for existing in (False, True):
+                    with self.subTest(command=command, existing=existing):
+                        name = f"{command}-private-{int(existing)}"
+                        parent = self.tmp / name
+                        parent.mkdir()
+                        parent.chmod(0o775)
+                        repo = parent / "parents" / "project"
+                        if existing:
+                            repo.mkdir(parents=True)
+                            repo.chmod(0o755)
+                        lane, said = self.start_empty_project(command, repo, name, "--base", "main")
+                        self.assert_empty_first_commit(repo, lane, said, "main")
+                        self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o775)
+                        self.assertEqual(stat.S_IMODE(repo.parent.stat().st_mode), 0o775 if existing else 0o700)
+                        self.assertEqual(stat.S_IMODE(repo.stat().st_mode), 0o755 if existing else 0o700)
+        finally:
+            os.umask(old)
+
     def test_init_and_lane_add_refuse_missing_paths_inside_a_checkout(self):
         unborn = self.tmp / "unborn-parent"
         unborn.mkdir()
@@ -9357,6 +9432,7 @@ def save():'''))
         claimed = time.time()  # as a server claims a task before it starts the worker
         orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", token], start_new_session=True)
         self.addCleanup(lambda: orphan.poll() is None and (orphan.kill(), orphan.wait()))
+        self.soon(lambda: orphan.pid in hansa.run.pids_with_arg(token))  # the child has exec'd, even under load
         tid = self.desk.new_task("Add hello.txt")
         self.desk.update(tid, state="running", phase="starting", lane="a", provider="claude", started=claimed,
                          pid=None, launch=token, **fields)
@@ -20018,10 +20094,11 @@ def save():'''))
         (self.tmp / "ldev").symlink_to("/dev")
         bad[str(self.tmp / "ldev")] = own
         s = self.desk.settings()
-        for path, why in bad.items():
-            s["lanes"]["a"]["write"] = [path]
-            told = validate(s, self.desk.root)
-            self.assertTrue(len(told) == 1 and f"write cannot include {path}: " in told[0] and why in told[0], (path, told))
+        with unreadable_proc_root():
+            for path, why in bad.items():
+                s["lanes"]["a"]["write"] = [path]
+                told = validate(s, self.desk.root)
+                self.assertTrue(len(told) == 1 and f"write cannot include {path}: " in told[0] and why in told[0], (path, told))
         self.assertEqual(write_problems([str(good), "/opt/include", "/var/cache/x"]), [])
         self.assertIn("it would open /usr, where programs are installed", write_problems(["/usr/local/include/x"])[0])
 
@@ -20038,7 +20115,7 @@ def save():'''))
                 raise PermissionError(13, "Permission denied", str(p))
             return real(p, *a, **k)
         cannot = "hansa cannot follow its links to see where it leads"
-        with unittest.mock.patch("os.path.realpath", realpath):
+        with unittest.mock.patch("os.path.realpath", realpath), unreadable_proc_root():
             self.assertIn("write cannot include /proc/1/root: it is /proc or inside it",  # named as given, no crash
                           write_problems(["/proc/1/root"])[0])
             self.assertEqual(write_problems([str(shut / "cache")]), [f"write cannot include {shut / 'cache'}: {cannot} "
@@ -20406,6 +20483,137 @@ def save():'''))
 
     def mod_record(self):
         return json.loads((self.desk.mod_dir / "start.json").read_text())
+
+    def test_init_makes_each_new_desk_folder_private_under_either_umask(self):
+        for mask in (0o002, 0o022):
+            with self.subTest(umask=oct(mask)):
+                old = os.umask(mask)
+                try:
+                    desk = init_desk(self.tmp / f"new-{mask}" / "desk", str(self.repo), "a")
+                    folders = [desk.root.parent, desk.root, *(p for p in desk.root.rglob("*") if p.is_dir())]
+                    for folder in folders:
+                        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700, folder)
+                    with unittest.mock.patch.object(self, "desk", desk):
+                        argv, _, said = self.start_with_mod()
+                    self.assertIn("--plugin-dir", argv, said)
+                finally:
+                    os.umask(old)
+
+    def test_init_warns_and_preserves_existing_folder_modes_under_a_group_umask(self):
+        old = os.umask(0o002)
+        try:
+            for mode in (0o775, 0o777, 0o755):
+                with self.subTest(mode=oct(mode)):
+                    root = self.tmp / f"existing desk-{mode}"
+                    desk = Desk(root)
+                    folders = (root, desk.tasks_dir, desk.lanes_dir, desk.lanes_dir / "a", desk.state_dir,
+                               desk.notes_dir, desk.secrets_dir, root / ".claude")
+                    for folder in folders:
+                        folder.mkdir(parents=True, exist_ok=True)
+                        folder.chmod(mode)
+                    said, err = io.StringIO(), io.StringIO()
+                    with contextlib.redirect_stdout(said), contextlib.redirect_stderr(err):
+                        main(["init", str(root), "--repo", str(self.repo)])
+                    self.assertIn("desk ready", said.getvalue())
+                    self.assertTrue(desk.settings_path.is_file())
+                    for folder in folders:
+                        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), mode, folder)
+                    if mode & 0o022:
+                        self.assertIn("warning:", err.getvalue())
+                        self.assertIn(f"others may write in {desk.root}", err.getvalue())
+                        self.assertIn(f"chmod go-w {shlex.quote(str(desk.root))}", err.getvalue())
+                    else:
+                        self.assertNotIn("chmod go-w", err.getvalue())
+        finally:
+            os.umask(old)
+
+    def test_mod_makes_every_missing_parent_private_even_when_a_start_was_recorded_first(self):
+        old = os.umask(0o002)
+        try:
+            for record_first in (False, True):
+                with self.subTest(record_first=record_first), root_above(self.tmp):
+                    desk = Desk(self.tmp / f"mod-{record_first}")
+                    desk.root.mkdir(mode=0o700)
+                    if record_first:
+                        plugin.record_start(desk, {})
+                    with unittest.mock.patch.object(plugin, "version", return_value="2.1.306"):
+                        plan = plugin.plan(desk, "claude")
+                    self.assertTrue(plan["on"], plan)
+                    for folder in (desk.state_dir, *(p for p in desk.state_dir.rglob("*") if p.is_dir())):
+                        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700, folder)
+        finally:
+            os.umask(old)
+
+    def test_desk_lock_recreates_private_state_for_the_mod_under_a_group_umask(self):
+        old = os.umask(0o002)
+        try:
+            shutil.rmtree(self.desk.state_dir)
+            with self.desk.lock():
+                self.assertEqual(stat.S_IMODE(self.desk.state_dir.stat().st_mode), 0o700)
+            argv, _, said = self.start_with_mod()
+            self.assertIn("--plugin-dir", argv, said)
+        finally:
+            os.umask(old)
+
+    def test_mod_copy_makes_each_nested_folder_private_under_a_group_umask(self):
+        old = os.umask(0o002)
+        try:
+            source, dest = self.tmp / "source", self.tmp / "copies"
+            nested = source / "hooks" / "nested" / "deeper"
+            nested.mkdir(parents=True)
+            (nested / "code.js").write_text("// nested mod file\n")
+            dest.mkdir(mode=0o700)
+            copy, left = plugin.copy(dest, source)
+            self.assertEqual(left, [])
+            self.assertEqual((copy / "hooks/nested/deeper/code.js").read_text(), "// nested mod file\n")
+            for folder in (copy, *(p for p in copy.rglob("*") if p.is_dir())):
+                self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700, folder)
+        finally:
+            os.umask(old)
+
+    def test_mod_for_another_accounts_desk_makes_private_parents_even_after_the_follower(self):
+        old = os.umask(0o002)
+        try:
+            for follower_first in (False, True):
+                with self.subTest(follower_first=follower_first):
+                    home = self.tmp / f"home-{follower_first}"
+                    home.mkdir(mode=0o755)
+                    home.chmod(0o755)
+                    with root_above(self.tmp), unittest.mock.patch.object(Path, "home", return_value=home), \
+                            unittest.mock.patch.object(account, "desk_account", return_value="desk-owner"), \
+                            unittest.mock.patch.object(plugin, "version", return_value="2.1.306"):
+                        if follower_first:
+                            notify.private_dir(self.desk)
+                        plan = plugin.plan(self.desk, "claude")
+                    self.assertTrue(plan["on"], plan)
+                    private = home / ".hansa"
+                    for folder in (private, *(p for p in private.rglob("*") if p.is_dir())):
+                        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700, folder)
+                    self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o755)
+        finally:
+            os.umask(old)
+
+    def test_mod_refusal_preserves_modes_and_gives_the_owner_a_quoted_fix_under_a_group_umask(self):
+        old = os.umask(0o002)
+        try:
+            desk = init_desk(self.tmp / "old desk")
+            desk.root.chmod(0o775)
+            with unittest.mock.patch.object(self, "desk", desk):
+                argv, _, said = self.start_with_mod()
+                self.assertNotIn("--plugin-dir", argv)
+                fix = f"chmod go-w {shlex.quote(str(desk.root))}"
+                self.assertIn(f"others may write in {desk.root}", said)
+                self.assertIn(fix, said)
+                self.assertIn(fix, self.mod_line())
+            self.assertEqual(stat.S_IMODE(desk.root.stat().st_mode), 0o775)
+            # Root's folder is trusted as an owner, but this account cannot repair its mode.
+            with root_above(self.tmp), unittest.mock.patch.object(account, "uid", return_value=4242), \
+                    unittest.mock.patch.object(account, "owner", return_value=0):
+                why = plugin.folder_problem(desk.root)
+            self.assertIn(f"others may write in {desk.root}", why)
+            self.assertNotIn("chmod", why)
+        finally:
+            os.umask(old)
 
     MOD_WORDS = ("coordinator's compaction, the desk's settings: compact when idle at 400,000 tokens (the mod reads it); "
                  "compact while working at 550,000 tokens (hansa passes it as --autocompact at a start)")
@@ -20798,7 +21006,7 @@ def save():'''))
         self.assertIn(f"hansa could not record this start in {self.desk.mod_dir / 'start.json'}", said)
         self.assertIn(self.MOD_UNKNOWN, self.mod_line())
         self.desk.mod_dir.unlink()
-        self.desk.mod_dir.mkdir()
+        self.desk.mod_dir.mkdir(mode=0o700)  # a safe folder, before testing an unwritable one below
         self.start_with_mod()
         self.desk.mod_dir.chmod(0o500)  # a folder hansa cannot write in: no copy, no record
         self.addCleanup(self.desk.mod_dir.chmod, 0o700)
@@ -20855,9 +21063,10 @@ def save():'''))
         argv, _, said = self.start_with_mod()
         self.assertNotIn("--plugin-dir", argv)
         self.assertEqual(argv[argv.index("--autocompact") + 1], "550000")  # Claude Code is new enough
+        fix = f"; run chmod go-w {shlex.quote(str(self.desk.mod_dir))}"
         self.assertIn("hansa did not load the coordinator's mod, because its copy would be in a folder another account "
-                      f"could change: others may write in {self.desk.mod_dir}. More: hansa help inbox", said)
-        self.assertIn(f"others may write in {self.desk.mod_dir}; --autocompact options of its command line: --autocompact "
+                      f"could change: others may write in {self.desk.mod_dir}{fix}. More: hansa help inbox", said)
+        self.assertIn(f"others may write in {self.desk.mod_dir}{fix}; --autocompact options of its command line: --autocompact "
                       "550000.", self.mod_line())
         self.desk.mod_dir.chmod(0o700)
         theirs = lambda p: 4242 if Path(p) == self.desk.mod_dir else os.getuid()  # noqa: E731
@@ -20865,6 +21074,7 @@ def save():'''))
             argv, _, said = self.start_with_mod()
         self.assertNotIn("--plugin-dir", argv)
         self.assertIn(f"{self.desk.mod_dir} belongs to {account.name_of(4242)}", said)
+        self.assertNotIn("chmod go-w", said)
         # earlier copies others could change (the folder, a file in it), and one by an older hansa: none is reused,
         # each is removed, and the new one is hansa's own code, closed to others
         code = Path(__file__).resolve().parent.parent / "hansa" / "mod" / "hooks" / "register.js"
@@ -21417,7 +21627,7 @@ def save():'''))
         self.as_root()
         log, _ = self.stand_in_runuser()
         root_home = self.tmp / "root-home"
-        root_home.mkdir()
+        root_home.mkdir(mode=0o700)  # root's existing home must be safe; hansa leaves its mode alone
         desk_side = (str(self.desk.root), str(self.repo.resolve()))  # the account's; everything else stands for root's
 
         def start(version="2.1.306", *extra):
@@ -21578,6 +21788,32 @@ def save():'''))
                 self.assertEqual(public_settings(self.desk)["settings"]["coordinator"]["effort"], effort)
                 self.assertEqual(cli.coordinator_desk(self.desk, os.getuid())["effort"], effort)
                 self.assertEqual(self.desk.settings_path.read_bytes(), before)
+
+    def test_init_for_makes_only_the_new_desk_private_under_a_group_umask(self):
+        self.as_root()
+        me = account.name_of(os.getuid())
+        old = os.umask(0o002)
+        try:
+            for existing in (False, True):
+                with self.subTest(existing=existing):
+                    parent = self.tmp / f"account-parent-{existing}"
+                    parent.mkdir()
+                    root = parent / "desk"
+                    if existing:
+                        root.mkdir()
+                    given = []
+                    with unittest.mock.patch("os.chown", lambda p, *a, **k: given.append(
+                            stat.S_IMODE(p.stat().st_mode))), \
+                            unittest.mock.patch.object(account, "switch", side_effect=SystemExit(0)), \
+                            self.assertRaises(SystemExit) as done:
+                        main(["init", str(root), "--user", me])
+                    self.assertEqual(done.exception.code, 0)
+                    self.assertEqual(given, [0o775 if existing else 0o700])
+                    self.assertEqual(stat.S_IMODE(root.stat().st_mode), given[0])
+                    # The account must be able to traverse root's enclosing folder after handoff.
+                    self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o775)
+        finally:
+            os.umask(old)
 
     def test_init_for_an_account_lists_the_desk_as_that_account(self):
         self.as_root()
@@ -30892,7 +31128,8 @@ def save():'''))
         path.write_bytes(raw)
         listed = notes.page_list(self.desk)
         self.assertNotIn(key, json.dumps(listed))
-        item = notes.page_note(self.desk, "", listed[0]["id"])
+        entry = next(item for item in listed if item["name"] == "[key of mimo].md")
+        item = notes.page_note(self.desk, "", entry["id"])
         self.assertNotIn(key, json.dumps(item))
         self.assertIn("[key of mimo]", item["text"])
         self.assertEqual(path.read_bytes(), raw)
@@ -34261,6 +34498,8 @@ def save():'''))
         from hansa import alert, release
 
         def page(c, tab="release-hits", language="en"):
+            if not shutil.which("node"):
+                c.skipTest("node is needed for this case's page checks")
             harness = c.tmp / "direct-page.js"
             harness.write_text(c.PAGE_HARNESS.replace("  const ticks = [];", r"""
   if (ask === "direct-setting") {
