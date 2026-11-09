@@ -3179,7 +3179,8 @@ def main(argv=None):
             "or after installing; needs no desk and installs nothing")
     p.add_argument("--json", action="store_true", help="machine-readable rows and overall ok status")
     p.add_argument("--lang", choices=("zh", "en"), help="output language (default: the shell's locale)")
-    p.epilog = "Each command has a 15-second limit. Exit 1 if any row fails; notes do not fail. See docs/getting-started.md."
+    from .doctor import guide_path
+    p.epilog = "Each command has a 15-second limit. Exit 1 if any row fails; notes do not fail. See " + guide_path() + "."
     p = add("add", cmd_add, "queue a task")
     verify_options(p)
     p.add_argument("--after", action="append", default=[], metavar="T", type=_record_reference,

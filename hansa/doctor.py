@@ -23,6 +23,13 @@ TIMEOUT = 15
 GUIDE = "docs/getting-started.md"
 
 
+def guide_path(lang=None):
+    chinese = "docs/zh-CN/getting-started.md"
+    if language(lang) == "zh" and (Path(__file__).resolve().parent.parent / chinese).is_file():
+        return chinese
+    return GUIDE
+
+
 def version_text(version):
     return ".".join(map(str, version))
 
@@ -44,6 +51,7 @@ def package_version(executable):
 
 def check(lang=None):
     lang = language(lang)
+    guide = guide_path(lang)
     env = without_session(os.environ)
     rows = []
 
@@ -66,7 +74,7 @@ def check(lang=None):
                       f"安装 Node {minimum} 或更新版本：https://nodejs.org/en/download")
         if which("apt-get"):
             return "sudo apt-get install " + {"python": "python3"}.get(name, name)
-        return tr("See ", "参阅 ") + GUIDE
+        return tr("See ", "参阅 ") + guide
 
     def row(name, state, found, need, repair=""):
         rows.append(dict(name=name, state=state, found=found, need=need, fix=repair if state != "ok" else ""))
@@ -182,7 +190,8 @@ def check(lang=None):
     else:
         prerequisites = [r["fix"] for r in rows if r["state"] == "fails"
                          and r["name"] in ("Node", "bubblewrap", "socat")]
-        repair = "; ".join([*prerequisites, tr("See ", "参阅 ") + GUIDE + "#install-the-tools"])
+        section = "#安装所需工具" if guide.startswith("docs/zh-CN/") else "#install-the-tools"
+        repair = "; ".join([*prerequisites, tr("See ", "参阅 ") + guide + section])
         try:
             with tempfile.TemporaryDirectory(prefix="hansa-doctor-") as temporary:
                 folder = Path(temporary).resolve()

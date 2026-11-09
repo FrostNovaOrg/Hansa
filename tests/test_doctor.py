@@ -186,6 +186,37 @@ with open({str(self.calls)!r}, 'a') as out:
         self.assertIn("22.12.0", row["fix"])
         self.assertIn("更新", row["fix"])
 
+    def test_guide_paths_follow_language_and_installed_chinese_file(self):
+        root = self.tmp / "installation"
+        chinese = root / "docs/zh-CN/getting-started.md"
+        chinese.parent.mkdir(parents=True)
+        for name in ("git", "apt-get"):
+            (self.bin / name).unlink()
+        self.tool("srt", "raise SystemExit(1)", self.package / "dist/cli.js")
+        for present in (True, False):
+            if present:
+                chinese.write_text("# 上手指南\n", encoding="utf-8")
+            else:
+                chinese.unlink()
+            for lang in ("en", "zh", None):
+                guide = "docs/zh-CN/getting-started.md" if present and lang != "en" else "docs/getting-started.md"
+                section = "#安装所需工具" if present and lang != "en" else "#install-the-tools"
+                args = ["--lang", lang] if lang else []
+                with self.subTest(present=present, lang=lang), \
+                        patch.object(doctor, "__file__", str(root / "hansa/doctor.py")), \
+                        patch.object(doctor.sys, "platform", "linux"), \
+                        patch.dict(os.environ, {"LANG": "zh_CN.UTF-8"}):
+                    code, output = self.command(*args)
+                    self.assertEqual(code, 1)
+                    self.assertIn(("See " if lang == "en" else "参阅 ") + guide, output)
+                    self.assertIn(guide + section, output)
+                    other = "docs/getting-started.md" if present and lang != "en" else "docs/zh-CN/getting-started.md"
+                    self.assertNotIn(other, output)
+                    with patch.dict(os.environ, {"LANG": "C" if lang == "en" else "zh_CN.UTF-8"}):
+                        _, help_text = self.command("--help")
+                    self.assertIn(guide, help_text)
+                    self.assertNotIn(other, help_text)
+
     def test_old_unknown_and_new_versions(self):
         for tool, label, versions in (("claude", "Claude Code", ("2.1.305", "unknown", "2.1.306", "2.2.0")),
                                       ("node", "Node", ("v22.11.0", "unknown", "v22.12.0", "v24.22.0"))):

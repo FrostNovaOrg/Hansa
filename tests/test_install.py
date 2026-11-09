@@ -298,15 +298,25 @@ sys.exit(42)
                 self.assert_success(self.run_install(**env))
                 self.assertEqual("检查" in self.output, chinese)
                 self.assertEqual("creates a desk" in self.output, not chinese)
-                self.assertIn(str(self.install / "docs/getting-started.md"), self.output)
-                self.assertNotIn("docs/zh-CN/", self.output)
+                guide = "docs/zh-CN/getting-started.md" if chinese else "docs/getting-started.md"
+                label = "上手指南：" if chinese else "Getting started: "
+                self.assertIn(label + str(self.install / guide), self.output)
+                other = "docs/getting-started.md" if chinese else "docs/zh-CN/getting-started.md"
+                self.assertNotIn(str(self.install / other), self.output)
                 self.assertEqual((self.install / "docs/zh-CN/getting-started.md").read_text(encoding="utf-8"),
                                  "中文版指南\n")
                 for command in ("doctor", "init ~/shop/desk --repo ~/shop/repo", "YOUR-HOST"):
                     self.assertIn(command, self.output)
                 if chinese:
-                    for words in ("工作台", "协调员", "入门指南", "Enter", "s"):
+                    for words in ("工作台", "协调员", "上手指南", "Enter", "s"):
                         self.assertIn(words, self.output)
+
+    def test_chinese_next_steps_fall_back_when_installed_chinese_guide_is_missing(self):
+        self.assert_success(self.run_install(LANG="zh_CN.UTF-8"))
+        (self.install / "docs/zh-CN/getting-started.md").unlink()
+        self.assert_success(self.run_install(LANG="zh_CN.UTF-8"))
+        self.assertIn("上手指南：" + str(self.install / "docs/getting-started.md"), self.output)
+        self.assertNotIn("docs/zh-CN/", self.output)
 
     def test_the_last_next_step_sends_claude_code_to_setup_in_either_language(self):
         for env, words in (({}, ("Open Claude Code", "set up Hansa with me")),

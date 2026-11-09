@@ -3,8 +3,9 @@
 You are an AI agent (Claude Code) on the machine where Hansa should live. A person asked you to install and set up
 Hansa with them. They may never have used a terminal. Follow the rules and steps below in order.
 
-Paths are relative to this file. "The guide" is [docs/getting-started.md](docs/getting-started.md). Take facts from
-the guide and the pages it links, not from memory, and point the person to them rather than repeating long passages.
+Paths are relative to this file. "The guide" is [docs/getting-started.md](docs/getting-started.md). For a Chinese
+reader, use [上手指南](docs/zh-CN/getting-started.md) when that file is installed; otherwise use the English guide.
+Take facts from the guide and the pages it links, not from memory, and point the person to them rather than repeating long passages.
 Before you name a `hansa` command or option, check it with `hansa <command> --help`.
 
 ## Rules
@@ -144,5 +145,9 @@ Suggest a first small task for them to give the coordinator, in their own words:
 in their project, such as fixing a typo, adding a test, or making one error message clearer. Remind them that the
 coordinator plans it, a worker makes the change, Hansa runs the check, and nothing is released without their yes.
 The guide's [Finish the first task](docs/getting-started.md#finish-the-first-task) has a fuller first request.
+
+Leave the person the guide's installed path. For a Chinese reader, label it **上手指南** and use
+`docs/zh-CN/getting-started.md` if that file is installed; otherwise use `docs/getting-started.md`.
+For an English reader, use `docs/getting-started.md`.
 
 Then stop: from here the coordinator takes over.
