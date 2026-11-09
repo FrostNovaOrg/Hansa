@@ -16,6 +16,32 @@ The [README](../README.md) has the overview.
 | **Check** | A lane's test command. hansa runs it on each task's branch, in the lane's sandbox; a failed check blocks the merge unless the coordinator overrides it, which is recorded. |
 | **Release** | Sending a lane's base branch out through one of its named release targets, after the principal's yes. It runs outside the sandbox, as the desk's account. |
 
+## How work moves
+
+This chart follows one task from the coordinator's `hansa add` to a release, with the commands at each step.
+
+```mermaid
+flowchart TB
+    P(["You<br/>on the web page"])
+    C["Coordinator<br/>Claude Code session in the desk"]
+    subgraph S["hansa serve, always running"]
+        Q["Task queue"]
+        W["Worker: claude -p<br/>in the lane's worktree, on branch task/t0001,<br/>inside Claude Code's sandbox"]
+        K["hansa commits the changes<br/>and runs the lane's check"]
+    end
+    B[("Lane's base branch")]
+    O(["Pushed, deployed"])
+
+    C -- "hansa add" --> Q
+    Q -- "free lane, ready provider" --> W
+    W -- "report" --> K
+    K -- "posts to the coordinator's session" --> C
+    C -- "hansa verify, hansa retry" --> Q
+    C -- "hansa merge" --> B
+    B -- "hansa release: waits for you" --> P
+    P -- "Release: hansa runs the lane's release command" --> O
+```
+
 ## The desk
 
 A desk is one folder of plain files:
