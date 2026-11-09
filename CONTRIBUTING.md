@@ -20,7 +20,7 @@ and code blocks, not the wording; review the translation too.
 
 ### Running the tests here
 
-- Run `python3 tests/run_parallel.py` (or `python3 -m unittest tests.test_hansa`) before opening a pull request; both use a stand-in for `claude`, so no model is called. The runner spreads the tests over processes (`--jobs N`, by default half the CPUs, at most 8), keeps unittest's output, and lists the slowest with `--slowest K`.
+- Run `python3 tests/run_parallel.py` (or `python3 -m unittest tests.test_hansa tests.test_push_services tests.test_docs contrib.codex.tests`) before opening a pull request; both run the same suites and use a stand-in for `claude`, so no model is called. The runner spreads the tests over processes (`--jobs N`, by default half the CPUs, at most 8), keeps unittest's output, and lists the slowest with `--slowest K`.
 - The runner also checks local Markdown links; see [Documentation tests](docs/testing.md) for its scope and the focused command.
 - The coordinator's mod (`hansa/mod/`, a Claude Code plugin) has tests of its own, in Claude Code's test kit: after a change there, run `claude plugin validate hansa/mod` and `claude plugin test hansa/mod` (Claude Code 2.1.306 or later; no model is called).
 - The optional Codex adapter (`contrib/codex`) has tests of its own, which `tests/run_parallel.py` runs after `tests.test_hansa` (alone: `python3 -m unittest contrib.codex.tests`). Fakes stand in for codex, srt and claude. On non-macOS systems, the adapter refuses Codex worker runs, so tests that start one skip.
