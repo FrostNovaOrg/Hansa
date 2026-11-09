@@ -13,9 +13,9 @@ machine, but workers do not: Claude Code's sandbox cannot start as root. The
 desk, the lanes' repositories and the provider logins belong to an ordinary
 account instead: hansa's server and workers run as that account, but root's follower and its files stay root's.
 ```sh
-useradd --system --create-home hansa                   # the account
-bin/hansa init /path/to/desk --user hansa              # a desk that is the account's
-chown -R hansa /path/to/checkout                       # and each lane's repository
+useradd --system --create-home hansa                                # the account
+chown -R hansa /path/to/checkout                                    # and each lane's repository
+bin/hansa init /path/to/desk --user hansa --repo /path/to/checkout  # a desk that is the account's, with lane a on the checkout
 ```
 Keep hansa's own checkout where the account can reach and read it, not under root's home: root's `hansa`
 runs its commands again as the account, from that checkout, and the account cannot load hansa from a
@@ -38,8 +38,8 @@ refuses to work for root in a repository another account owns, so the
 coordinator reads the lanes' repositories with `hansa git LANE ...` (which runs
 git as the account) and with the Read tool, one simple command at a time, and
 never tells git to trust them (`safe.directory`): that would have root run what
-the account's repository settings name. In `manual` mode any command other than
-`hansa` waits for the principal's approval.
+the account's repository settings name. Claude Code asks the principal before
+each command other than `hansa` that is not already allowed.
 
 ## What a lane's commands meet in Linux's sandbox
 

@@ -10,7 +10,8 @@ It runs on a machine you control that stays on, such as a Mac mini at home or a 
 over SSH from wherever you are. It is not a hosted service: the desk, its keys and its logins live on that machine.
 
 - **Status:** Alpha, `0.5.0a1`: settings, commands and files may still change. Up to 0.4 the project was called Bellhop.
-- **Runs on:** macOS or Linux, with Python 3.9 or newer, git and Claude Code; [`hansa doctor`](#quick-start) checks the machine
+- **Runs on:** macOS or Linux, with Python 3.9 or newer, git, Claude Code, Node 22.12.0 or newer and srt 0.0.79;
+  [`hansa doctor`](#quick-start) checks them all
 - **Interfaces:** The `hansa` menu and command; a web page reached through an SSH tunnel (a private link from your computer)
 - **License:** MIT
 
@@ -119,8 +120,8 @@ with or endorsed by Anthropic or OpenAI.
 - **Releases wait for you**, or for a target you approved in advance. They run outside the sandbox, with the desk
   account's logins. [Releases and alerts](docs/releases.md)
 - **Keys stay out of sight.** They live in `secrets/`, readable by hansa's account, and go only to the provider. hansa
-  hides keys wherever they might appear and refuses to merge one, but cannot see into compressed files.
-  [The desk](docs/desk.md#where-a-desks-files-are)
+  hides the keys it knows wherever they might appear and refuses to merge one, but cannot see into compressed files.
+  The event log keeps what it recorded before a key was saved. [The desk](docs/desk.md#where-a-desks-files-are)
 - **The page is private by default.** It listens only on the machine itself and needs the token in the address
   `hansa web` prints. `hansa serve --host` can open it wider; whoever holds that address can approve a release.
   [The token](docs/who-changes-what.md#a-claude-code-sessions-identity-and-the-pages-token)
