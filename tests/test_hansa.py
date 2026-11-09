@@ -7047,25 +7047,295 @@ def save():'''))
             self.assertEqual(base, self.git_out("rev-parse", "other"))
             self.assertEqual(run.git("rev-parse", "HEAD", cwd=wt), base)
 
-    def test_init_on_a_repository_with_no_commit_says_to_make_one(self):
-        empty = self.tmp / "empty"
-        empty.mkdir()
-        sh("git", "init", "-q", "-b", "main", cwd=empty)
-        for args in ([], ["--base", "main"]):
-            with self.assertRaises(SystemExit) as e:
-                main(["init", str(self.tmp / "new"), "--repo", str(empty), *args])
-            self.assertIn("has no commit yet; make a first commit there (git commit), then run this again; "
-                          "no desk was made", str(e.exception.code))
-            self.assertFalse((self.tmp / "new").exists())  # nothing half made
+    def start_empty_project(self, mode, repo, name, *options):
+        """Exercise both CLI entry points, including their preflight and saved lane."""
+        out = io.StringIO()
+        desk = Desk(self.tmp / f"{name}-desk") if mode == "init" else self.desk
+        lane = "a" if mode == "init" else name
+        args = (["init", str(desk.root)] if mode == "init" else
+                ["--desk", str(desk.root), "lane", "add", name])
+        with contextlib.redirect_stdout(out):
+            main([*args, "--repo", str(repo), *options])
+        return desk.settings()["lanes"][lane], out.getvalue()
+
+    def assert_empty_first_commit(self, repo, lane, said, branch, identity="hansa <hansa@localhost>"):
+        from hansa.run import git
+        self.assertEqual(git("rev-list", "--count", "HEAD", cwd=repo), "1")
+        self.assertEqual(git("ls-tree", "-r", "HEAD", cwd=repo), "")
+        self.assertEqual(git("log", "-1", "--format=%s", cwd=repo), "Initial commit")
+        self.assertEqual(git("log", "-1", "--format=%an <%ae>%n%cn <%ce>", cwd=repo),
+                         f"{identity}\n{identity}")
+        self.assertEqual(git("symbolic-ref", "--short", "HEAD", cwd=repo), branch)
+        self.assertEqual((lane["repo"], lane["base"]), (str(repo.resolve()), branch))
+        lines = [line for line in said.splitlines() if str(repo.resolve()) in line and "empty first commit" in line]
+        self.assertEqual(len(lines), 1)
+        for words in ("new repository", f"branch {branch}"):
+            self.assertIn(words, lines[0])
+
+    def test_init_on_a_repository_with_no_commit_makes_an_empty_first_commit(self):
+        for mode in ("init", "add"):
+            for explicit in (False, True):
+                with self.subTest(mode=mode, explicit=explicit):
+                    name = f"{mode}-unborn-{int(explicit)}"
+                    repo = self.tmp / name
+                    repo.mkdir()
+                    sh("git", "init", "-q", "-b", "unborn", cwd=repo)
+                    options = ("--base", "chosen/start") if explicit else ()
+                    lane, said = self.start_empty_project(mode, repo, name, *options)
+                    self.assert_empty_first_commit(repo, lane, said, "chosen/start" if explicit else "unborn")
+
+    def test_init_and_lane_add_make_repositories_for_empty_folders(self):
+        config = self.tmp / "global-gitconfig"
+        config.write_text("[init]\n\tdefaultBranch = project-start\n[user]\n\tuseConfigOnly = true\n"
+                          "\tname = Global Person\n\temail = global@example.org\n")
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)}):
+            for mode in ("init", "add"):
+                for finder in (False, True):
+                    with self.subTest(mode=mode, finder=finder):
+                        name = f"{mode}-empty-{int(finder)}"
+                        repo = self.tmp / name
+                        repo.mkdir()
+                        if finder:
+                            (repo / ".DS_Store").write_bytes(b"Finder metadata")
+                        lane, said = self.start_empty_project(mode, repo, name)
+                        self.assert_empty_first_commit(repo, lane, said, "project-start")
+                        if finder:
+                            self.assertEqual((repo / ".DS_Store").read_bytes(), b"Finder metadata")
+
+    def test_init_and_lane_add_create_missing_project_parents(self):
+        config = self.tmp / "global-gitconfig"
+        config.write_text("[init]\n\tdefaultBranch = bad..default\n")
+        with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)}):
+            for mode in ("init", "add"):
+                with self.subTest(mode=mode):
+                    repo = self.tmp / f"{mode}-missing" / "parents" / "project"
+                    lane, said = self.start_empty_project(mode, repo, f"{mode}-missing", "--base", "start/here")
+                    self.assert_empty_first_commit(repo, lane, said, "start/here")
+
+    def test_init_and_lane_add_refuse_missing_paths_inside_a_checkout(self):
+        unborn = self.tmp / "unborn-parent"
+        unborn.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=unborn)
+        for mode in ("init", "add"):
+            for i, parent in enumerate((self.repo, unborn)):
+                with self.subTest(mode=mode, parent=parent):
+                    name = f"{mode}-nested-{i}"
+                    repo = parent / name / "project"
+                    before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+                    with self.assertRaises(SystemExit) as e:
+                        self.start_empty_project(mode, repo, name)
+                    for words in (str(repo), "inside git checkout", str(parent.resolve())):
+                        self.assertIn(words, str(e.exception))
+                    self.assertFalse((parent / name).exists())
+                    self.assertFalse((self.tmp / f"{name}-desk").exists())
+                    self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+
+    def test_init_and_lane_add_leave_nonempty_folders_for_the_user_to_commit(self):
+        for mode in ("init", "add"):
+            with self.subTest(mode=mode):
+                name = f"{mode}-full"
+                repo = self.tmp / f"{name} project"
+                repo.mkdir()
+                (repo / "notes.txt").write_text("my project\n")
+                with self.assertRaises(SystemExit) as e:
+                    self.start_empty_project(mode, repo, name)
+                q = shlex.quote(str(repo.resolve()))
+                for words in ("does not choose which files go into git", f"git -C {q} init",
+                              f"git -C {q} add", f"git -C {q} commit"):
+                    self.assertIn(words, str(e.exception))
+                self.assertEqual(list(repo.iterdir()), [repo / "notes.txt"])
+                self.assertEqual((repo / "notes.txt").read_text(), "my project\n")
+                self.assertFalse((self.tmp / f"{name}-desk").exists())
+                self.assertNotIn(name, self.desk.settings()["lanes"])
+                self.assertFalse((self.desk.lanes_dir / name).exists())
+
+    def test_init_and_lane_add_refuse_uncommitted_files_or_index_entries(self):
+        for mode in ("init", "add"):
+            for staged in (False, True):
+                with self.subTest(mode=mode, staged=staged):
+                    name = f"{mode}-files-{int(staged)}"
+                    repo = self.tmp / name
+                    repo.mkdir()
+                    sh("git", "init", "-q", "-b", "unborn", cwd=repo)
+                    (repo / "file.txt").write_text("keep\n")
+                    if staged:
+                        sh("git", "add", "file.txt", cwd=repo)
+                        (repo / "file.txt").unlink()  # disk looks empty; the index does not
+                    head = (repo / ".git" / "HEAD").read_bytes()
+                    index = (repo / ".git" / "index").read_bytes() if staged else None
+                    with self.assertRaises(SystemExit) as e:
+                        self.start_empty_project(mode, repo, name, "--base", "other")
+                    q = shlex.quote(str(repo.resolve()))
+                    for words in ("files that are not committed yet", f"git -C {q} add", f"git -C {q} commit"):
+                        self.assertIn(words, str(e.exception))
+                    self.assertEqual((repo / ".git" / "HEAD").read_bytes(), head)
+                    if staged:
+                        self.assertEqual((repo / ".git" / "index").read_bytes(), index)
+                    self.assertFalse((repo / ".git" / "refs" / "heads" / "other").exists())
+                    self.assertFalse((self.tmp / f"{name}-desk").exists())
+                    self.assertNotIn(name, self.desk.settings()["lanes"])
+
+    def test_new_repository_refuses_invalid_bases_before_making_anything(self):
+        for mode in ("init", "add"):
+            for existing in (False, True):
+                for i, base in enumerate(("bad..branch", "HEAD", "--help", "bad branch", "")):
+                    with self.subTest(mode=mode, existing=existing, base=base):
+                        name = f"{mode}-bad-base-{int(existing)}-{i}"
+                        repo = self.tmp / name / "project"
+                        if existing:
+                            repo.mkdir(parents=True)
+                            sh("git", "init", "-q", "-b", "unborn", cwd=repo)
+                        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+                        with self.assertRaises(SystemExit) as e:
+                            self.start_empty_project(mode, repo, name, f"--base={base}")
+                        self.assertIn("base takes the name of a branch" if mode == "add" and not base else
+                                      "not a valid branch name", str(e.exception))
+                        if base:
+                            self.assertIn(repr(base), str(e.exception))
+                        if existing:
+                            self.assertEqual(list(repo.iterdir()), [repo / ".git"])
+                            self.assertEqual((repo / ".git" / "HEAD").read_text(), "ref: refs/heads/unborn\n")
+                            self.assertEqual(list((repo / ".git" / "refs" / "heads").iterdir()), [])
+                        else:
+                            self.assertFalse(repo.parent.exists())
+                        self.assertFalse((self.tmp / f"{name}-desk").exists())
+                        self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+
+    def test_new_repository_waits_for_lane_settings_validation(self):
+        cases = (("--providers", "missing"), ("--identity", "bad"), ("--network", "http://bad"),
+                 ("--allow", "Bash(git:*)"), ("--merge-timeout", "-1"))
+        for i, options in enumerate(cases):
+            with self.subTest(options=options):
+                name = f"bad-settings-{i}"
+                repo = self.tmp / name / "project"
+                before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+                with self.assertRaises(SystemExit) as e:
+                    self.start_empty_project("add", repo, name, *options)
+                self.assertIn({"--providers": "unknown provider", "--identity": "identity", "--network": "network",
+                               "--allow": "allow", "--merge-timeout": "merge_timeout_min"}[options[0]], str(e.exception))
+                self.assertFalse(repo.parent.exists())
+                self.assertFalse((self.desk.lanes_dir / name).exists())
+                self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+
+    def test_empty_first_commit_uses_the_lane_then_repository_identity(self):
+        for mode in ("init", "add"):
+            for override in (False, True) if mode == "add" else (False,):
+                with self.subTest(mode=mode, override=override):
+                    name = f"{mode}-identity-{int(override)}"
+                    repo = self.tmp / name
+                    repo.mkdir()
+                    sh("git", "init", "-q", "-b", "main", cwd=repo)
+                    sh("git", "config", "--local", "user.name", "Repo Person", cwd=repo)
+                    sh("git", "config", "--local", "user.email", "repo@example.org", cwd=repo)
+                    options = ("--identity", "Lane Person <lane@example.org>") if override else ()
+                    with unittest.mock.patch.dict(os.environ, {"GIT_AUTHOR_NAME": "Wrong", "GIT_AUTHOR_EMAIL": "wrong@x",
+                                                              "GIT_COMMITTER_NAME": "Wrong", "GIT_COMMITTER_EMAIL": "wrong@x"}):
+                        lane, said = self.start_empty_project(mode, repo, name, *options)
+                    who = "Lane Person <lane@example.org>" if override else "Repo Person <repo@example.org>"
+                    self.assert_empty_first_commit(repo, lane, said, "main", who)
+        repo = self.tmp / "new-identity"
+        lane, said = self.start_empty_project("add", repo, "new-identity", "--base", "main",
+                                             "--identity", "Lane Person <lane@example.org>")
+        self.assert_empty_first_commit(repo, lane, said, "main", "Lane Person <lane@example.org>")
+
+    def test_new_repository_creation_reports_partial_git_failures(self):
+        from hansa.run import git
+        for mode in ("init", "add"):
+            for failure in ("init", "partial-init", "commit", "missing-git", "mkdir"):
+                with self.subTest(mode=mode, failure=failure):
+                    name = f"{mode}-failure-{failure}"
+                    repo = self.tmp / name / "project"
+                    before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+                    def fail(*args, **kw):
+                        if args[0] == "init" and failure in ("init", "partial-init", "missing-git"):
+                            if failure == "missing-git":
+                                raise FileNotFoundError("git missing")
+                            if failure == "partial-init":
+                                (repo / ".git").mkdir()
+                            raise RuntimeError("git init refused")
+                        if "commit" in args and failure == "commit":
+                            raise RuntimeError("git commit refused")
+                        return git(*args, **kw)
+                    mkdir = Path.mkdir
+                    def make(path, *args, **kw):
+                        if path == repo.resolve() and failure == "mkdir":
+                            raise PermissionError("mkdir refused")
+                        return mkdir(path, *args, **kw)
+                    with unittest.mock.patch.object(cli, "git", side_effect=fail), \
+                            unittest.mock.patch.object(Path, "mkdir", make), self.assertRaises(SystemExit) as e:
+                        self.start_empty_project(mode, repo, name)
+                    said = str(e.exception)
+                    self.assertIn("no first commit made", said)
+                    self.assertIn("no desk was made" if mode == "init" else "no lane was added", said)
+                    self.assertIn("new repository made" if failure == "commit" else
+                                  "git initialization may be incomplete" if failure == "partial-init" else
+                                  "no new repository made", said)
+                    self.assertIn("no folders made" if failure == "mkdir" else
+                                  f"folders made: {repo.parent.resolve()}, {repo.resolve()}", said)
+                    self.assertFalse((self.tmp / f"{name}-desk").exists())
+                    self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+
+    def test_empty_first_commit_does_not_run_hooks_or_request_signing(self):
+        for mode in ("init", "add"):
+            with self.subTest(mode=mode):
+                name = f"{mode}-no-hooks"
+                repo = self.tmp / name
+                repo.mkdir()
+                sh("git", "init", "-q", "-b", "main", cwd=repo)
+                sh("git", "config", "commit.gpgSign", "true", cwd=repo)
+                hook = repo / ".git" / "hooks" / "pre-commit"
+                hook.write_text("#!/bin/sh\necho should-not-be-committed > from-hook\ngit add from-hook\n")
+                hook.chmod(0o755)
+                lane, said = self.start_empty_project(mode, repo, name)
+                self.assert_empty_first_commit(repo, lane, said, "main")
+                self.assertFalse((repo / "from-hook").exists())
+
+    def test_init_and_lane_add_do_not_bootstrap_files_or_broken_links(self):
+        for mode in ("init", "add"):
+            for kind in ("file", "dangling", "loop", "bad-git"):
+                with self.subTest(mode=mode, kind=kind):
+                    name = f"{mode}-refused-{kind}"
+                    repo = self.tmp / name
+                    if kind == "file":
+                        repo.write_text("keep\n")
+                    elif kind == "dangling":
+                        repo.symlink_to(self.tmp / f"{name}-target")
+                    elif kind == "loop":
+                        repo.symlink_to(repo)
+                    else:
+                        repo.mkdir()
+                        (repo / ".git").write_text("gitdir: missing\n")
+                    with self.assertRaises(SystemExit):
+                        self.start_empty_project(mode, repo, name)
+                    self.assertFalse((self.tmp / f"{name}-desk").exists())
+                    self.assertFalse((self.tmp / f"{name}-target").exists())
+                    self.assertNotIn(name, self.desk.settings()["lanes"])
+
+    def test_existing_checkout_and_subfolder_keep_their_commit_and_base(self):
+        before = self.git_out("rev-parse", "HEAD")
+        subfolder = self.repo / "subfolder"
+        subfolder.mkdir()
+        for mode in ("init", "add"):
+            for i, repo in enumerate((self.repo, subfolder)):
+                lane, said = self.start_empty_project(mode, repo, f"{mode}-existing-{i}")
+                self.assertEqual((lane["repo"], lane["base"]), (str(repo.resolve()), "main"))
+                self.assertNotIn("empty first commit", said)
+                self.assertEqual(self.git_out("rev-parse", "HEAD"), before)
+
+    def test_lane_add_like_does_not_bootstrap_an_unborn_repository(self):
+        repo = self.tmp / "like-unborn"
+        repo.mkdir()
+        sh("git", "init", "-q", "-b", "unborn", cwd=repo)
+        settings = self.desk.settings()
+        settings["lanes"]["a"].update(repo=str(repo.resolve()), base="unborn")
+        write_json(self.desk.settings_path, settings)
+        said = self.hansa("lane", "add", "copied", "--like", "a")
+        self.assertNotIn("empty first commit", said)
         with self.assertRaises(SystemExit) as e:
-            main(["--desk", str(self.desk.root), "lane", "add", "z", "--repo", str(empty)])
-        self.assertIn("has no commit yet", str(e.exception.code))
-        self.assertNotIn("z", self.desk.settings()["lanes"])
-        plain_dir = self.tmp / "plain-folder"
-        plain_dir.mkdir()
-        with self.assertRaises(SystemExit) as e:
-            main(["init", str(self.tmp / "new"), "--repo", str(plain_dir)])
-        self.assertIn("is not a git checkout", str(e.exception.code))
+            self.hansa("lane", "add", "refused", "--like", "a", "--base", "unborn")
+        self.assertIn("has no commit yet", str(e.exception))
+        self.assertEqual(list((repo / ".git" / "refs" / "heads").iterdir()), [])
+        self.assertNotIn("refused", self.desk.settings()["lanes"])
 
     def test_hansa_notes_lists_files_with_sizes_lines_and_headings(self):
         (self.desk.notes_dir / "plan.md").write_text(self.NOTES)
@@ -21329,6 +21599,22 @@ def save():'''))
         self.assertEqual([r["desk"] for r in entries], [str(root.resolve())])
         self.assertEqual(entries[0]["hansa"], up.hansa_command())
         self.assertFalse((Desk(root).state_dir / "serve-start.json").exists())
+
+    def test_init_for_an_account_makes_the_repository_in_the_account_process(self):
+        self.as_root()
+        log, ran = self.stand_in_runuser()
+        me = account.name_of(os.getuid())
+        root, repo = self.tmp / "account-desk", self.tmp / "account-project"
+        with unittest.mock.patch("os.chown"), \
+                unittest.mock.patch.object(cli, "make_lane_repo", side_effect=AssertionError("root must not init git")), \
+                self.assertRaises(SystemExit) as done:
+            main(["init", str(root), "--repo", str(repo), "--base", "account-start", "--user", me])
+        self.assertEqual(done.exception.code, 0, ran[-1].stderr)
+        command = json.loads(log.read_text().splitlines()[-1])
+        self.assertEqual(command[:3], ["-u", me, "--"])
+        self.assertNotIn("--user", command)
+        lane = Desk(root).settings()["lanes"]["a"]
+        self.assert_empty_first_commit(repo, lane, ran[-1].stdout, "account-start")
 
     def test_init_for_an_account_refuses_a_link_or_a_folder_with_things_in_it(self):
         self.as_root()

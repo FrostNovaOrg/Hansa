@@ -28,7 +28,7 @@ from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
                   quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_detail, words_in_merge, words_text, write_try,
-                  is_local, mac_loopback_listeners)
+                  is_local, mac_loopback_listeners, worktree_git_settings)
 
 CARD = Path(__file__).with_name("card.md")
 DOCS = Path(__file__).resolve().parent.parent / "docs"  # where hansa help TOPIC reads; an install may leave it out
@@ -115,7 +115,7 @@ def answer_lane_refused(name: str) -> str:
             "the principal's answer; nothing was changed")
 
 
-def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "", *, command: str = "hansa init") -> Desk:
+def init_desk(root: Path, repo: str = "", lane: str = "a", base: str | None = None, *, command: str = "hansa init") -> Desk:
     if answer_name(lane):
         raise SystemExit(answer_lane_refused(lane))
     desk = Desk(root)
@@ -128,16 +128,17 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "", *, co
     if moved:
         raise SystemExit(f"hansa: {moved}; no desk was made")
     if repo:  # looked at before anything is made, so a refusal leaves no half-made desk
-        if not resolved(repo):
-            raise SystemExit(f"hansa: cannot follow the links of {repo} to see where it leads; no desk was made")
-        repo = resolved(repo)
+        repo = repo_path(repo, "no desk was made")
         theirs = account.foreign_repo(repo)
         if theirs:
             raise SystemExit(f"hansa: {theirs}; no desk was made")
         why = path_rule_problem(repo) or desk_paths_problem(desk, (), [(lane, repo)])
         if why:
             raise SystemExit(f"hansa: {why}; no desk was made")
-        base = lane_base(repo, base, "no desk was made")
+        new_repo = {}
+        base = lane_base(repo, base, "no desk was made", new_repo=new_repo)
+        if new_repo:
+            base = make_lane_repo(repo, new_repo, default_lane(repo, base), "no desk was made")
     for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir):
         d.mkdir(parents=True, exist_ok=True)
     desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
@@ -158,15 +159,78 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "", *, co
     return desk
 
 
-def lane_base(repo: str, base: str, nothing: str) -> str:
-    """A new lane's base: base, or else the branch the checkout is on; refused in one line when it is not a git
-    checkout, has no commit yet, or an explicit base does not resolve to a commit (a lane's tasks start from
-    a commit). nothing: what was not done, said after."""
+def repo_path(path: str, nothing: str) -> str:
+    """Resolve the existing prefix strictly: a missing folder is fine, a dangling or looping link is not."""
+    at = Path(os.path.abspath(path))
     try:
-        if git("rev-parse", "--is-inside-work-tree", cwd=repo) and not subprocess.run(
-                ["git", "rev-parse", "-q", "--verify", "HEAD^{commit}"], cwd=repo, capture_output=True).stdout.strip():
-            raise SystemExit(f"hansa: {repo} has no commit yet; make a first commit there (git commit), then run "
-                             f"this again; {nothing}")
+        while not os.path.lexists(at):
+            at = at.parent
+        at.resolve(strict=True)
+        out = resolved(path)
+        if out:
+            return out
+    except (OSError, ValueError, RuntimeError):
+        pass
+    raise SystemExit(f"hansa: cannot follow the links of {path} to see where it leads; {nothing}")
+
+
+def lane_base(repo: str, base: str | None, nothing: str, *, new_repo: dict | None = None) -> str:
+    """Read-only preflight. With new_repo, plan an empty first commit for a new/empty project; without it
+    (--like), require a commit as before. HEAD is a provisional base until git init chooses its branch.
+    Existing commits still accept tags and commit IDs as bases. nothing says what was not done."""
+    try:
+        at = Path(repo)
+        while not at.exists():
+            at = at.parent
+        try:
+            git("rev-parse", "--is-inside-work-tree", cwd=at)
+        except RuntimeError:
+            # A broken/forbidden git folder is not a new project. Do not init through it or nest a repository.
+            if new_repo is None or any(os.path.lexists(p / ".git") for p in (at, *at.parents)):
+                raise
+            if not at.is_dir():
+                raise
+            checkout = ""
+        else:
+            checkout = str(at)
+            if at != Path(repo):
+                checkout = git("rev-parse", "--show-toplevel", cwd=at)
+                raise SystemExit(f"hansa: {repo} does not exist and is inside git checkout {checkout}; {nothing}")
+            try:
+                git("rev-parse", "--verify", "HEAD^{commit}", cwd=repo)
+            except RuntimeError:
+                if new_repo is None:
+                    raise SystemExit(f"hansa: {repo} has no commit yet; make a first commit there (git commit), "
+                                     f"then run this again; {nothing}")
+                checkout = git("rev-parse", "--show-toplevel", cwd=repo)
+            else:
+                return _existing_lane_base(repo, base, nothing)
+
+        # Hansa never chooses files to put into git. Check both disk and index: staged files can be deleted.
+        folder = Path(checkout or repo)
+        ignored = {".git"} if checkout else {".DS_Store"}
+        files = folder.exists() and any(p.name not in ignored for p in folder.iterdir())
+        staged = checkout and git("ls-files", "--stage", cwd=checkout)
+        if files or staged:
+            q = shlex.quote(str(folder))
+            why = ("has files that are not committed yet" if checkout else
+                   "has files; hansa does not choose which files go into git")
+            commands = (f"git -C {q} init; " if not checkout else "") + (
+                f"git -C {q} add <files>; git -C {q} commit -m \"Initial commit\"")
+            raise SystemExit(f"hansa: {folder} {why}; choose the files and commit them first: {commands}; {nothing}")
+        if base is not None and (base.startswith("-") or subprocess.run(
+                ["git", "check-ref-format", "--branch", base], cwd=at, capture_output=True).returncode != 0):
+            raise SystemExit(f"hansa: base {base!r} is not a valid branch name; {nothing}")
+        branch = base or (git("symbolic-ref", "--short", "HEAD", cwd=repo) if checkout else "")
+        new_repo.update(init=not checkout, branch=branch)
+        return branch or "HEAD"
+    except (RuntimeError, OSError) as e:
+        raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); {nothing}")
+
+
+def _existing_lane_base(repo: str, base: str | None, nothing: str) -> str:
+    """The base of a checkout that already has a commit; keep accepting any ref to a commit."""
+    try:
         if base:
             try:
                 git("rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}", cwd=repo)
@@ -177,6 +241,34 @@ def lane_base(repo: str, base: str, nothing: str) -> str:
         return base or git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
     except (RuntimeError, OSError) as e:
         raise SystemExit(f"hansa: {repo} is not a git checkout ({e}); {nothing}")
+
+
+def make_lane_repo(repo: str, plan: dict, lane: dict, nothing: str) -> str:
+    """Carry out lane_base's plan only after all refusals. Report partial creation if an OS/git write fails."""
+    missing, at = [], Path(repo)
+    while not at.exists():
+        missing.append(at)
+        at = at.parent
+    initialized = False
+    try:
+        if plan["init"]:
+            Path(repo).mkdir(parents=True, exist_ok=True)
+            git("init", *(["-b", plan["branch"]] if plan["branch"] else []), cwd=repo)
+            initialized = True
+        elif plan["branch"]:
+            git("symbolic-ref", "HEAD", f"refs/heads/{plan['branch']}", cwd=repo)
+        branch = git("symbolic-ref", "--short", "HEAD", cwd=repo)
+        git(*worktree_git_settings(), "commit", "--allow-empty", "--only", "-m", "Initial commit", cwd=repo,
+            env=identity_env(lane))
+    except (RuntimeError, OSError) as e:
+        made = [str(p) for p in reversed(missing) if p.exists()]
+        folders = "folders made: " + ", ".join(made) if made else "no folders made"
+        repository = ("new repository made" if initialized else "git initialization may be incomplete"
+                      if plan["init"] and os.path.lexists(Path(repo) / ".git") else "no new repository made")
+        raise SystemExit(f"hansa: could not make the empty first commit in {repo} ({e}); {folders}; "
+                         f"{repository}; no first commit made; {nothing}")
+    print(f"{repo}: new repository with an empty first commit, branch {branch}")
+    return branch
 
 
 def desk_spellings(desk: Desk) -> list:
@@ -352,7 +444,7 @@ def cmd_init(a):
         raise SystemExit(answer_lane_refused(a.lane))
     if a.user:
         _init_for(a)
-    desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base or "")
+    desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base)
     print(f"desk ready at {desk.root}")
     problem = up.list_desk(desk)
     if problem:
@@ -397,7 +489,7 @@ def _init_for(a) -> None:
             raise SystemExit(refuse)
     os.chown(root, pw.pw_uid, pw.pw_gid, follow_symlinks=False)
     argv = ["init", str(root), "--lane", a.lane] + (["--repo", a.repo] if a.repo else []) \
-        + (["--base", a.base] if a.base else [])
+        + (["--base", a.base] if a.base is not None else [])
     account.switch(a.user, argv, root)
 
 
@@ -2069,10 +2161,10 @@ def _save_topic(problem: str) -> str:
     return next((topic for start, topic in SAVE_TOPICS if rest.startswith(start)), "")
 
 
-def _save(desk: Desk, new: dict, command: str) -> None:
+def _save(desk: Desk, new: dict, command: str, *, dry: bool = False) -> None:
     """Save the coordinator's change, checked as the page's are; on problems print them, with a pointer for each
     field they are about, and change nothing. Callers name their command for settings history."""
-    problems = desk.save_settings(new, by="coordinator", command=command)
+    problems = desk.save_settings(new, by="coordinator", command=command, dry=dry)
     if problems:
         topics = dict.fromkeys(filter(None, map(_save_topic, problems)))
         raise SystemExit("hansa: nothing was changed:\n" + "\n".join(f"  {x}" for x in problems)
@@ -2264,10 +2356,7 @@ def cmd_lane(a):
                 raise SystemExit("hansa: say which git checkout the lane works on (--repo PATH), or which lane to "
                                  "copy (--like L); nothing was changed")
             else:
-                repo = resolved(a.repo)
-                if not repo:
-                    raise SystemExit(f"hansa: cannot follow the links of {a.repo} to see where it leads; "
-                                     "nothing was changed")
+                repo = repo_path(a.repo, "nothing was changed")
             theirs = account.foreign_repo(repo)
             if theirs:
                 raise SystemExit(f"hansa: {theirs}; nothing was changed")
@@ -2275,13 +2364,17 @@ def cmd_lane(a):
                 why = path_rule_problem(x) or pattern_path_problem(x, f"lane {a.name}'s repository", "git's data in it")
                 if why:
                     raise SystemExit(f"hansa: {why}; nothing was changed")
+            new_repo = {}
             if not a.like:
-                base = lane_base(repo, a.base, "nothing was changed")
+                base = lane_base(repo, a.base, "nothing was changed", new_repo=new_repo)
                 ln = default_lane(repo, base, given.pop("providers", None) or None)
                 ln.update({k: v for k, v in given.items() if v or isinstance(v, int)})
             elif a.base:
                 lane_base(repo, a.base, "nothing was changed")
             new["lanes"][a.name] = ln
+            if new_repo:
+                _save(desk, new, "hansa lane add", dry=True)
+                base = ln["base"] = make_lane_repo(repo, new_repo, ln, "no lane was added")
             _save(desk, new, "hansa lane add")
             desk.event("lane_added", lane=a.name, **({"like": a.like} if a.like else {}))
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
@@ -3171,9 +3264,9 @@ def main(argv=None):
     p.add_argument("--lang", choices=("zh", "en"), help="language of the next steps (default: the shell's locale)")
     p = add("init", cmd_init, "create a desk")
     p.add_argument("dir")
-    p.add_argument("--repo", help="git checkout the first lane works on")
+    p.add_argument("--repo", help="project the first lane works on; a new or empty folder gets a repository and an empty first commit")
     p.add_argument("--lane", default="a")
-    p.add_argument("--base", help="base branch; must resolve to an existing commit (default: the checkout's current branch)")
+    p.add_argument("--base", help="base branch; an existing commit, or a valid branch name for a new/empty repository (default: its current branch)")
     p.add_argument("--user", help="as root on a Linux server: the account the desk belongs to and hansa runs as")
     p = add("doctor", cmd_doctor, "read-only installation checks; run first when helping someone install, "
             "or after installing; needs no desk and installs nothing")
@@ -3448,7 +3541,7 @@ def main(argv=None):
         "need localhost, and it opens every service on the machine's loopback, local proxies among them, which "
         "reach the internet: list it only on a Mac whose loopback holds nothing a worker must not reach."))
     q.add_argument("name")
-    q.add_argument("--repo", help="the git checkout the lane works on")
+    q.add_argument("--repo", help="project the lane works on; a new or empty folder gets a repository and an empty first commit")
     q.add_argument("--like", metavar="LANE", help="start as a copy of this lane's settings (repository, base, "
                    "providers, setup, check, merge_check, merge_lane, verify_for, network, folders it may write, env, allow, limits "
                    "with merge_timeout_min, commit_message, merge_message, identity, release_files) "
@@ -3457,7 +3550,7 @@ def main(argv=None):
                    "reach the new lane. The worktree is the new lane's own. Standing instructions an earlier lane "
                    "of this name left, when they differ, are kept as brief-before-DATE.md beside the new ones. Not "
                    "with --repo")
-    q.add_argument("--base", help="base branch; must resolve to an existing commit (default: the checkout's current branch)")
+    q.add_argument("--base", help="base branch; an existing commit, or a valid branch name for a new/empty repository (default: its current branch)")
     q.add_argument("--providers", help="provider order, comma-separated (default: claude)")
     q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved "
                    "unless the lane has a merge_check (/bin/sh -c)")

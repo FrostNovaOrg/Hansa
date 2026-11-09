@@ -67,18 +67,8 @@ hansa doctor
 
 ## 创建并启动工作台
 
-运行 `hansa init` 或 `hansa lane add` 前，`~/shop/repo` 里至少要有一次提交。
-如果是空项目，先运行下面的命令，把作者姓名和邮箱换成你自己的：
-
-```sh
-mkdir -p ~/shop
-git init ~/shop/repo
-git -C ~/shop/repo config user.name "Your Name"
-git -C ~/shop/repo config user.email "you@example.com"
-git -C ~/shop/repo commit --allow-empty -m "Initial commit"
-```
-
-然后运行：
+对于新项目或空文件夹，`hansa init` 会创建所需的文件夹和 Git 仓库，并做一次不含文件的初始提交。
+`hansa lane add --repo` 也会这样处理。如果文件夹里已经有文件，请先自行选择要纳入 Git 的文件并提交。
 
 ```sh
 hansa init ~/shop/desk --repo ~/shop/repo
@@ -159,7 +149,7 @@ autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForw
 | 看到的情况 | 原因 | 处理办法 |
 |---|---|---|
 | `No module named hansa` | 无法读取项目文件 | 确保工作台所在账号能读取 hansa 的项目文件。 |
-| 初始化时拒绝仓库 | 还没有提交 | 先做第一次提交，再试。 |
+| 初始化时拒绝仓库 | 有文件尚未提交，或指定的文件夹不存在且位于已有仓库内 | 先提交文件，或改用已有仓库的路径。 |
 | 服务在运行，但没有协调员 | 没有 tmux | 安装 tmux 后重新运行 `hansa up`，或运行 `hansa coordinator`。 |
 | 协调员无法运行获准的命令 | 没有信任文件夹 | Claude Code 问是否信任这个文件夹时，选“是”。 |
 | 登录失败 | 账号或服务商不对 | 由负责人以工作台所在账号登录，或在网页上保存接口地址和密钥。 |

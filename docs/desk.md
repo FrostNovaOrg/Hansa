@@ -13,11 +13,30 @@ give the usual "no desk here" refusal.
 
 ## Creating a desk and lanes
 
-For the initial checkout, first commit, `hansa init` and startup, follow
+For `hansa init` and startup, follow
 [Getting started](getting-started.md#create-and-start-the-desk).
-An explicit `--base` with `hansa init DIR --repo PATH` or
-`hansa lane add L --repo PATH` must resolve to a
-commit in that checkout; this also applies to `hansa lane add L --like OTHER
+With `--repo PATH`, `hansa init` and `hansa lane add` without `--like` make a
+repository and an empty `Initial commit` when PATH is new or empty (a `.DS_Store`
+is ignored). Missing parent folders are made too, unless the nearest existing
+folder is inside a git checkout: that is refused without making anything, to
+avoid creating a nested repository by mistake. An existing repository with no
+commit gets the same first commit only when it holds just `.git` and has nothing
+staged. Hansa never chooses files to put into git: a project with files must be
+committed first; the refusal gives commands with its path filled in.
+The commit uses the [lane's identity](who-changes-what.md#commit-messages-and-identity),
+including `lane add --identity`, else the repository's own config, else hansa's.
+The command prints the repository's path and branch. On Linux, `init --user`
+creates it as that account.
+
+For these new or empty repositories, `--base` must be a valid branch name and
+becomes the first commit's branch. Without it, git init chooses the branch, or
+an existing empty repository keeps the branch HEAD names. Invalid bases and
+other refusals are checked before any folders, repositories or desk files are
+made. If creation itself fails, hansa stops and says what it made and what it
+did not make; any partial repository or folders remain for you to inspect.
+
+For a checkout that already has a commit, an explicit `--base` with either
+command must resolve to a commit; this also applies to `hansa lane add L --like OTHER
 --base BRANCH`. A missing base or a reference to a tree or file is refused
 before desk files, lane settings or standing instructions are written, so a
 base typo is caught before the first task. The refusal says how to list the
