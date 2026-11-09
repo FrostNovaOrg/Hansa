@@ -216,14 +216,18 @@ again after the base moved never passes on an older commit's verdict.
 
 A full build can run for minutes with no output; an ssh silent that long can
 break with neither end noticing, and the release then waits out its time limit
-for an answer that never comes. So start the try there with `nohup`, its output
-then its exit code going to a fresh file named after the commit (a rerun never
-reads an earlier result), and poll for that code every 30 seconds or so with
+for an answer that never comes. Give each attempt its own remote folder with
+`mktemp -d` under an existing `/path/to/tries`. Start the try there with `nohup`,
+its output then its exit code going to that folder's `result.log`. A rerun at
+the same commit gets a different folder and cannot read an earlier result.
+Poll for that code every 30 seconds or so with
 short ssh calls (connect timeout, keepalive) until it appears or time runs out:
 
 ```sh
-c=$HANSA_RELEASE_COMMIT f=/path/to/tries/$c.log
+c=$HANSA_RELEASE_COMMIT
 o="-o ConnectTimeout=20 -o ServerAliveInterval=10"
+d=$(ssh $o HOST "mktemp -d /path/to/tries/$c.XXXXXXXX") || exit 1
+f=$d/result.log
 ssh $o HOST "nohup sh -c '/path/to/hansa/bin/hansa --desk /path/to/desk lane try L --merge-check --at $c; echo try-exit=\$?' >$f 2>&1 </dev/null &" || exit 1
 end=$(( $(date +%s) + 3000 ))  # under the target's own time limit
 while [ "$(date +%s)" -lt "$end" ]; do
@@ -567,11 +571,13 @@ and the level in `HANSA_ALERT_LEVEL` (the highest in a batch; see
 [alert settings](desk.md#settings-on-the-web-page)), and the text on standard input: UTF-8, in the saved
 `alert_language` (`en` by default, or `zh`; set only by the principal beside the command), keys removed, cut at 1,000
 characters; a release's text names its lane and target, preceded by its description
-as kept when the release was asked, if any. Alerts name the desk by
-the last two folders of its path, as the page title does: `[hansa] desk shop/desk: ...`
-for `/work/shop/desk`, or `[hansa] desk desk: ...` for `/desk`. Spaces and
-non-ASCII letters stay as they are. Desks with the same last two folders have
-the same alert name. A new to-do reads `to-do #N for you: <text>`; the principal
+as kept when the release was asked, if any. Alerts use the
+[desk name saved by the principal](desk.md#settings-on-the-web-page), as the
+page title does: `[hansa] desk NAME: ...`. With no name set, they use the last
+two folders of its path: `shop/desk` for `/work/shop/desk`, or `desk` for `/desk`.
+Spaces and non-ASCII letters stay as they are. Desks with the same saved name,
+or the same folders when unnamed, have the same alert name.
+A new to-do reads `to-do #N for you: <text>`; the principal
 answers in the conversation. When the gathered alerts go out, to-dos already
 closed are left out. If nothing remains, neither channel sends. Closing a to-do
 after its alert went out sends nothing more.
@@ -687,6 +693,28 @@ alerted stays alerted when it restarts on new code. `hansa status` shows a line 
 
 ### Push addresses and services
 
+On the principal's page:
+
+1. Open **Settings → Alerts → Push addresses → Add an address**.
+2. Paste the whole address from the push app or service. Leave the service at
+   **Recognize it**, or choose the service's name. Each service's hint on the
+   page says what to paste. An extra secret field appears only for a service
+   that takes one.
+3. Give it a name if you like, then press **Save settings**. The entry now shows
+   only the hidden address, with its key concealed.
+4. Press **Send a test push** on that entry. Its last result shows sent and the
+   time, or what went wrong. A test sends even when the entry is switched off.
+
+For Bark on iPhone, install it from the App Store and follow the
+[Bark guide](push-services.md#bark) to copy its address. The
+[service guide](push-services.md) covers the other services and self-hosted servers.
+
+To replace a saved address or extra secret, paste the new value into that
+entry. Leave either field empty to keep its saved value. Switch an entry off,
+rename it or press **Remove**, then **Save settings**. Until saved, address and
+secret changes and removals show the ordinary unsaved-changes note. Provider
+keys still use their own **Save key** buttons.
+
 `alert_push` is a list of at most ten `{id, service, on, name?}` entries.
 IDs are stable, unique lowercase letters/digits, hyphens or underscores (up to
 64 characters). Addresses are stored atomically in
@@ -695,8 +723,10 @@ IDs are stable, unique lowercase letters/digits, hyphens or underscores (up to
 `Desk.keys` includes whole addresses and secret parts extracted only by each
 entry's recorded service, when at least eight characters long, for redaction
 and refusal of a task's change that contains them. Saving scrubs those values
-from files covered by `Desk.scrub`; the
-append-only event log is not rewritten. Only the recorded service checks,
+from files covered by `Desk.scrub`: task files, requests and kept lane-try output.
+This protection covers the keys hansa knows. The append-only event log is not
+rewritten, so text recorded before a key was saved stays in earlier entries.
+Only the recorded service checks,
 masks and sends a saved entry. Recognition asks all services only before an
 address is saved. An orphan secret file, or one whose metadata cannot be read,
 still has its whole value protected, without guessing a service to extract
