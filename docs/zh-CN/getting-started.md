@@ -36,6 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/FrostNovaOrg/Hansa/main/install.sh 
 ```
 
 安装程序把项目下载到 `~/.local/share/hansa`，在 `~/.local/bin/hansa` 建立命令链接，不需要管理员权限，也不会修改你的 shell 配置文件。
+安装程序和 `hansa doctor` 的中文输出优先引用已安装的中文上手指南，缺少中文文件时使用英文指南。
 
 要更新时，先暂停工作台，等正在运行的工作结束，再运行一次安装程序，然后重启并恢复工作（[升级步骤](../concepts.md#upgrading-and-going-back)（英文））。要卸载 hansa，运行下面的命令；已有工作台会留在原处：
 

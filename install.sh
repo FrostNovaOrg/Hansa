@@ -64,6 +64,7 @@ printf '%s hansa at %s\n\n' "$action" "$install_dir"
 # Quote commands for copying into a shell, including HOME paths with spaces.
 python3 -B - "$link" "$install_dir/docs/getting-started.md" <<'PY'
 import os
+from pathlib import Path
 import shlex
 import sys
 
@@ -73,6 +74,9 @@ on_path = any(os.path.abspath(p or '.') == os.path.dirname(link)
 command = 'hansa' if on_path else shlex.quote(link)
 lang = os.environ.get('LC_ALL') or os.environ.get('LC_MESSAGES') or os.environ.get('LANG', '')
 zh = lang.startswith('zh')
+chinese_guide = Path(guide).parent / 'zh-CN' / 'getting-started.md'
+if zh and chinese_guide.is_file():
+    guide = str(chinese_guide)
 if not on_path:
     print('export PATH="$HOME/.local/bin:$PATH"')
     print('请自行将上面这行添加到 shell 配置文件。' if zh else
@@ -93,7 +97,7 @@ print('从另一台电脑连接：' if zh else 'From another computer:')
 # SSH joins its arguments into a remote shell command: preserve both shells' quotes.
 print('ssh -t -L 8765:127.0.0.1:8765 YOUR-HOST ' + shlex.quote(shlex.quote(link)))
 print()
-print(('入门指南：' if zh else 'Getting started: ') + guide)
+print(('上手指南：' if zh else 'Getting started: ') + guide)
 print()
 print('打开 Claude Code，然后说：“读 ~/.local/share/hansa/SETUP.md，和我一起装好 Hansa”' if zh else
       'Open Claude Code and say: "read ~/.local/share/hansa/SETUP.md and set up Hansa with me"')

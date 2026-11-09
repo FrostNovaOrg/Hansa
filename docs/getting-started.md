@@ -42,11 +42,12 @@ With Git and Python 3.9+, run:
 curl -fsSL https://raw.githubusercontent.com/FrostNovaOrg/Hansa/main/install.sh | sh
 ```
 
-It clones into `~/.local/share/hansa`, links `~/.local/bin/hansa`, needs no
-administrator rights and leaves your shell profile unchanged.
+It clones into `~/.local/share/hansa` and links `~/.local/bin/hansa`, without
+administrator rights or shell profile changes. Chinese installer and doctor
+output prefers installed translations, otherwise English.
 
-To update, pause the desk, wait until running work finishes, rerun the installer,
-then restart and resume ([upgrade steps](concepts.md#upgrading-and-going-back)).
+Update: pause the desk, let work finish, rerun the installer, restart and resume
+([upgrade steps](concepts.md#upgrading-and-going-back)).
 To remove hansa (desks stay where they are):
 
 ```sh
