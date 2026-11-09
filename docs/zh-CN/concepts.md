@@ -60,10 +60,12 @@ desk/
 ├── notes/                 the coordinator's notes; notes/PROJECT.md holds the project's own rules
 ├── events.jsonl           append-only record of everything that happened
 ├── asks.json              requests from the agents to the principal
-├── PAUSED                 present: no new work starts
+├── PAUSED                 present: queued tasks and releases without asking wait
 ├── statusline.json        what hansa serve last counted, for the status line of the coordinator's session
 └── .hansa/                runtime state: providers' rests, the heartbeat, the page's token and port, releases
 ```
+
+暂停后，排队中的任务不会启动，包括后续任务和核验。已经运行的工作会继续完成，连同它的检查。工作线试运行（`hansa lane try`）、合并检查，以及负责人已明确同意的发布仍可启动。设为免询问的发布和新的 Linux 测试台运行要等到 `hansa resume` 后才能启动。
 
 更多见[工作台：文件、密钥和笔记](../desk.md)（英文）。
 
@@ -106,7 +108,7 @@ desk/
 | `hansa release yes\|no ID CODE` | 转达负责人在对话中给出的发布答复，用提醒里的一次性代码确认 |
 | `hansa lane ...`, `hansa concurrency [N]` | 列出、添加、修改或移除工作线；设置同时运行的任务数量 |
 | `hansa ask "<what>"` | 给负责人记一件待办；用 `--close N "<outcome>"` 记录结果并关闭 |
-| `hansa cost [--by day\|seat\|lane\|task\|model\|provider]` | 查看 token 用量，以及按负责人所设价格折算的金额 |
+| `hansa cost [--by day\|seat\|lane\|task\|goal\|model\|provider]` | 查看 token 用量，以及按负责人所设价格折算的金额 |
 | `hansa explain [lane L \| provider P \| server \| notify]` | 查看工作台当前的设置和状态，以及各项的来源 |
 | `hansa explain history [lane L \| provider P] [--last N]` | 查看谁在何时改了哪项设置，以及改前和改后的值 |
 
@@ -124,9 +126,11 @@ desk/
 
 ## 升级与退回旧版
 
-**升级。** 在工作台里运行 `hansa pause "upgrade"`，暂停启动新任务，让正在运行的工作做完。用 `hansa status` 查看正在运行的工作，等到全部结束。
+**升级。** 在工作台里运行 `hansa pause "upgrade"`，暂停启动排队中的任务，让正在运行的工作做完。工作线试运行、合并检查，以及负责人已明确同意的发布仍可启动。用 `hansa status` 查看正在运行的工作，等到全部结束。
 
-进入 hansa 的克隆仓库，记下 `git rev-parse HEAD` 的输出，以便退回旧版；然后运行 `git fetch origin`，切换到你要用的版本。`git checkout --detach COMMIT` 可以把仓库固定在指定的提交上。
+进入 hansa 的克隆仓库（用安装脚本安装时位于 `~/.local/share/hansa`），记下 `git rev-parse HEAD` 的输出，以便退回旧版。要固定版本，先运行 `git fetch origin`，再用 `git checkout --detach COMMIT` 切换到你选定的提交。固定版本后要升级，就再次获取更新，再用同样的命令切换到新的提交。
+
+安装脚本用 `git pull --ff-only` 更新已有的克隆仓库，这条命令无法在分离 HEAD 状态下更新。要恢复随分支更新，先在克隆仓库里运行 `git checkout main`（或切回固定版本之前跟踪的分支）。用 `git branch -vv` 检查它的上游分支，再次运行[安装脚本](getting-started.md#安装-hansa)。该分支必须跟踪上游，而且这次更新必须能快进完成。
 
 重启 `hansa serve`，让新代码生效。如果服务是由 `hansa up` 启动的，用它打印的进程号运行 `kill PID` 来停止服务，再在工作台里运行 `hansa up`。`hansa up` 不会重启已经运行的服务。如果服务是手动启动的，按 Ctrl-C 停止，再用相同选项重新运行原来的 `hansa serve` 命令。
 

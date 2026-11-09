@@ -69,7 +69,7 @@ jobs:
         if: runner.os == 'macOS'
         run: npm install -g @anthropic-ai/sandbox-runtime@0.0.79
       - name: Run the tests
-        run: python3 -m unittest -v tests.test_hansa tests.test_push_services
+        run: python3 -m unittest -v tests.test_hansa tests.test_push_services tests.test_docs
       - name: Run the Codex adapter's tests
         run: python3 -m unittest -v contrib.codex.tests
       - name: Validate the coordinator plugin

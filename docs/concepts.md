@@ -60,10 +60,15 @@ desk/
 ├── notes/                 the coordinator's notes; notes/PROJECT.md holds the project's own rules
 ├── events.jsonl           append-only record of everything that happened
 ├── asks.json              requests from the agents to the principal
-├── PAUSED                 present: no new work starts
+├── PAUSED                 present: queued tasks and releases without asking wait
 ├── statusline.json        what hansa serve last counted, for the status line of the coordinator's session
 └── .hansa/                runtime state: providers' rests, the heartbeat, the page's token and port, releases
 ```
+
+Pausing stops queued tasks from starting, including follow-ups and verifications.
+Running work finishes, including its checks. Lane tries (`hansa lane try`), merge
+checks and releases the principal said yes to can still start. Releases set to go
+out without asking and new Linux bench runs wait until `hansa resume`.
 
 More: [The desk: files, keys and notes](desk.md).
 
@@ -121,7 +126,7 @@ lists commands and topics, and `hansa help <topic>` prints one from `docs/`.
 | `hansa release yes\|no ID CODE` | Pass on the principal's answer to a release, given in the conversation with their alert's one-time code |
 | `hansa lane ...`, `hansa concurrency [N]` | List, add, change or remove lanes; how many tasks run at once |
 | `hansa ask "<what>"` | Record a to-do for the principal; close it with `--close N "<outcome>"` |
-| `hansa cost [--by day\|seat\|lane\|task\|model\|provider]` | Tokens, and what they are worth at the principal's prices |
+| `hansa cost [--by day\|seat\|lane\|task\|goal\|model\|provider]` | Tokens, and what they are worth at the principal's prices |
 | `hansa explain [lane L \| provider P \| server \| notify]` | This desk's current settings and state, and where each comes from |
 | `hansa explain history [lane L \| provider P] [--last N]` | Who changed each setting, when, and its old and new values |
 
@@ -168,11 +173,20 @@ the old events.
 
 ## Upgrading and going back
 
-**Upgrading.** In the desk, run `hansa pause "upgrade"` to keep new work from starting while
-running work finishes. `hansa status` lists what runs; wait until nothing runs.
+**Upgrading.** In the desk, run `hansa pause "upgrade"` to keep queued tasks from starting
+while running work finishes. Lane tries, merge checks and releases the principal said yes
+to can still start. `hansa status` lists what runs; wait until nothing runs.
 
-In hansa's clone, record `git rev-parse HEAD` so you can go back, then run `git fetch origin` and
-check out the version you want. `git checkout --detach COMMIT` runs one fixed commit.
+In hansa's clone (`~/.local/share/hansa` with the installer), record `git rev-parse HEAD`
+so you can go back. To pin a version, run `git fetch origin`, then
+`git checkout --detach COMMIT` with the commit you want. To upgrade a pinned installation,
+fetch again and check out the next commit the same way.
+
+The installer updates an existing clone with `git pull --ff-only`; this cannot update a
+detached checkout. To return to branch updates, run `git checkout main` in the clone
+(or the branch you tracked before pinning). Check its upstream with `git branch -vv`,
+then run the [installer](getting-started.md#install-hansa) again. The branch
+must track its upstream, and the update must be a fast-forward.
 
 Restart `hansa serve` to run the new code. If `hansa up` started the server, stop it with
 `kill PID`, using the pid it printed, then run `hansa up` in the desk. It leaves running
