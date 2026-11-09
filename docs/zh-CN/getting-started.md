@@ -2,7 +2,7 @@
 
 [English](../getting-started.md)
 
-在一台一直开着的 Mac 或 Linux 机器上运行 hansa。你是**负责人**，登录、密钥和设置由你掌管；协调员负责为工作智能体安排任务。如果你用 root 账号操作，请先按[在 Linux 服务器上](../linux-server.md#the-coordinator-as-root-the-desk-as-an-ordinary-account)（英文）的说明设置。
+在一台一直开着的 Mac 或 Linux 机器上运行 hansa。你是**负责人**，登录、密钥和设置由你掌管；协调员负责为工作智能体安排任务。如果你用 root 账号操作，请先按[在 Linux 服务器上（英文）](../linux-server.md#the-coordinator-as-root-the-desk-as-an-ordinary-account)的说明设置。
 
 ## 安装所需工具
 
@@ -11,8 +11,8 @@
 | 工具 | 版本 |
 |---|---|
 | Python | 3.9 或更新版本；只用标准库，无需编译安装其他东西 |
-| Git | 必须安装，没有强制的最低版本。Linux 上建议用 Git 2.32 以上：隐藏沙箱占位文件时能保留全局配置（[详情](../linux-server.md#what-a-lanes-commands-meet-in-linuxs-sandbox)（英文））。 |
-| [Claude Code](https://code.claude.com/docs/en/overview)（英文） | 协调员插件需要 2.1.306 以上；项目的自动测试使用 2.1.307 |
+| Git | 必须安装，没有强制的最低版本。Linux 上建议用 Git 2.32 以上：隐藏沙箱占位文件时能保留全局配置（[详情（英文）](../linux-server.md#what-a-lanes-commands-meet-in-linuxs-sandbox)）。 |
+| [Claude Code（英文）](https://code.claude.com/docs/en/overview) | 协调员插件需要 2.1.306 以上；项目的自动测试使用 2.1.307 |
 | Node | srt 需要 22.12.0 以上；项目的自动测试使用 24.22.0 |
 | srt (`@anthropic-ai/sandbox-runtime`) | 0.0.79 |
 | tmux | 建议安装；用 `hansa up` 启动协调员时必须有它，没有固定版本要求 |
@@ -23,9 +23,9 @@
 npm install -g @anthropic-ai/claude-code@2.1.307 @anthropic-ai/sandbox-runtime@0.0.79
 ```
 
-[工具与升级](../sandbox.md#tools-and-upgrades)（英文）记录了所用版本和升级时要做的检查。
+[工具与升级（英文）](../sandbox.md#tools-and-upgrades)记录了所用版本和升级时要做的检查。
 
-工作智能体需要 Claude Code 的操作系统沙箱，macOS 自带所需支持。Linux 上要安装 `bubblewrap` 和 `socat`（Debian/Ubuntu 上运行 `sudo apt-get install bubblewrap socat tmux`），并确保普通账号能使用用户命名空间。Ubuntu 24.04 以上版本的 AppArmor 限制可能拦住它。请按你的发行版，参照 [Claude Code 的 Linux 沙箱设置](https://code.claude.com/docs/en/sandboxing#set-up-linux-and-wsl2)（英文）处理。
+工作智能体需要 Claude Code 的操作系统沙箱，macOS 自带所需支持。Linux 上要安装 `bubblewrap` 和 `socat`（Debian/Ubuntu 上运行 `sudo apt-get install bubblewrap socat tmux`），并确保普通账号能使用用户命名空间。Ubuntu 24.04 以上版本的 AppArmor 限制可能拦住它。请按你的发行版，参照 [Claude Code 的 Linux 沙箱设置（英文）](https://code.claude.com/docs/en/sandboxing#set-up-linux-and-wsl2)处理。
 
 ## 安装 hansa
 
@@ -85,7 +85,7 @@ hansa init ~/shop/desk --repo ~/shop/repo
 cd ~/shop/desk
 ```
 
-文件夹名尽量简单。如果某个名字被拒绝，见 [hansa 拒绝的路径](../sandbox.md#paths-hansa-refuses)（英文）。
+文件夹名尽量简单。如果某个名字被拒绝，见 [hansa 拒绝的路径（英文）](../sandbox.md#paths-hansa-refuses)。
 
 初始化会以项目当前检出的分支为基础创建工作线 `a`，并把尚未启动的工作台登记到这个账号下，所以打开 `hansa` 菜单就能看到它。如果已经用订阅登录，`hansa up` 会先启动服务，再在 tmux 里启动协调员。
 
@@ -117,7 +117,7 @@ hansa web
 > 看看工作线 a，用已经配置好的服务商。设置一条有用的检查命令，并列出下载依赖需要访问的主机。先试运行工作线，再做一处小改进，要能测试。审查并检查结果，必要时另做核验，确认站得住后合并。不要发布。
 
 如果是空项目，可以让它写一个 Python 函数和 unittest 测试。
-协调员会设置检查命令，例如 `hansa lane set a check "python3 -m unittest discover"`，并用 `hansa lane set a network HOST ...` 设置下载所需的主机。默认的网络名单是空的，要逐个列出所需的软件包仓库或下载主机，见[工作线的网络名单](../sandbox.md#a-lanes-network-list)（英文）。
+协调员会设置检查命令，例如 `hansa lane set a check "python3 -m unittest discover"`，并用 `hansa lane set a network HOST ...` 设置下载所需的主机。默认的网络名单是空的，要逐个列出所需的软件包仓库或下载主机，见[工作线的网络名单（英文）](../sandbox.md#a-lanes-network-list)。
 
 `hansa lane try a` 会在工作线的沙箱里运行准备步骤和检查。确认它通过了，并且 `hansa explain server` 显示服务的沙箱探测结果为 `hansa serve tried srt` 和 `it ran`。工作智能体自己的沙箱探测也必须通过。
 如果没有 srt，准备步骤和检查会显示 **could not run**，表示机器的运行环境有问题，任务本身还没有失败。如果配置好的准备步骤无法运行，工作智能体就不会启动。把工具装到服务能通过 `PATH` 找到的位置，重启服务，合并前再检查一次（`hansa merge ID --recheck`）。
