@@ -810,10 +810,17 @@ Bark recognizes `api.day.app` and ordinary bare device keys automatically;
 two official address forms. Gotify is always chosen. Bare PushDeer keys require
 choosing PushDeer, and self-hosted servers require choosing their service.
 Choosing Bark for an address another service recognizes is refused, naming the
-service to choose instead: an official host or endpoint, or a Gotify
-`/message?token=…` or PushDeer `/message/push?pushkey=…` address. A saved Bark
-address and a self-hosted Bark server's address are Bark's own form and are
-accepted.
+service to choose instead, only when Bark does not also accept the address as
+its own: a Gotify `/message?token=…` or PushDeer `/message/push?pushkey=…`
+address, a Server酱 `SCT…` or `sctp<uid>t…` key or `.send` address, an ntfy
+address on `ntfy.sh` that is not exactly `https://ntfy.sh/TOPIC`, or a Telegram
+`sendMessage`, WeCom, DingTalk, Feishu/Lark, Discord or Slack official endpoint
+address. A plain `https://HOST/KEY` address with a lowercase host, one key path
+and no query or fragment is Bark's own form and is accepted, as are a saved Bark
+address, any address on `api.day.app`, a bare device key, and a self-hosted Bark
+server's address. That includes `https://ntfy.sh/TOPIC`,
+`https://api2.pushdeer.com/KEY` and `https://sctapi.ftqq.com/KEY`, which another
+service also recognizes but which Bark accepts as its own form.
 See [the service guide](push-services.md) for request contents and limits.
 WeCom, DingTalk (including `oapi.dingtalk.io`), Feishu/Lark, Discord and Slack
 recognize their official hosts and endpoint paths; Telegram recognizes its

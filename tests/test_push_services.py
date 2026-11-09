@@ -297,8 +297,17 @@ class PhoneServicesTest(_PushServicesCase):
                 entry = self.save(address, service, **({"secret": secret} if secret else {}))
                 with ExitStack() as stack:
                     for definition in alert_services.SERVICES.values():
-                        # Saved entries must not be recognized again, even by their own service.
-                        stack.enter_context(patch.object(definition, "recognizes", side_effect=AssertionError("recognition of saved entry")))
+                        if service == "json":
+                            # A JSON webhook file is checked against the other
+                            # services on purpose: a switch cut short to it must
+                            # still hide the previous service's parts. None of
+                            # them recognizes this address.
+                            stack.enter_context(patch.object(definition, "recognizes", return_value=False))
+                        else:
+                            # Saved entries must not be recognized again, even by their own service.
+                            stack.enter_context(patch.object(
+                                definition, "recognizes",
+                                side_effect=AssertionError("recognition of saved entry")))
                         if definition.id != service:
                             for method in ("normalize", "secrets", "hidden", "validate", "requests"):
                                 if hasattr(definition, method):
@@ -391,6 +400,41 @@ class PhoneServicesTest(_PushServicesCase):
         # The settings write landed and the address write did not: the entry
         # records Bark while its file still holds the Gotify address.
         self.assertEqual(self.desk.settings()["alert_push"][0]["service"], "bark")
+        self.assertEqual(alert_push._read(self.desk, entry["id"]), address)
+        values = set(alert_push.keys(self.desk).values())
+        self.assertIn(address, values)
+        self.assertIn("fixture-old-gotify-token", values)
+        self.assertNotIn("fixture-old-gotify-token", self.desk.redact("fixture-old-gotify-token"))
+
+    def test_files_not_in_their_saved_form_keep_parts_from_the_normalized_address(self):
+        cases = (
+            ("bark", "https://api.day.app/fixture-saved-bark-key",
+             "https://API.day.app/fixture-bark-key", "fixture-bark-key"),
+            ("gotify", "https://gotify.example/message?token=fixture-saved-gotify-token",
+             "https://GOTIFY.example/message?token=fixture-gotify-token", "fixture-gotify-token"),
+            ("ntfy", "https://ntfy.sh/fixture-saved-topic",
+             "https://ntfy.sh/fixture-private-topic/", "fixture-private-topic"),
+        )
+        for n, (service, saved, edited, part) in enumerate(cases):
+            with self.subTest(service=service):
+                self.desk = init_desk(self.tmp / f"edited-address-{n}")
+                entry = self.save(saved, service)
+                alert_push._write_secret(self.desk, entry["id"], edited)
+                values = set(alert_push.keys(self.desk).values())
+                self.assertIn(edited, values)
+                self.assertIn(part, values)
+                self.assertNotEqual(self.desk.redact(part), part)
+
+    def test_a_switch_cut_short_to_the_json_webhook_hides_the_old_token(self):
+        address = "https://push.example.com/message?token=fixture-old-gotify-token"
+        entry = self.save(address, "gotify")
+        with patch.object(alert_push, "_write_secret", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                alert_push.change(self.desk, [{"id": entry["id"], "service": "json",
+                                               "address": "https://hooks.example/fixture-json-webhook"}], by="page")
+        # The settings write landed and the address write did not: the entry
+        # records the JSON webhook while its file still holds the Gotify address.
+        self.assertEqual(self.desk.settings()["alert_push"][0]["service"], "json")
         self.assertEqual(alert_push._read(self.desk, entry["id"]), address)
         values = set(alert_push.keys(self.desk).values())
         self.assertIn(address, values)

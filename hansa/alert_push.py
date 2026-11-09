@@ -105,31 +105,36 @@ def _write_secret(desk, id, value, extra=False):
 
 
 def _service_of_address(value, recorded):
-    """The service whose saved form this address is, and that form.
+    """The service whose address this is, and the address to take its parts from.
 
     A saved address is exactly what its recorded service's normalize returns.
     A service switch cut short after the settings write leaves the previous
     service's address behind, so the recorded service no longer accepts it:
     take the parts of the service the value still is an address of. The generic
-    JSON webhook accepts every address, so it never identifies another one.
+    JSON webhook accepts every address and has no part secret of its own, so it
+    never claims one here; a switch to it that was cut short still hides the
+    previous service's parts. Failing that, a file the recorded service can
+    still normalize keeps its parts from that normalized form. Any other file
+    keeps its whole value only.
     """
-    try:
-        normalized = recorded.normalize(value)
-    except ValueError:
-        pass
-    else:
-        if normalized == value:
-            return recorded, normalized
-    for service in alert_services.SERVICES.values():
-        if service is recorded or service.id == "json":
-            continue
+    if recorded.id != "json":
         try:
-            normalized = service.normalize(value)
+            normalized = recorded.normalize(value)
         except ValueError:
-            continue
-        if normalized == value:
-            return service, normalized
-    return None, None
+            pass
+        else:
+            if normalized == value:
+                return recorded, normalized
+    other = alert_services.other_address(value, recorded)
+    if other is not None:
+        try:
+            return other, other.normalize(value)
+        except ValueError:
+            pass
+    try:
+        return recorded, recorded.normalize(value)
+    except ValueError:
+        return None, None
 
 
 def keys(desk) -> dict:
