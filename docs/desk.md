@@ -620,6 +620,10 @@ A saved language change also applies to alerts still gathering.
 
 Push addresses send alerts to phones and chats through push apps such as Bark.
 Add, save and test up to ten entries in **Settings → Alerts → Push addresses**.
+Under **Add an address**, paste the whole address from your push app or service.
+Leave **Recognize it** selected, or choose a service and follow the service's hint.
+Press **Save settings**, then **Send a test push** on the saved entry.
+For Bark, copy the address from the app's home screen.
 See [push-address setup](releases.md#push-addresses-and-services) for the page's
 controls, and the [service guide](push-services.md), including
 [Bark](push-services.md#bark), for what to paste.
