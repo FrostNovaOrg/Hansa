@@ -3,8 +3,8 @@
 [简体中文](README.zh-CN.md)
 
 **Hansa is a team of AI coding agents that builds and maintains your software product while you decide and approve.
-You say what you want in plain language; agents from several model makers build, test and check each other's work,
-and nothing ships until you approve it, each time or in advance.**
+You say what you want in plain language; a coordinator plans the work and keeps the project on record, agents from
+several model makers build, test and check each other's work, and nothing ships until you approve it.**
 
 It runs on a machine you control that stays on, such as a Mac mini at home or a rented Linux server, and you reach it
 over SSH from wherever you are. It is not a hosted service: the desk, its keys and its logins live on that machine.
@@ -20,6 +20,10 @@ over SSH from wherever you are. It is not a hosted service: the desk, its keys a
 agent, the **coordinator**, which asks when something is unclear, suggests improvements and turns your wishes into
 tasks. Day to day you get:
 
+- the project run for you ([Goals and product decisions](docs/tasks.md#goals-and-product-decisions)): each goal kept
+  in your words, each decision with its reason and who made it, tasks and your to-dos under their goal; per goal, the
+  page shows what is done, what evidence is missing, the cost and the rounds; a cleared session, or a new one weeks
+  later, picks up from these records;
 - a web page that shows the work under way, what waits for you, and what the work has cost;
 - alerts on your phone or in your team chat (Bark, ntfy, Telegram, Slack, Discord, WeCom, DingTalk, Feishu and more:
   [Push services](docs/push-services.md));
