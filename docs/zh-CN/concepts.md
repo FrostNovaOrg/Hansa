@@ -9,7 +9,7 @@
 | 术语 | 含义 |
 |---|---|
 | **负责人** | 工作台为之工作的人，也就是你。你在网页上设置服务商、密钥、模型和价格，查看待办，批准或拒绝发布。待办在对话里答复，协调员会记下每件事的结果。发布请求也可以在对话里答复，需要用提醒中的一次性代码确认。 |
-| **协调员** | 工作台里的一个交互式 Claude Code 会话（`hansa coordinator`）。它通过 `hansa` 规划工作、安排任务、审查和合并改动，也负责设置工作线。它在沙箱外运行，可以安装工作线需要的软件；尚未获准的命令，Claude Code 都会先问负责人。它按 [`hansa/card.md`](../../hansa/card.md)（英文）操作，其余说明由 `hansa help` 提供。 |
+| **协调员** | 工作台里的一个交互式 Claude Code 会话（`hansa coordinator`）。它通过 `hansa` 规划工作、安排任务、审查和合并改动，也负责设置工作线。它在沙箱外运行，可以安装工作线需要的软件；尚未获准的命令，Claude Code 都会先问负责人。它按 [`hansa/card.md`（英文）](../../hansa/card.md)操作，其余说明由 `hansa help` 提供。 |
 | **助手** | 协调员会话里的三个子智能体：`scout`（调研助手，查资料）和 `reviewer`（复核助手，审查影响重大的改动）只读取内容；`operator`（操作助手）负责在机器上实际做一件事，比如安装软件。 |
 | **工作智能体** | 每件任务或每次核验（`hansa verify`）各运行一次 `claude -p`。它可以在 Claude Code 的沙箱里运行任何命令；命令只能写入自己的工作副本和工作线允许的文件夹，只能连接工作线允许的主机。它从不提交改动。 |
 | **工作台** | 一个文件夹，存放团队的设置、密钥、任务和只能追加、不能改写的事件记录。命令行、网页和智能体读的都是这些文件。 |
@@ -67,7 +67,7 @@ desk/
 
 暂停后，排队中的任务不会启动，包括后续任务和核验。已经运行的工作会继续完成，连同它的检查。工作线试运行（`hansa lane try`）、合并检查，以及负责人已明确同意的发布仍可启动。设为免询问的发布和新的 Linux 测试台运行要等到 `hansa resume` 后才能启动。
 
-更多见[工作台：文件、密钥和笔记](../desk.md)（英文）。
+更多见[工作台：文件、密钥和笔记（英文）](../desk.md)。
 
 ## macOS 与 Linux
 
@@ -75,24 +75,24 @@ desk/
 |---|---|---|
 | 工作智能体的沙箱 | 系统自带支持 | 需要 `bubblewrap` 和 `socat`；Ubuntu 24.04 及更新版本的 AppArmor 可能拦住它 |
 | 工作线网络名单里的 `localhost` | 工作智能体要运行自己的本地服务时需要它，但加入后，这台机器回环地址上的所有服务都会开放给工作智能体；只有这些服务都无需对工作智能体保密时才加入 | 不要加入：每个沙箱都有自己的回环地址，加入它只会通过沙箱的代理开放这台机器的回环地址 |
-| 在沙箱里构建 | `mktemp` 除非明确使用 `TMPDIR` 里的路径模板，否则会忽略它，因而被拒绝；见[工作线里的 Java 和 Maven](../java-and-maven.md)（英文） | 挂载表可能把可写文件夹显示成只读，git 也会忽略沙箱的占位文件；见[在 Linux 服务器上](../linux-server.md#what-a-lanes-commands-meet-in-linuxs-sandbox)（英文） |
-| 以 root 运行 | — | 协调员可以用 root 账号运行，工作台归普通账号所有；见[在 Linux 服务器上](../linux-server.md)（英文） |
+| 在沙箱里构建 | `mktemp` 除非明确使用 `TMPDIR` 里的路径模板，否则会忽略它，因而被拒绝；见[工作线里的 Java 和 Maven（英文）](../java-and-maven.md) | 挂载表可能把可写文件夹显示成只读，git 也会忽略沙箱的占位文件；见[在 Linux 服务器上（英文）](../linux-server.md#what-a-lanes-commands-meet-in-linuxs-sandbox) |
+| 以 root 运行 | — | 协调员可以用 root 账号运行，工作台归普通账号所有；见[在 Linux 服务器上（英文）](../linux-server.md) |
 
 ## 限制
 
 - 目前是 Alpha 版：设置、命令和文件仍可能随版本变化。
 - 工作智能体的命令，以及工作线的准备步骤和检查，都在操作系统的沙箱里运行。协调员使用工作台所在的系统账号运行（在 Linux 服务器上也可以用 root）。只有你允许这些代码访问该账号或该机器上的全部文件时，才用这个账号或这台机器运行工作台。
-- 使用 [Codex 适配器](../../contrib/codex/README.md)（英文）时，Codex 运行的命令能读取 Codex 的登录信息：Codex 和它运行的命令共用一个沙箱，而且所有工作线上的 Codex 运行都共用这一个登录。Claude 工作智能体读不到它；Codex 运行时只能连接工作线允许的主机和 OpenAI 的主机。
+- 使用 [Codex 适配器（英文）](../../contrib/codex/README.md)时，Codex 运行的命令能读取 Codex 的登录信息：Codex 和它运行的命令共用一个沙箱，而且所有工作线上的 Codex 运行都共用这一个登录。Claude 工作智能体读不到它；Codex 运行时只能连接工作线允许的主机和 OpenAI 的主机。
 - 发布命令在沙箱外运行，使用工作台所在的系统账号。从基础分支构建和启动的程序也会在沙箱外以该账号运行，因此要把工作线的构建和发布文件列入 `release_files`。
 - 禁止协调员推送和发布的规则只拦得住写明的那些命令写法。其他写法只有在 Claude Code 运行前询问负责人时，才会停下来等你同意。
 - hansa 在显示或记录文本时会隐去负责人的密钥，也不会合并含有密钥的改动。但它看不到压缩文件里的内容；在密钥保存之前已经写入事件记录的内容也会保留。
-- 一次运行结束时，hansa 会停止它留下的进程。不过，如果某个进程在 `hansa serve` 的两轮巡查之间脱离了所有追踪标记、离开工作副本，而且它的父进程在下一轮巡查前结束，它仍可能逃过清理。见[一次运行结束时 hansa 会停止什么](../sandbox.md#what-hansa-stops-when-a-run-ends)（英文）。
+- 一次运行结束时，hansa 会停止它留下的进程。不过，如果某个进程在 `hansa serve` 的两轮巡查之间脱离了所有追踪标记、离开工作副本，而且它的父进程在下一轮巡查前结束，它仍可能逃过清理。见[一次运行结束时 hansa 会停止什么（英文）](../sandbox.md#what-hansa-stops-when-a-run-ends)。
 - `hansa merge` 运行工作线仓库的合并钩子（合并时自动运行的脚本）时，会一直持有工作台锁，因此 `hansa serve` 需要等这些脚本结束。
 - 一个工作台只能在一台机器上运行一个 `hansa serve`。
 
 ## 日常命令
 
-这些命令由协调员运行，你也可以自己用。协调员的全部命令都在 [`hansa/card.md`](../../hansa/card.md)（英文）里，运行 `hansa help card` 可以打印这份说明。`hansa help` 列出命令和帮助主题，`hansa help <topic>` 打印 `docs/` 里对应的一篇文档。`hansa --help` 列出所有命令，包括负责人使用的 `init`、`serve`、`web`、`coordinator` 和 `ping`；`hansa <command> --help` 或 `hansa help <command>` 显示该命令的选项。
+这些命令由协调员运行，你也可以自己用。协调员的全部命令都在 [`hansa/card.md`（英文）](../../hansa/card.md)里，运行 `hansa help card` 可以打印这份说明。`hansa help` 列出命令和帮助主题，`hansa help <topic>` 打印 `docs/` 里对应的一篇文档。`hansa --help` 列出所有命令，包括负责人使用的 `init`、`serve`、`web`、`coordinator` 和 `ping`；`hansa <command> --help` 或 `hansa help <command>` 显示该命令的选项。
 
 | 命令 | 用途 |
 |---|---|
@@ -116,7 +116,7 @@ desk/
 
 `hansa explain history` 按从新到旧的顺序列出设置变更，包括 UTC 时间、谁改的、设置路径，以及旧值 → 新值。在网页上保存的设置记为负责人所改；协调员的改动则注明所用命令，比如 `hansa lane set`。`hansa explain history lane g` 只列出工作线 g 的变更，包括发布目标和常设说明。`hansa explain history provider astra` 只列出该服务商的变更，包括密钥变更。`--last N` 只显示最新的 N 条匹配记录；不加则显示全部匹配记录。已经移除的工作线和服务商也能查询。
 
-每项被修改的设置各记一条，比如 `lanes.g.env`、`providers.astra.model` 或 `lanes.g.targets.preview.command`。列表和工作线的环境变量字典（变量名及其值）都作为一个整体保存，所以清空环境变量时，会显示原来的变量 → `{}`。新增或移除设置时，没有值的一侧显示 `(unset)`。工作线的常设说明使用路径 `lanes.g.brief`。禁读清单旁保存的来源记录不算另一项设置变更。没有实际改动的保存、被拒绝的保存，以及只校验而不保存的操作，都不会写入历史。
+每项被修改的设置各记一条，比如 `lanes.g.env`、`providers.astra.model` 或 `lanes.g.targets.preview.command`。列表和工作线的环境变量字典（变量名及其值）都作为一个整体保存，所以清空环境变量时，会显示原来的变量 → `{}`。新增或移除设置时，没有值的一侧显示 `(unset)`。工作线的常设说明使用路径 `lanes.g.brief`。对于协调员加入负责人禁读清单（列出工作智能体不得读取的路径）的条目，hansa 还记录是谁在何时加入的；这些记录不算另一项设置变更。没有实际改动的保存、被拒绝的保存，以及只校验而不保存的操作，都不会写入历史。
 
 所有通过 hansa 保存设置的方式都会记录变更：网页、`hansa init`、`hansa example`、`hansa lane add/set/remove/target/brief`、`hansa hide`、`hansa concurrency`、`hansa disk-floor` 和 `hansa memory-floor`。这里只记录通过 hansa 做的改动，直接编辑文件的改动不会被记录。
 
@@ -128,13 +128,13 @@ desk/
 
 **升级。** 在工作台里运行 `hansa pause "upgrade"`，暂停启动排队中的任务，让正在运行的工作做完。工作线试运行、合并检查，以及负责人已明确同意的发布仍可启动。用 `hansa status` 查看正在运行的工作，等到全部结束。
 
-进入 hansa 的克隆仓库（用安装脚本安装时位于 `~/.local/share/hansa`），记下 `git rev-parse HEAD` 的输出，以便退回旧版。要固定版本，先运行 `git fetch origin`，再用 `git checkout --detach COMMIT` 切换到你选定的提交。固定版本后要升级，就再次获取更新，再用同样的命令切换到新的提交。
+进入 hansa 的克隆仓库（用安装脚本安装时位于 `~/.local/share/hansa`），记下 `git rev-parse HEAD` 的输出，以便退回旧版。要固定版本，先运行 `git fetch origin`，再用 `git checkout --detach COMMIT` 切换到你选定的提交。安装的版本会停留在这个提交。固定版本后要升级，就再次获取更新，再用同样的命令切换到新的提交。
 
 安装脚本用 `git pull --ff-only` 更新已有的克隆仓库，这条命令无法在分离 HEAD 状态下更新。要恢复随分支更新，先在克隆仓库里运行 `git checkout main`（或切回固定版本之前跟踪的分支）。用 `git branch -vv` 检查它的上游分支，再次运行[安装脚本](getting-started.md#安装-hansa)。该分支必须跟踪上游，而且这次更新必须能快进完成。
 
 重启 `hansa serve`，让新代码生效。如果服务是由 `hansa up` 启动的，用它打印的进程号运行 `kill PID` 来停止服务，再在工作台里运行 `hansa up`。`hansa up` 不会重启已经运行的服务。如果服务是手动启动的，按 Ctrl-C 停止，再用相同选项重新运行原来的 `hansa serve` 命令。
 
-服务启动时会更新协调员的常设说明。协调员在会话开始、执行 `/clear` 后，或对话压缩后读取这份说明；如果改了权限、助手、插件（mod）或启动选项，要重启协调员会话。见[重新启动服务和协调员](../desk.md#starting-the-server-and-the-coordinator-again)（英文）。然后运行 `hansa resume` 恢复工作。`hansa status` 的第一行会显示版本和安装时间。
+服务启动时会更新协调员的常设说明。协调员在会话开始、执行 `/clear` 后，或对话压缩后读取这份说明；如果改了权限、助手、插件（mod）或启动选项，要重启协调员会话。见[重新启动服务和协调员（英文）](../desk.md#starting-the-server-and-the-coordinator-again)。然后运行 `hansa resume` 恢复工作。`hansa status` 的第一行会显示版本和安装时间。
 
 **退回旧版。** 按相同步骤，切换到之前用的提交。新命令可能写入旧代码不认识的设置：`hansa status` 和 `hansa add` 仍可能正常工作，但保存设置会被拒绝，每个不认识的设置都会提示 `unknown setting: NAME`。退回旧版之前，先撤销新命令写入的设置。
 

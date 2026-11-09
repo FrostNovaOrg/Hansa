@@ -8,7 +8,7 @@ hansa 发送的是工作台名称和提醒正文，措辞由你保存的提醒�
 
 以上这些方式都会把提醒正文暴露给你选择的服务器。发到手机时，内容还可能经过苹果或谷歌的推送服务，它们同样能读到这些文字。HTTPS 保护的是发往服务器这一段传输，而不是让那台服务器看不到提醒。自建服务器改变的只是第一台服务器由谁运行。
 
-对下面这些聊天服务，消息内容依次是工作台名称、一个换行和提醒正文。紧急提醒会按你保存的提醒语言，以 **Urgent:** 或 **紧急：** 开头；这个标记不会改变通知权限。Telegram 和 Discord 会让被动提醒不出声，其他情况使用普通通知。通用 JSON 网址则把级别放在单独的字段里。各服务自己的频率限制仍然有效，测试推送和传输重试也算在内；hansa 不会按各服务的配额来调节发送速度。
+对企业微信、钉钉、飞书/Lark、Telegram、Discord 和 Slack，消息内容依次是工作台名称、一个换行和提醒正文。紧急提醒会按你保存的提醒语言，以 **Urgent:** 或 **紧急：** 开头；这个标记不会改变通知权限。Telegram 和 Discord 会让被动提醒不出声，其他情况使用普通通知。通用 JSON 网址则把级别放在单独的字段里。各服务自己的频率限制仍然有效，测试推送和传输重试也算在内；hansa 不会按各服务的配额来调节发送速度。
 
 ## Bark
 
@@ -28,13 +28,13 @@ hansa 发给 Bark 的整条消息（包括密钥和其他字段）不得超过 3
 
 主题是保密的：任何知道未受保护主题的人都能读取和发送消息。请选一个至少八个字符、难以猜到的主题。少于八个字符的主题 hansa 不接受，除非你提供访问令牌，所以短主题必须配合身份验证。为了让普通任务文字不被改动，隐去密钥和清理文件时会有意忽略不足八个字符的密钥部分；整个地址仍然受保护。令牌同样保密；请在你的服务器上设置访问限制，不要只依赖短主题。
 
-hansa 把主题、工作台名称、提醒正文和优先级作为一条 JSON 消息发送到服务器的根地址，例如 `https://ntfy.sh/`。令牌放在 Authorization 头里。中文标题放在消息里，不放在头里。ntfy 服务器能读到这些字段。发到手机时，内容还可能继续经过苹果或谷歌的推送服务，具体取决于应用和服务器的设置。
+hansa 把主题、工作台名称、提醒正文和优先级作为一条 JSON 消息发送到服务器的根地址，例如 `https://ntfy.sh/`。令牌放在 Authorization 头里。标题始终放在 JSON 请求体里。ntfy 服务器能读到这些字段。发到手机时，内容还可能继续经过苹果或谷歌的推送服务，具体取决于应用和服务器的设置。
 
 被动提醒用优先级 2（低，不发声），主动提醒用 3（默认），紧急提醒用 4（高）。hansa 从不用优先级 5，它可能引起长时间连续振动。消息最多 4,096 个 UTF-8 字节，标题最多 1,024 字节，需要时用 `…` 缩短。这样可以避免 ntfy 把过长的消息当作附件，或者直接拒收。`ntfy.sh` 每天允许 250 条消息；自建服务器的限制由管理员决定。
 
 HTTP 200 表示已发送。失败时，如果服务器返回了数字 `code`，hansa 会保留它：**40301** 表示被拒绝（请检查主题的权限和令牌），**42908** 表示已达到每日配额。HTTP 429 可以在这条地址的时限内重试；重试并不会解除配额限制。
 
-官方资料：[发布消息](https://docs.ntfy.sh/publish/)（英文）和[身份验证](https://docs.ntfy.sh/publish/#authentication)（英文）。
+官方资料：[发布消息（英文）](https://docs.ntfy.sh/publish/)和[身份验证（英文）](https://docs.ntfy.sh/publish/#authentication)。
 
 ## Gotify
 
@@ -46,7 +46,7 @@ Gotify 有 Android 应用，而且需要你自己的服务器。在 Gotify 网�
 
 HTTP 200 表示已发送。失败时，如果 Gotify 返回了 `errorCode`，hansa 会把它和 HTTP 类别一起保留。遇到 HTTP 401 或 403，请检查应用令牌是否复制正确，以及服务器是否允许发送。hansa 不保存 Gotify 的错误描述。
 
-官方资料：[推送消息](https://gotify.net/docs/pushmsg)（英文）。
+官方资料：[推送消息（英文）](https://gotify.net/docs/pushmsg)。
 
 ## PushDeer
 
@@ -68,7 +68,7 @@ PushDeer 没有提醒级别。紧急消息在英文下以 **Urgent:** 开头，�
 
 整个密钥都是保密的，它授权你向自己的账号发送消息。hansa 把工作台名称和提醒正文发送到对应的 Server酱 服务器，密钥就在地址里。Server酱 再转发到微信；腾讯，以及手机投递中可能用到的苹果或谷歌推送服务，也都能读到通知内容。
 
-Server酱 没有提醒级别。紧急提醒按你保存的提醒语言，以 **Urgent:** 或 **紧急：** 开头。hansa 会去掉标题里的换行，并且最多保留 32 个字符，与 Server酱 自家的集成保持一致。正文以 Markdown 代码块里的原样文字行发送，所以 `*words*` 这样的文字、链接或标题都会按普通文字显示。hansa 把这个排版后的正文限制在 3,500 个 UTF-8 字节以内，缩短时以 `…` 结尾。
+Server酱 没有提醒级别。紧急提醒按你保存的提醒语言，以 **Urgent:** 或 **紧急：** 开头。hansa 会用空格连接标题的各行，并且最多保留 32 个字符，与 Server酱 自家的集成保持一致。正文以 Markdown 代码块里的原样文字行发送，所以 `*words*` 这样的文字、链接或标题都会按普通文字显示。hansa 把这个排版后的正文限制在 3,500 个 UTF-8 字节以内，缩短时以 `…` 结尾。
 
 免费的 Turbo 账号每天允许 **5 次推送，发送失败也算**；订阅用户每天 1,000 次，每分钟最多 50 次。测试推送也会占用一次推送。Server酱³ 的账号限制可能不同，请查看它的页面。
 
@@ -88,7 +88,7 @@ JSON 里的 `errcode` 为 **0** 表示已送达。在 HTTP 200 下，其他 code
 
 ## 钉钉自定义机器人
 
-从你的自定义机器人里复制 `https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN` 并粘贴。识别依据是主机和 `/robot/send` 路径；国际版帮助中心的 `oapi.dingtalk.io` 主机也可以，会按粘贴的原样调用。令牌是保密的。可选的**加签**密钥（`SEC…`）填在 **Extra secret（额外密钥）** 里。如果启用了关键词安全设置，请把工作台名称设为关键词：每条消息都以它开头，紧跟在紧急标记之后。钉钉和会话成员都能读到提醒内容。
+从你的自定义机器人里复制 `https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN` 并粘贴。识别依据是主机和 `/robot/send` 路径；国际版帮助中心的 `oapi.dingtalk.io` 主机也可以，会按粘贴的原样调用。令牌是保密的。可选的**加签**密钥（`SEC…`）填在 **Extra secret（额外密钥）** 里。如果启用了关键词安全设置，请把工作台名称设为关键词：工作台名称放在每条消息开头；有紧急标记时，则紧跟在标记之后。钉钉和会话成员都能读到提醒内容。
 
 hansa 以 JSON 形式 POST `{"msgtype":"text","text":{"content":"DESK\nBODY"}}`。设置了加签密钥后，每次发送都会在 URL 后面加上 `&timestamp=TS&sign=SIGN`：TS 是当前的 Unix 时间，单位毫秒；SIGN 是对 `TS + "\n" + secret` 做 HMAC-SHA256 后再 Base64 的结果，以 UTF-8 编码的密钥作为 HMAC 密钥，最后用 `quote_plus` 做 URL 编码。没有密钥时这两个字段都不加。这里没有级别；紧急文字用上面共用的标记。
 
@@ -108,7 +108,7 @@ hansa 以 JSON 形式 POST `{"msg_type":"text","content":{"text":"DESK\nBODY"}}`
 
 JSON 里的 `code` 为 **0** 表示已发送。HTTP 200 下的其他 code 都算 `refused_by_service`：**19021** 表示签名或时间戳有问题，**19022** 表示 IP 被拒绝，**19024** 表示缺少关键词，**11232** 表示触发频率限制。
 
-官方资料：[飞书](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)和 [Lark](https://open.larksuite.com/document/client-docs/bot-v3/add-custom-bot)（英文）。
+官方资料：[飞书](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)和 [Lark（英文）](https://open.larksuite.com/document/client-docs/bot-v3/add-custom-bot)。
 
 ## Telegram
 
@@ -118,7 +118,7 @@ hansa 会从目标地址里去掉查询参数，然后向 `https://api.telegram.
 
 JSON 里的布尔值 `ok: true` 表示已发送。失败时 hansa 会保留 `error_code`，例如 **400**（请求有误）或 **403**（被禁止），但不保留描述文字。
 
-官方资料：[机器人设置](https://core.telegram.org/bots/tutorial#obtain-your-bot-token)（英文）和 [sendMessage](https://core.telegram.org/bots/api#sendmessage)（英文）。
+官方资料：[机器人设置（英文）](https://core.telegram.org/bots/tutorial#obtain-your-bot-token)和 [sendMessage（英文）](https://core.telegram.org/bots/api#sendmessage)。
 
 ## Discord
 
@@ -128,7 +128,7 @@ hansa 向该地址 POST JSON `{"content":"DESK\nBODY"}`，并带上 `User-Agent:
 
 任何 HTTP 2xx 都表示已发送，包括 Discord 正常的 **204** 响应。**HTTP 404 表示 webhook 已不存在**：请创建一个新的，并替换保存的地址。它会在上次结果里显示为 `http_4xx`。
 
-官方资料：[执行 webhook](https://discord.com/developers/docs/resources/webhook#execute-webhook)（英文）和 [User-Agent](https://discord.com/developers/docs/reference#user-agent)（英文）。
+官方资料：[执行 webhook（英文）](https://discord.com/developers/docs/resources/webhook#execute-webhook)和 [User-Agent（英文）](https://discord.com/developers/docs/reference#user-agent)。
 
 ## Slack
 
@@ -138,7 +138,7 @@ hansa POST JSON `{"text":"DESK\nBODY"}`。这里没有级别；紧急文字用�
 
 成功要求 **HTTP 200**，而且整个响应体恰好是 **`ok`**。失败时会返回 `invalid_payload`、`channel_not_found` 这样的纯文本单词；hansa 把这个单词当作 code 保留，响应为 400/404 时用 `http_4xx`，HTTP 200 但确认不成功时用 `refused_by_service`。
 
-官方资料：[Incoming Webhooks](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/)（英文）。
+官方资料：[Incoming Webhooks（英文）](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/)。
 
 ## 通用 JSON 网址
 
@@ -156,4 +156,4 @@ hansa 会 POST 下面这样的 JSON，把工作台名称同时放进 `desk` 和 
 
 `refused_by_service` 表示服务器回应了，但没有按该服务要求的方式确认这次推送。hansa 只保留数字错误码，或最多 40 个字符的 ASCII 单词，从不保留响应里的消息文字或内容。这个 code 会出现在这条地址的上次结果和 `hansa status` 里。
 
-`http_4xx` 通常要改地址、令牌或权限；`http_429` 表示触发频率限制；`http_5xx` 表示服务器出错。`tls`、`network`、`timeout` 和 `deadline` 表示连接或时限方面的问题。`redirect` 会被拒绝，以免密钥被发到别的地址：请粘贴服务文档里最终的 HTTPS 地址。重试规则见[提醒与投递规则](../releases.md#alerts)（英文）。
+`http_4xx` 通常要改地址、令牌或权限；`http_429` 表示触发频率限制；`http_5xx` 表示服务器出错。`tls`、`network`、`timeout` 和 `deadline` 表示连接或时限方面的问题。`redirect` 会被拒绝，以免密钥被发到别的地址：请粘贴服务文档里最终的 HTTPS 地址。重试规则见[提醒与投递规则（英文）](../releases.md#alerts)。

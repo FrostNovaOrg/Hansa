@@ -250,6 +250,20 @@ class DocsTest(unittest.TestCase):
         self.assertIn("fenced code block 1", translation_error("```sh\na\n```\n", "```mermaid\na\n```\n"))
         self.assertIn("fenced code block 1", translation_error("~~~\na\n~~~\n", "~~~\na\n~~\n"))
 
+    def test_translation_checker_detects_drift_in_unclosed_fence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "docs/zh-CN").mkdir(parents=True)
+            (root / "docs/guide.md").write_text(
+                "# Guide\n```sh\nhansa doctor", encoding="utf-8")
+            (root / "docs/zh-CN/guide.md").write_text(
+                "# 指南\n```sh\nhansa status", encoding="utf-8")
+            errors = check_translations(root)
+            self.assertEqual(len(errors), 1, errors)
+            for word in ("docs/zh-CN/guide.md", "fenced code block 1", "line 2",
+                         "hansa doctor", "hansa status"):
+                self.assertIn(word, errors[0])
+
     def test_translation_checker_names_files_and_requires_english(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -268,6 +282,17 @@ class DocsTest(unittest.TestCase):
         checked, errors = check_links(ROOT)
         self.assertFalse(errors, "Broken Markdown links:\n" + "\n".join(errors))
         print(f"Checked {checked} relative Markdown links.", flush=True)
+
+    def test_link_checker_ignores_broken_link_in_unclosed_fence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "README.md").write_text(
+                "# Guide\n```md\n[example](missing.md)", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            checked, errors = check_links(root)
+            self.assertFalse(errors, errors)
+            self.assertEqual(checked, 0)
 
     def test_checker_detects_broken_links(self):
         with tempfile.TemporaryDirectory() as folder:

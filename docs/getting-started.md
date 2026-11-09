@@ -129,10 +129,10 @@ In your terminal, go to the desk and run:
 hansa web
 ```
 
-Open its printed address, including `?t=...`, and keep the terminal open.
+Open the address, including `?t=...`, and keep the terminal open.
 The token grants page access, including release approval.
-Start it from a plain shell: `hansa web` refuses to expose
-the token inside a Claude Code session.
+Start the server and `hansa web` from a plain shell: `hansa web` refuses
+to expose the token in Claude Code sessions.
 
 In **Settings → Providers**, add endpoints, default models and effort; use
 **Save settings** and the separate **Save key** button. In **Coordinator**, select

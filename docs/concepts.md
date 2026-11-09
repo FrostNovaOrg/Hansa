@@ -146,9 +146,10 @@ Each changed setting gets one entry: `lanes.g.env`,
 Lists and a lane's environment dictionary are kept as whole values, so
 clearing an environment shows its old variables → `{}`. Added or removed
 settings show `(unset)` on the absent side. A lane's standing instructions
-use `lanes.g.brief`. The provenance kept beside the no-read list is not a
-second setting change. Saves that change nothing, refused saves, and dry
-validation add no history.
+use `lanes.g.brief`. For entries the coordinator adds to the principal's list
+of what workers may not read, hansa records who added them and when; those
+details do not count as a second setting change. Saves that change nothing,
+refused saves, and dry validation add no history.
 
 All settings writers record changes: the page, `hansa init`, `hansa example`,
 `hansa lane add/set/remove/target/brief`, `hansa hide`, `hansa concurrency`,
@@ -179,8 +180,9 @@ to can still start. `hansa status` lists what runs; wait until nothing runs.
 
 In hansa's clone (`~/.local/share/hansa` with the installer), record `git rev-parse HEAD`
 so you can go back. To pin a version, run `git fetch origin`, then
-`git checkout --detach COMMIT` with the commit you want. To upgrade a pinned installation,
-fetch again and check out the next commit the same way.
+`git checkout --detach COMMIT` with the commit you want. The installation stays
+at that commit. To upgrade a pinned installation, fetch again and check out
+the next commit the same way.
 
 The installer updates an existing clone with `git pull --ff-only`; this cannot update a
 detached checkout. To return to branch updates, run `git checkout main` in the clone

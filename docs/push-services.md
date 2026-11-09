@@ -18,9 +18,10 @@ can also pass through Apple's or Google's push service; they can read that
 text too. HTTPS protects the trip to the server, rather than hiding the alert
 from that server. Self-hosting changes who runs the first server.
 
-For the chat services below, the message is the desk name, a line break, then
-the alert body. Urgent batches start with **Urgent: ** or **紧急：** in your
-saved alert language; this marker does not change notification permissions.
+For WeCom, DingTalk, Feishu/Lark, Telegram, Discord and Slack, the message is
+the desk name, a line break, then the alert body. Urgent batches start with
+**Urgent:** or **紧急：** in your saved alert language; this marker does not
+change notification permissions.
 Telegram and Discord silence passive batches and otherwise use normal
 notifications. The JSON webhook carries the level as a separate field.
 Service rate limits still apply, including to test pushes and transport retries;
@@ -74,7 +75,7 @@ topic alone.
 
 Hansa sends the topic, desk name, alert text and priority as a JSON message to
 the server's root address, for example `https://ntfy.sh/`. A token travels in
-the Authorization header. Chinese titles travel in the message, not a header.
+the Authorization header. The title always goes in the JSON body.
 The ntfy server can read these fields. Delivery to a phone may continue through
 Apple's or Google's push service, depending on the app and server setup.
 
@@ -142,7 +143,7 @@ and the desk name followed by a line break and the alert body. The server then
 delivers through the device's push service, including Apple or Google where
 used. Those services and the PushDeer server can read the text.
 
-PushDeer has no alert levels. An urgent message starts with **Urgent: ** in
+PushDeer has no alert levels. An urgent message starts with **Urgent:** in
 English or **紧急：** in Chinese; this is a text marker and does not override
 the phone's notification settings. Hansa caps the combined title and body at
 3,500 UTF-8 bytes, with `…` when shortened, to leave room below the phone push
@@ -170,12 +171,12 @@ desk name and alert body to the corresponding Server酱 server, with the key in
 the address. Server酱 forwards to WeChat; Tencent and any Apple or Google push
 service used for phone delivery can read the notification too.
 
-Server酱 has no alert levels. Urgent alerts start with **Urgent: ** or **紧急：**
-in your saved alert language. Hansa removes title line breaks and keeps at most
-32 characters, matching Server酱's own integrations. The body is sent as literal
-lines in Markdown code blocks, so text such as `*words*`, links or headings is
-shown as text. Hansa caps that formatted body at 3,500 UTF-8 bytes and ends a
-shortened body with `…`.
+Server酱 has no alert levels. Urgent alerts start with **Urgent:** or **紧急：**
+in your saved alert language. Hansa joins the title's lines with a space and
+keeps at most 32 characters, matching Server酱's own integrations. The body is
+sent as literal lines in Markdown code blocks, so text such as `*words*`, links
+or headings is shown as text. Hansa caps that formatted body at 3,500 UTF-8
+bytes and ends a shortened body with `…`.
 
 Free Turbo accounts allow **5 pushes a day, including failed attempts**;
 subscribers get 1,000 a day, with a limit of 50 a minute. Testing uses a push
@@ -215,7 +216,8 @@ custom robot. Recognition uses the host and `/robot/send` path; the
 international help centre's `oapi.dingtalk.io` host also works and is called
 as pasted. The token is secret. Put the optional **加签** signing secret
 (`SEC…`) in **Extra secret**. If keyword security is enabled, use the desk's
-name as the keyword: it starts every message, after any urgent marker.
+name as the keyword: the desk name starts each message, after the urgent marker
+when there is one.
 DingTalk and the conversation's members can read the alert.
 
 Hansa POSTs `{"msgtype":"text","text":{"content":"DESK\nBODY"}}` as JSON.
