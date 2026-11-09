@@ -41,6 +41,8 @@ class InstallTest(unittest.TestCase):
         (self.source / "bin/hansa").chmod(0o755)
         (self.source / "docs").mkdir()
         (self.source / "docs/getting-started.md").write_text("fixture guide\n")
+        (self.source / "docs/zh-CN").mkdir()
+        (self.source / "docs/zh-CN/getting-started.md").write_text("中文版指南\n", encoding="utf-8")
         self.commit(self.source, "initial")
         for name in (".zshrc", ".bashrc", ".profile", "personal-file"):
             (self.home / name).write_text("keep me\n")
@@ -296,6 +298,10 @@ sys.exit(42)
                 self.assert_success(self.run_install(**env))
                 self.assertEqual("检查" in self.output, chinese)
                 self.assertEqual("creates a desk" in self.output, not chinese)
+                self.assertIn(str(self.install / "docs/getting-started.md"), self.output)
+                self.assertNotIn("docs/zh-CN/", self.output)
+                self.assertEqual((self.install / "docs/zh-CN/getting-started.md").read_text(encoding="utf-8"),
+                                 "中文版指南\n")
                 for command in ("doctor", "init ~/shop/desk --repo ~/shop/repo", "YOUR-HOST"):
                     self.assertIn(command, self.output)
                 if chinese:

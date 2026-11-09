@@ -42,7 +42,7 @@ hansa
 
 也可以在那台机器上打开 Claude Code，让它按 [SETUP.md（英文）](SETUP.md) 一步一步问你，和你一起装好 Hansa。这份说明是写给智能体看的，它会用你的语言和你交流。
 
-`~/shop/repo` 是你项目的 git 仓库，里面至少要有一次提交；`~/shop/desk` 是新建的工作台。后面的步骤见[上手指南（英文）](docs/getting-started.md)。
+`~/shop/repo` 是你项目的 git 仓库，里面至少要有一次提交；`~/shop/desk` 是新建的工作台。后面的步骤见[上手指南](docs/zh-CN/getting-started.md)。
 
 ## 工作原理
 
@@ -99,13 +99,13 @@ Hansa 运行的是你自己安装的 Claude Code，用你自己的账号或密�
 
 ## 文档
 
-用 Hansa 不需要读它的代码。`docs/` 目前只有英文。
+用 Hansa 不需要读它的代码。[上手指南](docs/zh-CN/getting-started.md)已有中文版，其余文档目前是英文。
 
 ### 从这里开始
 
 | 文档 | 内容 |
 |---|---|
-| [上手指南（英文）](docs/getting-started.md) | 安装、登录、新建工作台、经 SSH 打开网页、完成第一件任务 |
+| [上手指南](docs/zh-CN/getting-started.md) | 安装、登录、新建工作台、经 SSH 打开网页、完成第一件任务 |
 | [SETUP.md（英文）](SETUP.md) | 写给智能体的安装说明，它会用你的语言陪你装好：对 Claude Code 说“读 SETUP.md，和我一起装好 Hansa” |
 | [概念（英文）](docs/concepts.md) | 关键术语、工作怎么流转、工作台的文件、macOS 与 Linux、限制、命令、升级 |
 | [工作台怎么运转（英文）](docs/principles.md) | Hansa 的运行规则、由什么来执行，以及各自防范的问题 |

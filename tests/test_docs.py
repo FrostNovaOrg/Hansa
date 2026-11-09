@@ -1,5 +1,6 @@
-"""Check local inline Markdown links without fetching anything from the network."""
+"""Check local Markdown links and Chinese translations without network requests."""
 import html
+from itertools import zip_longest
 from pathlib import Path
 import re
 import subprocess
@@ -19,21 +20,31 @@ def blank(text):
     return re.sub(r"[^\n]", " ", text)
 
 
-def without_fences(text):
-    lines = []
+def fenced_blocks(text):
+    """Yield (opening line, language, exact source) for backtick and tilde fences."""
     fence = None
-    for line in text.splitlines(keepends=True):
+    for number, line in enumerate(text.splitlines(keepends=True), 1):
         marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
         if fence is not None:
-            lines.append(blank(line))
+            block.append(line)
             if (marker and marker[1][0] == fence[0] and
                     len(marker[1]) >= len(fence) and not marker[2].strip()):
+                yield opening, language, "".join(block)
                 fence = None
         elif marker:
             fence = marker[1]
-            lines.append(blank(line))
-        else:
-            lines.append(line)
+            opening, block = number, [line]
+            language = marker[2].strip().split()[0] if marker[2].strip() else ""
+    if fence is not None:  # Markdown permits an unclosed fence extending to EOF.
+        yield opening, language, "".join(block)
+
+
+def without_fences(text):
+    lines = text.splitlines(keepends=True)
+    for opening, _, block in fenced_blocks(text):
+        start = opening - 1
+        end = start + len(block.splitlines(keepends=True))
+        lines[start:end] = [blank(line) for line in lines[start:end]]
     return "".join(lines)
 
 
@@ -72,14 +83,10 @@ def links(text):
             yield visible.count("\n", 0, match.start()) + 1, destination
 
 
-def anchors(text):
+def headings(text):
+    """Yield (line, level, title), ignoring fenced and inline code examples."""
     text = without_fences(text)
     visible = INLINE_CODE.sub(lambda match: blank(match[0]), text)
-    found = set()
-    for match in re.finditer(r'''<a\s+[^>]*\bname\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>''',
-                             visible, re.IGNORECASE):
-        found.add(html.unescape(next(value for value in match.groups() if value is not None)))
-    used = set()
     lines = text.splitlines()
     visible_lines = visible.splitlines()
     for index, line in enumerate(lines):
@@ -87,11 +94,24 @@ def anchors(text):
                    if re.match(r"^ {0,3}#{1,6}(?:[ \t]|$)", visible_lines[index]) else None)
         if heading:
             title = re.sub(r"[ \t]+#+[ \t]*$", "", heading[1] or "")
+            level = len(line.lstrip().split()[0])
         elif (index + 1 < len(lines) and visible_lines[index].strip() and
               re.fullmatch(r" {0,3}(?:=+|-+)[ \t]*", visible_lines[index + 1])):
             title = line.strip()
+            level = 1 if visible_lines[index + 1].lstrip().startswith("=") else 2
         else:
             continue
+        yield index + 1, level, title
+
+
+def anchors(text):
+    visible = INLINE_CODE.sub(lambda match: blank(match[0]), without_fences(text))
+    found = set()
+    for match in re.finditer(r'''<a\s+[^>]*\bname\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>''',
+                             visible, re.IGNORECASE):
+        found.add(html.unescape(next(value for value in match.groups() if value is not None)))
+    used = set()
+    for _, _, title in headings(text):
         # Render text relevant to a heading's slug: keep code/link labels, drop HTML.
         title = INLINE_CODE.sub(lambda match: match[2], title)
         title = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", title)
@@ -106,6 +126,57 @@ def anchors(text):
         used.add(slug)
         found.add(slug)
     return found
+
+
+def translation_error(english, chinese):
+    """Return the first structural drift; translated wording is reviewed by people."""
+    for index, (expected, actual) in enumerate(zip_longest(headings(english), headings(chinese)), 1):
+        if expected is None or actual is None or expected[1] != actual[1]:
+            def describe(heading):
+                if heading is None:
+                    return "missing"
+                line, level, title = heading
+                return f"H{level} {title!r} (line {line})"
+            return f"heading {index} differs: English {describe(expected)}; Chinese {describe(actual)}"
+
+    english_blocks, chinese_blocks = list(fenced_blocks(english)), list(fenced_blocks(chinese))
+    expected_blocks = [block for block in english_blocks if block[1] != "mermaid"]
+    actual_blocks = [block for block in chinese_blocks if block[1] != "mermaid"]
+    for index, (expected, actual) in enumerate(zip_longest(expected_blocks, actual_blocks), 1):
+        if expected is None:
+            return f"fenced code block {index} differs: absent in English; Chinese line {actual[0]}"
+        if actual is None:
+            return f"fenced code block {index} differs: English line {expected[0]}; missing in Chinese"
+        if expected[2] != actual[2]:
+            for line, (left, right) in enumerate(zip_longest(expected[2].splitlines(keepends=True),
+                                                           actual[2].splitlines(keepends=True)), 1):
+                if left != right:
+                    return (f"fenced code block {index}, line {line} differs: "
+                            f"English {left!r}; Chinese {right!r}")
+
+    expected_mermaid = sum(block[1] == "mermaid" for block in english_blocks)
+    actual_mermaid = sum(block[1] == "mermaid" for block in chinese_blocks)
+    if expected_mermaid != actual_mermaid:
+        return (f"mermaid block {min(expected_mermaid, actual_mermaid) + 1} differs: "
+                f"English has {expected_mermaid}; Chinese has {actual_mermaid}")
+    return None
+
+
+def check_translations(root):
+    errors = []
+    chinese_docs = root / "docs/zh-CN"
+    for chinese in sorted(chinese_docs.rglob("*")):
+        if not chinese.is_file():
+            continue
+        english = root / "docs" / chinese.relative_to(chinese_docs)
+        if not english.is_file():
+            error = f"missing English document {english.relative_to(root).as_posix()}"
+        else:
+            error = translation_error(english.read_text(encoding="utf-8"),
+                                      chinese.read_text(encoding="utf-8"))
+        if error:
+            errors.append(f"{chinese.relative_to(root).as_posix()}: {error}")
+    return errors
 
 
 def check_links(root):
@@ -138,6 +209,61 @@ def check_links(root):
 
 
 class DocsTest(unittest.TestCase):
+    def test_chinese_docs_match_english(self):
+        errors = check_translations(ROOT)
+        self.assertFalse(errors, "Chinese documentation drift:\n" + "\n".join(errors))
+
+    def test_translation_checker_detects_drift(self):
+        english = ("# Guide\n## Install\n### Run\n"
+                   "````sh\n# A code comment\n```\nhansa doctor\n````\n"
+                   "~~~text\noutput /some/path\n~~~\n"
+                   "```mermaid\ngraph LR\nA[Start] --> B[End]\n```\n")
+        chinese = english.replace("# Guide", "# 指南").replace("## Install", "## 安装")
+        chinese = chinese.replace("### Run", "### 运行").replace("[Start]", "[开始]")
+        self.assertIsNone(translation_error(english, chinese))
+        # Setext headings count at the same levels as ATX headings.
+        self.assertIsNone(translation_error("# Guide\n## Install\n", "指南\n====\n安装\n----\n"))
+        # Multiline inline-code examples cannot introduce a heading.
+        self.assertIsNone(translation_error("# Guide\n", "# 指南\n`example\n## hidden\n`\n"))
+        cases = [
+            (chinese.replace("## 安装\n", ""), ("heading 2", "H2", "H3")),
+            (chinese.replace("## 安装\n### 运行", "### 运行\n## 安装"), ("heading 2", "H2", "H3")),
+            (chinese + "## 多余\n", ("heading 4", "missing", "多余")),
+            (chinese.replace("hansa doctor", "hansa status"), ("fenced code block 1", "line 4", "hansa status")),
+            (chinese.replace("output /some/path", "输出 /some/path"), ("fenced code block 2", "输出")),
+            (chinese.replace("~~~text", "~~~sh"), ("fenced code block 2", "line 1")),
+            (chinese.replace("~~~text\noutput /some/path\n~~~\n", ""), ("fenced code block 2", "missing")),
+            (chinese + "```sh\nextra\n```\n", ("fenced code block 3", "absent in English")),
+            (chinese.replace("```mermaid\ngraph LR\nA[开始] --> B[End]\n```\n", ""), ("mermaid block 1", "English has 1", "Chinese has 0")),
+            (chinese + "~~~mermaid\ngraph LR\n~~~\n", ("mermaid block 2", "English has 1", "Chinese has 2")),
+        ]
+        for changed, words in cases:
+            with self.subTest(words=words):
+                error = translation_error(english, changed)
+                self.assertIsNotNone(error)
+                for word in words:
+                    self.assertIn(word, error)
+        # Fences with no language, an indented fence, and a fence ending at EOF.
+        self.assertIsNone(translation_error("  ~~~\nvalue\n", "  ~~~\nvalue\n"))
+        self.assertIn("fenced code block 1", translation_error("```\na\n```\n", "```\nb\n```\n"))
+        # Neither a language change nor an unmatched delimiter may hide drift.
+        self.assertIn("fenced code block 1", translation_error("```sh\na\n```\n", "```mermaid\na\n```\n"))
+        self.assertIn("fenced code block 1", translation_error("~~~\na\n~~~\n", "~~~\na\n~~\n"))
+
+    def test_translation_checker_names_files_and_requires_english(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "docs/zh-CN/nested").mkdir(parents=True)
+            (root / "docs/nested").mkdir()
+            (root / "docs/zh-CN/missing.md").write_text("# 缺失\n", encoding="utf-8")
+            (root / "docs/nested/guide.md").write_text("# Guide\n## Install\n", encoding="utf-8")
+            (root / "docs/zh-CN/nested/guide.md").write_text("# 指南\n", encoding="utf-8")
+            errors = check_translations(root)
+            self.assertEqual(len(errors), 2, errors)
+            self.assertIn("docs/zh-CN/missing.md: missing English document docs/missing.md", errors[0])
+            self.assertIn("docs/zh-CN/nested/guide.md: heading 2", errors[1])
+            self.assertIn("missing", errors[1])
+
     def test_repository_links(self):
         checked, errors = check_links(ROOT)
         self.assertFalse(errors, "Broken Markdown links:\n" + "\n".join(errors))
