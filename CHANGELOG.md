@@ -75,6 +75,7 @@ a web page for the principal (the person directing the work), and task workers. 
 - Push checks run on GitHub's Ubuntu machine for tests a sandbox cannot run, plus adapter and plugin
   checks. Pull requests run the full suite on Ubuntu; manual runs add macOS and its real sandbox
   runtime. See [contributing](CONTRIBUTING.md).
+- GitHub's checks run the documentation tests.
 
 ### Releases and alerts
 
@@ -142,11 +143,18 @@ a web page for the principal (the person directing the work), and task workers. 
   Hansa starts no second server when it cannot inspect the one holding the desk.
   A symbolic link to `bin/hansa` on PATH works. [Getting started](docs/getting-started.md) covers local and SSH use.
 - `hansa doctor` checks tools, login and sandbox operation, with fixes, JSON output and English or Chinese.
+- The installer and `hansa doctor` point Chinese readers to the Chinese getting-started guide.
 - `hansa status` shows how the coordinator's last turn ended, or that its turns are not recorded.
 - Under the coordinator's prompt, hansa shows the desk name, model and effort, problems, waiting decisions, work,
   24-hour cost and page address without its key, refreshed by `hansa serve`, also in `hansa up` sessions; a person's own line stays.
 - The mod and `hansa doctor` require Claude Code 2.1.306 or later; older starts suggest `claude update`. `--autocompact` is passed from 2.1.290.
 - [SETUP.md](SETUP.md) guides an AI agent through installing and setting up Hansa with you, one question at a time.
+
+### Documentation
+
+- The Chinese README links to Simplified Chinese guides for getting started, concepts,
+  how a desk is run and push services. Tests keep each guide's headings and code blocks in step with English.
+- The [backup instructions](docs/desk.md#backing-up-and-moving-a-desk) keep goals and decisions.
 
 ### The Codex adapter
 
