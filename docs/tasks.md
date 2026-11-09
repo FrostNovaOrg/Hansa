@@ -99,7 +99,8 @@ existing task, merge and release records; reports and checks remain on their tas
 
 ## Time limits, and work left running in the background
 
-New lanes stop at 200 turns; saved lanes keep their limits (`hansa lane set L max_turns 200` lowers one).
+New lanes stop at 200 turns or 240 minutes; saved lanes keep their limits.
+Change them with `hansa lane set L max_turns N` and `hansa lane set L timeout_min N`.
 
 A run stopped at a ceiling before writing its report has its notes along the way as its report. At the
 time ceiling, a line follows them: the last tool call the session record shows the worker starting, whether
@@ -260,6 +261,9 @@ Lane tries are requested by hand and
 releases never restart: both only keep the count.
 
 ## Effort
+
+Effort tells the model how much reasoning to spend on a run. The values are `low`, `medium`,
+`high`, `xhigh` and `max`; a provider may not support every value.
 
 Each run is started with an effort, and hansa records where it came from: a task's own `--effort` (`hansa add`,
 `hansa retry`, `hansa verify`), else its provider's default effort (set on the page), else none, which leaves
@@ -534,7 +538,7 @@ trim removes the ref 30 days after it ends.
 Cost figures are Claude Code's own token counts, priced with the principal's
 table of prices (on the page). With a subscription they show what the tokens
 are worth, not a bill. `hansa cost` gives them (`--days N` or `--since HH:MM`;
-`--by day`, `seat`, `lane`, `task`, `model` or `provider`; `--json`, with
+`--by day`, `seat`, `lane`, `task`, `goal`, `model` or `provider`; `--json`, with
 `--rows` for every row). A task's turns and tokens are recorded when it ends.
 
 To say what one job cost, note the time `hansa status` shows when it starts,

@@ -101,8 +101,8 @@ such as `env`, `nice` or `timeout` (`xargs git push` is denied). Run by its
 full path (`/usr/bin/git push`), through `sudo`, `command`, `python -m` or a
 git alias, through another shell (`bash -c "git push"`), a script, or an
 `xargs` given options of its own before the command (`xargs -n1 git push`),
-they are not caught; in
-manual mode such a command asks the principal.
+they are not caught. In manual mode, Claude Code asks the principal before each
+command that is not already allowed.
 
 ### What runs outside the worker, and what stays closed to the coordinator
 
