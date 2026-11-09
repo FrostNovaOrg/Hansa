@@ -1,5 +1,7 @@
 # Push services
 
+[简体中文](zh-CN/push-services.md)
+
 On the desk's page, open **Settings → Alerts** and add a push address. Choose
 **Recognize it** for the official addresses below, or choose a service yourself.
 Self-hosted servers always need HTTPS. Save the entry and use its test button;

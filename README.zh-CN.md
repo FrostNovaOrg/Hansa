@@ -17,7 +17,7 @@
 
 - 协调员替你管项目：每个目标都按你的原话记下，每个决定都记着理由和拍板的人，任务和你的待办都挂在各自的目标下；网页上每个目标做完了什么、还缺哪些证据、花了多少钱、用了几轮，一目了然；清空会话后，或者几周后开新会话，都能从这些记录接着干（[目标与产品决定（英文）](docs/tasks.md#goals-and-product-decisions)）；
 - 一个网页，看得到正在做的事、等你处理的事，以及这些工作花了多少钱；
-- 发到手机或团队群里的提醒（Bark、ntfy、Telegram、Slack、Discord、企业微信、钉钉、飞书等，见[推送服务（英文）](docs/push-services.md)）；
+- 发到手机或团队群里的提醒（Bark、ntfy、Telegram、Slack、Discord、企业微信、钉钉、飞书等，见[推送服务](docs/zh-CN/push-services.md)）；
 - 审批：发布要等你点头，或者用你事先批准的发布目标；
 - 一台机器管几个产品：每个产品一个**工作台**（一个文件夹，放着团队的设置、任务和记录），一台机器可以同时跑好几个工作台，无人值守地连续运转几周。
 
@@ -99,7 +99,7 @@ Hansa 运行的是你自己安装的 Claude Code，用你自己的账号或密�
 
 ## 文档
 
-用 Hansa 不需要读它的代码。[上手指南](docs/zh-CN/getting-started.md)、[概念](docs/zh-CN/concepts.md)和[工作台怎么运转](docs/zh-CN/principles.md)已有中文版，其余文档目前是英文。
+用 Hansa 不需要读它的代码。[上手指南](docs/zh-CN/getting-started.md)、[概念](docs/zh-CN/concepts.md)、[工作台怎么运转](docs/zh-CN/principles.md)和[推送服务](docs/zh-CN/push-services.md)已有中文版，其余文档目前是英文。
 
 ### 从这里开始
 
@@ -109,7 +109,7 @@ Hansa 运行的是你自己安装的 Claude Code，用你自己的账号或密�
 | [SETUP.md（英文）](SETUP.md) | 写给智能体的安装说明，它会用你的语言陪你装好：对 Claude Code 说“读 SETUP.md，和我一起装好 Hansa” |
 | [概念](docs/zh-CN/concepts.md) | 关键术语、工作怎么流转、工作台的文件、macOS 与 Linux、限制、命令、升级 |
 | [工作台怎么运转](docs/zh-CN/principles.md) | Hansa 的运行规则、由什么来执行，以及各自防范的问题 |
-| [推送服务（英文）](docs/push-services.md) | 把提醒发到手机和群聊：Bark、ntfy、Telegram、Slack、企业微信、钉钉、飞书等 |
+| [推送服务](docs/zh-CN/push-services.md) | 把提醒发到手机和群聊：Bark、ntfy、Telegram、Slack、企业微信、钉钉、飞书等 |
 
 ### 参考
 
