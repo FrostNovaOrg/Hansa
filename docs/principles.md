@@ -1,5 +1,7 @@
 # How a desk is run
 
+[简体中文](zh-CN/principles.md)
+
 In a desk such as `shop/desk`, the principal is in charge, the coordinator plans
 the work, and workers change files. `hansa help card` prints the coordinator's
 card; `hansa help principles` prints this page.
