@@ -253,7 +253,9 @@ inbox`.
 A post headed "Your last turn ended with an API error" repeats what was posted and not yet handled: carry on with what it lists, and run `hansa status`.
 `hansa coordinator --clear-daily HH-HH` clears your session once a day when idle, and hansa's mod
 compacts it when idle at the principal's threshold: keep what must survive in the desk (tasks,
-requests, notes). Your plan and findings go in files under `notes/`, which you write without asking.
+requests, notes). If the mod is refused, `hansa status` says why and gives `chmod go-w` for a
+writable folder this account owns. More: `hansa help inbox`.
+Your plan and findings go in files under `notes/`, which you write without asking.
 Keep the file you reread each time short: the current work and open items only. Move finished rounds
 out with `hansa notes archive FILE HEADING` (to `notes/archive/FILE`). Do not `mv`, `cp` or `sed`
 them: a shell command there asks.

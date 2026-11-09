@@ -25,6 +25,17 @@ checkout's branches and retry. Existing tags and commit IDs remain accepted.
 Without `--base`, the checkout's current branch is used, or `--like` copies
 the other lane's base.
 
+`hansa init` makes a new desk folder and its `tasks/`, `lanes/` (including
+the initial lane), `.hansa/`, `notes/`, `secrets/` and `.claude/` folders
+with mode 0700, including when the account's umask is 0002. New enclosing
+folders are private too. With `--user`, root makes the desk folder 0700
+before giving it to the account; enclosing folders root makes retain their
+usual modes so the account can traverse them.
+Existing folders keep their modes. In an existing group- or world-writable
+desk folder, init still makes the desk and warns:
+`warning: others may write in <folder>; run chmod go-w <folder>`.
+The command quotes a path containing spaces or shell characters.
+
 Settings and JSON state files use UTF-8. Filename bytes that are not UTF-8,
 as Linux permits, are stored as JSON escapes and restored when the file is
 read. Ordinary Unicode text stays readable, and saved command lines keep
@@ -1382,6 +1393,20 @@ is given whenever Claude Code is new enough, whether or not the mod loads. On a 
 start says that hansa did not load the coordinator's mod, with the version, 2.1.306 and `claude update`. When hansa skips it, the start, `hansa status` and
 the page say why. A session whose settings turn hooks off runs without the mod's rules, and hansa cannot see that;
 Claude Code's own auto-compact still applies to it.
+
+The mod's copy is under `.hansa/coordinator-mod/` in the desk, or
+`~/.hansa/coordinator-mod/<hash>/` for root on another account's desk.
+Every missing folder hansa makes on that path is 0700, as are folders inside
+the copy. The follower's own `~/.hansa/followers/<hash>/` uses the same
+rule, so starting it first leaves the mod's enclosing folders private.
+Existing modes stay unchanged. To keep another account from changing the
+code loaded into the session, hansa refuses the mod if its folder or an
+enclosing folder belongs to another ordinary account, or is writable by
+group or others without the sticky bit. When this account owns a writable
+folder, the reason adds `; run chmod go-w <folder>`, with the path shell-quoted;
+the start, `hansa status` and the page show that reason. For another account's
+folder, the refusal stays as it was. Repair the permissions and start the
+coordinator again to load the mod.
 
 Below **compact when idle at**, what compacts an idle session is Claude Code's own idle compaction (Claude Code
 2.1.299 or later): a conversation of 200,000 tokens or more left idle about 54 minutes is compacted before its

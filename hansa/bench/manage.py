@@ -44,7 +44,7 @@ class Busy(ValueError):
 @contextmanager
 def exclusive(desk):
     """Shared with the broker/selftest; never hold the desk lock during VM calls."""
-    desk.state_dir.mkdir(exist_ok=True)
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)
     with open(desk.state_dir / "bench.lock", "a") as held:
         try:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)

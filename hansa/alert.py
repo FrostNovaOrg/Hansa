@@ -272,7 +272,7 @@ def add(desk: Desk, kind: str, text: str, release=None, asked=None, ask=None, *,
                   **({"translations": translations} if translations else {}),
                   **({"release": release, "asked": asked} if release is not None else {}),
                   **({"ask": ask} if ask is not None else {})})
-        desk.state_dir.mkdir(exist_ok=True)
+        desk.state_dir.mkdir(mode=0o700, exist_ok=True)
         write_json(queue_file(desk), q)
     return True
 
@@ -444,7 +444,7 @@ def run(desk: Desk, cmd: str, kinds: str, text: str, timeout: float = TIMEOUT, c
 @contextlib.contextmanager
 def _one_run(desk: Desk, wait: bool):
     """One alert run at a time, across processes; yields False when another holds it and wait is False."""
-    desk.state_dir.mkdir(exist_ok=True)
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)
     with open(desk.state_dir / "alert.lock", "w") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
@@ -689,7 +689,7 @@ def unheard_check(desk: Desk, t: float | None = None) -> dict:
                 and add(desk, "coordinator", unheard_text(desk, items, t), zh=unheard_text(desk, items, t, zh=True)):
             new["told"] = t
     if new != stored:
-        desk.state_dir.mkdir(exist_ok=True)
+        desk.state_dir.mkdir(mode=0o700, exist_ok=True)
         write_json(unheard_file(desk), new)
     return new
 
@@ -785,7 +785,7 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
             queued = add(desk, "coordinator", text, zh=text_zh)
             if queued:
                 told[tid] = round_
-            desk.state_dir.mkdir(exist_ok=True)
+            desk.state_dir.mkdir(mode=0o700, exist_ok=True)
             write_json(reviews_file(desk), told)
         return "queued" if queued else ""
     elif req.get("case") == "turn":

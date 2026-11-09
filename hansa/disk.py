@@ -215,7 +215,7 @@ def look(desk: Desk, s: dict) -> dict:
     low = [v for v in vols if v["free"] < bar(v)] if fl else []
     rec = {"measured": now(), "floor": fl, "low": low, "failed": failed}
     if not written(was, rec):
-        desk.state_dir.mkdir(exist_ok=True)
+        desk.state_dir.mkdir(mode=0o700, exist_ok=True)
         write_json(record_file(desk), rec)
     if low and not was_low:
         desk.event("disk_low", floor=fl, volumes=[volume_text(v, fl) for v in low], again=again_text(fl, low))

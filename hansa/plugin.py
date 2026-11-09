@@ -69,7 +69,7 @@ import time
 from pathlib import Path
 
 from . import account, up
-from .desk import Desk, compact_settings, now, write_json
+from .desk import Desk, compact_settings, mkdir_private, now, write_json
 
 MOD = Path(__file__).with_name("mod")
 NEEDS = (2, 1, 290)  # Claude Code's version --autocompact needs, on a compatible endpoint too
@@ -116,7 +116,8 @@ def folder_problem(path: Path) -> str:
         if owner not in (me, 0):
             return f"{d} belongs to {account.name_of(owner)}"
         if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not st.st_mode & stat.S_ISVTX:
-            return f"others may write in {d}"
+            fix = f"; run chmod go-w {shlex.quote(str(d))}" if owner == me else ""
+            return f"others may write in {d}{fix}"
     return ""
 
 
@@ -128,7 +129,7 @@ def copy(d: Path, src: Path = MOD) -> tuple:
         rel = f.relative_to(src).as_posix()
         if f.is_file() and rel.split("/")[0] not in NOT_COPIED and not any(
                 rel == x or rel.startswith(x + "/") for x in CLAUDE_WRITES):
-            (dest / rel).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            mkdir_private((dest / rel).parent)
             (dest / rel).write_bytes(f.read_bytes())
             (dest / rel).chmod(0o600)
     left = []
@@ -229,7 +230,7 @@ def plan(desk: Desk, claude: str) -> dict:
         step = "finding the folder for the mod's copy (the home folder)"
         d = home(desk)
         step = f"making the mod's folder {d}"
-        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        mkdir_private(d)
         bad = folder_problem(d)
         if bad:
             return {**out, "why": f"its copy would be in a folder another account could change: {bad}"}
@@ -292,7 +293,7 @@ def record_start(desk: Desk, rec: dict, root: bool = False) -> None:
              "autocompact_options": opts if _words(opts) else None,
              "version": v if isinstance(v, str) and re.fullmatch(r"\d{1,6}\.\d{1,6}\.\d{1,6}", v) else "",
              "clear_daily": _window(rec.get("clear_daily")), "root": root}
-    desk.mod_dir.mkdir(parents=True, exist_ok=True)
+    mkdir_private(desk.mod_dir)
     write_json(desk.mod_dir / "start.json", clean)
 
 

@@ -21,7 +21,7 @@ from . import account, alert, build, cost, gaps, goals, history, installed_text,
 from .desk import (EFFORTS, Desk, SettingsError, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
-                   PROJECT_INTRO, answer_name, compact_settings, work_lane_problem, write_text)
+                   PROJECT_INTRO, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
 from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
@@ -138,13 +138,12 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "", *, co
         if why:
             raise SystemExit(f"hansa: {why}; no desk was made")
         base = lane_base(repo, base, "no desk was made")
-    for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir):
-        d.mkdir(parents=True, exist_ok=True)
-    desk.secrets_dir.mkdir(mode=0o700, exist_ok=True)
+    for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir, desk.secrets_dir):
+        mkdir_private(d)
     s = default_settings()
     if repo:
         s["lanes"][lane] = default_lane(repo, base)
-        (desk.lanes_dir / lane).mkdir(exist_ok=True)
+        mkdir_private(desk.lanes_dir / lane)
         write_text(desk.lanes_dir / lane / "brief.md", "")
     with desk.lock():
         write_json(desk.settings_path, s)
@@ -152,7 +151,7 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str = "", *, co
     write_text(desk.root / "CLAUDE.md", CARD.read_text(encoding="utf-8"))
     if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; then only hansa notes archive writes it
         write_text(desk.project_path, PROJECT_INTRO)
-    (desk.root / ".claude").mkdir(exist_ok=True)
+    mkdir_private(desk.root / ".claude")
     write_json(desk.root / ".claude" / "settings.json", {"permissions": permissions(desk)})
     desk.event("desk_created", repo=repo, lane=lane if repo else "")
     return desk
@@ -354,6 +353,8 @@ def cmd_init(a):
         _init_for(a)
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base or "")
     print(f"desk ready at {desk.root}")
+    if desk.root.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        print(f"warning: others may write in {desk.root}; run chmod go-w {shlex.quote(str(desk.root))}", file=sys.stderr)
     problem = up.list_desk(desk)
     if problem:
         print(desk.redact(f"hansa init: the desk was made; {problem}; its first server start "
@@ -391,7 +392,7 @@ def _init_for(a) -> None:
         raise SystemExit(refuse)
     root.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.mkdir(root)
+        os.mkdir(root, 0o700)
     except FileExistsError:
         if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
             raise SystemExit(refuse)
@@ -1579,7 +1580,7 @@ LOCK_WAIT = 2.0  # seconds hansa serve waits for serve.lock before it says anoth
 
 def hold_server_lock(desk: Desk):
     """One hansa serve per desk: it holds this lock while it runs. None when another server holds it."""
-    desk.state_dir.mkdir(exist_ok=True)
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)
     f = open(desk.state_dir / "serve.lock", "a")  # not emptied before it is held: it names the server holding it
     end = time.monotonic() + LOCK_WAIT  # by the clock: on macOS short sleeps overshoot, so counting them waits long
     while True:  # asking whether a server runs holds it shared for a moment (run.lock_held): not a server
@@ -1972,7 +1973,7 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
     _bring(desk, json_text(cs), mine, "permissions_refreshed", keep_as="coordinator-settings.json")
     if not desk.notes_dir.exists() and not desk.notes_dir.is_symlink():  # a desk made before notes/
         desk.notes_dir.mkdir()
-    desk.state_dir.mkdir(exist_ok=True)  # who runs the coordinator: hansa cost says when it cannot read its records
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)  # who runs the coordinator: hansa cost says when it cannot read its records
     plugin.forget(desk)  # the earlier start's record of the mod, before this start prepares it
     started = now()  # and when: this start's record of the mod is tied to it (plugin.status)
     write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": started})
@@ -2035,7 +2036,7 @@ def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> No
     if dst.is_file() and dst.read_text(encoding="utf-8") == new:
         return
     if dst.is_file():
-        desk.state_dir.mkdir(exist_ok=True)
+        desk.state_dir.mkdir(mode=0o700, exist_ok=True)
         write_text(desk.state_dir / f"{keep_as or dst.name}.{int(time.time())}", dst.read_text(encoding="utf-8"))
     dst.parent.mkdir(parents=True, exist_ok=True)
     write_text(dst, new)

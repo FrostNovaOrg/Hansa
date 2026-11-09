@@ -339,6 +339,16 @@ def now() -> float:
     return round(time.time(), 3)
 
 
+def mkdir_private(path: Path) -> None:
+    """Make each missing folder 0700, leaving existing modes alone. Unlike mkdir(parents=True), this also
+    keeps new parents private, so an ordinary group-writable umask cannot expose state or the mod's code."""
+    try:
+        path.mkdir(mode=0o700, exist_ok=True)
+    except FileNotFoundError:
+        mkdir_private(path.parent)
+        path.mkdir(mode=0o700, exist_ok=True)
+
+
 def json_text(data) -> str:
     # Filesystem bytes represented by surrogates use JSON escapes; ordinary Unicode stays readable.
     return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8", "backslashreplace").decode("utf-8") + "\n"
@@ -3067,7 +3077,7 @@ class Desk:
                 if os.environ.get("HANSA_MERGING"):  # waiting would never end: the merge running the hook holds it
                     raise SystemExit("hansa: this runs in a git hook of a hansa merge, which holds the desk until the merge "
                                      "ends; commands that change the desk cannot run here")
-                self.state_dir.mkdir(exist_ok=True)
+                self.state_dir.mkdir(mode=0o700, exist_ok=True)
                 self._lock_file = open(self.state_dir / "lock", "w")
                 fcntl.flock(self._lock_file, fcntl.LOCK_EX)
             self._held += 1
@@ -3208,7 +3218,7 @@ class Desk:
         with self.lock():
             st = read_json(self.state_dir / "providers.json", {}) or {}
             st.setdefault(name, {}).update(fields)
-            self.state_dir.mkdir(exist_ok=True)
+            self.state_dir.mkdir(mode=0o700, exist_ok=True)
             write_json(self.state_dir / "providers.json", st)
 
     def asks(self) -> list:
