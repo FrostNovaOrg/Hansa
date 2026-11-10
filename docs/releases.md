@@ -281,7 +281,9 @@ When the release is done and its watch still runs, the same `--stop ID [reason]`
 or Stop on the page stops the watch, leaving the release done. The watch records
 stopped, by whom and why, and keeps its output so far; a server restart does not
 start it again. A release whose watch has ended, or that has no watch, is still
-refused as already ended.
+refused as already ended. If the watch's command has already written its exit
+code when the stop is handled, hansa keeps its passed or failed result and says
+the stop came after its command had ended, as for a release.
 
 The request lists direct commits among its outgoing commits, with their count (at most 200 SHAs and
 subjects): walk the base's first-parent line; a task's recorded `merge_commit` that hansa landed in

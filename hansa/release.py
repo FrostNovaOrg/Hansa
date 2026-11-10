@@ -1701,17 +1701,23 @@ def _finish_watch(desk: Desk, rid, problem: str = "") -> None:
         text = desk.redact(log.read_text(encoding="utf-8", errors="replace")) if log.exists() else ""
         if log.exists():
             write_text(log, text)
-        result = ("stopped" if w.get("stop_asked") else "timed_out" if w.get("timed_out") else
+        # As for releases, a stop after the command's exit file was written keeps its real result.
+        # The stop path records termed before signalling, so recovery cannot mistake that exit for a late stop.
+        stopped = bool(w.get("stop_asked")) and bool(w.get("termed"))
+        late = bool(w.get("stop_asked")) and not stopped
+        result = ("stopped" if stopped else "timed_out" if w.get("timed_out") else
                   "passed" if code == 0 and not problem else "failed")
         ended = _watch_change(desk, rid, {"state": result, "exit": code, "ended": now(),
                                          "tail": text.strip().splitlines()[-TAIL:],
+                                         **({"stop_late": w.get("stop_late") or now()} if late else {}),
                                          "problem": desk.redact(problem)[:600], "pid": None, "pid_start": ""})
     (d / f"{rid}.watch.exit").unlink(missing_ok=True)
     drop_checkout(desk, rid, r.get("repo"))
     if ended:
         desk.failed_starts.pop(("release-watch", rid, w.get("launch")), None)
         desk.event("release_watch_ended", id=rid, lane=r.get("lane"), target=r.get("target"),
-                   commit=r.get("commit"), state=result, exit=code)
+                   commit=r.get("commit"), state=result, exit=code,
+                   **({"stop_late": True, "stopped_by": w.get("stopped_by") or ""} if late else {}))
 
 
 def _watch_tick(desk: Desk, rs, procs: dict, starting: bool, pending: dict) -> None:
@@ -1725,6 +1731,9 @@ def _watch_tick(desk: Desk, rs, procs: dict, starting: bool, pending: dict) -> N
             proc = procs.get(rid)
             if w.get("stop_asked"):
                 # Keep the durable stop request through recovery: an unfinished watch normally starts over.
+                if not w.get("termed") and not w.get("stop_late"):
+                    field = "stop_late" if (log_dir(desk) / f"{rid}.watch.exit").exists() else "termed"
+                    _watch_change(desk, rid, {field: now()})
                 pid = w.get("pid")
                 if not pid and w.get("launch"):
                     pid = leader(pids_with_arg(w["launch"], w.get("started")))
@@ -2154,17 +2163,20 @@ def watch_text(r: dict, zh: bool = False) -> str:
     if st == "stopped":
         return ((f"发布监测已由{_who(w, True)}停止" if zh else f"watch stopped by {_who(w)}")
                 + (f": {w['stop_reason']}" if w.get("stop_reason") else ""))
-    if w.get("stop_asked"):
+    if w.get("stop_asked") and st in WATCH_OPEN:
         return ((f"发布监测正在停止（{_who(w, True)}请求）" if zh else f"watch stopping (asked by {_who(w)})")
                 + (f": {w['stop_reason']}" if w.get("stop_reason") else ""))
+    late = ((f"；{_who(w, True)}在 {when(w.get('stop_asked'))} 叫停时，它的命令已经结束了" if zh else
+             f"; the stop {_who(w)} asked at {when(w.get('stop_asked'))} came after its command had ended")
+            if w.get("stop_late") else "")
     if st == "timed_out":
-        return "发布监测超时" if zh else "watch timed out"
+        return ("发布监测超时" if zh else "watch timed out") + late
     if st == "failed":
         return (("发布监测失败" if zh else "watch failed")
                 + (f" (exit {w['exit']})" if w.get("exit") is not None else "")
-                + (f": {w['problem']}" if w.get("problem") else ""))
+                + (f": {w['problem']}" if w.get("problem") else "")) + late
     return ({"waiting": "发布监测等待运行", "starting": "发布监测正在启动", "running": "发布监测正在运行",
-             "passed": "发布监测通过"}.get(st, st) if zh else "watch " + st)
+             "passed": "发布监测通过"}.get(st, st) if zh else "watch " + st) + late
 
 
 def _output_tail(desk: Desk, r: dict, watch: bool = False) -> list:

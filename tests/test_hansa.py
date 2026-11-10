@@ -43405,12 +43405,51 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         r = release.get(self.desk, 1)
         self.assertEqual((r["state"], r["watch_run"]["state"]), ("done", "stopped"))
 
+    def test_release_watch_stop_after_command_ended_records_its_real_end(self):
+        from hansa import release
+        for rid, (code, restarted) in enumerate(((0, False), (7, False), (0, True), (7, True)), 1):
+            with self.subTest(code=code, restarted=restarted):
+                self.hansa("lane", "target", "a", "push", "true", "--watch", f"echo watched; exit {code}")
+                self.tick_targets("push")
+                self.hansa("release", "a", "push")
+                old = Dispatcher(self.desk)
+                try:
+                    self.settle_release(old, rid)
+                    self.soon(lambda: (release.log_dir(self.desk) / f"{rid}.watch.exit").exists(), timeout=30)
+                    with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "coordinator"}):
+                        self.hansa("release", "--stop", str(rid), "too late")
+                    d = Dispatcher(self.desk) if restarted else old
+                    w = self.settle_watch(d, rid)
+                    self.assertEqual((w["state"], w["exit"]), ("passed" if code == 0 else "failed", code))
+                    self.assertTrue(w.get("stop_late"))
+                    self.assertEqual((w["stopped_by"], w["stop_reason"], w["tail"]),
+                                     ("coordinator", "too late", ["watched"]))
+                    self.assertEqual(release.get(self.desk, rid)["state"], "done")
+                    self.assertIsNone(w.get("termed"))
+                    for shown in (self.hansa("release"), self.hansa("release", "--show", str(rid))):
+                        self.assertIn("watch passed" if code == 0 else "watch failed (exit 7)", shown)
+                        self.assertIn("came after its command had ended", shown)
+                        self.assertNotIn("watch stopping", shown)
+                    row = next(r for r in views.status(self.desk)["releases"] if r["id"] == rid)
+                    self.assertIn("came after its command had ended", row["watch_what"])
+                    self.assertIn("命令已经结束", row["watch_what_zh"])
+                    ev = next(e for e in self.events("release_watch_ended") if e["id"] == rid)
+                    self.assertTrue(ev.get("stop_late"))
+                    [heard] = notify.items_for(self.desk, [ev], {"key": "k", "session": None})
+                    self.assertIn("came after its command had ended", heard["line"])
+                    self.assertNotIn("watch stopping", heard["line"])
+                    Dispatcher(self.desk).tick()
+                    self.assertEqual(release.get(self.desk, rid)["watch_run"], w)
+                finally:
+                    for proc in old.release_watch_procs.values():
+                        proc.wait(timeout=30)
+
     def settle_watch(self, d, rid):
         from hansa import release
         def ended():
             d.tick()
             return (release.get(self.desk, rid).get("watch_run") or {}).get("state") in (
-                "passed", "failed", "timed_out")
+                "passed", "failed", "timed_out", "stopped")
         self.soon(ended, timeout=30)
         return release.get(self.desk, rid)["watch_run"]
 
@@ -43633,14 +43672,15 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         rs = [{"id": rid, "state": "done", "ended": at - 40 * 86400,
                "watch_run": {"state": state, "ended": at - days * 86400}}
               for rid, state, days in ((1, "passed", 31), (2, "failed", 31), (3, "timed_out", 31),
-                                       (4, "passed", 29), (5, "running", 31))]
+                                       (4, "passed", 29), (5, "running", 31),
+                                       (6, "stopped", 31), (7, "stopped", 29))]
         release._write(self.desk, rs)
         for r in rs:
             (folder / f"{r['id']}.watch.log").write_bytes(big)
         disk.trim(self.desk, at)
         for r in rs:
             data = (folder / f"{r['id']}.watch.log").read_bytes()
-            if r["id"] <= 3:
+            if r["id"] in (1, 2, 3, 6):
                 header, tail = data.split(b"\n", 1)
                 self.assertTrue(header.startswith(b"[hansa trimmed"))
                 self.assertLessEqual(len(tail), disk.TRIM_KEEP)
