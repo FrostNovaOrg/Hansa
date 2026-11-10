@@ -60,7 +60,10 @@ To encrypt notifications, open Bark's encryption settings and choose **AES-128**
 that same key into **Encryption key (optional)**, or paste the shell script
 from the app's **copy example** button into that field. Hansa reads the key,
 algorithm and device key without running the script; it accepts only CBC with
-the matching key length and refuses an example for another device. It stores
+the matching key length and refuses an example for another device: one whose
+push address on the entry's Bark server, or whose device key line, names
+another device. A link to another site that the paste brings along, such as
+`# see https://bark.day.app/en/guide/encryption`, is ignored. It stores
 only the encryption key, discarding the example's IV and other script contents.
 Save settings, then send a test push. Its encrypted text explains that
 **Decryption Failed** on the phone means the app and hansa have different keys.
@@ -70,6 +73,15 @@ redaction and task-change secret checks, and is never shown again. The saved
 entry says **encrypted** on the page, in `hansa status` and in `hansa explain`.
 A blank replacement field keeps the saved key; removing the entry removes its
 secrets, just as for other services. Without a key, Bark delivery stays unchanged.
+Hansa writes the key file with one newline at the end and reads it less only
+that newline, as a key may begin or end with spaces. A key file edited by hand
+to a key the page would refuse (another length, or an extra blank line) sends
+nothing, never plain text: the entry's result is `bad_key`, which says on the
+page and in `hansa status` that its encryption key is not valid and to set it
+again on the page. Such an entry carries no release code, and none is made for it.
+Other services' extra secrets (an ntfy or Gotify token, a JSON webhook's token,
+a signing secret) are read without the blank space around them, so a file
+written by hand or by another program with more than one newline still works.
 
 The device key is secret: someone with it can send to your device. Hansa sends
 a JSON POST to that Bark server's `/push` address, and the server sends the

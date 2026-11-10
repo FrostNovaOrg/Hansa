@@ -51,19 +51,24 @@ def _encryption_key(address, value):
     key = assignments.get("key", "")
     if len(ciphers) != 1 or ciphers[0][1] != "cbc" or not _key_valid(key) or len(key) * 8 != int(ciphers[0][0]):
         raise ValueError(ENCRYPTION_PROBLEM)
-    devices = re.findall(r"https://[^\s'\"<>`]+", value)
-    device_keys = []
-    for url in devices:
+    # A push address names its device on the entry's Bark server; a link to another site that a paste brought
+    # along (# see https://bark.day.app/en/guide/encryption) names no device and is left out.
+    device_keys, elsewhere = [], False
+    for url in re.findall(r"https://[^\s'\"<>`]+", value):
         try:
-            parts = urlsplit(url).path.split("/")
+            parsed = urlsplit(url)
+            parts = parsed.path.split("/")
             device = unquote(parts[1]) if len(parts) > 1 else ""
         except ValueError:
             raise ValueError(ENCRYPTION_PROBLEM) from None
-        if device:
+        if device and parsed.netloc.lower() == urlsplit(address).netloc:
             device_keys.append(device)
+        elif device:
+            elsewhere = True
     device_keys.extend(assignments[name] for name in ("device_key", "deviceKey") if name in assignments)
     if not device_keys:
-        raise ValueError(ENCRYPTION_PROBLEM)
+        # Only addresses on other servers: the example is not this entry's device's.
+        raise ValueError(DEVICE_PROBLEM if elsewhere else ENCRYPTION_PROBLEM)
     if any(device != urlsplit(address).path[1:] for device in device_keys):
         raise ValueError(DEVICE_PROBLEM)
     return key

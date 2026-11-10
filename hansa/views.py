@@ -1094,6 +1094,9 @@ def status_text(st: dict) -> str:
                       + (f" · code {last['code']}" if "code" in last else "") if last else " · no push yet"))
         if last and entry["service"] == "discord" and last["why"] == "http_4xx" and last.get("code") == 10015:
             out[-1] += " · this webhook address no longer exists; paste a new address on the page (Settings, Alerts)"
+        if last and last["why"] == "bad_key":
+            out[-1] += (" · this entry's encryption key is not valid; nothing was sent: set it again on the page "
+                        "(Settings, Alerts)")
     out += [st["disk"]["low_text"] + ". More: hansa help free-space"] if (st.get("disk") or {}).get("low_text") else []
     out += (st.get("disk") or {}).get("unknown") or []
     out += [st["memory"]["low_text"]] if (st.get("memory") or {}).get("low_text") else []
@@ -1184,9 +1187,14 @@ def status_text(st: dict) -> str:
         out.append("releases (hansa release):")
         out += [f"  {r['what']}" for r in st.get("after_merge_waiting") or []]
         out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in shown_releases]
-        if any(r["state"] == "waiting" for r in st["releases"]):
+        waiting = [r for r in st["releases"] if r["state"] == "waiting"]
+        if waiting:
+            # Follow these releases, not the set-up: a code that failed to be made or was voided answers nothing.
             out.append("  the principal answers on the page, or says the one-time code of their alert in the "
-                       "conversation: pass it with hansa release yes|no ID CODE" if st.get("release_codes") else
+                       "conversation: pass it with hansa release yes|no ID CODE"
+                       if any(r.get("code_live") for r in waiting) else
+                       "  the principal answers on the page: no waiting release has a live one-time code"
+                       if st.get("release_codes") else
                        "  the principal answers on the page only: no alert command is set and no enabled Bark entry "
                        "encrypts, so no code is sent")
     if st["asks"]:
