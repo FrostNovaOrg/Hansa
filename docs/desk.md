@@ -1315,7 +1315,9 @@ its event are separate writes; it can go when both become one durable operation.
 hansa posts to the coordinator's Claude Code session through the session's
 inbox (a local socket every interactive session listens on) when something
 needs the coordinator: a task ended (after hansa's own check), failed, was
-cancelled, stopped at its ceiling or could not start; a verification's verdict;
+cancelled, stopped at its ceiling or could not start; a lane whose tasks wait,
+not failed, because the machine or the lane cannot start them (once for each lane
+and reason; [Task states](tasks.md#task-states)); a verification's verdict;
 a merge check ended; the principal answered a release; a release ended
 (done, or failed with its exit code and last lines) or became void; a provider
 an open request names became ready when it was not as the request was made
