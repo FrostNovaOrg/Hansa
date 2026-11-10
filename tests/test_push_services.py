@@ -855,9 +855,9 @@ class ChatServicesTest(_PushServicesCase):
                     self.assertEqual(payload, {"chat_id": "-100123456", "text": text, "disable_notification": False})
                     self.assertEqual(request["url"], address.split("?", 1)[0])
                 elif service == "discord":
-                    self.assertEqual(payload, {"content": text})
+                    self.assertEqual(payload, {"content": text, "allowed_mentions": {"parse": []}})
                 elif service == "slack":
-                    self.assertEqual(payload, {"text": text})
+                    self.assertEqual(payload, {"text": text, "mrkdwn": False, "link_names": False, "parse": "none"})
                     self.assertEqual(request["success"], {"status": 200, "text": "ok"})
                 else:
                     self.assertEqual(payload, {"desk": "台面", "title": "台面", "text": "正文\n下一行", "level": "active"})
@@ -932,6 +932,26 @@ class ChatServicesTest(_PushServicesCase):
         self.assertEqual(request["url"], address)
         [unsigned] = definition.requests(address, "", "desk", "body", "active")
         self.assertEqual(unsigned["json"], {"msg_type": "text", "content": {"text": "desk\nbody"}})
+
+    def test_discord_and_slack_mentions_are_plain_text_without_pings(self):
+        title = "Shop @everyone <!channel>"
+        body = "to-do: @everyone @here <@123456> <@&123456> <!channel> <!here> <!everyone> <@U12345> & details"
+        for level in ("passive", "active", "urgent"):
+            with self.subTest(level=level, service="discord"):
+                [request] = alert_services.SERVICES["discord"].requests(CHAT_SERVICE_CASES[4][1], "", title, body, level)
+                self.assertEqual(request["json"].get("allowed_mentions"), {"parse": []})
+                self.assertEqual(request["json"]["content"], title + "\n" + body)
+            with self.subTest(level=level, service="slack"):
+                [request] = alert_services.SERVICES["slack"].requests(CHAT_SERVICE_CASES[5][1], "", title, body, level)
+                payload = request["json"]
+                self.assertIs(payload.get("mrkdwn"), False)
+                self.assertIs(payload.get("link_names"), False)
+                self.assertEqual(payload.get("parse"), "none")
+                self.assertNotIn("<", payload["text"])
+                self.assertIn("&lt;!channel&gt;", payload["text"])
+                self.assertIn("&lt;@U12345&gt;", payload["text"])
+                self.assertIn("&amp; details", payload["text"])
+                self.assertIn("@everyone @here", payload["text"])
 
     def test_passive_telegram_and_discord_suppress_notifications(self):
         for service, address, token, _, _ in CHAT_SERVICE_CASES[3:5]:

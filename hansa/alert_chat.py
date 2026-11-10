@@ -165,7 +165,7 @@ class Discord(_Chat):
         return parsed.netloc + parsed.path.rsplit("/", 1)[0] + "/…"
 
     def requests(self, address, secret, title, body, level):
-        payload = {"content": _characters(title + "\n" + body, 2000)}
+        payload = {"content": _characters(title + "\n" + body, 2000), "allowed_mentions": {"parse": []}}
         if level == "passive":
             payload["flags"] = 4096
         return [{"url": address, "json": payload, "error_field": "code", "headers": {
@@ -188,7 +188,10 @@ class Slack(_Chat):
         return urlsplit(address).netloc + "/services/…"
 
     def requests(self, address, secret, title, body, level):
-        return [{"url": address, "json": {"text": _characters(title + "\n" + body, 4000)},
+        # Escape Slack's control characters before sending: explicit mention tokens must be text too.
+        text = (title + "\n" + body).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return [{"url": address, "json": {"text": _characters(text, 4000), "mrkdwn": False,
+                                           "link_names": False, "parse": "none"},
                  "success": {"status": 200, "text": "ok"}}]
 
 
