@@ -34,7 +34,11 @@ with the same counts, decisions, evidence and lifetime cost.
 | `hansa ask "<what>" --goal G` | ties a new principal to-do to the goal; closing it removes it from the goal's open to-dos |
 
 Task counts use the latest task in each retry chain: queued/running, waiting for review (`done`
-or `merging`), merged and failed. Cancelled tasks stay in `show` but do not add to these counts.
+or `merging`), merged and failed. A merged task stays a chain of its own, with its merge, releases
+and evidence; a follow-up sent on top of it is a new chain, `(retry of ID)` in its title, counting
+only its own rounds. A follow-up cancelled before it started counts as one cancelled chain and
+leaves the task it was sent back from as it was.
+Cancelled tasks stay in `show` but do not add to these counts.
 Verifications appear as verifications of their task, without counting the product work twice.
 `hansa status` shows at most five open goals with the task and to-do counts and points to `hansa goal list`
 for the rest. With no goals it adds no goal lines. Ended goals remain readable with `show`,
@@ -294,7 +298,9 @@ while `--after` accepts task references. The target is saved with the task, so c
 cannot silently send it to another repository or base.
 
 When T is sent back with `hansa retry`, the task waits for its latest follow-up, through any
-number of retries. If that task is closed, cancelled or fails without being sent back, the
+number of retries. Once a task in that chain is merged, the dependency is met: a later follow-up of
+merged work adds no wait and holds nothing, whether it waits, is cancelled or is closed.
+If the latest task is closed, cancelled or fails without being sent back, the
 dependent task stays queued but held. Hansa posts the reason to its coordinator once for that
 dependency and attempt, naming both tasks and the choices: `hansa cancel ID` to drop the waiting
 task, or `hansa retry T` (the latest follow-up when there is one). A later retry and merge clears
@@ -513,6 +519,17 @@ verification's report, with its verdict. Earlier notes are not carried, so
 what still holds of them is said again in the new note. Each round's note is
 kept on its own beside its task, as `note.md` in the task's folder (keys
 removed, as from what else hansa writes there).
+
+A done, failed, closed or cancelled task becomes replaced, so it can be sent back once; a second `hansa retry` of it is
+refused and names the follow-up to send back instead. A merged task stays merged: each
+`hansa retry` of it is new work on top of that merge, and it can be sent back more than once.
+
+A follow-up cancelled while still queued, before it ever started, gives the task it replaced back
+as it was (waiting for review, failed, or closed), and `hansa cancel` says so; `hansa retry` of
+the cancelled follow-up is then refused and points to that task. A follow-up the machine kept from
+starting (`next:` says `hansa retry` it once the machine is fixed) has no commit of its own; its
+retry starts where it would have started, the earlier task's last commit, and is given that
+earlier task's report.
 
 A verification of a follow-up judges each ask in the original task together with
 this round's note, which restates what still holds of earlier rounds' notes and

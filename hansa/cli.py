@@ -1089,6 +1089,9 @@ def cmd_cancel(a):
                         **({"restored_parent": restored["id"]} if restored else {}))
             if restored:
                 desk.update(restored["id"], state=restored["ended_as"], replaced_by=None, ended_as=None)
+                v = desk.meta(restored["verify"]) if restored.get("verify") else {}
+                if v.get("closed") == f"closed: {restored['id']} was replaced by {a.id}":  # it checks the work again
+                    desk.update(v["id"], closed=None)
         elif m["state"] == "running":  # hansa serve stops it; stopping it here as well is only quicker
             m = desk.update(a.id, cancel=True, cancel_by=by)
         elif m["state"] == "done":
@@ -3365,7 +3368,7 @@ def main(argv=None):
                    "the machine's sake, once that is fixed; recorded)")
     p.epilog = see_more("merge-check")
     p = add("retry", cmd_retry, "queue a follow-up task (new id) that continues from this task's last commit with "
-            "your note; this task becomes replaced")
+            "your note; this task becomes replaced unless it is merged")
     p.description += ". The follow-up keeps its goal, even when the goal is done or dropped"
     verify_options(p)
     p.add_argument("id")
@@ -3376,7 +3379,9 @@ def main(argv=None):
                      "verdict, whatever the verdict was. Earlier notes are not carried, so repeat in this note what "
                      "still holds of them. The follow-up replaces the earlier task: the earlier "
                      "task is replaced at once (its verification, if one is open, closed), and the follow-up is the "
-                     "one to review and merge. Its own lane must still be on the desk and, when recorded, on the "
+                     "one to review and merge; a second retry of it is refused. A merged task stays merged, and each "
+                     "retry of it is new work on top. A follow-up cancelled before it started gives the earlier task "
+                     "back as it was. Its own lane must still be on the desk and, when recorded, on the "
                      "repository where it ran; otherwise give the work again with hansa add --lane L.")
     p.add_argument("--lane", metavar="L", help="queue the follow-up on this work lane on the same repository "
                    "and base branch as the task's own lane, for example when that lane is busy; the task's "

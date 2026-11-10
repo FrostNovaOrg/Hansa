@@ -22284,7 +22284,10 @@ def save():'''))
         self.assertIn("run the merge check (the lane's merge_check when set)", merge)
         retry = " ".join(self.hansa("help", "retry").split())
         self.assertIn("queue a follow-up task (new id) that continues from this task's last commit with your note; "
-                      "this task becomes replaced", retry)
+                      "this task becomes replaced unless it is merged", retry)
+        for words in ("a second retry of it is refused", "A merged task stays merged",
+                      "cancelled before it started gives the earlier task back"):
+            self.assertIn(words, retry)
         self.assertNotIn("attempt", retry)
         self.assertIn("a verification by another model", " ".join(self.hansa("help", "verify").split()))
 
@@ -26480,6 +26483,15 @@ def save():'''))
                     self.hansa("cancel", next_)
                 self.hansa("cancel", dependent)
 
+    def test_retry_records_queued_cancel_reopens_the_verification(self):
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        vid = self.ended(tid, "done", "Earlier report", "holds", "Verification report")
+        follow = self.hansa("retry", tid, "wrong note").split()[0]
+        self.assertIn("replaced", self.desk.meta(vid)["closed"])
+        self.hansa("cancel", follow)
+        self.assertFalse(self.desk.meta(vid).get("closed"))
+        self.assertIn("merge or send back", self.hansa("show", vid))
+
     def test_retry_records_machine_failure_keeps_start_and_report(self):
         from hansa import run
         d = Dispatcher(self.desk)
@@ -26814,9 +26826,9 @@ def save():'''))
         self.hansa("lane", "add", "b", "--like", "a")
         tid = self.desk.new_task("Never started")
         self.hansa("cancel", tid)
+        self.assert_retry_lane_refused_unchanged(tid, ("--lane", "b"), ("(none)", "hansa add --lane b"))
         retry = self.hansa("retry", tid, "carry on").split()[0]
         self.assertEqual((self.desk.meta(retry)["state"], self.desk.meta(retry)["lane"]), ("queued", ""))
-        self.assert_retry_lane_refused_unchanged(tid, ("--lane", "b"), ("(none)", "hansa add --lane b"))
 
     def test_retry_lane_accepts_legacy_records_and_compares_the_current_own_base(self):
         tid = self.desk.new_task("Legacy task", lane="a")
@@ -29171,7 +29183,9 @@ def save():'''))
                 shown = self.hansa("show", tid)
                 meaning = next(line[len("meaning: "):] for line in shown.splitlines()
                                if line.startswith("meaning: "))
-                for word in ("HELD", first, latest, ending, f"hansa cancel {tid}", f"hansa retry {latest}"):
+                # A follow-up cancelled before it started gives the failed task back: that one holds it.
+                held, why = (first, "failed") if ending == "cancelled" else (latest, ending)
+                for word in ("HELD", first, held, why, f"hansa cancel {tid}", f"hansa retry {held}"):
                     self.assertIn(word, meaning)
                 self.assertNotIn("free lane", meaning)
                 self.assertIn(meaning, self.hansa("status"))
@@ -29373,7 +29387,10 @@ def save():'''))
         tid = self.hansa("add", "Waiting", "--lane", "a", "--after", first).split()[0]
         real_start = run.start
         def start(desk, task, lane, provider):
-            self.hansa("retry", first, "More work")  # between dispatch's read and its claim
+            # Between dispatch's read and its claim: a follow-up of merged work adds no wait, but a
+            # prerequisite whose record now says it merged elsewhere is seen at the claim.
+            self.hansa("retry", first, "More work")
+            self.desk.update(first, merge_base="elsewhere")
             return real_start(desk, task, lane, provider)
         with unittest.mock.patch("hansa.run.start", side_effect=start), \
                 unittest.mock.patch("hansa.run.prepare") as prepare:
