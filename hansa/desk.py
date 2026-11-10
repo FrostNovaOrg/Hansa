@@ -1978,8 +1978,9 @@ BREAKS_WHY = f"a name in it (or where its link leads) has one of {RULE_BREAKERS}
 
 
 def _repo_fences(lanes, contents=False) -> list:
-    """Repositories no hide entry may close, and no write entry may open (contents too): git runs there
-    outside the worker's sandbox, so another lane must not plant hooks or change its configuration."""
+    """The lanes' repositories, as fences: no hide entry may be one or above one (runs read them), and no write
+    entry may be one, inside one or above one (contents): hansa runs git there outside the sandbox, so a hook or
+    a git setting a worker put there would run outside it."""
     relation = "inside or above" if contents else "above"
     return [(repo, _overlaps if contents else _above,
              f"it is {repo}, lane {name}'s repository, or a folder {relation} it")

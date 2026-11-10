@@ -331,17 +331,6 @@ warns, naming the folder and the other desk, when a
 folder on this desk's write lists is, holds or is inside one on a write list
 of another listed desk.
 
-No entry may be any lane's repository on this desk, a folder inside it
-(including `.git` and `.git/hooks`), or a folder above it, through links too.
-This is necessary while hansa runs git in those repositories outside the
-worker's sandbox: a worker could plant a hook or change git's configuration
-there. `hansa lane set L write ...` refuses the whole change and says why.
-`hansa lane add` also refuses a repository that overlaps an existing write
-entry, naming the lane and the entry; remove that entry first. An entry
-saved before this check is left out of the worker's, setup's and check's
-sandbox, with its reason recorded on the task and marked by
-`hansa explain lane L`; the run continues with the entries that pass.
-
 So none of the user's caches can be listed: not `~/.cache/pip`,
 `~/Library/Caches/pip`, `~/.m2/repository`, `~/.gradle/caches`,
 `~/.npm/_cacache`, `~/.cargo/registry` or any other hidden folder. They are
@@ -383,6 +372,17 @@ invisible character (a space other than the plain one too), which the sandbox
 may read as a pattern or a person as another name. Each refusal says what it
 would open. `hansa explain lane L` marks each entry a run would leave out,
 with why. The coordinator tells the principal what it added and why.
+
+No entry may be any lane's repository on this desk, a folder inside it
+(including `.git` and `.git/hooks`), or a folder above it, through links too:
+hansa runs git in those repositories outside the sandbox, so a hook or a git
+setting a worker put there would run outside it. `hansa lane set L write ...`
+refuses the whole change and says why. `hansa lane add` refuses a repository
+that is, holds or is inside an entry on a lane's write list, naming the lane
+and the entry; remove that entry first. An entry saved before this check is
+left out of the worker's, setup's and check's sandbox, with its reason
+recorded on the task and marked by `hansa explain lane L`; the run goes on
+with the entries that pass.
 
 Point a tool at the lane's folder with the lane's env (`hansa lane set L env
 NAME=/Users/me/hansa-cache/shop-desk/L/TOOL`, and list that folder): pip
