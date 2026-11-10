@@ -128,7 +128,8 @@ cannot be hidden whole: instead each file and folder hansa keeps there
 neither is hidden from the runs, and the coordinator's session is denied Read
 and Edit on each. What holds this desk or the repository, and the rest of that
 folder, stays as it was. `hansa init` warns, naming the other desk, when it
-makes a desk inside a listed desk or in a folder that holds one.
+makes a desk inside a listed desk; it refuses a folder that holds one, as it
+refuses any folder that holds something.
 
 A list that is missing, or holds `[]`, hides nothing, and runs start. One that
 is there but cannot be used (no permission, a folder in its place, another read
