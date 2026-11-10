@@ -19411,8 +19411,15 @@ def save():'''))
         with self.in_session(c, sc):
             self.hansa_out("notify", "on")
         self.soon(lambda: [r for r in notify.live_records(self.desk) if r["session"]["pid"] == c.pid])
-        time.sleep(1)
-        self.assertEqual(self.posts(sc), [])
+        posts = self.soon(lambda: self.posts(sc))  # no server runs: C hears only its startup notice
+        self.assertEqual(len(posts), 1, posts)
+        self.assertNotIn("t0001", posts[0])
+        self.assertNotRegex(posts[0], r"session pid .* ended at")
+        lines = posts[0].splitlines()
+        self.assertEqual(len(lines), 2, posts[0])
+        self.assertEqual(lines[0], f"[hansa] desk {self.desk.root}")
+        self.assertTrue(lines[1].startswith("- hansa serve is not running:"), posts[0])
+        self.assertIn("next: hansa up", lines[1])
         self.assertEqual(len(self.posts(sb)), 1)
 
     def missed_a_server_stop(self, desk=None):
