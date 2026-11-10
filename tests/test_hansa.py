@@ -13199,6 +13199,18 @@ def save():'''))
                 shown = self.hansa("show", tid)
                 self.assertIn(unit, shown)
                 self.assertIn(package, shown)
+                [header] = [line for line in shown.splitlines() if line.startswith("merge check")]
+                if unit_fails:
+                    self.assertIn("ran the task check there", header)
+                    self.assertIn("the merge check did not run", header)
+                    self.assertIn("task check FAILED (exit 7)", header)
+                else:
+                    self.assertIn("ran the task check, then the merge check there", header)
+                    self.assertIn("merge check FAILED (exit 8)", header)
+                    self.assertNotIn("task check FAILED", header)
+                for word in ("&&", unit, package):
+                    self.assertNotIn(word, header)
+                self.assertIn("nothing was merged", header)
 
     def test_recheck_deduplicates_commands_and_leaves_passed_checks_alone(self):
         for passed in (False, True):
@@ -28511,7 +28523,8 @@ def save():'''))
         self.assertNotIn("next:", shown)  # nothing left to do with it
         self.assertNotIn(vid, [m["id"] for m in views.status(self.desk)["review"]])
 
-    def task_with_verdict(self, verdict, name="change.py", release_files=False):
+    def task_with_verdict(self, verdict, name="change.py", release_files=False, verify_report=""):
+        """verify_report: what the verification reports, other than the task's report, before its verdict."""
         s = self.desk.settings()
         s["lanes"]["a"].update(check="test -f README.md", env={"FAKE_HELLO": name, "FAKE_VERDICT": verdict})
         if release_files:
@@ -28519,6 +28532,10 @@ def save():'''))
         self.assertEqual(self.desk.save_settings(s), [])
         d = Dispatcher(self.desk)
         tid = self.settle(d, self.desk.new_task(f"Add {name}"))["id"]
+        if verify_report:
+            s = self.desk.settings()
+            s["lanes"]["a"]["env"]["FAKE_REPORT"] = f"{verify_report}\n\nVERDICT: {verdict}"
+            self.assertEqual(self.desk.save_settings(s), [])
         self.hansa("verify", tid)
         vid = self.desk.meta(tid)["verify"]
         self.settle(d, vid)
@@ -28582,7 +28599,7 @@ def save():'''))
     def test_standing_verdict_drives_page_goal_override_rounds_and_followup_report(self):
         from hansa.run import rethink_text, rounds_line
         self.hansa("goal", "add", "Hold the merge")
-        d, tid, first = self.task_with_verdict("does not hold")
+        d, tid, first = self.task_with_verdict("does not hold", verify_report="The verifier found hello.py missing.")
         self.desk.update(tid, goal="g1")
         self.later_verification(d, tid, "cancelled")
         row = next(r for r in views.task_list(self.desk)["rows"] if r["id"] == tid)
@@ -28591,8 +28608,11 @@ def save():'''))
         new = self.hansa("retry", tid, "fix the verdict").split()[0]
         text = (self.desk.tasks_dir / new / "task.md").read_text()
         report = (self.desk.tasks_dir / first / "result.md").read_text().strip()
-        self.assertIn(report, text)
-        self.assertIn(first, text)
+        self.assertNotIn(report, (self.desk.tasks_dir / tid / "result.md").read_text())
+        section = text[text.index(f"The report of {first},"):]
+        self.assertIn("its verdict: does not hold", section.split("\n", 1)[0])
+        self.assertIn("The verifier found hello.py missing.", section)
+        self.assertIn(report, section)
         self.assertIn("judged 1", rounds_line(self.desk, self.desk.meta(new)))
         self.hansa("lane", "set", "a", "env", "FAKE_VERDICT=does not hold", "FAKE_HELLO=next.py")
         self.settle(d, new)
