@@ -510,7 +510,7 @@ class PhoneServicesTest(_PushServicesCase):
         unsafe = "http://pushdeer.example.com:8800/message/push?pushkey=K"
         with self.assertRaisesRegex(ValueError, "HTTPS.*8800"):
             alert_services.SERVICES["pushdeer"].normalize(unsafe)
-        with self.assertRaisesRegex(ValueError, "push service does not accept"):
+        with self.assertRaisesRegex(ValueError, "HTTPS.*8800"):
             self.save(unsafe, "pushdeer")
         entry = self.save("https://pushdeer.example.com:8443/message/push?pushkey=K", "pushdeer")
         _, request = self.deliver(entry)
