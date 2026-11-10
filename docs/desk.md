@@ -1077,7 +1077,21 @@ values: `-c`, `--continue`, `-r`/`--resume`, `--session-id`, `--fork-session` an
 `--messaging-socket-path`. So a session started with `--resume <its id>` or
 `--session-id <its id>` is recorded, and so is one `hansa up`'s launcher
 started (it carries its inbox) when it runs `hansa notify on`: it hears from
-hansa already, and running it does no harm. When a word that is kept holds
+hansa already, and running it does no harm.
+
+In their place the record keeps the session's conversation (`conversation`):
+its id (the session's id, a UUID) and its transcript's path when known. For
+`hansa notify on` it is the id Claude Code gives the commands run in the
+session (`CLAUDE_CODE_SESSION_ID`), with the transcript found under that
+session's Claude Code folder (`projects/*/<id>.jsonl`); without that variable,
+the id given to `--resume` or `--session-id`. For `hansa coordinator` and the
+launcher, it is the id their words give with `--resume` or `--session-id`, or
+a new conversation (`null`) when no word picks one. Words that pick a
+conversation hansa cannot name (`--continue`, `--resume` without an id or with
+a name, `--fork-session`) leave it out. From then on the session's hooks keep
+it up to date (below), after a `/clear` too, which gives the session a new id.
+The id is not a credential; the session's other variables (its inbox, its
+token) are never kept. When a word that is kept holds
 one of the desk's keys or the session's identity, or the argument list or the
 folder cannot be read, no command is saved and the start says why. The record
 then holds only that and the session's process, so `hansa up` starts no older
@@ -1158,8 +1172,8 @@ server and a session `coordinator`; when that session exists, in a new window.
 The pane gets the server's clean environment (above), with the recorded
 variables, and runs in the recorded folder:
 
-- a `hansa coordinator` record: `<hansa> --desk <desk> coordinator <recorded words> --continue`;
-- a `hansa notify on` record: the recorded argument list, with `--continue`,
+- a `hansa coordinator` record: `<hansa> --desk <desk> coordinator <recorded words> <conversation>`;
+- a `hansa notify on` record: the recorded argument list, with `<conversation>`,
   through hansa's launcher (`hansa notify-launch`, not listed in help). The
   launcher starts the follower for its own process, as `hansa coordinator`
   does, records the start again, then execs claude with
@@ -1181,24 +1195,56 @@ variables, and runs in the recorded folder:
   words give a `--settings` of their own (then it adds nothing: the two are
   not merged).
 
-`--continue` continues the most recent conversation in that folder. hansa's own
-`claude -p` runs (`hansa ping`) use a temporary folder, so they leave none
-there. A prompt given on the recorded command line is given again.
+`<conversation>` is the session's own conversation, by the record:
 
-With no record on a new desk (no task, and nothing under `.hansa/followers/`,
-as after `hansa init`), it starts `hansa coordinator` in the desk, without
-`--continue`, and says that the first start in a folder asks whether to trust
-it: attach and answer. With no record on any other desk, it starts nothing:
+- `--resume <id>` when the record names it, unless its transcript's path is
+  known and the file is not there (a path hansa cannot look at counts as
+  there);
+- nothing, a new conversation, when the record says the session had none (it
+  started without picking one and no turn of it ended: it was never typed
+  into) or its transcript is gone. Claude Code refuses `--resume` of an id
+  whose conversation is gone ("No conversation found with session ID"), and
+  `--continue` would pick whatever conversation is there;
+- `--continue`, the most recent conversation in that folder, for a record that
+  does not name one: one written by an older hansa, until the session's next
+  turn records its id, or a start with words hansa cannot name. hansa's own
+  `claude -p` runs (`hansa ping`) use a temporary folder, so they leave none
+  there.
+
+A prompt given on the recorded command line is given again.
+
+With no record on a new desk, as after `hansa init`, it starts `hansa
+coordinator` in the desk, without `--continue`, and says that the first start
+in a folder asks whether to trust it: attach and answer. A desk is new when no
+coordinator ever ran on it: `hansa coordinator` never prepared it (no
+`.hansa/coordinator.json`), nothing is under `.hansa/followers/`, and no task
+was added from a Claude Code session (a task records the session that added
+it). Tasks added by hand from a shell, as the guide's `hansa add` before tmux
+was installed, do not count. With no record on any other desk, it starts nothing:
 that desk had a coordinator before hansa recorded its start, maybe a session
 in another folder that ran `hansa notify on`, and a fresh `hansa coordinator`
 would be a second coordinator, in the wrong folder, with a new conversation.
 It says that the start is not recorded yet, and what to do: start the
 coordinator as before and run `hansa notify on` in it, or start it with
 `hansa coordinator`; from then on `hansa up` starts it again. After a start, it waits
-three seconds and prints that the session started, with the attach command
-(`tmux -L NAME attach -t SESSION`, or `tmux attach -t SESSION` for tmux's
-default server); if the pane ended, it says that the start failed, with the
-command to run by hand. Without tmux it starts no coordinator, and prints the
+three seconds and prints that the session started, a `conversation:` line
+saying whether it resumed the coordinator's own conversation (and its id),
+started a new one (and why), or continued the folder's most recent one, and
+the attach command (`tmux -L NAME attach -t SESSION`, or `tmux attach -t
+SESSION` for tmux's default server). Only a pane tmux says is there and not
+dead counts as running: for a pane that ended and closed, tmux answers with
+nothing and exits 0. Only a start that ends at once leaves a file: when the
+pane's command ends within a minute of its start, the pane writes its last
+screen, up to 100 lines as they were shown (not redacted), to
+`.hansa/coordinator-pane.txt` (`tmux capture-pane`) before it closes. A session
+that ran longer and then ended writes none, so its conversation is not left on
+disk; `hansa up` removes the file before each start. So when the pane ended,
+`hansa up` says `coordinator failed to start:`, prints the last lines of that
+file (Claude Code's own words, such as a missing `claude` or a conversation not
+found), with the command to run by hand, and exits 1. When that start resumed
+the coordinator's conversation by its id, it also gives the command that starts
+the same session with a new conversation, to use when Claude Code says no
+conversation was found with that id. Without tmux it starts no coordinator, and prints the
 command to run in a terminal of one's own. On another account's desk it starts
 nothing, as for the server. While no session hears from hansa, `hansa status`
 says in one line that `hansa up` starts the session again, and how, or why it
@@ -1224,11 +1270,19 @@ rename, without the desk's lock:
 
 `error` is Claude Code's error type (`rate_limit`, `overloaded`,
 `authentication_failed`, ... `unknown`); a type not on its list is kept as
-`unknown`. Nothing else of the hook's input is kept: not the last message, the
-error's details, the transcript's path, the folder or the session's id.
-Missing or malformed input writes nothing, and the command always exits 0. As
-root on an account's desk, root passes only the event and the error type to the
-account's hansa, which writes the record. `hansa serve` removes, as it starts,
+`unknown`. Nothing else of the hook's input is kept there: not the last
+message, the error's details, the transcript's path, the folder or the
+session's id. The same command also runs as a `SessionStart` hook after a
+`/clear` (matcher `clear`; `hansa coordinator`'s own `coordinator-cleared`
+hook runs there too). On each of the three it keeps the conversation the
+session runs, the session's id (a UUID) and the transcript's path from the
+hook's input, in the start record (`.hansa/coordinator-start.json`,
+`conversation`), when that record is of this session (pid `N`, started when
+the record says) and the conversation changed; that is what `hansa up`
+resumes. Missing or malformed input writes nothing, and the command always
+exits 0. As root on an account's desk, root passes only the event and the
+error type to the account's hansa, which writes the turn's record; root keeps
+no start record. `hansa serve` removes, as it starts,
 the records of sessions whose process is gone (`up.sweep_turns`); it leaves
 alone any file there whose name is not a pid's record (`<pid>.json`, the pid
 plain digits from 1 to 4194304), and the sweep never stops the server.
