@@ -30958,6 +30958,67 @@ def save():'''))
                 self.assertIn(reason, out)
                 self.assertNotIn("no task finished", out)
 
+    def test_waiting_wait_queued_only_ignores_unwatched_active_work(self):
+        for case in ("paused", "disk", "memory"):
+            with self.subTest(case=case):
+                self.desk = init_desk(self.tmp / ("queued-wait-" + case), str(self.repo), "a")
+                self.free, self.memory_available = 500 * 10 ** 9, 8 * 10 ** 9
+                reason = self.waiting_hold(case)
+                queued = [self.desk.new_task("Queued") for _ in range(2)]
+                active = self.desk.new_task("Unwatched work")
+                self.desk.change(active, lambda m: {"state": "running"})
+                with cli.hold_server_lock(self.desk):
+                    self.round_at(0)
+                    patcher, sleeps = self.patch_sleeps(lambda _: self.fail("waited for unwatched work"))
+                    with patcher:
+                        out = self.hansa("wait", *queued, "--timeout", "1")
+                self.assertEqual(sleeps, [])
+                self.assertIn(reason, out)
+                self.assertNotIn("no task finished", out)
+
+    def wait_for_active_work_under_hold(self, explicit):
+        for case in ("paused", "disk", "memory"):
+            for state, end_state in (("running", "done"), ("merging", "merged")):
+                with self.subTest(case=case, state=state):
+                    self.desk = init_desk(self.tmp / ("active-wait-" + case + state), str(self.repo), "a")
+                    self.free, self.memory_available = 500 * 10 ** 9, 8 * 10 ** 9
+                    self.waiting_hold(case)
+                    queued = self.desk.new_task("Queued")
+                    active = self.desk.new_task("Work that can finish")
+                    self.desk.change(active, lambda m: {"state": state})
+
+                    def finish(_):
+                        self.assertEqual(self.desk.meta(active)["state"], state)
+                        self.desk.change(active, lambda m: {"state": end_state})
+
+                    with cli.hold_server_lock(self.desk):
+                        self.round_at(0)
+                        patcher, sleeps = self.patch_sleeps(finish)
+                        with patcher:
+                            out = self.hansa("wait", *([queued, active] if explicit else []), "--timeout", "1")
+                    self.assertEqual(len(sleeps), 1, out)
+                    self.assertIn(f"{active} {end_state}:", out)
+                    self.assertEqual(self.desk.meta(queued)["state"], "queued")
+
+    def test_waiting_wait_watched_active_work_finishes_under_dispatch_holds(self):
+        self.wait_for_active_work_under_hold(explicit=True)
+
+    def test_waiting_wait_without_ids_active_work_finishes_under_dispatch_holds(self):
+        self.wait_for_active_work_under_hold(explicit=False)
+
+    def test_waiting_wait_active_work_returns_when_server_is_down(self):
+        for state in ("running", "merging"):
+            with self.subTest(state=state):
+                tid = self.desk.new_task("Work without a server")
+                self.desk.change(tid, lambda m: {"state": state})
+                patcher, sleeps = self.patch_sleeps(lambda _: self.fail("waited without a server"))
+                with patcher:
+                    out = self.hansa("wait", tid, "--timeout", "1")
+                self.assertEqual(sleeps, [])
+                self.assertIn("hansa serve is not running", out)
+                self.assertIn("next: hansa", out)
+                self.assertIn(" up", out)
+
     def test_waiting_follower_starts_down_posts_once(self):
         self.coordinator_desk(1)
         with unittest.mock.patch.object(notify, "post") as post:

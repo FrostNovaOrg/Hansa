@@ -1454,7 +1454,7 @@ def cmd_wait(a):
         if ended:
             break
         hold = "dispatch is paused" if desk.paused() else views.disk_short(desk)
-        if hold:
+        if hold and all(desk.meta(t)["state"] == "queued" for t in watch):
             print(f"nothing new starts: {hold}")
             return
         if server_state(desk)["state"] == "gone":
@@ -3592,8 +3592,9 @@ def main(argv=None):
     p = add("wait", cmd_wait, "return when a task finishes or fails; run it in the "
             "background when hansa does not notify the session (hansa notify)")
     p.description += (". Open to-dos are not waited on; with no tasks to watch, return at once with nothing to wait for."
-                      " Also returns with the reason when dispatch is paused, under a disk or memory floor,"
-                      " or hansa serve is not running.")
+                      " Also returns with the reason when every watched task is queued and dispatch is paused"
+                      " or under a disk or memory floor; running and merging tasks are still waited on."
+                      " Returns at once when hansa serve is not running.")
     p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")
     p.add_argument("--timeout", type=float, default=60, help="minutes (default 60)")
     p.add_argument("--every", type=float, default=5.0, help=argparse.SUPPRESS)

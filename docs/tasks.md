@@ -657,6 +657,13 @@ money goes. A turn's time runs from its first step in the window to its last;
 
 ## Task states
 
+`hansa wait [ID ...]` returns when a watched task ends. With no IDs, it watches all queued,
+running and merging tasks. When dispatch is paused or under a disk or memory floor, it returns
+at once with the reason only if every watched task is queued; running and merging tasks are
+still waited on, even if queued tasks are watched alongside them. With no tasks to watch, or
+with `hansa serve` not running, it returns at once. For a stopped server, it gives the command
+to start that desk.
+
 While the lane's setup runs, status and show name it and show its elapsed minutes instead of saying the
 model has not replied. Once setup completes, model progress is shown as above.
 

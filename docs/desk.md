@@ -1363,9 +1363,11 @@ says all of this.
 While hansa posts to a session, that session does not keep `hansa wait`
 running in the background; `hansa wait` is for a session hansa does not post
 to. It waits for tasks only; open to-dos do not keep it waiting. With no tasks
-to watch, it returns at once, saying there is nothing to wait for. It also returns with the reason
-when dispatch is paused, under a disk or memory floor, or `hansa serve` is not running, checking
-these conditions while it waits. When the server is down, it gives the command to start that desk.
+to watch, it returns at once, saying there is nothing to wait for. With no IDs, it watches all queued,
+running and merging tasks. When dispatch is paused or under a disk or memory floor, it returns
+with the reason only if every watched task is queued; it still waits for running and merging
+tasks, even alongside queued tasks. It checks these conditions while waiting. If `hansa serve`
+is not running, it returns at once with the command to start that desk.
 A follower started while the server is down posts that fact once, with the same start command.
 That startup notice does not count as a post, an inbox refusal or waiting work for the principal's
 coordinator alerts; task posts and later server-stop notices keep their usual alert timing.
