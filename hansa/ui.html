@@ -450,7 +450,7 @@ document.documentElement.setAttribute("lang", language);
 const T = ZH ? {
   status:"状态", settings:"设置", cost:"工作与成本",
   tasks:"全部任务", tasksIntro:"查找工作台的所有任务，按排队时间从新到旧排列。",
-  taskState:"状态", taskTitle:"标题", queuedAt:"排队时间", endedAt:"结束时间", latestVerdict:"最近核验结论",
+  taskState:"状态", taskTitle:"标题", queuedAt:"排队时间", endedAt:"结束时间", latestVerdict:"仍然有效的核验结论",
   taskStates:{queued:"排队中", running:"运行中", done:"做完待审", merging:"合并中", merged:"已合并", failed:"失败", cancelled:"已取消", replaced:"已被接替"},
   anyState:"所有状态", anyLane:"所有工作线", applyFilters:"筛选", tasksLoading:"正在加载任务…", tasksEmpty:"没有符合条件的任务。",
   tasksLoadFailed:"任务加载失败，请重试。", newerPage:"上一页", olderPage:"下一页", taskPage:(p, n, total) => `第 ${p} / ${n} 页 · 共 ${total} 件任务`,
@@ -626,7 +626,7 @@ const T = ZH ? {
 } : {
   status:"Status", settings:"Settings", cost:"Work and cost",
   tasks:"All tasks", tasksIntro:"Find every desk task, newest queued first.",
-  taskState:"State", taskTitle:"Title", queuedAt:"Queued at", endedAt:"Ended at", latestVerdict:"Latest verification verdict",
+  taskState:"State", taskTitle:"Title", queuedAt:"Queued at", endedAt:"Ended at", latestVerdict:"Standing verification verdict",
   taskStates:{queued:"Queued", running:"Running", done:"Awaiting review", merging:"Merging", merged:"Merged", failed:"Failed", cancelled:"Cancelled", replaced:"Replaced"},
   anyState:"All states", anyLane:"All lanes", applyFilters:"Filter", tasksLoading:"Loading tasks…", tasksEmpty:"No matching tasks.",
   tasksLoadFailed:"Could not load tasks. Try again.", newerPage:"Previous page", olderPage:"Next page", taskPage:(p, n, total) => `Page ${p} of ${n} · ${total} tasks`,

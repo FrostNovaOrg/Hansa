@@ -12361,7 +12361,11 @@ def save():'''))
         self.assertEqual(self.desk.meta(t1)["merge_check"]["phase"], "running")
         self.hansa("merge", t2)
         self.hansa("lane", "set", "m", "base", "other")
-        self.hansa("lane", "set", "b", "base", "other")
+        # An older desk could already have changed this base with t2 merging.
+        # The command now refuses that change; retain this old-desk fixture for the busy-lane check.
+        settings = self.desk.settings()
+        settings["lanes"]["b"]["base"] = "other"
+        write_json(self.desk.settings_path, settings)
         d.tick()  # merge_checks must see that m is held, even though these bases may run together
         self.assertEqual(self.desk.meta(t2)["merge_check"]["phase"], "queued")
         self.assertEqual([e["task"] for e in self.events("merge_check_started")], [t1])
@@ -13106,6 +13110,170 @@ def save():'''))
         self.assertIn("still broken", views.show_text(self.desk, tid))
         self.assertNotIn("lane", m["merge_check_result"])
 
+    def test_recheck_failed_task_runs_both_commands_on_the_merge_tree(self):
+        for separate in (False, True):
+            for missing in (False, True):
+                with self.subTest(merge_lane=separate, could_not_run=missing):
+                    self.hansa("lane", "set", "a", "check", "echo unit-failed; exit 1")
+                    name = f"recheck-{separate}-{missing}.txt"
+                    self.hansa("lane", "set", "a", "env", f"FAKE_HELLO={name}")
+                    d = Dispatcher(self.desk)
+                    tid = self.settle(d, self.desk.new_task("Add " + name))["id"]
+                    if missing:
+                        self.desk.update(tid, check={**self.desk.meta(tid)["check"], "could_not_run": True,
+                                                    "note": "could not run"})
+                    more = "more-" + name
+                    unit = f"test -f {name} && test -f {more} && echo unit-ran"
+                    package = f"test -f {more} && echo packaging-ran"
+                    self.hansa("lane", "set", "a", "check", unit)
+                    self.hansa("lane", "set", "a", "env", "none")
+                    if separate:
+                        if "m" in self.desk.settings()["lanes"]:
+                            self.hansa("lane", "remove", "m")
+                        self.merge_lane_for_checks(package)
+                    else:
+                        self.hansa("lane", "set", "a", "merge_check", package)
+                    (self.repo / more).write_text("Only on the merged tree\n")
+                    sh("git", "add", more, cwd=self.repo)
+                    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "advance", cwd=self.repo)
+                    calls = len(self.srt_calls())
+                    said = self.hansa("merge", tid, "--recheck")
+                    m = self.settle_merge(d, tid)
+                    self.assertEqual(m["state"], "merged", m)
+                    self.assertEqual([self.ran(c) for c in self.srt_calls()[calls:]], [unit, package])
+                    self.assertIn(unit, said)
+                    self.assertNotIn("merge check again", said)
+                    shown = self.hansa("show", tid)
+                    for command in (unit, package):
+                        self.assertIn(command, shown)
+                    self.assertEqual([(s["command"], s["exit"], s["ok"]) for s in m["merge_check_result"]["steps"]],
+                                     [(unit, 0, True), (package, 0, True)])
+                    self.assertEqual(len(self.events("task_merged")[-1]["steps"]), 2)
+                    if separate:
+                        self.hansa("lane", "remove", "m")
+
+    def test_recheck_failed_unit_or_merge_command_stops_the_merge(self):
+        for unit_fails in (True, False):
+            with self.subTest(unit_fails=unit_fails):
+                d, tid = self.merge_check_lane(check="exit 1", merge_check="echo packaging-ok")
+                unit = "echo unit-still-fails; exit 7" if unit_fails else "echo unit-fixed"
+                package = "echo packaging-ok" if unit_fails else "echo packaging-fails; exit 8"
+                self.hansa("lane", "set", "a", "check", unit)
+                self.hansa("lane", "set", "a", "merge_check", package)
+                tip = self.git_out("rev-parse", "main")
+                self.hansa("merge", tid, "--recheck")
+                m = self.settle_merge(d, tid)
+                self.assertEqual((m["state"], m["merge_check_result"]["exit"]), ("done", 7 if unit_fails else 8))
+                self.assertEqual(self.git_out("rev-parse", "main"), tip)
+                steps = m["merge_check_result"]["steps"]
+                self.assertEqual([s["exit"] for s in steps], [7, None] if unit_fails else [0, 8])
+                shown = self.hansa("show", tid)
+                self.assertIn(unit, shown)
+                self.assertIn(package, shown)
+
+    def test_recheck_deduplicates_commands_and_leaves_passed_checks_alone(self):
+        for passed in (False, True):
+            with self.subTest(task_check_passed=passed):
+                d, tid = self.merge_check_lane(check="true" if passed else "exit 1")
+                unit = "echo unit-current"
+                package = "echo merge-current" if passed else unit
+                self.hansa("lane", "set", "a", "check", unit)
+                self.hansa("lane", "set", "a", "merge_check", package)
+                self.hansa("lane", "set", "a", "env", "none")
+                calls = len(self.srt_calls())
+                self.hansa("merge", tid, "--recheck")
+                self.assertEqual(self.settle_merge(d, tid)["state"], "merged")
+                self.assertEqual([self.ran(c) for c in self.srt_calls()[calls:]], [package])
+                # Let the next worker make a change too.
+                self.hansa("lane", "set", "a", "env", "FAKE_HELLO=next.txt")
+
+    def test_recheck_with_despite_check_merges_as_a_recorded_override(self):
+        d, tid = self.merge_check_lane(check="exit 1", merge_check="exit 2")
+        calls = len(self.srt_calls())
+        said = self.hansa("merge", tid, "--recheck", "--despite-check")
+        self.assertIn("merged into main", said)
+        self.assertEqual(self.desk.meta(tid)["state"], "merged")
+        self.assertEqual(len(self.srt_calls()), calls)
+        self.assertTrue(self.events("task_merged")[-1]["despite_check"])
+
+    def test_recheck_failed_task_keeps_its_results_when_merges_wait_together(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        command = "echo merged-tree-checked"
+        self.merge_lane_for_checks(command)
+        for failed_first in (False, True):
+            with self.subTest(failed_first=failed_first):
+                settings = self.desk.settings()
+                for lane, check in (("a", "true"), ("b", "exit 1")):
+                    settings["lanes"][lane].update(check=check, merge_check=command,
+                                                   env={"FAKE_HELLO": f"{lane}-{failed_first}.txt"})
+                self.assertEqual(self.desk.save_settings(settings), [])
+                d = Dispatcher(self.desk)
+                passed = self.settle(d, self.desk.new_task("Passed task", lane="a"))["id"]
+                failed = self.settle(d, self.desk.new_task("Failed task", lane="b"))["id"]
+                self.assertFalse(self.desk.meta(failed)["check"]["ok"])
+                settings["lanes"]["b"]["check"] = command
+                for lane in ("a", "b"):
+                    settings["lanes"][lane]["env"] = {}
+                self.assertEqual(self.desk.save_settings(settings), [])
+                for tid in ([failed, passed] if failed_first else [passed, failed]):
+                    self.hansa("merge", tid, *(["--recheck"] if tid == failed else []))
+                for tid in (passed, failed):
+                    self.assertEqual(self.settle_merge(d, tid)["state"], "merged")
+                result = self.desk.meta(failed)["merge_check_result"]
+                self.assertEqual([(s["command"], s["exit"]) for s in result["steps"]], [(command, 0)])
+                self.assertEqual(self.desk.meta(passed)["merge_check_result"].get("steps", []), [])
+
+    def test_lane_base_change_refuses_running_merging_and_review_but_allows_queued(self):
+        sh("git", "branch", "dev", cwd=self.repo)
+        tid = self.desk.new_task("Work on main", lane="a")
+        self.hansa("lane", "set", "a", "base", "dev")  # not started: follows the lane
+        self.hansa("lane", "set", "a", "base", "main")
+        for state in ("running", "merging", "done"):
+            with self.subTest(state=state):
+                self.desk.update(tid, state=state)
+                with self.assertRaises(SystemExit) as refused:
+                    self.hansa("lane", "set", "a", "base", "dev")
+                said = str(refused.exception)
+                for word in (tid, "merge", "close"):
+                    self.assertIn(word, said)
+                self.assertEqual(self.desk.settings()["lanes"]["a"]["base"], "main")
+        self.desk.update(tid, state="cancelled")
+        self.hansa("lane", "set", "a", "base", "dev")
+
+    def test_merge_refuses_a_base_missing_the_start_commit_even_with_override(self):
+        sh("git", "branch", "dev", cwd=self.repo)
+        self.new_tip()
+        d = Dispatcher(self.desk)
+        start = self.git_out("rev-parse", "main")
+        # An old desk may already have repointed the lane, or git history may be rewritten.
+        for renamed in (True, False):
+            with self.subTest(base_changed=renamed):
+                sh("git", "checkout", "-q", "main", cwd=self.repo)
+                sh("git", "reset", "--hard", start, cwd=self.repo)
+                sh("git", "branch", "-f", "dev", start + "~1", cwd=self.repo)
+                settings = self.desk.settings()
+                settings["lanes"]["a"]["base"] = "main"
+                write_json(self.desk.settings_path, settings)
+                tid = self.settle(d, self.desk.new_task("Add hello.txt"))["id"]
+                m = self.desk.meta(tid)
+                settings = self.desk.settings()
+                settings["lanes"]["a"]["base"] = "dev" if renamed else "main"
+                write_json(self.desk.settings_path, settings)
+                sh("git", "checkout", "-q", settings["lanes"]["a"]["base"], cwd=self.repo)
+                if not renamed:
+                    sh("git", "reset", "--hard", "dev", cwd=self.repo)
+                tip = self.git_out("rev-parse", "HEAD")
+                for flag in ([], ["--despite-check"]):
+                    with self.assertRaises(SystemExit) as refused:
+                        self.hansa("merge", tid, *flag)
+                    said = str(refused.exception)
+                    for word in (m["base"], "does not hold", "1 commit", f"hansa retry {tid} --fresh"):
+                        self.assertIn(word, said)
+                    self.assertEqual(self.git_out("rev-parse", "HEAD"), tip)
+        fresh = self.hansa("retry", tid, "--fresh", "Redo on the current base").split()[0]
+        self.assertEqual(self.settle(d, fresh)["base"], self.git_out("rev-parse", "main"))
+        self.assertIn("merged into main", self.hansa("merge", fresh))
+
     def test_a_queued_merge_with_its_checks_removed_records_no_lane(self):
         d, tid = self.merge_check_lane(check="true", merge_check="test -f hello.txt")
         self.hansa("merge", tid)
@@ -13270,7 +13438,7 @@ def save():'''))
         # --recheck runs it too
         tid = self.desk.new_task("Add hello.txt again")
         self.settle(d, tid)
-        self.assertIn(f"{tid} is not merged yet: hansa runs the lane's merge check again",
+        self.assertIn(f"{tid} is not merged yet: hansa runs the lane's checks",
                       self.hansa("merge", tid, "--recheck"))
         self.assertEqual(self.events("check_rerun_queued")[-1]["command"], heavy)
         self.assertEqual(self.settle_merge(d, tid)["merge_check_result"]["command"], heavy)
@@ -28294,6 +28462,90 @@ def save():'''))
         self.assertIn(f"{vid} · done", self.hansa("show", vid))
         self.assertIn("verdict: holds, with notes", self.hansa("show", vid))
         self.assertIn("VERDICT: holds, with notes", self.hansa("show", vid, "--report"))
+
+    def later_verification(self, d, tid, outcome):
+        self.hansa("lane", "set", "a", "env", *(["FAKE_VERDICT=" + outcome] if outcome in
+                   ("holds", "holds, with notes", "does not hold", "unsure") else ["none"]))
+        self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        if outcome == "cancelled":
+            self.hansa("cancel", vid)
+        elif outcome == "failed":
+            # A provider error leaves this terminal record and no verdict.
+            self.desk.update(vid, state="failed", error="I could not do it")
+        else:
+            self.settle(d, vid)
+        return vid
+
+    def test_standing_verdict_survives_inconclusive_verifications(self):
+        from hansa.run import _latest_verdict, unverified_note
+        for outcome in ("cancelled", "failed", "none", "unsure"):
+            with self.subTest(later=outcome):
+                d, tid, first = self.task_with_verdict("does not hold", name=outcome + ".py")
+                later = self.later_verification(d, tid, outcome)
+                with self.assertRaises(SystemExit) as refused:
+                    self.hansa("merge", tid)
+                self.assertIn(first, str(refused.exception))
+                self.assertEqual(_latest_verdict(self.desk, self.desk.meta(tid)), "does not hold")
+                self.assertIn(first, unverified_note(self.desk, self.desk.meta(tid)))
+                shown = self.hansa("show", tid)
+                self.assertIn(first + ": does not hold", shown)
+                self.assertIn(later, shown)
+                self.assertIn("unsure" if outcome == "unsure" else "without a verdict", shown)
+                self.assertIn("merged into main", self.hansa("merge", tid, "--despite-check"))
+                self.assertTrue(self.events("task_merged")[-1]["despite_check"])
+
+    def test_later_definite_verdict_replaces_the_standing_verdict(self):
+        for verdict in ("holds", "holds, with notes", "does not hold"):
+            with self.subTest(later=verdict):
+                d, tid, first = self.task_with_verdict("does not hold", name=verdict.replace(" ", "_") + ".py")
+                later = self.later_verification(d, tid, verdict)
+                self.assertIn(later + ": " + verdict, self.hansa("show", tid))
+                if verdict == "does not hold":
+                    with self.assertRaises(SystemExit) as refused:
+                        self.hansa("merge", tid)
+                    self.assertIn(later, str(refused.exception))
+                    self.hansa("close", tid)
+                else:
+                    self.assertIn("merged into main", self.hansa("merge", tid))
+
+    def test_standing_verdict_drives_page_goal_override_rounds_and_followup_report(self):
+        from hansa.run import rethink_text, rounds_line
+        self.hansa("goal", "add", "Hold the merge")
+        d, tid, first = self.task_with_verdict("does not hold")
+        self.desk.update(tid, goal="g1")
+        self.later_verification(d, tid, "cancelled")
+        row = next(r for r in views.task_list(self.desk)["rows"] if r["id"] == tid)
+        self.assertEqual(row["verdict"], "does not hold")
+        self.assertIn(f"does not hold ({first})", self.hansa("goal", "show", "g1"))
+        new = self.hansa("retry", tid, "fix the verdict").split()[0]
+        text = (self.desk.tasks_dir / new / "task.md").read_text()
+        report = (self.desk.tasks_dir / first / "result.md").read_text().strip()
+        self.assertIn(report, text)
+        self.assertIn(first, text)
+        self.assertIn("judged 1", rounds_line(self.desk, self.desk.meta(new)))
+        self.hansa("lane", "set", "a", "env", "FAKE_VERDICT=does not hold", "FAKE_HELLO=next.py")
+        self.settle(d, new)
+        self.hansa("verify", new)
+        second = self.desk.meta(new)["verify"]
+        self.settle(d, second)
+        self.later_verification(d, new, "unsure")
+        self.assertIn("has not held 2 times", rethink_text(self.desk, self.desk.meta(new)))
+        self.assertIn("has not held 2 times", self.hansa("show", new))
+        self.assertIn("merged into main", self.hansa("merge", new, "--despite-check"))
+        self.assertTrue(self.events("task_merged")[-1]["despite_check"])
+        self.assertIn("merged despite a failed check or verdict", self.hansa("goal", "show", "g1"))
+
+    def test_standing_verdict_does_not_hide_a_pending_verification(self):
+        _, tid, first = self.task_with_verdict("does not hold")
+        self.hansa("verify", tid)
+        pending = self.desk.meta(tid)["verify"]
+        for command in ("merge", "verify"):
+            with self.assertRaises(SystemExit) as refused:
+                self.hansa(command, tid)
+            self.assertIn(pending, str(refused.exception))
+        self.assertIn(pending, self.hansa("show", tid))
+        self.assertEqual(views.verification(self.desk, self.desk.meta(tid))["state"], "queued")
 
     def gaps_verification(self, report, verdict="holds, with notes", tid=None):
         d = Dispatcher(self.desk)

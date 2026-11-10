@@ -195,16 +195,11 @@ def task_releases(m: dict, context: dict) -> list:
 
 
 def task_evidence(desk: Desk, m: dict, context: dict) -> dict:
-    from .run import rounds_of
+    from .run import rounds_of, standing_verification
     check = m.get("check") or {}
     checked = ("could not run" if check.get("could_not_run") else "passed" if check.get("ok") else
                "failed" if check else "none")
-    v = None
-    if m.get("verify"):
-        try:
-            v = desk.meta(m["verify"])
-        except SystemExit:
-            pass
+    v = standing_verification(desk, m)
     verdict = ("running" if v and v["state"] in ("queued", "running") else
                (v.get("verdict") or "none") if v else "none")
     merge, missing = "not merged", None

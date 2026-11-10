@@ -28,6 +28,7 @@ from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
                   quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_detail, words_in_merge, words_text, write_try,
+                  merge_recheck_steps, standing_verification, task_base_problem,
                   is_local, mac_loopback_listeners, worktree_git_settings)
 
 CARD = Path(__file__).with_name("card.md")
@@ -724,9 +725,6 @@ def cmd_merge(a):
     # Nothing changes the task, its verification, the keys or another merge until this one is done.
     # The repository's merge hooks run inside it: hansa serve waits for them, and a hansa command in a hook
     # that would change the desk stops at once (HANSA_MERGING) instead of waiting for this merge forever.
-    if a.recheck and a.despite_check:
-        raise SystemExit("hansa: --recheck runs the lane's check again before merging and --despite-check merges without "
-                         "it; choose one. Nothing was merged")
     with desk.lock():
         m, v, chk, repo, base, lane = _mergeable(desk, a)
         verification_note = (f"; verification {v['task']}: holds, with notes (report: hansa show {v['task']} --report)"
@@ -735,16 +733,20 @@ def cmd_merge(a):
         check_lane = desk.settings()["lanes"][check_name]
         sess = notify.recorded(notify.session_here())  # the session that hears how a merge check ends
         tip = git("rev-parse", base, cwd=repo)
-        if a.recheck:
-            if not merge_command(check_lane):
+        if a.recheck and not a.despite_check:
+            steps = merge_recheck_steps(m, lane, check_lane)
+            if not steps:
                 raise SystemExit(f"hansa: lane {check_name} has no check to run again; nothing was merged")
+            commands = "; then ".join(f"{s['what']} ({s['command']})" for s in steps)
             by = os.environ.get("HANSA_ROLE", "cli")
             desk.update(a.id, state="merging", merge_check_result=None,
                         merge_check={"phase": "queued", "queued": now(), "moves": 0, "recheck": True, "by": by}, **sess)
-            desk.event("check_rerun_queued", task=a.id, onto=tip, by=by, command=merge_command(check_lane))
-            print(f"{a.id} is not merged yet: hansa runs the lane's {_merge_what(check_lane, lane)} again. It merges {a.id} onto "
-                  f"{base} as it is now in lane {check_name}'s worktree, runs {_merge_step(check_lane, lane)} there, and merges "
-                  f"exactly that if it passes. {_runs_when(desk, a.id, base)} "
+            desk.event("check_rerun_queued", task=a.id, onto=tip, by=by, command=merge_command(check_lane), steps=steps)
+            what = "check again" if len(steps) == 1 and not own_merge_check(check_lane, lane) else "checks"
+            print(f"{a.id} is not merged yet: hansa runs the lane's {what}. It merges {a.id} onto "
+                  f"{base} as it is now in lane {check_name}'s worktree, runs "
+                  f"{'its setup, then ' if check_lane.get('setup') else ''}{commands} there, and merges "
+                  f"exactly that if what ran passed. {_runs_when(desk, a.id, base)} "
                   f"{_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
                   + verification_note + _unverified_later(desk, m))
             return
@@ -868,6 +870,9 @@ def _mergeable(desk: Desk, a):
     if held:
         raise SystemExit(f"hansa: {held}; nothing was merged. hansa show {a.id} says what it holds; hansa retry "
                          f"{a.id} \"...\" continues from the recorded commit")
+    problem = task_base_problem(repo, m, base)
+    if problem:
+        raise SystemExit("hansa: " + problem)
     leaked = keys_in_change(desk, repo, m["base"], m["head"]) or m.get("leaked")  # a key saved since counts too
     if leaked:
         if leaked != m.get("leaked"):
@@ -887,9 +892,10 @@ def _mergeable(desk: Desk, a):
     if words:
         desk.event("merge_forbidden", task=a.id, found=len(words))
         raise SystemExit(desk.redact(f"hansa: {words_text(a.id, words)}. Nothing was merged"))
-    v = views.verification(desk, m)
+    v = views.verification(desk, m, latest=True)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is still verifying {a.id}; nothing was merged. {_wait_for(desk, v['task'])}")
+    v = views.verification(desk, m)
     touched = _release_files_touched(repo, m, lane)
     if touched and not (v and v["verdict"] in HOLDING_VERDICTS):
         beyond = len(touched) - 10
@@ -997,7 +1003,8 @@ def _retry(desk: Desk, a) -> None:
     report = desk.tasks_dir / a.id / "result.md"
     if report.exists() and report.read_text(encoding="utf-8").strip():
         text += "\nThe earlier task's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
-    vid = m.get("verify")  # the latest verification of the attempt, whatever it found, given whole
+    verification = standing_verification(desk, m)
+    vid = verification["id"] if verification else None
     vreport = desk.tasks_dir / vid / "result.md" if vid else None
     if vreport and vreport.exists() and vreport.read_text(encoding="utf-8").strip():
         verdict = desk.meta(vid).get("verdict") or "none"
@@ -1045,7 +1052,8 @@ def _follow_up_start(desk: Desk, m: dict) -> str:
     lines = []
     for r in rounds:
         state = m["state"] if r is m else r.get("ended_as") or r["state"]
-        vid = r.get("verify")
+        verification = standing_verification(desk, r)
+        vid = verification["id"] if verification else None
         how = state + (f", verified by {vid} (verdict: {desk.meta(vid).get('verdict') or 'none'})" if vid
                        else ", not verified")
         f = desk.tasks_dir / r["id"] / NOTE_FILE
@@ -1154,7 +1162,7 @@ def queue_verification(desk: Desk, tid: str, *, lane="", effort="", note="", ses
     if m["state"] != "done" or not m.get("commits"):
         raise SystemExit(f"hansa: only a finished task with changes can be verified; {tid} is {m['state']}"
                          + ("" if m.get("commits") else ", with nothing to merge"))
-    v = views.verification(desk, m)
+    v = views.verification(desk, m, latest=True)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is already verifying {tid}")
     target, lane = lane, m.get("lane", "")
@@ -3339,9 +3347,10 @@ def main(argv=None):
     p.add_argument("--despite-check", action="store_true", help="merge now with no merge check, despite a failed check "
                    "or a 'does not hold' verdict (recorded); never past release files or a key")
     p.add_argument("--recheck", action="store_true", help="run the merge check (the lane's merge_check when set) "
+                   "and, if the task's check failed or could not run, its lane's check too (same command: once), "
                    "on the task merged onto the base "
                    "as it is now, and merge exactly that if it passes (after a check that failed or could not run for "
-                   "the machine's sake, once that is fixed; recorded)")
+                   "the machine's sake, once that is fixed; recorded); --despite-check skips these checks")
     p.epilog = see_more("merge-check")
     p = add("retry", cmd_retry, "queue a follow-up task (new id) that continues from this task's last commit with "
             "your note; this task becomes replaced")
