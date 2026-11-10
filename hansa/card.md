@@ -231,8 +231,9 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   and its end; `hansa release` lists them.
 - hansa sends each gathered batch to the principal's alert command and/or push addresses, side by side when set up;
   the coordinator does not send alerts. Only the alert command and Bark entries that encrypt receive release codes. `coordinator`
-  alerts say your session has not heard hansa, waits on a dialog, or leaves a finished task waiting
-  for review; when they mention it, run `hansa status`. Push addresses and their secrets are also the
+  alerts say your session has not heard hansa, waits on a dialog, leaves a finished task waiting
+  for review, or keeps ending its turns with an API error; `credit` alerts, that a provider ran out of credit;
+  when they mention it, run `hansa status`. Push addresses and their secrets are also the
   principal's, set and tested on the page (Settings, Alerts). More: `hansa help alerts`.
 
 ## Hearing from hansa

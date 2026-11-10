@@ -1295,7 +1295,7 @@ def code_text(r: dict, zh: bool = False) -> str:
     return "一次性码在等提醒发出" if zh else "a one-time code waits to go out in the principal's alert"
 
 
-def stop_release(desk: Desk, rid, reason: str = "", by: str = "cli") -> dict:
+def stop_release(desk: Desk, rid, reason: str = "", by: str = "terminal") -> dict:
     """Call a release off (the coordinator's hansa release --stop, the principal's Stop on the page): one that has not
     started yet (waiting, approved) is closed as stopped now; a starting or running one is marked, and hansa serve
     stops its command (TERM to its process group, KILL STOP_GRACE seconds later) and records it as stopped when it
@@ -2134,11 +2134,16 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
     return st or "?"
 
 
+# Who stopped a release or its watch (stopped_by), in words, (English, Chinese): the page's Stop is the principal's;
+# hansa release --stop records "coordinator" in a Claude Code session (or with HANSA_ROLE=coordinator), "terminal"
+# outside one; "cli" was recorded for both before.
+STOPPED_BY = {"page": ("the principal", "你"), "coordinator": ("the coordinator", "协调员"),
+              "terminal": ("a command in a terminal", "终端里的命令"), "cli": ("a hansa command", "一条 hansa 命令")}
+
+
 def _who(r: dict, zh: bool = False) -> str:
     by = r.get("stopped_by") or ""
-    if zh:
-        return "你" if by == "page" else "协调员" if by == "coordinator" else by or "?"
-    return "the principal" if by == "page" else "the coordinator" if by == "coordinator" else by or "?"
+    return STOPPED_BY[by][zh] if by in STOPPED_BY else by or "?"
 
 
 def checked_text(r: dict) -> str:

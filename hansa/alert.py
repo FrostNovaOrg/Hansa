@@ -63,7 +63,8 @@ The `coordinator` alert has four cases, each after the minutes the principal set
     waits on its window  `claude agents --json` lists a live follower's session as `waiting` (a permission dialog or a
                          question) window_min after something was posted to it: once per stretch of waiting
     work sits untouched  a task posted to the session has waited review_min for review, and the session is `idle` at
-                         a lookup after that: once for that task; hansa does not post it again
+                         a lookup after that: once for that task; hansa does not post it again, and the alert's
+                         next step is to ask the coordinator in that session to review it
     its turns fail       API errors keep ending the session's turns (its Stop and StopFailure hooks' record): after
                          turn_min (default 30), or at once for one only the principal can cure (case `turn`, urgent);
                          once a turn ends normally after that alert, case `turn_ok` (passive)
@@ -84,8 +85,10 @@ once the principal was alerted. By the error:
     authentication_failed (perhaps a short login refresh): one repost after 2 minutes, and the alert if the turn
         after it fails too, or after 2 minutes when nothing waits; it says to log in again in that session
     max_output_tokens: one repost at once, ending "go on"; the alert if the next failure is that too
-A turn the principal started is never posted again; it alerts after turn_min. The alert names the error, since when,
-and how many things posted to the session wait unhandled. turn_min 0 turns the `turn` and `turn_ok` alerts off;
+The alert ends with the advice for its error (TURN_ADVICE: what to fix and where for those only the principal can
+cure, and authentication_failed; that hansa tries again for the rest). A turn the principal started is never posted
+again; it alerts after turn_min, with that advice first where only the principal can cure it, then to type the request
+again. The alert names the error, since when, and how many things posted to the session wait unhandled. turn_min 0 turns the `turn` and `turn_ok` alerts off;
 the reposts still go. hansa status shows a line while a stretch holds for a session hansa posts to: the error, since
 when, how many reposts went and whether the principal was alerted; none once a turn ended normally.
 
@@ -133,7 +136,10 @@ in the conversation (this release only, once, 24 hours; send it nowhere else), o
 That folder is removed when the command ends, and what a stopped
 or killed hansa serve left there is swept when it starts (sweep_runs): secrets/ is closed to the coordinator, workers,
 verifiers, so a leftover that holds the alert's text is never theirs to read. Text is in the saved alert_language;
-English wording is unchanged when there is no target description. A release alert puts its target's description,
+English wording is unchanged when there is no target description. Each problem alert ends with a next step the
+principal can take on a phone ("next:", TELL_COORDINATOR, HANSA_UP): a diagnosis command only as the coordinator's to
+run, a command for the principal only saying where. Chinese texts say hansa's own words in Chinese, with a task's title
+and a program's own message as they are, quoted 「…」. A release alert puts its target's description,
 kept as it was when asked, after the request, code and instructions, or the result.
 """
 from __future__ import annotations
@@ -170,6 +176,13 @@ HOUR = 3600
 STUCK_ALERT = 15 * 60  # seconds hansa serve finishes no round before the principal is alerted
 EVERY = 2.0  # seconds between the alert thread's looks
 UNHEARD_EVERY = 10.0  # seconds between its looks at whether any session hears from hansa (unheard_check)
+
+# The next step an alert gives the principal, (English, Chinese). The principal reads alerts on a phone and need not use
+# a terminal: a diagnosis command is the coordinator's to run; a command only where the principal is the one to run it,
+# saying where.
+TELL_COORDINATOR = ("tell the coordinator; it can find the cause with hansa explain server",
+                    "告诉协调员；它可以用 hansa explain server 查明原因")
+HANSA_UP = ("run hansa up in a terminal on the desk's machine", "在工作台所在机器的终端里运行 hansa up")
 
 
 def queue_file(desk: Desk) -> Path:
@@ -406,12 +419,13 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
     elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason until cleared (run.hold)
         from .run import sandbox_held_text
         held = {**fields, "kind": fields.get("run")}
-        why = sandbox_held_text(held)
+        why = sandbox_held_text(held, principal=True)
         _problem(desk, "sandbox", f"lane {fields.get('lane')} cannot run: {why}; "
                              + (f"task {fields['task']} is held" if fields.get("task") else "its tasks are held")
-                             + ", not failed",
-            zh=f"工作线 {fields.get('lane')} 因沙箱暂缓：{sandbox_held_text(held, zh=True)}；"
-               + (f"任务 {fields['task']} 暂缓" if fields.get("task") else "其任务暂缓") + "，没有失败",
+                             + f", not failed · next: {TELL_COORDINATOR[0]}",
+            zh=f"工作线 {fields.get('lane')} 因沙箱暂缓：{sandbox_held_text(held, zh=True, principal=True)}；"
+               + (f"任务 {fields['task']} 暂缓" if fields.get("task") else "其任务暂缓")
+               + f"，没有失败 · 下一步：{TELL_COORDINATOR[1]}",
             lane=fields.get("lane", ""))
     elif kind == "sandbox_ready":
         _recovered(desk, "sandbox", f"lane {fields.get('lane')}'s sandbox works again",
@@ -743,10 +757,11 @@ def stuck_check(desk: Desk, told: float) -> float:
                        zh="后台（hansa serve）已恢复完成轮次", at=last)
         return 0.0
     if not told:
-        _problem(desk, "server_stuck", f"hansa serve has finished no round for {int(quiet // 60)} minutes: no task starts "
-                                  "or ends, and no release runs; see hansa explain server",
-            zh=f"后台（hansa serve）已 {int(quiet // 60)} 分钟没跑完一轮：在忙或卡住了；"
-               "任务无法开始或结束，发布也无法运行；请查看 hansa explain server", since=last)
+        _problem(desk, "server_stuck", f"hansa serve has finished no round for {int(quiet // 60)} minutes: it is busy "
+                                  "with a long step, or stuck; meanwhile no task starts or ends, and no release runs "
+                                  f"· next: {TELL_COORDINATOR[0]}",
+            zh=f"后台（hansa serve）已 {int(quiet // 60)} 分钟没跑完一轮：在忙一个很长的步骤，或卡住了；"
+               f"这期间任务无法开始或结束，发布也无法运行 · 下一步：{TELL_COORDINATOR[1]}", since=last)
         return time.time()
     return told
 
@@ -888,27 +903,63 @@ def unheard_check(desk: Desk, t: float | None = None) -> dict:
 
 
 def unheard_text(desk: Desk, items: list, t: float, zh: bool = False) -> str:
-    """The first case's alert: the case, the session that last heard from hansa, and what waits."""
+    """The first case's alert: the case, the session that last heard from hansa, what waits, and the next step: to start
+    the session again when it ended (or none ever heard), or to have its follower started again when it runs."""
     from . import notify
     last = max(notify.records(desk), key=lambda r: r.get("seen") or 0, default=None)
+    runs = bool(last) and not notify.gone(last.get("session") or {})
     if last:
         sess = last.get("session") or {}
         if zh:
-            how = "会话已结束" if notify.gone(sess) else "会话仍在运行，但提醒已关闭或跟随进程已停止"
+            how = "会话仍在运行，但提醒已关闭或跟随进程已停止" if runs else "会话已结束"
             who = (f"上次是会话 {notify.who(sess.get('pid'), str(last.get('name') or '尚未命名'))}，"
                    f"直到 {_when(last.get('ended') or last.get('seen'))}：{how}")
         else:
-            how = ("its session ended" if notify.gone(sess) else
-                   "its session runs, but notifications were turned off or its follower stopped")
+            how = ("its session runs, but notifications were turned off or its follower stopped" if runs else
+                   "its session ended")
             who = (f"the last was session {notify.who(sess.get('pid'), str(last.get('name') or ''))}, until "
                    f"{_when(last.get('ended') or last.get('seen'))}: {how}")
     else:
         who = "这个工作台还没有会话接收过" if zh else "none has on this desk yet"
     if zh:
+        step = "在那个会话里让协调员运行 hansa notify on" if runs else HANSA_UP[1]
         return (f"协调员未收到：没有会话接收 hansa 的消息（{who}）· {len(items)} 件事在等协调员，"
-                f"最早的已等 {_mins(t - items[0]['at'])} 分钟：{items[0]['line']}")
+                f"最早的已等 {_mins(t - items[0]['at'])} 分钟：{_what_zh(desk, items[0])} · 下一步：{step}")
+    step = "ask the coordinator in that session to run hansa notify on" if runs else HANSA_UP[0]
     return (f"the coordinator's session cannot be reached: no session hears from hansa ({who}) · {len(items)} "
-            f"thing(s) wait for the coordinator, the oldest for {_mins(t - items[0]['at'])} min: {items[0]['line']}")
+            f"thing(s) wait for the coordinator, the oldest for {_mins(t - items[0]['at'])} min: {items[0]['line']}"
+            f" · next: {step}")
+
+
+TASK_STATE_ZH = {"done": "已完成", "failed": "失败了", "cancelled": "已取消", "merging": "在合并", "merged": "已合并",
+                 "queued": "在排队", "running": "在运行", "checking": "在检查"}
+# What waits for the coordinator, by the subject a follower posts it under (notify._item's key), when not a task's
+WHAT_ZH = {"server": "hansa serve 已停止", "srt": "hansa serve 无法运行 srt", "disk": "磁盘空间有变化",
+           "memory": "可用内存有变化", "credit": "服务商余额不足", "start": "工作线无法开始任务",
+           "ready": "服务商已就绪，待办也许已完成", "after-merge": "合并后的发布在等", "release": "发布有了结果",
+           "release-answer": "你已回答发布", "release-watch": "发布监测已结束"}
+
+
+def _what_zh(desk: Desk, x: dict) -> str:
+    """What waits (an entry of _waiting), in Chinese: a task by its ID, title (quoted, as it is) and state; anything
+    else by its subject. An entry without its subject (an older record) is its follower's line, quoted."""
+    what = str(x.get("what") or "")
+    head, _, rest = what.partition(" ")
+    if head in ("task", "after") and rest:
+        tid = rest.split(" ")[0]
+        try:
+            m = desk.meta(tid)
+        except SystemExit:  # its folder is gone
+            return f"任务 {tid}"
+        title = desk.redact(str(m.get("title") or ""))
+        if head == "after":
+            return f"任务 {tid}「{title}」在等它之前的任务"
+        if m.get("kind") == "verify":
+            return f"核验 {tid}「{title}」已结束"
+        return f"任务 {tid}「{title}」" + TASK_STATE_ZH.get(m.get("state"), f"（{m.get('state')}）")
+    if head in WHAT_ZH:
+        return WHAT_ZH[head] + (f" #{rest}" if head.startswith("release") and rest else "")
+    return f"「{x.get('line') or ''}」" if not what else "一件事"
 
 
 def session_minutes(desk: Desk) -> dict:
@@ -921,6 +972,22 @@ def session_minutes(desk: Desk) -> dict:
     return {"no_session": mins["no_session_min"] if on else 0,
             "window": mins["window_min"] if on else 0, "review": mins["review_min"] if on else 0,
             "turn": mins["turn_min"] if on else 0}
+
+
+MINUTES_WHAT = {"no_session_min": "no listening session", "window_min": "waiting for input",
+                "review_min": "task waiting for review", "turn_min": "turns failing"}  # as the page names them
+
+
+def minutes_line(desk: Desk, s: dict) -> str:
+    """For hansa status, with the other alert settings: the minutes of each case of the `coordinator` alert, as the
+    principal set them on the page (or their defaults); '' while no alert channel is set up, as none goes out."""
+    from .desk import coordinator_alert_settings
+    if not configured(desk, s):
+        return ""
+    mins = coordinator_alert_settings(s)
+    return ("Coordinator alerts after: " + " · ".join(f"{what} {f'{mins[k]} min' if mins[k] else 'off'}"
+                                                       for k, what in MINUTES_WHAT.items())
+            + " (set on the page, Settings, Alerts)")
 
 
 def reviews_file(desk: Desk) -> Path:
@@ -941,8 +1008,10 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
     if req.get("case") == "inbox":
         since = req["since"] if _at(req.get("since")) else t
         text = (f"the coordinator's session {who} cannot be reached: its inbox refuses posts for "
-                f"{_mins(t - since)} min · hansa keeps the lines and tries again")
-        text_zh = (f"协调员未收到：会话 {who_zh} 的收件箱已拒收 {_mins(t - since)} 分钟 · hansa 保留消息并重试")
+                f"{_mins(t - since)} min · hansa keeps the lines and tries again · next: if it lasts, quit that session, "
+                f"then {HANSA_UP[0]}")
+        text_zh = (f"协调员未收到：会话 {who_zh} 的收件箱已拒收 {_mins(t - since)} 分钟 · hansa 保留消息并重试"
+                   f" · 下一步：如果一直这样，请退出那个会话，再{HANSA_UP[1]}")
     elif req.get("case") == "window":
         since = req["since"] if _at(req.get("since")) else t
         posted = req["posted"] if _at(req.get("posted")) and req["posted"] else since  # the first thing's post
@@ -964,9 +1033,10 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
         posted = req["posted"] if _at(req.get("posted")) else t
         ended = bool(req.get("ended"))  # a follower started afresh: it waits since it ended (notify.Watch.restore)
         text = (f"the coordinator's session {who} is idle while {tid} has waited for review for {_mins(t - posted)} "
-                f"min since {'it ended' if ended else 'hansa posted it there'}: {title} · hansa does not post it again")
+                f"min since {'it ended' if ended else 'hansa posted it there'}: {title} · next: ask the coordinator in "
+                f"that session to review {tid}")
         text_zh = (f"协调员的会话 {who_zh} 空闲，但 {tid} 自{'结束' if ended else ' hansa 发到那里'}后已等了 "
-                   f"{_mins(t - posted)} 分钟待审：{title} · hansa 不会重复发送")
+                   f"{_mins(t - posted)} 分钟待审：「{title}」 · 下一步：在那个会话里让协调员审阅 {tid}")
         with desk.lock():
             try:
                 told = read_json(reviews_file(desk), {})
@@ -999,38 +1069,71 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
     return "queued" if add(desk, "coordinator", text, zh=text_zh) else ""
 
 
-TURN_ADVICE = {  # what the principal may do, by the error (up.TURN_ERRORS) that keeps ending the coordinator's turns
-    "rate_limit": ("a usage limit may only reset hours later", "用量上限可能要几个小时后才重置"),
+_RETRY = ("hansa tries again with its next post to the session", "hansa 下次给那个会话发消息时会再试")
+# What the principal may do, (English, Chinese), by the error (up.TURN_ERRORS) that keeps ending the coordinator's turns:
+# for those only the principal can cure (notify.TURN_PRINCIPAL, TURN_LOGIN), what to fix and where; for the rest, that
+# hansa tries again (the reposts, then whatever it posts next starts a turn).
+TURN_ADVICE = {
+    "rate_limit": (f"a usage limit may only reset hours later; {_RETRY[0]}", f"用量上限可能要几个小时后才重置；{_RETRY[1]}"),
+    "overloaded": (f"the service is overloaded, which waiting may cure; {_RETRY[0]}",
+                   f"服务繁忙，等一等也许就好；{_RETRY[1]}"),
+    "server_error": (f"the service had an error of its own; {_RETRY[0]}", f"服务自身出了错；{_RETRY[1]}"),
+    "unknown": _RETRY,
+    "max_output_tokens": (f"a reply grew too long; {_RETRY[0]}", f"回复太长了；{_RETRY[1]}"),
+    "authentication_failed": ("its login failed: log in again in that session (/login)",
+                              "登录失效：请在那个会话里重新登录（/login）"),
+    "billing_error": ("the account has no credit left or its billing failed: add credit or fix billing on the "
+                      "account's page with its provider",
+                      "账号余额不足或付款失败：请在服务商的账号页面充值或修好付款方式"),
+    "oauth_org_not_allowed": ("the organization of the account logged in does not allow it: log in again in that "
+                              "session (/login) with an account it allows",
+                              "登录账号所在的组织不允许这样用：请在那个会话里换一个允许的账号重新登录（/login）"),
+    "account_on_hold": ("the account is on hold: see the account's page with its provider, or its support",
+                        "账号被暂停：请到服务商的账号页面查看，或联系它的客服"),
+    "verification_required": ("the account must be verified: complete the verification its provider asks for on "
+                              "its website", "账号需要验证：请在服务商的网站上完成它要求的验证"),
+    "model_not_found": ("the session's model does not exist or the account may not use it: choose another with "
+                        "/model in that session", "会话的模型不存在或账号无权使用：请在那个会话里用 /model 换一个"),
+    "cloud_credential_error": ("the cloud credentials the session uses failed: renew them on the desk's machine",
+                               "会话使用的云服务凭据失效：请在工作台所在的机器上更新它们"),
     "invalid_request": ("the session's context may have gone wrong: /compact or /clear in that session may cure it",
                         "会话的上下文可能出了问题：在那个会话里 /compact 或 /clear 也许能解决"),
-    "authentication_failed": ("log in again in that session", "请在那个会话里重新登录"),
 }
 
 
 def turn_text(req: dict, who: str, who_zh: str, t: float) -> tuple:
-    """The `turn` case's alert (notify.Turns), (English, Chinese): the error, since when, how many things wait."""
+    """The `turn` case's alert (notify.Turns), (English, Chinese): the error, since when, how many things wait, and
+    the advice for the error."""
     since = req["since"] if _at(req.get("since")) else t
     count = req["count"] if isinstance(req.get("count"), int) and not isinstance(req.get("count"), bool) else 0
     error = str(req.get("error") or "unknown")[:40]
     at = time.strftime("%H:%M", time.localtime(since))
-    en, zh = TURN_ADVICE.get(error, ("", ""))
     if req.get("principal"):  # the principal's own request failed; nothing says the session's turns keep failing
         failed = time.strftime("%H:%M", time.localtime(req["at"] if _at(req.get("at")) else since))
-        return (f"the coordinator's session {who}: {principal_turn_text(error, failed)}" + (f" · {en}" if en else ""),
-                f"协调员的会话 {who_zh}：{principal_turn_text(error, failed, zh=True)}" + (f" · {zh}" if zh else ""))
+        return (f"the coordinator's session {who}: {principal_turn_text(error, failed, count=count)}",
+                f"协调员的会话 {who_zh}：{principal_turn_text(error, failed, zh=True, count=count)}")
+    en, zh = TURN_ADVICE.get(error, _RETRY)
     text = (f"the coordinator's session {who} cannot work: its turns end with an API error ({error}) since {at} "
-            f"({_mins(t - since)} min) · {count} thing(s) hansa posted to it wait unhandled" + (f" · {en}" if en else ""))
+            f"({_mins(t - since)} min) · {count} thing(s) hansa posted to it wait unhandled · {en}")
     text_zh = (f"协调员的会话 {who_zh} 无法工作：自 {at} 起（{_mins(t - since)} 分钟）轮次一直以 API 错误（{error}）结束 · "
-               f"hansa 发去的 {count} 件事尚未处理" + (f" · {zh}" if zh else ""))
+               f"hansa 发去的 {count} 件事尚未处理 · {zh}")
     return text, text_zh
 
 
-def principal_turn_text(error: str, at: str, zh: bool = False) -> str:
-    """A turn the principal started ended with an API error at HH:MM (notify.Turns' principal): what it says."""
+def principal_turn_text(error: str, at: str, zh: bool = False, count: int = 0) -> str:
+    """A turn the principal started ended with an API error at HH:MM (notify.Turns' principal): what it says. For an
+    error only the principal can cure (notify.TURN_PRINCIPAL, TURN_LOGIN), what to fix first, then to type the request
+    again; for the rest, to type it again, as hansa does not post the principal's request again. count: how many things
+    hansa posted meanwhile wait unhandled."""
+    from .notify import TURN_LOGIN, TURN_PRINCIPAL
+    fix = TURN_ADVICE.get(error) if error in (*TURN_PRINCIPAL, TURN_LOGIN) else None
     if zh:
-        return f"负责人自己的请求在 {at} 因 API 错误（{error}）结束，没有完成 · 请在那个会话里再输入一次"
-    return (f"the principal's own request ended with an API error ({error}) at {at} and was not done · type it again "
-            "in that session")
+        again = f"{fix[1]}，然后在那个会话里再输入一次" if fix else "请在那个会话里再输入一次"
+        return (f"负责人自己的请求在 {at} 因 API 错误（{error}）结束，没有完成 · {again}"
+                + (f" · hansa 期间发去的 {count} 件事尚未处理" if count else ""))
+    again = f"{fix[0]}, then type it again in that session" if fix else "type it again in that session"
+    return (f"the principal's own request ended with an API error ({error}) at {at} and was not done · {again}"
+            + (f" · {count} thing(s) hansa posted meanwhile wait unhandled" if count else ""))
 
 
 def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
@@ -1157,8 +1260,9 @@ def explain_line(s: dict, desk: Desk | None = None) -> str:
                    "the principal approves releases on the page only."))
     return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
-            "filed (hansa ask), a lane's runs cannot start because their sandbox cannot, free space goes under the "
-            "floor (hansa disk-floor), hansa serve finishes no round for a long time, or what hansa posts to your "
-            "session cannot reach it (no session hears from hansa, its inbox refuses posts, your session waits on a "
-            "permission dialog or a question, or a task posted to it waits for review while it is idle). You send no "
+            "filed (hansa ask), a provider runs out of credit, a lane's runs cannot start because their sandbox "
+            "cannot, free space goes under the floor (hansa disk-floor), hansa serve finishes no round for a long time, "
+            "what hansa posts to your session cannot reach it (no session hears from hansa, its inbox refuses posts, "
+            "your session waits on a permission dialog or a question, or a task posted to it waits for review while it "
+            "is idle), or your turns keep ending with an API error (and once they end normally again). You send no "
             f"alerts and cannot set it. {pushes} (set up on the page, Settings, Alerts). " + code_channels)

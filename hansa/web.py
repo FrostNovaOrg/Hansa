@@ -128,7 +128,20 @@ def _save_settings(desk: Desk, body: dict) -> dict:
             brief.parent.mkdir(parents=True, exist_ok=True)
             brief.touch(exist_ok=True)
     warnings = [] if problems else lane_warnings(new)
-    return {"ok": not problems, "problems": problems, **({"lane_warnings": warnings} if warnings else {})}
+    # A minutes box of the coordinator alert emptied on the page leaves its key out: say which default applies now
+    emptied = {} if problems else _emptied_minutes(on_disk, new)
+    return {"ok": not problems, "problems": problems, **({"lane_warnings": warnings} if warnings else {}),
+            **({"coordinator_alert_defaults": emptied} if emptied else {})}
+
+
+def _emptied_minutes(before: dict, after: dict) -> dict:
+    """The coordinator alert's minutes (desk.COORDINATOR_ALERT) set before and left out by this save, with the
+    default each now takes: {key: minutes}."""
+    from .desk import COORDINATOR_ALERT
+    was, now_ = before.get("coordinator_alert"), after.get("coordinator_alert")
+    if not isinstance(was, dict) or not isinstance(now_, dict):
+        return {}
+    return {k: v for k, v in COORDINATOR_ALERT.items() if k in was and k not in now_}
 
 
 def _push_test(desk: Desk, body: dict) -> dict:

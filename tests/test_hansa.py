@@ -46576,8 +46576,10 @@ else:
                 self.assertTrue(alert.send_due(self.desk, gather=0, capped=False)["ok"])
                 sent = self.alerted(out)[-1]
                 self.assertEqual((sent["kind"], sent["level"]), ("sandbox", "urgent"))
-                for words in ("工作线 a", f"其{who}的{problem}", why or "?", "其工作智能体和核验者",
-                              "沙箱试跑通过后会自动恢复", "修复后重启 hansa serve", "hansa explain server",
+                said = (why or "?").removeprefix("the sandbox could not start: ").removeprefix("the sandbox starts, but ")
+                for words in ("工作线 a", f"其{who}的{problem}：「{said}」", "其工作智能体和核验者",
+                              "沙箱试跑通过后会自动恢复", "修复后 hansa serve 重新启动或设置改动时会再试",
+                              "下一步：告诉协调员；它可以用 hansa explain server 查明原因",
                               f"任务 {task} 暂缓" if task else "其任务暂缓", "没有失败"):
                     self.assertIn(words, sent["text"])
 
@@ -49140,7 +49142,7 @@ else:
                                           8: lambda: shown.append(self.hansa_out("status"))})
             self.assertEqual(self.coordinator_alerts(), [
                 "the coordinator's session pid 4242 (desk-4242) is idle while t0001 has waited for review for 3 min "
-                "since hansa posted it there: Add a · hansa does not post it again"])
+                "since hansa posted it there: Add a · next: ask the coordinator in that session to review t0001"])
             self.assertEqual(len(posted()), 1)  # hansa does not post it again
             self.assertIn("waiting for review while the coordinator's session pid 4242 (desk-4242) is idle: t0001 for 7 "
                           "min", shown[0])
@@ -49199,7 +49201,8 @@ else:
                         f"coordinator_alert: {COORDINATOR_ALERT_WHAT[k]} ({k}) must be a whole number from 0 (off) to "
                         f"1440, not {json.dumps(bad)}"])
             edges = {"no_session_min": 0, "window_min": 1440, "review_min": 1}
-            self.assertEqual(self.page_save(lambda s: s.update(coordinator_alert=edges)), {"ok": True, "problems": []})
+            self.assertEqual(self.page_save(lambda s: s.update(coordinator_alert=edges)),
+                             {"ok": True, "problems": [], "coordinator_alert_defaults": {"turn_min": 30}})
             s = self.desk.settings()
             s["coordinator_alert"] = {"no_session_min": 5, "window_min": 5, "review_min": 5}
             self.assertEqual(self.desk.save_settings(s, by="coordinator"), [
@@ -49728,7 +49731,7 @@ else:
                     ("invalid_request", "the session's context may have gone wrong: /compact or /clear in that "
                      "session may cure it", "在那个会话里 /compact 或 /clear 也许能解决"),
                     ("authentication_failed", "log in again in that session", "请在那个会话里重新登录"),
-                    ("overloaded", "", "")):
+                    ("overloaded", "hansa tries again with its next post to the session", "hansa 下次给那个会话发消息时会再试")):
                 with self.subTest(zh=zh, error=error):
                     write_json(alert.queue_file(self.desk), [])
                     self.assertEqual(alert.from_follower(self.desk, me, {"case": "turn", "error": error,
@@ -49746,7 +49749,7 @@ else:
                                       f"with an API error ({error}) since ", x["text"])
                         self.assertIn("(31 min) · 3 thing(s) hansa posted to it wait unhandled", x["text"])
                         self.assertIn(en_said, x["text"])
-                    self.assertEqual(x["text"].count(" · "), 1 if error == "overloaded" else 2)
+                    self.assertEqual(x["text"].count(" · "), 2)
             write_json(alert.queue_file(self.desk), [])
             self.assertEqual(alert.from_follower(self.desk, me, {"case": "turn_ok", "since": at, "at": at + 600}),
                              "queued")
@@ -49855,6 +49858,184 @@ else:
                           views.status_text(views.status(self.desk)))
             rec["coordinator"] = {}
             self.assertNotIn("API error", views.status_text(views.status(self.desk)))
+
+    # -- what an alert asks of the principal, who reads it on a phone in the alert language ---------------------------
+    WHO = {"session": {"pid": 4242, "start": ""}, "name": "desk-4242"}
+
+    def queued_texts(self, kind) -> list:
+        """The (English, Chinese) of each queued alert of this kind."""
+        from hansa import alert
+        return [(x["translations"]["en"], x["translations"]["zh"]) for x in alert.queued(self.desk) if x["kind"] == kind]
+
+    def test_alerts_about_the_coordinators_session_say_what_the_principal_can_do(self):
+        from hansa import alert
+        self.coordinator_desk("next-steps")
+        items = [{"at": time.time() - 900, "line": "t0001 done: Add a"}]
+        up_en, up_zh = "run hansa up in a terminal on the desk's machine", "在工作台所在机器的终端里运行 hansa up"
+        for records, gone, en, zh in (
+                ([], False, up_en, up_zh), ([{**self.WHO, "seen": 100}], True, up_en, up_zh),
+                ([{**self.WHO, "seen": 100}], False, "ask the coordinator in that session to run hansa notify on",
+                 "在那个会话里让协调员运行 hansa notify on")):
+            with self.subTest(records=records, gone=gone), \
+                    unittest.mock.patch.object(notify, "records", return_value=records), \
+                    unittest.mock.patch.object(notify, "gone", return_value=gone):
+                self.assertIn(" · next: " + en, alert.unheard_text(self.desk, items, time.time()))
+                self.assertIn(" · 下一步：" + zh, alert.unheard_text(self.desk, items, time.time(), zh=True))
+        with self.subTest("the inbox refuses posts"):
+            self.assertEqual(alert.from_follower(self.desk, self.WHO, {"case": "inbox", "since": time.time() - 700}),
+                             "queued")
+            [(en, zh)] = self.queued_texts("coordinator")
+            self.assertIn("its inbox refuses posts for 11 min", en)
+            self.assertIn(" · next: if it lasts, quit that session, then " + up_en, en)
+            self.assertIn(" · 下一步：如果一直这样，请退出那个会话，再" + up_zh, zh)
+        with self.subTest("work waits for review"):
+            write_json(alert.queue_file(self.desk), [])
+            tid = self.coordinator_task_ended("修复登录按钮")
+            self.assertEqual(alert.from_follower(self.desk, self.WHO, {"case": "review", "task": tid,
+                                                                       "posted": time.time() - 7300}), "queued")
+            [(en, zh)] = self.queued_texts("coordinator")
+            self.assertIn(f"{tid} has waited for review for 121 min", en)
+            self.assertTrue(en.endswith(f" · next: ask the coordinator in that session to review {tid}"), en)
+            self.assertNotIn("does not post it again", en)
+            self.assertIn("待审：「修复登录按钮」", zh)
+            self.assertTrue(zh.endswith(f" · 下一步：在那个会话里让协调员审阅 {tid}"), zh)
+            self.assertNotIn("不会重复发送", zh)
+
+    def test_server_and_sandbox_alerts_say_what_the_trouble_means_and_leave_the_diagnosis_to_the_coordinator(self):
+        from hansa import alert
+        self.coordinator_desk("diagnosis")
+        write_json(self.desk.state_dir / "heartbeat", time.time() - alert.STUCK_ALERT - 60)
+        alert.stuck_check(self.desk, 0)
+        self.desk.event("sandbox_held", lane="a", run="worker", why="the sandbox could not start: srt: bad thing",
+                        task="t0009", alert=True)
+        [(stuck, stuck_zh)], [(held, held_zh)] = self.queued_texts("server_stuck"), self.queued_texts("sandbox")
+        for text in (stuck, held):
+            self.assertNotIn("see hansa explain server", text)
+            self.assertNotIn("restart hansa serve; hansa explain server", text)
+            self.assertIn(" · next: tell the coordinator; it can find the cause with hansa explain server", text)
+        self.assertIn("busy with a long step, or stuck", stuck)
+        self.assertIn("lane a cannot run: its worker's sandbox could not start: srt: bad thing", held)
+        self.assertIn("task t0009 is held, not failed", held)
+        for text in (stuck_zh, held_zh):
+            self.assertNotIn("请查看 hansa explain server", text)
+            self.assertNotIn("修复后重启 hansa serve；hansa explain server", text)
+            self.assertIn(" · 下一步：告诉协调员；它可以用 hansa explain server 查明原因", text)
+        self.assertIn("其工作智能体的沙箱无法启动：「srt: bad thing」", held_zh)
+        self.assertNotIn("the sandbox could not start", held_zh)
+
+    def test_turn_advice_covers_every_error_a_turn_can_end_with(self):
+        from hansa import alert
+        self.assertEqual(set(alert.TURN_ADVICE), set(up.TURN_ERRORS))
+        fix = (*notify.TURN_PRINCIPAL, notify.TURN_LOGIN)
+        for error in up.TURN_ERRORS:
+            with self.subTest(error=error):
+                en, zh = alert.TURN_ADVICE[error]
+                if error in fix:
+                    self.assertNotIn("hansa tries again", en)
+                else:
+                    self.assertIn("hansa tries again", en)
+                    self.assertIn("会再试", zh)
+        for error, en, zh in (("billing_error", "add credit", "充值"), ("authentication_failed", "log in again", "重新登录"),
+                              ("account_on_hold", "the account is on hold", "账号被暂停"),
+                              ("model_not_found", "/model", "/model"), ("verification_required", "verif", "验证")):
+            with self.subTest(error=error):
+                text, text_zh = alert.turn_text({"error": error, "since": time.time() - 60, "count": 1}, "pid 1",
+                                                "pid 1", time.time())
+                self.assertIn(en, text)
+                self.assertIn(zh, text_zh)
+
+    def test_a_failed_request_of_the_principals_says_what_to_fix_first_and_what_waits_meanwhile(self):
+        from hansa import alert
+        t, who = time.time(), "pid 4242 (desk-4242)"
+        for error in (*notify.TURN_PRINCIPAL, notify.TURN_LOGIN):
+            with self.subTest(error=error):
+                en, zh = alert.turn_text({"error": error, "principal": True, "at": t, "since": t, "count": 2}, who, who,
+                                         t + 60)
+                advice, advice_zh = alert.TURN_ADVICE[error]
+                self.assertIn(f"{advice}, then type it again in that session", en)
+                self.assertIn("2 thing(s) hansa posted meanwhile wait unhandled", en)
+                self.assertIn(f"{advice_zh}，然后在那个会话里再输入一次", zh)
+                self.assertIn("hansa 期间发去的 2 件事尚未处理", zh)
+        for error in (*notify.TURN_WAIT, notify.TURN_LONG):
+            with self.subTest(error=error):
+                en, zh = alert.turn_text({"error": error, "principal": True, "at": t, "since": t, "count": 0}, who, who,
+                                         t + 60)
+                self.assertTrue(en.endswith(" · type it again in that session"), en)
+                self.assertNotIn("tries again", en)
+                self.assertNotIn("unhandled", en)
+                self.assertTrue(zh.endswith(" · 请在那个会话里再输入一次"), zh)
+
+    def test_chinese_alerts_say_hansas_words_in_chinese(self):
+        from hansa import alert
+        self.coordinator_desk("zh-words", no_session_min=1)
+        self.assertTrue(self.page_save(lambda s: s.update(alert_language="zh"))["ok"])
+        alert.unheard_check(self.desk)
+        tid = self.coordinator_task_ended("修复登录按钮")
+        alert.unheard_check(self.desk, time.time() + 120)
+        [(en, zh)] = self.queued_texts("coordinator")
+        self.assertIn(f"{tid} done: 修复登录按钮 (no changes)", en)
+        self.assertIn(f"最早的已等 ", zh)
+        self.assertIn(f"分钟：任务 {tid}「修复登录按钮」已完成", zh)
+        for english in ("done", "no changes", "next"):
+            self.assertNotIn(english, zh)
+
+    def test_who_stopped_a_release_is_said_in_words(self):
+        from hansa import release
+        self.release_listing_history()
+        for session, by, en, zh in (([], "terminal", "a command in a terminal", "终端里的命令"),
+                                    (["CLAUDECODE"], "coordinator", "the coordinator", "协调员")):
+            with self.subTest(by=by), unittest.mock.patch.dict(os.environ), \
+                    unittest.mock.patch.object(cli, "session_vars", return_value=session):
+                os.environ.pop("HANSA_ROLE", None)
+                self.hansa("release", "a", "pub")
+                rid = release.releases(self.desk)[-1]["id"]
+                self.hansa("release", "--stop", str(rid))
+                r = release.get(self.desk, rid)
+                self.assertEqual(r["stopped_by"], by)
+                self.assertIn(f"stopped by {en} ", release.state_text(self.desk, r))
+                self.assertTrue(release.state_text(self.desk, r, zh=True).startswith(f"{zh}在 "))
+        old = {**r, "stopped_by": "cli"}  # recorded before: a terminal's or a session's
+        for zh in (False, True):
+            self.assertNotIn("cli", release.state_text(self.desk, old, zh=zh))
+
+    def test_explain_the_page_and_the_card_list_the_turn_and_credit_alerts(self):
+        self.alert_fake()
+        said = self.hansa("explain")
+        self.assertIn("a provider runs out of credit", said)
+        self.assertIn("your turns keep ending with an API error", said)
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        en = next(x for x in ui.splitlines() if 'alertCmd:"Alert command' in x)
+        zh = next(x for x in ui.splitlines() if 'alertCmd:"提醒命令' in x)
+        self.assertIn("a provider runs out of credit", en)
+        self.assertIn("the coordinator's turns keep ending with an API error", en)
+        self.assertIn("服务商余额不足", zh)
+        self.assertIn("协调员的轮次接连因 API 错误结束", zh)
+        card = " ".join((Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text().split())
+        line = card[card.index("`coordinator` alerts say"):][:400]
+        self.assertIn("keeps ending its turns with an API error", line)
+        self.assertIn("ran out of credit", line)
+
+    def test_status_shows_the_coordinator_alert_minutes_with_the_alert_settings(self):
+        self.assertNotIn("Coordinator alerts after", self.hansa_out("status"))  # no alert channel: none goes out
+        self.alert_fake()
+        self.assertEqual(self.page_save(lambda s: s["coordinator_alert"].update(turn_min=45, review_min=0)),
+                         {"ok": True, "problems": []})
+        self.assertIn("Coordinator alerts after: no listening session 10 min · waiting for input 10 min · task waiting "
+                      "for review off · turns failing 45 min (set on the page, Settings, Alerts)",
+                      self.hansa_out("status"))
+
+    def test_an_emptied_coordinator_alert_minutes_box_says_it_uses_the_default(self):
+        self.assertEqual(self.page_save(lambda s: s["coordinator_alert"].update(turn_min=45)),
+                         {"ok": True, "problems": []})
+        self.assertEqual(self.page_save(lambda s: s["coordinator_alert"].pop("turn_min")),
+                         {"ok": True, "problems": [], "coordinator_alert_defaults": {"turn_min": 30}})
+        self.assertEqual(self.desk.settings()["coordinator_alert"].get("turn_min"), None)
+        self.assertEqual(self.page_save(lambda s: None), {"ok": True, "problems": []})  # said once, when emptied
+        ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
+        self.assertIn("r.coordinator_alert_defaults", ui)
+        for words in ('alertDefaultUsed:(what, m) => `${what}：留空，使用默认值 ${m} 分钟。`',
+                      'alertDefaultUsed:(what, m) => `${what}: left empty, so the default, ${m} minutes, applies.`'):
+            self.assertIn(words, ui)
 
     def test_show_full_gives_claude_codes_reason_for_a_refused_call_whole(self):
         tid = self.desk.new_task("Build it")
