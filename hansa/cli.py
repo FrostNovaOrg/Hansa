@@ -21,7 +21,7 @@ from . import account, alert, build, cost, gaps, goals, history, installed_text,
 from .desk import (EFFORTS, Desk, SettingsError, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
-                   PROJECT_INTRO, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
+                   PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
 from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
@@ -1448,8 +1448,10 @@ def cmd_release(a):
         _answer_by_code(desk, a)
         return
     note, target = list(a.note), None
-    if note and note[0] and note[0] in lane_targets(desk.settings()["lanes"].get(a.lane)):
-        target = note.pop(0)  # hansa release L TARGET [note]; with one target, L [note] is enough
+    targets = lane_targets(desk.settings()["lanes"].get(a.lane))
+    # On a one-target lane, a mistyped target must not become a note and release the only target.
+    if note and note[0] and (note[0] in targets or len(targets) == 1 and NAME.match(note[0])):
+        target = note.pop(0)
     r = release.ask(desk, a.lane, " ".join(note), by=os.environ.get("HANSA_ROLE", "cli"),
                     session=notify.session_here(), target=target, direct=a.direct)
     who = release.what(r)
@@ -1461,6 +1463,11 @@ def cmd_release(a):
             f"({release.runs_text(r)})")
     head += "".join("\n" + x for x in release.outside.lines(r))
     head += "".join("\n" + x for x in release.direct_lines(r))
+    if r.get("since_release") and r["since"] == r["commit"]:
+        head = (f"Nothing new on {who}: same commit as release #{r['since_release']}, asked to run again.\n"
+                + head)
+    for rid in r.get("_replaced", []):
+        head += f"\nReplaces waiting release #{rid}; its one-time code no longer works."
     if r["state"] == "forbidden":
         mailbox = release.mailbox_refusal(r["hits"])
         if mailbox:
@@ -3398,7 +3405,8 @@ def main(argv=None):
             "after the principal's yes on the page), or list the releases")
     p.description = ("hansa release L [TARGET] [note]: ask for a release of lane L's base branch as it is now, by "
                      "one of its named release targets (hansa lane target L NAME \"...\"); TARGET is needed when "
-                     "the lane has more than one. "
+                     "the lane has more than one; name the target before a one-word note that could be a target "
+                     "name (hansa release L TARGET hotfix). "
                      "hansa records the commit, the target and its command, the note, the commits that go out (on no "
                      "remote-tracking branch and not in that target's last release) and the files they change; a word "
                      "the principal keeps from going out, in the command line or in a line, a file name or a message "
