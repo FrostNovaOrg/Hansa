@@ -817,27 +817,42 @@ def tracked(top: str, path) -> bool:
     return bool(r) and r.returncode == 0
 
 
-def exclude_copy(top: str, path: Path) -> str:
-    """Keep the copy out of the repository whose work tree it is in: its path in that repository's info/exclude,
-    once, and not when git already ignores it. What was done, as a sentence."""
+def exclude_path(top: str, path) -> tuple:
+    """Keep path (a file or a folder) out of the repository whose work tree it is in: its path in that repository's
+    info/exclude, once, and not when git already ignores it; never in a tracked .gitignore. Shared by the card's copy
+    (exclude_copy) and a desk made inside a work tree (cli.keep_desk_out). What was done: ("ignored", ""),
+    ("added", exclude), ("listed", exclude) when the line was there already, or ("failed", why)."""
     rel = os.path.relpath(os.path.realpath(path), os.path.realpath(top))
+    if rel == ".":
+        return "failed", f"{path} is the top folder of that work tree, which info/exclude cannot leave out"
     r = _git(top, "check-ignore", "-q", "--", rel)
     if r and r.returncode == 0:
-        return f"git in {top} ignores it."
+        return "ignored", ""
     r = _git(top, "rev-parse", "--git-path", "info/exclude")
     if not r or r.returncode or not r.stdout.strip():
-        return f"git in {top} lists it, as the repository's info/exclude could not be found: commit it nowhere."
+        return "failed", "the repository's info/exclude could not be found"
     exclude = Path(top, r.stdout.strip())
     line = "/" + re.sub(r"([*?\[\\])", r"\\\1", rel.replace(os.sep, "/"))
     try:
         text = exclude.read_text(encoding="utf-8", errors="replace") if exclude.is_file() else ""
-        if line not in text.splitlines():
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            with open(exclude, "a", encoding="utf-8") as f:
-                f.write(("\n" if text and not text.endswith("\n") else "") + line + "\n")
+        if line in text.splitlines():
+            return "listed", str(exclude)
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with open(exclude, "a", encoding="utf-8") as f:
+            f.write(("\n" if text and not text.endswith("\n") else "") + line + "\n")
     except OSError as e:
-        return f"git in {top} lists it, as {exclude} could not be written ({e.strerror or e}): commit it nowhere."
-    return f"hansa added it to {exclude}, so git in {top} leaves it out."
+        return "failed", f"{exclude} could not be written ({e.strerror or e})"
+    return "added", str(exclude)
+
+
+def exclude_copy(top: str, path: Path) -> str:
+    """Keep the copy out of the repository whose work tree it is in (exclude_path). What was done, as a sentence."""
+    done, detail = exclude_path(top, path)
+    if done == "ignored":
+        return f"git in {top} ignores it."
+    if done == "failed":
+        return f"git in {top} lists it, as {detail}: commit it nowhere."
+    return f"hansa added it to {detail}, so git in {top} leaves it out."
 
 
 def copy_text(desk: Desk, path: Path) -> str:

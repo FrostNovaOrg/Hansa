@@ -86,19 +86,19 @@ starts nothing and calls no model.
 
 ## Create and start the desk
 
-For a new or empty project, `hansa init` makes the folder, a repository and
-an empty first commit. `hansa lane add --repo` does too. If the folder already
-has files, choose and commit them first.
+`hansa init` and `hansa lane add --repo` give a new or empty project a
+repository and an empty first commit; commit existing files first.
 
 ```sh
 hansa init ~/shop/desk --repo ~/shop/repo
 cd ~/shop/desk
 ```
 
-Use plain folder names; if rejected, see [paths hansa refuses](sandbox.md#paths-hansa-refuses).
+`hansa init` refuses a desk folder holding files and keeps one inside a repository out of its commits;
+use plain names ([paths hansa refuses](sandbox.md#paths-hansa-refuses)).
 
-Init creates lane `a` on the checkout's current branch and registers the stopped
-desk for this account, so `hansa` shows it. With a subscription login,
+Init creates lane `a` on the checkout's current branch and lists the stopped
+desk, so `hansa` shows it. With a subscription login,
 `hansa up` starts the server, then the coordinator in tmux.
 
 For endpoint-only setups, keep `hansa serve` running. From another terminal,

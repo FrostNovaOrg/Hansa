@@ -57,6 +57,24 @@ desk folder, init still makes the desk and warns:
 `warning: others may write in <folder>; run chmod go-w <folder>`.
 The command quotes a path containing spaces or shell characters.
 
+The desk's folder must be new or empty (a `.DS_Store` is ignored). `hansa init`
+refuses one that holds anything (files, folders, links, or what an interrupted
+init left) before anything is made, naming up to three of the entries and
+giving a `hansa init` command with the desk in a folder of its own beside the
+project (`~/shop-desk` for `~/shop`); so it never writes over a project's own
+`CLAUDE.md` or `.claude/settings.json`. A desk may lie inside a git
+repository's work tree (the lane's or another), though a folder beside the
+project is the better place: `hansa init`, and `hansa lane add --repo R` for a
+desk inside R's work tree, write the desk's path into that repository's
+`info/exclude` (never into a tracked `.gitignore`), so `git add` there takes none
+of its settings, tasks, `secrets/` or `.hansa/`, and say so in one line. A line
+already there, or a path git ignores already, is left as it is and not
+mentioned. When the line cannot be written (the desk is the work tree's top
+folder, say), the command warns that the desk's files must stay out of that
+repository's commits. `--lane NAME` is judged by the same settings check as
+`hansa lane add`, so a name it refuses (a capital, `_`, a space, a path) is
+refused before anything is made.
+
 Settings and JSON state files use UTF-8. Filename bytes that are not UTF-8,
 as Linux permits, are stored as JSON escapes and restored when the file is
 read. Ordinary Unicode text stays readable, and saved command lines keep

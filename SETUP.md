@@ -70,7 +70,9 @@ author name and email are not secrets: ask for them if the repository has none s
 
 The desk is the folder holding the team's settings and tasks. Recommend a folder next to the repository, named after
 it with `-desk` (for `~/shop`, `~/shop-desk`). Use plain folder names; see
-[paths hansa refuses](docs/sandbox.md#paths-hansa-refuses). It is created in the plan's step:
+[paths hansa refuses](docs/sandbox.md#paths-hansa-refuses). `hansa init` refuses a folder that already holds
+files, the project's own among them; a desk inside a git repository it keeps out of that repository's commits with a
+line in its `info/exclude`, and says so. It is created in the plan's step:
 
 ```sh
 hansa init ~/shop-desk --repo ~/shop

@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 
 from . import account, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
-from .desk import (EFFORTS, Desk, SettingsError, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
+from .desk import (EFFORTS, Desk, SettingsError, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
@@ -117,12 +117,58 @@ def answer_lane_refused(name: str) -> str:
             "the principal's answer; nothing was changed")
 
 
+def held(folder: Path) -> list:
+    """What an existing folder holds, sorted, but Finder's .DS_Store; [] for a missing or an empty folder.
+    OSError when it cannot be read."""
+    return sorted(p.name for p in folder.iterdir() if p.name != ".DS_Store") if folder.is_dir() else []
+
+
+def beside_project(folder: Path, repo: str, lane: str, base: str | None) -> str:
+    """A hansa init that works, for a folder that holds something: the desk in a new folder of its own beside the
+    project (the repository given, else the work tree folder is in, else folder), named after it with -desk."""
+    project = Path(os.path.realpath(os.path.expanduser(repo))) if repo else Path(up.git_top(folder) or folder)
+    at, n = project.with_name(f"{project.name}-desk"), 1
+    while os.path.lexists(at) and (not at.is_dir() or held(at) or (at / "settings.json").exists()):
+        n += 1
+        at = project.with_name(f"{project.name}-desk-{n}")
+    return shlex.join(["hansa", "init", str(at)] + (["--repo", str(project)] if repo else [])
+                      + (["--lane", lane] if lane != "a" else []) + (["--base", base] if base is not None else []))
+
+
+def keep_desk_out(desk: Desk, repo: str = "") -> None:
+    """A desk inside the work tree of a git repository (with repo, only of that one): its path in the repository's
+    info/exclude, so that `git add` there takes none of the desk's settings, tasks, secrets/ and .hansa/. Said in one
+    line when written; a warning when it cannot be; nothing when git already leaves it out."""
+    top = up.git_top(desk.root)
+    if not top or repo and os.path.realpath(up.git_top(repo) or repo) != os.path.realpath(top):
+        return
+    done, detail = up.exclude_path(top, desk.root)
+    better = "a folder of its own beside the project is the better place for a desk"
+    if done == "added":
+        print(f"The desk at {desk.root} lies inside the git work tree at {top}: hansa wrote its path into {detail}, "
+              f"which keeps `git add` there from taking the desk's files; {better}.")
+    elif done == "failed":
+        print(f"warning: the desk at {desk.root} lies inside the git work tree at {top}, and hansa could not write "
+              f"its path into the repository's info/exclude ({detail}): keep the desk's files (its settings, tasks, "
+              f"secrets/ and .hansa/) out of that repository's commits; {better}.", file=sys.stderr)
+
+
 def init_desk(root: Path, repo: str = "", lane: str = "a", base: str | None = None, *, command: str = "hansa init") -> Desk:
     if answer_name(lane):
         raise SystemExit(answer_lane_refused(lane))
     desk = Desk(root)
     if desk.settings_path.exists():
         raise SystemExit(f"hansa: {desk.root} already has a desk")
+    try:  # a project's own CLAUDE.md and .claude/settings.json would be written over
+        there = held(desk.root) if desk.root.is_dir() or not os.path.lexists(desk.root) else [desk.root.name]
+    except OSError as e:
+        raise SystemExit(f"hansa: cannot read {desk.root} ({e.strerror or e}); no desk was made")
+    if there:
+        named = ", ".join(there[:3]) + (f" and {len(there) - 3} more" if len(there) > 3 else "")
+        what = f"holds {named}" if desk.root.is_dir() else "is not a folder"
+        raise SystemExit(f"hansa: {desk.root} {what}: a desk needs a new or an empty folder of its own; "
+                         f"no desk was made. Make it in a folder of its own beside the project: "
+                         f"{beside_project(desk.root, repo, lane, base)}")
     for x in dict.fromkeys([str(desk.root), str(desk.given)]):  # every rule for the desk's folders starts with it
         if path_rule_problem(x):
             raise SystemExit(f"hansa: {path_rule_problem(x)}; no desk was made")
@@ -139,6 +185,9 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str | None = No
             raise SystemExit(f"hansa: {why}; no desk was made")
         new_repo = {}
         base = lane_base(repo, base, "no desk was made", new_repo=new_repo)
+        s = default_settings()  # judged as every later change is (hansa lane add's lane name among it)
+        s["lanes"][lane] = default_lane(repo, base)
+        _settings_refused(validate(s, desk.root), "no desk was made")
         if new_repo:
             base = make_lane_repo(repo, new_repo, default_lane(repo, base), "no desk was made")
     for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir, desk.secrets_dir):
@@ -447,6 +496,7 @@ def cmd_init(a):
         _init_for(a)
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base)
     print(f"desk ready at {desk.root}")
+    keep_desk_out(desk)
     if desk.root.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         print(f"warning: others may write in {desk.root}; run chmod go-w {shlex.quote(str(desk.root))}", file=sys.stderr)
     problem = up.list_desk(desk)
@@ -2184,10 +2234,14 @@ def _save_topic(problem: str) -> str:
 def _save(desk: Desk, new: dict, command: str, *, dry: bool = False) -> None:
     """Save the coordinator's change, checked as the page's are; on problems print them, with a pointer for each
     field they are about, and change nothing. Callers name their command for settings history."""
-    problems = desk.save_settings(new, by="coordinator", command=command, dry=dry)
+    _settings_refused(desk.save_settings(new, by="coordinator", command=command, dry=dry))
+
+
+def _settings_refused(problems: list, nothing: str = "nothing was changed") -> None:
+    """Refuse settings with problems: print them, with a pointer for each field they are about."""
     if problems:
         topics = dict.fromkeys(filter(None, map(_save_topic, problems)))
-        raise SystemExit("hansa: nothing was changed:\n" + "\n".join(f"  {x}" for x in problems)
+        raise SystemExit(f"hansa: {nothing}:\n" + "\n".join(f"  {x}" for x in problems)
                          + "".join(f"\n{see_more(x)}" for x in topics))
 
 
@@ -2419,6 +2473,7 @@ def cmd_lane(a):
             if aside:
                 print(f"An earlier lane {a.name} left standing instructions in {brief}; lane {a.name} now has "
                       f"{a.like}'s, and the earlier ones are kept in {aside}")
+            keep_desk_out(desk, repo)
             for f in OUTSIDE_WORKER:
                 if ln.get(f):
                     desk.event("lane_command_changed", lane=a.name, field=f, old="", new=ln[f])

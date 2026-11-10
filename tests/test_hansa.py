@@ -6706,8 +6706,10 @@ def save():'''))
         root = self.tmp / "other"
         (root / "notes").mkdir(parents=True)
         (root / "notes" / "PROJECT.md").write_text("ours\n")
-        init_desk(root)
+        with self.assertRaisesRegex(SystemExit, "holds notes: a desk needs a new or an empty folder"):
+            init_desk(root)  # a folder that holds something is no folder for a new desk
         self.assertEqual((root / "notes" / "PROJECT.md").read_text(), "ours\n")
+        self.assertEqual(sorted(p.name for p in root.iterdir()), ["notes"])
 
     def test_status_says_the_project_file_size_and_when_it_is_long(self):
         project = self.desk.project_path
@@ -7038,16 +7040,16 @@ def save():'''))
     def test_init_refuses_a_missing_base_before_making_a_desk(self):
         for existing in (False, True):
             root = self.tmp / f"new-{existing}"
-            if existing:
+            if existing:  # a folder that holds only Finder's .DS_Store counts as empty
                 root.mkdir()
-                (root / "keep.txt").write_text("keep me\n")
+                (root / ".DS_Store").write_text("keep me\n")
             with self.assertRaises(SystemExit) as e:
                 main(["init", str(root), "--repo", str(self.repo), "--base", "does-not-exist"])
             for word in ("does-not-exist", str(self.repo), "commit", "branch", "no desk was made"):
                 self.assertIn(word, str(e.exception))
             if existing:
-                self.assertEqual(list(root.iterdir()), [root / "keep.txt"])
-                self.assertEqual((root / "keep.txt").read_text(), "keep me\n")
+                self.assertEqual(list(root.iterdir()), [root / ".DS_Store"])
+                self.assertEqual((root / ".DS_Store").read_text(), "keep me\n")
             else:
                 self.assertFalse(root.exists())
 
@@ -7252,6 +7254,157 @@ def save():'''))
                 self.assertFalse((self.tmp / f"{name}-desk").exists())
                 self.assertNotIn(name, self.desk.settings()["lanes"])
                 self.assertFalse((self.desk.lanes_dir / name).exists())
+
+    def init_says(self, *args):
+        """hansa init's (or another command's) exit, stdout and stderr."""
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                main(list(args))
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_init_refuses_a_folder_that_holds_something_and_names_a_command_that_works(self):
+        # run in the project's own folder, init wrote over its CLAUDE.md and .claude/settings.json
+        (self.repo / "CLAUDE.md").write_text("# My project rules\n")
+        (self.repo / ".claude").mkdir()
+        (self.repo / ".claude" / "settings.json").write_text('{"model":"opus"}')
+        interrupted = self.tmp / "interrupted"  # an interrupted hansa init's own empty folders, no settings.json
+        for d in ("tasks", "lanes", ".hansa", "notes", "secrets"):
+            (interrupted / d).mkdir(parents=True)
+        linked = self.tmp / "linked"
+        linked.mkdir()
+        (linked / "elsewhere").symlink_to(self.tmp / "nowhere")
+        folders = self.tmp / "folders"
+        (folders / "sub").mkdir(parents=True)
+        a_file = self.tmp / "a-file"
+        a_file.write_text("")
+        repo = str(self.repo.resolve())
+        works = shlex.join(["hansa", "init", str(self.tmp.resolve() / "repo-desk"), "--repo", repo])
+        for root, said in ((self.repo, "holds .claude, .git, CLAUDE.md and 1 more"),
+                           (interrupted, "holds .hansa, lanes, notes and 2 more"), (linked, "holds elsewhere:"),
+                           (folders, "holds sub:"), (a_file, "is not a folder")):
+            with self.subTest(root=root.name):
+                before = sorted(p.name for p in root.iterdir()) if root.is_dir() else None
+                code, _, _ = self.init_says("init", str(root), "--repo", str(self.repo))
+                self.assertIn(said, str(code))
+                self.assertIn("a desk needs a new or an empty folder of its own; no desk was made", str(code))
+                self.assertIn(works, str(code))
+                self.assertEqual(sorted(p.name for p in root.iterdir()) if root.is_dir() else None, before)
+        self.assertEqual((self.repo / "CLAUDE.md").read_text(), "# My project rules\n")
+        self.assertEqual((self.repo / ".claude" / "settings.json").read_text(), '{"model":"opus"}')
+        code, out, _ = self.init_says(*shlex.split(works)[1:])  # the command it gives works
+        self.assertEqual(code, 0)
+        self.assertIn("desk ready", out)
+        code, _, _ = self.init_says("init", str(self.repo), "--repo", str(self.repo), "--lane", "web")
+        self.assertIn(shlex.join(["hansa", "init", str(self.tmp.resolve() / "repo-desk-2"), "--repo", repo,
+                                  "--lane", "web"]), str(code))  # that one is taken now
+        code, _, _ = self.init_says("init", str(folders))  # with no repository: beside the folder
+        self.assertIn(shlex.join(["hansa", "init", str(self.tmp.resolve() / "folders-desk")]), str(code))
+
+    def test_init_takes_a_missing_an_empty_or_a_finder_only_folder(self):
+        empty, finder = self.tmp / "empty", self.tmp / "finder"
+        empty.mkdir()
+        finder.mkdir()
+        (finder / ".DS_Store").write_bytes(b"Finder metadata")
+        for root in (self.tmp / "missing" / "desk", empty, finder):
+            with self.subTest(root=root.name):
+                code, out, _ = self.init_says("init", str(root), "--repo", str(self.repo))
+                self.assertEqual(code, 0)
+                self.assertTrue((root / "settings.json").is_file())
+        self.assertEqual((finder / ".DS_Store").read_bytes(), b"Finder metadata")
+
+    def test_init_refuses_the_lane_names_lane_add_refuses_before_making_anything(self):
+        new = self.tmp / "new-project"  # a repository hansa would make
+        for name in ("Main", "web_app", "my lane", "../x"):
+            for repo in (self.repo, new):
+                with self.subTest(name=name, repo=repo.name):
+                    root = self.tmp / "named"
+                    code, _, _ = self.init_says("init", str(root), "--repo", str(repo), "--lane", name)
+                    self.assertIn(f"no desk was made:\n  lane {name}: use lowercase letters, digits and '-'",
+                                  str(code))
+                    self.assertFalse(root.exists())
+                    self.assertFalse(new.exists())
+                    self.assertFalse((self.tmp / "x").exists())
+            code, _, _ = self.init_says("--desk", str(self.desk.root), "lane", "add", name, "--repo", str(self.repo))
+            self.assertIn(f"lane {name}: use lowercase letters, digits and '-'", str(code))
+
+    def test_a_desk_inside_a_repository_is_kept_out_of_its_commits_once(self):
+        exclude = self.repo / ".git" / "info" / "exclude"
+
+        def clean(repo):
+            return subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout
+
+        def said_once(out, desk_root, top, exclude):
+            lines = [x for x in out.splitlines() if "lies inside the git work tree" in x]
+            self.assertEqual(len(lines), 1, out)
+            for words in (str(Path(desk_root).resolve()), f"work tree at {Path(top).resolve()}",
+                          os.path.realpath(exclude), "keeps `git add` there from taking the desk's files",
+                          "a folder of its own beside the project is the better place"):
+                self.assertIn(words, lines[0])
+
+        before = clean(self.repo)
+        code, out, _ = self.init_says("init", str(self.repo / "desk"), "--repo", str(self.repo))
+        self.assertEqual(code, 0)
+        said_once(out, self.repo / "desk", self.repo, exclude)
+        self.assertEqual(exclude.read_text().splitlines().count("/desk"), 1)
+        self.assertEqual(clean(self.repo), before)
+        self.assertEqual((self.repo / ".gitignore").exists(), False)  # never a tracked .gitignore
+        # the line is there: lane add writes and says nothing a second time
+        code, out, _ = self.init_says("--desk", str(self.repo / "desk"), "lane", "add", "b", "--repo", str(self.repo))
+        self.assertEqual(code, 0)
+        self.assertNotIn("lies inside", out)
+        self.assertEqual(exclude.read_text().splitlines().count("/desk"), 1)
+        # lane add on a desk inside the lane's repository that has no line yet
+        inner = init_desk(self.repo / "inner", "", "a")
+        other = self.tmp / "other"
+        other.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=other)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i", cwd=other)
+        code, out, _ = self.init_says("--desk", str(inner.root), "lane", "add", "o", "--repo", str(other))
+        self.assertNotIn("lies inside", out)  # not the repository it lies in
+        code, out, _ = self.init_says("--desk", str(inner.root), "lane", "add", "b", "--repo", str(self.repo))
+        self.assertEqual(code, 0)
+        said_once(out, inner.root, self.repo, exclude)
+        self.assertEqual(clean(self.repo), before)
+        # inside another repository than --repo's, or with no --repo
+        for root, args in ((other / "with-repo", ["--repo", str(self.repo)]), (other / "alone", [])):
+            with self.subTest(root=root.name):
+                code, out, _ = self.init_says("init", str(root), *args)
+                self.assertEqual(code, 0)
+                said_once(out, root, other, other / ".git" / "info" / "exclude")
+        self.assertEqual(clean(other), "")
+        # inside the repository hansa makes for --repo
+        fresh = self.tmp / "fresh"
+        code, out, _ = self.init_says("init", str(fresh / "desk"), "--repo", str(fresh))
+        self.assertEqual(code, 0, out)
+        said_once(out, fresh / "desk", fresh, fresh / ".git" / "info" / "exclude")
+        self.assertEqual(clean(fresh), "")
+        # beside the repository: nothing said
+        code, out, err = self.init_says("init", str(self.tmp / "beside"), "--repo", str(self.repo))
+        self.assertNotIn("lies inside", out + err)
+
+    def test_a_desk_hansa_cannot_keep_out_of_a_repository_is_made_with_a_warning(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=other)
+        (other / ".git" / "info").mkdir(exist_ok=True)
+        if (other / ".git" / "info" / "exclude").exists():
+            (other / ".git" / "info" / "exclude").unlink()
+        (other / ".git" / "info" / "exclude").mkdir()  # cannot be written
+        top = self.tmp / "top"  # an empty folder that becomes both the repository and the desk
+        top.mkdir()
+        for root, args, why in ((other / "desk", [], "could not be written"),
+                                (top, ["--repo", str(top)], "is the top folder of that work tree")):
+            with self.subTest(root=root.name):
+                code, out, err = self.init_says("init", str(root), *args)
+                self.assertEqual(code, 0)
+                self.assertIn("desk ready", out)
+                [warned] = [x for x in err.splitlines() if "lies inside the git work tree" in x]
+                for words in ("warning:", why, "keep the desk's files", "out of that repository's commits"):
+                    self.assertIn(words, warned)
 
     def test_init_and_lane_add_refuse_uncommitted_files_or_index_entries(self):
         for mode in ("init", "add"):
@@ -20106,8 +20259,11 @@ def save():'''))
         c = init_desk(self.tmp / "x" / "y" / "c", str(self.repo), "a")
         up.desks_file().parent.mkdir(parents=True, exist_ok=True)
         write_json(up.desks_file(), [{"desk": str(d.root), "hansa": "", "at": 0} for d in (self.desk, c)])
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["init", str(self.tmp / "x")])  # a folder that holds a desk holds something: no desk is made over it
+        self.assertIn("holds y: a desk needs a new or an empty folder", str(e.exception.code))
         for root, named, said in ((self.desk.root / "inner", self.desk.root, "holds this desk"),
-                                  (self.tmp / "x", c.root, "is inside this desk"), (self.tmp / "beside", None, "")):
+                                  (self.tmp / "beside", None, "")):
             with self.subTest(root=root):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
@@ -20896,10 +21052,10 @@ def save():'''))
         try:
             for mode in (0o775, 0o777, 0o755):
                 with self.subTest(mode=oct(mode)):
-                    root = self.tmp / f"existing desk-{mode}"
+                    # an empty desk folder and its parent (one that holds anything is refused)
+                    root = self.tmp / f"existing parent-{mode}" / "desk"
                     desk = Desk(root)
-                    folders = (root, desk.tasks_dir, desk.lanes_dir, desk.lanes_dir / "a", desk.state_dir,
-                               desk.notes_dir, desk.secrets_dir, root / ".claude")
+                    folders = (root.parent, root)
                     for folder in folders:
                         folder.mkdir(parents=True, exist_ok=True)
                         folder.chmod(mode)
