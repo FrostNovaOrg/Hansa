@@ -56,8 +56,6 @@ hansa doctor
 每一行都列出检查结果、要求和处理办法；提示项不算失败。退出码 `0` 表示没有未通过的项，`1` 表示有未通过的项。加上 `--json` 会输出 `{"ok": ..., "rows": [...]}`，其中每行包含 `name`、`state`、`found`、`need`、`fix`；状态为 `ok`、`note`、`fails` 或 `skipped`。`--lang zh|en` 和 `hansa menu` 一样，用来选择语言。
 检查中的命令超过 15 秒就会停止，之后会短暂等待，清理子进程留下的输出连接。
 
-`HANSA_CLAUDE` 非空时，hansa 使用它指定的文件运行 Claude Code。如果文件不存在或无法运行，`hansa doctor` 的 Claude Code 一项会显示失败，列出该值和修复办法；hansa 不会改用另一个 `claude`。`hansa status`、`hansa coordinator` 的 `hansa: ...` 错误（退出码 1），以及 `hansa ping` 和网页服务商 Check 的失败结果都显示相同原因。`HANSA_CLAUDE` 为空或未设置时，仍按原来的方式从 PATH 查找。
-
 ## 登录（由负责人操作）
 
 如果用订阅，请以工作台所在账号运行 `claude auth login`；新工作台的 `claude` 服务商会使用这个登录。
