@@ -497,6 +497,14 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   each checked alone.
 - **Closing.** `hansa close ID` closes a finished task without merging, or a finished verification
   while keeping its verdict. `cancel` on finished work refuses and points to `close`.
+  It also puts away a failed task or verification, whatever stopped it and even when its lane
+  has since been removed: the task becomes `cancelled`, closed without merging as one closed from
+  review is, and `hansa show` keeps why it failed; a verification stays `failed` with a closed note,
+  and the task it checked is unchanged. Closed, neither is listed under `failed (latest)` in
+  `hansa status` (which shows the latest five failed that are not closed, and how many more there
+  are; `--json` gives the count of all of them as `failed_count`), nor counted failed by a goal.
+  A task queued `--after` it is held as for a prerequisite closed without merging; `hansa retry`
+  goes as for any closed task. `cancel` on a failed task refuses and points to `close`.
 - **`--recheck`.** `hansa merge ID --recheck` goes the same way whether or not
   the base has moved: the task merged onto the base's tip, the lane's setup and
   merge check run there when the lane is free, and exactly that merged if what
@@ -586,7 +594,19 @@ told the command of the task's last check and how it ended, and that the whole
 check need not be run again unless it needs to.
 A verification's scratch changes are kept under `refs/hansa/scratch/ID`, leaving its worktree clean
 and the shared stash alone; `hansa show ID` gives the `hansa git` command to read them, and the daily
-trim removes the ref 30 days after it ends.
+trim removes the ref 30 days after it ends. When git cannot keep them (the ref is locked, say), the
+verdict stands and `hansa show ID` says the scratch changes could not be kept, with git's words.
+
+When hansa cannot commit a worker's work as the run ends (a locked git index, or any other git error
+there), the task fails: "hansa could not commit the work: " and git's first line. `hansa show ID` gives
+all git said and the command that reads the work, which hansa keeps under `refs/hansa/kept/ID` (made
+without the worktree's index, so a locked one does not stop it). The lane's next task starts clean:
+if git could not clear the worktree then, that task clears it, as the work is kept. `hansa retry ID`
+works as for any failed task: it starts from the base, since the work was never committed.
+
+Anything else a task finds in its lane's worktree when it starts is set aside in `git stash`, named
+"hansa: left over before ID". That task's `hansa show` says so: the stash commit, the last task that
+ran in that worktree, and the `hansa git` commands that show the changes and the new files.
 
 ## What work costs
 
@@ -640,7 +660,7 @@ money goes. A turn's time runs from its first step in the window to its last;
 | `running` | a worker is on it, or hansa is running the lane's check on its work |
 | `done` | the worker finished; waiting for the coordinator's review (`hansa show` / `hansa merge` / `hansa retry`) |
 | `merging` | `hansa merge` is checking it, as the base's tip is not in the task's recorded head or the lane has a `merge_check` of its own: merged onto the base as it is now, with that `merge_check` (else the lane's check) run there; it merges if that passes. Or it needs no check (a task with no commits never does) and waits behind other merges on the same repository and base, or a release running there |
-| `failed` | the run ended with an error; `hansa show` says why |
+| `failed` | the run ended with an error; `hansa show` says why. `hansa retry` sends it back; `hansa close` puts it away (a task becomes cancelled, a verification stays failed), and `hansa show` still says why it failed |
 | `merged` | merged into the lane's base branch |
 | `cancelled` | stopped or closed on request |
 | `replaced` | a follow-up task took its place |

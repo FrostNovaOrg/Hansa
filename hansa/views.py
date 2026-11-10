@@ -26,7 +26,8 @@ STATES = {
                 "merge_check of its own: merged onto the base as it is now, with that merge_check (else the lane's "
                 "check) run there; it merges if that passes. Or it needs no check (a task with no commits never does) "
                 "and waits behind other merges on the same repository and base, or a release running there"),
-    "failed": "the run ended with an error; hansa show says why",
+    "failed": ("the run ended with an error; hansa show says why. hansa retry sends it back; hansa close puts it "
+               "away (a task becomes cancelled, a verification stays failed), and hansa show still says why it failed"),
     "merged": "merged into the lane's base branch",
     "cancelled": "stopped or closed on request",
     "replaced": "a follow-up task took its place",
@@ -927,6 +928,7 @@ def status(desk: Desk) -> dict:
     ready = ready_now(desk, s)
     running = [m for m in tasks if m["state"] == "running"]
     merging = [m for m in tasks if m["state"] == "merging"]
+    failed = [m for m in tasks if m["state"] == "failed" and not m.get("closed")]
     tried = tried_lanes(desk)
     busy = {occupied_lane(m) for m in tasks if lane_occupied(m)} | tried
     held = sandbox_held(desk)
@@ -1043,8 +1045,10 @@ def status(desk: Desk) -> dict:
                     "merge_note": (m.get("merge_check_result") or {}).get("note")
                     or f"exit {(m.get('merge_check_result') or {}).get('exit')}"}
                    for m in tasks if m["state"] == "done" and m.get("kind") != "verify"],
+        # failed work not put away (hansa close): the latest five, and how many there are in all
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
-                   for m in tasks if m["state"] == "failed"][-5:],
+                   for m in failed][-5:],
+        "failed_count": len(failed),
         "asks": [{**a, "note": ask_note(a, ready)} for a in desk.asks() if not a.get("closed")],
         # the open releases (hansa release) and the latest that ended: the page asks the principal about each waiting one
         "releases": release.page_rows(desk, s, tasks),
@@ -1165,6 +1169,9 @@ def status_text(st: dict) -> str:
     if st["failed"]:
         out.append("failed (latest):")
         out += [f"  {m['id']} {m['lane']}: {m['error']}" for m in st["failed"]]
+        more = st.get("failed_count", 0) - len(st["failed"])
+        if more > 0:
+            out.append(f"  ... and {more} more failed, not closed (hansa close ID puts one away)")
     out.append("providers:")
     wn, wm = (max((len(p[k]) for p in st["providers"]), default=0) for k in ("name", "model"))
     rests = [rest_words(p) for p in st["providers"]]
@@ -1478,10 +1485,33 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     out += [x for x in (rounds_line(desk, m), "" if verifying else rethink_text(desk, m)) if x]
     if m.get("error"):
         out.append(f"error: {m['error']}")
+    if m.get("failed_error") is not None and m["state"] == "cancelled":  # closed after it failed (hansa close)
+        out.append(f"it had failed before it was closed: {m['failed_error'] or 'no error was recorded'}")
     out += [f"message: {m[k]}" for k in ("commit_message_note", "merge_message_note") if m.get(k)]
     out += [disk.trimmed_text(m)] if disk.trimmed_text(m) else []
+    def git_words(lead, text):  # git's words, its first line after `lead`, the rest indented under it
+        said = [x for x in desk.redact(text).splitlines() if x.strip()] or [""]
+        return [f"{lead}{said[0]}", *("  " + x for x in said[1:])]
+
+    if m.get("git_error"):  # what git said when hansa recorded the run's work (run.finish)
+        out += git_words("git said: ", m["git_error"])
+    if m.get("kept_ref"):
+        out.append(f"the work hansa could not commit is kept: hansa git {m['lane']} show {m['kept_ref']}")
+    elif m.get("kept_error"):
+        out += git_words("the work hansa could not commit could not be kept aside either; it is still in the "
+                         "worktree, and the lane's next task sets it aside in git stash: ", m["kept_error"])
     if verifying and m.get("scratch_ref"):
         out.append(f"left scratch changes: hansa git {m['lane']} show {m['scratch_ref']}")
+    elif verifying and m.get("scratch_error"):
+        out += git_words("its scratch changes could not be kept (the verdict stands): ", m["scratch_error"])
+    left = m.get("leftovers") or {}
+    if left.get("stash"):
+        at = left["stash"][:12]
+        out.append("set aside when it started: what the worktree held"
+                   + (f", left after {left['after']} (the last task that ran there)," if left.get("after") else ",")
+                   + f" is in git stash as {at} (hansa: left over before {tid}); its changes: "
+                   + f"hansa git {m['lane']} diff {at}^ {at}"
+                   + (f"; its new files: hansa git {m['lane']} show {at}^3" if left.get("untracked") else ""))
     if m.get("closed"):  # a verification that had ended when its task closed: kept as it ended
         out.append(m["closed"])
     if m.get("machine_problem") and m["state"] == "failed":

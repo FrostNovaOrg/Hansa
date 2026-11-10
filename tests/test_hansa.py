@@ -11267,6 +11267,136 @@ def save():'''))
         self.assertIn(f"pid {pid['script']}: ", shown)
         self.assertIn(f"pid {pid['tmpdir']}: ", shown)
 
+    @contextlib.contextmanager
+    def linux_proc(self, root):
+        """Read /proc as hansa does on Linux, from `root`: a stand-in for a kernel whose stat holds raw bytes."""
+        real_is_dir, real_iterdir = Path.is_dir, Path.iterdir
+        real_read_text, real_read_bytes = Path.read_text, Path.read_bytes
+
+        def under_proc(path):
+            name = str(path)
+            return root / name[len("/proc/"):] if name.startswith("/proc/") else None
+
+        def is_dir(path, *args, **kwargs):
+            return True if str(path) == "/proc" else real_is_dir(path, *args, **kwargs)
+
+        def iterdir(path):
+            return iter(list(root.iterdir())) if str(path) == "/proc" else real_iterdir(path)
+
+        def read_text(path, *args, **kwargs):
+            fake = under_proc(path)
+            return real_read_bytes(fake).decode() if fake is not None else real_read_text(path, *args, **kwargs)
+
+        def read_bytes(path, *args, **kwargs):
+            fake = under_proc(path)
+            return real_read_bytes(fake) if fake is not None else real_read_bytes(path, *args, **kwargs)
+
+        with unittest.mock.patch.object(Path, "is_dir", is_dir), \
+                unittest.mock.patch.object(Path, "iterdir", iterdir), \
+                unittest.mock.patch.object(Path, "read_text", read_text), \
+                unittest.mock.patch.object(Path, "read_bytes", read_bytes):
+            yield
+
+    @staticmethod
+    def fake_proc_stat(pid, comm: bytes, state: bytes = b"S", start: int = 12345) -> bytes:
+        """A /proc/PID/stat line as the kernel writes it, with this raw name in it."""
+        fields = [state, b"1", str(pid).encode(), str(pid).encode(), b"0", b"-1", b"4194560", *[b"0"] * 8,
+                  b"20", b"0", b"1", b"0", str(start).encode(), b"0"]
+        return b"%d (%s) %s" % (pid, comm, b" ".join(fields))
+
+    def fake_proc(self, pid, *, stat: bytes, cmdline: bytes = b"", environ: bytes = b"") -> Path:
+        """A stand-in /proc holding this process, and nothing else that runs."""
+        root = self.tmp / "proc"
+        (root / "sys" / "kernel" / "random").mkdir(parents=True, exist_ok=True)
+        (root / "sys" / "kernel" / "random" / "boot_id").write_text("boot\n")
+        (root / "stat").write_text("btime 1\n")
+        d = root / str(pid)
+        d.mkdir(exist_ok=True)
+        (d / "stat").write_bytes(stat)
+        (d / "cmdline").write_bytes(cmdline)
+        (d / "environ").write_bytes(environ)
+        return root
+
+    @contextlib.contextmanager
+    def fake_live_process(self, pid):
+        """os.kill as it would find this process: running until it is signalled, and gone once it is."""
+        state = {"alive": True, "signals": []}
+
+        def kill(p, sig):
+            if int(p) != pid:
+                raise ProcessLookupError(p)
+            if sig == 0:
+                if not state["alive"]:
+                    raise ProcessLookupError(p)
+                return
+            state["signals"].append(sig)
+            state["alive"] = False
+
+        with unittest.mock.patch.object(os, "kill", kill):
+            yield state
+
+    def leftover_in_fake_proc(self, comm: bytes):
+        """A task whose run left a script naming the run's folder, as a stand-in /proc shows this process."""
+        pid = 99999999
+        folder = self.tmp / "run-tmp"
+        folder.mkdir(exist_ok=True)
+        script = folder / "test_集成测试运行器.sh"
+        script.write_text("#!/bin/sh\n")
+        root = self.fake_proc(pid, stat=self.fake_proc_stat(pid, comm),
+                              cmdline=b"/bin/sh\0" + str(script).encode() + b"\0", environ=b"HOME=/\0")
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, worker_tmps=[{"path": str(folder)}])
+        return tid, pid, root
+
+    def test_a_process_name_cut_inside_a_character_keeps_its_start_and_state(self):
+        from hansa import run
+        comm = "test_集成测试运行器.sh".encode()[:15]  # the kernel's 15-byte cut, inside 试's first byte
+        self.assertRaises(UnicodeDecodeError, comm.decode)
+        _, pid, root = self.leftover_in_fake_proc(comm)
+        with self.linux_proc(root):
+            self.assertEqual(run.proc_start(pid), "boot:12345")
+            self.assertEqual(run._state(pid), "S")
+            self.assertTrue(run.same_start(pid, "boot:12345"))  # still the same process, though its name cannot decode
+
+    def test_a_leftover_whose_name_is_cut_inside_a_character_is_stopped_and_listed(self):
+        from hansa import run
+        comm = "test_集成测试运行器.sh".encode()[:15]
+        tid, pid, root = self.leftover_in_fake_proc(comm)
+        with self.linux_proc(root), self.fake_live_process(pid) as proc:
+            stopped = run.sweep(self.desk, tid)
+        self.assertEqual(proc["signals"], [signal.SIGTERM])
+        self.assertEqual([x["pid"] for x in stopped], [pid])
+        self.assertEqual([x["pid"] for x in self.desk.meta(tid)["left_running"]], [pid])
+        self.assertIn("test_集成测试运行器.sh", stopped[0]["command"])
+        self.assertIn(f"pid {pid}: ", views.show_text(self.desk, tid))
+        [e] = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+               if e["event"] == "left_running_stopped"]
+        self.assertEqual(e["task"], tid)
+
+    def test_a_leftover_whose_name_holds_spaces_and_parentheses_is_stopped_as_before(self):
+        from hansa import run
+        comm = b"test (1) run.sh"  # 15 bytes, spaces and parentheses, and every byte decodes
+        tid, pid, root = self.leftover_in_fake_proc(comm)
+        with self.linux_proc(root):
+            self.assertEqual(run.proc_start(pid), "boot:12345")
+            self.assertEqual(run._state(pid), "S")
+        with self.linux_proc(root), self.fake_live_process(pid) as proc:
+            stopped = run.sweep(self.desk, tid)
+        self.assertEqual(proc["signals"], [signal.SIGTERM])
+        self.assertEqual([x["pid"] for x in stopped], [pid])
+        self.assertEqual([x["pid"] for x in self.desk.meta(tid)["left_running"]], [pid])
+        self.assertIn(f"pid {pid}: ", views.show_text(self.desk, tid))
+
+    def test_process_table_lists_a_process_whose_name_is_cut_inside_a_character(self):
+        from hansa import run
+        pid = 99999999
+        comm = "test_集成测试运行器.sh".encode()[:15]  # the kernel's 15-byte cut, inside 试's first byte
+        root = self.fake_proc(pid, stat=self.fake_proc_stat(pid, comm))
+        with self.linux_proc(root):
+            table = run.process_table()
+        self.assertEqual(table[pid][:2], (1, "boot:12345"))
+        self.assertAlmostEqual(table[pid][2], 1 + 12345 / os.sysconf("SC_CLK_TCK"))
+
     def test_a_verification_is_swept_at_its_end_too(self):
         from hansa import run
         tmp = str(self.tmp / "worker")
@@ -11464,7 +11594,7 @@ def save():'''))
             pid = int(path.parent.name)
             if pid == 8103:
                 raise PermissionError("unreadable terminal")
-            return f"{pid} (a name with ) in it) S 1 {pid} {pid} {0 if pid == 8101 else 123}"
+            return f"{pid} (a name with ) in it) S 1 {pid} {pid} {0 if pid == 8101 else 123}".encode()
 
         def mac_proc(pid):
             if pid == 8103:
@@ -11480,7 +11610,7 @@ def save():'''))
             with self.subTest(system=system), \
                     unittest.mock.patch.object(run, "process_table", return_value=table) as listing, \
                     unittest.mock.patch.object(Path, "is_dir", return_value=system == "linux"), \
-                    unittest.mock.patch.object(Path, "read_text", linux_stat), \
+                    unittest.mock.patch.object(Path, "read_bytes", linux_stat), \
                     unittest.mock.patch.object(os, "readlink", return_value=folder), \
                     unittest.mock.patch.object(run, "_mac_proc", side_effect=mac_proc), \
                     unittest.mock.patch.object(ctypes, "CDLL", return_value=types.SimpleNamespace(proc_pidinfo=cwd)):
@@ -15454,6 +15584,7 @@ def save():'''))
         p = self.sleeper()
         with unittest.mock.patch.object(run, "_ON_MAC", False), \
                 unittest.mock.patch.object(Path, "read_text", side_effect=OSError("gone")), \
+                unittest.mock.patch.object(Path, "read_bytes", side_effect=OSError("gone")), \
                 unittest.mock.patch.object(run, "_sysctl", side_effect=AssertionError("sysctl off macOS")):
             self.assertEqual(run.proc_start(p.pid), "")
             self.assertEqual(run._state(p.pid), "")
@@ -15509,6 +15640,76 @@ def save():'''))
         stashes = subprocess.run(["git", "stash", "list"], cwd=m["worktree"], capture_output=True, text=True).stdout
         self.assertIn("hansa: what the lane's setup changed", stashes)
         self.assertIn("set aside", (self.desk.tasks_dir / tid / "setup.log").read_text())
+
+    def test_a_commit_hansa_cannot_make_fails_the_task_and_keeps_the_work_under_its_ref(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = 'touch "$(git rev-parse --git-dir)/index.lock"'  # git add -A fails at the end
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertTrue(m["error"].startswith("hansa could not commit the work: fatal: Unable to create"), m["error"])
+        self.assertIn("index.lock", m["error"])
+        shown = self.hansa("show", tid)
+        self.assertIn("git add -A failed: fatal: Unable to create", shown)  # git's words, as git gave them
+        ref = f"refs/hansa/kept/{tid}"
+        [line] = [x for x in shown.splitlines() if f"hansa git a show {ref}" in x]
+        patch = self.hansa(*shlex.split(line[line.index("hansa git "):])[1:])
+        self.assertIn(f"+hello from {tid}", patch)
+        self.assertIn(f"hansa retry {tid}", shown)  # as for any failed task
+        wt = Path(m["worktree"])
+        lock = Path(sh_out("git", "rev-parse", "--absolute-git-dir", cwd=wt), "index.lock")
+        self.assertIn(f"hello from {tid}", (wt / "hello.txt").read_text())  # git could not clear it with the lock there
+        lock.unlink()
+        s["lanes"]["a"]["setup"] = ""
+        self.assertEqual(self.desk.save_settings(s), [])
+        new = self.hansa("retry", tid, "again").split()[0]
+        n = self.settle(d, new)
+        self.assertEqual((n["state"], n["files"]), ("done", ["hello.txt"]), n)
+        self.assertEqual(sh_out("git", "stash", "list", cwd=self.repo), "")  # nothing of tid's set aside unnamed
+        self.assertNotIn("set aside", self.hansa("show", new))
+        self.assertEqual(sh_out("git", "show", f"{ref}:hello.txt", cwd=self.repo), f"hello from {tid}")
+
+    def test_what_a_task_finds_left_in_the_worktree_is_set_aside_and_named_in_its_show(self):
+        d = Dispatcher(self.desk)
+        first = self.settle(d, self.desk.new_task("Add hello.txt"))
+        wt = Path(first["worktree"])
+        (wt / "README.md").write_text("changed by hand\n")
+        (wt / "stray.txt").write_text("stray\n")
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(d, tid)
+        self.assertEqual((m["state"], m["files"]), ("done", ["hello.txt"]), m)
+        stash = sh_out("git", "rev-parse", "refs/stash", cwd=self.repo)
+        self.assertIn(f"hansa: left over before {tid}", sh_out("git", "stash", "list", cwd=self.repo))
+        shown = self.hansa("show", tid)
+        [line] = [x for x in shown.splitlines() if "set aside" in x]
+        self.assertIn(first["id"], line)  # the task that left them
+        self.assertIn(stash[:12], line)
+        diff = self.hansa(*shlex.split(line[line.index("hansa git "):].split(";")[0])[1:])
+        self.assertIn("+changed by hand", diff)
+        new = self.hansa(*shlex.split(line[line.rindex("hansa git "):])[1:])
+        self.assertIn("+stray", new)
+
+    def test_a_verification_whose_scratch_changes_cannot_be_kept_keeps_its_verdict_and_says_so(self):
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(d, tid)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "holds", "FAKE_WRITE": "evidence", "FAKE_WRITE_FILE": "scratch.txt"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        lock = self.repo / ".git" / "refs" / "hansa" / "scratch" / f"{vid}.lock"  # the ref cannot be written
+        lock.parent.mkdir(parents=True)
+        lock.touch()
+        v = self.settle(d, vid)
+        self.assertEqual((v["state"], v["verdict"]), ("done", "holds"), v)
+        self.assertFalse(v.get("scratch_ref"))
+        self.assertIn(f"{vid}: holds", self.hansa("show", tid))
+        [line] = [x for x in self.hansa("show", vid).splitlines() if "scratch changes" in x]
+        self.assertIn("could not be kept", line)
+        self.assertIn("refs/hansa/scratch/", line)  # git's words
 
     def test_a_failing_setup_fails_the_task_with_its_output_and_never_holds_up_the_server(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -27207,8 +27408,134 @@ def save():'''))
         self.assertEqual([e["task"] for e in self.events("verification_closed")], [vid])
         self.assertIn("only a finished", self.refused("merge", tid))
         queued = self.desk.new_task("Still queued")
-        self.assertIn("only finished tasks or verifications", self.refused("close", queued))
+        self.assertIn("only finished or failed tasks or verifications", self.refused("close", queued))
         self.assertEqual(self.desk.meta(queued)["state"], "queued")
+
+    FAILURES = {"ceiling": "stopped at the ceiling of 3 tries; its notes say what it reached",
+                "setup": "the lane's setup command failed (exit 3), so the worker never started",
+                "start": "srt could not start the worker", "error": "error: I could not do it"}
+
+    def test_close_of_a_failed_task_puts_it_away_and_keeps_why_it_failed(self):
+        for kind, error in self.FAILURES.items():
+            with self.subTest(kind=kind):
+                tid = self.desk.new_task("Failed " + kind, lane="a")
+                self.desk.update(tid, state="failed", error=error, machine_problem=kind == "start")
+                said = self.hansa("close", tid)
+                self.assertIn(f"{tid} had failed", said)
+                self.assertIn("now closed", said)
+                m = self.desk.meta(tid)
+                self.assertEqual((m["state"], m["error"], m["failed_error"]),
+                                 ("cancelled", "closed without merging", error))
+                shown = self.hansa("show", tid)
+                self.assertIn("closed without merging", shown)
+                self.assertIn(error, shown)
+                self.assertNotIn(tid, self.hansa("status"))
+                self.assertIn(tid, [e["task"] for e in self.events("task_cancel")])
+
+    def test_close_of_a_failed_verification_leaves_the_task_it_checked_as_it_was(self):
+        tid = self.desk.new_task("Merged task")
+        vid = self.desk.new_task("Its verification", kind="verify", parent=tid, lane="a")
+        self.desk.update(tid, state="merged", verify=vid)
+        self.desk.update(vid, state="failed", error=self.FAILURES["error"])
+        self.assertIn(vid, self.hansa("status"))
+        before = (self.desk.tasks_dir / tid / "meta.json").read_bytes()
+        said = self.hansa("close", vid)
+        self.assertIn(f"{vid} had failed", said)
+        self.assertIn("now closed", said)
+        self.assertEqual((self.desk.tasks_dir / tid / "meta.json").read_bytes(), before)
+        v = self.desk.meta(vid)
+        self.assertEqual((v["state"], v["error"]), ("failed", self.FAILURES["error"]))
+        shown = self.hansa("show", vid)
+        self.assertIn("closed", shown)
+        self.assertIn(self.FAILURES["error"], shown)
+        self.assertNotIn("next:", shown)
+        self.assertNotIn(vid, self.hansa("status"))
+        self.assertEqual(json.loads(self.hansa("status", "--json"))["failed_count"], 0)
+        self.assertEqual([e["task"] for e in self.events("verification_closed")], [vid])
+
+    def test_close_of_a_failed_task_whose_lane_was_removed(self):
+        tid = self.desk.new_task("Failed on a lane since removed", lane="a")
+        self.desk.update(tid, state="failed", lane="gone", error=self.FAILURES["setup"])
+        self.assertNotIn("gone", self.desk.settings()["lanes"])
+        self.assertIn(f"{tid} had failed", self.hansa("close", tid))
+        self.assertEqual(self.desk.meta(tid)["state"], "cancelled")
+        self.assertIn(self.FAILURES["setup"], self.hansa("show", tid))
+
+    def test_cancel_of_a_failed_task_points_to_close(self):
+        tid = self.desk.new_task("Failed task", lane="a")
+        self.desk.update(tid, state="failed", error="error: no")
+        before = (self.desk.tasks_dir / tid / "meta.json").read_bytes()
+        said = self.refused("cancel", tid)
+        self.assertIn("only queued, running or merging", said)
+        self.assertIn(f"hansa close {tid} puts it away", said)
+        self.assertEqual((self.desk.tasks_dir / tid / "meta.json").read_bytes(), before)
+
+    def test_status_lists_the_latest_five_failed_not_closed_and_how_many_more(self):
+        tids = [self.desk.new_task(f"Failed {i}", lane="a") for i in range(8)]
+        for t in tids:
+            self.desk.update(t, state="failed", error=f"error: {t}")
+        self.hansa("close", tids[-1])
+        said = self.hansa("status")
+        for t in tids[2:7]:
+            self.assertIn(f"{t} a: error: {t}", said)
+        for t in (*tids[:2], tids[-1]):
+            self.assertNotIn(f"error: {t}", said)
+        self.assertIn("2 more failed", said)
+        st = json.loads(self.hansa("status", "--json"))
+        self.assertEqual(([m["id"] for m in st["failed"]], st["failed_count"]), (tids[2:7], 7))
+        for t in tids[:2]:
+            self.hansa("close", t)
+        said = self.hansa("status")
+        self.assertIn(tids[2], said)
+        self.assertNotIn("more failed", said)
+        self.assertEqual(json.loads(self.hansa("status", "--json"))["failed_count"], 5)
+
+    def test_a_closed_failed_task_no_longer_counts_failed_in_its_goal(self):
+        self.hansa("goal", "add", "Export")
+        tid = self.desk.new_task("Build the export", goal="g1", lane="a")
+        self.desk.update(tid, state="failed", error="error: no")
+        self.assertIn("1 failed", self.hansa("goal", "list"))
+        self.assertEqual(views.status(self.desk)["goals"][0]["counts"]["failed"], 1)
+        self.hansa("close", tid)
+        closed = self.desk.new_task("Closed without merging", goal="g1", lane="a")
+        self.desk.update(closed, state="done")
+        self.hansa("close", closed)  # as a task closed from review is counted
+        self.assertIn("0 failed", self.hansa("goal", "list"))
+        [listed] = json.loads(self.hansa("goal", "list", "--json"))
+        self.assertEqual((listed["counts"]["failed"], views.status(self.desk)["goals"][0]["counts"]["failed"]), (0, 0))
+        shown = self.hansa("goal", "show", "g1")
+        self.assertIn(f"{tid} cancelled", shown)
+        self.assertIn(f"{closed} cancelled", shown)
+
+    def test_a_task_after_a_failed_task_that_is_closed_is_held_as_after_one_closed_from_review(self):
+        reasons = []
+        for ending in ("failed", "done"):
+            first = self.desk.new_task("Earlier " + ending, lane="a")
+            tid = self.hansa("add", "Needs " + ending, "--lane", "a", "--after", first).split()[0]
+            self.desk.update(first, state=ending, error="error: no" if ending == "failed" else "")
+            self.hansa("close", first)
+            Dispatcher(self.desk).tick()
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")
+            shown = self.hansa("show", tid)
+            for word in ("HELD", f"{first} closed without merging", f"hansa cancel {tid}", f"hansa retry {first}"):
+                self.assertIn(word, shown)
+            reasons.append(shown.replace(first, "T1").replace(tid, "T2"))
+        held = [next(x for x in r.splitlines() if "HELD" in x) for r in reasons]
+        self.assertEqual(held[0], held[1])
+
+    def test_retry_of_a_closed_failed_task_goes_as_for_a_task_closed_from_review(self):
+        replies = []
+        for ending in ("failed", "done"):
+            tid = self.desk.new_task("Earlier " + ending, lane="a")
+            self.desk.update(tid, state=ending, error="error: no" if ending == "failed" else "")
+            self.hansa("close", tid)
+            follow = self.hansa("retry", tid, "Try again").split()[0]
+            m = self.desk.meta(tid)
+            self.assertEqual((m["state"], m["replaced_by"], m["ended_as"]), ("replaced", follow, "cancelled"))
+            self.assertIn(f"Follow-up to {tid} (cancelled)", (self.desk.tasks_dir / follow / "task.md").read_text())
+            self.hansa("cancel", follow)
+            replies.append(self.desk.meta(tid)["state"])
+        self.assertEqual(replies, ["cancelled", "cancelled"])
 
     def test_close_keeps_finished_work_unchanged_when_the_record_cannot_be_written(self):
         for kind in ("task", "verify"):

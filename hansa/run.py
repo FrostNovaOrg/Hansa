@@ -3425,6 +3425,13 @@ def task_processes(marks: list, folders: list = ()) -> list:
 _KP_PPID, _KP_TDEV, _PROC_PIDVNODEPATHINFO, _VNODEPATHINFO_SIZE = 560, 572, 9, 2352
 
 
+def _stat_fields(pid) -> list:
+    """The fields of /proc/PID/stat after the process's name. The kernel cuts a name at 15 bytes, perhaps inside
+    a character, so the line is decoded with errors='replace': the fields after the last ')' are ASCII."""
+    line = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", errors="replace")
+    return line.rsplit(")", 1)[1].split()
+
+
 def process_table() -> dict:
     """This account's running processes: {pid: (parent pid, start as proc_start gives it, start in seconds since
     the epoch)}. {} when the list cannot be read."""
@@ -3440,7 +3447,7 @@ def process_table() -> dict:
         for p in entries:
             try:
                 if p.name.isdigit() and p.stat().st_uid == os.getuid():
-                    f = (p / "stat").read_text().rsplit(")", 1)[1].split()
+                    f = _stat_fields(p.name)
                     if f[0] != "Z":
                         out[int(p.name)] = (int(f[1]), f"{boot}:{f[19]}", btime + int(f[19]) / hz)
             except (OSError, IndexError, ValueError):
@@ -3493,7 +3500,7 @@ def working_in(folders: list, since: float = 0, table: dict | None = None) -> di
             continue
         try:
             if lib is None:
-                fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+                fields = _stat_fields(pid)
                 if int(fields[4]) != 0:  # tty_nr: the controlling terminal, regardless of open file descriptors
                     continue
                 cwd = os.readlink(f"/proc/{pid}/cwd")
@@ -3545,7 +3552,7 @@ def group_members(pgid) -> dict:
         for p in Path("/proc").iterdir():
             try:
                 if p.name.isdigit():
-                    f = (p / "stat").read_text().rsplit(")", 1)[1].split()
+                    f = _stat_fields(p.name)
                     if f[0] != "Z" and int(f[2]) == int(pgid):
                         out[int(p.name)] = proc_start(int(p.name))
             except (OSError, IndexError, ValueError):
@@ -3732,8 +3739,10 @@ def sweep(desk: Desk, tid: str, *, run: dict | None = None) -> list:
     return stopped
 
 
-def ready_worktree(desk: Desk, repo: Path, wt: Path, tid: str, start: str) -> None:
-    """Make the worktree if it is not there yet, check its .git file, and set aside what was left in it."""
+def ready_worktree(desk: Desk, repo: Path, wt: Path, tid: str, start: str) -> dict:
+    """Make the worktree if it is not there yet, check its .git file, and set aside what was left in it: in git stash,
+    unless it is what the last task there kept under its own ref already (then it is cleared). Returns where it went:
+    {"stash": its commit, "after": the last task that ran there, "untracked": whether it holds new files}, or {}."""
     if not wt.exists():
         _remember_git_file(desk, wt, None)  # removed by hand: a new one gets its own line
     if not os.path.lexists(wt / ".git") and not expected_git_line(desk, wt):
@@ -3743,15 +3752,93 @@ def ready_worktree(desk: Desk, repo: Path, wt: Path, tid: str, start: str) -> No
         check_git_file(desk, wt, repo)  # also finds and remembers the line of a worktree just made
     except GitFileChanged as e:  # changed since the last task ended: this one does not start, the next one can
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
-    try:
+    try:  # every git call of this preparation: an error of git's holds the lane, it does not fail the task
         if merge_in_progress(desk, wt):  # a merge left half done cannot be set aside
             wgit(desk, wt, "merge", "--abort")
-        if wgit(desk, wt, "status", "--porcelain"):
-            wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: left over before {tid}")
+        if not wgit(desk, wt, "status", "--porcelain"):
+            return {}
+        before = last_task_in(desk, wt, tid)
+        ref = (before or {}).get("kept_ref") or (before or {}).get("scratch_ref")
+        if ref and kept_under(desk, wt, ref):  # kept already, when hansa could not clear it then: cleared now
+            clean_worktree(desk, wt, "HEAD")
+            return {}
+        wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: left over before {tid}")
+        stash = wgit(desk, wt, "rev-parse", "-q", "--verify", "refs/stash")
+        try:
+            untracked = bool(wgit(desk, wt, "rev-parse", "-q", "--verify", f"{stash}^3"))
+        except GitFileChanged:
+            raise
+        except RuntimeError:
+            untracked = False
+        return {"stash": stash, "after": (before or {}).get("id", ""), "untracked": untracked}
     except GitFileChanged:
         raise
     except RuntimeError as e:  # a file in it git cannot read, say: the lane's problem, not the task's
         raise LaneCannotStart(f"git cannot prepare its worktree {wt}: {e}", "worktree") from None
+
+
+def last_task_in(desk: Desk, wt: Path, tid: str) -> dict | None:
+    """The task that ran last in the worktree, other than tid: as far as hansa knows, the one that left what is there."""
+    here = os.path.realpath(wt)
+    ran = [m for m in desk.tasks() if m.get("id") != tid and m.get("worktree") and isinstance(m.get("finished"), (int, float))
+           and os.path.realpath(m["worktree"]) == here]
+    return max(ran, key=lambda m: m["finished"], default=None)
+
+
+def snapshot_tree(desk: Desk, wt: Path, head: str) -> str:
+    """The tree of everything in the worktree, as git add -A would stage it on `head`, made with an index of its own:
+    the worktree's index is neither read nor written, so a locked one does not stop it."""
+    with tempfile.TemporaryDirectory(prefix="hansa-index-") as t:
+        env = {"GIT_INDEX_FILE": os.path.join(t, "index")}
+        wgit(desk, wt, "read-tree", head, env=env)
+        wgit(desk, wt, "add", "-A", env=env)
+        return wgit(desk, wt, "write-tree", env=env)
+
+
+def keep_aside(desk: Desk, wt: Path, head: str, ref: str, message: str) -> None:
+    """Keep what is in the worktree as a commit on `head` under `ref`; neither the branch nor refs/stash moves."""
+    commit = wgit(desk, wt, "commit-tree", snapshot_tree(desk, wt, head), "-p", head, "-m", message)
+    wgit(desk, wt, "update-ref", ref, commit)
+
+
+def kept_under(desk: Desk, wt: Path, ref: str) -> bool:
+    """Whether what is in the worktree now is exactly what `ref` keeps."""
+    try:
+        return wgit(desk, wt, "rev-parse", f"{ref}^{{tree}}") == snapshot_tree(desk, wt, "HEAD")
+    except GitFileChanged:
+        raise
+    except RuntimeError:
+        return False
+
+
+def clean_worktree(desk: Desk, wt: Path, head: str) -> None:
+    wgit(desk, wt, "reset", "--hard", head)
+    wgit(desk, wt, "clean", "-fd")
+
+
+def keep_work(desk: Desk, wt: Path, tid: str) -> dict:
+    """After hansa could not commit a task's work: keep what is in the worktree under refs/hansa/kept/ID, and clear the
+    worktree when git lets it (else the next task does, ready_worktree). The fields finish records: kept_ref, or
+    kept_error with git's words; {} when the worktree holds nothing."""
+    ref = f"refs/hansa/kept/{tid}"
+    try:
+        if not wgit(desk, wt, "status", "--porcelain"):
+            return {}
+        head = wgit(desk, wt, "rev-parse", "HEAD")
+        keep_aside(desk, wt, head, ref, f"hansa: {tid}'s work, which hansa could not commit")
+    except (RuntimeError, OSError) as e:
+        return {"kept_error": desk.redact(str(e))[:600]}
+    try:
+        clean_worktree(desk, wt, head)
+    except (RuntimeError, OSError):
+        pass
+    return {"kept_ref": ref}
+
+
+def git_first_line(e: BaseException) -> str:
+    """git's first line in an error of git(): without hansa's `git CMD failed: ` in front of it."""
+    lines = [x for x in str(e).splitlines() if x.strip()]
+    return re.sub(r"^git .*? failed: ", "", lines[0]) if lines else str(e)
 
 
 def merge_in_progress(desk: Desk, wt: Path) -> bool:
@@ -3861,7 +3948,7 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict):
     base = git("rev-parse", lane.get("base") or "main", cwd=repo) if updating or not meta.get("base") else meta["base"]
     start = restart["commit"] if carrying else meta.get("start_from") or base
     wt = desk.worktrees_dir / lane_name
-    ready_worktree(desk, repo, wt, tid, start)
+    desk.update(tid, leftovers=ready_worktree(desk, repo, wt, tid, start) or None)
     branch = f"task/{tid}"
     if wgit(desk, wt, "branch", "--list", branch):
         # an earlier try of this task: keep its commits under another name
@@ -4391,6 +4478,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     sweep(desk, tid)  # nothing the run left running may write in the worktree or its branch while hansa commits
     wt = Path(meta["worktree"]) if meta.get("worktree") else None
     changed = ""  # what the principal is told when the worktree's .git was changed: then the task fails
+    not_committed = ""  # git's first line when hansa could not record a task's work: then it fails too
     recorded = False
     restart = None
     try:
@@ -4405,15 +4493,21 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             desk, wt, meta.get("base", "") if meta.get("update") and meta.get("update_conflicts") else "")
         if wgit(desk, wt, "status", "--porcelain") and set_up and not setup:  # a setup's leftovers are nobody's work
             if meta.get("kind") == "verify":  # its scratch changes are evidence, not work: kept aside
-                wgit(desk, wt, "add", "-A")
-                tree = wgit(desk, wt, "write-tree")
-                scratch = wgit(desk, wt, "commit-tree", tree, "-p", head, "-m", f"hansa: {tid} scratch changes")
                 ref = f"refs/hansa/scratch/{tid}"
-                wgit(desk, wt, "update-ref", ref, scratch)
-                fields["scratch_ref"] = ref
-                # Only clean after the snapshot has a ref; neither the task branch nor refs/stash moves.
-                wgit(desk, wt, "reset", "--hard", head)
-                wgit(desk, wt, "clean", "-fd")
+                try:
+                    keep_aside(desk, wt, head, ref, f"hansa: {tid} scratch changes")
+                except GitFileChanged:
+                    raise
+                except RuntimeError as e:  # the verdict stands; they stay in the worktree for the next task to set aside
+                    fields["scratch_error"] = desk.redact(str(e))[:600]
+                else:
+                    fields["scratch_ref"] = ref
+                    try:  # only clean after the snapshot has a ref; else the next task does (ready_worktree)
+                        clean_worktree(desk, wt, head)
+                    except GitFileChanged:
+                        raise
+                    except RuntimeError:
+                        pass
             else:
                 ln = desk.settings()["lanes"].get(meta.get("lane"))
                 head = commit_work(desk, wt, task_message(ln, meta.get("lane") or "", tid, meta.get("title") or ""),
@@ -4449,8 +4543,12 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         if not recorded:
             fields.update(head="", commits=0, files=[], stat="")
     except (RuntimeError, KeyError, OSError) as e:
-        fields.update(head="", commits=0, files=[], stat="", git_error=str(e)[:300])
+        fields.update(head="", commits=0, files=[], stat="", git_error=desk.redact(str(e))[:600])
         restart = None
+        if meta.get("kind") != "verify":  # the work is not recorded: the task fails, and its files are kept aside
+            not_committed = git_first_line(e) or type(e).__name__
+            if wt is not None and set_up and not setup:
+                fields.update(keep_work(desk, wt, tid))
 
     attempts = list(meta.get("attempts", []))
     if setup:
@@ -4542,6 +4640,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         subtype = run.get("subtype") or "error"  # Claude Code says "success" of a run that ended on an error
         error = (f"{'error' if subtype == 'success' else subtype}: "
                  f"{lines[-1][:200] if lines else f'no output (exit {returncode})'}")
+    elif not_committed:
+        state, error = "failed", f"hansa could not commit the work: {not_committed}"
     else:
         state, error = "done", ""
     lane = desk.settings()["lanes"].get(meta.get("lane"), {})
@@ -5790,7 +5890,7 @@ def proc_start(pid) -> str:
         return ""
     try:
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-        return boot + ":" + Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        return boot + ":" + _stat_fields(pid)[19]
     except (OSError, IndexError):
         pass
     return _mac_start(pid) if _ON_MAC else ""
@@ -5822,7 +5922,7 @@ def same_start(pid, start: str) -> bool:
 def _state(pid) -> str:
     """A process's state letter (Z: ended, waiting to be reaped); '' if unknown."""
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        return _stat_fields(pid)[0]
     except (OSError, IndexError):
         pass
     return _mac_state(pid) if _ON_MAC else ""
@@ -5850,7 +5950,7 @@ def group_running(pgid) -> bool:
         for p in Path("/proc").iterdir():
             try:
                 if p.name.isdigit():
-                    f = (p / "stat").read_text().rsplit(")", 1)[1].split()
+                    f = _stat_fields(p.name)
                     if f[0] != "Z" and int(f[2]) == pgid:
                         return True
             except (OSError, IndexError, ValueError):
