@@ -1988,7 +1988,10 @@ def cmd_coordinator(a):
     dirs = repos
     no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir]]
     no_builtin = [f"Agent({n})" for n in BUILTIN_HELPERS]
-    claude = claude_bin()
+    try:
+        claude = claude_bin()
+    except RuntimeError as e:
+        raise SystemExit(f"hansa: {e}") from None
     if "DISABLE_AUTOUPDATER" not in env and not can_update(claude):  # it would fail and say so at every start
         env["DISABLE_AUTOUPDATER"] = "1"
     argv = [claude] + (["--add-dir", *dirs] if dirs else []) + ["--disallowedTools", *no_edit, *no_builtin, *no_read]

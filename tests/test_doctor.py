@@ -273,6 +273,40 @@ with open({str(self.calls)!r}, 'a') as out:
         self.claude(version="2.1.1", path=fallback)
         self.assertEqual(self.rows()["Claude Code"]["state"], "fails")
 
+    def test_invalid_hansa_claude_is_a_problem_even_with_claude_on_path(self):
+        missing = self.tmp / "missing-claude"
+        unrunnable = self.tool("unrunnable-claude", "raise SystemExit(99)")
+        unrunnable.chmod(0o644)
+        directory = self.tmp / "a-directory"
+        directory.mkdir()
+        for given, reason in ((missing, "does not exist"), (unrunnable, "cannot be run"),
+                              (directory, "cannot be run")):
+            with self.subTest(given=given), patch.dict(os.environ, {"HANSA_CLAUDE": str(given)}):
+                code, output = self.command("--lang", "en")
+                self.assertEqual(code, 1)
+                self.assertIn("[fails] Claude Code: HANSA_CLAUDE", output)
+                for words in (str(given), reason, "unset", "path"):
+                    self.assertIn(words, output)
+                self.assertFalse(any(c["name"] == "claude" for c in self.recorded()))
+
+    def test_program_does_not_fall_back_from_invalid_hansa_claude(self):
+        for given in (self.tmp / "missing-claude", self.bin):
+            with self.subTest(given=given), patch.dict(os.environ, {"HANSA_CLAUDE": str(given)}):
+                self.assertEqual(program("claude"), "")
+                self.assertEqual(program("claude", dict(os.environ)), "")
+
+    def test_empty_or_unset_hansa_claude_uses_path(self):
+        from hansa import run
+        for given in (None, ""):
+            with self.subTest(given=given), patch.dict(os.environ):
+                if given is None:
+                    os.environ.pop("HANSA_CLAUDE", None)
+                else:
+                    os.environ["HANSA_CLAUDE"] = given
+                self.assertEqual(program("claude"), str(self.bin / "claude"))
+                self.assertEqual(run.claude_bin(), str(self.bin / "claude"))
+                self.assertEqual(self.rows()["Claude Code"]["state"], "ok")
+
     def test_command_failure_and_cannot_start_do_not_stop_other_rows(self):
         for name, label in (("git", "Git"), ("claude", "Claude Code"), ("node", "Node"), ("tmux", "tmux")):
             path = self.bin / name

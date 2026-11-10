@@ -22806,6 +22806,66 @@ def save():'''))
         self.assertIn(str(self.desk.root / "CLAUDE.md"),
                       json.loads(seen["argv"][seen["argv"].index("--settings") + 1])["claudeMdExcludes"])
 
+    def invalid_claude_overrides(self):
+        missing = self.tmp / ("missing-" + "x" * 180)
+        unrunnable = self.tmp / "unrunnable-claude"
+        unrunnable.write_text("#!/bin/sh\nexit 99\n")
+        unrunnable.chmod(0o644)
+        return ((missing, "does not exist"), (unrunnable, "cannot be run"))
+
+    def claude_refusal(self, given, words):
+        from hansa import run
+        os.environ["HANSA_CLAUDE"] = str(given)
+        with self.assertRaises(RuntimeError) as raised:
+            run.claude_bin()
+        why = str(raised.exception)
+        self.assertIn(str(given), why)
+        self.assertIn(words, why)
+        return why
+
+    def test_coordinator_reports_invalid_hansa_claude_without_a_traceback(self):
+        for given, words in self.invalid_claude_overrides():
+            with self.subTest(given=given):
+                why = self.claude_refusal(given, words)
+                r = subprocess.run([sys.executable, "-m", "hansa", "--desk", str(self.desk.root), "coordinator"],
+                                   capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 1)
+                self.assertEqual(r.stderr.strip(), f"hansa: {why}")
+
+    def test_ping_reports_invalid_hansa_claude_as_a_failed_check(self):
+        self.assertFalse((self.desk.state_dir / "serve-start.json").exists())
+        for given, words in self.invalid_claude_overrides():
+            with self.subTest(given=given):
+                why = self.claude_refusal(given, words)
+                self.assertEqual(self.hansa("ping", "claude").strip(), f"claude: NOT ok - {why}")
+                saved = self.desk.provider_state()["claude"]["check"]
+                self.assertFalse(saved["ok"])
+                self.assertEqual(saved["detail"], why)
+
+    def test_page_check_reports_invalid_hansa_claude_as_a_failed_check(self):
+        for given, words in self.invalid_claude_overrides():
+            with self.subTest(given=given):
+                why = self.claude_refusal(given, words)
+                reply = self.page_post("/api/check", {"provider": "claude"})
+                self.assertFalse(reply["ok"])
+                self.assertEqual(reply["detail"], why)
+                self.assertEqual(self.desk.provider_state()["claude"]["check"], reply)
+
+    def test_start_holds_tell_the_coordinator_without_alerting_the_principal(self):
+        from hansa import alert, run
+        with unittest.mock.patch("hansa.alert.command", return_value="true"):
+            s = self.desk.settings()
+            s["alert_language"] = "zh"
+            self.assertEqual(self.desk.save_settings(s, by="page"), [])
+            for cause, why in (("claude", "claude was not found"), ("claude", "HANSA_CLAUDE is /missing"),
+                               ("repo", "its repository folder /repo is gone"),
+                               ("worktree", "git cannot prepare the worktree")):
+                with self.subTest(cause=cause, why=why):
+                    tid = self.desk.new_task("Wait for the lane")
+                    run.start_hold(self.desk, tid, "a", run.LaneCannotStart(why, cause))
+                    self.assertIn(why, self.told_starts()[-1])
+                    self.assertEqual(alert.queued(self.desk), [])
+
     def ping_on(self, model: str) -> dict:
         """`hansa ping` of a compatible provider whose model is `model`, with the fake claude."""
         from hansa import run
@@ -26389,7 +26449,7 @@ def save():'''))
                 self.desk.new_task("Add three.txt", lane="b")]
         fake = os.environ.pop("HANSA_CLAUDE")
         d = Dispatcher(self.desk)
-        with unittest.mock.patch("hansa.run.program_candidates", lambda name, env=None: []):
+        with unittest.mock.patch("hansa.desk.program_candidates", lambda name, env=None: []):
             d.tick()
             d.tick()
             for tid in tids:
