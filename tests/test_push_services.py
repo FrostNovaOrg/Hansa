@@ -1,5 +1,7 @@
 """Push services and child-only HTTP acknowledgements, without a network."""
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
+import base64
+import io
 import json
 import os
 from pathlib import Path
@@ -13,8 +15,91 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from hansa import __version__, alert_chat, alert_http, alert_push, alert_services, views
-from hansa.cli import init_desk
+from hansa.cli import init_desk, main
 from hansa.desk import public_settings, read_json, write_json
+
+
+def bark_example(key="1234567890123456", bits=128, mode="cbc", device="fixture-bark-key"):
+    return (f"#!/bin/bash\nkey='{key}'\niv='copied-iv-unused'\n"
+            f"ciphertext=$(printf '%s' '{{\"body\":\"test\"}}' | openssl enc -aes-{bits}-{mode} "
+            "-e -K $(printf '%s' \"$key\" | xxd -p) -iv $(printf '%s' \"$iv\" | xxd -p) | base64)\n"
+            f"curl 'https://api.day.app/{device}' -d \"ciphertext=$ciphertext\" -d \"iv=$iv\"\n")
+
+
+def decrypt_bark(payload, key):
+    """Test-only AES inverse, using the schedule covered by the FIPS vectors."""
+    from hansa.aes import AES, SBOX
+
+    def multiply(a, b):
+        out = 0
+        for _ in range(8):
+            if b & 1:
+                out ^= a
+            a = ((a << 1) ^ (0x11b if a & 128 else 0)) & 255
+            b >>= 1
+        return out
+
+    inverse = [SBOX.index(i) for i in range(256)]
+    cipher = AES(key.encode("ascii"))
+    data = base64.b64decode(payload["ciphertext"], validate=True)
+    previous, plain = payload["iv"].encode("ascii"), bytearray()
+    for offset in range(0, len(data), 16):
+        block = data[offset:offset + 16]
+        state = list(block)
+        for round_key in reversed(cipher._round_keys[1:]):
+            state = [a ^ b for a, b in zip(state, round_key)]
+            if round_key != cipher._round_keys[-1]:
+                for col in range(4):
+                    a = state[col * 4:col * 4 + 4]
+                    for row in range(4):
+                        state[col * 4 + row] = (multiply(a[row], 14) ^ multiply(a[(row + 1) % 4], 11)
+                                               ^ multiply(a[(row + 2) % 4], 13) ^ multiply(a[(row + 3) % 4], 9))
+            state = [state[((col - row) % 4) * 4 + row] for col in range(4) for row in range(4)]
+            state = [inverse[x] for x in state]
+        state = [a ^ b for a, b in zip(state, cipher._round_keys[0])]
+        plain.extend(a ^ b for a, b in zip(state, previous))
+        previous = block
+    padding = plain[-1]
+    assert 1 <= padding <= 16 and plain[-padding:] == bytes([padding]) * padding
+    return bytes(plain[:-padding])
+
+
+class AESTest(unittest.TestCase):
+    def test_fips_197_all_key_sizes(self):
+        from hansa.aes import AES
+        for size, expected in ((16, "69c4e0d86a7b0430d8cdb78070b4c55a"),
+                               (24, "dda97ca4864cdfe06eaf70a0ec0d7191"),
+                               (32, "8ea2b7ca516745bfeafc49904b496089")):
+            with self.subTest(size=size):
+                self.assertEqual(AES(bytes(range(size))).encrypt_block(
+                    bytes.fromhex("00112233445566778899aabbccddeeff")).hex(), expected)
+
+    def test_bark_cbc_vector_and_pkcs7_boundaries(self):
+        from hansa.aes import cbc_encrypt
+        key = b"1234567890123456"
+        result = cbc_encrypt(key, key, b'{"body": "test", "sound": "birdsong"}')
+        self.assertEqual(base64.b64encode(result).decode(),
+                         "+aPt5cwN9GbTLLSFri60l3h1X00u/9j1FENfWiTxhNHVLGU+XoJ15JJG5W/d/yf0")
+        for size in (16, 24, 32):
+            for length in (0, 1, 15, 16, 17, 31, 32, 33):
+                with self.subTest(size=size, length=length):
+                    raw = bytes(range(length))
+                    ciphertext = cbc_encrypt(b"k" * size, key, raw)
+                    self.assertEqual(len(ciphertext), (length // 16 + 1) * 16)
+                    self.assertEqual(decrypt_bark({"iv": key.decode(), "ciphertext":
+                        base64.b64encode(ciphertext).decode()}, "k" * size), raw)
+
+    def test_invalid_key_block_and_iv_lengths_are_refused(self):
+        from hansa.aes import AES, cbc_encrypt
+        for size in (0, 15, 17, 23, 25, 31, 33):
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                AES(b"k" * size)
+        for size in (0, 15, 17):
+            with self.subTest(size=size):
+                with self.assertRaises(ValueError):
+                    AES(b"k" * 16).encrypt_block(b"x" * size)
+                with self.assertRaises(ValueError):
+                    cbc_encrypt(b"k" * 16, b"x" * size, b"body")
 
 
 SAVED_SERVICE_CASES = (
@@ -76,6 +161,157 @@ class _PushServicesCase(unittest.TestCase):
         self.assertEqual(sending.call_args.kwargs, {"deadline_s": 30})
         [request] = sending.call_args.args[0]
         return why, request
+
+
+class BarkEncryptionTest(_PushServicesCase):
+    def test_keys_private_encrypted_status_and_task_change_guard(self):
+        from hansa import alert, history
+        from hansa.run import keys_in_change
+        for size in (16, 24, 32):
+            key = "k" * size
+            with self.subTest(size=size):
+                entry = self.save("fixture-bark-key", "bark", secret=key)
+                path = alert_push._file(self.desk, entry["id"], True)
+                self.assertEqual(path.read_text(), key + "\n")
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertIn(key, self.desk.keys().values())
+                self.assertNotIn(key, self.desk.redact(key))
+                self.desk.event("fixture", text=key)
+                why, _ = self.deliver(entry, result={"why": key})
+                self.assertEqual(why, "network")
+                for text in (json.dumps(public_settings(self.desk)), self.desk.settings_path.read_text(),
+                             self.desk.events_path.read_text(), json.dumps(history.read(self.desk)),
+                             json.dumps(views.status(self.desk)), views.status_text(views.status(self.desk)),
+                             alert.explain_line(self.desk.settings(), self.desk),
+                             alert_push._last_file(self.desk, entry["id"]).read_text()):
+                    self.assertNotIn(key, text)
+                self.assertTrue(alert_push.public(self.desk)[-1]["encrypted"])
+                self.assertIn("encrypted", views.status_text(views.status(self.desk)))
+                self.assertIn("encrypted", alert.explain_line(self.desk.settings(), self.desk))
+        # Exercise the same changed-line reader used to refuse a task's merge.
+        diff = "+" + key + "\n"
+        with patch("hansa.run.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout=diff.encode())):
+            self.assertTrue(keys_in_change(self.desk, self.tmp, "base", "head"))
+        for command in ("status", "explain"):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                main(["--desk", str(self.desk.root), command])
+            self.assertIn("encrypted", output.getvalue())
+            self.assertNotIn(key, output.getvalue())
+
+    def test_examples_keep_only_the_matching_cbc_key(self):
+        for size in (16, 24, 32):
+            key = "k" * size
+            entry = self.save("fixture-bark-key", "bark", secret=bark_example(key, size * 8))
+            self.assertEqual(alert_push._read(self.desk, entry["id"], True), key)
+            self.assertNotIn("copied-iv", "".join(p.read_text() for p in self.desk.secrets_dir.iterdir()))
+        # The completed pair must use a replacement address from this save.
+        alert_push.change(self.desk, [{"id": entry["id"], "address": "replacement-device",
+            "secret": bark_example(device="replacement-device")}], by="page")
+        self.assertEqual(alert_push._read(self.desk, entry["id"], True), "1234567890123456")
+
+    def test_example_with_literal_server_and_device_variables(self):
+        example = bark_example().replace("curl 'https://api.day.app/fixture-bark-key'",
+            'server=\'https://api.day.app\'\ndevice_key=\'fixture-bark-key\'\ncurl "$server/$device_key"')
+        entry = self.save("fixture-bark-key", "bark", secret=example)
+        self.assertEqual(alert_push._read(self.desk, entry["id"], True), "1234567890123456")
+
+    def test_printable_ascii_key_preserves_spaces_in_storage_redaction_and_encryption(self):
+        key = " abcdefghijklmn "
+        self.assertEqual(len(key), 16)
+        entry = self.save("fixture-bark-key", "bark", secret=key)
+        self.assertEqual(alert_push._read(self.desk, entry["id"], True), key)
+        self.assertIn(key, self.desk.keys().values())
+        self.assertNotIn(key, self.desk.redact(key))
+        self.assertEqual(json.loads(decrypt_bark(self.deliver(entry)[1]["json"], key))["title"], "shop/desk")
+
+    def test_invalid_keys_and_examples_save_nothing(self):
+        entry = self.save("fixture-bark-key", "bark")
+        bad = ["k" * n for n in (1, 15, 17, 23, 25, 31, 33)] + [None, 123, "中" * 16, "k" * 15 + "\x00",
+               bark_example(mode="ecb"), bark_example(mode="gcm"), bark_example(bits=192),
+               bark_example().replace("openssl enc", "echo"), bark_example().replace("key=", "other="),
+               bark_example().replace("https://api.day.app/fixture-bark-key", "https://api.day.app/")]
+        for value in bad:
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "AES-128.*192.*256.*CBC"):
+                alert_push.change(self.desk, [{"id": entry["id"], "secret": value}], by="page")
+            self.assertFalse(alert_push._file(self.desk, entry["id"], True).exists())
+        with self.assertRaisesRegex(ValueError, "this example is for another Bark device"):
+            alert_push.change(self.desk, [{"id": entry["id"], "secret": bark_example(device="other-device")}], by="page")
+        self.assertFalse(alert_push._file(self.desk, entry["id"], True).exists())
+
+    def test_encrypted_requests_decrypt_all_fields_fresh_ivs_and_no_release_codes(self):
+        for size in (16, 24, 32):
+            key = "k" * size
+            entry = self.save("fixture-bark-key", "bark", secret=key)
+            ivs = []
+            for level, mapped in (("passive", "passive"), ("active", "active"), ("urgent", "timeSensitive")):
+                with patch.object(alert_push, "_text", return_value=("台面", "正文\n🙂")):
+                    why, request = self.deliver(entry, level)
+                self.assertEqual(why, "sent")
+                self.assertEqual(request["url"], "https://api.day.app/push")
+                self.assertEqual(set(request["json"]), {"device_key", "ciphertext", "iv"})
+                self.assertEqual(request["json"]["device_key"], "fixture-bark-key")
+                self.assertEqual(json.loads(decrypt_bark(request["json"], key)),
+                    {"title": "台面", "body": "正文\n🙂", "group": "台面", "level": mapped})
+                self.assertEqual(len(request["json"]["iv"]), 16)
+                self.assertTrue(request["json"]["iv"].isascii())
+                ivs.append(request["json"]["iv"])
+            self.assertEqual(len(set(ivs)), len(ivs))
+            with patch.object(alert_http, "send", return_value=[{"why": "sent"}]) as sending:
+                alert_push.send(self.desk, entry, [{"kind": "release_waiting", "code": "654321",
+                    "text": "approve with 654321", "translations": {"en": "release waits 654321"}}])
+            self.assertNotIn("654321", decrypt_bark(sending.call_args.args[0][0]["json"], key).decode())
+
+    def test_encrypted_final_bound_cuts_only_body_and_refuses_fixed_fields(self):
+        from hansa import alert_bark
+        service = alert_services.SERVICES["bark"]
+        key = "1234567890123456"
+        for body in ("中🙂" * 3000, 'x"\\\n' * 3000, "a" * 2500):
+            [request] = service.requests("https://api.day.app/fixture-bark-key", key, "台面", body, "urgent")
+            payload = request["json"]
+            self.assertEqual(set(payload), {"device_key", "ciphertext", "iv"})
+            self.assertLessEqual(len(json.dumps(payload, ensure_ascii=False).encode()), alert_bark.MAX_BYTES)
+            inside = json.loads(decrypt_bark(payload, key))
+            self.assertEqual((inside["title"], inside["group"], inside["level"]), ("台面", "台面", "timeSensitive"))
+            self.assertTrue(inside["body"].endswith("…"))
+            kept = inside["body"][:-1]
+            self.assertTrue(body.startswith(kept))
+            from hansa.aes import cbc_encrypt
+            larger = json.dumps({**inside, "body": body[:len(kept) + 1] + "…"}, ensure_ascii=False).encode()
+            bigger = {**payload, "ciphertext": base64.b64encode(cbc_encrypt(key.encode(), payload["iv"].encode(), larger)).decode()}
+            self.assertGreater(len(json.dumps(bigger, ensure_ascii=False).encode()), alert_bark.MAX_BYTES)
+        entry = self.save("k" * 3500, "bark", secret=key)
+        with patch.object(alert_http, "send") as sending:
+            self.assertEqual(alert_push.test(self.desk, entry["id"]), "too_big")
+        sending.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "too_big"):
+            service.requests("https://api.day.app/device", key, "中" * 1000, "", "active")
+
+    def test_encrypted_test_push_explains_key_mismatch_in_both_languages(self):
+        key = "1234567890123456"
+        entry = self.save("fixture-bark-key", "bark", secret=key)
+        for lang, word in (("en", "encrypted"), ("zh", "加密")):
+            settings = self.desk.settings()
+            settings["alert_language"] = lang
+            self.assertFalse(self.desk.save_settings(settings, by="page"))
+            with patch.object(alert_http, "send", return_value=[{"why": "sent"}]) as sending:
+                self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
+            text = json.loads(decrypt_bark(sending.call_args.args[0][0]["json"], key))["body"]
+            self.assertIn(word, text)
+            self.assertIn("Decryption Failed", text)
+            self.assertIn("keys differ" if lang == "en" else "密钥不同", text)
+
+    def test_plain_bark_request_stays_byte_for_byte(self):
+        [request] = alert_services.SERVICES["bark"].requests(
+            "https://api.day.app/device", "", "desk", "正文", "active")
+        self.assertEqual(json.dumps(request, ensure_ascii=False),
+            '{"url": "https://api.day.app/push", "json": {"device_key": "device", "title": "desk", '
+            '"body": "正文", "group": "desk", "level": "active"}}')
+        entry = self.save("fixture-bark-key", "bark")
+        self.assertIs(alert_push.public(self.desk)[0]["encrypted"], False)
+        with patch.object(alert_http, "send", return_value=[{"why": "sent"}]) as sending:
+            alert_push.test(self.desk, entry["id"])
+        self.assertEqual(sending.call_args.args[0][0]["json"]["body"], "a test alert from hansa")
 
 
 class PhoneServicesTest(_PushServicesCase):

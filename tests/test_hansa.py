@@ -38178,7 +38178,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         const root = "entry" in step ? cards()[step.entry] : find(el => "data-push-add" in el.attrs, block());
         const el = field(root, key); if (!el) throw new Error("push field missing: " + key);
         if (key === "on") el.checked = step[key]; else el.value = step[key];
-        el.on[key === "service" || key === "on" ? "change" : "input"]({target:el});
+        if (key === "secret" && step.paste) {
+          el.on.paste({target:el, preventDefault:() => {}, clipboardData:{getData:() => step[key]}});
+        } else el.on[key === "service" || key === "on" ? "change" : "input"]({target:el});
       }
       if ("turn_min" in step) { const el = turnInput(); el.value = step.turn_min; el.on.input({target:el}); }
       if (step.remove) find(el => "data-push-remove" in el.attrs, cards()[step.entry]).on.click();
@@ -47855,6 +47857,63 @@ class AlertPushPageTest(unittest.TestCase):
             self.assertNotIn(self.KEY, json.dumps(shown))
             self.assertEqual(entry["address"], "")
 
+    def test_bark_encryption_field_hint_keep_remove_and_encrypted_marker(self):
+        key = "1234567890123456"
+        entry = self.add()
+        for language, label, marker, hint in (("en", "Encryption key (optional)", "encrypted", "encryption settings"),
+                                               ("zh", "加密密钥（选填）", "已加密", "加密设置")):
+            shown = self.page(language=language)
+            card = shown["before"]["entries"][0]
+            self.assertTrue(card["secret"])
+            self.assertEqual(card["secretType"], "password")
+            for word in (label, hint, "AES-128", "192", "256", "CBC"):
+                self.assertIn(word, card["text"])
+            self.assertIn("copied example" if language == "en" else "复制的示例", card["text"])
+        self.assertTrue(save_from_page(self.desk, {"settings": self.desk.settings(),
+            "alert_push_changes": [{"id": entry["id"], "secret": key}]})["ok"])
+        for language, marker in (("en", "encrypted"), ("zh", "已加密")):
+            shown = self.page([{"entry": 0, "name": "phone-" + language}, {"save": True}], language)
+            self.assertIn(marker, shown["before"]["entries"][0]["text"])
+            self.assertEqual(shown["before"]["entries"][0]["secretValue"], "")
+            self.assertNotIn("secret", shown["posted"]["alert_push_changes"][0])
+            self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+            self.assertEqual(alert_push._read(self.desk, entry["id"], True), key)
+            self.assertNotIn(key, json.dumps(shown))
+        shown = self.page([{"entry": 0, "remove": True}, {"save": True}])
+        self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+        self.assertFalse(alert_push._file(self.desk, entry["id"], True).exists())
+
+    def test_bark_key_refusals_use_page_language_and_do_not_echo_the_key(self):
+        from tests.test_push_services import bark_example
+        entry = self.add()
+        for value, foreign in (("short", False), ("中" * 16, False), (bark_example(mode="ecb"), False),
+                               (bark_example(mode="gcm"), False), (bark_example(device="other-device"), True)):
+            refusal = save_from_page(self.desk, {"settings": self.desk.settings(),
+                "alert_push_changes": [{"id": entry["id"], "secret": value}]})
+            self.assertFalse(refusal["ok"])
+            self.assertNotIn(value, json.dumps(refusal, ensure_ascii=False))
+            for language in ("en", "zh"):
+                shown = self.page([{"entry": 0, "secret": value}, {"reply": refusal, "save": True}], language)
+                problem = " ".join(shown["problems"])
+                if foreign:
+                    self.assertIn("another Bark device" if language == "en" else "另一台 Bark 设备", problem)
+                else:
+                    for word in ("AES-128", "192", "256", "CBC", "Bark"):
+                        self.assertIn(word, problem)
+                    self.assertIn("Choose" if language == "en" else "选择", problem)
+
+    def test_bark_copied_example_paste_and_literal_key_are_saved_exactly(self):
+        from tests.test_push_services import bark_example
+        self.add()
+        for secret in (bark_example(device=self.KEY), " abcdefghijklmn ", " " * 16):
+            shown = self.page([{"entry": 0, "secret": secret, "paste": True}, {"save": True}])
+            self.assertEqual(shown["posted"]["alert_push_changes"][0]["secret"], secret)
+            self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+            expected = "1234567890123456" if secret.startswith("#!") else secret
+            entry = self.desk.settings()["alert_push"][0]
+            self.assertEqual(alert_push._read(self.desk, entry["id"], True), expected)
+            self.assertNotIn(expected, json.dumps(self.page()))
+
     def test_push_page_recognizes_a_pasted_bark_address_on_save_and_clears_the_input(self):
         for language in ("en", "zh"):
             with self.subTest(language=language):
@@ -47963,6 +48022,10 @@ class AlertPushPageTest(unittest.TestCase):
             names = {"en": "Future phone", "zh": "未来手机"}
             hints = {"en": "Paste your future address.", "zh": "粘贴未来地址。"}
             extra_secret = True
+            def normalize_secret(self, address, value):
+                return value
+            def validate(self, address, secret):
+                pass
         with unittest.mock.patch.dict(alert_services.SERVICES, {"fixture": FutureService()}):
             entry = self.add(service="fixture", secret="fixture-extra-secret")
             for language in ("en", "zh"):
@@ -47979,7 +48042,7 @@ class AlertPushPageTest(unittest.TestCase):
                 self.assertEqual(shown["after"]["add"]["secretType"], "password")
                 self.assertIn(FutureService.hints[language], shown["after"]["add"]["text"])
                 shown = self.page([{"service": "fixture", "secret": "new-extra"}, {"service": "bark"}], language)
-                self.assertFalse(shown["after"]["add"]["secret"])
+                self.assertTrue(shown["after"]["add"]["secret"])
                 self.assertNotIn("new-extra", json.dumps(shown["after"]))
                 shown = self.page([{"entry": 0, "name": "kept address " + language}, {"save": True}], language)
                 [edit] = shown["posted"]["alert_push_changes"]
@@ -47996,7 +48059,7 @@ class AlertPushPageTest(unittest.TestCase):
                 alert_push.change(self.desk, [{"id": entry["id"], "secret": "fixture-extra-secret"}], by="page")
             shown = self.page([{"entry": 0, "service": "bark", "address": "https://api.day.app/switched-fixture"}, {"save": True}])
             self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
-            self.assertFalse(self.page()["before"]["entries"][0]["secret"])
+            self.assertTrue(self.page()["before"]["entries"][0]["secret"])
             self.assertEqual(self.desk.settings()["alert_push"][0]["service"], "bark")
             self.assertEqual(alert_push._read(self.desk, entry["id"], True), "")
 
@@ -48905,7 +48968,7 @@ class AlertPushTest(unittest.TestCase):
         self.assertEqual(set(service["name"]), {"en", "zh"})
         self.assertIn("home screen", service["hint"]["en"])
         self.assertIn("首页", service["hint"]["zh"])
-        self.assertFalse(service["extra_secret"])
+        self.assertTrue(service["extra_secret"])
         auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
         code, result, _ = self.web_request("/api/alert/push-test", method="POST", headers=auth,
                                           data=json.dumps({"id": entry["id"]}).encode())
@@ -49027,8 +49090,12 @@ class AlertPushTest(unittest.TestCase):
         class FutureService(alert_bark.Bark):
             id = "fixture"
             extra_secret = True
+            def normalize_secret(self, address, value):
+                return value
+            def validate(self, address, secret):
+                pass
             def requests(self, address, secret, title, body, level):
-                [request] = super().requests(address, secret, title, body, level)
+                [request] = super().requests(address, "", title, body, level)
                 request["headers"] = {"Authorization": secret}
                 return [request]
         with unittest.mock.patch.dict(alert_services.SERVICES, {"fixture": FutureService()}):

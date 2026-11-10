@@ -534,19 +534,30 @@ also works when the pasted text contains exactly one HTTPS address. Hansa
 retains only the server and device key, dropping example text after the key
 and Bark's query parameters.
 If a self-hosted address cannot be recognized, choose **Bark** and save again.
+For encryption, choose **AES-128**, **AES-192** or **AES-256**, mode **CBC**, in
+Bark's encryption settings. Choose **Bark** on hansa's page and paste the same
+16, 24 or 32 character ASCII key into **Encryption key (optional)**, or paste
+the app's copied example there. Only the key is saved; the example must match
+this entry's device and CBC key length. Hansa discards its IV and generates a
+fresh random 16-character IV for every push. Save, then send a test push. The
+encrypted test explains that **Decryption Failed** means the two keys differ.
+The page, `hansa status` and `hansa explain` mark the saved entry **encrypted**.
+See [the Bark guide](push-services.md#bark) for setup and privacy.
 
 To replace an address or extra secret, paste the new value into the saved
 entry; leave either field empty to keep its saved value. Switch off, rename
 or remove entries, then **Save settings**. Only the principal changes addresses.
 
-Each address (and an extra signing secret or access token when needed) is kept
+Each address (and an encryption key, signing secret or access token when needed) is kept
 in a separate 0600 secret file under the desk's 0700 `secrets/` folder. Metadata
 alone enters settings; history records changes without credentials. The page
 and status show secret parts hidden.
 
 The desk's name and alert texts leave this machine for each address's service
 and, for phone apps, on to Apple's or Google's push service. Those services can
-read them. One-time release codes never go to push addresses. Answer their
+read them unless Bark encryption is enabled; then Bark's server and Apple see
+ciphertext and routing information, without the desk name or alert text.
+One-time release codes never go to push addresses. Answer their
 waiting releases on the page; only the alert command receives codes, and with
 only push addresses no code is made.
 
@@ -808,7 +819,10 @@ and its tests. Requests pass through `alert_http.send`, including response
 checks in its isolated child. A definition may also supply
 `validate(address, secret)` to check the completed pair before saving or sending:
 ntfy requires a token for topics shorter than eight characters, and Gotify
-requires an application token. Keep these checks while topics need protected
+requires an application token. Bark's optional `normalize_secret(address, value)`
+extracts the encryption key from a copied example before secret validation;
+`validate` checks the saved ASCII key length. Service definitions may supply
+English/Chinese extra-secret labels and hints. Keep these checks while topics need protected
 access and tokens can be pasted separately from addresses. Redaction and file
 scrubbing deliberately ignore secret parts shorter than eight characters to
 avoid changing ordinary task text; ntfy therefore requires a token for a short topic.
@@ -856,7 +870,14 @@ cap applies, then the entire UTF-8 JSON is limited to 3,500 bytes including
 escapes and the key. Only the body may be shortened, at a character boundary
 with `…`. Fixed fields that cannot fit give `too_big` without a request.
 Keep this bound while Bark and Apple's push service add their own envelope.
-Bark does not implement encryption against its server or Apple's service.
+With a saved encryption key, Bark sends only `device_key`, `ciphertext` and
+`iv` outside the ciphertext; all notification fields, including `level`, go
+inside. Standard-library Python implements AES-128/192/256-CBC with PKCS7
+padding and standard padded base64, without running a program with the key.
+The 3,500-byte bound applies to the final encrypted JSON request, including
+ciphertext and IV; only the inner body may be shortened. This hides the desk
+name and text from Bark's server and Apple. Without a key, the plain request
+is unchanged. Release codes remain excluded from every push.
 
 Each entry has `.hansa/alert-push-ID-last.json` with `{at, ok, why}` and an
 optional safe service `code` on failure.

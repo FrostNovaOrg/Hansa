@@ -3,7 +3,9 @@
 A service supplies id, names/hints (en/zh), extra_secret, deadline_s, max_bytes,
 levels, recognizes(value), normalize(value), secrets(address), hidden(address),
 and requests(address, secret, title, body, level), with optional
-validate(address, secret) for the completed credential pair. Requests use
+validate(address, secret) for the completed credential pair, and
+normalize_secret(address, value) to extract a key from a copied example.
+Optional secret_labels/secret_hints supply English/Chinese field instructions. Requests use
 alert_http.send's private interface; no response bodies or credentials cross
 into public results.
 """
@@ -98,5 +100,7 @@ def parse(value: str, service: str = "recognize") -> tuple[str, str]:
 
 
 def public() -> list[dict]:
-    return [{"id": s.id, "name": s.names, "hint": s.hints, "extra_secret": s.extra_secret}
+    return [{"id": s.id, "name": s.names, "hint": s.hints, "extra_secret": s.extra_secret,
+             **({"secret_label": s.secret_labels, "secret_hint": s.secret_hints}
+                if hasattr(s, "secret_labels") else {})}
             for s in SERVICES.values()]

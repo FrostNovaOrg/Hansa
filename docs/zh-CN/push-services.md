@@ -6,19 +6,23 @@
 
 hansa 发送的是工作台名称和提醒正文，措辞由你保存的提醒语言决定。批准发布用的一次性代码从不通过推送发送：请在网页上回答。地址和额外密钥都私密地保存在这台机器上，其中密钥部分在网页和 `hansa status` 里都会隐藏。不要把密钥、主题或令牌写进地址的名称里。
 
-以上这些方式都会把提醒正文暴露给你选择的服务器。发到手机时，内容还可能经过苹果或谷歌的推送服务，它们同样能读到这些文字。HTTPS 保护的是发往服务器这一段传输，而不是让那台服务器看不到提醒。自建服务器改变的只是第一台服务器由谁运行。
+除非按下文启用 Bark 加密，否则这些方式会把提醒正文暴露给你选择的服务器。发到手机时，内容还可能经过苹果或谷歌的推送服务，它们同样能读到未加密的文字。HTTPS 保护的是发往服务器这一段传输。自建服务器改变的只是第一台服务器由谁运行。
 
 对企业微信、钉钉、飞书/Lark、Telegram、Discord 和 Slack，消息内容依次是工作台名称、一个换行和提醒正文。紧急提醒会按你保存的提醒语言，以 **Urgent:** 或 **紧急：** 开头；这个标记不会改变通知权限。Telegram 和 Discord 会让被动提醒不出声，其他情况使用普通通知。通用 JSON 网址则把级别放在单独的字段里。各服务自己的频率限制仍然有效，测试推送和传输重试也算在内；hansa 不会按各服务的配额来调节发送速度。
 
 ## Bark
 
-安装 Bark，复制它首页上显示的地址，例如 `https://api.day.app/YOUR_DEVICE_KEY`。现成的 curl 命令也可以，只要其中恰好包含一个 HTTPS 地址。hansa 只保留服务器和设备密钥：命令里的示例标题、正文以及 `group`、`ttl` 之类的查询选项都会被丢弃。只给设备密钥时，使用 `api.day.app`。要换别的服务器，请手动选择 **Bark**。如果地址属于别的服务，又不是 Bark 自己的形式，hansa 会拒绝保存并指出该选哪个服务：任意主机上的 Gotify `/message?token=…` 或 PushDeer `/message/push?pushkey=…` 地址，Server酱 的 `SCT…`/`sctp<uid>t…` 密钥或 `.send` 地址，`ntfy.sh` 上不是恰好 `https://ntfy.sh/TOPIC` 的 ntfy 地址，以及 Telegram 的 `sendMessage`、企业微信、钉钉、飞书/Lark、Discord 和 Slack 端点地址。小写主机、只有一段密钥路径、不带查询或片段的 `https://HOST/KEY` 地址是 Bark 自己的形式，所以 `https://ntfy.sh/TOPIC`、`https://api2.pushdeer.com/KEY` 和 `https://sctapi.ftqq.com/KEY` 会当作 Bark 接受；已保存的 Bark 地址和自建 Bark 服务器的地址也一样。没有额外密钥。
+安装 Bark，复制它首页上显示的地址，例如 `https://api.day.app/YOUR_DEVICE_KEY`。现成的 curl 命令也可以，只要其中恰好包含一个 HTTPS 地址。hansa 只保留服务器和设备密钥：命令里的示例标题、正文以及 `group`、`ttl` 之类的查询选项都会被丢弃。只给设备密钥时，使用 `api.day.app`。要换别的服务器，请手动选择 **Bark**。如果地址属于别的服务，又不是 Bark 自己的形式，hansa 会拒绝保存并指出该选哪个服务：任意主机上的 Gotify `/message?token=…` 或 PushDeer `/message/push?pushkey=…` 地址，Server酱 的 `SCT…`/`sctp<uid>t…` 密钥或 `.send` 地址，`ntfy.sh` 上不是恰好 `https://ntfy.sh/TOPIC` 的 ntfy 地址，以及 Telegram 的 `sendMessage`、企业微信、钉钉、飞书/Lark、Discord 和 Slack 端点地址。小写主机、只有一段密钥路径、不带查询或片段的 `https://HOST/KEY` 地址是 Bark 自己的形式，所以 `https://ntfy.sh/TOPIC`、`https://api2.pushdeer.com/KEY` 和 `https://sctapi.ftqq.com/KEY` 会当作 Bark 接受；已保存的 Bark 地址和自建 Bark 服务器的地址也一样。
 
-设备密钥是保密的：拿到它的人可以往你的设备发推送。hansa 把密钥、工作台名称和提醒正文发送到那台 Bark 服务器的 `/push` 地址，再由服务器通过苹果的推送服务发出通知。那台服务器和苹果都能读到这些内容。
+要加密通知，请打开 Bark 的加密设置，选择 **AES-128**、**AES-192** 或 **AES-256**，模式选 **CBC**。分别输入恰好 16、24 或 32 个 ASCII 字符的密钥。在 hansa 网页上选择 **Bark**，将同一个密钥粘贴到 **加密密钥（选填）**；也可以将应用中 **复制示例** 按钮复制出的 shell 脚本粘贴到此字段。hansa 不会执行脚本，只读取密钥、算法和设备密钥；只接受密钥长度匹配的 CBC，并拒绝另一台设备的示例。它只保存加密密钥，丢弃示例中的 IV 和其他脚本内容。保存设置后发送测试推送。加密的测试正文会说明：手机显示 **Decryption Failed** 表示应用与 hansa 的密钥不同。
+
+加密密钥单独保存在 `secrets/` 下的 0600 文件中，纳入脱敏和任务变更的密钥检查，保存后不再显示。网页、`hansa status` 和 `hansa explain` 中的该条目会标为 **已加密**（命令中为 **encrypted**）。替换字段留空时保留已存密钥；删除条目会删除其密钥，与其他服务一致。不设置加密密钥时，Bark 的发送方式保持原样。
+
+设备密钥是保密的：拿到它的人可以往你的设备发推送。hansa 向那台 Bark 服务器的 `/push` 地址发送 JSON POST，再由服务器通过苹果的推送服务发出通知。启用加密后，密文外只有 `device_key`、标准 base64 编码的 `ciphertext` 和每次随机生成的 16 字符 `iv`。标题、正文、分组和提醒级别全部放在密文内，使用 AES-CBC 和 PKCS7 填充。加密密钥不会离开 hansa。Bark 服务器和苹果看到的是密文，而不是工作台名称和提醒正文；它们仍能看到路由信息和 IV。没有加密密钥时，这些服务能读到工作台名称和提醒正文。
 
 被动提醒不出声，主动提醒使用普通通知方式，紧急提醒会标记为时效性通知。hansa 从不申请发送关键提醒的权限。手机的权限和专注模式设置仍会影响你能听到什么。
 
-hansa 发给 Bark 的整条消息（包括密钥和其他字段）不得超过 3,500 个 UTF-8 字节。需要时它会用 `…` 缩短正文；如果光是固定字段就太大，结果会是 `too_big`。Bark 的服务器还可能另有限制。HTTP 请求成功时结果是 `sent`；失败时显示 HTTP 类别，例如 `http_4xx` 或 `http_429`。hansa 不保留 Bark 的响应文字，也不保留 Bark 自己的错误码。
+hansa 发给 Bark 的整条消息（包括密钥和其他字段，加密时也包括密文和 IV）不得超过 3,500 个 UTF-8 字节。需要时它只在字符边界用 `…` 缩短消息内的正文；如果光是固定字段就太大，结果会是 `too_big`。Bark 的服务器还可能另有限制。HTTP 请求成功时结果是 `sent`；失败时显示 HTTP 类别，例如 `http_4xx` 或 `http_429`。hansa 不保留 Bark 的响应文字，也不保留 Bark 自己的错误码。
 
 官方资料：[Bark](https://github.com/Finb/Bark)。
 

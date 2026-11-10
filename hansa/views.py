@@ -1084,6 +1084,7 @@ def status_text(st: dict) -> str:
         last = entry["last"]
         out.append(f"Push {entry['service']} {entry['name'] or entry['id']}: {entry['address'] or 'no address'}"
                    f" · {'on' if entry['on'] else 'off'}"
+                   + (" · encrypted" if entry.get("encrypted") else "")
                    + (f" · last {'ok' if last['ok'] else 'failed'}: {last['why']} at "
                       + time.strftime("%Y-%m-%d %H:%M", time.localtime(last["at"]))
                       + (f" · code {last['code']}" if "code" in last else "") if last else " · no push yet"))
