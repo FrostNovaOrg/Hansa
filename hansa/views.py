@@ -1488,8 +1488,29 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(f"it had failed before it was closed: {m['failed_error'] or 'no error was recorded'}")
     out += [f"message: {m[k]}" for k in ("commit_message_note", "merge_message_note") if m.get(k)]
     out += [disk.trimmed_text(m)] if disk.trimmed_text(m) else []
+    def git_words(lead, text):  # git's words, its first line after `lead`, the rest indented under it
+        said = [x for x in desk.redact(text).splitlines() if x.strip()] or [""]
+        return [f"{lead}{said[0]}", *("  " + x for x in said[1:])]
+
+    if m.get("git_error"):  # what git said when hansa recorded the run's work (run.finish)
+        out += git_words("git said: ", m["git_error"])
+    if m.get("kept_ref"):
+        out.append(f"the work hansa could not commit is kept: hansa git {m['lane']} show {m['kept_ref']}")
+    elif m.get("kept_error"):
+        out += git_words("the work hansa could not commit could not be kept aside either; it is still in the "
+                         "worktree, and the lane's next task sets it aside in git stash: ", m["kept_error"])
     if verifying and m.get("scratch_ref"):
         out.append(f"left scratch changes: hansa git {m['lane']} show {m['scratch_ref']}")
+    elif verifying and m.get("scratch_error"):
+        out += git_words("its scratch changes could not be kept (the verdict stands): ", m["scratch_error"])
+    left = m.get("leftovers") or {}
+    if left.get("stash"):
+        at = left["stash"][:12]
+        out.append("set aside when it started: what the worktree held"
+                   + (f", left after {left['after']} (the last task that ran there)," if left.get("after") else ",")
+                   + f" is in git stash as {at} (hansa: left over before {tid}); its changes: "
+                   + f"hansa git {m['lane']} diff {at}^ {at}"
+                   + (f"; its new files: hansa git {m['lane']} show {at}^3" if left.get("untracked") else ""))
     if m.get("closed"):  # a verification that had ended when its task closed: kept as it ended
         out.append(m["closed"])
     if m.get("machine_problem") and m["state"] == "failed":
