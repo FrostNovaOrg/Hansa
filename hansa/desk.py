@@ -2823,6 +2823,16 @@ class Desk:
             problems += self.keys_in_desk_name(new.get("desk_name", ""))
             lanes = new.get("lanes")
             for name, ln in (lanes.items() if isinstance(lanes, dict) else []):
+                before = old["lanes"].get(name)
+                if isinstance(ln, dict) and before and ln.get("base", "main") != before.get("base", "main"):
+                    # Started work must keep its destination; queued work has not taken a base yet.
+                    held = [m["id"] for m in self.tasks() if m.get("lane") == name and
+                            (m["state"] in ("running", "merging") or
+                             (m["state"] == "done" and m.get("kind") != "verify"))]
+                    if held:
+                        problems.append(f"lane {name}: cannot change base while {', '.join(held)} is running, merging "
+                                        "or finished and waiting for review; merge or close them first (hansa merge / "
+                                        "hansa close; stop running work with hansa cancel)")
                 if isinstance(ln, dict) and ln.get("merge_lane") and not (old["lanes"].get(name) or {}).get("merge_lane"):
                     work = [m["id"] for m in self.tasks() if m.get("lane") == name and m["state"] in ("queued", "running")]
                     if work:

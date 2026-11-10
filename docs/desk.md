@@ -141,9 +141,11 @@ place. This tab only reads records; changes are recorded through the commands.
 
 All tasks lists every work task, newest queued first, 50 per page through to the
 oldest. Each line shows its number, title, lane, current state, queued time,
-ended time and latest verification verdict. These come from
+ended time and standing verification verdict. These come from
 `tasks/<id>/meta.json`: `id`, `title`, `lane`, `state`, `created`,
-`finished`, and the `verdict` in the task named by `verify`. Ended is the saved
+`finished`, and the last definite verification verdict (`holds`, `holds, with
+notes`, or `does not hold`). Later `unsure` or missing verdicts do not replace it;
+with no definite verdict, the latest verdict given is shown. Ended is the saved
 worker finish time, not the merge time. Missing fields stay blank. Original tasks
 and their follow-ups both appear; an original's state remains Replaced.
 Verification tasks have no rows of their own. Click a line or its number to open
