@@ -474,22 +474,49 @@ def items_for(desk: Desk, events: list, me: dict) -> list:
 
 
 def _review_task(desk: Desk, key: tuple):
-    """A completion's review task: queue-time verifications post on behalf of their parent."""
+    """A completion's review task: verifications post on behalf of their parent."""
     if key[0] not in ("task", "merge"):
         return None
     try:
         m = desk.meta(key[1])
         if m.get("kind") == "verify":
             m = desk.meta(m.get("parent") or "")
-            if not m.get("verify_after"):
-                return None
     except SystemExit:
         return None
     return m["id"] if waits_review(desk, m["id"]) else None
 
 
+def reviews_for(desk: Desk, me: dict) -> dict:
+    """For a follower started afresh: {task: when it ended} for each task that waits for review now and would be
+    posted to its session (its own, or one no other live session made; as items_for sends it). It ended when its
+    verification did, if it has one."""
+    from .alert import session_minutes
+    if not session_minutes(desk)["review"]:
+        return {}
+    others = [r.get("session") for r in live_records(desk) if r.get("key") != me.get("key")]
+    out = {}
+    for m in desk.tasks():
+        sess = m.get("session")
+        if m.get("kind") == "verify" or m.get("state") != "done" or (
+                sess and not same(sess, me.get("session")) and any(same(sess, o) for o in others)):
+            continue
+        if not waits_review(desk, m["id"]):
+            continue
+        ended = [m.get("finished")]
+        if m.get("verify"):
+            try:
+                ended.append(desk.meta(m["verify"]).get("finished"))
+            except SystemExit:
+                pass
+        ended = [x for x in ended if isinstance(x, (int, float)) and not isinstance(x, bool)]
+        if ended:
+            out[m["id"]] = max(ended)
+    return out
+
+
 def waits_review(desk: Desk, tid) -> bool:
-    """Whether finished work needs review now; queue-time requests wait for their verification."""
+    """Whether finished work needs review now: not while a verification of it is queued or running (one the
+    coordinator ordered, or one requested when it was queued)."""
     if not isinstance(tid, str) or not TASK_ID.match(tid):
         return False
     try:
@@ -503,7 +530,7 @@ def waits_review(desk: Desk, tid) -> bool:
     except SystemExit:  # its verification folder is gone
         v = None
     return (m.get("state") == "done" and m.get("kind") != "verify" and not verification_due(m)
-            and not (m.get("verify_after") and v and v["state"] in ("queued", "running")))
+            and not (v and v["state"] in ("queued", "running")))
 
 
 def _srt_ran(desk: Desk):
@@ -595,7 +622,7 @@ def handle(desk: Desk, req: dict) -> dict:
             missed = {"key": prev["key"], "pid": ps.get("pid"), "name": prev.get("name") or "",
                       "at": prev.get("ended") or prev.get("seen"), "session_ended": _proc_gone(ps)}
         return {"pos": end, "done": done, "summary": summary, "summary_items": summary_items,
-                "missed": missed, "summary_review": sorted(review), **srv}
+                "missed": missed, "summary_review": sorted(review), "reviews": reviews_for(desk, me), **srv}
     if op == "caught_up":  # the follower posted what an ended one missed: nobody is to post it again
         k = str(req.get("of", ""))
         r = read_json(register_dir(desk) / f"{k}.json", {}) if KEY.match(k) else {}
@@ -790,19 +817,25 @@ class Watch:
     once every LOOK_EVERY seconds counting the name lookup's (clock, shared with Namer), and only while one of them
     could hold: something waits to be posted, or was posted
     in the last `window` minutes (and the minute after, for the lookup that sees them go by), or the session was last
-    seen waiting on its window with something posted to it; or a task posted to it has waited `review` minutes for
-    review, not yet alerted. minutes: {no_session, window, review} as the desk gives them (alert.session_minutes;
+    seen busy or waiting with something posted to it that it has not finished; or a task posted to it has waited
+    `review` minutes for review, not yet alerted, or was alerted of and still waits (so that hansa status says it only
+    while the session is idle). minutes: {no_session, window, review} as the desk gives them (alert.session_minutes;
     0: off). no_session also covers a running session's inbox refusing posts, once per stretch of failures.
-        window  the session is `waiting` (a permission dialog or a question) at a lookup `window` minutes or more after
-                the first post since a lookup last saw it otherwise: alerted once per stretch of waiting
+        window  something posted to it is not finished (no lookup saw the session otherwise than `busy` or `waiting`
+                since), and the session has been `waiting` (a permission dialog or a question) for `window` minutes:
+                from the first lookup that saw it waiting, or from the post when no lookup came between. Alerted once
+                per stretch of waiting
         review  a task posted to it has waited `review` minutes for review since, and the session is `idle` at a
-                lookup after that: alerted once for that task; hansa does not post it again
-    Any other status (`busy`, `idle`, `shell`), one hansa does not know, or the session not listed ends a stretch and
-    sends nothing; a lookup that fails changes nothing, sends nothing, and is written in the follower's log. state() is
-    carried over a restart on new code, so what was told stays told. look: the lookup, for tests."""
+                lookup after that: alerted once for that task; hansa does not post it again. A follower started
+                afresh takes the tasks that wait for review and would be posted to it from the desk (restore), as
+                waiting since they ended
+    Any other status ends a stretch of waiting and sends nothing; one other than `busy` (`idle`, `shell`, one hansa
+    does not know, or the session not listed) also counts what was posted before as finished. A lookup that fails
+    changes nothing, sends nothing, and is written in the follower's log. state() is carried over a restart on new
+    code, so what was told stays told. look: the lookup, for tests."""
 
     KEEP = ("first", "count", "oldest", "last", "last_count", "last_line", "told", "status", "seen", "looked",
-            "reviews")
+            "reviews", "wait_from")
 
     def __init__(self, pid: int, was=None, look=None):
         w = was if isinstance(was, dict) else {}
@@ -810,7 +843,8 @@ class Watch:
         def num(k):
             return float(w[k]) if isinstance(w.get(k), (int, float)) else 0.0
         self.look = look or (lambda: session_row(pid, NAME_LIMIT))
-        self.first, self.last, self.told, self.seen = (num(k) for k in ("first", "last", "told", "seen"))
+        self.first, self.last, self.told, self.seen, self.wait_from = (
+            num(k) for k in ("first", "last", "told", "seen", "wait_from"))
         self.clock = Lookups(num("looked"))
         self.count, self.last_count = int(num("count")), int(num("last_count"))
         self.oldest, self.last_line, self.status = (str(w.get(k) or "") for k in ("oldest", "last_line", "status"))
@@ -834,7 +868,14 @@ class Watch:
         self.count += len(lines)
         self.last, self.last_count, self.last_line = t, len(lines), line
         for tid in reviews:  # the wait counts from its latest post; told stays told
-            self.reviews[tid] = {**self.reviews.get(tid, {}), "posted": t}
+            self.reviews[tid] = {**{k: v for k, v in self.reviews.get(tid, {}).items() if k != "ended"}, "posted": t}
+
+    def restore(self, waiting) -> None:
+        """What the desk gave a follower started afresh: {task: when it ended} for the tasks that wait for review and
+        would be posted to its session. Each waits since it ended, unless this follower posted it since."""
+        for tid, at in (waiting.items() if isinstance(waiting, dict) else ()):
+            if isinstance(tid, str) and TASK_ID.match(tid) and isinstance(at, (int, float)) and tid not in self.reviews:
+                self.reviews[tid] = {"posted": float(at), "ended": True}
 
     def still(self, tids) -> None:
         """The desk's answer: which of the tasks asked about still wait for review (None: it was not asked)."""
@@ -844,9 +885,9 @@ class Watch:
     def wants(self, t: float, pending: bool, window: int, review: int) -> bool:
         """Whether a case could hold now, so that a lookup is worth its cost."""
         if window and (pending or (self.last and t - self.last <= window * 60 + LOOK_EVERY)
-                       or (self.first and self.status == "waiting")):
+                       or (self.first and self.status in ("busy", "waiting"))):
             return True
-        return bool(review) and any(not v.get("told") and t - v["posted"] >= review * 60 for v in self.reviews.values())
+        return bool(review) and any(v.get("told") or t - v["posted"] >= review * 60 for v in self.reviews.values())
 
     def tick(self, t: float, pending: bool, minutes: dict, heard=None, last_post=None, want: bool = False) -> list:
         """Takes the answer of a lookup that ended, and starts one when due; never waits for one. Returns the cases
@@ -883,22 +924,28 @@ class Watch:
     def saw(self, at: float, status: str, window: int, review: int) -> list:
         """What a lookup begun at `at` found: the session's status, '' when it is not listed."""
         out = []
-        self.status, self.seen = status, at
+        before, self.status, self.seen = self.seen, status, at
         if status == "waiting":
-            if window and self.first and at - self.first >= window * 60 and not self.told:
+            if self.first and not self.wait_from:  # it waits since this lookup, or since the post if none came between
+                self.wait_from = self.first if before < self.first else at
+            if window and self.wait_from and at - self.wait_from >= window * 60 and not self.told:
                 self.told = at
-                out.append(("window", {"since": self.first, "count": self.count, "oldest": self.oldest}))
-        else:  # seen doing something else: a stretch of waiting is over, and what was posted before was not missed
-            self.told = 0.0
-            if self.last >= at:  # posted after the lookup began: not seen yet
+                out.append(("window", {"since": self.wait_from, "posted": self.first, "count": self.count,
+                                       "oldest": self.oldest}))
+        else:  # seen doing something else: a stretch of waiting is over
+            self.told, self.wait_from = 0.0, 0.0
+            if status == "busy":  # at work on what was posted, perhaps: not finished yet
+                pass
+            elif self.last >= at:  # finished; posted after the lookup began: not seen yet
                 self.first, self.count, self.oldest = self.last, self.last_count, self.last_line
-            else:
+            else:  # finished: what was posted before was not missed
                 self.first, self.count, self.oldest = 0.0, 0, ""
         if status == "idle" and review:
             for tid, v in sorted(self.reviews.items()):
                 if not v.get("told") and at - v["posted"] >= review * 60:
                     v["told"] = at
-                    out.append(("review", {"task": tid, "posted": v["posted"]}))
+                    out.append(("review", {"task": tid, "posted": v["posted"],
+                                           **({"ended": True} if v.get("ended") else {})}))
         return out
 
     def holds(self, t: float, minutes: dict, last_post=None, pending: bool = False) -> dict:
@@ -909,9 +956,9 @@ class Watch:
         since = refused_since(last_post, pending)
         if minutes.get("no_session") and since is not None and t - since >= minutes["no_session"] * 60:
             out["inbox"] = since
-        if minutes.get("window") and self.status == "waiting" and self.first \
-                and t - self.first >= minutes["window"] * 60:
-            out["window"] = self.first
+        if minutes.get("window") and self.status == "waiting" and self.first and self.wait_from \
+                and t - self.wait_from >= minutes["window"] * 60:
+            out["window"] = self.wait_from
         told = {k: v["posted"] for k, v in sorted(self.reviews.items()) if v.get("told")}
         if minutes.get("review") and self.status == "idle" and told:
             out["review"] = told
@@ -924,6 +971,7 @@ TURN_PRINCIPAL = ("billing_error", "oauth_org_not_allowed", "account_on_hold", "
                   "model_not_found", "cloud_credential_error", "invalid_request")  # only the principal can
 TURN_LOGIN, TURN_LONG = "authentication_failed", "max_output_tokens"
 TURN_REPOSTS = (2, 10, 30)  # minutes after a stretch of failures began: its reposts, while failures that wait may cure
+TURN_START = 3  # minutes after a repost for the turn it starts to begin: until then, or while it runs, no alert
 TURN_LOGIN_WAIT = 2  # minutes after authentication_failed (perhaps a short login refresh) before acting on it
 TURN_KEPT = 50  # subjects kept unhandled at most: without the hooks, nothing ever empties it
 
@@ -949,8 +997,10 @@ class Turns:
                    posted before an ok turn ended
         a stretch  failures in a row (the record's failed_since); a turn the principal started (nothing posted
                    between the turn before's end and its failure) is never posted again, and alerts only after
-                   turn_min. Failures that waiting may cure (TURN_WAIT) post again at TURN_REPOSTS minutes, and alert
-                   after turn_min; those only the principal can cure (TURN_PRINCIPAL) alert at once and stop reposts
+                   turn_min, saying that the principal's own request failed (principal, at). Failures that waiting may
+                   cure (TURN_WAIT) post again at TURN_REPOSTS minutes, and alert after turn_min, but not while the
+                   turn a repost started may still end well (it runs, or TURN_START minutes have not gone by since
+                   the repost without one ending); those only the principal can cure (TURN_PRINCIPAL) alert at once and stop reposts
                    until an ok turn; authentication_failed is posted again once after TURN_LOGIN_WAIT minutes and alerts
                    if that turn fails too (alerts then when nothing waits); max_output_tokens is posted again once,
                    ending "go on", and alerts if the next failure is that too. At most len(TURN_REPOSTS) reposts in a
@@ -961,7 +1011,7 @@ class Turns:
     new code, so what was told stays told and what was posted again is not posted again."""
 
     KEEP = ("unhandled", "posted", "seen_at", "since", "error", "failed_at", "principal", "reposts", "reposted",
-            "told", "login", "long", "blocked", "urgent")
+            "told", "login", "long", "blocked", "urgent", "ours")
 
     def __init__(self, was=None):
         w = was if isinstance(was, dict) else {}
@@ -975,7 +1025,8 @@ class Turns:
             num(k) for k in ("posted", "seen_at", "since", "failed_at", "reposted", "told", "login", "long"))
         self.reposts = int(num("reposts"))
         self.error = str(w.get("error") or "")
-        self.principal, self.blocked, self.urgent = (bool(w.get(k)) for k in ("principal", "blocked", "urgent"))
+        self.principal, self.blocked, self.urgent, self.ours = (
+            bool(w.get(k)) for k in ("principal", "blocked", "urgent", "ours"))
 
     def state(self) -> dict:
         return {k: getattr(self, k) for k in self.KEEP}
@@ -994,7 +1045,13 @@ class Turns:
         principal was alerted, 0 if not)}; {} when there is none (no failure seen, or a turn ended ok since)."""
         if not self.since:
             return {}
-        return {"error": self.error or "unknown", "since": self.since, "reposts": self.reposts, "told": self.told}
+        return {"error": self.error or "unknown", "since": self.since, "reposts": self.reposts, "told": self.told,
+                **self._principals()}
+
+    def _principals(self) -> dict:
+        """{principal, at} when the stretch is only the principal's own request failing (no turn hansa started failed in
+        it): said as that, at the time of its latest failure, not as turns that keep failing."""
+        return {"principal": True, "at": self.failed_at} if self.principal and not self.ours else {}
 
     def wants(self) -> bool:
         """Whether the session's status is worth looking up for this: a stretch of failures goes on, not yet alerted."""
@@ -1002,7 +1059,7 @@ class Turns:
 
     def _new_stretch(self, since: float) -> None:
         self.since, self.reposts, self.reposted, self.told, self.login, self.long = since, 0, 0.0, 0.0, 0.0, 0.0
-        self.blocked = self.urgent = self.principal = False
+        self.blocked = self.urgent = self.principal = self.ours = False
         self.error, self.failed_at = "", 0.0
 
     def _over(self, ok_at, turn_min: int) -> list:
@@ -1026,6 +1083,7 @@ class Turns:
         # the end of the turn before this one: exact for a stretch's first failure, else no earlier than seen
         prev = (rec["last_ok"] or 0.0) if rec["fails"] <= 1 else max(prev, since)
         self.principal = self.posted <= prev
+        self.ours = self.ours or not self.principal
         self.error, self.failed_at = rec["error"], rec["at"]
         if self.error in TURN_PRINCIPAL:
             self.blocked = True
@@ -1055,13 +1113,18 @@ class Turns:
             if why:
                 repost = {"why": why, "error": self.error, "at": self.failed_at, "lines": lines,
                           "go_on": why == "long"}
+        # a repost goes now, or the turn the last one started may still end well: it runs (seen busy or waiting after
+        # it), or TURN_START minutes have not gone by for one to start
+        repost_turn = repost is not None or self.reposted > self.failed_at and (
+            t < self.reposted + TURN_START * 60 or seen > self.reposted and status in ("busy", "waiting"))
         if not self.told and turn_min and (
-                self.urgent or t - self.since >= turn_min * 60
+                self.urgent or t - self.since >= turn_min * 60 and not repost_turn
                 or self.error == TURN_LOGIN and not self.login and not self.unhandled
                 and t >= self.failed_at + TURN_LOGIN_WAIT * 60):
             self.told = t
             out.append(("turn", {"error": self.error, "since": self.since, "count": len(self.unhandled),
-                                 "fails": rec["fails"]}))
+                                 "fails": rec["fails"],
+                                 **self._principals()}))
         return repost, out
 
     def went(self, t: float, why: str) -> None:
@@ -1191,6 +1254,8 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
         srt_done = told_srt  # told_srt as of done: a restart reads again from there, so it carries this one
         _say(("restarted on hansa's new code; " if resume else "") +
              f"following desk {desk.root} for session {sess['pid']} at {sock}, from byte {pos}")
+        if not resume:  # started afresh: what waits for review counts from when it ended (Watch.restore)
+            watch.restore(r.get("reviews"))
         summary, missed = bool(r.get("summary")), r.get("missed")
         pending = {tuple(x["key"]): x for x in r.get("summary_items") or []}
         first, last, errors = 0.0, 0.0, 0

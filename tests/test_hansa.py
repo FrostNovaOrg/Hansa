@@ -29482,15 +29482,15 @@ def save():'''))
                     self.hansa("verify", tid)
                 vid = self.desk.meta(tid)["verify"]
                 feed()
-                review(not automatic)  # queued
+                review(False)  # queued: whoever asked for it waits for its verdict, not for a review
                 self.desk.update(vid, state="running")
                 feed()
-                review(not automatic)
+                review(False)
                 self.desk.update(vid, state="done", verdict=verdict)
                 self.desk.event("task_finished", task=vid, state="done")
                 [item] = feed()
                 self.assertEqual(item["key"], ["task", vid])
-                self.assertEqual(item.get("review"), tid if automatic else None)
+                self.assertEqual(item.get("review"), tid)  # the verdict's post counts for the task it verified
                 review(True)
             if automatic:
                 self.desk.resume()
@@ -29508,7 +29508,7 @@ def save():'''))
                 vid = self.desk.new_task("Verify the work", lane="a", kind="verify", parent=tid)
                 options = {"verify_after": {"lane": "", "effort": "", "note": ""}} if automatic else {}
                 self.desk.update(tid, state="done", commits=1, verify=vid, **options)
-                self.assertEqual(notify.waits_review(self.desk, tid), not automatic)
+                self.assertFalse(notify.waits_review(self.desk, tid))  # its verification is queued
                 shutil.rmtree(self.desk.tasks_dir / vid)
                 self.assertTrue(notify.waits_review(self.desk, tid))
                 me = {"key": "4242-0123abcd", "session": None, "uid": os.getuid()}
@@ -49108,6 +49108,133 @@ else:
         self.assertIn("coordinator", alert.KINDS)
         self.assertIn("`coordinator`", self.hansa_out("help", "alerts"))
 
+    def test_a_session_that_stops_on_a_dialog_while_handling_a_post_alerts_once_it_waited_window_min(self):
+        # the post starts a turn (busy), the turn stops on a permission dialog (waiting): the wait counts from the
+        # first lookup that saw it, however long it was busy before
+        for dialog in (2.5, 5):
+            with self.subTest(dialog=dialog):
+                self.coordinator_desk(f"dialog-after-busy-{dialog}", window_min=2, review_min=0)
+                self.agents_say({"4242": "busy"})
+                shown = []
+                log = self.follow_on_a_clock(dialog + 5, at={
+                    0.5: lambda: self.coordinator_task_ended("Add a"),
+                    dialog: lambda: self.agents_say({"4242": "waiting"}),
+                    dialog + 4.5: lambda: shown.append(self.hansa_out("status"))})[0]
+                alerts = self.coordinator_alerts()
+                self.assertEqual(len(alerts), 1, (alerts, log))
+                self.assertIn("has waited on its window (a permission dialog or a question) for 2 min, so it cannot "
+                              "act on what hansa posted to it: 1 thing(s) since ", alerts[0])
+                self.assertIn("the oldest: t0001 done: Add a", alerts[0])
+                self.assertIn("pid 4242 (desk-4242) has waited on its window for ", shown[0])
+        with self.subTest("handled (idle), then a dialog with nothing new posted: none"):
+            self.coordinator_desk("dialog-after-idle", window_min=2, review_min=0)
+            self.agents_say({"4242": "busy"})
+            self.follow_on_a_clock(9, at={0.5: lambda: self.coordinator_task_ended("Add a"),
+                                          2: lambda: self.agents_say({"4242": "idle"}),
+                                          3: lambda: self.agents_say({"4242": "waiting"})})
+            self.assertEqual(self.coordinator_alerts(), [])
+
+    def test_no_session_hears_counts_only_what_still_waits_in_its_present_wording(self):
+        from hansa import alert
+        unheard = "no session hears from hansa"
+        with self.subTest("a task closed a minute after it ended"):
+            self.coordinator_desk("unheard-closed")
+            alert.unheard_check(self.desk, time.time())
+            tid = self.coordinator_task_ended("Add a")
+            a = self.events("task_finished")[0]["ts"]
+            alert.unheard_check(self.desk, a + 30)
+            self.desk.update(tid, state="cancelled", error="closed without merging")  # hansa close, from a shell
+            self.desk.event("task_cancel", task=tid)
+            self.assertNotIn(unheard, self.status_at(a + 3 * 3600))  # also before hansa serve looks again
+            alert.unheard_check(self.desk, a + 11 * 60)
+            alert.unheard_check(self.desk, a + 3 * 3600)
+            self.assertEqual(self.coordinator_alerts(), [])
+            self.assertNotIn(unheard, self.status_at(a + 3 * 3600))
+        with self.subTest("a task cancelled a week before an alert channel is set up"):
+            self.coordinator_desk("unheard-week")
+            cmd = self.desk.settings()["alert"]["command"]
+            self.assertEqual(self.page_save(lambda s: s.update(alert={"command": ""})), {"ok": True, "problems": []})
+            alert.unheard_check(self.desk, time.time())
+            tid = self.desk.new_task("Add a", lane="a")
+            self.desk.update(tid, state="cancelled", error="cancelled on the page", finished=time.time())
+            self.desk.event("task_finished", task=tid, state="cancelled")
+            a = self.events("task_finished")[0]["ts"]
+            alert.unheard_check(self.desk, a + 60)
+            self.assertEqual(self.page_save(lambda s: s.update(alert={"command": cmd})), {"ok": True, "problems": []})
+            alert.unheard_check(self.desk, a + 7 * 86400)
+            self.assertEqual(self.coordinator_alerts(), [])
+        with self.subTest("what still waits, as it reads now"):
+            self.coordinator_desk("unheard-wording")
+            alert.unheard_check(self.desk, time.time())
+            tid = self.coordinator_task_ended("Old title")
+            a = self.events("task_finished")[0]["ts"]
+            alert.unheard_check(self.desk, a + 60)
+            self.desk.update(tid, title="New title")
+            alert.unheard_check(self.desk, a + 10 * 60)
+            [text] = self.coordinator_alerts()
+            self.assertIn("1 thing(s) wait for the coordinator, the oldest for 10 min: t0001 done: New title", text)
+            self.assertIn("the oldest for 20 min (t0001 done: New title", self.status_at(a + 20 * 60))
+        with self.subTest("hansa serve starts 12 hours after it stopped"):
+            self.coordinator_desk("unheard-serve")
+            t = time.time()
+            alert.unheard_check(self.desk, t)
+            self.desk.event("server_stopped")
+            held = cli.hold_server_lock(self.desk)
+            self.addCleanup(held.close)
+            self.round_at(0)
+            alert.unheard_check(self.desk, t + 12 * 3600)  # its first look, as it starts
+            self.assertEqual(self.coordinator_alerts(), [])
+            self.assertNotIn(unheard, self.status_at(t + 12 * 3600))
+
+    def test_a_done_task_unreviewed_for_long_alerts_from_a_follower_started_afresh(self):
+        self.coordinator_desk("review-afresh", window_min=0, review_min=3)
+        self.agents_say({"4242": "idle"})
+        t0 = float(int(time.time()))
+        tid = self.coordinator_task_ended("Add a")
+        self.desk.update(tid, finished=t0 - 2 * 3600)  # it ended two hours before this session's follower started
+        log = self.follow_on_a_clock(4, start=t0)[0]
+        alerts = self.coordinator_alerts()
+        self.assertEqual(len(alerts), 1, (alerts, log))
+        self.assertIn("is idle while t0001 has waited for review for 12", alerts[0])
+        self.assertIn("since it ended: Add a", alerts[0])
+        with self.subTest("another follower started afresh: told is told"):
+            self.follow_on_a_clock(4, start=t0 + 600)
+            self.assertEqual(len(self.coordinator_alerts()), 1)
+
+    def test_the_review_status_line_holds_only_while_the_session_is_idle(self):
+        self.coordinator_desk("review-status", window_min=0, review_min=3)
+        self.agents_say({"4242": "idle"})
+        shown = {}
+        self.follow_on_a_clock(10, at={0.5: lambda: self.coordinator_task_ended("Add a"),
+                                       5: lambda: shown.__setitem__("idle", self.hansa_out("status")),
+                                       6: lambda: self.agents_say({"4242": "busy"}),
+                                       8.5: lambda: shown.__setitem__("busy", self.hansa_out("status"))})
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        line = "waiting for review while the coordinator's session pid 4242 (desk-4242) is idle: t0001"
+        self.assertIn(line, shown["idle"])
+        self.assertNotIn(line, shown["busy"])
+
+    def test_a_task_does_not_wait_for_review_while_a_verification_the_coordinator_ordered_runs(self):
+        self.coordinator_desk("review-verify", window_min=0, review_min=3)
+        self.agents_say({"4242": "idle"})
+        tids, before = [], []
+
+        def verify():  # as hansa verify leaves it
+            vid = self.desk.new_task("Verify t0001", kind="verify", parent=tids[0], lane="a", title="Verify t0001")
+            self.desk.update(tids[0], verify=vid)
+            tids.append(vid)
+            self.assertFalse(notify.waits_review(self.desk, tids[0]))
+
+        def verdict():
+            self.desk.update(tids[1], state="done", verdict="holds", finished=time.time())
+            self.desk.event("task_finished", task=tids[1], state="done")
+        log = self.follow_on_a_clock(12, at={0.5: lambda: tids.append(self.coordinator_task_ended("Add a")), 1: verify,
+                                             6: lambda: before.append(list(self.coordinator_alerts())), 7: verdict})[0]
+        self.assertEqual(before, [[]], log)
+        alerts = self.coordinator_alerts()  # once the verdict is in, it waits for review again
+        self.assertEqual(len(alerts), 1, (alerts, log))
+        self.assertIn("is idle while t0001 has waited for review for 3 min", alerts[0])
+
     # Helpers post page requests; tests check responses and tool results.
 
     def page_post(self, path: str, body: dict) -> dict:
@@ -49281,6 +49408,55 @@ else:
             turns.posted_lines(self.T0 + 90, [("y", "t0002 done: Add b")])
             rec = self.turn(self.T0 + 100, since=self.T0, fails=2)
             self.assertEqual(self.at_minutes(turns, rec, [2, 3], turn_min=0), [(2, "wait", [])])
+
+    def test_turns_after_the_third_repost_the_alert_waits_for_that_turn_to_fail_or_not_start(self):
+        fail = lambda m, n: self.turn(self.T0 + m * 60, since=self.T0, last_ok=self.T0 - 200, fails=n)
+
+        def through_third():
+            turns = self.turns_after_a_post()
+            self.assertEqual(self.at_minutes(turns, fail(0, 1), [1, 2]), [(2, "wait", [])])
+            self.assertEqual(self.at_minutes(turns, fail(3, 2), [4, 10]), [(10, "wait", [])])
+            # turn_min (30) has gone by, but the third repost goes first: no alert in the same tick
+            self.assertEqual(self.at_minutes(turns, fail(11, 3), [12, 30]), [(30, "wait", [])])
+            return turns
+        with self.subTest("the turn the third repost started ends with the error too"):
+            turns = through_third()
+            self.assertEqual(self.at_minutes(turns, fail(11, 3), [30.5, 31, 35], status="busy"), [])
+            self.assertEqual(self.at_minutes(turns, fail(35.5, 4), [36, 40]), [(36, None, ["turn"])])
+        with self.subTest("no turn starts within a few minutes"):
+            turns = through_third()
+            self.assertEqual(self.at_minutes(turns, fail(11, 3), [31, 32, 32.9, 34, 40]), [(34, None, ["turn"])])
+        with self.subTest("its turn runs, then ends well: none"):
+            turns = through_third()
+            self.assertEqual(self.at_minutes(turns, fail(11, 3), [31, 35, 60], status="busy"), [])
+            self.assertEqual(self.at_minutes(turns, self.turn(self.T0 + 61 * 60, ok=True), [62, 90]), [])
+
+    def test_turns_a_failure_of_the_principals_own_request_is_said_as_such_without_minutes_counting(self):
+        from hansa import alert
+        turns = self.turns_after_a_post(posted=-300)  # nothing posted since the turn before: the principal's turn
+        rec = self.turn(self.T0, last_ok=self.T0 - 200)
+        self.assertEqual(self.at_minutes(turns, rec, [1, 29]), [])
+        _, cases = turns.tick(self.T0 + 30 * 60, rec, "idle", self.T0 + 30 * 60 - 10, 30)
+        [(case, fields)] = cases  # the principal's rule: the alert after 30 minutes stays
+        self.assertEqual(case, "turn")
+        at, later = time.strftime("%H:%M", time.localtime(self.T0)), self.T0 + 2 * 86400
+        who = "pid 4242 (desk-4242)"
+        text, zh = alert.turn_text(fields, who, who, self.T0 + 30 * 60)
+        said = f"the principal's own request ended with an API error (overloaded) at {at} and was not done"
+        self.assertIn(f"the coordinator's session {who}: {said}", text)
+        self.assertIn("type it again in that session", text)
+        self.assertNotIn("cannot work", text)
+        self.assertNotIn(" min", text)
+        self.assertIn(f"{at} 因 API 错误（overloaded）结束，没有完成", zh)
+        self.assertNotIn("分钟", zh)
+        self.assertEqual(self.at_minutes(turns, rec, [60, 2 * 1440]), [])
+        line = alert.turn_line(turns.holds(), who, later, True)
+        self.assertIn(f"the coordinator's session {who}: {said}", line)
+        self.assertIn("type it again", line)
+        self.assertNotIn("2880", line)
+        self.assertNotIn(" min", line)
+        turns.tick(later + 60, self.turn(later + 30, ok=True), "idle", later + 50, 30)  # the next turn ends well
+        self.assertEqual(alert.turn_line(turns.holds(), who, later + 60, True), "")
 
     def test_turns_a_due_repost_waits_while_the_session_is_busy_or_waiting(self):
         for status in ("busy", "waiting", "shell", ""):
