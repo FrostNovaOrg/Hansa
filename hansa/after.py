@@ -57,7 +57,7 @@ def pending(m: dict, tasks: list) -> list:
     by_id = {t["id"]: t for t in tasks}
     children = {}
     for t in sorted(tasks, key=lambda t: (t.get("created", 0), len(t["id"]), t["id"])):
-        if t.get("parent") and t.get("kind") != "verify":
+        if t.get("parent") and t.get("kind") != "verify" and not t.get("restored_parent"):
             children[t["parent"]] = t["id"]
     out = []
     for tid in m["after"]:
@@ -65,7 +65,9 @@ def pending(m: dict, tasks: list) -> list:
         while latest not in seen:
             seen.add(latest)
             t = by_id.get(latest, {})
-            successor = children.get(latest) or t.get("replaced_by")
+            if t.get("state") == "merged":
+                break  # later work cannot undo a prerequisite's merge
+            successor = t.get("replaced_by") or children.get(latest)
             if not successor:
                 break
             latest = successor
