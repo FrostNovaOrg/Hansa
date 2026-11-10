@@ -36,7 +36,7 @@ from pathlib import Path
 
 from . import account, after, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
-                   refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, program_candidates,
+                   refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, claude_bin,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
 from .srt_output import protected
@@ -462,23 +462,6 @@ COMMAND_SHOWN = 4000
 CEILING = "the task was probably too big or unclear, or the worker got stuck"
 STOPPED_NOTE = "(Stopped at the ceiling before it wrote its report. Its notes along the way, to see what went wrong:)\n\n"
 LATE_NOTE = "\n\n(Written after that, when a background notice came in:)\n\n"
-
-
-def claude_bin() -> str:
-    """The claude hansa runs: HANSA_CLAUDE's when it is set, and then no other in its place; else the first found."""
-    given = os.environ.get("HANSA_CLAUDE") or ""
-    if given:
-        if not os.path.exists(given):
-            raise RuntimeError(f"HANSA_CLAUDE is {given}, which does not exist; put Claude Code there, or set "
-                               "HANSA_CLAUDE to its path (or unset it)")
-        if not os.path.isfile(given) or not os.access(given, os.X_OK):
-            raise RuntimeError(f"HANSA_CLAUDE is {given}, which cannot be run (not a file this account may run); "
-                               "make it one, or set HANSA_CLAUDE to Claude Code's path (or unset it)")
-        return given
-    for c in program_candidates("claude"):
-        if c and os.access(c, os.X_OK):
-            return c
-    raise RuntimeError("claude was not found; install Claude Code or set HANSA_CLAUDE")
 
 
 class LaneCannotStart(RuntimeError):
@@ -7314,13 +7297,13 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -
         return {"ok": False, "detail": prob}
     tmp = desk.state_dir / "check"
     tmp.mkdir(parents=True, exist_ok=True)
-    # no tools: a model behind a compatible endpoint often calls one before it answers, and one turn ends there
-    argv = [claude or claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"], "--tools", ""]
-    argv += isolated(tmp)
     t0 = time.time()
     stamp = (key_stamp(desk, name), json.dumps(p, sort_keys=True))
     kind = ""
     try:
+        # no tools: a model behind a compatible endpoint often calls one before it answers, and one turn ends there
+        argv = [claude or claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"], "--tools", ""]
+        argv += isolated(tmp)
         env = {**provider_env(desk, name, p), "CLAUDE_CODE_MAX_RETRIES": "0"}
         r = subprocess.run(argv, cwd=str(tmp), env=env, input="Reply with the single word OK.",
                            capture_output=True, text=True, timeout=timeout)
@@ -7341,6 +7324,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -
                 (f": {said.group(1)}" if said and why else "")
     except subprocess.TimeoutExpired:
         ok, detail = False, f"no answer in {timeout}s"
+    except RuntimeError as e:
+        ok, detail = False, str(e)
     except Exception as e:  # noqa: BLE001
         ok, detail = False, str(e)[:200]
     detail = desk.redact(detail)
