@@ -709,8 +709,8 @@ def cmd_git(a):
     # before git has written the signed text to it, and git then dies of SIGPIPE
     args = [args[0], *GIT_NO_PROGRAMS.get(args[0], ()), *args[1:]]
     no_sig = str(NO_SIGNATURE)
-    no_programs = ["-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", f"gpg.program={no_sig}",
-                   "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
+    no_programs = ["-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false",
+                   "-c", f"gpg.program={no_sig}", "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
     r = subprocess.run(["git", "--no-pager", *no_programs, *args],
                        cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
     sys.stdout.write(desk.redact(r.stdout))
@@ -935,7 +935,8 @@ def _release_files_touched(repo, m: dict, lane: dict) -> list:
         return []
     files = list(m.get("files") or [])
     try:
-        files += git("diff", "--name-only", "--no-renames", m["base"], m["head"], cwd=repo).splitlines()
+        files += [f for f in git("diff", "--name-only", "--no-renames", "-z", m["base"], m["head"],
+                                cwd=repo).split("\0") if f]
     except (RuntimeError, KeyError):
         pass
     return release_files_in(files, patterns)
