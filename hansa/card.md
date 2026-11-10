@@ -211,7 +211,7 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
 - List release build files run outside the sandbox (`hansa lane set L release_files "pom.xml
   build.sh"`): `hansa merge` refuses a change touching one until `hansa verify <id>` holds, and
   nothing, including `--despite-check`, bypasses this. More: `hansa help release-files`.
-- Ask: `hansa release L [TARGET] "<note>"`. A word the principal keeps from going out, in the command
+- Ask: `hansa release L [TARGET] "<note>"`. A word the principal keeps from going out, in the release or watch command
   or the outgoing commits, refuses it with the places found: take them out of the history (a task) or
   of the command, or ask the principal. The same words refuse a title at `hansa add` and a task at
   `hansa merge`. More: `hansa help forbidden-words`.

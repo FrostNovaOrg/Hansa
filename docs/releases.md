@@ -51,13 +51,18 @@ a quoted note with spaces can still omit TARGET. The reply names any waiting req
 and says its one-time code no longer works. At the same commit as the target's last finished release,
 the reply first says there is nothing new, names that release and says it was asked to run again;
 asking again stays allowed. These remarks appear in the command's reply, not in the alert.
+For a target's first release with two or more remotes, including a `--fixed` target,
+every base commit missing from at least one remote's tracking branches is counted, shown,
+scanned and checked for direct commits, even if another remote already has it;
+the heading gives each remote's missing count (for example, `3 not on remote public, 0 not on remote mirror`),
+and a remote with no tracking branches lacks the whole history, so an earlier private push cannot hide a first public release.
 A word from the principal's list of words no
-release may send out, in the command line or in a line, a file name, a
+release may send out, in the release or watch command line or in a line, a file name, a
 message or the author's or committer's name or email of any outgoing commit
 (all are checked, and the page shows at most 200 of them and says how many
 were checked; the word scan and its limits are under [Forbidden words before a
 release](#forbidden-words-before-a-release)), refuses it; each hit names its commit and where it is (`author`, `committer`, a
-file). A command that holds one of those words
+file). A release or watch command that holds one of those words
 is kept when it is set (`hansa lane target`), and hansa says the word and where at once, before
 any release is asked. A command that holds one of the desk's keys is
 refused when it is set, since a command is stored and shown as written: have
@@ -158,6 +163,9 @@ the watch). `--watch-minutes N` sets a separate limit, default 90 minutes
 (1–1440). At the limit hansa stops the watch's process group. A failed, void or
 stopped release starts no watch. An unfinished watch starts again from the
 beginning after hansa serve restarts, so it should be safe to repeat.
+The watch command gets the same forbidden-word warning when saved and refusal
+when a release is requested as the release command, with `watch command` as the place found;
+this prevents a watch from sending words the principal forbids.
 
 hansa posts a line for that release to the coordinator's session: watch passed
 (exit 0), failed (its exit code and last lines, keys removed), or timed out.
@@ -273,8 +281,8 @@ later hansa merge does not hide an earlier direct commit. With no remote-trackin
 readable last release, history older on that line than the oldest hansa merge in the outgoing range
 is history from before hansa and is not direct. With no hansa merge in that range either, every
 outgoing commit is listed as direct: hansa cannot tell what came before it. With a remote-tracking
-branch, no such cutoff applies, even when the last release's commit is gone. Commits on
-remote-tracking branches or in the target's last release are not looked at, nor are working files
+branch, no such cutoff applies, even when the last release's commit is gone. Commits outside
+the outgoing range described above are not looked at, nor are working files
 or uncommitted changes; the ask and waiting line use recorded task landings to identify direct commits. Only the
 principal saves `release_direct` on the page: `record` (default) lists these commits and keeps ticked
 targets going out without asking; `hold` (also used for an unknown setting value) refuses a release

@@ -6,8 +6,9 @@ command, time limit, and optionally another target of the lane that must have se
 (after). The coordinator asks for a release of the base branch as it is now with `hansa release L [TARGET] [note]`
 (TARGET is needed when the lane has more than one). hansa records the request in .hansa/releases.json, which no
 agent may edit: the lane, the target, the commit, the command line, the note, the commits that go out (reachable
-from the commit, on no remote-tracking branch of the repository and not in that target's last release that went
-out) and the files they change. Before the request waits for the principal, the command line, the lines those commits add,
+from the commit and missing from at least one remote on a first release with multiple remotes; otherwise on no
+remote-tracking branch and not in that target's last release) and the files they change. Before the request waits
+for the principal, the release and watch command lines, the lines those commits add,
 the names of the files they add or change, and their messages are checked against the principal's
 release_forbidden words; a hit refuses it (the last net: hansa add refuses a title with one, and a merge a task
 whose commits or merge commit hold one, run.words_in_merge). The principal answers on the page (Release, or Refuse with a
@@ -367,9 +368,28 @@ def merging_on(desk: Desk, s: dict, repo, tasks=None):
 
 
 # -- what goes out ---------------------------------------------------------------------------------------------
-def _range(since: str, commit: str) -> list:
-    """The commits that go out: reachable from the release commit, on no remote-tracking branch of the repository
-    (the whole history when it has none) and not in the target's last release."""
+def _remote_ranges(repo, commit: str) -> dict:
+    """Each remote's missing commits when a first release must account for more than one remote."""
+    remotes = _git_bytes(repo, "remote").splitlines()
+    return {remote: [commit, "--not", f"--remotes={remote}", "--"] for remote in remotes} if len(remotes) > 1 else {}
+
+
+def _range(repo, since: str, commit: str) -> list:
+    """The shared outgoing range. A first release with multiple remotes includes every commit any remote lacks;
+    otherwise keep the range on no remote-tracking branch and outside the target's last release."""
+    remote_ranges = _remote_ranges(repo, commit) if not since else {}
+    if remote_ranges:
+        missing, boundary = set(), set()
+        for rng in remote_ranges.values():
+            for sha in _git_lines(repo, "rev-list", "--boundary", *rng):
+                if sha.startswith("-"):
+                    boundary.add(sha[1:])
+                else:
+                    missing.add(sha)
+        if not missing:
+            return [commit, f"^{commit}", "--"]
+        # A boundary missing from another remote still goes out. Only commits every remote has can stop the walk.
+        return [commit, *(f"^{sha}" for sha in sorted(boundary - missing)), "--"]
     return [commit, *([f"^{since}"] if since else []), "--not", "--remotes", "--"]
 
 
@@ -405,7 +425,7 @@ def _git_lines(repo, *args):
 
 def outgoing(repo, since: str, commit: str) -> tuple:
     """The commits that go out ({sha, subject}, newest first) and the files they change."""
-    rng = _range(since, commit)
+    rng = _range(repo, since, commit)
     rows = _git_bytes(repo, "log", "--format=%H%x1f%s", *rng)
     commits = [dict(zip(("sha", "subject"), x.split("\x1f", 1))) for x in rows.splitlines() if "\x1f" in x]
     names = _git_bytes(repo, "log", "--cc", "--format=", "--name-only", "--no-renames", "-z", *rng)
@@ -428,7 +448,7 @@ def hansa_merges(desk: Desk, s: dict, a: dict, tasks=None) -> set:
 
 def direct_commits(repo, since: str, commit: str, commits: list, merges: set) -> list:
     """Outgoing first-parent commits other than hansa landings, and what their merges brought in."""
-    rows = _git_bytes(repo, "log", "--first-parent", "--format=%H %P", *_range(since, commit))
+    rows = _git_bytes(repo, "log", "--first-parent", "--format=%H %P", *_range(repo, since, commit))
     line = [row.split() for row in rows.splitlines()]
     if not since and not _git_bytes(repo, "for-each-ref", "--format=%(refname)", "refs/remotes").strip():
         oldest = [i for i, row in enumerate(line) if row[0] in merges]
@@ -531,16 +551,17 @@ def _added(lines, binary_blob):
 
 
 def forbidden_in(repo, since: str, commit: str, words: list, command: str = "", mailboxes: bool = False,
-                 mailbox_allow=()) -> tuple:
+                 mailbox_allow=(), watch: str = "") -> tuple:
     """Where what goes out holds one of the principal's forbidden words (any case, within one line, in text read as
-    UTF-8): the release command line, and every outgoing commit's message, its author's and committer's names and
+    UTF-8): the release and watch command lines, and every outgoing commit's message, its author's and committer's names and
     emails (where: author or committer; line: Name <email>), the names of the files it adds or
     changes (a renamed one by its new name) and the lines it adds. Each commit's own change is read once: a merge's
     is what it adds beyond all its parents (git's dense combined diff, --cc), not its diff against each parent, so
     what a merge brings in from a branch is read in that branch's commits when they go out, and not at all when
-    they are on a remote-tracking branch, already out. ([{word, commit, where, line}], each place once, at most
+    they are outside the outgoing range, already out. ([{word, commit, where, line}], each place once, at most
     MOST_HITS; how many commits were checked)."""
-    return words_in(repo, _range(since, commit), words, [("release command", command)], mailboxes, mailbox_allow)
+    return words_in(repo, _range(repo, since, commit), words,
+                    [("release command", command), ("watch command", watch)], mailboxes, mailbox_allow)
 
 
 def words_in(repo, rng: list, words: list, texts=(), mailboxes: bool = False, mailbox_allow=()) -> tuple:
@@ -622,16 +643,17 @@ def command_hits(ln: dict, words: list, only: str | None = None) -> list:
             for target, t in sorted(lane_targets(ln).items()):
                 if only is not None and target != only:
                     continue
-                for line in str(t.get("command") or "").splitlines():
-                    before = len(scan.hits)
-                    scan.line(line, where="release command")
-                    low = line.casefold()
-                    w = next((w for w, matcher in scan.matchers
-                              if scan.search(w, matcher, line, low, where="release command")), None)
-                    if w:
-                        out.append((target, w, line.strip()[:300]))
-                    for hit in scan.hits[before:]:
-                        out.append((target, hit["word"], hit["line"] + "; " + pattern_limit_text(hit), hit))
+                for field, where in (("command", "release command"), ("watch", "watch command")):
+                    for line in str(t.get(field) or "").splitlines():
+                        before = len(scan.hits)
+                        scan.line(line, where=where)
+                        low = line.casefold()
+                        w = next((w for w, matcher in scan.matchers
+                                  if scan.search(w, matcher, line, low, where=where)), None)
+                        if w:
+                            out.append((target, w, ("watch command: " if field == "watch" else "") + line.strip()[:300]))
+                        for hit in scan.hits[before:]:
+                            out.append((target, hit["word"], hit["line"] + "; " + pattern_limit_text(hit), hit))
         except PatternLimit as e:
             out.append((target, e.hit["word"], e.hit["line"] + "; " + pattern_limit_text(e.hit), e.hit))
     return out
@@ -817,15 +839,15 @@ def repository_input(command: str, repository, commit: str, fixed: bool = False,
 
 
 def scan_key(repo, since: str, commit: str, words: list, command: str, mailboxes: bool = False,
-             mailbox_allow=(), exceptions=()) -> str:
+             mailbox_allow=(), exceptions=(), watch: str = "") -> str:
     """What a forbidden-word scan depends on, in one string: the commit, the starting point (the target's last
     release and the repository's remote-tracking branches), the principal's entries, lane exceptions, mailbox
-    rule, allowlist and command line. A scan
+    rule, allowlist and release and watch command lines. A scan
     made with the same key finds the same."""
     remotes = _git_bytes(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes")
     words = sorted(w if w.startswith("re:") else w.casefold() for w in words if isinstance(w, str) and w.strip())
-    # "identities": a scan from before authors and committers were read does not count for one that reads them
-    parts = [repo_key(repo), commit, since, remotes, words, command, "identities",
+    # Invalidate older scans that did not include every remote's missing commits or the watch command.
+    parts = [repo_key(repo), commit, since, remotes, _git_bytes(repo, "remote"), words, command, watch, "remote-union",
              mailboxes, sorted(entry.casefold() for entry in mailbox_allow), sorted(set(exceptions))]
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
@@ -909,7 +931,7 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
             mailbox_allow = s.get("release_mailbox_allow") or []
             try:
                 key = scan_key(a["repo"], a["since"], a["commit"], words, a["command"], mailboxes, mailbox_allow,
-                               lane_exceptions(s, lane))
+                               lane_exceptions(s, lane), watch=a["watch"])
             except RuntimeError as e:
                 raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). "
                                  "Nothing was asked")
@@ -923,10 +945,13 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
         try:  # without the lock: the server's round, the page and other commands go on meanwhile
             commits, files = outgoing(a["repo"], a["since"], a["commit"])
             directs = direct_commits(a["repo"], a["since"], a["commit"], commits, merges)
-            hits, checked = forbidden_in(a["repo"], a["since"], a["commit"], words, a["command"], mailboxes, mailbox_allow)
+            hits, checked = forbidden_in(a["repo"], a["since"], a["commit"], words, a["command"], mailboxes, mailbox_allow,
+                                         watch=a["watch"])
+            remote_counts = {remote: int(_git_bytes(a["repo"], "rev-list", "--count", *rng))
+                             for remote, rng in (_remote_ranges(a["repo"], a["commit"]) if not a["since"] else {}).items()}
         except RuntimeError as e:
             raise SystemExit(f"hansa: the commits going out cannot be read ({desk.redact(str(e))}). Nothing was asked")
-        scanned = ((key, a["target"], merges, automatic), commits, files, hits, checked, directs)
+        scanned = ((key, a["target"], merges, automatic), commits, files, hits, checked, directs, remote_counts)
     else:
         raise SystemExit(f"hansa: what goes out from lane {lane} kept changing while it was read (its base branch "
                          "moving, say); ask again in a moment. Nothing was asked")
@@ -944,7 +969,7 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
 def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, note: str, by: str,
             session, direct: str | None) -> dict:
     """Under the desk lock: write the request, from what was read and scanned with this key."""
-    commits, files, hits, checked, directs = scanned
+    commits, files, hits, checked, directs, remote_counts = scanned
     if direct is not None and not directs:
         raise SystemExit("hansa: --direct was given, but this release has no direct commits. Nothing was asked")
     held = bool(directs) and s.get("release_direct", "record") != "record"
@@ -972,6 +997,7 @@ def _record(desk: Desk, s: dict, lane: str, a: dict, key: str, scanned: tuple, n
          **({"after_merge": a["after_merge"]} if a.get("after_merge") else {}),
          "by": by, "since": since, "since_release": prev["id"] if prev and since else None,
          "count": len(commits), "checked": checked, "scanned": key, "commits": commits[:MOST_COMMITS],
+         **({"remote_counts": remote_counts} if remote_counts else {}),
          "direct": directs[:MOST_COMMITS], "direct_count": len(directs),
          **({"direct_reason": desk.redact(direct.strip())} if direct is not None else {}),
          **({"direct_hold": True} if held else {}),
@@ -1458,7 +1484,7 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
             mailbox_allow = s.get("release_mailbox_allow") or []
             try:
                 key = scan_key(r["repo"], r.get("since") or "", r["commit"], words, r["command"], mailboxes,
-                               mailbox_allow, lane_exceptions(s, r["lane"]))
+                               mailbox_allow, lane_exceptions(s, r["lane"]), watch=r.get("watch") or "")
             except RuntimeError as e:
                 void(desk, rid, desk.redact(f"the commits going out cannot be read ({e})")[:400], ("approved",),
                      desk.redact(f"要发出去的提交读不出来（{e}）")[:400])
@@ -1481,7 +1507,7 @@ def start(desk: Desk, rid) -> subprocess.Popen | None:
                 break
         try:  # without the lock: the server's round goes on meanwhile
             scanned = (key, *forbidden_in(r["repo"], r.get("since") or "", r["commit"], words, r["command"],
-                                         mailboxes, mailbox_allow))
+                                         mailboxes, mailbox_allow, watch=r.get("watch") or ""))
         except RuntimeError as e:
             void(desk, rid, desk.redact(f"the commits going out cannot be read ({e})")[:400], ("approved",),
                  desk.redact(f"要发出去的提交读不出来（{e}）")[:400])
@@ -2212,7 +2238,7 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
         row = {k: r.get(k) for k in ("id", "lane", "target", "base", "commit", "command", "note", "state", "asked",
                                      "answered",
                                      "reason", "void", "exit", "problem", "count", "commits", "files", "files_count",
-                                     "named", "hits", "ended", "without_asking", "since_release", "fixed",
+                                     "named", "hits", "ended", "without_asking", "since_release", "remote_counts", "fixed",
                                      "stop_asked", "stopped_by", "stop_reason", "answered_by", "channel",
                                      "outside", "outside_folders")}
         if r.get("watch"):

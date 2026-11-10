@@ -592,7 +592,7 @@ const T = ZH ? {
   mcAgain:"（又一次：检查期间基础分支变了）",
   checkMinutes:(c, n) => `检查已跑 ${c} 分钟（一共 ${n} 分钟）`,
   releases:"发布", releaseWaiting:"等你点头才会发布", releaseRecent:"最近的发布", releaseCommand:"命令（hansa 用这台机器的账户在沙箱外运行，能用账户的登录和网络）",
-  releaseNote:"说明", releaseCommits:(n, since) => since ? `自上次发布 #${since} 以来的 ${n} 个提交` : `不在任何远程跟踪分支上的 ${n} 个提交（这条工作线还没发布过）`,
+  releaseNote:"说明", releaseCommits:(n, since, remotes) => since ? `自上次发布 #${since} 以来的 ${n} 个提交` : remotes ? `至少一个远程缺少的 ${n} 个提交（${Object.entries(remotes).map(([remote, count]) => `${count} 个不在远程 ${remote} 上`).join("，")}；此目标还没发布过）` : `不在任何远程跟踪分支上的 ${n} 个提交（这条工作线还没发布过）`,
   releaseChecked:(n, shown) => `已检查全部 ${n} 个待发布提交是否含有禁止发布的内容` + (shown < n ? `（这里只列出前 ${shown} 个）` : ""),
   releaseUnmatched:"清单上这些工作线已和保存清单时不一样，它们的发布要等你点头（直接保存会保留旧的记录：用下面的按钮，或取消勾选再勾上，然后保存，才会按当前设置重新纳入）：",
   releaseTakeBack:"按当前设置重新纳入（之后点保存）",
@@ -749,7 +749,7 @@ const T = ZH ? {
   mcAgain:" (again: the base moved while it was checked)",
   checkMinutes:(c, n) => `${c} min so far (${n} min in all)`,
   releases:"Releases", releaseWaiting:"Waiting for your yes", releaseRecent:"Recent releases", releaseCommand:"Command (hansa runs it as this machine's account, outside the sandbox, with its logins and network)",
-  releaseNote:"Note", releaseCommits:(n, since) => since ? `${n} commit(s) since release #${since}` : `${n} commit(s) on no remote-tracking branch (no release of this lane went out before)`,
+  releaseNote:"Note", releaseCommits:(n, since, remotes) => since ? `${n} commit(s) since release #${since}` : remotes ? `${n} commit(s) missing from at least one remote (${Object.entries(remotes).map(([remote, count]) => `${count} not on remote ${remote}`).join(", ")}; no release of this target went out before)` : `${n} commit(s) on no remote-tracking branch (no release of this lane went out before)`,
   releaseChecked:(n, shown) => `all ${n} outgoing commit(s) checked for forbidden words` + (shown < n ? ` (the first ${shown} shown here)` : ""),
   releaseUnmatched:"These lanes on the list are no longer what they were when the list was saved, so their releases wait for your yes (a plain Save keeps them as they were: take them back in with the button below, or untick and tick them again, then Save):",
   releaseTakeBack:"Take them back in as they are now (then Save)",
@@ -1691,8 +1691,8 @@ function releaseBlock(r) {
     releaseOutside(r),
     r.moved ? h("div", {class:"bad"}, T.releaseMoved + ((ZH && r.moved_zh) || r.moved)) : null,
     r.code ? h("div", {class:"muted"}, (ZH && r.code_zh) || r.code) : null,
-    h("div", {class:"muted"}, T.releaseCommits(r.count, r.since_release), " · ", T.releaseChecked(r.checked ?? r.count, (r.commits || []).length)),
-    principalList(`release:${r.id}:commits`, T.releaseCommits(r.count, r.since_release), (r.commits || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`))),
+    h("div", {class:"muted"}, T.releaseCommits(r.count, r.since_release, r.remote_counts), " · ", T.releaseChecked(r.checked ?? r.count, (r.commits || []).length)),
+    principalList(`release:${r.id}:commits`, T.releaseCommits(r.count, r.since_release, r.remote_counts), (r.commits || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`))),
     h("div", {class:"muted"}, T.releaseFiles(r.files_count)),
     principalList(`release:${r.id}:files`, T.releaseFiles(r.files_count), (r.files || []).map(f => named.has(f)
       ? h("div", {class:"warn"}, h("strong", {}, f), T.releaseNamed) : h("div", {}, f))));

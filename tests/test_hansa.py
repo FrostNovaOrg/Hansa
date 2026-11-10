@@ -36059,6 +36059,169 @@ def save():'''))
         r = release.get(self.desk, r["id"])
         self.assertEqual((r["state"], [h["where"] for h in r["hits"]]), ("forbidden", ["release command"]))
 
+    def test_first_release_with_multiple_remotes_counts_and_scans_what_any_remote_lacks(self):
+        from hansa import release
+        for fixed in (False, True):
+            for public_at in ("empty", "initial", "head"):
+                with self.subTest(fixed=fixed, public_at=public_at):
+                    c = DeskTest(self._testMethodName)
+                    c.setUp()
+                    try:
+                        initial = c.git_out("rev-parse", "HEAD")
+                        first = c.commit_in_repo("b.txt", "private falcon\n")
+                        head = c.commit_in_repo("c.txt", "clean\n")
+                        for remote in ("mirror", "public"):
+                            c.git_out("remote", "add", remote, str(c.tmp / remote))
+                        c.git_out("update-ref", "refs/remotes/mirror/main", head)
+                        if public_at != "empty":
+                            c.git_out("update-ref", "refs/remotes/public/main",
+                                      initial if public_at == "initial" else head)
+                        c.hansa("lane", "target", "a", "public", "git push public HEAD:main",
+                                *(["--fixed"] if fixed else []))
+                        expected = {initial, first, head} if public_at == "empty" else (
+                            {first, head} if public_at == "initial" else set())
+                        told = c.hansa("release", "a", "public")
+                        r = release.releases(c.desk)[-1]
+                        c.assertEqual((r["count"], r["checked"], r["direct_count"]), (len(expected),) * 3)
+                        c.assertEqual({x["sha"] for x in r["commits"]}, expected)
+                        c.assertEqual({x["sha"] for x in r["direct"]}, expected)
+                        c.assertEqual(r["files"], sorted((["README.md"] if initial in expected else [])
+                                                        + (["b.txt", "c.txt"] if first in expected else [])))
+                        c.assertIn(f"{len(expected)} not on remote public", told)
+                        c.assertIn("0 not on remote mirror", told)
+                        c.assertEqual(views.status(c.desk)["releases"][-1]["remote_counts"],
+                                      {"mirror": 0, "public": len(expected)})
+                        c.assertTrue(c.page_save(lambda s: s.update(release_forbidden=["Falcon"]))["ok"])
+                        if expected:
+                            refused = c.refused("release", "a", "public")
+                            c.assertIn(f"{first[:10]} b.txt: private falcon", refused)
+                            c.assertEqual(release.releases(c.desk)[-1]["checked"], len(expected))
+                        else:
+                            c.hansa("release", "a", "public")
+                            c.assertEqual(release.releases(c.desk)[-1]["checked"], 0)
+                    finally:
+                        c.doCleanups()
+
+    def test_first_release_remote_ranges_preserve_single_remote_and_previous_release_rules(self):
+        from hansa import release
+        self.with_release("true")
+        initial = self.git_out("rev-parse", "HEAD")
+        first = self.commit_in_repo("b.txt", "clean\n")
+        head = self.commit_in_repo("c.txt", "clean too\n")
+        for remotes, expected in (((), {initial, first, head}), (("mirror",), {head}),
+                                  (("mirror", "public"), {initial, first, head})):
+            with self.subTest(remotes=remotes):
+                for remote in remotes:
+                    if remote not in self.git_out("remote").splitlines():
+                        self.git_out("remote", "add", remote, str(self.tmp / remote))
+                if remotes:
+                    self.git_out("update-ref", "refs/remotes/mirror/main", first)
+                self.hansa("release", "a")
+                r = release.releases(self.desk)[-1]
+                self.assertEqual({x["sha"] for x in r["commits"]}, expected)
+                self.assertEqual((r["count"], r["checked"]), (len(expected),) * 2)
+        # A finished release keeps the existing range, even with an empty second remote.
+        release.change(self.desk, r["id"], lambda _: {"state": "done", "ended": now()})
+        fresh = self.commit_in_repo("d.txt", "new\n")
+        told = self.hansa("release", "a")
+        r2 = release.releases(self.desk)[-1]
+        self.assertIn(f"1 commit(s) since release #{r['id']}", told)
+        self.assertEqual([x["sha"] for x in r2["commits"]], [fresh])
+        self.assertNotIn("not on remote", told)
+
+    def test_first_release_unions_missing_commits_across_remote_branches(self):
+        from hansa import release
+        initial = self.git_out("rev-parse", "HEAD")
+        left = self.commit_in_repo("left.txt", "falcon left\n")
+        self.git_out("checkout", "-q", "-b", "other", initial)
+        right = self.commit_in_repo("right.txt", "falcon right\n")
+        self.git_out("checkout", "-q", "main")
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff", "-m", "Join", "other")
+        head = self.git_out("rev-parse", "HEAD")
+        for remote, sha in (("mirror", left), ("public", right)):
+            self.git_out("remote", "add", remote, str(self.tmp / remote))
+            self.git_out("update-ref", f"refs/remotes/{remote}/topic", sha)
+        self.with_release("true")
+        self.assertTrue(self.page_save(lambda s: s.update(release_forbidden=["Falcon"]))["ok"])
+        said = self.refused("release", "a")
+        r = release.releases(self.desk)[-1]
+        self.assertEqual({x["sha"] for x in r["commits"]}, {left, right, head})
+        self.assertEqual((r["count"], r["checked"], r["direct_count"]), (3, 3, 3))
+        self.assertEqual({h["where"] for h in r["hits"]}, {"left.txt", "right.txt"})
+        for remote in ("mirror", "public"):
+            self.assertIn(f"2 not on remote {remote}", said)
+        # Tracking branches of the same remote are taken together.
+        self.git_out("update-ref", "refs/remotes/mirror/other", right)
+        self.refused("release", "a")
+        self.assertEqual(release.releases(self.desk)[-1]["remote_counts"], {"mirror": 1, "public": 2})
+
+    def test_adding_an_empty_remote_invalidates_a_first_release_scan(self):
+        from hansa import release
+        self.with_release("true")
+        head = self.commit_in_repo("b.txt", "private falcon\n")
+        self.git_out("remote", "add", "mirror", str(self.tmp / "mirror"))
+        self.git_out("update-ref", "refs/remotes/mirror/main", head)
+        self.assertTrue(self.page_save(lambda s: s.update(release_forbidden=["Falcon"]))["ok"])
+        self.hansa("release", "a")
+        r = release.releases(self.desk)[-1]
+        self.assertEqual(r["checked"], 0)
+        self.assertTrue(release.answer(self.desk, r["id"], True, commit=r["commit"], command=r["command"])["ok"])
+        self.git_out("remote", "add", "public", str(self.tmp / "public"))
+        proc = release.start(self.desk, r["id"])
+        if proc is not None:
+            proc.wait(timeout=30)
+            release.finish(self.desk, r["id"])
+        self.assertIsNone(proc)
+        r = release.get(self.desk, r["id"])
+        self.assertEqual((r["state"], r["checked"]), ("forbidden", 2))
+        self.assertEqual(r["hits"][0]["where"], "b.txt")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_first_release_page_explains_each_remote_count(self):
+        self.with_release("true")
+        head = self.git_out("rev-parse", "HEAD")
+        for remote in ("mirror", "public"):
+            self.git_out("remote", "add", remote, str(self.tmp / remote))
+        self.git_out("update-ref", "refs/remotes/mirror/main", head)
+        self.hansa("release", "a")
+        harness = self.tmp / "release-remotes.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                got = subprocess.run(["node", str(harness), str(Path(cli.__file__).with_name("ui.html")),
+                                      "release-hits", language], input=json.dumps({"/api/status": views.status(self.desk)}),
+                                     capture_output=True, text=True, timeout=60)
+                self.assertEqual(got.returncode, 0, got.stderr)
+                shown = json.loads(got.stdout)
+                for label in (("1 not on remote public", "0 not on remote mirror") if language == "en" else
+                              ("1 个不在远程 public 上", "0 个不在远程 mirror 上")):
+                    self.assertIn(label, shown)
+
+    def test_release_watch_forbidden_word_warns_when_saved(self):
+        self.assertTrue(self.page_save(lambda s: s.update(release_forbidden=["Falcon"]))["ok"])
+        told = self.hansa("lane", "target", "a", "public", "true", "--watch", "echo falcon watch")
+        self.assertIn('Warning: lane a\'s release target public holds "Falcon"', told)
+        self.assertIn("watch command: echo falcon watch", told)
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["public"]["watch"], "echo falcon watch")
+
+    def test_release_watch_forbidden_word_refuses_request_and_rescans_before_start(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "public", "true", "--watch", "echo falcon watch")
+        self.assertTrue(self.page_save(lambda s: s.update(release_forbidden=["Falcon"]))["ok"])
+        told = self.refused("release", "a", "public")
+        self.assertIn("watch command: echo falcon watch", told)
+        r = release.releases(self.desk)[-1]
+        self.assertEqual(r["state"], "forbidden")
+        self.assertEqual([(h["where"], h["commit"]) for h in r["hits"]], [("watch command", "")])
+        self.assertTrue(self.page_save(lambda s: s.update(release_forbidden=[]))["ok"])
+        self.hansa("release", "a", "public")
+        r = release.releases(self.desk)[-1]
+        self.assertTrue(release.answer(self.desk, r["id"], True, commit=r["commit"], command=r["command"])["ok"])
+        self.assertTrue(self.page_save(lambda s: s.update(release_forbidden=["Falcon"]))["ok"])
+        self.assertIsNone(release.start(self.desk, r["id"]))
+        self.assertEqual(release.get(self.desk, r["id"])["state"], "forbidden")
+        self.assertEqual(release.get(self.desk, r["id"])["hits"][0]["where"], "watch command")
+
     def test_every_outgoing_commit_is_checked_and_none_already_on_a_remote_tracking_branch(self):
         from hansa import release
         self.with_release("true")
