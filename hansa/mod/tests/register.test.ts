@@ -22,12 +22,13 @@ function setup(on, tokens: { value: number }, thresholds: Record<string, unknown
   const variables: Record<string, string> = { HANSA_MOD_SETTINGS: SETTINGS,
     ...(clear === undefined ? {} : { HANSA_MOD_CLEAR_DAILY: clear }), ...env }
   const files: Record<string, string> = { [SETTINGS]: desk(thresholds) }
-  const calls = { compact: 0, refuse: '', skip: '', shrinks: true, reads: 0, writes: 0, logs: [] as string[],
+  const calls = { compact: 0, refuse: '', skip: '', shrinks: true, reads: 0, envReads: 0, writes: 0, logs: [] as string[],
     clears: [] as { command: string, args?: string, at: number }[], clearFails: 0,
     during: null as null | (($) => Promise<unknown>), usage: null as null | (() => Promise<unknown>),
     env: null as null | ((name: string) => Promise<unknown>),
     lines: [] as (string | undefined)[], model: 'Opus 5.5', steps: [] as Record<string, unknown>[] }
   on('env.get', async ($, e) => { // as mock.env answers, with a moment for what comes while the mod waits for a variable
+    calls.envReads += 1 // any variable: what the mod asks of its environment
     if (calls.env) await calls.env(e.name)
     return { value: typeof variables[e.name] === 'string' ? variables[e.name] : undefined }
   })
@@ -647,6 +648,21 @@ test('a Stop while the clear has not returned: no decision starts, not even a re
   clear.release()
   await settled(clock, () => calls.reads > reads) // the decision once the clear has returned: it reads them
   expect(calls.reads).toBe(reads + 1)
+})
+
+test('a Stop while the clear has not returned: no decision starts, not even a read of the environment', async ($, on) => {
+  const { clock, calls } = await started($, on, '04-09', 0, 3)
+  await until(clock, 0, 4, 10)
+  await turn($, 't1')
+  const clear = holdClear(calls)
+  await clock.advance(5 * MIN)
+  await clear.asked
+  const envReads = calls.envReads
+  await held($, stopped())
+  await clock.advance(10 * MIN) // the Stop's decision, once its hook has returned, and any wait it could set
+  expect(calls.envReads).toBe(envReads)
+  clear.release()
+  await settled(clock, () => calls.envReads > envReads) // the decision once the clear has returned: it reads them
 })
 
 test('a decision under way when the clear starts: it decides nothing once it sees the clear', async ($, on) => {
