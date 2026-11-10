@@ -2280,6 +2280,7 @@ class DesksTest(unittest.TestCase):
         self.assertIn(str(good.root), said)
         self.assertNotIn("private failure text", said + raw)
         self.assertEqual(sum(str(gone) in line for line in said.splitlines()), 1)
+        self.assertIn(f"hansa desks --forget {shlex.quote(str(gone))}", said)
 
     def test_desks_missing_list_and_unreadable_list_use_the_shared_reason(self):
         from hansa.desk import desks_list_problem
@@ -26662,6 +26663,117 @@ def save():'''))
         m = self.settle(d, tid)
         self.assertEqual(m["state"], "done", m)
         self.assertEqual(run.sandbox_held(self.desk), {})
+
+    def test_a_lane_whose_repository_folder_is_gone_says_so_and_the_way_out(self):
+        repo = self.desk.settings()["lanes"]["a"]["repo"]
+        self.repo.rename(self.tmp / "repo-moved")
+        # in order: the lane's tasks cleared first (lane remove refuses otherwise), and queued again after
+        way_out = ("cancel its queued tasks and close those waiting for review (hansa cancel, hansa close), then "
+                   "hansa lane remove a, then hansa lane add a --repo NEW_PATH, then queue the tasks again")
+        for shown in (self.hansa("explain", "lane", "a"), self.hansa("lane")):
+            self.assertIn(f"its repository folder {repo} is gone", shown)
+            self.assertIn(way_out, shown)
+            self.assertNotIn("then start in a fresh worktree", shown)  # as if the waiting tasks carried over
+        out = self.hansa("add", "--lane", "a", "Add hello.txt")  # queued, and told why it waits
+        tid = re.search(r"(t\d+) queued", out).group(1)
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertIn(f"{tid} waits: lane a's repository folder {repo} is gone", out)
+        self.assertIn(way_out, out)
+        Dispatcher(self.desk).tick()
+        self.assertIn(way_out, views.status_text(views.status(self.desk)))
+        self.assertIn(way_out, self.hansa("show", tid))
+        self.assertIn(way_out, self.told_starts()[0])
+
+    def test_a_lane_whose_repository_folder_moved_is_removed_and_added_on_the_new_folder(self):
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.desk.update(tid, state="cancelled")
+        wt = self.desk.worktrees_dir / "a"
+        (wt / "mine.txt").write_text("not committed\n")
+        moved = self.tmp / "repo moved"
+        self.repo.rename(moved)
+        out = self.hansa("lane", "remove", "a")
+        self.assertNotIn("a", self.desk.settings()["lanes"])
+        self.assertFalse(os.path.lexists(wt))
+        aside = Path(re.search(r"moved aside to (\S+?)(?:[;,]|$)", out, re.M).group(1))
+        self.assertTrue(aside.is_relative_to(self.desk.root), out)
+        self.assertEqual((aside / "mine.txt").read_text(), "not committed\n")  # nothing in it deleted
+        self.assertTrue((aside / "hello.txt").exists())
+        self.assertIn("hansa lane add a --repo NEW_PATH, then queue its tasks again", out)
+        out = self.hansa("lane", "add", "a", "--repo", str(moved))
+        self.assertNotIn("moved aside", out)  # nothing left at worktrees/a
+        m = self.settle(d, self.desk.new_task("Add two.txt", lane="a"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(m["worktree"], str(wt))
+        self.assertFalse((wt / "mine.txt").exists())  # a fresh worktree
+
+    def test_lane_remove_discard_and_keep_on_a_lane_whose_repository_folder_is_gone(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        d = Dispatcher(self.desk)
+        for ln in ("a", "b"):
+            tid = self.desk.new_task("Add hello.txt", lane=ln)
+            self.assertEqual(self.settle(d, tid)["state"], "done")
+            self.desk.update(tid, state="cancelled")
+        self.repo.rename(self.tmp / "repo-moved")
+        out = self.hansa("lane", "remove", "a", "--discard")
+        self.assertFalse(os.path.lexists(self.desk.worktrees_dir / "a"))
+        self.assertIn(f"Its worktree {self.desk.worktrees_dir / 'a'} is deleted", out)
+        self.assertEqual([p.name for p in self.desk.worktrees_dir.iterdir()], ["b"])
+        out = self.hansa("lane", "remove", "b", "--keep")
+        self.assertIn("there is no repository to keep a branch in", out)
+        aside = Path(re.search(r"moved aside to (\S+?)(?:[;,]|$)", out, re.M).group(1))
+        self.assertTrue((aside / "hello.txt").exists())
+        self.assertFalse(os.path.lexists(self.desk.worktrees_dir / "b"))
+
+    def test_lane_add_sets_aside_a_worktree_left_of_another_or_an_unreachable_repository(self):
+        other = self.tmp / "other"
+        shutil.copytree(self.repo, other)
+        d = Dispatcher(self.desk)
+        wt = self.desk.worktrees_dir / "a"
+
+        def leave_worktree():  # as an earlier version's lane remove left it: the lane gone, its worktree not
+            tid = self.desk.new_task("Add hello.txt", lane="a")
+            self.assertEqual(self.settle(d, tid)["state"], "done")
+            self.desk.update(tid, state="cancelled")
+            (wt / "mine.txt").write_text("left\n")
+            s = self.desk.settings()
+            del s["lanes"]["a"]
+            self.assertEqual(self.desk.save_settings(s), [])
+
+        leave_worktree()  # its own repository: kept as it is
+        out = self.hansa("lane", "add", "a", "--repo", str(self.repo))
+        self.assertNotIn("moved aside", out)
+        self.assertTrue((wt / "mine.txt").exists())
+        (wt / "mine.txt").unlink()
+        renamed = self.tmp / "repo-renamed"
+        # renamed: git there still lists the worktree, whose .git names the old folder; then a repository of its own
+        for name, rename, new in (("a repository moved", True, renamed), ("another repository", False, other)):
+            with self.subTest(name):
+                leave_worktree()
+                if rename:
+                    self.repo.rename(renamed)
+                out = self.hansa("lane", "add", "a", "--repo", str(new))
+                said = [x for x in out.splitlines() if "moved aside" in x]
+                self.assertEqual(len(said), 1, out)
+                aside = Path(re.search(r"moved aside to (\S+?)(?:[;,]|$)", said[0]).group(1))
+                self.assertTrue(aside.is_relative_to(self.desk.root))
+                self.assertEqual((aside / "mine.txt").read_text(), "left\n")
+                # another repository, still there, lists the worktree until pruned; a moved one's old folder is gone
+                pruned = f"until git worktree prune is run in {renamed.resolve()}"
+                if rename:
+                    self.assertNotIn("git worktree prune", said[0])
+                else:
+                    self.assertIn(pruned, said[0])
+                    self.assertIn(f"still lists that worktree at {wt} ", said[0])
+                    listed = lambda: subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=renamed,
+                                                    capture_output=True, text=True, check=True).stdout
+                    self.assertIn(f"worktree {wt.resolve()}\n", listed())  # as said
+                    subprocess.run(["git", "worktree", "prune"], cwd=renamed, check=True)
+                    self.assertNotIn(f"worktree {wt.resolve()}\n", listed())
+                m = self.settle(d, self.desk.new_task("Add two.txt", lane="a"))
+                self.assertEqual(m["state"], "done", m)
+                self.assertFalse((wt / "mine.txt").exists())
 
     def test_a_worktree_git_cannot_prepare_holds_its_lane_alone_until_it_is_fixed(self):
         from hansa import run

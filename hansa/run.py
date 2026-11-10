@@ -824,6 +824,20 @@ START_NEXT = {
                 "can prepare it (hansa explain server has git's whole error)"}
 
 
+def repo_gone_text(lane_name: str, repo: str) -> str:
+    """A lane whose repository folder is gone, which it was, and the way out when it was moved or renamed."""
+    return (f"its repository folder {repo} is gone (moved or removed); {START_NEXT['repo']}; "
+            f"{repo_way_out(lane_name)}")
+
+
+def repo_way_out(lane_name: str) -> str:
+    """In order, as hansa lane remove refuses while the lane has queued tasks or tasks waiting for review, and the
+    lane's tasks do not carry over to the lane added again."""
+    return (f"if it was moved or renamed: cancel its queued tasks and close those waiting for review (hansa cancel, "
+            f"hansa close), then hansa lane remove {lane_name}, then hansa lane add {lane_name} --repo NEW_PATH, "
+            f"then queue the tasks again (they do not carry over)")
+
+
 def sandbox_held(desk: Desk) -> dict:
     """The lanes whose runs' sandbox could not start, as last tried: {lane: {group: {why, part, kind, at, task}}},
     a group as in SANDBOX_GROUPS. A record written before groups ({lane: {why, ...}}) is read by its kind."""
@@ -840,21 +854,23 @@ def sandbox_held(desk: Desk) -> dict:
     return out
 
 
-def start_held_text(h: dict, short: bool = False) -> str:
+def start_held_text(h: dict, short: bool = False, lane: str = "") -> str:
     """Why no task starts on a lane held for the machine or the lane (start_hold), and what starts them: in one
-    line when short, the reason's first line (git's error may be several)."""
+    line when short, the reason's first line (git's error may be several). lane: the lane's name, for the way out
+    of a repository folder gone (else the entry's own lane, or L)."""
     why = str(h.get("why") or "?")
     if short:
         why = (why.strip().splitlines() or ["?"])[0]
-    return f"{why}; {START_NEXT.get(h.get('cause'), 'its tasks wait')}"
+    out = f"{why}; {START_NEXT.get(h.get('cause'), 'its tasks wait')}"
+    return out + (f"; {repo_way_out(lane or h.get('lane') or 'L')}" if h.get("cause") == "repo" else "")
 
 
-def sandbox_held_text(h: dict, zh: bool = False, short: bool = False) -> str:
+def sandbox_held_text(h: dict, zh: bool = False, short: bool = False, lane: str = "") -> str:
     """Why a lane's runs are held (an entry of sandbox_held), which of them, and what starts them again, in a
     clause. zh: in Chinese for the alert, keeping the raw diagnostic in either language. short: the reason's first
-    line alone (hansa status), for one held for the machine or the lane (start_held_text)."""
+    line alone (hansa status), for one held for the machine or the lane (start_held_text), whose lane is `lane`."""
     if h.get("cause"):
-        return start_held_text(h, short)
+        return start_held_text(h, short, lane)
     why = str(h.get("why") or "?")
     if zh:
         kind = {"worker": "工作智能体", "verifier": "核验者", "check": "检查"}.get(h.get("kind"), "运行")
@@ -7231,7 +7247,7 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
             continue
         if "start" in held.get(ln, {}):  # held for the machine or the lane (start_hold)
             h = held[ln]["start"]
-            why.append(reason("start", f"HELD: lane {ln} cannot run: {sandbox_held_text(h, short=True)}",
+            why.append(reason("start", f"HELD: lane {ln} cannot run: {sandbox_held_text(h, short=True, lane=ln)}",
                               lane=ln, cause=h.get("cause") or "", why=(str(h.get("why") or "?").splitlines() or ["?"])[0]))
             continue
         if "work" in held.get(ln, {}):

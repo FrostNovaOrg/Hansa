@@ -90,6 +90,41 @@ repository's commits. `--lane NAME` is judged by the same settings check as
 `hansa lane add`, so a name it refuses (a capital, `_`, a space, a path) is
 refused before anything is made.
 
+### A lane's repository moved or renamed
+
+`hansa lane set` cannot change a lane's `repo`. When the repository's folder is
+moved or renamed, the lane's tasks wait (see [Task states](tasks.md#task-states)),
+and `hansa lane`, `hansa explain lane L`, `hansa add --lane L` and, once one of
+the lane's tasks has tried to start, `hansa status` say that the folder is gone, which folder it was, and the way out,
+in order: cancel the lane's queued tasks and close those waiting for review
+(`hansa cancel`, `hansa close`), then `hansa lane remove L`, then
+`hansa lane add L --repo NEW_PATH`, then queue the tasks again. They do not carry
+over: `hansa lane remove` refuses while the lane has queued tasks or tasks waiting
+for review, and with the repository gone a review can only be closed, not merged.
+The tasks queued again start in a fresh worktree.
+The lane is added with the default settings, so set its `check`, `setup` and the
+rest again, as `hansa explain lane L` showed them before the removal; its standing
+instructions stay in `lanes/L/`.
+
+`hansa lane remove L` cannot remove the worktree of a lane whose repository folder
+is gone with `git worktree remove`, as there is no repository to run it in. It
+moves the folder aside within the desk, to `worktrees/L-aside-DATE`, deleting
+nothing in it, and says where; workers of other lanes cannot read it, as for any
+other entry there. `--discard` deletes it instead. `--keep` does as the default
+and says why: there is no repository to keep a branch in.
+
+`hansa lane add L` finds a worktree left at `worktrees/L` (by an older version's
+`hansa lane remove`, say) that is not a worktree of the lane's repository: one no
+repository hansa can reach lists, one of another repository, or one whose `.git`
+names the repository's old folder. It moves it aside the same way and says so in
+one line, and the lane gets a fresh worktree. When the worktree was another
+repository's and that repository is still there, the line adds that git there
+still lists the worktree until `git worktree prune` is run in it; hansa leaves
+that repository alone. When git in the lane's repository
+still lists `worktrees/L` as a worktree whose folder is gone, `hansa lane add`
+clears that record (`git worktree remove --force`), as `git worktree add` refuses
+the folder otherwise.
+
 Settings and JSON state files use UTF-8. Filename bytes that are not UTF-8,
 as Linux permits, are stored as JSON escapes and restored when the file is
 read. Ordinary Unicode text stays readable, and saved command lines keep
@@ -993,7 +1028,7 @@ reports, to-do texts, provider keys, release codes or the page's key.
 folder and files and every other entry as they are. It refuses while that desk's
 server runs, saying to stop it first, and says so when `PATH` is not on the
 list; both change nothing and exit 1. An entry whose folder is gone can still be
-taken off this way, so removing a desk takes three steps: stop its server (`x` in
+taken off this way (`hansa desks` gives that command beside it), so removing a desk takes three steps: stop its server (`x` in
 the menu), `hansa desks --forget DIR`, then delete `DIR`. The lock the list is
 written under is the one `hansa serve` takes, so a start and a forget cannot
 leave two versions of the list.
@@ -1319,9 +1354,10 @@ The [intent records](tasks.md#goals-and-product-decisions) keep goals and decisi
 including their reasons, replacements and outcomes.
 
 On the new machine, install the tools, run `hansa doctor`. Logins are per machine: run `claude auth login`. The
-coordinator's conversation stays behind. Changed paths: `hansa lane set` cannot change `repo`: edit it in
-`settings.json` while stopped, after merging or closing reviewed tasks; check `write`, `env` and `config_dir`. A copied
-repository needs `git worktree prune`.
+coordinator's conversation stays behind. Changed paths: `hansa lane set` cannot change `repo`; cancel or close the
+lane's tasks, then `hansa lane remove L`, then `hansa lane add L --repo NEW_PATH`, then queue the tasks again
+([a lane's repository moved or renamed](#a-lanes-repository-moved-or-renamed)); check `write`, `env` and `config_dir`.
+A copied repository needs `git worktree prune`.
 
 `hansa up` starts the server, lists the desk for this account, and says how to start the coordinator. Run `hansa lane try
 L` per lane, then `hansa resume`. Success: `hansa status` and `hansa desks` show your tasks and requests.

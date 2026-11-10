@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import stat
 import subprocess
@@ -22,7 +23,7 @@ from .desk import (EFFORTS, Desk, SettingsError, validate, allow_fix, default_la
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
-from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
+from .run import (HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
@@ -573,6 +574,9 @@ def _runs_when(desk: Desk, tid: str, base: str) -> str:
 def _waits(desk: Desk, tid: str) -> str:
     """A just-queued task's dependency or provider wait, in hansa status's words."""
     m = desk.meta(tid)
+    ln = desk.settings()["lanes"].get(m.get("lane") or "")
+    if ln and not Path(ln["repo"]).is_dir():  # before hansa serve has tried it and held the lane (run.start)
+        return f"\n{tid} waits: lane {m['lane']}'s {repo_gone_text(m['lane'], ln['repo']).removeprefix('its ')}"
     detail = waiting_detail(desk, desk.settings(), m, set())
     why = detail["waiting"]
     return f"\n{tid} waits: {why}" if detail["waiting_code"] == "after" or "no provider ready" in why else ""
@@ -2476,6 +2480,8 @@ def cmd_lane(a):
         widths = [max((len(r[i]) for r in rows), default=0) for i in range(3)]
         for r in rows:
             print("  ".join(f"{x:<{w}}" for x, w in zip(r, widths)) + "  " + r[3])
+            if not Path(lanes[r[0]]["repo"]).is_dir():
+                print(f"  {r[0]}: {repo_gone_text(r[0], lanes[r[0]]['repo'])}")
         print("no lanes yet: hansa lane add L --repo PATH" if not lanes else "more on one: hansa explain lane L")
         return
     if a.action == "try":
@@ -2547,6 +2553,7 @@ def cmd_lane(a):
                 base = ln["base"] = make_lane_repo(repo, new_repo, ln, "no lane was added")
             _save(desk, new, "hansa lane add")
             desk.event("lane_added", lane=a.name, **({"like": a.like} if a.like else {}))
+            aside_wt = _fresh_worktree(desk, a.name, repo)
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
             brief = desk.lanes_dir / a.name / "brief.md"
             aside = None
@@ -2563,6 +2570,8 @@ def cmd_lane(a):
             elif not brief.exists():
                 write_text(brief, "")
             print(_lane_added(a.name, repo, base, ln))
+            if aside_wt:
+                print(aside_wt)
             if aside:
                 print(f"An earlier lane {a.name} left standing instructions in {brief}; lane {a.name} now has "
                       f"{a.like}'s, and the earlier ones are kept in {aside}")
@@ -2714,7 +2723,7 @@ def _worktree_state(desk: Desk, wt: Path, repos: list) -> dict:
     repo = _worktree_repo(desk, wt, repos)
     if repo is None:
         return {"why": "no repository hansa knows of lists it as a worktree, so hansa cannot tell whose it is "
-                       "and runs no git there"}
+                       "and runs no git there", "unreached": True}
     try:
         check_git_file(desk, wt, repo)  # no git through a .git file hansa did not see git write
         left = set(sandbox_leftovers(desk, wt))
@@ -2759,6 +2768,100 @@ def _remove_worktree(desk: Desk, lane: str, wt: Path, st: dict, keep: bool, ln: 
     _remember_git_file(desk, wt, None)
     desk.event("lane_worktree_removed", lane=lane, worktree=str(wt), **({"kept": kept} if kept else {}))
     return kept
+
+
+def _worktree_of(desk: Desk, wt: Path, repo) -> bool:
+    """Whether the worktree is the repository's own: git there lists it, and its .git file, and the line hansa
+    remembers of it if any, name that git folder. A worktree whose repository was moved is not: its .git names the
+    old place."""
+    from .run import _known_git_files, _read_git_file, git_admin_dirs
+    try:
+        dirs = git_admin_dirs(Path(repo), wt)
+    except (RuntimeError, OSError):
+        return False
+    if len(dirs) != 1:
+        return False
+
+    def names(line) -> bool:
+        if not line or not line.startswith("gitdir:"):
+            return False
+        named = Path(line[len("gitdir:"):].strip())
+        return (named if named.is_absolute() else wt / named).resolve() == dirs[0]
+    known = _known_git_files(desk).get(str(wt))
+    return names(_read_git_file(wt)[0]) and (known is None or names(known))
+
+
+def _move_aside(desk: Desk, lane: str, wt: Path, why: str) -> Path:
+    """Move a lane's worktree that git cannot remove (its repository is gone, or it is not the lane's repository's)
+    aside within the desk, beside it in worktrees/, nothing in it deleted; hansa forgets its .git line, so the lane
+    gets a fresh worktree. Returns where it went."""
+    from .run import _remember_git_file
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    aside, n = wt.with_name(f"{wt.name}-aside-{stamp}"), 1
+    while os.path.lexists(aside):
+        n += 1
+        aside = wt.with_name(f"{wt.name}-aside-{stamp}-{n}")
+    os.rename(wt, aside)
+    _remember_git_file(desk, wt, None)
+    desk.event("lane_worktree_aside", lane=lane, worktree=str(wt), aside=str(aside), why=why)
+    return aside
+
+
+def _fresh_worktree(desk: Desk, lane: str, repo) -> str:
+    """hansa lane add: a worktree left at worktrees/LANE (by an earlier version's lane remove, say) that is not the
+    repository's own is moved aside (_move_aside), so the lane's tasks start in a fresh one. The line that says so,
+    or ''."""
+    wt = desk.worktrees_dir / lane
+    said = ""
+    if os.path.lexists(wt) and not _worktree_of(desk, wt, repo):
+        why = f"it is not a worktree of {repo}"
+        lister = _listing_repo(desk, wt, repo)
+        try:
+            aside = _move_aside(desk, lane, wt, why)
+        except OSError as e:
+            return (f"A worktree {wt} is left from an earlier lane {lane}, and {why}; it could not be moved aside "
+                    f"({e.strerror or e}), so the lane's tasks cannot start until the principal moves it")
+        said = (f"A worktree {wt} was left from an earlier lane {lane}, and {why}: it is moved aside to {aside}, "
+                f"with nothing in it deleted; the lane's tasks start in a fresh worktree"
+                + (f"; git in {lister} still lists that worktree at {wt} until git worktree prune is run in "
+                   f"{lister}" if lister else ""))
+    _forget_missing_worktree(repo, wt)
+    return said
+
+
+def _listing_repo(desk: Desk, wt: Path, repo) -> str:
+    """The repository, other than `repo` and still there, whose git lists the worktree: the folder its .git line (or
+    the line hansa remembers of it) names, read as files and never through git, when that git folder's gitdir names
+    the worktree back. '' when none."""
+    from .run import _known_git_files, _read_git_file
+    for line in (_read_git_file(wt)[0], _known_git_files(desk).get(str(wt))):
+        if not line or not line.startswith("gitdir:"):
+            continue
+        try:
+            admin = Path(line[len("gitdir:"):].strip())
+            admin = (admin if admin.is_absolute() else wt / admin).resolve()
+            back = Path((admin / "gitdir").read_text(encoding="utf-8").strip())
+            if (back if back.is_absolute() else admin / back).resolve() != (wt / ".git").resolve():
+                continue
+            common = Path((admin / "commondir").read_text(encoding="utf-8").strip())
+            common = (common if common.is_absolute() else admin / common).resolve()
+        except (OSError, ValueError):
+            continue
+        folder = common.parent if common.name == ".git" else common
+        if common.is_dir() and folder != Path(repo).resolve():
+            return str(folder)
+    return ""
+
+
+def _forget_missing_worktree(repo, wt: Path) -> None:
+    """git's record of the worktree in the repository, when the worktree's folder is no longer there (moved aside,
+    or removed by hand): cleared, as git worktree add refuses a folder git still lists as a missing worktree."""
+    from .run import git_admin_dirs
+    try:
+        if not os.path.lexists(wt) and git_admin_dirs(Path(repo), wt):
+            git("worktree", "remove", "--force", str(wt), cwd=repo)
+    except (RuntimeError, OSError):
+        pass  # the task's start says what git refuses
 
 
 def _target_text(name: str, t: dict, ln: dict) -> str:
@@ -2998,7 +3101,11 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
         print(f"lane {name} removed; its standing instructions stay in {desk.lanes_dir / name}")
         for n in verifiers:
             print(f"lane {name} removed from lane {n}'s verify_for")
+    gone = ln["repo"] if ln and not Path(ln["repo"]).is_dir() else ""
     for wt, st in states.items():
+        if st.get("unreached") and gone:  # git cannot remove it: there is no repository to run it in
+            _gone_worktree(desk, name, wt, gone, a)
+            continue
         if st.get("why"):
             print(f"Its worktree {wt} stays: {st['why']}. The principal can look at it and delete it; if git in its "
                   f"repository still lists it, git worktree prune there clears that")
@@ -3011,6 +3118,34 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
         print(f"Its worktree {wt} is removed, with git worktree remove in {st['repo']}, as the desk's account"
               + (f"; what it held that no branch kept is on branch {kept} there" if kept else
                  "; what it held that no branch kept is dropped" if held.get(wt) else ""))
+    if gone and known:
+        print(f"To add it again on the repository's new folder: hansa lane add {name} --repo NEW_PATH, then queue "
+              f"its tasks again; they start in a fresh worktree. It is added with the default settings: set its "
+              f"check, setup and the rest again")
+
+
+def _gone_worktree(desk: Desk, name: str, wt: Path, repo: str, a) -> None:
+    """hansa lane remove, for the worktree of a lane whose repository folder is gone, which git cannot remove:
+    moved aside within the desk, or deleted with --discard."""
+    why = f"its repository folder {repo} is gone, so git cannot remove it"
+    try:
+        aside = _move_aside(desk, name, wt, why)
+    except OSError as e:
+        print(f"Its worktree {wt} stays: {why}, and it could not be moved aside ({e.strerror or e}). The principal "
+              f"can look at it and delete it")
+        return
+    if a.discard:
+        shutil.rmtree(aside, ignore_errors=True)
+        if os.path.lexists(aside):
+            print(f"Its worktree {wt} could not all be deleted (--discard): {why}; what is left of it is moved "
+                  f"aside to {aside}, for the principal to look at and delete")
+        else:
+            desk.event("lane_worktree_removed", lane=name, worktree=str(wt), deleted=True)
+            print(f"Its worktree {wt} is deleted (--discard), with all it held: {why}")
+        return
+    print(("--keep keeps nothing on a branch: there is no repository to keep a branch in. " if a.keep else "")
+          + f"Its worktree {wt} is moved aside to {aside}, with nothing in it deleted: {why}. Delete it when "
+            f"nothing in it is needed")
 
 
 def _lane_try(desk: Desk, a) -> None:
@@ -3865,7 +4000,9 @@ def main(argv=None):
         "Remove a lane with no task queued, running or waiting for review, and its worktrees (git worktree remove, "
         "as the desk's account). When a worktree holds changes not committed or commits no branch keeps, nothing is "
         "removed unless --keep or --discard says what to do with them. For a lane that is gone but whose worktree "
-        "is still there, it removes the worktree the same way. The lane's standing instructions stay."))
+        "is still there, it removes the worktree the same way. The worktree of a lane whose repository folder is gone, "
+        "which git cannot remove, is moved aside within the desk (--discard deletes it). The lane's standing "
+        "instructions stay."))
     q.add_argument("name")
     q.add_argument("--keep", action="store_true", help="put what the worktree holds that no branch keeps on a new "
                    "branch hansa-kept/NAME-DATE of the lane's repository, then remove it")
