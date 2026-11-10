@@ -11,6 +11,17 @@ looked at (for example, a run's sandbox closes an enclosing desk), it skips
 that folder and keeps searching. With no desk found, commands that need one
 give the usual "no desk here" refusal.
 
+A folder named with `--desk` or `HANSA_DESK` must be a desk in the same sense:
+it must hold `settings.json` and `tasks/`. When it does not, or does not exist,
+a command that needs a desk refuses with a non-zero exit before it reads or
+writes anything there. The refusal names the folder and which of the two named
+it, and points to `hansa init DIR` for a new desk. So a mistyped `--desk`
+cannot queue work that no server will run. `hansa up` refuses the same way.
+Commands that need no desk ignore the name: `hansa init`, `hansa desks`,
+`hansa help`, `--version` and the menu. If the desk's `settings.json` is there
+but cannot be read, commands refuse as
+[Reading and restoring settings](#reading-and-restoring-settings) describes.
+
 ## Creating a desk and lanes
 
 For `hansa init` and startup, follow

@@ -2695,13 +2695,23 @@ class Desk:
 
     @classmethod
     def find(cls, explicit: str | None = None, *, optional: bool = False) -> Desk | None:
-        """Find a named or enclosing desk; optional returns None only when neither is given or found."""
+        """Find a named or enclosing desk; optional returns None only when neither is given or found.
+        A named folder that is not a desk (is_desk) is refused, so that nothing is written there."""
         if explicit or os.environ.get("HANSA_DESK"):
-            return cls(explicit or os.environ["HANSA_DESK"])
+            desk = cls(explicit or os.environ["HANSA_DESK"])
+            how = "--desk" if explicit else "HANSA_DESK"
+            try:
+                if desk.is_desk():
+                    return desk
+            except OSError as e:
+                raise SystemExit(f"hansa: cannot read {desk.given}, named by {how} ({e.strerror or e})") from None
+            raise SystemExit(f"hansa: {desk.given}, named by {how}, is not a desk (it holds no settings.json and "
+                             "tasks/); nothing was done. Name the desk's own folder, or make a new desk with "
+                             "hansa init DIR")
         here = Path.cwd().resolve()
         for d in (here, *here.parents):
             try:
-                found = (d / "settings.json").is_file() and (d / "tasks").is_dir()
+                found = cls(d).is_desk()
             except OSError:  # a sandbox may close an enclosing desk to a run
                 continue
             if found:
@@ -2709,6 +2719,11 @@ class Desk:
         if optional:
             return None
         raise SystemExit("hansa: no desk here. Run inside a desk, pass --desk DIR, or set HANSA_DESK.")
+
+    def is_desk(self) -> bool:
+        """Whether this folder is a desk: hansa init made its settings.json and tasks/. Raises OSError when a
+        folder on the way cannot be looked into."""
+        return self.settings_path.is_file() and self.tasks_dir.is_dir()
 
     # -- settings ---------------------------------------------------------
     def _saved_settings(self) -> dict:
