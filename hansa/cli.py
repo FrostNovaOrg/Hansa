@@ -2764,15 +2764,42 @@ def _fresh_worktree(desk: Desk, lane: str, repo) -> str:
     said = ""
     if os.path.lexists(wt) and not _worktree_of(desk, wt, repo):
         why = f"it is not a worktree of {repo}"
+        lister = _listing_repo(desk, wt, repo)
         try:
             aside = _move_aside(desk, lane, wt, why)
         except OSError as e:
             return (f"A worktree {wt} is left from an earlier lane {lane}, and {why}; it could not be moved aside "
                     f"({e.strerror or e}), so the lane's tasks cannot start until the principal moves it")
         said = (f"A worktree {wt} was left from an earlier lane {lane}, and {why}: it is moved aside to {aside}, "
-                f"with nothing in it deleted; the lane's tasks start in a fresh worktree")
+                f"with nothing in it deleted; the lane's tasks start in a fresh worktree"
+                + (f"; git in {lister} still lists that worktree at {wt} until git worktree prune is run in "
+                   f"{lister}" if lister else ""))
     _forget_missing_worktree(repo, wt)
     return said
+
+
+def _listing_repo(desk: Desk, wt: Path, repo) -> str:
+    """The repository, other than `repo` and still there, whose git lists the worktree: the folder its .git line (or
+    the line hansa remembers of it) names, read as files and never through git, when that git folder's gitdir names
+    the worktree back. '' when none."""
+    from .run import _known_git_files, _read_git_file
+    for line in (_read_git_file(wt)[0], _known_git_files(desk).get(str(wt))):
+        if not line or not line.startswith("gitdir:"):
+            continue
+        try:
+            admin = Path(line[len("gitdir:"):].strip())
+            admin = (admin if admin.is_absolute() else wt / admin).resolve()
+            back = Path((admin / "gitdir").read_text(encoding="utf-8").strip())
+            if (back if back.is_absolute() else admin / back).resolve() != (wt / ".git").resolve():
+                continue
+            common = Path((admin / "commondir").read_text(encoding="utf-8").strip())
+            common = (common if common.is_absolute() else admin / common).resolve()
+        except (OSError, ValueError):
+            continue
+        folder = common.parent if common.name == ".git" else common
+        if common.is_dir() and folder != Path(repo).resolve():
+            return str(folder)
+    return ""
 
 
 def _forget_missing_worktree(repo, wt: Path) -> None:
@@ -3037,9 +3064,9 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
               + (f"; what it held that no branch kept is on branch {kept} there" if kept else
                  "; what it held that no branch kept is dropped" if held.get(wt) else ""))
     if gone and known:
-        print(f"To add it again on the repository's new folder: hansa lane add {name} --repo NEW_PATH; its tasks "
-              f"then start in a fresh worktree. It is added with the default settings: set its check, setup and the "
-              f"rest again")
+        print(f"To add it again on the repository's new folder: hansa lane add {name} --repo NEW_PATH, then queue "
+              f"its tasks again; they start in a fresh worktree. It is added with the default settings: set its "
+              f"check, setup and the rest again")
 
 
 def _gone_worktree(desk: Desk, name: str, wt: Path, repo: str, a) -> None:

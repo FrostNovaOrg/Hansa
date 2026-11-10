@@ -848,8 +848,11 @@ def repo_gone_text(lane_name: str, repo: str) -> str:
 
 
 def repo_way_out(lane_name: str) -> str:
-    return (f"if it was moved or renamed: hansa lane remove {lane_name}, then hansa lane add {lane_name} --repo "
-            f"NEW_PATH (its tasks then start in a fresh worktree)")
+    """In order, as hansa lane remove refuses while the lane has queued tasks or tasks waiting for review, and the
+    lane's tasks do not carry over to the lane added again."""
+    return (f"if it was moved or renamed: cancel its queued tasks and close those waiting for review (hansa cancel, "
+            f"hansa close), then hansa lane remove {lane_name}, then hansa lane add {lane_name} --repo NEW_PATH, "
+            f"then queue the tasks again (they do not carry over)")
 
 
 def sandbox_held(desk: Desk) -> dict:
