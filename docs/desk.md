@@ -1169,12 +1169,18 @@ started a new one (and why), or continued the folder's most recent one, and
 the attach command (`tmux -L NAME attach -t SESSION`, or `tmux attach -t
 SESSION` for tmux's default server). Only a pane tmux says is there and not
 dead counts as running: for a pane that ended and closed, tmux answers with
-nothing and exits 0. As the pane's command ends, the pane writes its last
-screen to `.hansa/coordinator-pane.txt` (`tmux capture-pane`) before it closes;
-so when the pane ended, `hansa up` says `coordinator failed to start:`, prints
-the last lines of that file (Claude Code's own words, such as a missing
-`claude` or a conversation not found), with the command to run by hand, and
-exits 1. Without tmux it starts no coordinator, and prints the
+nothing and exits 0. Only a start that ends at once leaves a file: when the
+pane's command ends within a minute of its start, the pane writes its last
+screen, up to 100 lines as they were shown (not redacted), to
+`.hansa/coordinator-pane.txt` (`tmux capture-pane`) before it closes. A session
+that ran longer and then ended writes none, so its conversation is not left on
+disk; `hansa up` removes the file before each start. So when the pane ended,
+`hansa up` says `coordinator failed to start:`, prints the last lines of that
+file (Claude Code's own words, such as a missing `claude` or a conversation not
+found), with the command to run by hand, and exits 1. When that start resumed
+the coordinator's conversation by its id, it also gives the command that starts
+the same session with a new conversation, to use when Claude Code says no
+conversation was found with that id. Without tmux it starts no coordinator, and prints the
 command to run in a terminal of one's own. On another account's desk it starts
 nothing, as for the server. While no session hears from hansa, `hansa status`
 says in one line that `hansa up` starts the session again, and how, or why it

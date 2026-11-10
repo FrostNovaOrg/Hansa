@@ -28,6 +28,9 @@ COORDINATOR_WAIT = 3.0  # seconds a started coordinator's pane must last to coun
 # in .hansa/: what the coordinator's pane showed last as it ended, written by the pane itself, so the reason a start
 # failed is not lost with the pane
 PANE_OUTPUT = "coordinator-pane.txt"
+# seconds: a pane whose command ended within these of its start keeps its screen in PANE_OUTPUT (a start that
+# failed); one that ran longer, a session that was used, keeps none
+PANE_KEPT_WITHIN = 60
 LAUNCHER = "notify-launch"  # hansa's hidden command that starts a session hansa notify on recorded (cli.py)
 # claude's words that pick a conversation, or give a session's inbox, and whether each takes a value (None: one
 # that does not start with -, if any). A start again drops them and picks the conversation its record names
@@ -229,10 +232,17 @@ def pane_command(env: dict, cmd: list, log: Path = None) -> str:
 
 def kept_pane(env: dict, cmd: list, tmux: str, out: Path) -> str:
     """What the coordinator's pane runs: the command as pane_command gives it, on the terminal (an interactive
-    session), and, as it ends, the pane's last screen written to out by tmux, before the pane closes."""
+    session), and, when it ends within PANE_KEPT_WITHIN seconds of its start (a start that failed: hansa up looks
+    after COORDINATOR_WAIT), the pane's last screen written to out by tmux, before the pane closes. A session that
+    ran longer and ended leaves no copy of its screen on disk."""
     keep = (shlex.quote(tmux) + ' -S "${TMUX%%,*}" capture-pane -p -J -S -100 -t "$TMUX_PANE" > '
             + shlex.quote(str(out)) + " 2>/dev/null")
-    return pane_command(env, cmd)[len("exec "):] + " ; s=$? ; " + keep + " ; exit $s"
+    # POSIX sh, which has no $SECONDS: the time by which it must end, from date and expr. A date that gives no number
+    # leaves t empty or not a number, and test then fails, so nothing is kept
+    began = f't=$(expr "$(date +%s)" + {PANE_KEPT_WITHIN} 2>/dev/null) ; '
+    soon = '[ "$(date +%s)" -lt "$t" ] 2>/dev/null'
+    return (began + pane_command(env, cmd)[len("exec "):] + " ; s=$? ; if " + soon + " ; then " + keep
+            + " ; fi ; exit $s")
 
 
 def pane_output(out: Path, lines: int = 12) -> list:
@@ -759,15 +769,15 @@ def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None
     return _keep(desk, rec, unsafe(desk, [*rec["argv"], folder]))
 
 
-def restart_plan(desk: Desk, rec: dict) -> dict:
+def restart_plan(desk: Desk, rec: dict, conv: dict = None) -> dict:
     """What hansa up runs to start the coordinator's session again, from its record: the command, the folder, the
     words claude was given, the command to run by hand, and which conversation it comes back with
-    (conversation_plan)."""
+    (conversation_plan, unless conv gives it, as {'how': 'new'} for the same start with a new conversation)."""
     words = [x for x in (rec.get("words") if isinstance(rec.get("words"), list) else []) if isinstance(x, str)]
     argv = [x for x in (rec.get("argv") if isinstance(rec.get("argv"), list) else []) if isinstance(x, str)]
     hansa = rec.get("hansa") if isinstance(rec.get("hansa"), str) and rec.get("hansa") else hansa_command()
     desk_words = ["--desk", str(desk.root)]
-    conv = conversation_plan(rec)
+    conv = conv or conversation_plan(rec)
     if rec.get("kind") == "coordinator":
         clear = ["--clear-daily", rec["clear_daily"]] if isinstance(rec.get("clear_daily"), str) and \
             rec.get("clear_daily") else []
@@ -1284,6 +1294,10 @@ def coordinator_up(desk: Desk) -> bool:
             + "\n".join("  " + x for x in said) if said else
             "coordinator failed to start: its pane ended and left no output"))
         print(desk.redact(f"Run it by hand: {by_hand(plan)}"))
+        if plan["conversation"]["how"] == "resume":  # its conversation may be gone though its record names it
+            new = restart_plan(desk, rec, {"how": "new"})
+            print(desk.redact(f"If Claude Code says no conversation was found with the id "
+                              f"{plan['conversation']['id']}, start a new one instead: {by_hand(new)}"))
     except (OSError, subprocess.SubprocessError) as e:
         detail = e.stderr if isinstance(e, subprocess.CalledProcessError) else str(e)
         print(desk.redact(f"coordinator failed to start: {str(detail).strip()}. Run it by hand: {by_hand(plan)}"))

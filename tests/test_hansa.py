@@ -4236,6 +4236,32 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout), (3, "gone\n"))  # the command's own status, its output on the pane
         self.assertEqual(out.read_text(), "captured: -S /s/tmux-1/x capture-pane -p -J -S -100 -t %7\n")
 
+    def test_the_pane_keeps_its_screen_only_when_its_command_ended_within_its_first_minute(self):
+        """A start that failed ends at once and keeps its screen; a session that ran longer, then ended, keeps
+        none (its conversation is not left on disk). A stand-in date gives the times the pane's shell reads."""
+        from hansa import up
+        tmux, date = self.tmp / "bin" / "tmux", self.tmp / "bin" / "date"
+        tmux.parent.mkdir()
+        tmux.write_text("#!/bin/sh\necho \"captured: $*\"\n")
+        times = self.tmp / "times"
+        date.write_text(f"#!/bin/sh\n/usr/bin/head -n 1 {times} ; /usr/bin/tail -n +2 {times} > {times}.n ; "
+                        f"/bin/mv {times}.n {times}\n")
+        for f in (tmux, date):
+            f.chmod(0o755)
+        out = self.tmp / "pane.txt"
+        pane = up.kept_pane({"PATH": "/usr/bin:/bin"}, ["/bin/sh", "-c", "exit 3"], str(tmux), out)
+        for began, ended, kept in ((1000, 1000, True), (1000, 1059, True), (1000, 1060, False), (1000, 90000, False),
+                                   ("not a number", 1000, False), (1000, "not a number", False)):
+            with self.subTest(after=f"{began} to {ended}"):
+                out.unlink(missing_ok=True)
+                times.write_text(f"{began}\n{ended}\n")
+                r = subprocess.run(["/bin/sh", "-c", pane], capture_output=True, text=True, timeout=30,
+                                   env={"TMUX": "/s/tmux-1/x,9,0", "TMUX_PANE": "%7",
+                                        "PATH": f"{tmux.parent}:/usr/bin:/bin"})
+                self.assertEqual(r.returncode, 3)  # the command's own status either way
+                self.assertEqual(out.is_file(), kept)
+                self.assertEqual(times.read_text(), "")  # the shell asked the time at the start and at the end
+
     def uuid(self, n: int) -> str:
         return f"{n:08x}-1111-4222-8333-444455556666"
 
@@ -4367,6 +4393,74 @@ class CoordinatorUpTest(unittest.TestCase):
             with self.subTest(words=words):
                 _, rec, _ = self.notify_on(["claude", *words])
                 self.assertNotIn("conversation", rec)
+
+    def test_a_session_with_its_own_claude_config_dir_is_found_there_and_comes_back_to_its_conversation(self):
+        """hansa notify on in a session whose Claude Code folder is CLAUDE_CONFIG_DIR's: its transcript is found
+        there, and hansa up resumes it by its id, or starts a new one when that transcript is gone. One that is only
+        under HOME/.claude is not looked for: its path is not known, and hansa up resumes it by its id all the same."""
+        from hansa import up
+        sid, other = self.uuid(5), self.uuid(6)
+        config = self.tmp / "own-claude"
+        path = config / "projects" / "-own-folder" / f"{sid}.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}\n")
+        self.transcript(sid, "-own-folder")  # the home folder's has the same id: not the one this session uses
+        said, rec, _ = self.notify_on(["claude", "--model", "opus"], CLAUDE_CONFIG_DIR=str(config),
+                                      CLAUDE_CODE_SESSION_ID=sid)
+        self.assertEqual(rec["conversation"], {"id": sid, "transcript": str(path)})
+        self.assertEqual(rec["env"]["CLAUDE_CONFIG_DIR"], str(config))
+        said, calls, ok = self.coordinator_up()
+        self.assertTrue(ok, said)
+        launched = self.pane_words(calls[1])
+        self.assertEqual(launched[launched.index("notify-launch") + 1:], ["claude", "--model", "opus", "--resume", sid])
+        self.assertIn(f"conversation: it resumed the coordinator's own, session id {sid}", said)
+        path.unlink()  # the conversation is gone from CLAUDE_CONFIG_DIR's folder, though the home folder has one
+        said, calls, ok = self.coordinator_up()
+        launched = self.pane_words(calls[1])
+        self.assertEqual(launched[launched.index("notify-launch") + 1:], ["claude", "--model", "opus"])
+        self.assertIn(f"conversation: a new one; the coordinator's conversation {sid} is gone (its transcript {path} "
+                      "is not there)", said)
+        # only under HOME/.claude while CLAUDE_CONFIG_DIR is set: not found, so not known to be gone
+        self.transcript(other, "-own-folder")
+        said, rec, _ = self.notify_on(["claude"], CLAUDE_CONFIG_DIR=str(config), CLAUDE_CODE_SESSION_ID=other)
+        self.assertEqual(rec["conversation"], {"id": other, "transcript": ""})
+        said, calls, ok = self.coordinator_up()
+        self.assertEqual(self.pane_words(calls[1])[-2:], ["--resume", other])
+        self.assertIn(f"conversation: it resumed the coordinator's own, session id {other}", said)
+
+    def test_a_failed_start_that_resumed_by_id_also_gives_the_command_for_a_new_conversation(self):
+        """Its conversation may be gone though the record names it (no transcript path known): the failure lines
+        give the by-hand command as before, and the one that starts a new conversation, to use when Claude Code
+        says no conversation was found with that id. A start that resumed nothing gives no such line."""
+        from hansa import up
+        sid = self.uuid(7)
+        coordinator = [up.hansa_command(), "--desk", str(self.desk.root), "coordinator", "--model", "opus"]
+        rec = {"kind": "coordinator", "words": ["--model", "opus"], "folder": str(self.desk.root),
+               "session": {"pid": 0}, "conversation": {"id": sid, "transcript": ""}}
+        said, calls, ok = self.coordinator_up(rec, answers=(1, "%5\n", ""),
+                                              pane_said=f"No conversation found with session ID: {sid}\n")
+        self.assertFalse(ok)
+        self.assertIn(f"  No conversation found with session ID: {sid}\n", said)
+        cd = shlex.join(["cd", str(self.desk.root)]) + " && "
+        self.assertIn(f"Run it by hand: {cd}{shlex.join([*coordinator, '--resume', sid])}\n", said)
+        self.assertIn(f"If Claude Code says no conversation was found with the id {sid}, start a new one instead: "
+                      f"{cd}{shlex.join(coordinator)}\n", said)
+        # a session hansa notify on recorded: its own claude, then hansa notify on in it, either way
+        folder = str(self.own_folder())
+        said, calls, ok = self.coordinator_up(
+            {"kind": "notify", "argv": ["claude", "--model", "opus"], "folder": folder, "session": {"pid": 0},
+             "conversation": {"id": sid, "transcript": ""}}, answers=(1, "%5\n", ""), pane_said="Error\n")
+        cd = shlex.join(["cd", folder]) + " && "
+        self.assertIn(f"Run it by hand: {cd}claude --model opus --resume {sid}, then hansa notify on in it\n", said)
+        self.assertIn(f"start a new one instead: {cd}claude --model opus, then hansa notify on in it\n", said)
+        # nothing resumed by id: no such line
+        for conv in (None, "-"):
+            with self.subTest(conversation=conv):
+                base = {k: v for k, v in rec.items() if k != "conversation"}
+                said, _, ok = self.coordinator_up({**base, **({} if conv == "-" else {"conversation": conv})},
+                                                  answers=(1, "%5\n", ""), pane_said="Error\n")
+                self.assertIn("coordinator failed to start", said)
+                self.assertNotIn("start a new one instead", said)
 
     def test_up_runs_the_server_then_the_coordinator_and_neither_on_another_accounts_desk(self):
         from hansa import up
