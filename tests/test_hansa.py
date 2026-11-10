@@ -27069,8 +27069,134 @@ def save():'''))
         self.assertEqual([e["task"] for e in self.events("verification_closed")], [vid])
         self.assertIn("only a finished", self.refused("merge", tid))
         queued = self.desk.new_task("Still queued")
-        self.assertIn("only finished tasks or verifications", self.refused("close", queued))
+        self.assertIn("only finished or failed tasks or verifications", self.refused("close", queued))
         self.assertEqual(self.desk.meta(queued)["state"], "queued")
+
+    FAILURES = {"ceiling": "stopped at the ceiling of 3 tries; its notes say what it reached",
+                "setup": "the lane's setup command failed (exit 3), so the worker never started",
+                "start": "srt could not start the worker", "error": "error: I could not do it"}
+
+    def test_close_of_a_failed_task_puts_it_away_and_keeps_why_it_failed(self):
+        for kind, error in self.FAILURES.items():
+            with self.subTest(kind=kind):
+                tid = self.desk.new_task("Failed " + kind, lane="a")
+                self.desk.update(tid, state="failed", error=error, machine_problem=kind == "start")
+                said = self.hansa("close", tid)
+                self.assertIn(f"{tid} had failed", said)
+                self.assertIn("now closed", said)
+                m = self.desk.meta(tid)
+                self.assertEqual((m["state"], m["error"], m["failed_error"]),
+                                 ("cancelled", "closed without merging", error))
+                shown = self.hansa("show", tid)
+                self.assertIn("closed without merging", shown)
+                self.assertIn(error, shown)
+                self.assertNotIn(tid, self.hansa("status"))
+                self.assertIn(tid, [e["task"] for e in self.events("task_cancel")])
+
+    def test_close_of_a_failed_verification_leaves_the_task_it_checked_as_it_was(self):
+        tid = self.desk.new_task("Merged task")
+        vid = self.desk.new_task("Its verification", kind="verify", parent=tid, lane="a")
+        self.desk.update(tid, state="merged", verify=vid)
+        self.desk.update(vid, state="failed", error=self.FAILURES["error"])
+        self.assertIn(vid, self.hansa("status"))
+        before = (self.desk.tasks_dir / tid / "meta.json").read_bytes()
+        said = self.hansa("close", vid)
+        self.assertIn(f"{vid} had failed", said)
+        self.assertIn("now closed", said)
+        self.assertEqual((self.desk.tasks_dir / tid / "meta.json").read_bytes(), before)
+        v = self.desk.meta(vid)
+        self.assertEqual((v["state"], v["error"]), ("failed", self.FAILURES["error"]))
+        shown = self.hansa("show", vid)
+        self.assertIn("closed", shown)
+        self.assertIn(self.FAILURES["error"], shown)
+        self.assertNotIn("next:", shown)
+        self.assertNotIn(vid, self.hansa("status"))
+        self.assertEqual(json.loads(self.hansa("status", "--json"))["failed_count"], 0)
+        self.assertEqual([e["task"] for e in self.events("verification_closed")], [vid])
+
+    def test_close_of_a_failed_task_whose_lane_was_removed(self):
+        tid = self.desk.new_task("Failed on a lane since removed", lane="a")
+        self.desk.update(tid, state="failed", lane="gone", error=self.FAILURES["setup"])
+        self.assertNotIn("gone", self.desk.settings()["lanes"])
+        self.assertIn(f"{tid} had failed", self.hansa("close", tid))
+        self.assertEqual(self.desk.meta(tid)["state"], "cancelled")
+        self.assertIn(self.FAILURES["setup"], self.hansa("show", tid))
+
+    def test_cancel_of_a_failed_task_points_to_close(self):
+        tid = self.desk.new_task("Failed task", lane="a")
+        self.desk.update(tid, state="failed", error="error: no")
+        before = (self.desk.tasks_dir / tid / "meta.json").read_bytes()
+        said = self.refused("cancel", tid)
+        self.assertIn("only queued, running or merging", said)
+        self.assertIn(f"hansa close {tid} puts it away", said)
+        self.assertEqual((self.desk.tasks_dir / tid / "meta.json").read_bytes(), before)
+
+    def test_status_lists_the_latest_five_failed_not_closed_and_how_many_more(self):
+        tids = [self.desk.new_task(f"Failed {i}", lane="a") for i in range(8)]
+        for t in tids:
+            self.desk.update(t, state="failed", error=f"error: {t}")
+        self.hansa("close", tids[-1])
+        said = self.hansa("status")
+        for t in tids[2:7]:
+            self.assertIn(f"{t} a: error: {t}", said)
+        for t in (*tids[:2], tids[-1]):
+            self.assertNotIn(f"error: {t}", said)
+        self.assertIn("2 more failed", said)
+        st = json.loads(self.hansa("status", "--json"))
+        self.assertEqual(([m["id"] for m in st["failed"]], st["failed_count"]), (tids[2:7], 7))
+        for t in tids[:2]:
+            self.hansa("close", t)
+        said = self.hansa("status")
+        self.assertIn(tids[2], said)
+        self.assertNotIn("more failed", said)
+        self.assertEqual(json.loads(self.hansa("status", "--json"))["failed_count"], 5)
+
+    def test_a_closed_failed_task_no_longer_counts_failed_in_its_goal(self):
+        self.hansa("goal", "add", "Export")
+        tid = self.desk.new_task("Build the export", goal="g1", lane="a")
+        self.desk.update(tid, state="failed", error="error: no")
+        self.assertIn("1 failed", self.hansa("goal", "list"))
+        self.assertEqual(views.status(self.desk)["goals"][0]["counts"]["failed"], 1)
+        self.hansa("close", tid)
+        closed = self.desk.new_task("Closed without merging", goal="g1", lane="a")
+        self.desk.update(closed, state="done")
+        self.hansa("close", closed)  # as a task closed from review is counted
+        self.assertIn("0 failed", self.hansa("goal", "list"))
+        [listed] = json.loads(self.hansa("goal", "list", "--json"))
+        self.assertEqual((listed["counts"]["failed"], views.status(self.desk)["goals"][0]["counts"]["failed"]), (0, 0))
+        shown = self.hansa("goal", "show", "g1")
+        self.assertIn(f"{tid} cancelled", shown)
+        self.assertIn(f"{closed} cancelled", shown)
+
+    def test_a_task_after_a_failed_task_that_is_closed_is_held_as_after_one_closed_from_review(self):
+        reasons = []
+        for ending in ("failed", "done"):
+            first = self.desk.new_task("Earlier " + ending, lane="a")
+            tid = self.hansa("add", "Needs " + ending, "--lane", "a", "--after", first).split()[0]
+            self.desk.update(first, state=ending, error="error: no" if ending == "failed" else "")
+            self.hansa("close", first)
+            Dispatcher(self.desk).tick()
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")
+            shown = self.hansa("show", tid)
+            for word in ("HELD", f"{first} closed without merging", f"hansa cancel {tid}", f"hansa retry {first}"):
+                self.assertIn(word, shown)
+            reasons.append(shown.replace(first, "T1").replace(tid, "T2"))
+        held = [next(x for x in r.splitlines() if "HELD" in x) for r in reasons]
+        self.assertEqual(held[0], held[1])
+
+    def test_retry_of_a_closed_failed_task_goes_as_for_a_task_closed_from_review(self):
+        replies = []
+        for ending in ("failed", "done"):
+            tid = self.desk.new_task("Earlier " + ending, lane="a")
+            self.desk.update(tid, state=ending, error="error: no" if ending == "failed" else "")
+            self.hansa("close", tid)
+            follow = self.hansa("retry", tid, "Try again").split()[0]
+            m = self.desk.meta(tid)
+            self.assertEqual((m["state"], m["replaced_by"], m["ended_as"]), ("replaced", follow, "cancelled"))
+            self.assertIn(f"Follow-up to {tid} (cancelled)", (self.desk.tasks_dir / follow / "task.md").read_text())
+            self.hansa("cancel", follow)
+            replies.append(self.desk.meta(tid)["state"])
+        self.assertEqual(replies, ["cancelled", "cancelled"])
 
     def test_close_keeps_finished_work_unchanged_when_the_record_cannot_be_written(self):
         for kind in ("task", "verify"):

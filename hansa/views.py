@@ -26,7 +26,8 @@ STATES = {
                 "merge_check of its own: merged onto the base as it is now, with that merge_check (else the lane's "
                 "check) run there; it merges if that passes. Or it needs no check (a task with no commits never does) "
                 "and waits behind other merges on the same repository and base, or a release running there"),
-    "failed": "the run ended with an error; hansa show says why",
+    "failed": ("the run ended with an error; hansa show says why. hansa retry sends it back; hansa close puts it "
+               "away (a task becomes cancelled, a verification stays failed), and hansa show still says why it failed"),
     "merged": "merged into the lane's base branch",
     "cancelled": "stopped or closed on request",
     "replaced": "a follow-up task took its place",
@@ -927,6 +928,7 @@ def status(desk: Desk) -> dict:
     ready = ready_now(desk, s)
     running = [m for m in tasks if m["state"] == "running"]
     merging = [m for m in tasks if m["state"] == "merging"]
+    failed = [m for m in tasks if m["state"] == "failed" and not m.get("closed")]
     tried = tried_lanes(desk)
     busy = {occupied_lane(m) for m in tasks if lane_occupied(m)} | tried
     held = sandbox_held(desk)
@@ -1043,8 +1045,10 @@ def status(desk: Desk) -> dict:
                     "merge_note": (m.get("merge_check_result") or {}).get("note")
                     or f"exit {(m.get('merge_check_result') or {}).get('exit')}"}
                    for m in tasks if m["state"] == "done" and m.get("kind") != "verify"],
+        # failed work not put away (hansa close): the latest five, and how many there are in all
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
-                   for m in tasks if m["state"] == "failed"][-5:],
+                   for m in failed][-5:],
+        "failed_count": len(failed),
         "asks": [{**a, "note": ask_note(a, ready)} for a in desk.asks() if not a.get("closed")],
         # the open releases (hansa release) and the latest that ended: the page asks the principal about each waiting one
         "releases": release.page_rows(desk, s, tasks),
@@ -1165,6 +1169,9 @@ def status_text(st: dict) -> str:
     if st["failed"]:
         out.append("failed (latest):")
         out += [f"  {m['id']} {m['lane']}: {m['error']}" for m in st["failed"]]
+        more = st.get("failed_count", 0) - len(st["failed"])
+        if more > 0:
+            out.append(f"  ... and {more} more failed, not closed (hansa close ID puts one away)")
     out.append("providers:")
     wn, wm = (max((len(p[k]) for p in st["providers"]), default=0) for k in ("name", "model"))
     rests = [rest_words(p) for p in st["providers"]]
@@ -1477,6 +1484,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     out += [x for x in (rounds_line(desk, m), "" if verifying else rethink_text(desk, m)) if x]
     if m.get("error"):
         out.append(f"error: {m['error']}")
+    if m.get("failed_error") is not None and m["state"] == "cancelled":  # closed after it failed (hansa close)
+        out.append(f"it had failed before it was closed: {m['failed_error'] or 'no error was recorded'}")
     out += [f"message: {m[k]}" for k in ("commit_message_note", "merge_message_note") if m.get(k)]
     out += [disk.trimmed_text(m)] if disk.trimmed_text(m) else []
     if verifying and m.get("scratch_ref"):
