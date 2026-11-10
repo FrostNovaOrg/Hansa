@@ -11,7 +11,7 @@ into public results.
 """
 from urllib.parse import urlsplit
 
-from .alert_bark import Bark, _pasted_address
+from .alert_bark import BARE_KEY_PROBLEM, Bark, _pasted_address
 from .alert_chat import DingTalk, Discord, Feishu, JsonWebhook, Slack, Telegram, WeCom
 from .alert_phone import Gotify, Ntfy, PushDeer, ServerChan
 
@@ -70,6 +70,19 @@ def parse(value: str, service: str = "recognize") -> tuple[str, str]:
         definition = SERVICES.get(service)
         if definition is None:
             raise ValueError("unknown push service")
+        # Bark and ntfy share a loose /key grammar. A normalized URL alone
+        # cannot establish ownership on the other service's official host.
+        # Keep this check while both also accept self-hosted URLs.
+        if definition.id in ("bark", "ntfy"):
+            try:
+                address = _pasted_address(value) if definition.id == "bark" else value
+                host = urlsplit(address).hostname
+            except ValueError:
+                host = None
+            foreign = {"bark": ("ntfy.sh", "ntfy"), "ntfy": ("api.day.app", "bark")}[definition.id]
+            if host == foreign[0]:
+                name = SERVICES[foreign[1]].names["en"]
+                raise ValueError(f"this address looks like a {name} address; choose {name} as the push service")
         if definition.id == "bark":
             # Inspect the URL Bark would use, as a pasted command may hold one.
             try:
@@ -93,10 +106,24 @@ def parse(value: str, service: str = "recognize") -> tuple[str, str]:
                 raise ValueError(f"this address looks like a {name} address; choose {name} as the push service")
     try:
         return definition.id, definition.normalize(value)
-    except ValueError:
+    except ValueError as error:
+        if str(error) == BARE_KEY_PROBLEM:
+            raise ValueError(BARE_KEY_PROBLEM) from None
         # A stable refusal lets every service use the page's language and keeps
         # arbitrary parser exception text (possibly containing a key) private.
         raise ValueError("this push service does not accept the address; check its hint and paste the whole address again") from None
+
+
+def preview(value, service="recognize"):
+    """Parse without saving or echoing credentials; the page can explain its choice."""
+    try:
+        service, address = parse(value, service)
+    except ValueError as error:
+        return {"ok": False, "problems": [str(error)]}
+    # Every long ntfy topic is a redaction key, even an ordinary word. Show the
+    # warning for all of them instead of guessing which words a person uses.
+    warnings = ["ntfy_topic_hidden"] if service == "ntfy" and len(urlsplit(address).path[1:]) >= 8 else []
+    return {"ok": True, "service": service, "warnings": warnings}
 
 
 def public() -> list[dict]:

@@ -818,6 +818,11 @@ Object.assign(T, ZH ? {
   pushTestHint:"测试使用这个地址已保存的设置，即使关闭了提醒也会发送。请先保存修改，再测试。",
   pushLast:(what, t) => `上次推送：${what}（${t}）`, pushLastNone:"还没有推送过。",
   pushChooseService:"无法识别这个地址，请选择推送服务，然后再次保存设置。",
+  pushRecognized:service => `识别为 ${service}。保存前请确认这是你要用的服务；单独的密钥可能属于其他服务。`,
+  pushBareKeyProblem:"单独的 Bark 设备密钥至少需要 8 个字符；请粘贴 Bark 应用中的完整地址。",
+  pushDuplicate:entry => `这个推送地址已保存在条目“${entry}”中。`,
+  pushNtfyTopicWarning:"hansa 会在这个主题词出现的任何地方隐藏它，包括提醒和工作台名称。未设置访问控制时，任何猜到主题的人都能读取提醒。建议使用难以猜到的主题。",
+  pushChecking:"正在识别地址…", pushPreviewFailed:"无法识别地址，请检查连接后重新粘贴。",
   pushBadAddress:"这个推送服务不接受此地址，请查看服务的提示，重新粘贴完整地址。",
   pushForeign:service => `这个地址像是 ${service} 的地址，请选择 ${service} 作为推送服务。`,
   pushLegacyProblem:"Bark 已保存的密钥无法迁移，请在本页的“提醒”设置中重新粘贴 Bark 地址。",
@@ -869,6 +874,11 @@ Object.assign(T, ZH ? {
   pushTestHint:"The test uses this address's saved settings, even when alerts are off. Save changes before testing.",
   pushLast:(what, t) => `Last push: ${what} (${t})`, pushLastNone:"No push yet.",
   pushChooseService:"This address was not recognized. Choose a push service, then save settings again.",
+  pushRecognized:service => `Recognized as ${service}. Check this is the service you intend before saving; a bare key may belong to another service.`,
+  pushBareKeyProblem:"A bare Bark device key needs at least 8 characters; paste the whole address from the Bark app.",
+  pushDuplicate:entry => `This push address is already saved in entry “${entry}”.`,
+  pushNtfyTopicWarning:"hansa will hide this topic wherever it appears, including alerts and the desk's name. Without access controls, anyone who guesses it can read your alerts. Use a topic that is hard to guess.",
+  pushChecking:"Recognizing address…", pushPreviewFailed:"Could not recognize the address. Check the connection and paste it again.",
   pushBadAddress:"This push service does not accept the address. Check its hint and paste the whole address again.",
   pushForeign:service => `This address looks like a ${service} address. Choose ${service} as its push service.`,
   pushLegacyProblem:"Bark's saved key could not be moved. Paste the Bark address again on this page under Alerts.",
@@ -1806,6 +1816,8 @@ const pushForeignProblem = problem =>
   /^This address looks like a .+ address\. Choose .+ as its push service\.$/.test(problem)
   || /^这个地址像是 .+ 的地址，请选择 .+ 作为推送服务。$/.test(problem);
 const pushProblem = problem => {
+  const duplicate = /^push address is already saved in entry: (.+)$/.exec(problem);
+  if (duplicate) return T.pushDuplicate(duplicate[1]);
   // The refusal names the service in English; show the page's name for it.
   const foreign = /^this address looks like a (.+) address; choose .+ as the push service$/.exec(problem);
   if (foreign) {
@@ -1815,6 +1827,7 @@ const pushProblem = problem => {
   return {
     "choose the push service for this address":T.pushChooseService,
     "invalid push address":T.pushBadAddress,
+    "a bare Bark device key needs at least 8 characters; paste the whole address from the Bark app":T.pushBareKeyProblem,
     "choose AES-128, AES-192 or AES-256 with CBC in the Bark app; use a 16, 24 or 32 character ASCII key":T.pushBarkKeyProblem,
     "this example is for another Bark device":T.pushBarkDeviceProblem,
     "this push service does not accept the address; check its hint and paste the whole address again":T.pushBadAddress,
@@ -2094,7 +2107,8 @@ function problemTarget(problem) {
   if (record) return record;
   const group = /^(provider |at least one provider)/.test(problem) ? "providers"
     : /^(coordinator_alert|alert_language|the alert command|alert_push|push |a push |the extra push |this push )/.test(problem)
-      || [T.pushChooseService, T.pushBadAddress, T.pushLegacyProblem, T.pushBarkKeyProblem, T.pushBarkDeviceProblem].includes(problem)
+      || [T.pushChooseService, T.pushBadAddress, T.pushBareKeyProblem, T.pushLegacyProblem, T.pushBarkKeyProblem, T.pushBarkDeviceProblem].includes(problem)
+      || problem.startsWith(T.pushDuplicate("").split("“")[0])
       || pushForeignProblem(problem) ? "alerts"
     : /^desk_name/.test(problem) ? "lanes" : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
     : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
@@ -2263,6 +2277,25 @@ function pushSection() {
   const whyText = (why, entry, code) => entry.service === "discord" && why === "http_4xx" && code === 10015
     ? T.pushDiscordGone : why === "sent" ? T.pushSent : T.pushWhy[why] || T.pushUnknown;
   const editFields = (draft, fresh = false) => {
+    const preview = h("p", {class:"field-note", "aria-live":"polite", "data-push-preview":""});
+    let previewVersion = 0;
+    const updatePreview = async () => {
+      const version = ++previewVersion, address = draft.address.trim(), selected = draft.service;
+      preview.textContent = address ? T.pushChecking : "";
+      if (!address) return;
+      try {
+        const result = await api("/api/alert/push-preview", {address, service:selected});
+        // A slow reply must not describe a different paste or service choice.
+        if (version !== previewVersion || draft.address.trim() !== address || draft.service !== selected) return;
+        preview.className = result.ok ? "field-note" : "bad";
+        preview.textContent = result.ok ? T.pushRecognized(serviceName(result.service))
+          + (result.warnings?.includes("ntfy_topic_hidden") ? " " + T.pushNtfyTopicWarning : "")
+          : (result.problems || []).map(pushProblem).join(" · ");
+        if (result.warnings?.length) preview.className = "warn";
+      } catch (e) {
+        if (version === previewVersion) { preview.className = "bad"; preview.textContent = T.pushPreviewFailed; }
+      }
+    };
     const input = (key, label, hint = "", type = "text") => {
       const el = h("input", {type, value:draft[key], autocomplete:"off", "aria-label":label, "data-push-field":key,
         onpaste:e => {
@@ -2272,14 +2305,16 @@ function pushSection() {
           e.preventDefault(); draft[key] = e.clipboardData.getData("text");
           e.target.value = draft[key].replace(/[\r\n]/g, " "); refreshSettingsState();
         },
-        oninput:e => { draft[key] = e.target.value; refreshSettingsState(); }});
+        oninput:async e => { draft[key] = e.target.value; refreshSettingsState();
+          if (key === "address") await updatePreview(); }});
       return field(label, type === "password" ? passwordControl(el) : el, hint, "", true);
     };
     const select = h("select", {value:draft.service, "data-push-field":"service", onchange:e => {
       draft.service = e.target.value; draft.secret = ""; renderSettings();
     }}, (fresh ? [{id:"recognize", name:{en:T.pushRecognize, zh:T.pushRecognize}}] : []).concat(PUSH_SERVICES)
       .map(s => h("option", {value:s.id, selected:draft.service === s.id}, word(s.name))));
-    return fields(input("address", fresh ? T.pushAddress : T.pushReplacement, fresh ? "" : T.pushKeepAddress, "password"),
+    if (draft.address.trim()) updatePreview();
+    return fields(input("address", fresh ? T.pushAddress : T.pushReplacement, fresh ? "" : T.pushKeepAddress, "password"), preview,
       field(T.pushService, select, draft.service === "recognize" ? T.pushGeneralHint : word(service(draft.service)?.hint), "", true),
       service(draft.service)?.extra_secret ? input("secret", word(service(draft.service)?.secret_label) || T.pushSecret,
         [word(service(draft.service)?.secret_hint), fresh ? "" : T.pushKeepSecret].filter(Boolean).join(" "), "password") : null,

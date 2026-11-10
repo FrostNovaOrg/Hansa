@@ -39807,7 +39807,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         if (key === "on") el.checked = step[key]; else el.value = step[key];
         if (key === "secret" && step.paste) {
           el.on.paste({target:el, preventDefault:() => {}, clipboardData:{getData:() => step[key]}});
-        } else el.on[key === "service" || key === "on" ? "change" : "input"]({target:el});
+        } else await el.on[key === "service" || key === "on" ? "change" : "input"]({target:el});
       }
       if ("turn_min" in step) { const el = turnInput(); el.value = step.turn_min; el.on.input({target:el}); }
       if (step.remove) find(el => "data-push-remove" in el.attrs, cards()[step.entry]).on.click();
@@ -50170,7 +50170,8 @@ class AlertPushPageTest(unittest.TestCase):
             self.skipTest("needs node to run the page's script")
         harness = self.tmp / "push-page.js"
         harness.write_text(self.PAGE_HARNESS)
-        given = {"/api/settings": public_settings(self.desk), "pushSteps": list(steps), **(extra or {})}
+        given = {"/api/settings": public_settings(self.desk), "pushSteps": list(steps),
+                 "/api/alert/push-preview": {"ok": False, "problems": []}, **(extra or {})}
         result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"), "push",
                                  "zh-CN" if language == "zh" else "en"],
                                 input=json.dumps(given), capture_output=True, text=True, timeout=60)
@@ -50178,8 +50179,86 @@ class AlertPushPageTest(unittest.TestCase):
         return json.loads(result.stdout)
 
     def add(self, **edit):
-        alert_push.change(self.desk, [{"address": "https://api.day.app/" + self.KEY, **edit}], by="page")
+        count = len(self.desk.settings()["alert_push"])
+        key = self.KEY + (str(count) if count else "")
+        alert_push.change(self.desk, [{"address": "https://api.day.app/" + key, **edit}], by="page")
         return self.desk.settings()["alert_push"][-1]
+
+    def test_push_preview_names_bare_wecom_key_as_bark_without_saving(self):
+        address = "fixture-wecom-key"
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        code, reply, _ = self.web_request("/api/alert/push-preview", method="POST", headers=auth,
+            data=json.dumps({"address": address, "service": "recognize"}).encode())
+        self.assertEqual(code, 200)
+        self.assertEqual(reply.get("service"), "bark")
+        self.assertNotIn(address, json.dumps(reply))
+        for language in ("en", "zh"):
+            shown = self.page([{"address": address}], language, {"/api/alert/push-preview": reply})
+            self.assertIn("Bark", shown["after"]["add"]["text"])
+            self.assertEqual(shown["settingsPosts"], 0)
+        self.assertEqual(self.desk.settings()["alert_push"], [])
+
+    def test_push_preview_refusals_and_duplicate_save_are_localized(self):
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        for address, service, words in (("hello", "recognize", ("8", "Bark")),
+                ("https://ntfy.sh/myproject", "bark", ("ntfy",)),
+                ("https://api.day.app/fixture-device", "ntfy", ("Bark",))):
+            code, reply, _ = self.web_request("/api/alert/push-preview", method="POST", headers=auth,
+                data=json.dumps({"address": address, "service": service}).encode())
+            self.assertEqual(code, 200)
+            self.assertFalse(reply["ok"])
+            self.assertNotIn(address, json.dumps(reply))
+            for language in ("en", "zh"):
+                shown = self.page([{"service": service, "address": address}], language,
+                                  {"/api/alert/push-preview": reply})
+                for word in words:
+                    self.assertIn(word, shown["after"]["add"]["text"])
+                if language == "zh":
+                    self.assertNotIn("this address", shown["after"]["add"]["text"])
+        entry = self.add(name="My phone")
+        refusal = save_from_page(self.desk, {"settings": self.desk.settings(), "alert_push_changes": [
+            {"address": "https://api.day.app/" + self.KEY}]})
+        self.assertFalse(refusal["ok"])
+        for language in ("en", "zh"):
+            shown = self.page([{"address": "https://api.day.app/" + self.KEY},
+                {"reply": refusal, "save": True}], language)
+            self.assertIn("My phone", " ".join(shown["problems"]))
+            self.assertIn("已保存" if language == "zh" else "already saved", " ".join(shown["problems"]))
+        self.assertEqual(self.desk.settings()["alert_push"], [entry])
+
+    def test_push_preview_requires_auth_and_never_writes_private_files(self):
+        body = json.dumps({"address": "https://ntfy.sh/myproject"}).encode()
+        code, _, _ = self.web_request("/api/alert/push-preview", method="POST", data=body)
+        self.assertEqual(code, 403)
+        from hansa.alert_services import preview
+        self.assertIn("ntfy_topic_hidden", preview("https://topics.example/myproject", "ntfy")["warnings"])
+        self.assertEqual(preview("https://ntfy.sh/short")["warnings"], [])
+        self.assertFalse(preview(None)["ok"])
+        self.assertFalse(preview("https://[broken")["ok"])
+        self.assertEqual(list(self.desk.secrets_dir.glob("alert-push-*")), [])
+
+    def test_ntfy_word_topic_warns_before_save_about_redaction_and_readers(self):
+        self.desk = init_desk(self.tmp / "myproject")
+        settings = self.desk.settings()
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        code, reply, _ = self.web_request("/api/alert/push-preview", method="POST", headers=auth,
+            data=json.dumps({"address": "https://ntfy.sh/myproject", "service": "recognize"}).encode())
+        self.assertEqual(code, 200)
+        self.assertIn("ntfy_topic_hidden", reply.get("warnings", []))
+        for language in ("en", "zh"):
+            shown = self.page([{"address": "https://ntfy.sh/myproject"}], language,
+                              {"/api/alert/push-preview": reply})
+            text = shown["after"]["add"]["text"]
+            for word in (("wherever", "alerts", "desk", "guesses", "hard to guess") if language == "en"
+                         else ("出现", "提醒", "工作台名称", "猜到", "难以猜到")):
+                self.assertIn(word, text)
+            self.assertEqual(shown["settingsPosts"], 0)
+        self.assertTrue(save_from_page(self.desk, {"settings": settings, "alert_push_changes": [
+            {"address": "https://ntfy.sh/myproject"}]})["ok"])
+        title, body = alert_push._text(self.desk, [{"kind": "test", "text": "myproject"}], 0)
+        self.assertIn("[key of ", title)
+        self.assertIn("[key of ", body)
+        self.assertNotIn("myproject", title + body)
 
     def test_push_page_lists_upgraded_bark_with_hidden_address_switch_and_last_result(self):
         settings = self.desk.settings()
@@ -50262,6 +50341,7 @@ class AlertPushPageTest(unittest.TestCase):
     def test_push_page_recognizes_a_pasted_bark_address_on_save_and_clears_the_input(self):
         for language in ("en", "zh"):
             with self.subTest(language=language):
+                self.desk = init_desk(self.tmp / language)
                 address = "https://api.day.app/" + self.KEY + "/示例文字"
                 shown = self.page([{"address": address}, {"save": True}], language)
                 self.assertEqual(shown["before"]["add"]["options"][0],
@@ -50332,6 +50412,7 @@ class AlertPushPageTest(unittest.TestCase):
     def test_push_page_add_name_is_optional_localized_and_saved(self):
         for language in ("en", "zh"):
             with self.subTest(language=language):
+                self.desk = init_desk(self.tmp / language)
                 shown = self.page([{"address": "https://api.day.app/" + self.KEY,
                                     "name": "My phone"}, {"save": True}], language)
                 self.assertEqual(shown["before"]["add"]["name"], "")
@@ -51042,7 +51123,7 @@ class AlertPushTest(unittest.TestCase):
                 ("https://api.day.app/KEY#", "bark", "https://api.day.app/KEY"),
                 ("https://api.day.app/KEY\n", "bark", "https://api.day.app/KEY"),
                 ("https://api.day.app/KEY/a text", "bark", "https://api.day.app/KEY"),
-                ("KEY", "recognize", "https://api.day.app/KEY"),
+                ("DEVICE_KEY", "recognize", "https://api.day.app/DEVICE_KEY"),
                 ("https://bark.example.com/KEY/", "bark", "https://bark.example.com/KEY"))):
             with self.subTest(address=address), unittest.mock.patch.object(
                     self, "desk", init_desk(self.tmp / f"whole-{index}")):
@@ -51053,7 +51134,7 @@ class AlertPushTest(unittest.TestCase):
                 self.assertEqual(entry["service"], "bark")
                 self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
                 request = self.http.call_args.args[0][0]
-                self.assertEqual(request["json"]["device_key"], "KEY")
+                self.assertEqual(request["json"]["device_key"], saved.rsplit("/", 1)[-1])
                 self.assertEqual(request["url"], saved.rsplit("/", 1)[0] + "/push")
 
     def test_unmovable_legacy_bark_stays_private_and_recovers_only_after_a_bark_address_save(self):

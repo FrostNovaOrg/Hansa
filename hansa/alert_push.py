@@ -322,6 +322,19 @@ def prepare(desk, settings, changes, *, by=""):
         private.extend([address] if extra else service.secrets(address))
     if issue := private_metadata_problems(desk, value, private):
         raise ValueError(issue[0])
+    # Compare completed addresses, including edits in this save, to stop one
+    # destination receiving an alert twice. A replacement/removal frees it.
+    # Retain this while delivery runs independently for each saved entry.
+    addresses = {}
+    for entry in sorted(value, key=lambda e: (e["id"], False) in pending):
+        address = pending.get((entry["id"], False), _read(desk, entry["id"]))
+        if not address:
+            continue
+        if address in addresses:
+            previous = addresses[address]
+            label = desk.redact(previous.get("name") or previous["id"])
+            raise ValueError(f"push address is already saved in entry: {label}")
+        addresses[address] = entry
     return value, writes, removes
 
 

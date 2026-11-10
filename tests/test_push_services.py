@@ -168,6 +168,7 @@ class BarkEncryptionTest(_PushServicesCase):
         from hansa import alert, history
         from hansa.run import keys_in_change
         for size in (16, 24, 32):
+            self.desk = init_desk(self.tmp / f"size-{size}")
             key = "k" * size
             with self.subTest(size=size):
                 entry = self.save("fixture-bark-key", "bark", secret=key)
@@ -201,6 +202,7 @@ class BarkEncryptionTest(_PushServicesCase):
 
     def test_examples_keep_only_the_matching_cbc_key(self):
         for size in (16, 24, 32):
+            self.desk = init_desk(self.tmp / f"size-{size}")
             key = "k" * size
             entry = self.save("fixture-bark-key", "bark", secret=bark_example(key, size * 8))
             self.assertEqual(alert_push._read(self.desk, entry["id"], True), key)
@@ -241,6 +243,7 @@ class BarkEncryptionTest(_PushServicesCase):
 
     def test_encrypted_requests_decrypt_all_fields_fresh_ivs_and_release_codes(self):
         for size in (16, 24, 32):
+            self.desk = init_desk(self.tmp / f"size-{size}")
             key = "k" * size
             entry = self.save("fixture-bark-key", "bark", secret=key)
             ivs = []
@@ -372,11 +375,13 @@ class SecretFileTest(_PushServicesCase):
         self.assertRegex(page, r'bad_key:"[^"]*加密密钥无效[^"]*重新设置[^"]*"')
 
     def test_an_example_may_carry_a_link_to_another_site(self):
-        for link in ("# see https://bark.day.app/en/guide/encryption\n",
-                     "# docs: https://github.com/Finb/Bark/blob/master/README.md\n"):
+        for index, link in enumerate(("# see https://bark.day.app/en/guide/encryption\n",
+                     "# docs: https://github.com/Finb/Bark/blob/master/README.md\n")):
             with self.subTest(link=link):
+                self.desk = init_desk(self.tmp / f"link-{index}")
                 entry = self.save("fixture-bark-key", "bark", secret=link + bark_example())
                 self.assertEqual(alert_push._read(self.desk, entry["id"], True), "1234567890123456")
+        self.desk = init_desk(self.tmp / "refusals")
         entry = self.save("fixture-bark-key", "bark")
         for example in ("# see https://bark.day.app/en/guide/encryption\n" + bark_example(device="other-device"),
                         bark_example() + "curl 'https://api.day.app/other-device'\n",
@@ -392,6 +397,71 @@ class SecretFileTest(_PushServicesCase):
 
 
 class PhoneServicesTest(_PushServicesCase):
+    def test_short_bare_bark_keys_are_refused_before_writing(self):
+        for value in ("hello", "mytopic", "1234567"):
+            for service in ("recognize", "bark"):
+                with self.subTest(value=value, service=service):
+                    with self.assertRaisesRegex(ValueError, "at least 8"):
+                        self.save(value, service)
+                    self.assertEqual(self.desk.settings()["alert_push"], [])
+                    self.assertEqual(list(self.desk.secrets_dir.glob("alert-push-*")), [])
+        self.assertEqual(alert_services.parse("12345678"), ("bark", "https://api.day.app/12345678"))
+
+    def test_duplicate_address_names_existing_entry_and_writes_nothing(self):
+        entry = self.save("https://api.day.app/abcdefghijklmnopqrstuv", name="My phone")
+        before = self.desk.settings_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "My phone"):
+            self.save("https://api.day.app/abcdefghijklmnopqrstuv/title/body")
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+        self.assertEqual(self.desk.settings()["alert_push"], [entry])
+
+    def test_duplicate_edits_and_batch_adds_use_completed_addresses(self):
+        first = self.save("https://ntfy.sh/fixture-first-topic", name="First phone")
+        second = self.save("https://ntfy.sh/fixture-second-topic", name="Spare phone", on=False)
+        with self.assertRaisesRegex(ValueError, "Spare phone"):
+            alert_push.change(self.desk, [{"id": first["id"], "address":
+                "https://ntfy.sh/fixture-second-topic/"}], by="page")
+        self.assertEqual(alert_push._read(self.desk, first["id"]), "https://ntfy.sh/fixture-first-topic")
+        # Resaving an entry's own address is allowed, as is reusing a removed one.
+        alert_push.change(self.desk, [{"id": first["id"], "address": "https://ntfy.sh/fixture-first-topic/"}], by="page")
+        alert_push.change(self.desk, [{"id": first["id"], "remove": True},
+            {"address": "https://ntfy.sh/fixture-first-topic"}], by="page")
+        with self.assertRaisesRegex(ValueError, "New phone"):
+            alert_push.change(self.desk, [
+                {"address": "https://api.day.app/new-fixture-phone", "name": "New phone"},
+                {"address": "new-fixture-phone"}], by="page")
+        self.assertEqual(len(self.desk.settings()["alert_push"]), 2)
+        self.assertFalse(any("new-fixture-phone" in p.read_text() for p in self.desk.secrets_dir.glob("alert-push-*.address")))
+
+    def test_unnamed_duplicate_identifies_entry_without_exposing_address(self):
+        entry = self.save("https://ntfy.sh/fixture-hidden-topic")
+        with self.assertRaises(ValueError) as refusal:
+            self.save("https://ntfy.sh/fixture-hidden-topic/")
+        self.assertIn(entry["id"], str(refusal.exception))
+        self.assertNotIn("fixture-hidden-topic", str(refusal.exception))
+
+    def test_duplicate_refusal_does_not_echo_a_credential_in_a_pending_name(self):
+        key = "fixture-private-device-key"
+        with self.assertRaises(ValueError) as refusal:
+            alert_push.change(self.desk, [{"address": key, "name": key}, {"address": key}], by="page")
+        self.assertNotIn(key, str(refusal.exception))
+        self.assertEqual(self.desk.settings()["alert_push"], [])
+
+    def test_bark_and_ntfy_refuse_each_others_addresses_when_editing(self):
+        for service, address, foreign, name in (
+                ("bark", "https://api.day.app/fixture-phone-key", "https://ntfy.sh/hansa-alerts-7f3k", "ntfy"),
+                ("ntfy", "https://ntfy.sh/hansa-alerts-7f3k", "https://api.day.app/fixture-phone-key", "Bark")):
+            with self.subTest(service=service):
+                self.desk = init_desk(self.tmp / service)
+                entry = self.save(address, service)
+                with self.assertRaisesRegex(ValueError, f"looks like a {name} address"):
+                    alert_push.change(self.desk, [{"id": entry["id"], "address": foreign}], by="page")
+                self.assertEqual(alert_push._read(self.desk, entry["id"]), address)
+        self.assertEqual(alert_services.parse("https://phone.example/fixture-phone-key", "bark"),
+                         ("bark", "https://phone.example/fixture-phone-key"))
+        self.assertEqual(alert_services.parse("https://topic.example/myproject", "ntfy"),
+                         ("ntfy", "https://topic.example/myproject"))
+
     def test_secret_floor_applies_to_whole_values_and_parts_at_eight_characters(self):
         self.save("https://ntfy.sh/abcdefg", secret="tk_12345")
         self.save("https://ntfy.sh/abcdefgh", secret="tk_1234")
@@ -498,6 +568,7 @@ class PhoneServicesTest(_PushServicesCase):
         for address, service in (("https://api2.pushdeer.com/message/push?pushkey=K", "recognize"),
                                  ("K", "pushdeer")):
             with self.subTest(address=address):
+                self.desk = init_desk(self.tmp / service)
                 entry = self.save(address, service)
                 self.assertEqual(entry["service"], "pushdeer")
                 with patch.object(alert_push, "_text", return_value=("台面", "正文\n下一行")):
@@ -521,6 +592,7 @@ class PhoneServicesTest(_PushServicesCase):
                          ("sctp123tfixture-send-key", "https://123.push.ft07.com/send/sctp123tfixture-send-key.send")):
             for value in (key, url):
                 with self.subTest(value=value):
+                    self.desk = init_desk(self.tmp / key / ("address" if value == url else "key"))
                     matches = [s.id for s in alert_services.SERVICES.values() if s.recognizes(value)]
                     self.assertEqual(matches, ["serverchan"])
                     self.assertEqual(alert_services.parse(value), ("serverchan", url))
@@ -539,14 +611,15 @@ class PhoneServicesTest(_PushServicesCase):
         self.assertEqual(request["json"]["desp"], "\n".join("    " + line for line in body.splitlines()))
 
     def test_bark_bare_key_and_one_copied_https_example(self):
-        for value in ("KEY", "https://api.day.app/KEY/title/body?group=example&ttl=600",
-                      "curl -X GET 'https://api.day.app/KEY/title/body?group=example&ttl=600'"):
+        for index, value in enumerate(("DEVICE_KEY", "https://api.day.app/DEVICE_KEY/title/body?group=example&ttl=600",
+                      "curl -X GET 'https://api.day.app/DEVICE_KEY/title/body?group=example&ttl=600'")):
             with self.subTest(value=value):
-                self.assertEqual(alert_services.parse(value), ("bark", "https://api.day.app/KEY"))
+                self.desk = init_desk(self.tmp / f"spelling-{index}")
+                self.assertEqual(alert_services.parse(value), ("bark", "https://api.day.app/DEVICE_KEY"))
                 entry = self.save(value)
                 _, request = self.deliver(entry)
                 self.assertEqual(request["url"], "https://api.day.app/push")
-                self.assertEqual(request["json"]["device_key"], "KEY")
+                self.assertEqual(request["json"]["device_key"], "DEVICE_KEY")
         with self.assertRaises(ValueError):
             alert_services.parse("curl 'https://api.day.app/KEY' 'https://api.day.app/OTHER'")
         self.assertEqual(alert_services.parse("curl 'https://bark.example/KEY/a?ttl=600'", "bark"),
