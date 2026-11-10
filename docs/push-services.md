@@ -13,6 +13,10 @@ key pasted alone can still be taken as Bark. Paste the full service address
 or choose the service explicitly. Saving the same normalized address twice is
 refused, naming the entry that already has it (or its id if unnamed), including
 when that entry's alerts are off. Replace or remove that entry to reuse its address.
+The duplicate check applies only to an added or changed address. Duplicates saved
+by older versions do not block other settings changes or resaving an unchanged
+address. While they remain, `hansa status` names the entries sharing each address
+on one line and asks you to remove one on the page (**Settings → Alerts**).
 
 Hansa sends the desk name and alert text. Your saved alert language controls the
 wording. One-time codes used to approve releases go to the alert command and to Bark entries that encrypt,

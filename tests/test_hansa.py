@@ -39780,6 +39780,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       if (!block()) throw new Error("Push addresses block missing");
       const add = find(el => "data-push-add" in el.attrs, block());
       const describe = root => ({text:root.textContent,
+        preview:find(el => "data-push-preview" in el.attrs, root)?.textContent,
         address:field(root, "address")?.value, addressType:field(root, "address")?.attrs.type,
         secret:!!field(root, "secret"), secretValue:field(root, "secret")?.value,
         secretType:field(root, "secret")?.attrs.type,
@@ -50194,9 +50195,61 @@ class AlertPushPageTest(unittest.TestCase):
         self.assertNotIn(address, json.dumps(reply))
         for language in ("en", "zh"):
             shown = self.page([{"address": address}], language, {"/api/alert/push-preview": reply})
-            self.assertIn("Bark", shown["after"]["add"]["text"])
+            self.assertIn("识别为 Bark" if language == "zh" else "Recognized as Bark",
+                          shown["after"]["add"]["preview"])
             self.assertEqual(shown["settingsPosts"], 0)
         self.assertEqual(self.desk.settings()["alert_push"], [])
+
+    def legacy_duplicate(self):
+        first = self.add(name="Phone A")
+        second = self.add(name="Phone B", on=False)
+        # Before duplicate checks, the page could save this pair.
+        alert_push._file(self.desk, second["id"]).write_text(alert_push._read(self.desk, first["id"]) + "\n")
+        return first, second
+
+    def test_old_duplicate_allows_unrelated_page_saves_and_unchanged_address(self):
+        first, second = self.legacy_duplicate()
+        loaded = public_settings(self.desk)
+        loaded["settings"]["desk_name"] = "Renamed desk"
+        reply = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"]})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(self.desk.settings()["desk_name"], "Renamed desk")
+        reply = save_from_page(self.desk, {"settings": self.desk.settings(), "alert_push_changes": [
+            {"id": first["id"], "on": False, "name": "Main phone", "secret": "1234567890123456",
+             "address": "https://API.DAY.APP/" + self.KEY + "/"}]})
+        self.assertTrue(reply["ok"], reply)
+        self.assertFalse(self.desk.settings()["alert_push"][0]["on"])
+        self.assertEqual(self.desk.settings()["alert_push"][0]["name"], "Main phone")
+        self.assertEqual(alert_push._read(self.desk, first["id"]), alert_push._read(self.desk, second["id"]))
+        reply = save_from_page(self.desk, {"settings": self.desk.settings(), "alert_push_changes": [
+            {"address": "https://ntfy.sh/fixture-unrelated-topic"}]})
+        self.assertTrue(reply["ok"], reply)
+
+    def test_old_duplicate_still_refuses_added_or_changed_address(self):
+        first, second = self.legacy_duplicate()
+        third = self.add(name="Phone C")
+        for edit in ({"address": self.KEY}, {"id": third["id"], "address": self.KEY}):
+            with self.subTest(edit=edit):
+                before = self.desk.settings_path.read_bytes()
+                private = {p.name: p.read_bytes() for p in self.desk.secrets_dir.glob("alert-push-*")}
+                reply = save_from_page(self.desk, {"settings": self.desk.settings(), "alert_push_changes": [edit]})
+                self.assertFalse(reply["ok"])
+                self.assertIn("Phone A", " ".join(reply["problems"]))
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+                self.assertEqual({p.name: p.read_bytes() for p in self.desk.secrets_dir.glob("alert-push-*")}, private)
+
+    def test_status_names_old_duplicate_entries_without_exposing_address(self):
+        first, second = self.legacy_duplicate()
+        text = views.status_text(views.status(self.desk))
+        warnings = [line for line in text.splitlines() if "share a push address" in line]
+        self.assertEqual(len(warnings), 1, text)
+        for word in ("Phone A", "Phone B", "remove", "Settings", "Alerts"):
+            self.assertIn(word, warnings[0])
+        self.assertNotIn(self.KEY, json.dumps(views.status(self.desk)) + text)
+        alert_push.change(self.desk, [{"id": second["id"], "name": ""}], by="page")
+        self.assertEqual(views.status(self.desk)["alert_push_duplicates"], [["Phone A", second["id"]]])
+        alert_push.change(self.desk, [{"id": second["id"], "remove": True}], by="page")
+        self.assertNotIn("share a push address", views.status_text(views.status(self.desk)))
 
     def test_push_preview_refusals_and_duplicate_save_are_localized(self):
         auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
