@@ -438,6 +438,16 @@ def _merge_result_lines(m: dict, log: str = "") -> list:
         return [f"merge check: {r['note']}; nothing was merged", "  " + machine_hint(r)]
     how = f"FAILED ({r['note']})" if r.get("note") else f"FAILED (exit {r.get('exit')})"
     hint = machine_hint(r)
+    if r.get("steps"):  # a --recheck's steps: named as the per-step lines below name them (merge_result_lines)
+        ran = [s for s in r["steps"] if s.get("exit") is not None]
+        failed = [s for s in ran if not s.get("ok")]
+        not_run = [s for s in r["steps"] if s.get("exit") is None]
+        did = (f" and ran the {', then the '.join(s['what'] for s in ran)} there" if ran else "") + (
+            f"; the {' and the '.join(s['what'] for s in not_run)} did not run or was interrupted" if not_run else "")
+        if failed and not r.get("note"):
+            how = f"{failed[0]['what']} FAILED (exit {failed[0]['exit']})"
+        return ([f"merge check ({where}{did}): {how} in {r.get('seconds', 0)} s; nothing was merged"]
+                + failed_check_lines(log, r.get("tail", []), m["id"], "--merge-check-log") + (["  " + hint] if hint else []))
     return ([f"merge check ({where} and ran the lane's {'merge check' if r.get('own') else 'check'} there): {how}"
              + (f" in {r['seconds']} s: {r['command']}" if r.get("command") else "") + "; nothing was merged"]
             + failed_check_lines(log, r.get("tail", []), m["id"], "--merge-check-log") + (["  " + hint] if hint else []))
