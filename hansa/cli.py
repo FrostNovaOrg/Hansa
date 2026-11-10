@@ -1517,6 +1517,9 @@ def cmd_release(a):
     head = (f"release #{r['id']}: lane {a.lane}'s {r['base']} at {r['commit'][:10]}"
             + (f" by target {r['target']}" if r.get("target") else "") + ", "
             + (f"{r['count']} commit(s) since release #{r['since_release']}" if r.get("since_release") else
+               f"{r['count']} commit(s) missing from at least one remote ("
+               + ", ".join(f"{count} not on remote {remote}" for remote, count in r["remote_counts"].items())
+               + "; no release of it went out before)" if r.get("remote_counts") else
                f"{r['count']} commit(s) on no remote-tracking branch (no release of it went out before)")
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
             f"({release.runs_text(r)})")
