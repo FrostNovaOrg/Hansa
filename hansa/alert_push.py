@@ -81,7 +81,8 @@ def _file(desk, id: str, extra=False) -> Path:
 
 def _read(desk, id, extra=False):
     try:
-        return _file(desk, id, extra).read_text(encoding="utf-8").strip()
+        value = _file(desk, id, extra).read_text(encoding="utf-8")
+        return value.removesuffix("\n") if extra else value.strip()
     except FileNotFoundError:
         return ""
 
@@ -152,7 +153,8 @@ def keys(desk) -> dict:
     out = {}
     for path in sorted(desk.secrets_dir.glob("alert-push-*.*")):
         try:
-            value = path.read_text(encoding="utf-8").strip()
+            value = path.read_text(encoding="utf-8")
+            value = value.removesuffix("\n") if path.suffix == ".secret" else value.strip()
         except OSError:
             continue
         if len(value) < 8:  # like Desk.keys: short strings match ordinary task text
@@ -274,9 +276,13 @@ def prepare(desk, settings, changes, *, by=""):
                 entry[field] = edit[field]
         if "secret" in edit:
             secret = edit["secret"]
-            if not alert_services.SERVICES[entry["service"]].extra_secret:
+            definition = alert_services.SERVICES[entry["service"]]
+            if not definition.extra_secret:
                 raise ValueError("this push service does not take an extra secret")
-            if not isinstance(secret, str) or any(c.isspace() or unicodedata.category(c) == "Cc" for c in secret):
+            normalize_secret = getattr(definition, "normalize_secret", None)
+            if normalize_secret:
+                secret = normalize_secret(address if "address" in edit else _read(desk, entry["id"]), secret)
+            elif not isinstance(secret, str) or any(c.isspace() or unicodedata.category(c) == "Cc" for c in secret):
                 raise ValueError("the extra push secret must be text without spaces or controls")
             writes.append((entry["id"], secret, True))
     if issue := problems(value):
@@ -377,6 +383,7 @@ def public(desk, settings=None):
             hidden = ""
         out.append({**entry, "name": desk.redact(entry.get("name", "")), "address": hidden,
                     "address_set": bool(address), "secret_set": bool(_read(desk, entry["id"], True)),
+                    "encrypted": entry["service"] == "bark" and bool(_read(desk, entry["id"], True)),
                     "last": last_result(desk, entry["id"])})
     return out
 
@@ -434,6 +441,11 @@ def test(desk, id):
     entry = next((e for e in entries(desk.settings()) if e["id"] == id), None)
     if entry is None:
         return "no_address"
+    if entry["service"] == "bark" and _read(desk, id, True):
+        en = 'an encrypted test alert from hansa; "Decryption Failed" on the phone means the two keys differ'
+        zh = '来自 hansa 的加密测试提醒；手机显示“Decryption Failed”表示两边的密钥不同'
+        return send(desk, entry, [{"kind": "test", "level": "active", "text": en,
+                                  "translations": {"en": en, "zh": zh}}], testing=True)
     return send(desk, entry, [{"kind": "test", "level": "active", "text": "a test alert from hansa",
                              "translations": {"en": "a test alert from hansa", "zh": "来自 hansa 的测试提醒"}}], testing=True)
 

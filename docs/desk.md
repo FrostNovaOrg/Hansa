@@ -675,14 +675,18 @@ Add, save and test up to ten entries in **Settings → Alerts → Push addresses
 Under **Add an address**, paste the whole address from your push app or service.
 Leave **Recognize it** selected, or choose a service and follow the service's hint.
 Press **Save settings**, then **Send a test push** on the saved entry.
-For Bark, copy the address from the app's home screen.
+For Bark, copy the address from the app's home screen. To encrypt its pushes,
+choose AES-128, AES-192 or AES-256 with mode CBC in Bark, and paste the same
+16, 24 or 32 character ASCII key (or its copied example) into the entry's
+optional encryption key field. Saved encrypted entries are marked on the page,
+in status and in explain; the server and Apple receive ciphertext.
 See [push-address setup](releases.md#push-addresses-and-services) for the page's
 controls, and the [service guide](push-services.md), including
 [Bark](push-services.md#bark), for what to paste.
 
 Only the principal's page save adds, changes or removes push addresses. Settings
 (`alert_push`) keep metadata; each address is a secret in a separate 0600 file
-under the desk's 0700 `secrets/` folder. Services needing an extra signing secret
+under the desk's 0700 `secrets/` folder. Services needing an encryption key, signing secret
 or access token get the same protection. Hansa removes the keys it knows from
 new records and displayed text. Status and the page show a hidden address and
 each entry's last result. Saving a secret scrubs the task, request and try files

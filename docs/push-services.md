@@ -13,10 +13,10 @@ those on the desk's page. Addresses and extra secrets are stored privately on
 this machine, with secret parts hidden on the page and in status. Do not put a
 key, topic or token in an entry's name.
 
-All of these routes expose alert text to the server you choose. Phone delivery
-can also pass through Apple's or Google's push service; they can read that
-text too. HTTPS protects the trip to the server, rather than hiding the alert
-from that server. Self-hosting changes who runs the first server.
+These routes expose alert text to the server you choose unless you enable
+Bark encryption as described below. Phone delivery can also pass through
+Apple's or Google's push service, which can read unencrypted text too.
+HTTPS protects the trip to the server. Self-hosting changes who runs the first server.
 
 For WeCom, DingTalk, Feishu/Lark, Telegram, Discord and Slack, the message is
 the desk name, a line break, then the alert body. Urgent batches start with
@@ -44,19 +44,41 @@ addresses. A plain `https://HOST/KEY` address (lowercase host, one key path, no
 query or fragment) is Bark's own form, so `https://ntfy.sh/TOPIC`,
 `https://api2.pushdeer.com/KEY` and `https://sctapi.ftqq.com/KEY` are accepted
 as Bark; so are a saved Bark address and a self-hosted Bark server's address.
-There is no extra secret.
+
+To encrypt notifications, open Bark's encryption settings and choose **AES-128**,
+**AES-192** or **AES-256**, with mode **CBC**. Type a key of exactly 16, 24 or
+32 ASCII characters respectively. Choose **Bark** on hansa's page and paste
+that same key into **Encryption key (optional)**, or paste the shell script
+from the app's **copy example** button into that field. Hansa reads the key,
+algorithm and device key without running the script; it accepts only CBC with
+the matching key length and refuses an example for another device. It stores
+only the encryption key, discarding the example's IV and other script contents.
+Save settings, then send a test push. Its encrypted text explains that
+**Decryption Failed** on the phone means the app and hansa have different keys.
+
+The encryption key has its own 0600 file under `secrets/`, is included in
+redaction and task-change secret checks, and is never shown again. The saved
+entry says **encrypted** on the page, in `hansa status` and in `hansa explain`.
+A blank replacement field keeps the saved key; removing the entry removes its
+secrets, just as for other services. Without a key, Bark delivery stays unchanged.
 
 The device key is secret: someone with it can send to your device. Hansa sends
-the key, desk name and alert text to that Bark server's `/push` address, and the
-server sends the notification through Apple's push service. Neither server nor
-Apple is prevented from reading it.
+a JSON POST to that Bark server's `/push` address, and the server sends the
+notification through Apple's push service. With encryption enabled, only
+`device_key`, standard base64 `ciphertext` and a fresh random 16-character `iv`
+are outside the ciphertext. The title, body, group and level are inside it,
+encrypted using AES-CBC with PKCS7 padding. The encryption key never leaves
+hansa. Bark's server and Apple see ciphertext instead of the desk name and
+alert text; they still see the routing information and IV. Without an encryption
+key, those services can read the desk name and alert text.
 
 Passive alerts are quiet, active alerts use normal notification behavior, and
 urgent alerts are time-sensitive. Hansa never asks for critical alerts.
 Phone permissions and Focus settings still affect what you hear.
 
-Hansa limits the complete message sent to Bark, including the key and other
-fields, to 3,500 UTF-8 bytes. It shortens the body with `…` if necessary; if the
+Hansa limits the complete message sent to Bark, including the device key,
+ciphertext and IV when encrypted, to 3,500 UTF-8 bytes. It shortens only the
+body inside the message with `…` at a character boundary if necessary; if the
 fixed fields alone are too large, the result is `too_big`. Bark's server may
 impose further limits. A successful HTTP reply is `sent`; failures show their
 HTTP category, such as `http_4xx` or `http_429`. Hansa does not retain Bark's

@@ -9,19 +9,26 @@ To add a push address on the page:
 For Bark, install and open the Bark app on your iPhone, then paste the whole address shown on its home screen,
 such as https://api.day.app/KEY/example, into Add an address. Hansa keeps the server and key and drops the example
 text. Choose Bark explicitly for a self-hosted address if Recognize it asks you to choose a service.
+For encryption, choose AES-128, AES-192 or AES-256 with mode CBC in Bark's encryption settings. Paste the same
+16, 24 or 32 character ASCII key, or the app's copied example, into Encryption key (optional) on the entry.
+Only the key is saved; the example must match this device and CBC key length. Save settings, then test.
+The entry says encrypted on the page, in hansa status and hansa explain. A phone showing Decryption Failed
+has a different key. Each push uses a fresh random IV; every notification field is encrypted.
 There may be up to ten entries. Each has an on/off switch and an optional name. To replace an address or extra
 secret, paste a new one into that entry; leaving either empty keeps the saved value. Switch, rename or Remove,
 then Save settings. A test uses the saved entry even when it is off. Unsaved addresses and secrets stay only
 in this page until saved or reloaded.
 Only the principal's page save changes addresses. Each whole address, including its key, stays in a 0600 file
-under the desk's 0700 secrets/ folder, with the same protection for an extra signing secret or access token.
+under the desk's 0700 secrets/ folder, with the same protection for an encryption key, signing secret or access token.
 Settings hold only metadata; history records changes without credentials. Page replies and status hide secret
 parts. Previously saved Bark settings and key move automatically to the first push address, keeping on or off;
 the old setting and key file are removed and settings history records the move.
 
 Each gathered batch goes to every enabled entry with an address, even with no alert command. The desk's name
 and alert texts leave this machine for each address's service; for phone apps they go on to Apple's or Google's
-push service. Those services can read the text. One-time release codes never go to push addresses: answer those
+push service. Those services can read the text unless Bark encryption is enabled: then Bark's server and Apple
+see ciphertext and routing information, without the desk name or alert text.
+One-time release codes never go to push addresses: answer those
 release alerts on the page. Only the alert command gets codes. The sends run side by side with independent
 deadlines and results, so one slow or failed destination does not delay another's send or change its result.
 Hansa status shows each service, hidden address, on/off switch and last result (sent or its reason).
@@ -928,7 +935,8 @@ def explain_line(s: dict, desk: Desk | None = None) -> str:
     destinations = alert_push.public(desk, s) if desk else []
     pushes = ("Push addresses: " + "; ".join(
         f"{alert_services.SERVICES[e['service']].names['en']} {e['name'] or e['id']} ({e['address']}; "
-        f"{'on' if e['on'] else 'off'})" for e in destinations) if destinations else "No push addresses are set up")
+        f"{'on' if e['on'] else 'off'}{'; encrypted' if e.get('encrypted') else ''})"
+        for e in destinations) if destinations else "No push addresses are set up")
     a = s.get("alert") if isinstance(s.get("alert"), dict) else {}
     if not cmd:
         return (f"Alerts: no alert command is set. {pushes}. The principal sets these up on the page, Settings, Alerts; hansa "

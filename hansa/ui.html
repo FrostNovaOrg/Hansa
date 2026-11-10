@@ -810,6 +810,9 @@ Object.assign(T, ZH ? {
   pushGeneralHint:"粘贴推送应用或服务显示的完整地址，其中应包含密钥。如果无法识别，请选择推送服务。",
   pushKeepAddress:"留空则保留已保存的地址。保存后只显示隐藏密钥的地址。",
   pushKeepSecret:"留空则保留已保存的额外密钥。网页从不显示已保存的密钥。",
+  pushEncrypted:"已加密",
+  pushBarkKeyProblem:"请在 Bark 应用中选择 AES-128、AES-192 或 AES-256，模式选 CBC，并使用 16、24 或 32 个 ASCII 字符的密钥。",
+  pushBarkDeviceProblem:"这个示例属于另一台 Bark 设备。",
   pushRemove:"删除", pushUndo:"保留地址", pushRemoving:"保存设置时删除这个地址。",
   pushTest:"发一条测试推送", pushTesting:"发送中…", pushSent:"已发出", pushTestBad:"测试推送没有发出：",
   pushTestHint:"测试使用这个地址已保存的设置，即使关闭了提醒也会发送。请先保存修改，再测试。",
@@ -819,7 +822,7 @@ Object.assign(T, ZH ? {
   pushForeign:service => `这个地址像是 ${service} 的地址，请选择 ${service} 作为推送服务。`,
   pushLegacyProblem:"Bark 已保存的密钥无法迁移，请在本页的“提醒”设置中重新粘贴 Bark 地址。",
   pushDiscordGone:"这个 webhook 地址已不存在，请粘贴新的地址",
-  pushPrivacy:"工作台名称和提醒正文会发送到每个地址的推送服务；手机应用还会转交给苹果或谷歌的推送服务。这些服务能读到内容。一次性发布码从不发送到推送地址；发布要在这个网页上回答。",
+  pushPrivacy:"工作台名称和提醒正文会发送到每个地址的推送服务；手机应用还会转交给苹果或谷歌的推送服务。为 Bark 设置加密密钥后，Bark 服务器和苹果只能看到加密的内容；其他情况下这些服务能读到文字。一次性发布码从不发送到推送地址；发布要在这个网页上回答。",
   pushLimit:"最多可以保存 10 个推送地址。请先删除一个，再添加新地址。", pushUnknown:"推送没有发出，请稍后再试。",
   pushWhy:{off:"这个地址的提醒已关闭", no_address:"没有保存推送地址", empty:"没有要发送的内容",
     refused_url:"推送地址不被允许，请检查服务给出的地址", too_big:"推送内容太大，没有发送",
@@ -857,6 +860,9 @@ Object.assign(T, ZH ? {
   pushGeneralHint:"Paste the whole address shown by your push app or service, including its key. If it is not recognized, choose its service.",
   pushKeepAddress:"Left empty, the saved address stays. After saving, only its hidden form is shown.",
   pushKeepSecret:"Left empty, the saved extra secret stays. The page never shows a saved secret.",
+  pushEncrypted:"encrypted",
+  pushBarkKeyProblem:"Choose AES-128, AES-192 or AES-256 with CBC in the Bark app and use a 16, 24 or 32 character ASCII key.",
+  pushBarkDeviceProblem:"This example is for another Bark device.",
   pushRemove:"Remove", pushUndo:"Keep address", pushRemoving:"This address will be removed when you save settings.",
   pushTest:"Send a test push", pushTesting:"Sending…", pushSent:"sent", pushTestBad:"The test push was not sent: ",
   pushTestHint:"The test uses this address's saved settings, even when alerts are off. Save changes before testing.",
@@ -866,7 +872,7 @@ Object.assign(T, ZH ? {
   pushForeign:service => `This address looks like a ${service} address. Choose ${service} as its push service.`,
   pushLegacyProblem:"Bark's saved key could not be moved. Paste the Bark address again on this page under Alerts.",
   pushDiscordGone:"this webhook address no longer exists; paste a new address",
-  pushPrivacy:"The desk's name and alert texts go to each address's service; for phone apps, on to Apple's or Google's push service too. Those services can read the text. One-time release codes never go to a push address; releases are answered on this page.",
+  pushPrivacy:"The desk's name and alert texts go to each address's service; for phone apps, on to Apple's or Google's push service too. With a Bark encryption key, Bark's server and Apple see only encrypted content; otherwise those services can read the text. One-time release codes never go to a push address; releases are answered on this page.",
   pushLimit:"You can save up to 10 push addresses. Remove one before adding another.", pushUnknown:"The push was not sent. Try again later.",
   pushWhy:{off:"alerts to this address are off", no_address:"no push address is saved", empty:"there was nothing to send",
     refused_url:"this push address is not allowed; check the address from your service", too_big:"the push was too big to send",
@@ -1775,6 +1781,7 @@ let PUSH_NEW = emptyPush();
 const pushDraft = entry => PUSH_DRAFTS[entry.id] ||= {service:entry.service, on:entry.on, name:entry.name || "", address:"", secret:"", remove:false};
 function pushChanges() {
   const changes = [];
+  const hasSecret = draft => draft.service === "bark" ? draft.secret.length > 0 : !!draft.secret.trim();
   for (const entry of PUSH_ENTRIES) {
     const d = pushDraft(entry), edit = {id:entry.id};
     if (d.remove) { changes.push({...edit, remove:true}); continue; }
@@ -1782,12 +1789,12 @@ function pushChanges() {
     if (d.name !== (entry.name || "")) edit.name = d.name;
     if (d.service !== entry.service || d.address.trim()) edit.service = d.service;
     if (d.address.trim()) edit.address = d.address.trim();
-    if (d.secret.trim()) edit.secret = d.secret.trim();
+    if (hasSecret(d)) edit.secret = d.service === "bark" ? d.secret : d.secret.trim();
     if (Object.keys(edit).length > 1) changes.push(edit);
   }
-  if (PUSH_NEW.address.trim() || PUSH_NEW.secret.trim()) {
+  if (PUSH_NEW.address.trim() || hasSecret(PUSH_NEW)) {
     changes.push({service:PUSH_NEW.service, address:PUSH_NEW.address.trim(), name:PUSH_NEW.name.trim(),
-      ...(PUSH_NEW.secret.trim() ? {secret:PUSH_NEW.secret.trim()} : {})});
+      ...(hasSecret(PUSH_NEW) ? {secret:PUSH_NEW.service === "bark" ? PUSH_NEW.secret : PUSH_NEW.secret.trim()} : {})});
   }
   return changes;
 }
@@ -1805,6 +1812,8 @@ const pushProblem = problem => {
   return {
     "choose the push service for this address":T.pushChooseService,
     "invalid push address":T.pushBadAddress,
+    "choose AES-128, AES-192 or AES-256 with CBC in the Bark app; use a 16, 24 or 32 character ASCII key":T.pushBarkKeyProblem,
+    "this example is for another Bark device":T.pushBarkDeviceProblem,
     "this push service does not accept the address; check its hint and paste the whole address again":T.pushBadAddress,
     "Bark's saved key could not be moved; the principal should paste the Bark address again on the page (Settings, Alerts)":T.pushLegacyProblem
   }[problem] || problem;
@@ -2082,7 +2091,7 @@ function problemTarget(problem) {
   if (record) return record;
   const group = /^(provider |at least one provider)/.test(problem) ? "providers"
     : /^(coordinator_alert|alert_language|the alert command|alert_push|push |a push |the extra push |this push )/.test(problem)
-      || [T.pushChooseService, T.pushBadAddress, T.pushLegacyProblem].includes(problem)
+      || [T.pushChooseService, T.pushBadAddress, T.pushLegacyProblem, T.pushBarkKeyProblem, T.pushBarkDeviceProblem].includes(problem)
       || pushForeignProblem(problem) ? "alerts"
     : /^desk_name/.test(problem) ? "lanes" : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
     : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
@@ -2253,6 +2262,13 @@ function pushSection() {
   const editFields = (draft, fresh = false) => {
     const input = (key, label, hint = "", type = "text") => {
       const el = h("input", {type, value:draft[key], autocomplete:"off", "aria-label":label, "data-push-field":key,
+        onpaste:e => {
+          if (key !== "secret" || draft.service !== "bark") return;
+          // Password inputs strip line breaks. Preserve the copied script in
+          // memory for parsing; show only its flattened, masked input value.
+          e.preventDefault(); draft[key] = e.clipboardData.getData("text");
+          e.target.value = draft[key].replace(/[\r\n]/g, " "); refreshSettingsState();
+        },
         oninput:e => { draft[key] = e.target.value; refreshSettingsState(); }});
       return field(label, type === "password" ? passwordControl(el) : el, hint, "", true);
     };
@@ -2262,7 +2278,8 @@ function pushSection() {
       .map(s => h("option", {value:s.id, selected:draft.service === s.id}, word(s.name))));
     return fields(input("address", fresh ? T.pushAddress : T.pushReplacement, fresh ? "" : T.pushKeepAddress, "password"),
       field(T.pushService, select, draft.service === "recognize" ? T.pushGeneralHint : word(service(draft.service)?.hint), "", true),
-      service(draft.service)?.extra_secret ? input("secret", T.pushSecret, fresh ? "" : T.pushKeepSecret, "password") : null,
+      service(draft.service)?.extra_secret ? input("secret", word(service(draft.service)?.secret_label) || T.pushSecret,
+        [word(service(draft.service)?.secret_hint), fresh ? "" : T.pushKeepSecret].filter(Boolean).join(" "), "password") : null,
       input("name", T.pushName));
   };
   const cards = PUSH_ENTRIES.map(entry => {
@@ -2284,7 +2301,7 @@ function pushSection() {
       onchange:e => { draft.on = e.target.checked; refreshSettingsState(); }});
     return h("div", {class:"push-entry", "data-push-id":entry.id},
       h("h3", {}, draft.name || serviceName(entry.service)),
-      h("p", {class:"field-note"}, serviceName(entry.service)), h("p", {}, entry.address),
+      h("p", {class:"field-note"}, serviceName(entry.service) + (entry.encrypted ? " · " + T.pushEncrypted : "")), h("p", {}, entry.address),
       draft.remove ? h("p", {class:"warn"}, T.pushRemoving) :
         h("div", {}, fields(field(T.pushOn, on, "", "", true)), editFields(draft)),
       h("div", {class:"row"}, test, said,
