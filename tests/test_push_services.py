@@ -315,6 +315,82 @@ class BarkEncryptionTest(_PushServicesCase):
         self.assertEqual(sending.call_args.args[0][0]["json"]["body"], "a test alert from hansa")
 
 
+class SecretFileTest(_PushServicesCase):
+    """A secret file written by hand or by another program, not only with the one newline hansa writes."""
+
+    def rewrite(self, entry, text):
+        alert_push._file(self.desk, entry["id"], True).write_text(text, encoding="utf-8")
+
+    def test_other_services_extra_secrets_are_read_stripped_and_hidden_stripped(self):
+        token = "tk_fixture-auth-token"
+        ntfy = self.save("https://ntfy.sh/fixture-private-topic", secret=token)
+        gotify = self.save("https://gotify-extra.example", "gotify", secret=token)
+        hook = self.save("https://home.example/automation/fixture-path", "json", secret=token)
+        for entry, header, value in ((ntfy, "Authorization", "Bearer " + token), (gotify, "X-Gotify-Key", token),
+                                     (hook, "Authorization", "Bearer " + token)):
+            for text in (token + "\n\n", token + "\r\n", "  " + token + "\n \n"):
+                with self.subTest(service=entry["service"], text=text):
+                    self.rewrite(entry, text)
+                    why, request = self.deliver(entry)
+                    self.assertEqual(why, "sent")
+                    self.assertEqual(request["headers"][header], value)
+                    # The real request check passes it on (before: refused_url for a header holding a newline).
+                    self.assertNotIsInstance(alert_http._prepare(request), dict)
+                    self.assertEqual(alert_push.keys(self.desk)[f"alert-push-{entry['id']}.secret"], token)
+                    self.assertNotIn(token, self.desk.redact("the token " + token + " in text"))
+
+    def test_a_bark_key_file_is_read_less_only_its_last_newline(self):
+        key = " abcdefghijklmn "
+        entry = self.save("fixture-bark-key", "bark", secret=key)
+        self.assertEqual(alert_push._file(self.desk, entry["id"], True).read_text(), key + "\n")
+        self.assertEqual(alert_push._read(self.desk, entry["id"], True), key)
+        self.assertEqual(alert_push.keys(self.desk)[f"alert-push-{entry['id']}.secret"], key)
+        self.assertEqual(json.loads(decrypt_bark(self.deliver(entry)[1]["json"], key))["title"], "shop/desk")
+
+    def test_a_hand_edited_bark_key_that_is_not_valid_sends_nothing_and_says_so(self):
+        from hansa import alert
+        root = Path(alert.__file__).parent
+        entry = self.save("fixture-bark-key", "bark", secret="1234567890123456")
+        for text in ("k" * 15 + "\n", "1234567890123456\n\n", "k" * 10):
+            with self.subTest(text=text):
+                self.rewrite(entry, text)
+                with patch.object(alert_http, "send") as sending:
+                    self.assertEqual(alert_push.test(self.desk, entry["id"]), "bad_key")
+                    entries = [e for e in self.desk.settings()["alert_push"] if e["id"] == entry["id"]]
+                    self.assertEqual(alert_push.send(self.desk, entries[0], [{"kind": "test", "level": "active",
+                                                                             "text": "plain words"}]), "bad_key")
+                sending.assert_not_called()
+                self.assertFalse(alert_push.encrypts(self.desk, entry))
+                self.assertEqual(alert_push.last_result(self.desk, entry["id"])["why"], "bad_key")
+                status = views.status_text(views.status(self.desk))
+                self.assertIn("last failed: bad_key", status)
+                self.assertIn("encryption key is not valid", status)
+                self.assertIn("set it again on the page", status)
+                self.assertNotIn("not allowed", status)
+        page = (root / "ui.html").read_text()
+        self.assertRegex(page, r'bad_key:"[^"]*encryption key is not valid[^"]*set it again[^"]*"')
+        self.assertRegex(page, r'bad_key:"[^"]*加密密钥无效[^"]*重新设置[^"]*"')
+
+    def test_an_example_may_carry_a_link_to_another_site(self):
+        for link in ("# see https://bark.day.app/en/guide/encryption\n",
+                     "# docs: https://github.com/Finb/Bark/blob/master/README.md\n"):
+            with self.subTest(link=link):
+                entry = self.save("fixture-bark-key", "bark", secret=link + bark_example())
+                self.assertEqual(alert_push._read(self.desk, entry["id"], True), "1234567890123456")
+        entry = self.save("fixture-bark-key", "bark")
+        for example in ("# see https://bark.day.app/en/guide/encryption\n" + bark_example(device="other-device"),
+                        bark_example() + "curl 'https://api.day.app/other-device'\n",
+                        bark_example() + "device_key='other-device'\n",
+                        bark_example().replace("https://api.day.app/fixture-bark-key", "https://API.day.app/other")):
+            with self.subTest(example=example), self.assertRaisesRegex(ValueError, "for another Bark device"):
+                alert_push.change(self.desk, [{"id": entry["id"], "secret": example}], by="page")
+            self.assertFalse(alert_push._file(self.desk, entry["id"], True).exists())
+        # Only a link with no device on the entry's server is left: still refused, as before.
+        with self.assertRaisesRegex(ValueError, "for another Bark device"):
+            alert_push.change(self.desk, [{"id": entry["id"], "secret": bark_example().replace(
+                "https://api.day.app/fixture-bark-key", "https://bark.day.app/en/guide")}], by="page")
+
+
 class PhoneServicesTest(_PushServicesCase):
     def test_secret_floor_applies_to_whole_values_and_parts_at_eight_characters(self):
         self.save("https://ntfy.sh/abcdefg", secret="tk_12345")

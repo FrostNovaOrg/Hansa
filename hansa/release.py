@@ -2343,6 +2343,7 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
         row.update({k: r[k] for k in ("direct", "direct_count", "direct_reason", "direct_hold") if k in r})
         c = r.get("code") or {}  # whether a code went out, and when; never the code, nor its hash
         row["code_sent"] = c.get("sent") if code_live(r) else None
+        row["code_live"] = code_live(r)  # whether a code of this release can answer it now
         waits = r.get("state") == "waiting"
         row["code"], row["code_zh"] = (code_text(r), code_text(r, zh=True)) if waits else ("", "")
         row["runs"], row["runs_zh"] = runs_text(r), runs_text(r, zh=True)

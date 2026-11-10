@@ -600,7 +600,8 @@ the code is a second way to answer, by giving it to the coordinator in the conve
 If making any code fails, hansa voids the codes already made for that batch, records an
 `alert_error`, and sends the whole batch to every channel without codes, asking for an answer on the page.
 Removing an entry's encryption key makes later batches to it code-free. Its test push never makes or
-carries a release code, even while a release waits.
+carries a release code, even while a release waits. A key file edited by hand to a key the page would
+refuse makes the entry send nothing (`bad_key`) and carry no code.
 
 Each gathered batch goes to every enabled entry with an address. A command
 needs a nonblank command line. Sends run side by side with independent deadlines
@@ -678,7 +679,9 @@ already stopped waiting when its code was to be made) reads `release #1 of lane 
 (main at 08e2cfc99f) waits for your yes on the page: 8 commit(s), command:
 ...`. Codes come first to survive the 1,000-character cut. A code went out when at least one channel whose final
 text held it sent successfully. If no channel's final text held it, including after Bark's byte limit,
-the code is void and the page answers. It has 30 seconds; its own exit ends the run, even if it leaves a
+the code is void and the page answers. `hansa status`'s line under the waiting releases follows them, not
+the set-up: when none has a live code (none was made, making it failed, or it was voided), it says the
+principal answers on the page. It has 30 seconds; its own exit ends the run, even if it leaves a
 child running, and only at the limit is its process group killed. Alerts
 within 20 seconds of each other go out in one run to every channel that is set up,
 one batch at a time, and at most 20 runs an hour: beyond that, alerts are held and go out together in one
@@ -689,7 +692,8 @@ code and last lines (none for an alert that held a release's one-time code:
 then only how it ended is kept); the command is never retried: the next alert tries again.
 Each push service has a separate 30-second deadline including its transport's at most three
 tries; the batch never retries it. `hansa status` shows each push entry's last result,
-`sent` or the reason it could not send. A failed push records `alert_failed` with
+`sent` or the reason it could not send (`bad_key`: a Bark entry's encryption key is not valid; set it
+again on the page). A failed push records `alert_failed` with
 `channel: "push"`, the entry's `id`, `service` and reason, never its address or a code-bearing push's text,
 even when it failed or was cut. Neither channel carries the other's failure.
 The page has a button that sends a test alert through every channel that is set

@@ -46819,6 +46819,86 @@ else:
         self.assertNotIn("hash", c)
         self.assertIn("did not go out", c["void"])
 
+    def test_encrypted_bark_key_not_valid_carries_no_code_and_none_is_made(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        for text in ("k" * 10 + "\n", "k" * 15 + "\n", "1234567890123456\n\n"):
+            with self.subTest(text=text):
+                alert_push._file(self.desk, entry["id"], True).write_text(text)  # by hand: the page refuses it
+                self.assertFalse(alert.release_codes(self.desk))
+                self.assertFalse(views.status(self.desk)["release_codes"])
+                self.desk.event("release_waits", id=1, lane="a", why="waiting again")
+                http.reset_mock()
+                with unittest.mock.patch.object(release, "new_code") as make:
+                    alert.send_due(self.desk, gather=0)
+                make.assert_not_called()
+                http.assert_not_called()  # nothing is sent, and never in plain text
+                self.assertEqual(alert_push.last_result(self.desk, entry["id"])["why"], "bad_key")
+                self.assertNotIn("code", release.get(self.desk, 1))
+                self.assertIn("answers on the page only", self.hansa("status"))
+
+    def test_status_release_summary_follows_the_waiting_releases_live_codes(self):
+        from hansa import alert, release
+        self.alert_fake()
+        self.with_targets(staging="true", prod="true")
+        self.hansa("release", "a", "staging")
+        self.hansa("release", "a", "prod")
+        said = "or says the one-time code of their alert in the conversation"
+        self.assertTrue(alert.release_codes(self.desk))
+        # No code made yet: the page answers.
+        self.assertNotIn(said, self.hansa("status"))
+        self.assertIn("answers on the page", self.hansa("status"))
+        queued = alert.queued(self.desk)
+        with unittest.mock.patch.object(release, "new_code", side_effect=OSError("fixture releases write failed")):
+            alert.send_due(self.desk, gather=0)
+        status = self.hansa("status")
+        self.assertNotIn(said, status)
+        self.assertIn("the principal answers on the page: no waiting release has a live one-time code", status)
+        # A code made then voided (it did not go out) is no live code either.
+        new_code = release.new_code
+        made = []
+
+        def second_fails(desk, rid):
+            if made:
+                raise OSError("fixture releases write failed")
+            made.append(new_code(desk, rid))
+            return made[-1]
+        write_json(alert.queue_file(self.desk), queued)
+        with unittest.mock.patch.object(release, "new_code", side_effect=second_fails):
+            alert.send_due(self.desk, gather=0)
+        self.assertIn("did not go out", release.get(self.desk, 1)["code"]["void"])
+        self.assertNotIn(said, self.hansa("status"))
+        # One live code: the conversation answers too.
+        write_json(alert.queue_file(self.desk), queued)
+        alert.send_due(self.desk, gather=0)
+        self.assertTrue(release.code_live(release.get(self.desk, 1)))
+        self.assertIn(said, self.hansa("status"))
+
+    def test_encrypted_bark_code_text_failure_after_the_code_is_made_voids_it(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        original = alert._release_text
+
+        def fail_with_code(desk, rid, waiting, code="", zh=False):
+            if code:
+                raise RuntimeError("fixture text failed")
+            return original(desk, rid, waiting, code, zh)
+        with unittest.mock.patch.object(alert, "_release_text", side_effect=fail_with_code), \
+                unittest.mock.patch.object(release, "new_code", wraps=release.new_code) as make:
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        make.assert_called_once_with(self.desk, 1)
+        body = self.decrypted_bark(http)["body"]
+        self.assertIn("waits for your yes on the page", body)
+        self.assertNotIn("code ", body)
+        c = release.get(self.desk, 1)["code"]
+        self.assertNotIn("hash", c)  # the code the principal never received approves nothing
+        self.assertIn("did not go out", c["void"])
+        self.assertFalse(release.code_live(release.get(self.desk, 1)))
+
     def test_encrypted_bark_page_test_push_neither_creates_nor_carries_a_code(self):
         from hansa import alert, release
         entry, http = self.encrypted_bark_fake()
