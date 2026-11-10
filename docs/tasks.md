@@ -586,7 +586,19 @@ told the command of the task's last check and how it ended, and that the whole
 check need not be run again unless it needs to.
 A verification's scratch changes are kept under `refs/hansa/scratch/ID`, leaving its worktree clean
 and the shared stash alone; `hansa show ID` gives the `hansa git` command to read them, and the daily
-trim removes the ref 30 days after it ends.
+trim removes the ref 30 days after it ends. When git cannot keep them (the ref is locked, say), the
+verdict stands and `hansa show ID` says the scratch changes could not be kept, with git's words.
+
+When hansa cannot commit a worker's work as the run ends (a locked git index, or any other git error
+there), the task fails: "hansa could not commit the work: " and git's first line. `hansa show ID` gives
+all git said and the command that reads the work, which hansa keeps under `refs/hansa/kept/ID` (made
+without the worktree's index, so a locked one does not stop it). The lane's next task starts clean:
+if git could not clear the worktree then, that task clears it, as the work is kept. `hansa retry ID`
+works as for any failed task: it starts from the base, since the work was never committed.
+
+Anything else a task finds in its lane's worktree when it starts is set aside in `git stash`, named
+"hansa: left over before ID". That task's `hansa show` says so: the stash commit, the last task that
+ran in that worktree, and the `hansa git` commands that show the changes and the new files.
 
 ## What work costs
 

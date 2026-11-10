@@ -15510,6 +15510,76 @@ def save():'''))
         self.assertIn("hansa: what the lane's setup changed", stashes)
         self.assertIn("set aside", (self.desk.tasks_dir / tid / "setup.log").read_text())
 
+    def test_a_commit_hansa_cannot_make_fails_the_task_and_keeps_the_work_under_its_ref(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = 'touch "$(git rev-parse --git-dir)/index.lock"'  # git add -A fails at the end
+        self.assertEqual(self.desk.save_settings(s), [])
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertTrue(m["error"].startswith("hansa could not commit the work: fatal: Unable to create"), m["error"])
+        self.assertIn("index.lock", m["error"])
+        shown = self.hansa("show", tid)
+        self.assertIn("git add -A failed: fatal: Unable to create", shown)  # git's words, as git gave them
+        ref = f"refs/hansa/kept/{tid}"
+        [line] = [x for x in shown.splitlines() if f"hansa git a show {ref}" in x]
+        patch = self.hansa(*shlex.split(line[line.index("hansa git "):])[1:])
+        self.assertIn(f"+hello from {tid}", patch)
+        self.assertIn(f"hansa retry {tid}", shown)  # as for any failed task
+        wt = Path(m["worktree"])
+        lock = Path(sh_out("git", "rev-parse", "--absolute-git-dir", cwd=wt), "index.lock")
+        self.assertIn(f"hello from {tid}", (wt / "hello.txt").read_text())  # git could not clear it with the lock there
+        lock.unlink()
+        s["lanes"]["a"]["setup"] = ""
+        self.assertEqual(self.desk.save_settings(s), [])
+        new = self.hansa("retry", tid, "again").split()[0]
+        n = self.settle(d, new)
+        self.assertEqual((n["state"], n["files"]), ("done", ["hello.txt"]), n)
+        self.assertEqual(sh_out("git", "stash", "list", cwd=self.repo), "")  # nothing of tid's set aside unnamed
+        self.assertNotIn("set aside", self.hansa("show", new))
+        self.assertEqual(sh_out("git", "show", f"{ref}:hello.txt", cwd=self.repo), f"hello from {tid}")
+
+    def test_what_a_task_finds_left_in_the_worktree_is_set_aside_and_named_in_its_show(self):
+        d = Dispatcher(self.desk)
+        first = self.settle(d, self.desk.new_task("Add hello.txt"))
+        wt = Path(first["worktree"])
+        (wt / "README.md").write_text("changed by hand\n")
+        (wt / "stray.txt").write_text("stray\n")
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(d, tid)
+        self.assertEqual((m["state"], m["files"]), ("done", ["hello.txt"]), m)
+        stash = sh_out("git", "rev-parse", "refs/stash", cwd=self.repo)
+        self.assertIn(f"hansa: left over before {tid}", sh_out("git", "stash", "list", cwd=self.repo))
+        shown = self.hansa("show", tid)
+        [line] = [x for x in shown.splitlines() if "set aside" in x]
+        self.assertIn(first["id"], line)  # the task that left them
+        self.assertIn(stash[:12], line)
+        diff = self.hansa(*shlex.split(line[line.index("hansa git "):].split(";")[0])[1:])
+        self.assertIn("+changed by hand", diff)
+        new = self.hansa(*shlex.split(line[line.rindex("hansa git "):])[1:])
+        self.assertIn("+stray", new)
+
+    def test_a_verification_whose_scratch_changes_cannot_be_kept_keeps_its_verdict_and_says_so(self):
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt")
+        self.settle(d, tid)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_VERDICT": "holds", "FAKE_WRITE": "evidence", "FAKE_WRITE_FILE": "scratch.txt"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        lock = self.repo / ".git" / "refs" / "hansa" / "scratch" / f"{vid}.lock"  # the ref cannot be written
+        lock.parent.mkdir(parents=True)
+        lock.touch()
+        v = self.settle(d, vid)
+        self.assertEqual((v["state"], v["verdict"]), ("done", "holds"), v)
+        self.assertFalse(v.get("scratch_ref"))
+        self.assertIn(f"{vid}: holds", self.hansa("show", tid))
+        [line] = [x for x in self.hansa("show", vid).splitlines() if "scratch changes" in x]
+        self.assertIn("could not be kept", line)
+        self.assertIn("refs/hansa/scratch/", line)  # git's words
+
     def test_a_failing_setup_fails_the_task_with_its_output_and_never_holds_up_the_server(self):
         from concurrent.futures import ThreadPoolExecutor
         release = self.tmp / "release-setup"
