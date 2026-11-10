@@ -72,6 +72,13 @@ with `name`, `state`, `found`, `need`, `fix`; states are `ok`, `note`, `fails`,
 `skipped`. `--lang zh|en` selects language as in `hansa menu`.
 Commands time out after 15 seconds.
 
+When `HANSA_CLAUDE` is nonempty, hansa uses that file for Claude Code. If it is
+missing or cannot be run, `hansa doctor` reports a failed Claude Code row with
+the value and how to fix it; no other `claude` is used in its place. The same
+reason appears in `hansa status`, in `hansa coordinator`'s `hansa: ...` error
+(exit 1), and in failed `hansa ping` and page provider Check results. Empty or
+unset `HANSA_CLAUDE` keeps the usual PATH lookup.
+
 ## Log in (the principal's step)
 
 For a subscription, run `claude auth login` as the desk account; a new desk's
