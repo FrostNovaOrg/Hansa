@@ -561,6 +561,8 @@ One-time release codes go to the alert command and to Bark entries that encrypt,
 only. Other push entries get code-free wording asking for an answer on the page. With no alert command
 or enabled Bark entry that encrypts, no code is made. Answering on the page is always available;
 the code is a second way to answer, by giving it to the coordinator in the conversation.
+If making any code fails, hansa voids the codes already made for that batch, records an
+`alert_error`, and sends the whole batch to every channel without codes, asking for an answer on the page.
 Removing an entry's encryption key makes later batches to it code-free. Its test push never makes or
 carries a release code, even while a release waits.
 

@@ -160,6 +160,6 @@ hansa 会 POST 下面这样的 JSON，把工作台名称同时放进 `desk` 和 
 
 ## 查看发送失败的结果
 
-`refused_by_service` 表示服务器回应了，但没有按该服务要求的方式确认这次推送。hansa 只保留数字错误码，或最多 40 个字符的 ASCII 单词，从不保留响应里的消息文字或内容。这个 code 会出现在这条地址的上次结果和 `hansa status` 里。
+`refused_by_service` 表示服务器回应了，但没有按该服务要求的方式确认这次推送。对于不带发布一次性码的推送，hansa 只保留数字错误码，或最多 40 个字符的 ASCII 单词，从不保留响应里的消息文字或内容。这个 code 会出现在这条地址的上次结果和 `hansa status` 里。如果这次推送带有发布的一次性码，hansa 不保留服务响应的任何内容，包括服务的错误码；这条地址的上次结果和 `hansa status` 只显示发送结果。
 
 `http_4xx` 通常要改地址、令牌或权限；`http_429` 表示触发频率限制；`http_5xx` 表示服务器出错。`tls`、`network`、`timeout` 和 `deadline` 表示连接或时限方面的问题。`redirect` 会被拒绝，以免密钥被发到别的地址：请粘贴服务文档里最终的 HTTPS 地址。重试规则见[提醒与投递规则（英文）](../releases.md#alerts)。

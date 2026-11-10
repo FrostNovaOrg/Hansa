@@ -397,9 +397,12 @@ Any HTTP 2xx means sent; no response-body check is required. The transport's
 ## Reading a failed result
 
 `refused_by_service` means the server answered but did not acknowledge the
-push in the way its service requires. Hansa retains only a numeric error code
-or an ASCII word up to 40 characters, never the response's message or contents.
-The code appears in the entry's last result and in `hansa status`.
+push in the way its service requires. For a push without a release code, Hansa
+retains only a numeric error code or an ASCII word up to 40 characters, never
+the response's message or contents. The code appears in the entry's last result
+and in `hansa status`. For a push that carried a release code, Hansa keeps none
+of the service's answer, including its error code; the entry's last result and
+`hansa status` show only how the send ended.
 
 `http_4xx` usually needs an address, token or permission fix; `http_429` means
 rate limiting; `http_5xx` means a server error. `tls`, `network`, `timeout` and

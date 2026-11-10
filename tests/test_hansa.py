@@ -45008,6 +45008,56 @@ else:
         for rid in (1, 2):
             self.assertTrue(release.answer_by_code(self.desk, rid, True, self.sent_code(rid))["ok"])
 
+    def test_encrypted_bark_code_creation_failure_sends_whole_batch_without_codes(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        entry, http = self.encrypted_bark_fake()
+        self.with_targets(staging="true", prod="true")
+        self.hansa("release", "a", "staging")
+        self.hansa("release", "a", "prod")
+        queued = alert.queued(self.desk)
+        new_code = release.new_code
+        for language, fail_at in (("en", 1), ("en", 2), ("zh", 2)):
+            with self.subTest(language=language, fail_at=fail_at):
+                self.page_save(lambda s: s.update(alert_language=language))
+                write_json(alert.queue_file(self.desk), queued)
+                made = []
+
+                def fail(desk, rid):
+                    if rid == fail_at:
+                        raise OSError("fixture releases write failed" + (f": {made[0][1]}" if made else ""))
+                    code = new_code(desk, rid)
+                    made.append((rid, code))
+                    return code
+
+                http.reset_mock()
+                before = len(self.alerted(out))
+                with unittest.mock.patch.object(release, "new_code", side_effect=fail):
+                    self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+                http.assert_called_once()
+                self.assertEqual(len(self.alerted(out)), before + 1)
+                command = self.alerted(out)[-1]
+                self.assertEqual(command["kind"], "release_waiting")
+                for text in (command["text"], self.decrypted_bark(http)["body"]):
+                    for rid in (1, 2):
+                        self.assertIn(f"#{rid}", text)
+                    self.assertEqual(text.count("网页上点头" if language == "zh" else
+                                                "waits for your yes on the page"), 2)
+                    self.assertNotIn("code ", text)
+                    self.assertNotIn("一次性码", text)
+                    for _, code in made:
+                        self.assertNotIn(code, text)
+                self.assertEqual(alert.queued(self.desk), [])
+                self.assertIsNone(alert.send_due(self.desk, gather=0))
+                self.assertIn("fixture releases write failed", self.events("alert_error")[-1]["error"])
+                for rid, code in made:
+                    r = release.get(self.desk, rid)
+                    self.assertNotIn("hash", r["code"])
+                    self.assertIn("did not go out", r["code"]["void"])
+                    self.assertNotIn(code, json.dumps(self.events("alert_error")))
+                    self.assertFalse(release.answer_by_code(self.desk, rid, True, code)["ok"])
+                self.assertTrue(all(release.get(self.desk, rid)["state"] == "waiting" for rid in (1, 2)))
+
     def test_encrypted_bark_delivery_success_survives_failed_or_cut_siblings(self):
         from hansa import alert, release
         self.alert_fake("sys.exit(1)\n")
@@ -45153,6 +45203,8 @@ else:
                 self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
             make.assert_not_called()
             body = self.decrypted_bark(http)["body"]
+            self.assertIn("加密测试提醒" if language == "zh" else "an encrypted test alert", body)
+            self.assertIn("密钥不同" if language == "zh" else "the two keys differ", body)
             for word in (code, "code ", "一次性码", "K7P3QX"):
                 self.assertNotIn(word, body)
             self.assertEqual(release.get(self.desk, 1)["code"], before)

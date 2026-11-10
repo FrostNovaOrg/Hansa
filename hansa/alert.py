@@ -111,7 +111,9 @@ release_waiting alert queues only its release ID, request time and text without 
 the text is rebuilt in memory with a new code (release.new_code), only while that request still waits
 and an alert command or enabled Bark entry that encrypts gets the batch. Make it once per release before the
 channels start, sharing the same code across eligible channels; other push entries get the gathered text without
-codes. With neither eligible channel, no code is made. A code went out when any channel carrying it sent;
+codes. If making a code fails, void the codes already made, record alert_error and send the whole batch
+without codes, asking for an answer on the page. With neither eligible channel, no code is made.
+A code went out when any channel carrying it sent;
 when no channel's final text held it, including after character or byte cuts, it is void. Neither
 the code, what the command printed for such an alert, nor a code-bearing push's response text is written to a
 file (only how it ended is kept). Removing a Bark encryption key makes later batches to that entry code-free.
@@ -551,7 +553,19 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
         write_json(last_file(desk), {**{k: v for k, v in rec.items() if k != "held_since"},
                                      "runs": _runs(rec, t) + [t]})
         items = [dict(x) for x in q]
-        codes = _with_codes(desk, items) if cmd or any(alert_push.encrypts(desk, e) for e in pushes) else []
+        try:
+            codes = _with_codes(desk, items) if cmd or any(alert_push.encrypts(desk, e) for e in pushes) else []
+        except Exception as e:
+            # Code preparation must not take the gathered batch away from every channel.
+            # Use the original page-only wording, including when an earlier code was made.
+            made = [x for x in items if x.get("code")]
+            for x in made:
+                with contextlib.suppress(Exception):
+                    _codes_went(desk, [x], [])
+            from . import release
+            with contextlib.suppress(Exception):
+                desk.event("alert_error", error=release.hide_codes(str(e), [x["code"] for x in made])[:300])
+            items, codes = [dict(x) for x in q], []
         deliveries = []  # in memory only: each channel's final text and whether it sent
 
         def send_command():
@@ -597,8 +611,9 @@ def _with_codes(desk: Desk, items: list) -> list:
             code = release.new_code(desk, rid)
             if code:
                 seen.add(rid)
-                x.update(code=code, text=_release_text(desk, rid, True, code, zh=chinese(desk)))
+                x["code"] = code
                 codes.append(x)
+                x["text"] = _release_text(desk, rid, True, code, zh=chinese(desk))
     return codes
 
 
