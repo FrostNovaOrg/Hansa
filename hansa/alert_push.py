@@ -322,6 +322,21 @@ def prepare(desk, settings, changes, *, by=""):
         private.extend([address] if extra else service.secrets(address))
     if issue := private_metadata_problems(desk, value, private):
         raise ValueError(issue[0])
+    # Refuse duplicates only for added/changed addresses. Old duplicates must
+    # not block unrelated saves or resaving the same normalized address; status
+    # names them so the principal can remove one. Retain this while delivery
+    # runs independently for each saved entry. A replacement/removal frees it.
+    changed = {id for id, address, extra in writes if not extra and address != _read(desk, id)}
+    addresses = {}
+    for entry in sorted(value, key=lambda e: e["id"] in changed):
+        address = pending.get((entry["id"], False), _read(desk, entry["id"]))
+        if not address:
+            continue
+        if entry["id"] in changed and address in addresses:
+            previous = addresses[address]
+            label = desk.redact(previous.get("name") or previous["id"])
+            raise ValueError(f"push address is already saved in entry: {label}")
+        addresses.setdefault(address, entry)
     return value, writes, removes
 
 
@@ -406,6 +421,16 @@ def public(desk, settings=None):
                     "encrypted": entry["service"] == "bark" and bool(_secret(desk, entry)),
                     "last": last_result(desk, entry["id"])})
     return out
+
+
+def duplicate_names(desk, settings):
+    """Old duplicate destinations, without revealing their private addresses."""
+    groups = {}
+    for entry in entries(settings):
+        address = _read(desk, entry["id"])
+        if address:
+            groups.setdefault(address, []).append(desk.redact(entry.get("name") or entry["id"]))
+    return [names for names in groups.values() if len(names) > 1]
 
 
 def record(desk, entry, why, code=None):

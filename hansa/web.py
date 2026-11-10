@@ -333,6 +333,9 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     return self._send(200, alert.test(desk))
                 if path == "/api/alert/push-test":
                     return self._send(200, _push_test(desk, body))
+                if path == "/api/alert/push-preview":
+                    from .alert_services import preview
+                    return self._send(200, preview(body.get("address"), body.get("service", "recognize")))
                 return self._send(404, {"error": "not found"})
             except SettingsError as e:
                 return self._settings_unavailable(e)

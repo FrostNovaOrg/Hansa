@@ -79,7 +79,7 @@ they show what is merged, missing evidence and released; `show` also gives the g
 | `hansa cancel <id>` | stop a queued or running task or verification, or a merge check (back to review) |
 | `hansa close <id>` | close a finished or failed task or verification without merging |
 | `hansa notify [on \| off]` | the sessions hansa posts to; start or stop this one |
-| `hansa wait [id ...] [--timeout MIN]` | return when a task ends; with no tasks to watch, return at once |
+| `hansa wait [id ...] [--timeout MIN]` | return when a watched task ends (no ids: all queued/running/merging); return at once with no tasks, serve down, or all watched tasks queued while paused or under a floor; still wait for running/merging tasks |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart queued tasks, releases without asking and new bench runs; running work finishes; lane tries, merge checks and releases the principal said yes to can still start |
 | `hansa explain [lane L [--all] \| provider P \| server \| notify]` | settings and state, and where each comes from |
 | `hansa explain history [lane L \| provider P] [--last N]` | settings changes, newest first; more: `hansa help settings-changes` |

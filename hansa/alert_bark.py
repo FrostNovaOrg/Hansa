@@ -15,6 +15,7 @@ MAX_BYTES = 3500
 LEVELS = {"passive": "passive", "active": "active", "urgent": "timeSensitive"}
 ENCRYPTION_PROBLEM = "choose AES-128, AES-192 or AES-256 with CBC in the Bark app; use a 16, 24 or 32 character ASCII key"
 DEVICE_PROBLEM = "this example is for another Bark device"
+BARE_KEY_PROBLEM = "a bare Bark device key needs at least 8 characters; paste the whole address from the Bark app"
 
 
 def _key_valid(key):
@@ -124,6 +125,10 @@ class Bark:
         if not value or any(c.isspace() for c in value) or "\\" in value:
             raise ValueError("Bark needs an HTTPS address without spaces, controls, userinfo or backslashes")
         if re.fullmatch(r"[A-Za-z0-9_-]+", value):
+            # Keep the old bare-key floor: a short word is often an unfinished paste.
+            # Full app addresses still follow the URL grammar below.
+            if len(value) < 8:
+                raise ValueError(BARE_KEY_PROBLEM)
             value = DEFAULT_SERVER + "/" + value
         try:
             parsed = urlsplit(value)

@@ -4271,6 +4271,10 @@ class CoordinatorUpTest(unittest.TestCase):
         """The guide's way there: hansa up without tmux (the server starts, the coordinator not), a task queued by
         hand from a shell, tmux installed, hansa up again. No coordinator ever ran: it starts one."""
         from hansa import up
+        repo = self.tmp / "repo"
+        sh("git", "init", "-q", "-b", "main", str(repo), cwd=self.tmp)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
+        self.say("lane", "add", "a", "--repo", str(repo))
         self.say("add", "--lane", "a", "Add hello.txt")
         self.assertEqual([("session" in m) for m in self.desk.tasks()], [False])  # by hand: no session
         said, calls, ok = self.coordinator_up(tmux="")
@@ -18948,6 +18952,9 @@ def save():'''))
         self.assertEqual(sleeps, [])
 
     def test_wait_returns_when_a_task_ends(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         tid = self.desk.new_task("Add hello.txt")
         d, stop, broke = Dispatcher(self.desk), threading.Event(), []
 
@@ -18989,6 +18996,9 @@ def save():'''))
         self.assertIn("nothing to wait for", " ".join(out.getvalue().split()))
 
     def test_wait_ignores_request_answers_until_a_running_task_ends(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         self.desk.add_ask("Still open")
         self.desk.add_ask("Old page request")
         tid = self.desk.new_task("Add hello.txt")
@@ -19522,6 +19532,9 @@ def save():'''))
             for tid in calls])
 
     def test_a_task_that_ends_after_its_check_is_posted_once_to_its_session(self):
+        held = cli.hold_server_lock(self.desk)  # this test drives the running server's dispatcher by hand
+        self.addCleanup(held.close)
+        self.round_at(0)
         s = self.desk.settings()
         s["lanes"]["a"]["check"] = "true"
         self.assertEqual(self.desk.save_settings(s), [])
@@ -19801,8 +19814,15 @@ def save():'''))
         with self.in_session(c, sc):
             self.hansa_out("notify", "on")
         self.soon(lambda: [r for r in notify.live_records(self.desk) if r["session"]["pid"] == c.pid])
-        time.sleep(1)
-        self.assertEqual(self.posts(sc), [])
+        posts = self.soon(lambda: self.posts(sc))  # no server runs: C hears only its startup notice
+        self.assertEqual(len(posts), 1, posts)
+        self.assertNotIn("t0001", posts[0])
+        self.assertNotRegex(posts[0], r"session pid .* ended at")
+        lines = posts[0].splitlines()
+        self.assertEqual(len(lines), 2, posts[0])
+        self.assertEqual(lines[0], f"[hansa] desk {self.desk.root}")
+        self.assertTrue(lines[1].startswith("- hansa serve is not running:"), posts[0])
+        self.assertIn("next: hansa up", lines[1])
         self.assertEqual(len(self.posts(sb)), 1)
 
     def missed_a_server_stop(self, desk=None):
@@ -29555,6 +29575,9 @@ def save():'''))
         self.assertIn(f"Task {tid} has no check", (self.desk.tasks_dir / vid / "task.md").read_text())
 
     def test_queue_time_verification_each_option_implies_verify_and_is_not_inherited(self):
+        held = cli.hold_server_lock(self.desk)  # notification promises require a running server
+        self.addCleanup(held.close)
+        self.round_at(0)
         _, tid = self.queue_time_gap(check="")
         self.hansa("lane", "add", "b", "--like", "a")
         for option, value, field in (("--verify-lane", "b", "lane"), ("--verify-effort", "high", "effort"),
@@ -30823,6 +30846,9 @@ def save():'''))
         self.assertIn(f"error: closed: {t2} was cancelled", shown)
 
     def test_add_verify_retry_and_show_tell_a_session_that_hears_from_hansa_it_will_be_told(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         d = Dispatcher(self.desk)
         t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")
         for t in (t1, t2):
@@ -31056,6 +31082,9 @@ def save():'''))
                          {"replies": 0, "idle_min": 0, "note": ""})
 
     def test_a_running_task_shows_how_far_the_worker_has_got(self):
+        held = cli.hold_server_lock(self.desk)  # wait can reach its timeout while the server runs
+        self.addCleanup(held.close)
+        self.round_at(0)
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
         self.assertEqual(self.desk.save_settings(s), [])
@@ -31420,6 +31449,269 @@ def save():'''))
         for word in ("--after T", "latest follow-up", "restart", "hansa cancel", "hansa retry"):
             self.assertIn(word, topic)
 
+    def test_waiting_task_slot_in_status_show_and_page(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        running = self.desk.new_task("First", lane="a")
+        self.desk.change(running, lambda m: {"state": "running", "started": now()})
+        tid = self.desk.new_task("Second")
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        st = json.loads(self.hansa("status", "--json"))
+        self.assertEqual(st["queued"][0]["waiting_code"], "slot")
+        for text in (self.hansa("status"), self.hansa("show", tid)):
+            self.assertIn("free slot (1 of 1 running; hansa concurrency)", text)
+            self.assertNotIn("within seconds", text)
+        for language, [page] in self.picture_pages(st):
+            text = "".join(page["tables"])
+            self.assertIn("1 of 1 running" if language == "en" else "1/1", text)
+            self.assertIn("hansa concurrency", text)
+
+    def test_waiting_own_lane_merge_slot_in_status_and_reply(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.hansa("lane", "set", "a", "merge_check", "true")
+        running = self.desk.new_task("Other work", lane="b")
+        self.desk.change(running, lambda m: {"state": "running", "started": now()})
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        reply = self.hansa("merge", tid)
+        for text in (reply, self.hansa("status"), self.hansa("show", tid)):
+            self.assertIn("waits for a free concurrency slot", text)
+            self.assertNotIn("within seconds", text)
+        self.desk.change(running, lambda m: {"state": "done"})
+        self.assertNotIn("free concurrency slot", self.hansa("status"))
+
+    def test_waiting_setup_progress_in_status_show_and_wait(self):
+        tid = self.desk.new_task("Install first", lane="a")
+        self.desk.change(tid, lambda m: {"state": "running", "phase": "working", "provider": "claude",
+                                       "setup_ran": True, "started": time.time() - 120})
+        raw = self.desk.state_dir / "runs" / tid
+        raw.mkdir(parents=True)
+        for text in (self.hansa("status"), self.hansa("show", tid),
+                     views.progress_text(self.desk, self.desk.meta(tid))):
+            self.assertIn("the lane's setup is running (2 min)", text)
+            self.assertNotIn("no reply from the model yet", text)
+            self.assertNotIn("a worker is on it", text)
+        (raw / "setup.log.done").touch()
+        self.assertEqual(views.progress_text(self.desk, self.desk.meta(tid)), "no reply from the model yet")
+        for text in (self.hansa("status"), self.hansa("show", tid)):
+            self.assertNotIn("setup is running", text)
+            self.assertIn("no reply from the model yet", text)
+        self.assertIn("a worker is on it", self.hansa("show", tid))
+        self.desk.change(tid, lambda m: {"phase": "checking"})
+        self.assertEqual(views.progress_text(self.desk, self.desk.meta(tid)), "checking now")
+
+    def test_waiting_setup_reports_real_setup_until_done(self):
+        gate = self.tmp / "setup-release"
+        ready = self.tmp / "setup-ready"
+        command = f"touch {shlex.quote(str(ready))}; while ! test -f {shlex.quote(str(gate))}; do sleep 0.1; done"
+        self.hansa("lane", "set", "a", "setup", command)
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        d = Dispatcher(self.desk)
+        try:
+            d.tick()
+            self.soon(ready.exists)
+            for text in (self.hansa("status"), self.hansa("show", tid)):
+                self.assertIn("the lane's setup is running", text)
+                self.assertNotIn("no reply from the model yet", text)
+        finally:
+            gate.touch()
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertNotIn("setup is running", self.hansa("show", tid))
+
+    def test_waiting_wait_notices_a_new_dispatch_hold(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        tid = self.desk.new_task("Queued")
+        with unittest.mock.patch.object(cli.time, "sleep", side_effect=lambda _: self.desk.pause("maintenance")) as sleep:
+            out = self.hansa("wait", tid)
+        self.assertEqual(sleep.call_count, 1)
+        self.assertIn("dispatch is paused", out)
+
+    def waiting_hold(self, case):
+        if case == "paused":
+            self.desk.pause("maintenance")
+        elif case == "disk":
+            self.free = 10 ** 9
+            Dispatcher(self.desk).tick()
+        elif case == "memory":
+            self.memory_available = 10 ** 9
+            Dispatcher(self.desk).tick()
+        return {"paused": "dispatch is paused", "disk": "free space is under the floor", "memory": "memory",
+                "down": "not running"}[case]
+
+    def test_waiting_add_names_dispatch_holds(self):
+        for case in ("paused", "disk", "memory", "down"):
+            with self.subTest(case=case):
+                self.desk = init_desk(self.tmp / ("add-" + case), str(self.repo), "a")
+                self.free, self.memory_available = 500 * 10 ** 9, 8 * 10 ** 9
+                reason = self.waiting_hold(case)
+                held = cli.hold_server_lock(self.desk) if case != "down" else None
+                try:
+                    self.round_at(0)
+                    with unittest.mock.patch.object(notify, "hears_of", return_value=True):
+                        out = self.hansa("add", "A task")
+                finally:
+                    if held:
+                        held.close()
+                self.assertIn("t0001 queued", out)
+                self.assertIn(reason, out)
+                if case == "down":
+                    self.assertNotIn("tells this session", out)
+                    self.assertIn("next: hansa", out)
+                    self.assertIn(" up", out)
+                else:
+                    self.assertIn("tells this session", out)
+
+    def test_waiting_add_refuses_unknown_lane(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("add", "Never queued", "--lane", "bb")
+        self.assertIn("no lane bb", str(e.exception))
+        self.assertIn("lanes: a, b", str(e.exception))
+        self.assertEqual(self.desk.tasks(), [])
+
+    def test_waiting_wait_returns_for_dispatch_holds(self):
+        for case in ("paused", "disk", "memory", "down"):
+            with self.subTest(case=case):
+                self.desk = init_desk(self.tmp / ("wait-" + case), str(self.repo), "a")
+                self.free, self.memory_available = 500 * 10 ** 9, 8 * 10 ** 9
+                reason = self.waiting_hold(case)
+                tid = self.desk.new_task("Queued")
+                held = cli.hold_server_lock(self.desk) if case != "down" else None
+                try:
+                    self.round_at(0)
+                    with unittest.mock.patch.object(cli.time, "sleep", side_effect=AssertionError("wait slept")):
+                        out = self.hansa("wait", tid)
+                finally:
+                    if held:
+                        held.close()
+                self.assertIn(reason, out)
+                self.assertNotIn("no task finished", out)
+
+    def test_waiting_wait_queued_only_ignores_unwatched_active_work(self):
+        for case in ("paused", "disk", "memory"):
+            with self.subTest(case=case):
+                self.desk = init_desk(self.tmp / ("queued-wait-" + case), str(self.repo), "a")
+                self.free, self.memory_available = 500 * 10 ** 9, 8 * 10 ** 9
+                reason = self.waiting_hold(case)
+                queued = [self.desk.new_task("Queued") for _ in range(2)]
+                active = self.desk.new_task("Unwatched work")
+                self.desk.change(active, lambda m: {"state": "running"})
+                with cli.hold_server_lock(self.desk):
+                    self.round_at(0)
+                    patcher, sleeps = self.patch_sleeps(lambda _: self.fail("waited for unwatched work"))
+                    with patcher:
+                        out = self.hansa("wait", *queued, "--timeout", "1")
+                self.assertEqual(sleeps, [])
+                self.assertIn(reason, out)
+                self.assertNotIn("no task finished", out)
+
+    def wait_for_active_work_under_hold(self, explicit):
+        for case in ("paused", "disk", "memory"):
+            for state, end_state in (("running", "done"), ("merging", "merged")):
+                with self.subTest(case=case, state=state):
+                    self.desk = init_desk(self.tmp / ("active-wait-" + case + state), str(self.repo), "a")
+                    self.free, self.memory_available = 500 * 10 ** 9, 8 * 10 ** 9
+                    self.waiting_hold(case)
+                    queued = self.desk.new_task("Queued")
+                    active = self.desk.new_task("Work that can finish")
+                    self.desk.change(active, lambda m: {"state": state})
+
+                    def finish(_):
+                        self.assertEqual(self.desk.meta(active)["state"], state)
+                        self.desk.change(active, lambda m: {"state": end_state})
+
+                    with cli.hold_server_lock(self.desk):
+                        self.round_at(0)
+                        patcher, sleeps = self.patch_sleeps(finish)
+                        with patcher:
+                            out = self.hansa("wait", *([queued, active] if explicit else []), "--timeout", "1")
+                    self.assertEqual(len(sleeps), 1, out)
+                    self.assertIn(f"{active} {end_state}:", out)
+                    self.assertEqual(self.desk.meta(queued)["state"], "queued")
+
+    def test_waiting_wait_watched_active_work_finishes_under_dispatch_holds(self):
+        self.wait_for_active_work_under_hold(explicit=True)
+
+    def test_waiting_wait_without_ids_active_work_finishes_under_dispatch_holds(self):
+        self.wait_for_active_work_under_hold(explicit=False)
+
+    def test_waiting_wait_active_work_returns_when_server_is_down(self):
+        for state in ("running", "merging"):
+            with self.subTest(state=state):
+                tid = self.desk.new_task("Work without a server")
+                self.desk.change(tid, lambda m: {"state": state})
+                patcher, sleeps = self.patch_sleeps(lambda _: self.fail("waited without a server"))
+                with patcher:
+                    out = self.hansa("wait", tid, "--timeout", "1")
+                self.assertEqual(sleeps, [])
+                self.assertIn("hansa serve is not running", out)
+                self.assertIn("next: hansa", out)
+                self.assertIn(" up", out)
+
+    def test_waiting_follower_starts_down_posts_once(self):
+        self.coordinator_desk(1)
+        with unittest.mock.patch.object(notify, "post") as post:
+            self.follow_on_a_clock(1)
+        notices = [call.args[1] for call in post.call_args_list if "hansa serve is not running" in call.args[1]]
+        self.assertEqual(len(notices), 1)
+        self.assertIn("next: hansa", notices[0])
+        self.assertIn(" up", notices[0])
+        self.assertNotIn("stopped without a word", notices[0])
+
+    def test_waiting_startup_notice_does_not_start_coordinator_alerts(self):
+        self.coordinator_desk("startup-only", no_session_min=1, window_min=1, review_min=1, turn_min=1)
+        self.agents_say({"4242": "waiting"})
+        with unittest.mock.patch.object(notify, "post") as post:
+            _, _, carried = self.follow_on_a_clock(5, restart_at=4)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(self.coordinator_alerts(), [])
+        self.assertEqual(self.looked_up(), 0)
+        self.assertIsNone(carried["last_post"])
+        self.assertEqual(carried["watch"]["count"], 0)
+        self.assertEqual(carried["turns"], notify.Turns().state())
+
+    def test_waiting_refused_startup_notice_does_not_count_as_a_refusal(self):
+        self.coordinator_desk("startup-refused", no_session_min=1, window_min=1, review_min=1)
+        self.agents_say({"4242": "waiting"})
+        got = self.follow_with_refusing_inbox(240, lambda _: False)
+        self.assertTrue(got["attempts"])
+        self.assertEqual(got["posts"], [])
+        self.assertEqual(self.coordinator_alerts(), [])
+        self.assertEqual(self.looked_up(), 0)
+        self.assertTrue(all(r["me"]["last_post"] is None for r in got["requests"]))
+
+    def test_waiting_startup_notice_gathered_with_a_task_counts_only_the_task(self):
+        self.coordinator_desk("startup-with-task", no_session_min=1, window_min=1, review_min=0)
+        self.agents_say({"4242": "waiting"})
+        with unittest.mock.patch.object(notify, "post") as post:
+            _, _, carried = self.follow_on_a_clock(5, restart_at=4, at={
+                0.1: lambda: self.coordinator_task_ended("Task with startup")})
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("not running", post.call_args.args[1])
+        self.assertIn("Task with startup", post.call_args.args[1])
+        [text] = self.coordinator_alerts()
+        self.assertIn("1 thing(s)", text)
+        self.assertIn("oldest: t0001 done: Task with startup", text)
+        self.assertEqual(carried["watch"]["count"], 1)
+        self.assertEqual(len(carried["turns"]["unhandled"]), 1)
+
+    def test_waiting_task_refusal_counts_from_the_task_after_a_startup_notice(self):
+        self.coordinator_desk("startup-then-task", no_session_min=1, window_min=0, review_min=0)
+        got = self.follow_with_refusing_inbox(300, lambda t: t >= 270, at={
+            120: lambda: self.coordinator_task_ended("Task after startup")})
+        failed = [r["me"]["last_post"] for r in got["requests"] if (r["me"]["last_post"] or {}).get("failed")]
+        self.assertTrue(failed)
+        self.assertGreaterEqual(failed[0]["since"] - got["start"], 120)
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        self.assertEqual(len(got["posts"]), 1)
+        self.assertIn("Task after startup", got["posts"][0][1])
+
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": ""}
@@ -31493,6 +31785,9 @@ def save():'''))
         self.assertNotIn("within seconds", out)
 
     def test_add_retry_and_verify_say_when_no_provider_of_the_lane_can_start_the_task(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         d = Dispatcher(self.desk)
         tid = self.settle(d, self.desk.new_task("Add hello.txt"))["id"]
         out = self.hansa("add", "Ready at once")
@@ -40205,6 +40500,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       if (!block()) throw new Error("Push addresses block missing");
       const add = find(el => "data-push-add" in el.attrs, block());
       const describe = root => ({text:root.textContent,
+        preview:find(el => "data-push-preview" in el.attrs, root)?.textContent,
         address:field(root, "address")?.value, addressType:field(root, "address")?.attrs.type,
         secret:!!field(root, "secret"), secretValue:field(root, "secret")?.value,
         secretType:field(root, "secret")?.attrs.type,
@@ -40232,7 +40528,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         if (key === "on") el.checked = step[key]; else el.value = step[key];
         if (key === "secret" && step.paste) {
           el.on.paste({target:el, preventDefault:() => {}, clipboardData:{getData:() => step[key]}});
-        } else el.on[key === "service" || key === "on" ? "change" : "input"]({target:el});
+        } else await el.on[key === "service" || key === "on" ? "change" : "input"]({target:el});
       }
       if ("turn_min" in step) { const el = turnInput(); el.value = step.turn_min; el.on.input({target:el}); }
       if (step.remove) find(el => "data-push-remove" in el.attrs, cards()[step.entry]).on.click();
@@ -48393,6 +48689,9 @@ else:
 
     def test_successful_posts_advance_once_without_an_inbox_alert(self):
         self.coordinator_desk("inbox-success", no_session_min=1, window_min=0, review_min=0)
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         got = self.follow_with_refusing_inbox(180, lambda _: True, at={
             1: lambda: self.coordinator_task_ended("First success"),
             5: lambda: self.coordinator_task_ended("Second success")})
@@ -48422,8 +48721,11 @@ else:
                                                       start=t0, resume=carried, at=at)
                 self.assertEqual(self.coordinator_alerts(), [])
                 self.assertNotIn("inbox refuses posts", statuses[0])
-                self.assertEqual([("Refused after the restart" in text) for _, text in got["posts"]],
+                # The startup server-down notice is separate from the task posts this test counts.
+                self.assertEqual([("Refused after the restart" in text) for _, text in got["posts"] if "\n- t" in text],
                                  [True] if refusing else [])
+                if not refusing:
+                    self.assertEqual(got["requests"][-1]["me"]["last_post"], failed)
 
     def test_a_follower_stays_live_while_it_tries_a_refused_post(self):
         self.coordinator_desk("inbox-live", no_session_min=2, window_min=0, review_min=0)
@@ -48517,8 +48819,10 @@ else:
         """The `coordinator` alert, one row per rule; each row runs in a desk of its own."""
         from hansa import alert
 
-        def posted():
-            return self.posts(str(self.tmp / f"inbox-{self.desk.root.name}.sock"))
+        def posted(sock=None):
+            # Count task posts; the new startup server-down notice must not affect these alerts.
+            return [text for text in self.posts(sock or str(self.tmp / f"inbox-{self.desk.root.name}.sock"))
+                    if "\n- t" in text]
         waits = "the coordinator's session pid 4242 (desk-4242) has waited on its window"
 
         def row1():
@@ -48770,7 +49074,7 @@ else:
             self.assertIn("is idle while t0001 has waited for review for 3 min", self.coordinator_alerts()[0])
             self.assertIn("the principal's coordinator alert (review) went already: another follower alerted of this "
                           "task", log)
-            self.assertEqual((len(posted()), len(self.posts(str(self.tmp / "inbox-desk-16-1.sock")))), (1, 1))
+            self.assertEqual((len(posted()), len(posted(str(self.tmp / "inbox-desk-16-1.sock")))), (1, 1))
 
         def row17():
             """after a case-1 alert, a follower starts and ends within 5 s, between two looks; then something waits N1
@@ -49095,6 +49399,9 @@ else:
     def test_a_follower_posts_again_what_a_failed_turn_left_and_alerts_after_turn_min(self):
         from hansa import alert
         self.coordinator_desk("turns", no_session_min=0, window_min=0, review_min=0, turn_min=4)
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         self.assertEqual(alert.session_minutes(self.desk)["turn"], 4)
         self.agents_say({"4242": "idle"})
         t0 = float(int(time.time()))
@@ -49396,7 +49703,7 @@ else:
                 restarts.append(state)
                 raise Restarted
 
-            def deliver(sock, text, sess, me, beat=None):
+            def deliver(sock, text, sess, me, beat=None, wait=None):
                 delivered.append(text)
                 return True
             with unittest.mock.patch.object(notify, "source", lambda desk: ask), \
@@ -50726,7 +51033,8 @@ class AlertPushPageTest(unittest.TestCase):
             self.skipTest("needs node to run the page's script")
         harness = self.tmp / "push-page.js"
         harness.write_text(self.PAGE_HARNESS)
-        given = {"/api/settings": public_settings(self.desk), "pushSteps": list(steps), **(extra or {})}
+        given = {"/api/settings": public_settings(self.desk), "pushSteps": list(steps),
+                 "/api/alert/push-preview": {"ok": False, "problems": []}, **(extra or {})}
         result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"), "push",
                                  "zh-CN" if language == "zh" else "en"],
                                 input=json.dumps(given), capture_output=True, text=True, timeout=60)
@@ -50734,7 +51042,9 @@ class AlertPushPageTest(unittest.TestCase):
         return json.loads(result.stdout)
 
     def add(self, **edit):
-        alert_push.change(self.desk, [{"address": "https://api.day.app/" + self.KEY, **edit}], by="page")
+        count = len(self.desk.settings()["alert_push"])
+        key = self.KEY + (str(count) if count else "")
+        alert_push.change(self.desk, [{"address": "https://api.day.app/" + key, **edit}], by="page")
         return self.desk.settings()["alert_push"][-1]
 
     def test_service_refusals_show_code_and_action_on_page(self):
@@ -50896,6 +51206,133 @@ class AlertPushPageTest(unittest.TestCase):
         write_json(alert.queue_file(self.desk), [])
         self.assertIsNone(alert.hold_status(self.desk))
 
+    def test_push_preview_names_bare_wecom_key_as_bark_without_saving(self):
+        address = "fixture-wecom-key"
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        code, reply, _ = self.web_request("/api/alert/push-preview", method="POST", headers=auth,
+            data=json.dumps({"address": address, "service": "recognize"}).encode())
+        self.assertEqual(code, 200)
+        self.assertEqual(reply.get("service"), "bark")
+        self.assertNotIn(address, json.dumps(reply))
+        for language in ("en", "zh"):
+            shown = self.page([{"address": address}], language, {"/api/alert/push-preview": reply})
+            self.assertIn("识别为 Bark" if language == "zh" else "Recognized as Bark",
+                          shown["after"]["add"]["preview"])
+            self.assertEqual(shown["settingsPosts"], 0)
+        self.assertEqual(self.desk.settings()["alert_push"], [])
+
+    def legacy_duplicate(self):
+        first = self.add(name="Phone A")
+        second = self.add(name="Phone B", on=False)
+        # Before duplicate checks, the page could save this pair.
+        alert_push._file(self.desk, second["id"]).write_text(alert_push._read(self.desk, first["id"]) + "\n")
+        return first, second
+
+    def test_old_duplicate_allows_unrelated_page_saves_and_unchanged_address(self):
+        first, second = self.legacy_duplicate()
+        loaded = public_settings(self.desk)
+        loaded["settings"]["desk_name"] = "Renamed desk"
+        reply = save_from_page(self.desk, {"settings": loaded["settings"], "rev": loaded["rev"]})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(self.desk.settings()["desk_name"], "Renamed desk")
+        reply = save_from_page(self.desk, {"settings": self.desk.settings(), "alert_push_changes": [
+            {"id": first["id"], "on": False, "name": "Main phone", "secret": "1234567890123456",
+             "address": "https://API.DAY.APP/" + self.KEY + "/"}]})
+        self.assertTrue(reply["ok"], reply)
+        self.assertFalse(self.desk.settings()["alert_push"][0]["on"])
+        self.assertEqual(self.desk.settings()["alert_push"][0]["name"], "Main phone")
+        self.assertEqual(alert_push._read(self.desk, first["id"]), alert_push._read(self.desk, second["id"]))
+        reply = save_from_page(self.desk, {"settings": self.desk.settings(), "alert_push_changes": [
+            {"address": "https://ntfy.sh/fixture-unrelated-topic"}]})
+        self.assertTrue(reply["ok"], reply)
+
+    def test_old_duplicate_still_refuses_added_or_changed_address(self):
+        first, second = self.legacy_duplicate()
+        third = self.add(name="Phone C")
+        for edit in ({"address": self.KEY}, {"id": third["id"], "address": self.KEY}):
+            with self.subTest(edit=edit):
+                before = self.desk.settings_path.read_bytes()
+                private = {p.name: p.read_bytes() for p in self.desk.secrets_dir.glob("alert-push-*")}
+                reply = save_from_page(self.desk, {"settings": self.desk.settings(), "alert_push_changes": [edit]})
+                self.assertFalse(reply["ok"])
+                self.assertIn("Phone A", " ".join(reply["problems"]))
+                self.assertEqual(self.desk.settings_path.read_bytes(), before)
+                self.assertEqual({p.name: p.read_bytes() for p in self.desk.secrets_dir.glob("alert-push-*")}, private)
+
+    def test_status_names_old_duplicate_entries_without_exposing_address(self):
+        first, second = self.legacy_duplicate()
+        text = views.status_text(views.status(self.desk))
+        warnings = [line for line in text.splitlines() if "share a push address" in line]
+        self.assertEqual(len(warnings), 1, text)
+        for word in ("Phone A", "Phone B", "remove", "Settings", "Alerts"):
+            self.assertIn(word, warnings[0])
+        self.assertNotIn(self.KEY, json.dumps(views.status(self.desk)) + text)
+        alert_push.change(self.desk, [{"id": second["id"], "name": ""}], by="page")
+        self.assertEqual(views.status(self.desk)["alert_push_duplicates"], [["Phone A", second["id"]]])
+        alert_push.change(self.desk, [{"id": second["id"], "remove": True}], by="page")
+        self.assertNotIn("share a push address", views.status_text(views.status(self.desk)))
+
+    def test_push_preview_refusals_and_duplicate_save_are_localized(self):
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        for address, service, words in (("hello", "recognize", ("8", "Bark")),
+                ("https://ntfy.sh/myproject", "bark", ("ntfy",)),
+                ("https://api.day.app/fixture-device", "ntfy", ("Bark",))):
+            code, reply, _ = self.web_request("/api/alert/push-preview", method="POST", headers=auth,
+                data=json.dumps({"address": address, "service": service}).encode())
+            self.assertEqual(code, 200)
+            self.assertFalse(reply["ok"])
+            self.assertNotIn(address, json.dumps(reply))
+            for language in ("en", "zh"):
+                shown = self.page([{"service": service, "address": address}], language,
+                                  {"/api/alert/push-preview": reply})
+                for word in words:
+                    self.assertIn(word, shown["after"]["add"]["text"])
+                if language == "zh":
+                    self.assertNotIn("this address", shown["after"]["add"]["text"])
+        entry = self.add(name="My phone")
+        refusal = save_from_page(self.desk, {"settings": self.desk.settings(), "alert_push_changes": [
+            {"address": "https://api.day.app/" + self.KEY}]})
+        self.assertFalse(refusal["ok"])
+        for language in ("en", "zh"):
+            shown = self.page([{"address": "https://api.day.app/" + self.KEY},
+                {"reply": refusal, "save": True}], language)
+            self.assertIn("My phone", " ".join(shown["problems"]))
+            self.assertIn("已保存" if language == "zh" else "already saved", " ".join(shown["problems"]))
+        self.assertEqual(self.desk.settings()["alert_push"], [entry])
+
+    def test_push_preview_requires_auth_and_never_writes_private_files(self):
+        body = json.dumps({"address": "https://ntfy.sh/myproject"}).encode()
+        code, _, _ = self.web_request("/api/alert/push-preview", method="POST", data=body)
+        self.assertEqual(code, 403)
+        from hansa.alert_services import preview
+        self.assertIn("ntfy_topic_hidden", preview("https://topics.example/myproject", "ntfy")["warnings"])
+        self.assertEqual(preview("https://ntfy.sh/short")["warnings"], [])
+        self.assertFalse(preview(None)["ok"])
+        self.assertFalse(preview("https://[broken")["ok"])
+        self.assertEqual(list(self.desk.secrets_dir.glob("alert-push-*")), [])
+
+    def test_ntfy_word_topic_warns_before_save_about_redaction_and_readers(self):
+        self.desk = init_desk(self.tmp / "myproject")
+        settings = self.desk.settings()
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        code, reply, _ = self.web_request("/api/alert/push-preview", method="POST", headers=auth,
+            data=json.dumps({"address": "https://ntfy.sh/myproject", "service": "recognize"}).encode())
+        self.assertEqual(code, 200)
+        self.assertIn("ntfy_topic_hidden", reply.get("warnings", []))
+        for language in ("en", "zh"):
+            shown = self.page([{"address": "https://ntfy.sh/myproject"}], language,
+                              {"/api/alert/push-preview": reply})
+            text = shown["after"]["add"]["text"]
+            for word in (("wherever", "alerts", "desk", "guesses", "hard to guess") if language == "en"
+                         else ("出现", "提醒", "工作台名称", "猜到", "难以猜到")):
+                self.assertIn(word, text)
+            self.assertEqual(shown["settingsPosts"], 0)
+        self.assertTrue(save_from_page(self.desk, {"settings": settings, "alert_push_changes": [
+            {"address": "https://ntfy.sh/myproject"}]})["ok"])
+        title, body = alert_push._text(self.desk, [{"kind": "test", "text": "myproject"}], 0)
+        self.assertIn("[key of ", title)
+        self.assertIn("[key of ", body)
+        self.assertNotIn("myproject", title + body)
 
     def test_push_page_lists_upgraded_bark_with_hidden_address_switch_and_last_result(self):
         settings = self.desk.settings()
@@ -50978,6 +51415,7 @@ class AlertPushPageTest(unittest.TestCase):
     def test_push_page_recognizes_a_pasted_bark_address_on_save_and_clears_the_input(self):
         for language in ("en", "zh"):
             with self.subTest(language=language):
+                self.desk = init_desk(self.tmp / language)
                 address = "https://api.day.app/" + self.KEY + "/示例文字"
                 shown = self.page([{"address": address}, {"save": True}], language)
                 self.assertEqual(shown["before"]["add"]["options"][0],
@@ -51048,6 +51486,7 @@ class AlertPushPageTest(unittest.TestCase):
     def test_push_page_add_name_is_optional_localized_and_saved(self):
         for language in ("en", "zh"):
             with self.subTest(language=language):
+                self.desk = init_desk(self.tmp / language)
                 shown = self.page([{"address": "https://api.day.app/" + self.KEY,
                                     "name": "My phone"}, {"save": True}], language)
                 self.assertEqual(shown["before"]["add"]["name"], "")
@@ -51758,7 +52197,7 @@ class AlertPushTest(unittest.TestCase):
                 ("https://api.day.app/KEY#", "bark", "https://api.day.app/KEY"),
                 ("https://api.day.app/KEY\n", "bark", "https://api.day.app/KEY"),
                 ("https://api.day.app/KEY/a text", "bark", "https://api.day.app/KEY"),
-                ("KEY", "recognize", "https://api.day.app/KEY"),
+                ("DEVICE_KEY", "recognize", "https://api.day.app/DEVICE_KEY"),
                 ("https://bark.example.com/KEY/", "bark", "https://bark.example.com/KEY"))):
             with self.subTest(address=address), unittest.mock.patch.object(
                     self, "desk", init_desk(self.tmp / f"whole-{index}")):
@@ -51769,7 +52208,7 @@ class AlertPushTest(unittest.TestCase):
                 self.assertEqual(entry["service"], "bark")
                 self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
                 request = self.http.call_args.args[0][0]
-                self.assertEqual(request["json"]["device_key"], "KEY")
+                self.assertEqual(request["json"]["device_key"], saved.rsplit("/", 1)[-1])
                 self.assertEqual(request["url"], saved.rsplit("/", 1)[0] + "/push")
 
     def test_unmovable_legacy_bark_stays_private_and_recovers_only_after_a_bark_address_save(self):

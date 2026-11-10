@@ -7,6 +7,17 @@ On the desk's page, open **Settings → Alerts** and add a push address. Choose
 Self-hosted servers always need HTTPS. Save the entry and use its test button;
 the result appears beside the entry and in `hansa status`.
 
+As you enter an address, the page names the service it recognized before you
+save. Check that name: a bare key can belong to several services, so a WeCom
+key pasted alone can still be taken as Bark. Paste the full service address
+or choose the service explicitly. Saving the same normalized address twice is
+refused, naming the entry that already has it (or its id if unnamed), including
+when that entry's alerts are off. Replace or remove that entry to reuse its address.
+The duplicate check applies only to an added or changed address. Duplicates saved
+by older versions do not block other settings changes or resaving an unchanged
+address. While they remain, `hansa status` names the entries sharing each address
+on one line and asks you to remove one on the page (**Settings → Alerts**).
+
 Hansa sends the desk name and alert text. Your saved alert language controls the
 wording. One-time codes used to approve releases go to the alert command and to Bark entries that encrypt,
 inside their ciphertext only. All other push entries get code-free wording asking for an answer on the page.
@@ -53,17 +64,21 @@ Install Bark and copy the address on its home screen, such as
 `https://api.day.app/YOUR_DEVICE_KEY`. A ready-made curl command containing
 exactly one HTTPS address also works. Hansa keeps only the server and device
 key: example titles, bodies and query options such as `group` and `ttl` are
-discarded. A bare device key uses `api.day.app`. Choose **Bark** explicitly for
+discarded. A bare device key needs at least eight characters, as in the older
+Bark key field, to refuse short words and unfinished pastes; it uses `api.day.app`.
+Choose **Bark** explicitly for
 a different server. Hansa refuses a save and names the service to choose
 instead when an address belongs to another service and is not also Bark's own
 form: a Gotify `/message?token=…` or PushDeer `/message/push?pushkey=…`
-address, a Server酱 `SCT…`/`sctp<uid>t…` key or `.send` address, an ntfy address
-on `ntfy.sh` that is not exactly `https://ntfy.sh/TOPIC`, and Telegram
+address, a Server酱 `SCT…`/`sctp<uid>t…` key or `.send` address, and Telegram
 `sendMessage`, WeCom, DingTalk, Feishu/Lark, Discord and Slack endpoint
 addresses. A plain `https://HOST/KEY` address (lowercase host, one key path, no
-query or fragment) is Bark's own form, so `https://ntfy.sh/TOPIC`,
-`https://api2.pushdeer.com/KEY` and `https://sctapi.ftqq.com/KEY` are accepted
-as Bark; so are a saved Bark address and a self-hosted Bark server's address.
+query or fragment) is Bark's own form, so `https://api2.pushdeer.com/KEY` and
+`https://sctapi.ftqq.com/KEY` are accepted as Bark; so are a saved Bark address
+and a self-hosted Bark server's address. Bark refuses addresses on `ntfy.sh`,
+and ntfy refuses addresses on `api.day.app`, naming the service to choose.
+This prevents their similar address shapes from sending the wrong request body.
+Self-hosted addresses still need your explicit service choice.
 
 To encrypt notifications, open Bark's encryption settings and choose **AES-128**,
 **AES-192** or **AES-256**, with mode **CBC**. Type a key of exactly 16, 24 or
@@ -136,6 +151,14 @@ parts shorter than eight characters to avoid changing ordinary task text; the
 whole address is still protected. The token is secret too;
 configure access restrictions on your server rather than relying on a short
 topic alone.
+
+Before saving a topic of eight or more characters, the page warns that hansa
+will hide it wherever it appears, including alert text and the desk's name.
+For example, `myproject` is hidden even when it is ordinary text. The warning
+also explains that anyone who guesses an unprotected topic can read the alerts,
+and recommends a topic that is hard to guess. It appears for every such topic,
+so it does not depend on guessing which words are ordinary; redaction stays in
+place while topics are treated as secrets.
 
 Hansa sends the topic, desk name, alert text and priority as a JSON message to
 the server's root address, for example `https://ntfy.sh/`. A token travels in

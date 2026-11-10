@@ -295,6 +295,8 @@ def _verification_line(v) -> str:
 
 
 def _progress_line(p: dict) -> str:
+    if "setup_min" in p:
+        return f"the lane's setup is running ({p['setup_min']} min)"
     if p["idle_min"] is None:
         return "no reply from the model yet"
     return (f"{p['replies']} model replies, last activity {p['idle_min']} min ago"
@@ -333,12 +335,12 @@ def merge_check_waits_for(desk: Desk, m: dict, tasks: list | None = None) -> str
 
 
 def merge_lane_wait(desk: Desk, m: dict, tasks: list | None = None) -> str:
-    """A queued check on a separate merge lane can wait for that lane's try, or for a concurrency slot."""
+    """A queued merge check can wait for its lane's try, or for a concurrency slot."""
     s = desk.settings()
     lane = merge_check_lane(s, m)
-    if lane == m.get("lane") or (m.get("merge_check") or {}).get("phase") != "queued":
+    if (m.get("merge_check") or {}).get("phase") != "queued":
         return ""
-    if lane in tried_lanes(desk):
+    if lane != m.get("lane") and lane in tried_lanes(desk):
         return "try"
     return "slot" if sum(lane_occupied(x) for x in (desk.tasks() if tasks is None else tasks)) >= s["concurrency"] else ""
 
@@ -983,6 +985,7 @@ def status(desk: Desk) -> dict:
         "alert_held": alert.hold_status(desk),
         "alert_push": alert_push.public(desk, s),
         "alert_push_problem": alert_push.migration_problem(desk),
+        "alert_push_duplicates": alert_push.duplicate_names(desk, s),
         "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
         "merge_targets": [why for n, ln in sorted(s["lanes"].items()) if (why := merge_targets_problem(n, ln))],
         "shared_writes": shared_writes(desk.root, s),  # write-list folders another listed desk's lanes write too
@@ -1093,6 +1096,8 @@ def status_text(st: dict) -> str:
         out.append(f"{hold['count']} alert{'s' if hold['count'] != 1 else ''} held by the hourly limit until "
                    + time.strftime("%Y-%m-%d %H:%M", time.localtime(hold["until"])))
     out += [st["alert_push_problem"]] if st.get("alert_push_problem") else []
+    for names in st.get("alert_push_duplicates", []):
+        out.append("Push entries " + ", ".join(names) + " share a push address; remove one on the page (Settings, Alerts)")
     for entry in st.get("alert_push", []):
         last = entry["last"]
         out.append(f"Push {entry['service']} {entry['name'] or entry['id']}: {entry['address'] or 'no address'}"
@@ -1489,6 +1494,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                     + (f", not {m['parent']}'s own lane {own}" if own and own != m.get("lane") else ""))
     elif waiting.get("waiting_code") == "after":
         meaning = waiting["waiting"]
+    if m["state"] == "running" and m.get("setup_ran") and "setup_min" in (progress := progress_of(desk, m)):
+        meaning = _progress_line(progress)
     out = [head, f"title: {m['title']}", *task_text_lines(desk, m, full), f"meaning: {meaning}"]
     out += [f"attachment: {a['name']} ({a['size']} bytes)" for a in m.get("attachments", [])]
     if m.get("verify_after"):
