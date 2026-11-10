@@ -20,16 +20,16 @@ and code blocks, not the wording; review the translation too.
 
 ### Running the tests here
 
-- Run `python3 tests/run_parallel.py` (or `python3 -m unittest tests.test_hansa tests.test_push_services tests.test_docs contrib.codex.tests`) before opening a pull request; both run the same suites and use a stand-in for `claude`, so no model is called. The runner spreads the tests over processes (`--jobs N`, by default half the CPUs, at most 8), keeps unittest's output, and lists the slowest with `--slowest K`.
+- Run `python3 tests/run_parallel.py` (or `python3 -m unittest tests.test_hansa tests.test_push_services tests.test_docs tests.test_mod contrib.codex.tests`) before opening a pull request; both run the same suites, the ones every CI job runs, and use a stand-in for `claude`, so no model is called. The runner spreads the tests over processes (`--jobs N`, by default half the CPUs, at most 8), keeps unittest's output, and lists the slowest with `--slowest K`.
 - The runner also checks local Markdown links; see [Documentation tests](docs/testing.md) for its scope and the focused command.
-- The coordinator's mod (`hansa/mod/`, a Claude Code plugin) has tests of its own, in Claude Code's test kit: after a change there, run `claude plugin validate hansa/mod` and `claude plugin test hansa/mod` (Claude Code 2.1.306 or later; no model is called).
+- The coordinator's mod (`hansa/mod/`, a Claude Code plugin) has tests of its own, in Claude Code's test kit. `tests.test_mod` runs `claude plugin validate hansa/mod` and `claude plugin test hansa/mod` with the `claude` on the PATH (Claude Code 2.1.306 or later; no model is called), and skips them, saying why, where that `claude` cannot run them; see [The coordinator's mod](docs/testing.md#the-coordinators-mod).
 - The optional Codex adapter (`contrib/codex`) has tests of its own, which `tests/run_parallel.py` runs after `tests.test_hansa` (alone: `python3 -m unittest contrib.codex.tests`). Fakes stand in for codex, srt and claude. On non-macOS systems, the adapter refuses Codex worker runs, so tests that start one skip.
 - Run the tests as an ordinary user, not as root (in a container, say): as root, `test_a_lane_repository_must_belong_to_the_user_hansa_runs_as` makes hansa switch to another account with `runuser`, which replaces the test process, and the suite stops partway.
 - Before each push the maintainers run the whole suite on macOS and on Linux.
 
 ### What GitHub's checks run
 
-- Every CI job also runs the adapter's suite and `claude plugin validate hansa/mod` and `claude plugin test hansa/mod`, with no model or login. Adapter worker runs skip on Ubuntu; the macOS jobs exercise them with fakes. The pinned tool baseline and upgrade checks are in [Tools and upgrades](docs/sandbox.md#tools-and-upgrades).
+- Every CI job runs the suites `tests/run_parallel.py` runs, the adapter's and the mod's validation and tests among them, with no model or login; there the mod's two tests fail rather than skip (`HANSA_TESTS_NEED_CLAUDE_PLUGIN=1`). Adapter worker runs skip on Ubuntu; the macOS jobs exercise them with fakes. The pinned tool baseline and upgrade checks are in [Tools and upgrades](docs/sandbox.md#tools-and-upgrades).
 - Every push to `main` runs the whole suite on Ubuntu and macOS, with Python 3.9 and the latest version, and the real srt on macOS. The repository is public, so GitHub's macOS minutes no longer count against a quota.
 - Every pull request runs the whole suite on Ubuntu, with Python 3.9 and the latest version.
 - A manually started workflow (Actions, tests, Run workflow) runs the whole suite on Ubuntu and macOS with both Python versions, and the real srt on macOS; start it before a release whose changes touch the sandbox (the settings hansa gives srt or a worker's sandbox) or the web page.

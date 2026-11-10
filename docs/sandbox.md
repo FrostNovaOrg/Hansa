@@ -38,8 +38,9 @@ compatibility before changing a dependency's major version. A direct version pin
 does not freeze dependencies declared as ranges.
 
 Change the installation examples and CI pins together, including the full action
-commit IDs. Run the Python suites and `claude plugin validate hansa/mod` and
-`claude plugin test hansa/mod`, then start the manual CI run for the real macOS
+commit IDs. Run `python3 tests/run_parallel.py`, which also runs `claude plugin
+validate hansa/mod` and `claude plugin test hansa/mod` (check that those two did
+not skip), then start the manual CI run for the real macOS
 sandbox checks. Also check the real sandbox on Linux as an ordinary user: GitHub's
 Ubuntu runners cannot run it with their default settings. Record tool versions,
 platforms and skipped checks with the results. This baseline guards against

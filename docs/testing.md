@@ -41,6 +41,44 @@ by `and N more` for any remaining entries. Skipped tests do not count, and a
 run without failures or errors has no such line. This keeps failing test names
 visible in the last lines shown by lane checks and release reports.
 
+## What the runner runs
+
+`python3 tests/run_parallel.py` with no names runs the modules in its `SUITES`:
+`tests.test_hansa`, `tests.test_push_services`, `tests.test_docs`,
+`tests.test_mod` and `contrib.codex.tests`. GitHub's checks name the same
+modules in the workflow's "Run the tests" step, and `WorkflowTest` keeps the two
+lists equal. `tests/test_menu.py`, `tests/test_doctor.py`, `tests/test_install.py`
+and the files in `tests/bench/` have no entry of their own: `tests.test_hansa`
+imports their test classes, so they run wherever it runs.
+`test_every_test_class_under_tests_is_in_those_suites` fails for a test class
+under `tests/` (or `contrib/codex/tests/`) that none of those modules reaches.
+
+## The coordinator's mod
+
+`tests.test_mod` runs the mod's validation and tests (`claude plugin validate
+hansa/mod` and `claude plugin test hansa/mod`), each as one test, with the
+`claude` found on the PATH when the module loads. A failure fails the run and
+names `test_the_coordinators_mod_validates` or
+`test_the_coordinators_mod_passes_its_tests` in the `Failed tests:` line; its
+message holds what `claude` said, without the tests that passed. The commands
+run with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, so they send nothing to
+Anthropic, and need no login.
+
+Both tests skip, saying why, where that `claude` cannot run them: there is no
+`claude` on the PATH; it is older than 2.1.306 or has no `claude plugin test`; or
+a sandbox refused what it needed (a line saying `operation not permitted`,
+`EPERM`, `EACCES` or `permission denied` before `claude` reported a result). With
+`HANSA_TESTS_NEED_CLAUDE_PLUGIN=1`, as every CI job sets, a skip fails instead.
+`ModRunTest` checks each of these with stand-ins for `claude`.
+
+Tests in the mod's own kit must not rely on how far `clock.advance` or
+`clock.settle` gets while one of the test's own hooks is waiting (a clear held
+open, say). The kit cannot wait for such a hook: it stops waiting once nothing
+has moved for a moment, so on a loaded machine the advance can return before the
+hook has done what the test then reads. Hold such a call with a promise the test
+resolves itself, as `holdClear` in `hansa/mod/tests/register.test.ts` does, and
+look at what happened from the test's body, after awaiting what it waits for.
+
 ## Bench test clocks and connections
 
 The lifecycle tests replace `selftest.time`, rather than `selftest.time.sleep`:
