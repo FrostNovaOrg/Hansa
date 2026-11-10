@@ -586,6 +586,7 @@ def try_srt_at_start(desk: Desk) -> dict:
 # again, the held lanes' at once (sandbox_retry).
 SANDBOX_HELD = "sandbox-held.json"  # in the desk's state: {"lanes": {lane: {group: {why, part, kind, at, task}}},
 #                                     "told": [[lane, why]]} (sandbox_held)
+# Each work hold keeps its own told pairs too: clearing that hold resets its notices without changing start holds.
 SANDBOX_TRIES = {}  # fingerprint of the settings: what the try found (try_sandbox)
 # Each part of the settings, tried alone when the whole is refused, to name what the sandbox refuses
 SANDBOX_PARTS = (("the exact deny-write paths", lambda fs, net: {"denyWrite": [x for x in fs["denyWrite"] if not _glob(x)]}),
@@ -902,25 +903,33 @@ def sandbox_clear(desk: Desk, lane_name: str, group: str) -> None:
 def _hold_lane(desk: Desk, lane_name: str, entry: dict, group: str = "work", lanes=()) -> bool:
     """Record a lane's runs of the entry's kind as held (sandbox_held), in its group, and so each of `lanes` too;
     whether the principal's alert (the coordinator, for a start held: start_hold) is to be told, once for each
-    lane and reason."""
+    lane and reason. A passing sandbox try resets that lane's sandbox notices (sandbox_clear)."""
     names = list(dict.fromkeys([lane_name, *lanes]))
     with desk.lock():
         rec = read_json(desk.state_dir / SANDBOX_HELD, {}) or {}
         rec = rec if isinstance(rec, dict) else {}
         told = [x for x in rec.get("told") or [] if isinstance(x, list)]  # [lane, why]; a reason alone was before lanes
-        fresh = [[n, entry["why"]] for n in names if [n, entry["why"]] not in told]
+        fresh = []
         held = sandbox_held(desk)
         for n in names:
-            held.setdefault(n, {})[group] = entry
+            prior = held.get(n, {}).get(group)
+            # Old active holds inherit the saved notices. A new work hold starts a new stretch;
+            # its own notices disappear with it when sandbox_clear removes the work group.
+            seen = (prior.get("told", told) if prior else []) if group == "work" else told
+            pair = [n, entry["why"]]
+            if pair not in seen:
+                fresh.append(pair)
+            held.setdefault(n, {})[group] = {**entry, "told": [*seen, pair] if pair not in seen else seen} \
+                if group == "work" else entry
         desk.state_dir.mkdir(mode=0o700, exist_ok=True)
-        write_json(desk.state_dir / SANDBOX_HELD, {"lanes": held, "told": [*told, *fresh]})
+        write_json(desk.state_dir / SANDBOX_HELD, {"lanes": held, "told": [*told, *(x for x in fresh if x not in told)]})
     return bool(fresh)
 
 
 def hold(desk: Desk, tid: str, lane_name: str, why: str, part: str = "", kind: str = "") -> None:
     """A run whose sandbox could not start: its task goes back to the queue, held (no try used), and its lane's
     workers and verifiers are recorded as unable to run, for hansa status. The principal's alert is
-    told once for each lane and reason."""
+    told once for each lane and reason until a passing sandbox try clears the hold."""
     why = desk.redact(why)[:600]
     held = {"why": why, "part": part, "kind": kind, "lane": lane_name, "at": now()}
     desk.change(tid, lambda m: None if m["state"] not in ("queued", "running") else
