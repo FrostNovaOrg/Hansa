@@ -1293,21 +1293,22 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
 
 
 def server_news(r: dict, items: list, was_up, told_down: float, told_stuck: float, desk=None, me=None) -> tuple:
-    """What the follower says of hansa serve after a feed (run.server_state): not running only once its process
-    is gone; busy or stuck once its rounds stay quiet for long; and, after either, that it runs again once it
-    finishes a round after that was said. told_down, told_stuck: when that was said, 0 if not. desk and me: the
+    """What the follower says of hansa serve after a feed (run.server_state): not running when its process
+    is gone, including at the follower's start; busy or stuck once its rounds stay quiet for long; and, after
+    either, that it runs again once it finishes a round after that was said. told_down, told_stuck: when that
+    was said, 0 if not. desk and me: the
     desk and the follower's record, for what the stopped line tells its session to run. Returns (items,
     told_down, told_stuck)."""
     st = r.get("server") or {"state": "up" if r.get("server_up") else "gone", "quiet": 0}
     if any(x["key"] == ["server"] for x in items):  # hansa serve stopped, and said so
         told_down = told_down or time.time()
     if st["state"] == "gone":
-        if was_up and not told_down:
+        if not told_down:
             sess = (me or {}).get("session")
             hint = _up_hint(desk, _process_folder(sess) or _recorded_folder(desk, sess)) if desk else "hansa up"
-            items.append({"key": ["server"], "line": "hansa serve is not running (it stopped without a word): "
-                                                     "no task starts or ends until it runs again · next: "
-                                                     + hint})
+            items.append({"key": ["server"], "line": "hansa serve is not running"
+                          + (" (it stopped without a word)" if was_up else "")
+                          + ": no task starts or ends until it runs again · next: " + hint})
             told_down = time.time()
     elif st["state"] == "stuck":
         if not told_stuck and not told_down:

@@ -27,7 +27,7 @@ from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
-                  quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_detail, words_in_merge, words_text, write_try,
+                  quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, tried_lanes, try_file, try_log, try_srt_at_start, unverified_note, waiting_detail, words_in_merge, words_text, write_try,
                   merge_recheck_steps, standing_verification, task_base_problem,
                   is_local, mac_loopback_listeners, worktree_git_settings)
 
@@ -553,23 +553,27 @@ def _wait_for(desk: Desk, tid: str) -> str:
 
 def _runs_when(desk: Desk, tid: str, base: str) -> str:
     """When a merge check just queued runs: after the one ahead of it on the same repository and base branch,
-    if any, and when its lane is free."""
+    if any, and when its lane and a concurrency slot are free."""
     m = desk.meta(tid)
     ahead = views.merge_check_waits_for(desk, m)
     lane = merge_check_lane(desk.settings(), m)
-    if lane != m["lane"]:
+    if lane != m["lane"] or views.merge_lane_wait(desk, m) == "slot":
         return (f"One merge check runs at a time on {base}, so it waits for {ahead}." if ahead else
                 views.merge_check_text(desk, m, sentence=True))
     return (f"One merge check runs at a time on {base}, so it waits for {ahead}, then runs when lane {lane} is "
             f"free." if ahead else f"It runs when lane {lane} is free.")
 
 
-def _waits(desk: Desk, tid: str) -> str:
-    """A just-queued task's dependency or provider wait, in hansa status's words."""
+def _waits(desk: Desk, tid: str, *, all_reasons: bool = False) -> str:
+    """A just-queued task's wait, in hansa status's words; add also shows dispatch holds."""
     m = desk.meta(tid)
-    detail = waiting_detail(desk, desk.settings(), m, set())
+    busy = ({occupied_lane(t) for t in desk.tasks() if lane_occupied(t)} | tried_lanes(desk)
+            if all_reasons else set())
+    detail = waiting_detail(desk, desk.settings(), m, busy)
     why = detail["waiting"]
-    return f"\n{tid} waits: {why}" if detail["waiting_code"] == "after" or "no provider ready" in why else ""
+    return (f"\n{tid} waits: {why}" if detail["waiting_code"] == "after" or "no provider ready" in why
+            or all_reasons and (detail["waiting_code"] != "ready" or detail["waiting_values"].get("server") != "up")
+            else "")
 
 
 def _title_allowed(desk: Desk, s: dict, title: str | None, text: str, lane: str) -> None:
@@ -602,6 +606,9 @@ def cmd_add(a):
 
 def _add(desk: Desk, a, text: str) -> None:
     s = desk.settings()
+    if a.lane and a.lane not in s["lanes"]:
+        raise SystemExit(f"hansa: there is no lane {a.lane}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}; "
+                         "nothing was queued")
     _work_lane(s, a.lane)
     verification = _verify_request(desk, a, {"id": "the task", "lane": a.lane or ""})
     _title_allowed(desk, s, a.title, text, a.lane)
@@ -610,8 +617,6 @@ def _add(desk: Desk, a, text: str) -> None:
                         goal=a.goal or "", **({"after": a.after} if a.after else {}),
                         **verification,
                         **notify.recorded(notify.session_here()))
-    if a.lane and a.lane not in s["lanes"]:
-        print(f"note: there is no lane {a.lane} yet; the task waits until it is added: hansa lane add {a.lane} --repo PATH")
     if a.model:
         print("note: --model applies only when a Claude subscription provider runs the task; other providers use"
               f" their own model. Which provider runs it follows the lane's order: hansa explain lane {a.lane or 'L'}")
@@ -622,10 +627,13 @@ def _add(desk: Desk, a, text: str) -> None:
               f" is the first line of the text, here cut at 80 characters: {json.dumps(desk.meta(tid)['title'], ensure_ascii=False)}."
               f" To give one, cancel it (hansa cancel {tid}) and add it again with"
               f" --title \"...\"")
+    down = server_state(desk)["state"] == "gone"
     print(f"{tid} queued" + (f" for lane {a.lane}" if a.lane else "")
           + _verification_follows(verification)
-          + (f". {_queued_wait(desk, tid, verification)}; hansa show {tid} says where it is" if notify.hears_of(desk, tid)
-             else f". Follow it with: hansa show {tid}") + _waits(desk, tid))
+          + (f". {_queued_wait(desk, tid, verification)}; hansa show {tid} says where it is" if not down and notify.hears_of(desk, tid)
+             else f". Follow it with: hansa show {tid}") + _waits(desk, tid, all_reasons=True))
+    if down:
+        print("hansa serve is not running; next: " + notify._up_hint(desk, str(Path.cwd())))
 
 
 def cmd_status(a):
@@ -1440,12 +1448,20 @@ def cmd_wait(a):
     if not done_already and not any(map(live, watch)):
         print("nothing is queued or running: nothing to wait for")
         return
-    if server_state(desk)["state"] == "gone":  # as hansa status's server_up says it
-        print("note: hansa serve is not running, so no task will start or finish until it is")
     end = time.time() + a.timeout * 60
     while True:
         ended = [desk.meta(t) for t in watch if not live(t)]
-        if ended or time.time() >= end:
+        if ended:
+            break
+        hold = "dispatch is paused" if desk.paused() else views.disk_short(desk)
+        if hold:
+            print(f"nothing new starts: {hold}")
+            return
+        if server_state(desk)["state"] == "gone":
+            print("note: hansa serve is not running, so no task will start or finish until it is")
+            print("next: " + notify._up_hint(desk, str(Path.cwd())))
+            return
+        if time.time() >= end:
             break
         time.sleep(a.every)
     for m in ended:
@@ -3575,7 +3591,9 @@ def main(argv=None):
     p.epilog = see_more("inbox")
     p = add("wait", cmd_wait, "return when a task finishes or fails; run it in the "
             "background when hansa does not notify the session (hansa notify)")
-    p.description += ". Open to-dos are not waited on; with no tasks to watch, return at once with nothing to wait for."
+    p.description += (". Open to-dos are not waited on; with no tasks to watch, return at once with nothing to wait for."
+                      " Also returns with the reason when dispatch is paused, under a disk or memory floor,"
+                      " or hansa serve is not running.")
     p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")
     p.add_argument("--timeout", type=float, default=60, help="minutes (default 60)")
     p.add_argument("--every", type=float, default=5.0, help=argparse.SUPPRESS)

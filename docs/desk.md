@@ -1363,7 +1363,10 @@ says all of this.
 While hansa posts to a session, that session does not keep `hansa wait`
 running in the background; `hansa wait` is for a session hansa does not post
 to. It waits for tasks only; open to-dos do not keep it waiting. With no tasks
-to watch, it returns at once, saying there is nothing to wait for.
+to watch, it returns at once, saying there is nothing to wait for. It also returns with the reason
+when dispatch is paused, under a disk or memory floor, or `hansa serve` is not running, checking
+these conditions while it waits. When the server is down, it gives the command to start that desk.
+A follower started while the server is down posts that fact once, with the same start command.
 Since hansa posts when a task, a verification or a merge ends and when the
 principal answers a release, the coordinator needs no scheduled wakeups and no polling to
 find out: it ends its turn and waits. Each wakeup or poll is a turn that rereads

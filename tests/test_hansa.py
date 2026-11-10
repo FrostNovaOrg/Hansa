@@ -18549,6 +18549,9 @@ def save():'''))
         self.assertEqual(sleeps, [])
 
     def test_wait_returns_when_a_task_ends(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         tid = self.desk.new_task("Add hello.txt")
         d, stop, broke = Dispatcher(self.desk), threading.Event(), []
 
@@ -18590,6 +18593,9 @@ def save():'''))
         self.assertIn("nothing to wait for", " ".join(out.getvalue().split()))
 
     def test_wait_ignores_request_answers_until_a_running_task_ends(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         self.desk.add_ask("Still open")
         self.desk.add_ask("Old page request")
         tid = self.desk.new_task("Add hello.txt")
@@ -30192,6 +30198,9 @@ def save():'''))
         self.assertIn(f"error: closed: {t2} was cancelled", shown)
 
     def test_add_verify_retry_and_show_tell_a_session_that_hears_from_hansa_it_will_be_told(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         d = Dispatcher(self.desk)
         t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")
         for t in (t1, t2):
@@ -30789,6 +30798,156 @@ def save():'''))
         for word in ("--after T", "latest follow-up", "restart", "hansa cancel", "hansa retry"):
             self.assertIn(word, topic)
 
+    def test_waiting_task_slot_in_status_show_and_page(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        running = self.desk.new_task("First", lane="a")
+        self.desk.change(running, lambda m: {"state": "running", "started": now()})
+        tid = self.desk.new_task("Second")
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        st = json.loads(self.hansa("status", "--json"))
+        self.assertEqual(st["queued"][0]["waiting_code"], "slot")
+        for text in (self.hansa("status"), self.hansa("show", tid)):
+            self.assertIn("free slot (1 of 1 running; hansa concurrency)", text)
+            self.assertNotIn("within seconds", text)
+        for language, [page] in self.picture_pages(st):
+            text = "".join(page["tables"])
+            self.assertIn("1 of 1 running" if language == "en" else "1/1", text)
+            self.assertIn("hansa concurrency", text)
+
+    def test_waiting_own_lane_merge_slot_in_status_and_reply(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.hansa("lane", "set", "a", "merge_check", "true")
+        running = self.desk.new_task("Other work", lane="b")
+        self.desk.change(running, lambda m: {"state": "running", "started": now()})
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        reply = self.hansa("merge", tid)
+        for text in (reply, self.hansa("status"), self.hansa("show", tid)):
+            self.assertIn("waits for a free concurrency slot", text)
+            self.assertNotIn("within seconds", text)
+        self.desk.change(running, lambda m: {"state": "done"})
+        self.assertNotIn("free concurrency slot", self.hansa("status"))
+
+    def test_waiting_setup_progress_in_status_show_and_wait(self):
+        tid = self.desk.new_task("Install first", lane="a")
+        self.desk.change(tid, lambda m: {"state": "running", "phase": "working", "provider": "claude",
+                                       "setup_ran": True, "started": time.time() - 120})
+        raw = self.desk.state_dir / "runs" / tid
+        raw.mkdir(parents=True)
+        for text in (self.hansa("status"), self.hansa("show", tid),
+                     views.progress_text(self.desk, self.desk.meta(tid))):
+            self.assertIn("the lane's setup is running (2 min)", text)
+            self.assertNotIn("no reply from the model yet", text)
+            self.assertNotIn("a worker is on it", text)
+        (raw / "setup.log.done").touch()
+        self.assertEqual(views.progress_text(self.desk, self.desk.meta(tid)), "no reply from the model yet")
+        self.desk.change(tid, lambda m: {"phase": "checking"})
+        self.assertEqual(views.progress_text(self.desk, self.desk.meta(tid)), "checking now")
+
+    def test_waiting_setup_reports_real_setup_until_done(self):
+        gate = self.tmp / "setup-release"
+        ready = self.tmp / "setup-ready"
+        command = f"touch {shlex.quote(str(ready))}; while ! test -f {shlex.quote(str(gate))}; do sleep 0.1; done"
+        self.hansa("lane", "set", "a", "setup", command)
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        d = Dispatcher(self.desk)
+        try:
+            d.tick()
+            self.soon(ready.exists)
+            for text in (self.hansa("status"), self.hansa("show", tid)):
+                self.assertIn("the lane's setup is running", text)
+                self.assertNotIn("no reply from the model yet", text)
+        finally:
+            gate.touch()
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertNotIn("setup is running", self.hansa("show", tid))
+
+    def test_waiting_wait_notices_a_new_dispatch_hold(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        tid = self.desk.new_task("Queued")
+        with unittest.mock.patch.object(cli.time, "sleep", side_effect=lambda _: self.desk.pause("maintenance")) as sleep:
+            out = self.hansa("wait", tid)
+        self.assertEqual(sleep.call_count, 1)
+        self.assertIn("dispatch is paused", out)
+
+    def waiting_hold(self, case):
+        if case == "paused":
+            self.desk.pause("maintenance")
+        elif case == "disk":
+            self.free = 10 ** 9
+            Dispatcher(self.desk).tick()
+        elif case == "memory":
+            self.memory_available = 10 ** 9
+            Dispatcher(self.desk).tick()
+        return {"paused": "dispatch is paused", "disk": "free space is under the floor", "memory": "memory",
+                "down": "not running"}[case]
+
+    def test_waiting_add_names_dispatch_holds(self):
+        for case in ("paused", "disk", "memory", "down"):
+            with self.subTest(case=case):
+                self.desk = init_desk(self.tmp / ("add-" + case), str(self.repo), "a")
+                self.free, self.memory_available = 500 * 10 ** 9, 8 * 10 ** 9
+                reason = self.waiting_hold(case)
+                held = cli.hold_server_lock(self.desk) if case != "down" else None
+                try:
+                    self.round_at(0)
+                    with unittest.mock.patch.object(notify, "hears_of", return_value=True):
+                        out = self.hansa("add", "A task")
+                finally:
+                    if held:
+                        held.close()
+                self.assertIn("t0001 queued", out)
+                self.assertIn(reason, out)
+                if case == "down":
+                    self.assertNotIn("tells this session", out)
+                    self.assertIn("next: hansa", out)
+                    self.assertIn(" up", out)
+                else:
+                    self.assertIn("tells this session", out)
+
+    def test_waiting_add_refuses_unknown_lane(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("add", "Never queued", "--lane", "bb")
+        self.assertIn("no lane bb", str(e.exception))
+        self.assertIn("lanes: a, b", str(e.exception))
+        self.assertEqual(self.desk.tasks(), [])
+
+    def test_waiting_wait_returns_for_dispatch_holds(self):
+        for case in ("paused", "disk", "memory", "down"):
+            with self.subTest(case=case):
+                self.desk = init_desk(self.tmp / ("wait-" + case), str(self.repo), "a")
+                self.free, self.memory_available = 500 * 10 ** 9, 8 * 10 ** 9
+                reason = self.waiting_hold(case)
+                tid = self.desk.new_task("Queued")
+                held = cli.hold_server_lock(self.desk) if case != "down" else None
+                try:
+                    self.round_at(0)
+                    with unittest.mock.patch.object(cli.time, "sleep", side_effect=AssertionError("wait slept")):
+                        out = self.hansa("wait", tid)
+                finally:
+                    if held:
+                        held.close()
+                self.assertIn(reason, out)
+                self.assertNotIn("no task finished", out)
+
+    def test_waiting_follower_starts_down_posts_once(self):
+        self.coordinator_desk(1)
+        with unittest.mock.patch.object(notify, "post") as post:
+            self.follow_on_a_clock(1)
+        notices = [call.args[1] for call in post.call_args_list if "hansa serve is not running" in call.args[1]]
+        self.assertEqual(len(notices), 1)
+        self.assertIn("next: hansa", notices[0])
+        self.assertIn(" up", notices[0])
+        self.assertNotIn("stopped without a word", notices[0])
+
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": ""}
@@ -30862,6 +31021,9 @@ def save():'''))
         self.assertNotIn("within seconds", out)
 
     def test_add_retry_and_verify_say_when_no_provider_of_the_lane_can_start_the_task(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         d = Dispatcher(self.desk)
         tid = self.settle(d, self.desk.new_task("Add hello.txt"))["id"]
         out = self.hansa("add", "Ready at once")
@@ -47769,6 +47931,9 @@ else:
     def test_a_follower_posts_again_what_a_failed_turn_left_and_alerts_after_turn_min(self):
         from hansa import alert
         self.coordinator_desk("turns", no_session_min=0, window_min=0, review_min=0, turn_min=4)
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         self.assertEqual(alert.session_minutes(self.desk)["turn"], 4)
         self.agents_say({"4242": "idle"})
         t0 = float(int(time.time()))

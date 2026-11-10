@@ -1604,6 +1604,10 @@ def report_after_notices(home: Path, sid: str):
 def progress_of(desk: Desk, m: dict) -> dict:
     """How far a running worker has got: model replies so far, minutes since it last did
     anything, and the last thing it wrote. hansa records turns and tokens only at the end."""
+    if (m.get("state") == "running" and m.get("phase") not in ("starting", "checking")
+            and m.get("setup_ran") and not (desk.state_dir / "runs" / m["id"] / "setup.log.done").exists()):
+        return {"replies": 0, "idle_min": None, "note": "",
+                "setup_min": max(0, int((time.time() - (m.get("started") or time.time())) // 60))}
     p = desk.settings()["providers"].get(m.get("provider") or "")
     home = config_home(desk, m["provider"], p) if p else None
     sid = m.get("session_id", "")
@@ -7266,6 +7270,10 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
                  for p in task_providers(s, ln, m)}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
+            running = sum(lane_occupied(x) for x in lk["tasks"])
+            if running >= s["concurrency"]:
+                return result("slot", f"waits for a free slot ({running} of {s['concurrency']} running; hansa concurrency)",
+                              running=running, concurrency=s["concurrency"])
             why_not = lk["not_looking"]
             text = (f"ready for lane {ln} on {ready[0]}, but {why_not}" if why_not else
                     f"ready for lane {ln} on {ready[0]}; starts when `hansa serve` next looks (within seconds)")

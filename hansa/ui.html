@@ -463,7 +463,7 @@ const T = ZH ? {
   lanes:"工作线", lane:"工作线", now:"现在", free:"空闲",
   queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", minutes:"分钟",
   waitReasons:{
-    paused:() => "派发任务已暂停", no_lanes:() => "设置中没有工作线", no_work_lanes:() => "设置中没有接任务的工作线", slot:() => "等待空位",
+    paused:() => "派发任务已暂停", no_lanes:() => "设置中没有工作线", no_work_lanes:() => "设置中没有接任务的工作线", slot:v => v.concurrency == null ? "等待空位" : `等待空位（${v.running}/${v.concurrency} 正在运行；hansa concurrency）`,
     after:v => v.dependencies.map(d => {
       const name = d.latest + (d.latest !== d.task ? `（${d.task} 的最新后续任务）` : "");
       const why = d.why === "closed without merging" ? "已关闭，尚未合并" :
@@ -639,7 +639,7 @@ const T = ZH ? {
   lanes:"Lanes", lane:"Lane", now:"Now", free:"free",
   queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", minutes:"min",
   waitReasons:{
-    paused:() => "dispatch is paused", no_lanes:() => "no lanes in settings", no_work_lanes:() => "no lanes that take work in settings", slot:() => "waiting for a free slot",
+    paused:() => "dispatch is paused", no_lanes:() => "no lanes in settings", no_work_lanes:() => "no lanes that take work in settings", slot:v => v.concurrency == null ? "waiting for a free slot" : `waits for a free slot (${v.running} of ${v.concurrency} running; hansa concurrency)`,
     after:(v, render, text) => text,
     after_lane:(v, render, text) => text,
     disk:v => `Free disk space is below its floor; new work waits: ${v.volumes.map(x => `${x.mount}: ${x.free} free, floor ${x.floor}, resumes at ${x.again}`).join("; ")}`,
