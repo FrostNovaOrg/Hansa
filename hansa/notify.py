@@ -1248,10 +1248,15 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 first = first or last
             if pending and (summary or time.time() - last >= gather or time.time() - first >= 20):
                 lines = [x["line"] for x in pending.values()]
-                if _deliver(sock, message(str(desk.root), lines, missed_head(missed) if summary else ""), sess, me,
-                            beat=beat):
-                    watch.posted(time.time(), lines, [x["review"] for x in pending.values() if x.get("review")])
-                    turns.posted_lines(time.time(), [(json.dumps(x["key"]), x["line"]) for x in pending.values()])
+                # A server already down at startup is information, not work waiting for the coordinator.
+                # Keep it out of post/refusal timing, even when gathered with task lines.
+                work = [x for x in pending.values() if not x.get("startup")]
+                delivery = me if work else {**me, "last_post": None}
+                if _deliver(sock, message(str(desk.root), lines, missed_head(missed) if summary else ""), sess, delivery,
+                            beat=beat, wait=None if work else 0):
+                    if work:
+                        watch.posted(time.time(), [x["line"] for x in work], [x["review"] for x in work if x.get("review")])
+                        turns.posted_lines(time.time(), [(json.dumps(x["key"]), x["line"]) for x in work])
                     pending, first, done, srt_done = {}, 0.0, pos, told_srt
                     if summary:
                         summary = False
@@ -1261,7 +1266,8 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                             _say(f"could not record that what was missed is told: {e}")
                 elif gone(sess):
                     return 0
-            cases = watch.tick(time.time(), bool(pending or summary), minutes, heard=lambda n: namer.heard(n),
+            waiting = bool(summary or any(not x.get("startup") for x in pending.values()))
+            cases = watch.tick(time.time(), waiting, minutes, heard=lambda n: namer.heard(n),
                                last_post=me["last_post"], want=turns.wants())
             repost, said = turns.tick(time.time(), turn_rec, watch.status, watch.seen, minutes.get("turn") or 0)
             if repost:
@@ -1277,7 +1283,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                         if r.get("told") else "was not queued: no alert channel is set up"))
                 except Exception as e:  # noqa: BLE001 - told is told: no retry, as for any alert
                     _say(f"could not queue the principal's coordinator alert ({case}): {e}")
-            me["coordinator"] = watch.holds(time.time(), minutes, me["last_post"], bool(pending or summary))
+            me["coordinator"] = watch.holds(time.time(), minutes, me["last_post"], waiting)
             if stretch := turns.holds():  # failed turns go on: hansa status says so
                 me["coordinator"]["turn"] = stretch
             time.sleep(poll)
@@ -1306,7 +1312,7 @@ def server_news(r: dict, items: list, was_up, told_down: float, told_stuck: floa
         if not told_down:
             sess = (me or {}).get("session")
             hint = _up_hint(desk, _process_folder(sess) or _recorded_folder(desk, sess)) if desk else "hansa up"
-            items.append({"key": ["server"], "line": "hansa serve is not running"
+            items.append({"key": ["server"], **({"startup": True} if not was_up else {}), "line": "hansa serve is not running"
                           + (" (it stopped without a word)" if was_up else "")
                           + ": no task starts or ends until it runs again · next: " + hint})
             told_down = time.time()
@@ -1323,10 +1329,12 @@ def server_news(r: dict, items: list, was_up, told_down: float, told_stuck: floa
     return items, told_down, told_stuck
 
 
-def _deliver(sock: str, text: str, sess: dict, me: dict, beat=None) -> bool:
+def _deliver(sock: str, text: str, sess: dict, me: dict, beat=None, wait: float | None = None) -> bool:
     """True only when posted. After a minute of refusals, gather new lines before trying again; stop if gone.
-    beat: called at each refused try, to keep the follower's record live while this blocks."""
-    end = time.time() + POST_WAIT
+    beat: called at each refused try, to keep the follower's record live while this blocks.
+    wait=0: try a startup-only notice once, so its refusal never delays reading task events."""
+    wait = POST_WAIT if wait is None else wait
+    end = time.time() + wait
     failed = me.get("last_post") or {}
     failed = failed if refused_since(failed, True) is not None else {}  # an older follower's failure: a new stretch
     since = failed.get("since")
@@ -1347,7 +1355,7 @@ def _deliver(sock: str, text: str, sess: dict, me: dict, beat=None) -> bool:
             if time.time() >= end:
                 me["last_post"] = {**failed, "at": now(), "text": f"could not post: {e}", "failed": True,
                                    "since": since}
-                _say(f"inbox still refuses posts after {POST_WAIT} s; keeping the lines to try again ({e}): "
+                _say(f"inbox still refuses posts after {wait} s; keeping the lines to try again ({e}): "
                      + text.replace("\n", " | ")[:500])
                 time.sleep(2)  # the next batch's first try must not come faster than the tries within this one
                 return False

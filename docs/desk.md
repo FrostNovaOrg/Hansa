@@ -1367,6 +1367,8 @@ to watch, it returns at once, saying there is nothing to wait for. It also retur
 when dispatch is paused, under a disk or memory floor, or `hansa serve` is not running, checking
 these conditions while it waits. When the server is down, it gives the command to start that desk.
 A follower started while the server is down posts that fact once, with the same start command.
+That startup notice does not count as a post, an inbox refusal or waiting work for the principal's
+coordinator alerts; task posts and later server-stop notices keep their usual alert timing.
 Since hansa posts when a task, a verification or a merge ends and when the
 principal answers a release, the coordinator needs no scheduled wakeups and no polling to
 find out: it ends its turn and waits. Each wakeup or poll is a turn that rereads

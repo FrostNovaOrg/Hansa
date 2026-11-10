@@ -19129,6 +19129,9 @@ def save():'''))
             for tid in calls])
 
     def test_a_task_that_ends_after_its_check_is_posted_once_to_its_session(self):
+        held = cli.hold_server_lock(self.desk)  # this test drives the running server's dispatcher by hand
+        self.addCleanup(held.close)
+        self.round_at(0)
         s = self.desk.settings()
         s["lanes"]["a"]["check"] = "true"
         self.assertEqual(self.desk.save_settings(s), [])
@@ -28930,6 +28933,9 @@ def save():'''))
         self.assertIn(f"Task {tid} has no check", (self.desk.tasks_dir / vid / "task.md").read_text())
 
     def test_queue_time_verification_each_option_implies_verify_and_is_not_inherited(self):
+        held = cli.hold_server_lock(self.desk)  # notification promises require a running server
+        self.addCleanup(held.close)
+        self.round_at(0)
         _, tid = self.queue_time_gap(check="")
         self.hansa("lane", "add", "b", "--like", "a")
         for option, value, field in (("--verify-lane", "b", "lane"), ("--verify-effort", "high", "effort"),
@@ -30434,6 +30440,9 @@ def save():'''))
                          {"replies": 0, "idle_min": 0, "note": ""})
 
     def test_a_running_task_shows_how_far_the_worker_has_got(self):
+        held = cli.hold_server_lock(self.desk)  # wait can reach its timeout while the server runs
+        self.addCleanup(held.close)
+        self.round_at(0)
         s = self.desk.settings()
         s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
         self.assertEqual(self.desk.save_settings(s), [])
@@ -30846,6 +30855,10 @@ def save():'''))
             self.assertNotIn("a worker is on it", text)
         (raw / "setup.log.done").touch()
         self.assertEqual(views.progress_text(self.desk, self.desk.meta(tid)), "no reply from the model yet")
+        for text in (self.hansa("status"), self.hansa("show", tid)):
+            self.assertNotIn("setup is running", text)
+            self.assertIn("no reply from the model yet", text)
+        self.assertIn("a worker is on it", self.hansa("show", tid))
         self.desk.change(tid, lambda m: {"phase": "checking"})
         self.assertEqual(views.progress_text(self.desk, self.desk.meta(tid)), "checking now")
 
@@ -30947,6 +30960,54 @@ def save():'''))
         self.assertIn("next: hansa", notices[0])
         self.assertIn(" up", notices[0])
         self.assertNotIn("stopped without a word", notices[0])
+
+    def test_waiting_startup_notice_does_not_start_coordinator_alerts(self):
+        self.coordinator_desk("startup-only", no_session_min=1, window_min=1, review_min=1, turn_min=1)
+        self.agents_say({"4242": "waiting"})
+        with unittest.mock.patch.object(notify, "post") as post:
+            _, _, carried = self.follow_on_a_clock(5, restart_at=4)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(self.coordinator_alerts(), [])
+        self.assertEqual(self.looked_up(), 0)
+        self.assertIsNone(carried["last_post"])
+        self.assertEqual(carried["watch"]["count"], 0)
+        self.assertEqual(carried["turns"], notify.Turns().state())
+
+    def test_waiting_refused_startup_notice_does_not_count_as_a_refusal(self):
+        self.coordinator_desk("startup-refused", no_session_min=1, window_min=1, review_min=1)
+        self.agents_say({"4242": "waiting"})
+        got = self.follow_with_refusing_inbox(240, lambda _: False)
+        self.assertTrue(got["attempts"])
+        self.assertEqual(got["posts"], [])
+        self.assertEqual(self.coordinator_alerts(), [])
+        self.assertEqual(self.looked_up(), 0)
+        self.assertTrue(all(r["me"]["last_post"] is None for r in got["requests"]))
+
+    def test_waiting_startup_notice_gathered_with_a_task_counts_only_the_task(self):
+        self.coordinator_desk("startup-with-task", no_session_min=1, window_min=1, review_min=0)
+        self.agents_say({"4242": "waiting"})
+        with unittest.mock.patch.object(notify, "post") as post:
+            _, _, carried = self.follow_on_a_clock(5, restart_at=4, at={
+                0.1: lambda: self.coordinator_task_ended("Task with startup")})
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("not running", post.call_args.args[1])
+        self.assertIn("Task with startup", post.call_args.args[1])
+        [text] = self.coordinator_alerts()
+        self.assertIn("1 thing(s)", text)
+        self.assertIn("oldest: t0001 done: Task with startup", text)
+        self.assertEqual(carried["watch"]["count"], 1)
+        self.assertEqual(len(carried["turns"]["unhandled"]), 1)
+
+    def test_waiting_task_refusal_counts_from_the_task_after_a_startup_notice(self):
+        self.coordinator_desk("startup-then-task", no_session_min=1, window_min=0, review_min=0)
+        got = self.follow_with_refusing_inbox(300, lambda t: t >= 270, at={
+            120: lambda: self.coordinator_task_ended("Task after startup")})
+        failed = [r["me"]["last_post"] for r in got["requests"] if (r["me"]["last_post"] or {}).get("failed")]
+        self.assertTrue(failed)
+        self.assertGreaterEqual(failed[0]["since"] - got["start"], 120)
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        self.assertEqual(len(got["posts"]), 1)
+        self.assertIn("Task after startup", got["posts"][0][1])
 
     def test_waiting_reason_names_the_missing_piece(self):
         s = self.desk.settings()
@@ -47229,6 +47290,9 @@ else:
 
     def test_successful_posts_advance_once_without_an_inbox_alert(self):
         self.coordinator_desk("inbox-success", no_session_min=1, window_min=0, review_min=0)
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
         got = self.follow_with_refusing_inbox(180, lambda _: True, at={
             1: lambda: self.coordinator_task_ended("First success"),
             5: lambda: self.coordinator_task_ended("Second success")})
@@ -47258,8 +47322,11 @@ else:
                                                       start=t0, resume=carried, at=at)
                 self.assertEqual(self.coordinator_alerts(), [])
                 self.assertNotIn("inbox refuses posts", statuses[0])
-                self.assertEqual([("Refused after the restart" in text) for _, text in got["posts"]],
+                # The startup server-down notice is separate from the task posts this test counts.
+                self.assertEqual([("Refused after the restart" in text) for _, text in got["posts"] if "\n- t" in text],
                                  [True] if refusing else [])
+                if not refusing:
+                    self.assertEqual(got["requests"][-1]["me"]["last_post"], failed)
 
     def test_a_follower_stays_live_while_it_tries_a_refused_post(self):
         self.coordinator_desk("inbox-live", no_session_min=2, window_min=0, review_min=0)
@@ -47353,8 +47420,10 @@ else:
         """The `coordinator` alert, one row per rule; each row runs in a desk of its own."""
         from hansa import alert
 
-        def posted():
-            return self.posts(str(self.tmp / f"inbox-{self.desk.root.name}.sock"))
+        def posted(sock=None):
+            # Count task posts; the new startup server-down notice must not affect these alerts.
+            return [text for text in self.posts(sock or str(self.tmp / f"inbox-{self.desk.root.name}.sock"))
+                    if "\n- t" in text]
         waits = "the coordinator's session pid 4242 (desk-4242) has waited on its window"
 
         def row1():
@@ -47606,7 +47675,7 @@ else:
             self.assertIn("is idle while t0001 has waited for review for 3 min", self.coordinator_alerts()[0])
             self.assertIn("the principal's coordinator alert (review) went already: another follower alerted of this "
                           "task", log)
-            self.assertEqual((len(posted()), len(self.posts(str(self.tmp / "inbox-desk-16-1.sock")))), (1, 1))
+            self.assertEqual((len(posted()), len(posted(str(self.tmp / "inbox-desk-16-1.sock")))), (1, 1))
 
         def row17():
             """after a case-1 alert, a follower starts and ends within 5 s, between two looks; then something waits N1
@@ -48235,7 +48304,7 @@ else:
                 restarts.append(state)
                 raise Restarted
 
-            def deliver(sock, text, sess, me, beat=None):
+            def deliver(sock, text, sess, me, beat=None, wait=None):
                 delivered.append(text)
                 return True
             with unittest.mock.patch.object(notify, "source", lambda desk: ask), \
