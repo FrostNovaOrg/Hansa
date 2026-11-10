@@ -26104,6 +26104,144 @@ def save():'''))
             self.assertIn("lane a cannot run", said[0])
             self.assertIn("the deny-read list", said[0])
 
+    def told_starts(self) -> list:
+        """What hansa told the coordinator of starts held for the machine or a lane (notify._item of each event)."""
+        return [it[1] for e in self.events("start_held") if (it := notify._item(self.desk, e))]
+
+    def test_without_claude_queued_tasks_wait_and_start_once_it_is_found(self):
+        from hansa import run
+        self.hansa("lane", "add", "b", "--like", "a")
+        tids = [self.desk.new_task("Add hello.txt", lane="a"), self.desk.new_task("Add two.txt", lane="a"),
+                self.desk.new_task("Add three.txt", lane="b")]
+        fake = os.environ.pop("HANSA_CLAUDE")
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch("hansa.run.program_candidates", lambda name, env=None: []):
+            d.tick()
+            d.tick()
+            for tid in tids:
+                self.assertEqual(self.desk.meta(tid)["state"], "queued", self.desk.meta(tid))
+            self.assertEqual(self.events("task_not_started"), [])
+            shown = views.status_text(views.status(self.desk))
+            lanes = shown.split("lanes:\n", 1)[1]
+            self.assertEqual(lanes.count("UNABLE TO RUN"), 2, shown)
+            self.assertIn("claude was not found", lanes)
+            self.assertIn("install Claude Code", lanes)
+            self.assertIn("HANSA_CLAUDE", lanes)
+            self.assertIn("claude was not found", waiting_reason(self.desk, self.desk.settings(),
+                                                                 self.desk.meta(tids[2]), set()))
+            told = self.told_starts()
+            self.assertEqual(len(told), 1, told)  # the coordinator is told once, for both lanes
+            self.assertIn("claude was not found", told[0])
+        os.environ["HANSA_CLAUDE"] = fake  # found now: they start, with no retry
+        for tid in tids:
+            m = self.settle(d, tid)
+            self.assertEqual(m["state"], "done", m)
+            self.assertEqual(m.get("attempts", []), [])
+        self.assertEqual(run.sandbox_held(self.desk), {})
+        self.assertNotIn("UNABLE TO RUN", views.status_text(views.status(self.desk)))
+
+    def test_a_hansa_claude_that_names_no_program_holds_the_lanes_and_names_it(self):
+        from hansa import run
+        missing, unrunnable = self.tmp / "no-such-claude", self.tmp / "not-a-program"
+        unrunnable.write_text("#!/bin/sh\n")
+        unrunnable.chmod(0o644)
+        for given, said in ((missing, "does not exist"), (unrunnable, "cannot be run")):
+            with self.subTest(given=given):
+                os.environ["HANSA_CLAUDE"] = str(given)
+                with self.assertRaises(RuntimeError) as raised:
+                    run.claude_bin()  # not the claude on the PATH in its place
+                self.assertIn(f"HANSA_CLAUDE is {given}", str(raised.exception))
+                self.assertIn(said, str(raised.exception))
+                tid = self.desk.new_task("Add hello.txt")
+                Dispatcher(self.desk).tick()
+                self.assertEqual(self.desk.meta(tid)["state"], "queued", self.desk.meta(tid))
+                self.assertEqual(self.events("task_started"), [])
+                shown = views.status_text(views.status(self.desk))
+                self.assertIn("UNABLE TO RUN", shown)
+                self.assertIn(f"HANSA_CLAUDE is {given}", shown)
+                self.hansa("cancel", tid)
+                run.sandbox_clear(self.desk, "a", "start")
+
+    def test_a_lane_whose_repository_folder_is_gone_waits_and_starts_when_it_is_back(self):
+        from hansa import run
+        tid = self.desk.new_task("Add hello.txt")
+        moved = self.tmp / "repo-moved"
+        self.repo.rename(moved)
+        d = Dispatcher(self.desk)
+        d.tick()
+        d.tick()
+        m = self.desk.meta(tid)
+        self.assertEqual(m["state"], "queued", m)
+        self.assertEqual(self.events("task_not_started"), [])
+        shown = views.status_text(views.status(self.desk))
+        self.assertIn("UNABLE TO RUN", shown)
+        self.assertIn(f"its repository folder {self.desk.settings()['lanes']['a']['repo']} is gone", shown)
+        self.assertNotIn("Errno", shown)
+        self.assertEqual(len(self.told_starts()), 1)
+        moved.rename(self.repo)
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(run.sandbox_held(self.desk), {})
+
+    def test_a_worktree_git_cannot_prepare_holds_its_lane_alone_until_it_is_fixed(self):
+        from hansa import run
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file whatever its mode: git can set it aside")
+        self.hansa("lane", "add", "b", "--like", "a")
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle(d, self.desk.new_task("Add hello.txt", lane="a"))["state"], "done")
+        unreadable = self.desk.worktrees_dir / "a" / "unreadable.txt"
+        unreadable.write_text("x\n")
+        unreadable.chmod(0)
+        self.addCleanup(lambda: unreadable.exists() and unreadable.chmod(0o644))
+        b, c = self.desk.new_task("Add two.txt", lane="a"), self.desk.new_task("Add three.txt", lane="a")
+        other = self.desk.new_task("Add four.txt", lane="b")
+        self.assertEqual(self.settle(d, other)["state"], "done")  # the other lane goes on
+        for tid in (b, c):
+            self.assertEqual(self.desk.meta(tid)["state"], "queued", self.desk.meta(tid))
+        self.assertEqual(self.events("task_not_started"), [])
+        error = self.desk.meta(b)["error"]
+        self.assertIn("git stash push failed", error)
+        self.assertIn("\n", error)  # git's whole error, kept on the task
+        shown = views.status_text(views.status(self.desk))
+        held = [x for x in shown.splitlines() if "git stash push failed" in x]
+        self.assertEqual(len(held), 3, shown)  # the lane's line, and each queued task's waiting line
+        self.assertNotIn(error.splitlines()[1], shown)  # one line each
+        self.assertIn(error.splitlines()[-1], self.hansa("explain", "server"))
+        self.assertIn(error.splitlines()[-1], self.hansa("show", b))
+        told = self.told_starts()
+        self.assertEqual(len(told), 1, told)
+        self.assertNotIn("\n", told[0])
+        unreadable.chmod(0o644)
+        unreadable.unlink()
+        with unittest.mock.patch.object(run, "START_RETRY", 0):  # tried again at once, rather than in a minute
+            for tid in (b, c):
+                m = self.settle(d, tid)
+                self.assertEqual(m["state"], "done", m)
+                self.assertEqual(m.get("attempts", []), [])
+        self.assertEqual(run.sandbox_held(self.desk), {})
+
+    def test_a_task_that_cannot_start_for_its_own_reason_fails_and_says_what_to_do(self):
+        from hansa import run
+        tid = self.desk.new_task("Add hello.txt")
+        with unittest.mock.patch.object(run, "prepare", side_effect=RuntimeError("its attachment notes.txt is gone")):
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertEqual(m["error"], "could not start: its attachment notes.txt is gone")
+        self.assertEqual(run.sandbox_held(self.desk), {})
+        # and one that failed so on earlier code, as the review found it
+        old = self.desk.new_task("Add two.txt")
+        self.desk.update(old, state="failed", lane="a", provider="claude", started=time.time(), finished=time.time(),
+                         error="could not start: claude was not found; install Claude Code or set HANSA_CLAUDE")
+        for t in (tid, old):
+            shown = self.hansa("show", t)
+            head, nxt = shown.splitlines()[0], next(x for x in shown.splitlines() if x.startswith("next: "))
+            self.assertNotIn("()", head)
+            self.assertIn("· claude ·", head)
+            self.assertIn("machine or the lane", nxt)
+            self.assertIn(f"hansa retry {t}", nxt)
+            self.assertNotIn("what to change", nxt)
+
     def test_a_sandbox_refused_for_its_patterns_names_the_deny_write_patterns(self):
         self.refusing_srt("any('[' in x for x in settings['filesystem']['denyWrite'])")
         tid = self.desk.new_task("Add hello.txt")
