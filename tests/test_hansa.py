@@ -35494,7 +35494,7 @@ def save():'''))
         d.tick()
         self.assertEqual(self.desk.meta(t2)["state"], "running")
         self.assertEqual(self.settle(d, t2)["state"], "done")
-        # one notice each way, and one alert
+        # one notice and alert each way
         self.assertEqual((len(self.events("disk_low")), len(self.events("disk_ok"))), (1, 1))
         self.assertNotIn("DISK LOW", self.hansa("status"))
         lines = [notify._item(self.desk, e) for e in (*self.events("disk_low"), *self.events("disk_ok"))]
@@ -35502,8 +35502,10 @@ def save():'''))
         self.assertTrue(all(x[3] for x in lines))  # desk-wide: the coordinator's session hears it
         self.assertIn("free space is under the floor (10 GB)", lines[0][1])
         self.assertIn("free space is back over the floor (10 GB): hansa serve starts things again", lines[1][1])
-        [sent] = [x for x in alert.queued(self.desk) if x["kind"] == "disk"]
+        [sent, recovered] = [x for x in alert.queued(self.desk) if x["kind"] == "disk"]
         self.assertIn("free space is under the floor (10 GB)", sent["text"])
+        self.assertEqual(recovered["level"], "passive")
+        self.assertIn("back over the floor", recovered["text"])
         self.assertIn("disk", alert.KINDS)
 
     def test_a_release_asked_while_the_disk_is_low_waits_and_goes_once_there_is_space(self):
@@ -46996,6 +46998,9 @@ else:
         self.assertIn("hansa serve has finished no round for", self.alerted(out)[-1]["text"])
         write_json(self.desk.state_dir / "heartbeat", time.time())
         self.assertEqual(alert.stuck_check(self.desk, told), 0.0)
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertIn("finishing rounds again", self.alerted(out)[-1]["text"])
+        self.assertEqual(self.alerted(out)[-1]["level"], "passive")
         # the page's test button
         self.assertTrue(alert.test(self.desk)["ok"])
         self.assertEqual(self.alerted(out)[-1]["kind"], "test")
@@ -47007,6 +47012,188 @@ else:
         self.assertIsNone(alert.send_due(self.desk, gather=0))
         self.assertEqual(len(self.alerted(out)), count)
         self.assertEqual(len(self.events("alert_sent")), count)
+
+    def test_sandbox_alert_repeats_after_a_passing_try(self):
+        from hansa import alert, run
+        self.alert_fake()
+        tid = self.desk.new_task("Add hello.txt")
+        why = "the sandbox could not start: sandbox_apply: Invalid argument"
+        run.hold(self.desk, tid, "a", why, kind="worker")
+        saved = read_json(self.desk.state_dir / run.SANDBOX_HELD)
+        saved["lanes"]["a"]["work"].pop("told", None)  # an active hold saved before per-hold notices
+        write_json(self.desk.state_dir / run.SANDBOX_HELD, saved)
+        run.hold(self.desk, tid, "a", why, kind="worker")
+        self.assertEqual(len([x for x in alert.queued(self.desk) if x["kind"] == "sandbox"]), 1)
+        # A changed reason alerts once too, but neither reason repeats until the try passes.
+        run.hold(self.desk, tid, "a", why + " again", kind="worker")
+        run.hold(self.desk, tid, "a", why, kind="worker")
+        self.assertEqual(len([x for x in alert.queued(self.desk) if x["kind"] == "sandbox"]), 2)
+        self.assertTrue(run._hold_lane(self.desk, "b", {"why": why}))
+        self.assertTrue(run._hold_lane(self.desk, "a", {"why": "repository gone"}, "start"))
+        run.sandbox_clear(self.desk, "a", "start")
+        with unittest.mock.patch.object(run, "try_sandbox", return_value={"ok": True}):
+            run.sandbox_guard(self.desk, "a", "worker", {}, self.repo)
+        self.assertFalse(run._hold_lane(self.desk, "b", {"why": why}))
+        self.assertFalse(run._hold_lane(self.desk, "a", {"why": "repository gone"}, "start"))
+        run.hold(self.desk, tid, "a", why, kind="worker")
+        self.assertEqual(len([x for x in alert.queued(self.desk)
+                              if x["kind"] == "sandbox" and x["level"] == "urgent"]), 3)
+        self.assertEqual([e["alert"] for e in self.events("sandbox_held")], [True, False, True, False, True])
+
+    def test_disk_alert_has_one_passive_recovery_in_the_next_batch(self):
+        from hansa import alert, disk
+        out = self.alert_fake()
+        at = 1700000000.0
+        clock = lambda t: unittest.mock.patch.object(time, "time", return_value=t)
+        with clock(at):
+            disk.look(self.desk, self.desk.settings())  # healthy, without an earlier alert
+        self.assertEqual(alert.queued(self.desk), [])
+        self.free_at = {self.repo: 5 * disk.GB}
+        with clock(at):
+            disk.look(self.desk, self.desk.settings())
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        with clock(at + 300):
+            disk.look(self.desk, self.desk.settings())  # does not move the beginning of the trouble
+        self.free_at = {}
+        with clock(at + 600):
+            desk = Desk(self.desk.root)  # recovery may be recorded by a different process
+            disk.look(desk, desk.settings())
+            disk.look(desk, desk.settings())
+        [item] = alert.queued(self.desk)
+        self.assertEqual((item["kind"], item["level"]), ("disk", "passive"))
+        self.assertIn("back over the floor", item["text"])
+        for t in (at, at + 600):
+            self.assertIn(time.strftime("%H:%M", time.localtime(t)), item["text"])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        sent = self.alerted(out)[-1]
+        self.assertEqual((sent["kind"], sent["level"]), ("disk", "passive"))
+        self.assertEqual(len(sent["text"].splitlines()), 1)
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+
+    def test_sandbox_alert_has_one_passive_recovery_for_each_lane(self):
+        from hansa import alert, run
+        out = self.alert_fake()
+        at = 1700000000.0
+        tid = self.desk.new_task("Add hello.txt")
+        clock = lambda t: unittest.mock.patch.object(time, "time", return_value=t)
+        with clock(at):
+            run.hold(self.desk, tid, "a", "sandbox refused", kind="worker")
+            run.hold(self.desk, tid, "b", "sandbox refused", kind="worker")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        with clock(at + 300):
+            run.hold(self.desk, tid, "a", "another sandbox refusal", kind="worker")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        with clock(at + 600), unittest.mock.patch.object(run, "try_sandbox", return_value={"ok": True}):
+            run.sandbox_guard(Desk(self.desk.root), "a", "worker", {}, self.repo)
+            run.sandbox_clear(self.desk, "a", "work")
+        [item] = alert.queued(self.desk)
+        self.assertEqual((item["kind"], item["level"]), ("sandbox", "passive"))
+        self.assertIn("lane a", item["text"])
+        self.assertIn("sandbox works again", item["text"])
+        for t in (at, at + 600):
+            self.assertIn(time.strftime("%H:%M", time.localtime(t)), item["text"])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertEqual(self.alerted(out)[-1]["level"], "passive")
+        with clock(at + 900):
+            run.sandbox_clear(self.desk, "b", "work")
+        [item] = alert.queued(self.desk)
+        self.assertIn("lane b", item["text"])
+        self.assertEqual(item["level"], "passive")
+
+    def test_stuck_server_alert_has_one_passive_recovery_after_rounds_resume(self):
+        from hansa import alert
+        out = self.alert_fake()
+        at = 1700000000.0
+        heartbeat = self.desk.state_dir / "heartbeat"
+        clock = lambda t: unittest.mock.patch.object(time, "time", return_value=t)
+        write_json(heartbeat, at)
+        with clock(at + 960):
+            told = alert.stuck_check(self.desk, 0.0)
+            self.assertEqual(alert.stuck_check(self.desk, told), told)
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        # A clock change without a completed round is not a recovery.
+        with clock(at + 100):
+            self.assertEqual(alert.stuck_check(self.desk, told), 0.0)
+        self.assertEqual(alert.queued(self.desk), [])
+        # A new server's lock is not a completed round either; keep the recovery across its restart.
+        lock = self.desk.state_dir / "serve.lock"
+        lock.write_text("")
+        os.utime(lock, (at + 1000, at + 1000))
+        with clock(at + 1005):
+            told = alert.stuck_check(Desk(self.desk.root), 0.0)
+        self.assertEqual(alert.queued(self.desk), [])
+        write_json(heartbeat, at + 1200)
+        with clock(at + 1205):
+            told = alert.stuck_check(self.desk, told)
+            self.assertEqual(told, 0.0)
+            self.assertEqual(alert.stuck_check(self.desk, told), 0.0)
+        [item] = alert.queued(self.desk)
+        self.assertEqual((item["kind"], item["level"]), ("server_stuck", "passive"))
+        self.assertIn("finishing rounds again", item["text"])
+        for t in (at, at + 1200):
+            self.assertIn(time.strftime("%H:%M", time.localtime(t)), item["text"])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertEqual(self.alerted(out)[-1]["level"], "passive")
+        # Another stretch has its own beginning and all-clear.
+        with clock(at + 2160):
+            told = alert.stuck_check(self.desk, told)
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        write_json(heartbeat, at + 2400)
+        with clock(at + 2405):
+            alert.stuck_check(self.desk, told)
+        [item] = alert.queued(self.desk)
+        self.assertIn(time.strftime("%H:%M", time.localtime(at + 1200)), item["text"])
+        self.assertIn(time.strftime("%H:%M", time.localtime(at + 2400)), item["text"])
+
+    def test_recovery_alerts_require_an_alert_and_forget_recovery_with_channels_off(self):
+        from hansa import alert
+        at = 1700000000.0
+        heartbeat = self.desk.state_dir / "heartbeat"
+
+        def problem():
+            self.desk.event("disk_low", floor=10, volumes=[])
+            self.desk.event("sandbox_held", lane="a", why="refused", alert=True)
+            write_json(heartbeat, at)
+            with unittest.mock.patch.object(time, "time", return_value=at + 960):
+                return alert.stuck_check(self.desk, 0.0)
+
+        def recover(told):
+            self.desk.event("disk_ok", floor=10, volumes=[])
+            self.desk.event("sandbox_ready", lane="a")
+            write_json(heartbeat, at + 1200)
+            with unittest.mock.patch.object(time, "time", return_value=at + 1205):
+                alert.stuck_check(self.desk, told)
+
+        told = problem()  # no channel: no start alert, so no all-clear after channels are enabled
+        out = self.alert_fake()
+        recover(told)
+        self.assertEqual(alert.queued(self.desk), [])
+        told = problem()
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": ""}))["ok"])
+        recover(told)  # clearing while disabled must not leave an all-clear for a later healthy look
+        self.alert_fake()
+        recover(0.0)
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertEqual(len(self.alerted(out)), 1)
+
+    def test_recovery_alerts_follow_the_saved_language_and_share_the_next_batch(self):
+        from hansa import alert
+        out = self.alert_fake()
+        self.desk.event("disk_low", floor=10, volumes=[])
+        self.desk.event("sandbox_held", lane="a", why="refused", alert=True)
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.desk.event("disk_ok", floor=10, volumes=[])
+        self.desk.event("sandbox_ready", lane="a")
+        alert.add(self.desk, "test", "next batch", zh="下一批")
+        self.assertTrue(self.page_save(lambda s: s.update(alert_language="zh"))["ok"])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        sent = self.alerted(out)[-1]
+        self.assertEqual((sent["kind"], sent["level"]), ("disk,sandbox,test", "active"))
+        self.assertIn("磁盘空间已恢复", sent["text"])
+        self.assertIn("工作线 a 的沙箱已恢复", sent["text"])
+        self.assertEqual(sent["text"].count("此前故障从"), 2)
+        self.assertIn("下一批", sent["text"])
 
     def test_the_stuck_server_alert_counts_awake_time_with_wall_clock_fallbacks(self):
         from hansa import alert

@@ -95,7 +95,7 @@ PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbi
 HIDDEN_BY = "workers_may_not_read_added"
 # The events that may call for an alert to the principal (alert.from_event)
 ALERTED = ("release_asked", "release_waits", "release_ended", "release_void", "release_forbidden", "release_stopped",
-           "ask", "sandbox_held", "disk_low", "provider_credit")
+           "ask", "sandbox_held", "sandbox_ready", "disk_low", "disk_ok", "provider_credit")
 # What the principal's list of releases without asking records of each lane's release target, as the page saves
 # it: {lane, target, repo, base, command, watch?, after, fixed?, outside?} (outside: named outside files and hashes;
 # after: the target it must follow, "" for none; fixed: "yes"

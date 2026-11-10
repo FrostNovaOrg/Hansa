@@ -621,11 +621,22 @@ set` has nothing like it. `hansa serve` runs it when a release starts waiting
 for the principal's yes (also when a ticked target's tick no longer holds and
 its release goes back to waiting), when a release ends (done, failed, void or
 forbidden), when the coordinator stops a release, when a to-do for the principal is recorded (`hansa ask`), when a
-lane's runs cannot start because their sandbox cannot (once for each lane and reason), when free space goes under the
+lane's runs cannot start because their sandbox cannot (once for each lane and reason until a passing sandbox try
+clears the hold), when free space goes under the
 floor and `hansa serve` starts nothing new (once each time: see [free space](desk.md#free-space)), when
 its own rounds have stopped for 15 minutes, and when what hansa posts to the coordinator's session cannot reach it
 (below); not for ordinary task events,
-which go to the coordinator. It runs as the desk's account, outside the
+which go to the coordinator. After a passing sandbox try clears a lane's hold, a later hold alerts again,
+including for the same reason.
+
+After a `disk`, `sandbox` or `server_stuck` alert, recovery adds one passive line to the next gathered batch:
+free space is back over the floor and its margin, that lane's sandbox passes a try again, or `hansa serve`
+finishes a round again. The line says when the trouble began and ended, with dates and local times.
+It keeps the same alert kind; sandbox recovery is per lane. The beginning is remembered across processes
+and server restarts. A healthy look without an earlier queued alert sends no recovery; recovery while
+channels are off clears the notice without saving it for later. The coordinator's `turn_ok` recovery stays as below.
+
+The command runs as the desk's account, outside the
 sandbox, in a temporary folder of its own under the desk's `secrets/alert-runs` (closed to the
 coordinator, workers and verifiers; removed when the command ends, and what a stopped or killed
 `hansa serve` left there is swept when it starts), with hansa's own environment (not a lane's),
@@ -656,9 +667,9 @@ level, and `HANSA_ALERT_LEVEL` takes the highest in a batch:
 
 | Level | Alerts |
 | --- | --- |
-| `passive` | A release that finished successfully |
+| `passive` | A release that finished successfully; recovery after `disk`, `sandbox`, `server_stuck` or coordinator turn errors |
 | `active` | A waiting release, a to-do, a failed, void, forbidden or stopped release, and the test |
-| `urgent` | `server_stuck`, `coordinator`, `sandbox`, `disk`, `credit` |
+| `urgent` | Problem notices: `server_stuck`, `coordinator`, `sandbox`, `disk`, `credit` |
 
 Bark maps these to passive, active and time-sensitive notifications, respectively.
 ntfy uses priorities 2, 3 and 4; Gotify uses 2, 5 and 8. Telegram and Discord

@@ -44,11 +44,15 @@ hansa runs the command when a release starts waiting for the principal's yes,
 when a release ends (done, failed, void or forbidden), when the coordinator stops one (release_stopped; the principal's
 own Stop on the page sends none), when a to-do for the principal is recorded (hansa ask), when a lane's runs cannot
 start because a provider ran out of credit (once per rest: run.rest_provider), when a lane's runs cannot
-start because their sandbox cannot (once for each lane and reason: run.hold), when free space goes under the floor
+start because their sandbox cannot (once for each lane and reason until a passing try clears the hold: run.hold),
+when free space goes under the floor
 and hansa serve starts nothing new (once each time: disk.look),
 when hansa serve has finished no round for STUCK_ALERT seconds, and when what hansa posts to the coordinator's session
 cannot reach it (kind `coordinator`, below); not for ordinary task events, which go to the
 coordinator. The coordinator sends none: no hansa command does.
+After an alerted disk, sandbox or server_stuck problem clears, one passive recovery line joins the next batch,
+with the same kind and when the trouble began and ended. A sandbox recovery is per lane. The beginning is kept
+across processes and restarts in alert-recovery.json; a later sandbox hold alerts again even for the same reason.
 
 The `coordinator` alert has four cases, each after the minutes the principal sets on the page (settings
 `coordinator_alert`, desk.COORDINATOR_ALERT; 0 turns a case off):
@@ -96,7 +100,8 @@ keys removed, within MOST_TEXT characters), stopped after TIMEOUT seconds. Long 
 separately, urgent ones first, retaining each start and the total count. Alerts that come within GATHER seconds
 of each other go out in one run (none waits more than MOST_WAIT); closed to-dos and release requests that no longer
 wait as asked are left out, while their end alerts still go out.
-Each queued alert has a level: passive for a release that finished successfully; active for release_waiting, ask,
+Each queued alert has a level: passive for a release that finished successfully and recovery notices;
+active for release_waiting, ask,
 a failed, void or forbidden release, release_stopped and test; urgent for server_stuck, coordinator, sandbox, disk
 and credit. A batch takes the highest (passive < active < urgent); Bark maps that level to its own attention levels.
 One run at a time (.hansa/alert.lock), and at
@@ -302,6 +307,35 @@ def add(desk: Desk, kind: str, text: str, release=None, asked=None, ask=None, *,
 
 
 # -- what is alerted -------------------------------------------------------------------------------------------------
+def _problem(desk: Desk, kind: str, text: str, *, zh: str, lane: str = "", since: float | None = None) -> None:
+    """Remember the beginning only when its alert is queued, for one passive all-clear after recovery.
+    Keep it on disk: holds and their recovery may be recorded by different processes or across a restart."""
+    with desk.lock():
+        if add(desk, kind, text, zh=zh):
+            path = desk.state_dir / "alert-recovery.json"
+            rec = read_json(path, {}) or {}
+            rec.setdefault(f"{kind}:{lane}", time.time() if since is None else since)
+            write_json(path, rec)
+
+
+def _recovered(desk: Desk, kind: str, text: str, *, zh: str, lane: str = "", at: float | None = None) -> None:
+    """End an alerted stretch once. An explicit round time must advance beyond the stalled round."""
+    with desk.lock():
+        path = desk.state_dir / "alert-recovery.json"
+        rec = read_json(path, {}) or {}
+        key = f"{kind}:{lane}"
+        since = rec.get(key)
+        if since is None or at is not None and at <= since:
+            return
+        end = time.time() if at is None else at
+        began = time.strftime("%Y-%m-%d %H:%M", time.localtime(since))
+        ended = time.strftime("%Y-%m-%d %H:%M", time.localtime(end))
+        add(desk, kind, f"{text}; trouble lasted from {began} to {ended}",
+            zh=f"{zh}；此前故障从 {began} 持续到 {ended}", level="passive")
+        rec.pop(key)
+        write_json(path, rec)
+
+
 def _release_text(desk: Desk, rid, waiting: bool, code: str = "", zh: bool = False) -> str:
     from . import release
     r = release.get(desk, rid)
@@ -369,21 +403,28 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
         at = time.strftime('%H:%M', time.localtime(fields.get("since") or time.time()))
         add(desk, "credit", fields["text"],
             zh=f"服务商 {fields.get('provider')}：余额不足，自 {at} 起休息，等你在网页上确认充值")
-    elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason (run.hold)
+    elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason until cleared (run.hold)
         from .run import sandbox_held_text
         held = {**fields, "kind": fields.get("run")}
         why = sandbox_held_text(held)
-        add(desk, "sandbox", f"lane {fields.get('lane')} cannot run: {why}; "
+        _problem(desk, "sandbox", f"lane {fields.get('lane')} cannot run: {why}; "
                              + (f"task {fields['task']} is held" if fields.get("task") else "its tasks are held")
                              + ", not failed",
             zh=f"工作线 {fields.get('lane')} 因沙箱暂缓：{sandbox_held_text(held, zh=True)}；"
-               + (f"任务 {fields['task']} 暂缓" if fields.get("task") else "其任务暂缓") + "，没有失败")
+               + (f"任务 {fields['task']} 暂缓" if fields.get("task") else "其任务暂缓") + "，没有失败",
+            lane=fields.get("lane", ""))
+    elif kind == "sandbox_ready":
+        _recovered(desk, "sandbox", f"lane {fields.get('lane')}'s sandbox works again",
+                   zh=f"工作线 {fields.get('lane')} 的沙箱已恢复", lane=fields.get("lane", ""))
     elif kind == "disk_low":  # once each time it goes under (disk.look)
-        add(desk, "disk", f"free space is under the floor ({fields.get('floor') or 0:g} GB): "
+        _problem(desk, "disk", f"free space is under the floor ({fields.get('floor') or 0:g} GB): "
                           + "; ".join(fields.get("volumes") or []) + ": hansa serve starts no new task or release "
                           "until there is space again; what runs goes on",
             zh=f"磁盘空间低于下限（{fields.get('floor') or 0:g} GB）：" + "；".join(fields.get("volumes") or [])
                + "：hansa serve 暂停新任务和发布，等待空间恢复；正在运行的继续")
+    elif kind == "disk_ok":
+        _recovered(desk, "disk", "free space is back over the floor: hansa serve starts things again",
+                   zh="磁盘空间已恢复到下限以上：hansa serve 恢复启动新工作")
 
 
 # -- sending -----------------------------------------------------------------------------------------------------------
@@ -672,12 +713,17 @@ def stuck_check(desk: Desk, told: float) -> float:
     last, mono = _last_round(desk)
     quiet = _server_elapsed(last, mono) if last else 0
     if quiet < STUCK_ALERT:
+        heartbeat = read_json(desk.state_dir / "heartbeat")
+        at = heartbeat.get("at") if isinstance(heartbeat, dict) else heartbeat
+        if last and at == last:  # serve.lock's start time alone does not mean a round finished
+            _recovered(desk, "server_stuck", "hansa serve is finishing rounds again",
+                       zh="后台（hansa serve）已恢复完成轮次", at=last)
         return 0.0
     if not told:
-        add(desk, "server_stuck", f"hansa serve has finished no round for {int(quiet // 60)} minutes: no task starts "
+        _problem(desk, "server_stuck", f"hansa serve has finished no round for {int(quiet // 60)} minutes: no task starts "
                                   "or ends, and no release runs; see hansa explain server",
             zh=f"后台（hansa serve）已 {int(quiet // 60)} 分钟没跑完一轮：在忙或卡住了；"
-               "任务无法开始或结束，发布也无法运行；请查看 hansa explain server")
+               "任务无法开始或结束，发布也无法运行；请查看 hansa explain server", since=last)
         return time.time()
     return told
 
