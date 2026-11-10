@@ -851,8 +851,10 @@ def _askable(desk: Desk, s: dict, lane: str, target: str | None) -> dict:
                              f"say which: hansa release {lane} TARGET [note]. Nothing was asked")
         target = next(iter(targets))
     if target not in targets:
+        note_hint = (f" For a one-word note, name the target: hansa release {lane} {next(iter(targets))} {target}."
+                     if len(targets) == 1 else "")
         raise SystemExit(f"hansa: lane {lane} has no release target {target}; its targets: "
-                         f"{', '.join(sorted(x or '(unnamed)' for x in targets))}. Nothing was asked")
+                         f"{', '.join(sorted(x or '(unnamed)' for x in targets))}.{note_hint} Nothing was asked")
     command = targets[target].get("command") or ""
     repo, base = ln["repo"], ln.get("base") or "main"
     try:
@@ -931,7 +933,7 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
     target, commit, hits = r["target"], r["commit"], r.get("hits")
     desk.event("release_asked", id=r["id"], lane=lane, target=target, commit=commit, state=r["state"], by=by,
                **({"replaced": r["_replaced"]} if r.get("_replaced") else {}))
-    for n in r.pop("_replaced", []):
+    for n in r.get("_replaced", []):
         desk.event("release_void", id=n, lane=lane, target=target, why=f"replaced by release #{r['id']}", quiet=True)
     if hits:
         desk.event("release_forbidden", id=r["id"], lane=lane, target=target, commit=commit, found=len(hits),

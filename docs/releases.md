@@ -38,13 +38,20 @@ Settings shows each tick with the target's name, then its lane, its description
 if present, and always its command on a separate line. The command is cut at the
 row's width; hovering shows it whole.
 `hansa lane target L` lists them, each with its description and the way it runs. `hansa
-release L [TARGET] [note]` (TARGET needed when there is more than one)
+release L [TARGET] [note]` (TARGET needed when there is more than one, and before a one-word
+note that could be a target name, as in `hansa release a public staging`)
 records the request (a new request for the same target replaces one still
 waiting): the target, the commit, the command, the note, the
 commits that go out (on no remote-tracking branch of the repository and not
 in that target's last release; the whole history when it has no
 remote-tracking branch) and the files they change, a file the command names
-(such as `./deploy.sh`) marked. A word from the principal's list of words no
+(such as `./deploy.sh`) marked. On a one-target lane, an unknown word that `hansa lane target`
+would accept as a new target name is refused, to keep a mistyped target from releasing the only one;
+a quoted note with spaces can still omit TARGET. The reply names any waiting request it replaces
+and says its one-time code no longer works. At the same commit as the target's last finished release,
+the reply first says there is nothing new, names that release and says it was asked to run again;
+asking again stays allowed. These remarks appear in the command's reply, not in the alert.
+A word from the principal's list of words no
 release may send out, in the command line or in a line, a file name, a
 message or the author's or committer's name or email of any outgoing commit
 (all are checked, and the page shows at most 200 of them and says how many

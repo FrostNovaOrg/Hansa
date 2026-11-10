@@ -32573,7 +32573,7 @@ def save():'''))
         self.assertEqual([e["field"] for e in self.events("lane_command_changed")], ["release"])
         p, sock = self.session()
         with self.in_session(p, sock):
-            told = self.hansa("release", "a", "first", "cut")
+            told = self.hansa("release", "a", "first cut")
         self.assertIn("release #1: lane a's main at", told)
         self.assertIn("2 commit(s) on no remote-tracking branch (no release of it went out before)", told)
         self.assertIn("2 outgoing commit(s) checked for forbidden words", told)
@@ -41980,6 +41980,135 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[
             {"lane": "a", "target": x} for x in ticked])), {"ok": True, "problems": []})
 
+    def refuse_unknown_release_target(self, *args):
+        from hansa import alert, release
+        sent = self.alert_fake()
+        pushed = self.repo / "pushed.txt"
+        self.with_targets(public=f"touch {pushed}")
+        for ticked in (False, True):
+            with self.subTest(ticked=ticked, args=args):
+                self.tick_targets(*(["public"] if ticked else []))
+                said = self.refused("release", "a", *args)
+                self.assertIn("lane a has no release target staging", said)
+                self.assertIn("its targets: public", said)
+                self.assertIn("hansa release a public staging", said)
+                self.assertIn("Nothing was asked", said)
+                self.assertEqual(release.releases(self.desk), [])
+                self.assertEqual(self.events("release_asked"), [])
+                self.assertEqual(alert.queued(self.desk), [])
+                Dispatcher(self.desk).tick()
+                self.assertFalse(pushed.exists())
+                self.assertEqual(self.alerted(sent), [])
+
+    def test_release_unknown_target_word(self):
+        self.refuse_unknown_release_target("staging")
+
+    def test_release_unknown_target_word_with_note(self):
+        self.refuse_unknown_release_target("staging", "ship the fix")
+
+    def test_release_quoted_note(self):
+        from hansa import release
+        self.with_targets(public="true")
+        said = self.hansa("release", "a", "ship the login fix")
+        self.assertIn("waits for the principal's yes", said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["target"], r["note"], r["state"]), ("public", "ship the login fix", "waiting"))
+
+    def test_release_without_target_or_note(self):
+        from hansa import release
+        self.with_targets(public="true")
+        said = self.hansa("release", "a")
+        self.assertIn("waits for the principal's yes", said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["target"], r["note"], r["state"]), ("public", "", "waiting"))
+
+    def test_release_explicit_target_one_word_note(self):
+        from hansa import release
+        self.with_targets(public="true")
+        said = self.hansa("release", "a", "public", "hotfix")
+        self.assertIn("waits for the principal's yes", said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["target"], r["note"], r["state"]), ("public", "hotfix", "waiting"))
+
+    def test_release_no_or_several_targets_keeps_argument_rules(self):
+        from hansa import release
+        for args in ((), ("staging",), ("staging", "ship the fix"), ("ship the login fix",)):
+            with self.subTest(targets=0, args=args):
+                self.assertIn("lane a has no release target; set it first", self.refused("release", "a", *args))
+        self.with_targets(public="true", preview="true")
+        for args in ((), ("staging",), ("staging", "ship the fix"), ("ship the login fix",)):
+            with self.subTest(targets=2, args=args):
+                self.assertIn("2 release targets (preview, public); say which", self.refused("release", "a", *args))
+        self.assertEqual(release.releases(self.desk), [])
+        self.hansa("release", "a", "public", "hotfix")
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["target"], r["note"]), ("public", "hotfix"))
+
+    def test_release_target_word_uses_target_name_rule(self):
+        from hansa import release
+        self.with_targets(public="true")
+        for word in ("1", "a-b", "a" * 32):
+            with self.subTest(word=word):
+                # The same word is accepted when naming an actual target.
+                self.hansa("lane", "target", "a", word, "true")
+                self.hansa("lane", "target", "a", word, "none")
+                self.assertIn(f"no release target {word};", self.refused("release", "a", word))
+        for note in ("Hotfix", "hotfix!", "a" * 33, "ship the fix"):
+            with self.subTest(note=note):
+                self.hansa("release", "a", note)
+                self.assertEqual(release.releases(self.desk)[-1]["note"], note)
+
+    def test_release_reply_names_replaced_request_and_invalid_code(self):
+        from hansa import alert, release
+        sent = self.alert_fake()
+        self.with_targets(public="true", preview="true")
+        for ticked in (False, True):
+            with self.subTest(ticked=ticked):
+                self.hansa("release", "a", "public")
+                old = release.releases(self.desk)[-1]
+                alert.send_due(self.desk, gather=0, capped=False)
+                code = self.sent_code(old["id"])
+                self.hansa("release", "a", "preview")
+                if ticked:
+                    self.tick_targets("public")
+                said = self.hansa("release", "a", "public")
+                self.assertIn(f"Replaces waiting release #{old['id']}", said)
+                self.assertIn("one-time code no longer works", said)
+                self.assertEqual(release.get(self.desk, old["id"])["state"], "void")
+                self.assertIn("it is void", self.code_answer("yes", str(old["id"]), code)[1])
+                current = release.releases(self.desk)[-1]
+                alert.send_due(self.desk, gather=0, capped=False)
+                self.assertNotIn("Replaces waiting", self.alerted(sent)[-1]["text"])
+                self.hansa("release", "--stop", str(current["id"]))
+
+    def test_release_reply_starts_with_same_commit_notice(self):
+        from hansa import alert, release
+        sent = self.alert_fake()
+        self.with_targets(public="true", preview="true")
+        self.tick_targets("public")
+        said = self.hansa("release", "a", "public")
+        self.assertNotIn("Nothing new", said)
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        for ticked in (False, True):
+            with self.subTest(ticked=ticked):
+                self.tick_targets(*(["public"] if ticked else []))
+                said = self.hansa("release", "a", "public")
+                r = release.releases(self.desk)[-1]
+                alert.send_due(self.desk, gather=0, capped=False)
+                alert_text = self.alerted(sent)[-1]["text"]
+                self.hansa("release", "--stop", str(r["id"]))
+                first = said.splitlines()[0]
+                self.assertTrue(first.startswith("Nothing new"), said)
+                self.assertIn("same commit as release #1", first)
+                self.assertIn("asked to run again", first)
+                self.assertEqual(r["state"], "approved" if ticked else "waiting")
+                self.assertNotIn("asked to run again", alert_text)
+        # The notice belongs to the target's successful release at this exact commit.
+        self.assertNotIn("Nothing new", self.hansa("release", "a", "preview"))
+        self.commit_in_repo("new.txt", "new\n")
+        self.assertNotIn("Nothing new", self.hansa("release", "a", "public"))
+
     def settle_watch(self, d, rid):
         from hansa import release
         def ended():
@@ -42567,7 +42696,7 @@ else:
         self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
         self.assertEqual(self.desk.settings_path.read_bytes(), saved)
         self.assertEqual(self.desk.events_path.read_bytes(), events)
-        told = self.hansa("release", "a", "first", "cut")
+        told = self.hansa("release", "a", "first cut")
         self.assertIn("lane a target default is on the principal's list of releases without asking", told)
         r = release.get(self.desk, 1)
         self.assertEqual((r["state"], r["target"], r["note"]), ("approved", "default", "first cut"))
@@ -42789,7 +42918,7 @@ else:
         self.assertIn("has no release target test any more", {r["id"]: r for r in views.status(self.desk)["releases"]}[3]["moved"])
         self.assertIn("has no release target test now", public_settings(self.desk)["release_unmatched"][0]["why"])
         # with one target left, hansa release L [note] asks for it
-        self.hansa("release", "a", "the", "rest")
+        self.hansa("release", "a", "the rest")
         r = release.releases(self.desk)[-1]
         self.assertEqual((r["target"], r["note"]), ("push", "the rest"))
 
@@ -44056,7 +44185,7 @@ else:
         os.environ.pop("HANSA_TASK")
         # a release waits for the yes, and ends void
         self.hansa("lane", "target", "a", "default", "true")
-        self.hansa("release", "a", "first")
+        self.hansa("release", "a", "default", "first")
         alert.send_due(self.desk, gather=0)
         self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting")
         self.assertIn("release #1 (lane a, target default) · code ", self.alerted(out)[-1]["text"])
@@ -44501,7 +44630,7 @@ else:
         from hansa import alert, release
         out = self.alert_fake()
         self.hansa("lane", "target", "a", "default", "true")
-        self.hansa("release", "a", "first")
+        self.hansa("release", "a", "default", "first")
         queued_bytes = alert.queue_file(self.desk).read_bytes()
         [q] = json.loads(queued_bytes)
         self.assertNotIn("code", q)
@@ -44534,7 +44663,7 @@ else:
         self.assertIn("hansa release yes ID CODE", self.hansa("explain"))
         # A code goes first, so a long gathered text does not cut it.
         self.desk.add_ask("x" * 2000)
-        self.hansa("release", "a", "again")
+        self.hansa("release", "a", "default", "again")
         alert.send_due(self.desk, gather=0)
         self.assertIn(self.sent_code(2), self.alerted(out)[-1]["text"])
 
@@ -44623,9 +44752,9 @@ else:
         from hansa import alert, release
         out = self.alert_fake()
         self.hansa("lane", "target", "a", "default", "true")
-        self.hansa("release", "a", "original")
+        self.hansa("release", "a", "default", "original")
         release.void(self.desk, 1, "ask again")
-        self.hansa("release", "a", "replacement")
+        self.hansa("release", "a", "default", "replacement")
         self.assertEqual([r["id"] for r in release.releases(self.desk)], [1, 2])
         with unittest.mock.patch.object(release, "new_code", wraps=release.new_code) as make:
             self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
@@ -44774,7 +44903,7 @@ else:
                 self.assertNotIn(code.encode(), f.read_bytes(), f)
         # the same with an alert that goes out
         out = self.alert_fake()
-        self.hansa("release", "a", "again")
+        self.hansa("release", "a", "default", "again")
         alert.send_due(self.desk, gather=0)
         code = self.sent_code(2)
         self.assertIn(code, self.alerted(out)[-1]["text"])
