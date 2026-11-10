@@ -16,11 +16,20 @@ from hansa.desk import Desk, default_settings, validate
 from tests.bench.test_6 import KEY
 
 
+def desk_at(root) -> Desk:
+    """A desk in this folder, holding what hansa init makes and what makes a folder a desk (Desk.is_desk):
+    settings.json and tasks/."""
+    desk = Desk(root)
+    desk.tasks_dir.mkdir(parents=True, exist_ok=True)
+    desk.settings_path.write_text("{}\n", encoding="utf-8")
+    return desk
+
+
 class BenchManagementTest(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.desk = Desk(temporary.name)
+        self.desk = desk_at(temporary.name)
         self.calls, self.fail_action, self.status = [], "", "Stopped"
 
     def run_command(self, command, **options):
