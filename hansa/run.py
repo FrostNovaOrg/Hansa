@@ -36,7 +36,7 @@ from pathlib import Path
 
 from . import account, after, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
-                   refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, program_candidates,
+                   refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, claude_bin,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
 from .srt_output import protected
@@ -464,11 +464,20 @@ STOPPED_NOTE = "(Stopped at the ceiling before it wrote its report. Its notes al
 LATE_NOTE = "\n\n(Written after that, when a background notice came in:)\n\n"
 
 
-def claude_bin() -> str:
-    for c in program_candidates("claude"):
-        if c and os.access(c, os.X_OK):
-            return c
-    raise RuntimeError("claude was not found; install Claude Code or set HANSA_CLAUDE")
+class LaneCannotStart(RuntimeError):
+    """A task could not start for a reason of the machine or of its lane, not its own: it goes back to the queue,
+    no try used, and the lane waits (start_hold) until the cause is gone (start_cause_holds). cause: "claude"
+    (no claude to run: every lane that takes work waits), "repo" (the lane's repository folder is not there),
+    "worktree" (git cannot prepare the lane's worktree). str(): the whole reason."""
+
+    def __init__(self, why: str, cause: str) -> None:
+        self.cause = cause
+        super().__init__(why)
+
+
+# How often hansa serve tries again to prepare a lane's worktree that git could not prepare (cause "worktree"):
+# what git refused is not something hansa can look at without trying
+START_RETRY = 60
 
 
 SRT_MISSING = ("hansa needs srt (Anthropic's sandbox runtime) to run a lane's setup and check commands in a "
@@ -804,7 +813,15 @@ def sandbox_guard(desk: Desk, lane_name: str, kind: str, box: dict, wt: Path) ->
         sandbox_clear(desk, lane_name, "work")
 
 
-SANDBOX_GROUPS = {"work": "its workers and verifiers"}
+SANDBOX_GROUPS = {"work": "its workers and verifiers",
+                  "start": "its tasks"}  # held for the machine or the lane, not the sandbox (start_hold)
+# What a start held for each cause waits for, and what to do (start_held_text)
+START_NEXT = {
+    "claude": "its tasks wait, and start by themselves once hansa serve finds it (HANSA_CLAUDE is read as "
+              "hansa serve starts: after setting it, restart hansa serve)",
+    "repo": "its tasks wait, and start by themselves once the folder is there again",
+    "worktree": f"its tasks wait; hansa serve tries again every {START_RETRY} seconds, and they start once git "
+                "can prepare it (hansa explain server has git's whole error)"}
 
 
 def sandbox_held(desk: Desk) -> dict:
@@ -823,9 +840,21 @@ def sandbox_held(desk: Desk) -> dict:
     return out
 
 
-def sandbox_held_text(h: dict, zh: bool = False) -> str:
+def start_held_text(h: dict, short: bool = False) -> str:
+    """Why no task starts on a lane held for the machine or the lane (start_hold), and what starts them: in one
+    line when short, the reason's first line (git's error may be several)."""
+    why = str(h.get("why") or "?")
+    if short:
+        why = (why.strip().splitlines() or ["?"])[0]
+    return f"{why}; {START_NEXT.get(h.get('cause'), 'its tasks wait')}"
+
+
+def sandbox_held_text(h: dict, zh: bool = False, short: bool = False) -> str:
     """Why a lane's runs are held (an entry of sandbox_held), which of them, and what starts them again, in a
-    clause. zh: in Chinese for the alert, keeping the raw diagnostic in either language."""
+    clause. zh: in Chinese for the alert, keeping the raw diagnostic in either language. short: the reason's first
+    line alone (hansa status), for one held for the machine or the lane (start_held_text)."""
+    if h.get("cause"):
+        return start_held_text(h, short)
     why = str(h.get("why") or "?")
     if zh:
         kind = {"worker": "工作智能体", "verifier": "核验者", "check": "检查"}.get(h.get("kind"), "运行")
@@ -851,22 +880,25 @@ def sandbox_clear(desk: Desk, lane_name: str, group: str) -> None:
             rec = read_json(desk.state_dir / SANDBOX_HELD, {}) or {}
             write_json(desk.state_dir / SANDBOX_HELD, {**(rec if isinstance(rec, dict) else {}), "lanes": held})
     if was:
-        desk.event("sandbox_ready", lane=lane_name, group=group)
+        desk.event("start_ready" if group == "start" else "sandbox_ready", lane=lane_name, group=group)
 
 
-def _hold_lane(desk: Desk, lane_name: str, entry: dict) -> bool:
-    """Record a lane's runs of the entry's kind as held (sandbox_held); whether the principal's alert is to be
-    told, once for each lane and reason."""
+def _hold_lane(desk: Desk, lane_name: str, entry: dict, group: str = "work", lanes=()) -> bool:
+    """Record a lane's runs of the entry's kind as held (sandbox_held), in its group, and so each of `lanes` too;
+    whether the principal's alert (the coordinator, for a start held: start_hold) is to be told, once for each
+    lane and reason."""
+    names = list(dict.fromkeys([lane_name, *lanes]))
     with desk.lock():
         rec = read_json(desk.state_dir / SANDBOX_HELD, {}) or {}
         rec = rec if isinstance(rec, dict) else {}
         told = [x for x in rec.get("told") or [] if isinstance(x, list)]  # [lane, why]; a reason alone was before lanes
-        new = [lane_name, entry["why"]] not in told
+        fresh = [[n, entry["why"]] for n in names if [n, entry["why"]] not in told]
         held = sandbox_held(desk)
-        held.setdefault(lane_name, {})["work"] = entry
+        for n in names:
+            held.setdefault(n, {})[group] = entry
         desk.state_dir.mkdir(mode=0o700, exist_ok=True)
-        write_json(desk.state_dir / SANDBOX_HELD, {"lanes": held, "told": [*told, [lane_name, entry["why"]]] if new else told})
-    return new
+        write_json(desk.state_dir / SANDBOX_HELD, {"lanes": held, "told": [*told, *fresh]})
+    return bool(fresh)
 
 
 def hold(desk: Desk, tid: str, lane_name: str, why: str, part: str = "", kind: str = "") -> None:
@@ -885,6 +917,42 @@ def hold(desk: Desk, tid: str, lane_name: str, why: str, part: str = "", kind: s
     desk.event("sandbox_held", task=tid, lane=lane_name, run=kind, why=why, part=part, alert=new)
 
 
+def start_hold(desk: Desk, tid: str, lane_name: str, e: LaneCannotStart, lanes=()) -> None:
+    """A task that could not start for the machine or its lane (LaneCannotStart): as hold, it goes back to the
+    queue, no try used, and the lane is held in the group "start" (each of `lanes` too: every lane that takes
+    work, when claude is missing), for hansa status, until start_cause_holds says the cause is gone. The
+    coordinator is told once for each lane and reason (notify, the event start_held)."""
+    why = desk.redact(str(e))[:600]
+    held = {"why": why, "part": "", "kind": "", "cause": e.cause, "lane": lane_name, "at": now()}
+    desk.change(tid, lambda m: None if m["state"] not in ("queued", "running") else
+                {"state": "cancelled", "phase": "", "error": "cancelled before it started", "finished": now()}
+                if m.get("cancel") else
+                {"state": "queued", "phase": "", "pid": None, "pid_start": "", "held": held, "error": why})
+    remove_sandbox_tmp(desk, tid)
+    names = list(dict.fromkeys([lane_name, *lanes]))
+    new = _hold_lane(desk, lane_name, {**{k: held[k] for k in ("why", "cause", "at")}, "task": tid}, "start", names)
+    desk.event("start_held", task=tid, lane=lane_name, lanes=names, cause=e.cause, why=why, told=new)
+
+
+def start_cause_holds(s: dict, lane_name: str, h: dict) -> bool:
+    """Whether what kept a lane's task from starting (an entry of the group "start" of sandbox_held) still holds, as
+    hansa serve sees it now: claude still not found, the repository folder still not there; for git, until it is
+    time to try again (START_RETRY). A lane no longer in settings holds nothing."""
+    lane = s["lanes"].get(lane_name)
+    if not lane:
+        return False
+    if h.get("cause") == "claude":
+        try:
+            claude_bin()
+        except RuntimeError:
+            return True
+        return False
+    if h.get("cause") == "repo":
+        return not os.path.isdir(lane["repo"])
+    at = h.get("at")
+    return isinstance(at, (int, float)) and time.time() < at + START_RETRY
+
+
 @git_folders_kept
 def sandbox_retry(desk: Desk, s: dict) -> list:
     """As hansa serve starts: try again the sandbox of each lane's held runs (sandbox_held), a worker's in the
@@ -896,6 +964,8 @@ def sandbox_retry(desk: Desk, s: dict) -> list:
     for ln, groups in sandbox_held(desk).items():
         lane = s["lanes"].get(ln)
         for g, h in groups.items() if lane else []:
+            if g != "work":  # held for the machine or the lane, not the sandbox: the dispatch looks (start_cause_holds)
+                continue
             kind = h.get("kind") or "worker"
             try:
                 pname = next((x for x in lane["providers"] if x in s["providers"]), "")
@@ -3665,24 +3735,29 @@ def ready_worktree(desk: Desk, repo: Path, wt: Path, tid: str, start: str) -> di
         check_git_file(desk, wt, repo)  # also finds and remembers the line of a worktree just made
     except GitFileChanged as e:  # changed since the last task ended: this one does not start, the next one can
         raise RuntimeError(git_file_changed(desk, tid, e)) from None
-    if merge_in_progress(desk, wt):  # a merge left half done cannot be set aside
-        wgit(desk, wt, "merge", "--abort")
-    if not wgit(desk, wt, "status", "--porcelain"):
-        return {}
-    before = last_task_in(desk, wt, tid)
-    ref = (before or {}).get("kept_ref") or (before or {}).get("scratch_ref")
-    if ref and kept_under(desk, wt, ref):  # kept already, when hansa could not clear it then: cleared now
-        clean_worktree(desk, wt, "HEAD")
-        return {}
-    wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: left over before {tid}")
-    stash = wgit(desk, wt, "rev-parse", "-q", "--verify", "refs/stash")
-    try:
-        untracked = bool(wgit(desk, wt, "rev-parse", "-q", "--verify", f"{stash}^3"))
+    try:  # every git call of this preparation: an error of git's holds the lane, it does not fail the task
+        if merge_in_progress(desk, wt):  # a merge left half done cannot be set aside
+            wgit(desk, wt, "merge", "--abort")
+        if not wgit(desk, wt, "status", "--porcelain"):
+            return {}
+        before = last_task_in(desk, wt, tid)
+        ref = (before or {}).get("kept_ref") or (before or {}).get("scratch_ref")
+        if ref and kept_under(desk, wt, ref):  # kept already, when hansa could not clear it then: cleared now
+            clean_worktree(desk, wt, "HEAD")
+            return {}
+        wgit(desk, wt, "stash", "push", "--include-untracked", "-m", f"hansa: left over before {tid}")
+        stash = wgit(desk, wt, "rev-parse", "-q", "--verify", "refs/stash")
+        try:
+            untracked = bool(wgit(desk, wt, "rev-parse", "-q", "--verify", f"{stash}^3"))
+        except GitFileChanged:
+            raise
+        except RuntimeError:
+            untracked = False
+        return {"stash": stash, "after": (before or {}).get("id", ""), "untracked": untracked}
     except GitFileChanged:
         raise
-    except RuntimeError:
-        untracked = False
-    return {"stash": stash, "after": (before or {}).get("id", ""), "untracked": untracked}
+    except RuntimeError as e:  # a file in it git cannot read, say: the lane's problem, not the task's
+        raise LaneCannotStart(f"git cannot prepare its worktree {wt}: {e}", "worktree") from None
 
 
 def last_task_in(desk: Desk, wt: Path, tid: str) -> dict | None:
@@ -3958,6 +4033,13 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     cancelled while hansa prepared it."""
     if tid in getattr(desk, "_bench_removing", ()):
         return None  # Finish the earlier run's folder cleanup before reusing the task.
+    try:  # what the machine or the lane lacks holds the task, before anything of it is changed (start_hold)
+        claude_bin()
+    except RuntimeError as e:
+        raise LaneCannotStart(str(e), "claude") from None
+    repo = (desk.settings()["lanes"].get(lane_name) or {}).get("repo") or ""
+    if repo and not os.path.isdir(repo):
+        raise LaneCannotStart(f"its repository folder {repo} is gone (moved or removed)", "repo")
     with desk.lock():  # lane roles may have changed since dispatch chose it
         queued = desk.meta(tid)
         if queued.get("after") and (not after.lane_matches(desk.settings(), queued, lane_name)
@@ -6140,6 +6222,17 @@ class Dispatcher:
         passes."""
         return self.held.get((ln, "work")) == json.dumps(s, sort_keys=True, default=str)
 
+    def start_waits(self, ln: str, s: dict, waits: dict) -> bool:
+        """Whether a lane's tasks wait for what kept one of them from starting (start_hold): the cause as it is now
+        (start_cause_holds), looked at once a round for each lane (`waits`). A cause gone clears the hold, and the
+        lane's tasks start, no try used."""
+        if ln not in waits:
+            h = sandbox_held(self.desk).get(ln, {}).get("start")
+            waits[ln] = bool(h) and start_cause_holds(s, ln, h)
+            if h and not waits[ln]:
+                sandbox_clear(self.desk, ln, "start")
+        return waits[ln]
+
     def hold(self, tid: str, ln: str, s: dict, e: SandboxRefused) -> None:
         hold(self.desk, tid, ln, str(e), e.part, e.kind)
         self.held[(ln, "work")] = json.dumps(s, sort_keys=True, default=str)
@@ -6715,6 +6808,7 @@ class Dispatcher:
         running = [m for m in self.tasks() if lane_occupied(m)]
         free = s["concurrency"] - len(running)
         busy = {occupied_lane(m) for m in running} | tried_lanes(desk)
+        waits = {}  # this round's answer of start_waits, by lane
         for m in self.tasks():
             with serve_step():
                 if free <= 0:
@@ -6725,7 +6819,8 @@ class Dispatcher:
                     continue
                 for ln in ([m["lane"]] if m.get("lane") else sorted(s["lanes"])):
                     if (ln in busy or ln not in s["lanes"] or not after.lane_matches(s, m, ln) or work_lane_problem(s, ln,
-                            verifying=m.get("kind") == "verify" and bool(m.get("lane"))) or self.sandbox_waits(ln, s)):
+                            verifying=m.get("kind") == "verify" and bool(m.get("lane"))) or self.sandbox_waits(ln, s)
+                            or self.start_waits(ln, s, waits)):
                         continue
                     pname = next((p for p in task_providers(s, ln, m)
                                   if p not in refused_by(m) and not provider_problem(desk, s, p)), None)
@@ -6735,6 +6830,10 @@ class Dispatcher:
                         proc = start(desk, m["id"], ln, pname)
                     except SandboxRefused as e:  # held, not failed: it starts once a try passes
                         self.hold(m["id"], ln, s, e)
+                    except LaneCannotStart as e:  # held, not failed: it starts once the cause is gone
+                        start_hold(desk, m["id"], ln, e, sorted(n for n in s["lanes"] if not s["lanes"][n].get("merge_lane"))
+                                   if e.cause == "claude" else ())
+                        waits.clear()  # looked at again with what was just held
                     except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
                         not_started(desk, m["id"], e)
                     else:
@@ -7130,6 +7229,11 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
         if problem:
             why.append(reason("merge_lane" if s["lanes"][ln].get("merge_lane") else "verify_lane", problem, lane=ln))
             continue
+        if "start" in held.get(ln, {}):  # held for the machine or the lane (start_hold)
+            h = held[ln]["start"]
+            why.append(reason("start", f"HELD: lane {ln} cannot run: {sandbox_held_text(h, short=True)}",
+                              lane=ln, cause=h.get("cause") or "", why=(str(h.get("why") or "?").splitlines() or ["?"])[0]))
+            continue
         if "work" in held.get(ln, {}):
             h = held[ln]["work"]
             why.append(reason("sandbox", f"HELD: lane {ln} cannot run, {sandbox_held_text(h)}",
@@ -7193,13 +7297,13 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -
         return {"ok": False, "detail": prob}
     tmp = desk.state_dir / "check"
     tmp.mkdir(parents=True, exist_ok=True)
-    # no tools: a model behind a compatible endpoint often calls one before it answers, and one turn ends there
-    argv = [claude or claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"], "--tools", ""]
-    argv += isolated(tmp)
     t0 = time.time()
     stamp = (key_stamp(desk, name), json.dumps(p, sort_keys=True))
     kind = ""
     try:
+        # no tools: a model behind a compatible endpoint often calls one before it answers, and one turn ends there
+        argv = [claude or claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"], "--tools", ""]
+        argv += isolated(tmp)
         env = {**provider_env(desk, name, p), "CLAUDE_CODE_MAX_RETRIES": "0"}
         r = subprocess.run(argv, cwd=str(tmp), env=env, input="Reply with the single word OK.",
                            capture_output=True, text=True, timeout=timeout)
@@ -7220,6 +7324,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -
                 (f": {said.group(1)}" if said and why else "")
     except subprocess.TimeoutExpired:
         ok, detail = False, f"no answer in {timeout}s"
+    except RuntimeError as e:
+        ok, detail = False, str(e)
     except Exception as e:  # noqa: BLE001
         ok, detail = False, str(e)[:200]
     detail = desk.redact(detail)

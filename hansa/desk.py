@@ -1707,7 +1707,31 @@ def program_candidates(name: str, env=None) -> list:
 
 def program(name: str, env=None) -> str:
     """The program as hansa finds it, optionally in a saved environment; '' when it is not on this machine."""
+    if name == "claude":
+        try:
+            return claude_bin(env)
+        except RuntimeError:
+            return ""
     return next((c for c in program_candidates(name, env) if c and os.access(c, os.X_OK)), "")
+
+
+def claude_bin(env=None) -> str:
+    """The claude hansa runs: HANSA_CLAUDE's when it is set, and then no other in its place; else the first found.
+    RuntimeError gives the diagnostic for commands and checks; program() returns '' for an unavailable program."""
+    env = os.environ if env is None else env
+    given = env.get("HANSA_CLAUDE") or ""
+    if given:
+        if not os.path.exists(given):
+            raise RuntimeError(f"HANSA_CLAUDE is {given}, which does not exist; put Claude Code there, or set "
+                               "HANSA_CLAUDE to its path (or unset it)")
+        if not os.path.isfile(given) or not os.access(given, os.X_OK):
+            raise RuntimeError(f"HANSA_CLAUDE is {given}, which cannot be run (not a file this account may run); "
+                               "make it one, or set HANSA_CLAUDE to Claude Code's path (or unset it)")
+        return given
+    for c in program_candidates("claude", env):
+        if c and os.access(c, os.X_OK):
+            return c
+    raise RuntimeError("claude was not found; install Claude Code or set HANSA_CLAUDE")
 
 
 def _hops(path: str) -> list:

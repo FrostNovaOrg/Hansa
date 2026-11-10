@@ -55,6 +55,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -447,17 +448,25 @@ def hansa_merges(desk: Desk, s: dict, a: dict, tasks=None) -> set:
     return found
 
 
+def history_cutoff(repo, since: str, commit: str, merges: set) -> str:
+    """Before the first hansa landing on a first release with no remote history; otherwise no cutoff."""
+    if since or not merges or _git_bytes(repo, "for-each-ref", "--format=%(refname)", "refs/remotes").strip():
+        return ""
+    rows = _git_bytes(repo, "log", "--first-parent", "--format=%H %P", commit, "--").splitlines()
+    oldest = next((row.split() for row in reversed(rows) if row.split()[0] in merges), [])
+    return oldest[1] if len(oldest) > 1 else ""
+
+
 def direct_commits(repo, since: str, commit: str, commits: list, merges: set) -> list:
     """Outgoing first-parent commits other than hansa landings, and what their merges brought in."""
-    rows = _git_bytes(repo, "log", "--first-parent", "--format=%H %P", *_range(repo, since, commit))
-    line = [row.split() for row in rows.splitlines()]
-    if not since and not _git_bytes(repo, "for-each-ref", "--format=%(refname)", "refs/remotes").strip():
-        oldest = [i for i, row in enumerate(line) if row[0] in merges]
-        if oldest:
-            line = line[:oldest[-1] + 1]  # before hansa's first landing is the repository's earlier history
+    rng = _range(repo, since, commit)
+    cutoff = history_cutoff(repo, since, commit, merges)
+    if cutoff:
+        rng.insert(1, f"^{cutoff}")
+    rows = _git_bytes(repo, "log", "--first-parent", "--format=%H %P", *rng)
     direct = set()
-    for row in line:
-        sha, *parents = row
+    for row in rows.splitlines():
+        sha, *parents = row.split()
         if sha in merges:
             continue
         direct.add(sha)
@@ -2131,9 +2140,15 @@ def direct_lines(r: dict) -> list:
     n = r.get("direct_count", 0)
     if not n:
         return []
-    commits = r.get("direct") or []
+    commits = (r.get("direct") or [])[:10]
     out = [f"{n} direct commit(s)" + (f" (the first {len(commits)} shown)" if len(commits) < n else "")]
     out += [f"  {c['sha'][:10]} {c['subject']}" for c in commits]
+    if len(commits) < n:
+        command = ["git", "-C", r["repo"], "log", "--oneline", r["commit"]]
+        if r.get("since"):
+            command.append(f"^{r['since']}")
+        command.append("--")
+        out.append("all commits in this range (including direct commits): " + shlex.join(command))
     if r.get("direct_reason"):
         out.append(f"reason for direct commits: {r['direct_reason']}")
     if r.get("direct_hold") and r.get("state") == "waiting":
@@ -2199,7 +2214,9 @@ def _detail_lines(desk: Desk, r: dict, show: bool = False) -> list:
         tail = _output_tail(desk, r, watch=True) if show else (r.get("watch_run") or {}).get("tail", [])[-5:]
         out += [f"| {x}" for x in tail]
     out.append(checked_text(r))
-    out += outside.lines(r) + direct_lines(r)
+    if r.get("state") == "waiting":
+        out += outside.lines(r)
+    out += direct_lines(r)
     if r.get("state") == "forbidden":
         out += hits_text(r.get("hits", [])).splitlines()
     if show:
@@ -2231,6 +2248,8 @@ def list_text(desk: Desk) -> str:
         out.append(f"{title}:")
         for r in group:
             out.append("  " + line(desk, r, s))
+            if r.get("state") in ("void", "stopped"):
+                continue
             out += ["      " + x for x in _detail_lines(desk, r)]
     out.append("the whole output of a release: .hansa/releases/<id>.log (the principal's; hansa release shows its last lines)")
     return "\n".join(out)
@@ -2240,12 +2259,6 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
     """For hansa explain lane: the release targets and the last release of each."""
     s = desk.settings()
     targets = lane_targets(ln)
-    how = {False: f"it runs in {ln['repo']} at the base branch's commit, as the desk's account, outside the sandbox, "
-                  "with hansa's environment (not the lane's env), holding the repository (merges there wait for it), "
-                  "only after the principal says yes on the page",
-           True: "it runs from a checkout of the base branch's commit made for it (removed when it ends), as the "
-                 "desk's account, outside the sandbox, with hansa's environment (not the lane's env), holding nothing "
-                 f"(merges in {ln['repo']} go on meanwhile), only after the principal says yes on the page"}
     files = ln.get("release_files") or []
     listed = (["  release files (built and run by its releases outside the sandbox; hansa merge refuses a change "
                "touching one until a verification of it holds): " + " ".join(files)] if files else
@@ -2261,13 +2274,20 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
         rs = [r for r in releases(desk) if r.get("lane") == name and (r.get("target") or "") == target]
         limit = t.get("timeout_min") or ln.get("timeout_min", 240)
         head = f"  release target {target}" if target else "  release"
-        out += [f"{head}: {t.get('command')} (hansa release {name}{' ' + target if target else ''} asks for it; "
-                f"{how[bool(t.get('fixed'))]}; {limit} min as its limit"
-                + (f"; only for a commit target {t['after']} already sent out" if t.get("after") else "")
-                + ("; " + after_merge_text(s, name, target) if t.get("after_merge_min") else "")
-                + (": the principal lets it go out without asking" if lane_listed(s, name, target)
-                   else unlisted(s, name, target)) + ")",
-                f"  last release{' of ' + target if target else ''}: " + (line(desk, rs[-1], s) if rs else "none")]
+        sent = last_out(desk, name, ln["repo"], ln.get("base") or "main", target)
+        out += [f"{head}: {t.get('command')}",
+                f"    asks for it: hansa release {name}{' ' + target if target else ''}",
+                f"    {runs_text(t)}; {limit} min as its limit",
+                "    as the desk's account, outside the sandbox, with hansa's environment (not the lane's env)"]
+        out += ["    " + x for x in tick_text(s, name, target).splitlines()]
+        if t.get("after"):
+            out.append(f"    only for a commit target {t['after']} already sent out")
+        if t.get("after_merge_min"):
+            out.append("    " + after_merge_text(s, name, target))
+        out.append(f"  last release{' of ' + target if target else ''}: "
+                   + (line(desk, sent, s) if sent else "none"))
+        if rs and (not sent or rs[-1]["id"] != sent["id"]):
+            out.append(f"  last request{' of ' + target if target else ''}: " + line(desk, rs[-1], s))
         out += ["    " + x for x in outside.lines(outside.inspect(t.get("command") or "", ln["repo"],
                                                                  fingerprint=False))]
         if t.get("watch"):
@@ -2282,13 +2302,21 @@ def after_merge_text(s: dict, lane: str, target: str) -> str:
     return f"after merges: {delay} min; {gate}"
 
 
-def unlisted(s: dict, name: str, target: str = "") -> str:
-    """For hansa explain lane: a target on the principal's list that no longer goes out without asking, and why."""
+def tick_lapsed(s: dict, name: str, target: str) -> str:
+    """Why a saved tick no longer counts, for the ask and target views."""
     why = next((listed_mismatch(s, x) for x in s.get("releases_without_asking") or []
                 if listed_key(x) == (name, target)), "")
-    return (f": it is on the principal's list of releases without asking, but {why}, so its releases wait for the "
-            "yes until the principal takes it back in on the page (its button for that, or unticking and ticking "
-            "it again, then Save; a plain Save keeps the old entry)") if why else ""
+    return f"the principal's tick lapsed: {why}" if why else ""
+
+
+def tick_text(s: dict, name: str, target: str) -> str:
+    """A short, separate line for every target, including ones without an after-merge setting."""
+    if lane_listed(s, name, target):
+        return "goes out without asking: yes"
+    lapsed = tick_lapsed(s, name, target)
+    return ("goes out without asking: no" + ("\n" + lapsed
+            + "\nTake it back in on the page, or untick and tick it again, then Save; a plain Save keeps the old entry."
+            if lapsed else "; needs the principal's yes on the page"))
 
 
 def page_rows(desk: Desk, s: dict, tasks=None) -> list:

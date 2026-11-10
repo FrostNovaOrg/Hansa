@@ -1126,14 +1126,14 @@ def status_text(st: dict) -> str:
     for ln in lanes:
         out.append(f"  {ln['name']:<{wn}}  {' > '.join(ln['providers']):<{wp}}  "
                    + (ln["task"] or ("held by a try (hansa lane try)" if ln.get("trying") else
-                                     "UNABLE TO RUN" if "work" in (ln.get("held") or {}) else "free"))
+                                     "UNABLE TO RUN" if {"work", "start"} & set(ln.get("held") or {}) else "free"))
                    + (f" · waiting: {ln['waiting']}" if ln.get("waiting") else "")
                    + (f" · merge lane for lanes {', '.join(ln['merge_for']) or '(none yet)'}; takes no work"
                       if ln.get("merge_lane") else "")
                    + (f" · verify lane for lanes {', '.join(ln['verify_for'])}; takes only verifications"
                       if ln.get("verify_for") else "")
-                   + "".join(f"\n      {sandbox_held_text(h)}" for h in (ln.get("held") or {}).values())
-                   + ("\n      More: hansa help sandbox-probe" if ln.get("held") else ""))
+                   + "".join(f"\n      {sandbox_held_text(h, short=True)}" for h in (ln.get("held") or {}).values())
+                   + ("\n      More: hansa help sandbox-probe" if "work" in (ln.get("held") or {}) else ""))
     if st["running"]:
         out.append("running:")
         out += [f"  {m['id']} {m['lane']} " + (f"worker done, hansa is running the lane's check, "
@@ -1436,7 +1436,8 @@ def effort_text(effort: str, came_from, provider: dict | None) -> str:
 def run_text(m: dict, provider: dict | None) -> str:
     """A run's provider, model and effort: `name (model, effort high from the task's --effort)`."""
     e = effort_text(m.get("effort_used", m.get("effort", "")), m.get("effort_from"), provider)  # a task's, an attempt's
-    return f"{m['provider']} ({m.get('model_asked', m.get('model', ''))}" + (f", {e}" if e else "") + ")"
+    said = ", ".join(x for x in (m.get("model_asked", m.get("model", "")), e) if x)
+    return f"{m['provider']}" + (f" ({said})" if said else "")  # none yet: a task that never started
 
 
 def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
@@ -1699,6 +1700,9 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                       if str(m.get("error", "")).startswith("stopped at the ceiling")
                       else f"once the machine is fixed (hansa explain server): hansa retry {tid} to run it again"
                       if m.get("machine_problem")
+                      else (f"first fix what kept it from starting (the error above: the machine or the lane, or what "
+                            f"the task was given; hansa explain server), then hansa retry {tid}")
+                      if str(m.get("error", "")).startswith("could not start:")
                       else f"hansa retry {tid} \"what to change\" (or --fresh to start over)"),
            "queued": "hansa status shows what it is waiting for", "running": f"hansa cancel {tid} to stop it"}
     if v and v["verdict"] == "does not hold" and m["state"] == "done":

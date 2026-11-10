@@ -666,3 +666,21 @@ money goes. A turn's time runs from its first step in the window to its last;
 | `replaced` | a follow-up task took its place |
 
 A process hansa cannot look at is not taken as ended: only a lookup that says there is no such process (`ESRCH`), or a start time that reads differently from the one hansa saved, counts as gone. `EPERM`, `EACCES`, `EIO` and other errors leave the run as it is. A task an earlier server left `starting` fails after five minutes if hansa still cannot read the process list, as before; its lane then takes no other task until a look that works finds no process of that run. `hansa status` says why on the lane's line, and a queued task waiting for that lane says the same.
+
+A task that cannot start for a reason of the machine or of its lane, not its own, stays `queued` (no try used), and the lane waits, as for a sandbox that cannot start: `hansa status` shows the lane as `UNABLE TO RUN` with the reason in one line, and the queued tasks waiting for it say the same; `hansa show` (the task that met it) and `hansa explain server` give the whole reason. The coordinator is told once for each lane and reason. The tasks start by themselves once the cause is gone, with no `hansa retry`:
+
+| Cause | Lanes that wait | When the tasks start |
+|---|---|---|
+| no `claude` where `hansa serve` looks | every lane that takes work | once `hansa serve` finds it (install Claude Code on its PATH; `HANSA_CLAUDE` is read as `hansa serve` starts, so after setting it, restart `hansa serve`) |
+| `HANSA_CLAUDE` names a file that does not exist or cannot be run | every lane that takes work; no other `claude` runs in its place | once that file can be run, or after `hansa serve` is restarted with `HANSA_CLAUDE` set right or unset |
+| the lane's repository folder is not there (moved or removed) | that lane | once the folder is there again |
+| git cannot prepare the lane's worktree (a file in it git cannot read, say) | that lane; the others go on | `hansa serve` tries again every minute; they start once git can prepare it |
+
+If a nonempty `HANSA_CLAUDE` names a missing or unrunnable file, `hansa doctor`
+reports a failed Claude Code row with the value and remedy; the same reason
+appears in `hansa status`, in `hansa coordinator`'s `hansa: ...` error (exit 1),
+and in failed `hansa ping` and page provider Check results, without substituting
+another `claude`.
+Empty or unset `HANSA_CLAUDE` keeps the usual PATH lookup.
+
+A task that cannot start for a reason of its own (a file it was given is gone, say) fails, as before; `hansa show` then says to fix what kept it from starting first, then `hansa retry ID`.
