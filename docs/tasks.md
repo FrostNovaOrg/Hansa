@@ -280,6 +280,11 @@ passes it on, but some such endpoints do not act on it.
 
 ## Queuing after another task
 
+`hansa add` refuses a lane absent from settings and lists the desk's lanes, so a typo cannot leave a task
+waiting indefinitely. Its queued reply includes the wait reason when the task cannot start now, including a
+paused desk or a disk or memory floor. If `hansa serve` is down, it gives the command to start that desk and
+does not promise a session post.
+
 `hansa add "<task>" --after T` queues work now and starts it only when T has been merged into
 the new task's lane's base branch. Repeat `--after T` for several prerequisites; every one must
 be merged. A prerequisite already merged adds no wait. While waiting, the task takes no lane
@@ -651,6 +656,21 @@ money goes. A turn's time runs from its first step in the window to its last;
 `hansa cost` gives the coordinator's turns and that time over the window.
 
 ## Task states
+
+`hansa wait [ID ...]` returns when a watched task ends. With no IDs, it watches all queued,
+running and merging tasks. When dispatch is paused or under a disk or memory floor, it returns
+at once with the reason only if every watched task is queued; running and merging tasks are
+still waited on, even if queued tasks are watched alongside them. With no tasks to watch, or
+with `hansa serve` not running, it returns at once. For a stopped server, it gives the command
+to start that desk.
+
+While the lane's setup runs, status and show name it and show its elapsed minutes instead of saying the
+model has not replied. Once setup completes, model progress is shown as above.
+
+A queued task with an available lane and provider still needs a concurrency slot. Status, show and the page
+say how many slots are occupied and name `hansa concurrency`; status JSON uses `waiting_code: slot`.
+A merge check also waits for a slot, including when it uses the task's own lane; status and the merge reply
+say so.
 
 `hansa help states` prints this section.
 
