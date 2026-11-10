@@ -1616,16 +1616,20 @@ def cmd_notify(a):
 def turn_hooks(desk: Desk, pid: int) -> dict:
     """The Stop and StopFailure hooks that record how each turn of the session with this pid ends (hansa
     coordinator-turn), hansa's own code, never the desk's files. Not async: the next turn's end may follow at once,
-    and each record counts on the one before it."""
+    and each record counts on the one before it. They and a SessionStart hook after a /clear (which gives the
+    session a new id) also keep the conversation the session runs in its start record, for hansa up."""
     cmd = (f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
            f"{shlex.quote(str(desk.root))} coordinator-turn --pid {int(pid)}")
-    return {event: [{"hooks": [{"type": "command", "command": cmd}]}] for event in up.TURN_EVENTS}
+    return {**{event: [{"hooks": [{"type": "command", "command": cmd}]}] for event in up.TURN_EVENTS},
+            "SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": cmd}]}]}
 
 
 def cmd_coordinator_turn(a):
     """The coordinator's Stop and StopFailure hook: how its turn ended, in .hansa/coordinator-turns/<pid>.json.
-    Keeps only the event and the error type of its input; never fails loudly or slowly: on any problem it writes
-    nothing and exits 0. As root on the account's desk, the account's hansa writes it, given only those two.
+    Keeps only the event and the error type of its input there; and, as its SessionStart hook after a /clear does,
+    the conversation's id and transcript in the start record of the session with this pid (up.record_conversation).
+    Never fails loudly or slowly: on any problem it writes nothing and exits 0. As root on the account's desk, the
+    account's hansa writes the turn's record, given only those two, and no start record is kept (root keeps none).
     --forget: remove the record of this pid instead (forget_turns), reading no input."""
     if a.forget:
         try:
@@ -1640,16 +1644,21 @@ def cmd_coordinator_turn(a):
             pass
         return
     try:
-        given = up.turn_input(sys.stdin.read(1 << 20))
-        if given is None or a.pid <= 0:
+        raw = sys.stdin.read(1 << 20)
+        given, conv = up.turn_input(raw), up.conversation_input(raw)
+        if (given is None and conv is None) or a.pid <= 0:
             return
         desk = Desk.find(a.desk)
         theirs = account.desk_account(desk.root)
         if theirs:  # as the existing coordinator paths do for root (account.run)
-            account.run(theirs, ["coordinator-turn", "--pid", str(a.pid)], desk.root, input=json.dumps(given),
-                        text=True, capture_output=True, timeout=20)
+            if given is not None:
+                account.run(theirs, ["coordinator-turn", "--pid", str(a.pid)], desk.root, input=json.dumps(given),
+                            text=True, capture_output=True, timeout=20)
             return
-        up.record_turn(desk, a.pid, given)
+        if given is not None:
+            up.record_turn(desk, a.pid, given)
+        if conv is not None:
+            up.record_conversation(desk, a.pid, conv)
     except (Exception, SystemExit):  # noqa: BLE001 - a hook's record is never worth a failed turn
         return
 
@@ -2019,10 +2028,10 @@ def cmd_coordinator(a):
     # after a /clear (the mod's daily one, or anyone's) the fresh context starts from the desk's state, and the desk's
     # owner records the clear (plugin.record_clear); root on the account's desk records none. The hook is hansa's own
     # code, never the desk's files
-    hooks = {"SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
+    turns = turn_hooks(desk, os.getpid())  # how each turn ends, for this process, which becomes the session
+    hooks = {**turns, "SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
         f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
-        f"{shlex.quote(str(desk.root))} {'status' if theirs else 'coordinator-cleared'}")}]}],
-        **turn_hooks(desk, os.getpid())}  # how each turn ends, for this process, which becomes the session
+        f"{shlex.quote(str(desk.root))} {'status' if theirs else 'coordinator-cleared'}")}]}, *turns["SessionStart"]]}
     own = own_folder_rules(env)  # the folder Claude Code runs from for this session: root's, when root runs it
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
         rules = permissions(desk)

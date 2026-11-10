@@ -4021,8 +4021,9 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertFalse(up.prints(["--", "-p"]))
         self.assertFalse(up.prints(["--name", "n"]))
 
-    def coordinator_up(self, rec=None, tmux="/tools/tmux", answers=(1, "%5\n", "0\n"), hearing=()):
-        """hansa up's coordinator part with this record: what it said, the tmux calls it made, and its answer."""
+    def coordinator_up(self, rec=None, tmux="/tools/tmux", answers=(1, "%5\n", "0\n"), hearing=(), pane_said=None):
+        """hansa up's coordinator part with this record: what it said, the tmux calls it made, and its answer.
+        pane_said: what the pane writes as it ends (up.kept_pane), written as tmux makes it."""
         from hansa import up
         if rec is not None:
             write_json(self.desk.state_dir / "coordinator-start.json", rec)
@@ -4030,19 +4031,26 @@ class CoordinatorUpTest(unittest.TestCase):
                    if isinstance(a, int) else subprocess.CompletedProcess([], 0, a, "") for a in answers]
         if answers[2:] and answers[2] == "ended":
             replies[2] = subprocess.CompletedProcess([], 1, "", "can't find pane: %5")
+        replies = iter(replies)
+
+        def run(argv, **kw):
+            if pane_said is not None and ("new-session" in argv or "new-window" in argv):
+                (self.desk.state_dir / up.PANE_OUTPUT).write_text(pane_said)
+            return next(replies)
         with unittest.mock.patch.object(up, "program", return_value=tmux), \
                 unittest.mock.patch.object(up, "COORDINATOR_WAIT", 0), \
                 unittest.mock.patch.object(notify, "names", return_value=list(hearing)), \
-                unittest.mock.patch.object(up.subprocess, "run", side_effect=replies) as ran, \
+                unittest.mock.patch.object(up.subprocess, "run", side_effect=run) as ran, \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             ok = up.coordinator_up(self.desk)
         return out.getvalue(), ran.call_args_list, ok
 
     @staticmethod
     def pane_words(call) -> list:
-        """The command a new pane runs, after the clean environment it is given."""
+        """The command a new pane runs, after the clean environment it is given (up to what keeps its output)."""
         pane = shlex.split(call.args[0][-1])
-        return pane[pane.index("COLORTERM=${COLORTERM-}") + 1:]
+        pane = pane[pane.index("COLORTERM=${COLORTERM-}") + 1:]
+        return pane[:pane.index(";")] if ";" in pane else pane
 
     def test_up_starts_nothing_while_a_session_hears_or_the_recorded_one_still_runs(self):
         said, calls, ok = self.coordinator_up({"kind": "notify", "argv": ["claude"], "folder": str(self.tmp)},
@@ -4141,13 +4149,15 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertIn("No recorded coordinator start", said)
         self.assertIn("trust", said)
         self.assertIn("attach and answer", said)
-        # with tmux or without, a desk that had a coordinator before starts were recorded starts nothing
-        for had in ("a task", "a follower"):
+        # with tmux or without, a desk that had a coordinator before starts were recorded starts nothing: a task added
+        # from a session, a session that heard from hansa, or hansa coordinator's preparing of the desk
+        for had in ("a task from a session", "a follower", "hansa coordinator's start"):
             with self.subTest(had=had):
-                made = self.desk.tasks_dir / "t0001" if had == "a task" else \
-                    notify.register_dir(self.desk) / ("a" * 16 + ".json")
+                made = {"a task from a session": self.desk.tasks_dir / "t0001" / "meta.json",
+                        "a follower": notify.register_dir(self.desk) / ("a" * 16 + ".json"),
+                        "hansa coordinator's start": self.desk.state_dir / "coordinator.json"}[had]
                 made.parent.mkdir(parents=True, exist_ok=True)
-                made.mkdir() if had == "a task" else made.write_text("{}")
+                write_json(made, {"id": "t0001", "session": self.SESS} if had.startswith("a task") else {})
                 for tmux in ("/tools/tmux", ""):
                     said, calls, ok = self.coordinator_up(tmux=tmux)
                     self.assertEqual((calls, ok), ([], False))
@@ -4156,12 +4166,207 @@ class CoordinatorUpTest(unittest.TestCase):
                     self.assertIn("hansa notify on in it", said)
                     self.assertIn("start it with hansa coordinator", said)
                     self.assertNotIn("trust", said)
-                shutil.rmtree(made) if had == "a task" else made.unlink()
+                made.unlink()
         # a record that says why the last start was not recorded starts nothing, and says why
         said, calls, ok = self.coordinator_up({"kind": "unrecorded", "why": "a word of its command holds one of the "
                                                "desk's keys", "session": {"pid": 0}})
         self.assertEqual((calls, ok), ([], False))
         self.assertIn("not recorded (a word of its command holds one of the desk's keys); nothing started", said)
+
+    def test_up_starts_the_coordinator_on_a_desk_whose_tasks_were_added_by_hand(self):
+        """The guide's way there: hansa up without tmux (the server starts, the coordinator not), a task queued by
+        hand from a shell, tmux installed, hansa up again. No coordinator ever ran: it starts one."""
+        from hansa import up
+        self.say("add", "--lane", "a", "Add hello.txt")
+        self.assertEqual([("session" in m) for m in self.desk.tasks()], [False])  # by hand: no session
+        said, calls, ok = self.coordinator_up(tmux="")
+        self.assertIn("nothing started. In a terminal of your own: ", said)
+        self.assertNotIn("not recorded yet", said)
+        said, calls, ok = self.coordinator_up()
+        self.assertTrue(ok, said)
+        self.assertNotIn("not recorded yet", said)
+        self.assertEqual(self.pane_words(calls[1]), [up.hansa_command(), "--desk", str(self.desk.root), "coordinator"])
+        self.assertIn("No recorded coordinator start, and a new desk", said)
+        self.assertIn("coordinator started in tmux", said)
+
+    def test_up_says_the_coordinator_failed_when_its_pane_ended_and_closed_with_its_last_words(self):
+        """tmux answers for a pane that ended and closed with nothing, and exits 0: that is no running pane. The
+        pane keeps its last screen in .hansa/ as it ends, and hansa up prints it."""
+        from hansa import up
+        said, calls, ok = self.coordinator_up(answers=(1, "%5\n", ""),
+                                              pane_said="\nhansa: claude was not found on the PATH\n\n")
+        self.assertFalse(ok, said)
+        self.assertNotIn("coordinator started", said)
+        self.assertNotIn("attach:", said)
+        out = self.desk.state_dir / up.PANE_OUTPUT
+        self.assertIn(f"coordinator failed to start: its pane ended. Its last output (kept in {out}):\n"
+                      "  hansa: claude was not found on the PATH\n", said)
+        self.assertIn("Run it by hand: " + shlex.join(["cd", str(self.desk.root)]), said)
+        # what the pane runs: the command, then tmux's copy of its screen into that file, in its own pane
+        pane = calls[1].args[0][-1]
+        self.assertIn(shlex.join([up.hansa_command(), "--desk", str(self.desk.root), "coordinator"]) + " ; s=$? ; ",
+                      pane)
+        self.assertIn("/tools/tmux -S \"${TMUX%%,*}\" capture-pane -p -J -S -100 -t \"$TMUX_PANE\" > "
+                      + shlex.quote(str(out)), pane)
+        self.assertTrue(pane.endswith("; exit $s"))
+        # an earlier pane's output is not this start's: removed before the pane starts
+        said, _, ok = self.coordinator_up(answers=(1, "%5\n", "1\n"))
+        self.assertFalse(ok)
+        self.assertIn("coordinator failed to start: its pane ended and left no output", said)
+        # through hansa up: exit 1
+        with unittest.mock.patch.object(up, "server_up", return_value=True), \
+                unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                unittest.mock.patch.object(up, "COORDINATOR_WAIT", 0), \
+                unittest.mock.patch.object(up.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess([], rc, o, "") for rc, o in ((1, ""), (0, "%5\n"), (0, ""))]):
+            with self.assertRaises(SystemExit) as e:
+                self.say("up")
+        self.assertEqual(e.exception.code, 1)
+
+    def test_the_pane_keeps_its_last_output_as_it_ends(self):
+        """kept_pane's shell, run here with a stand-in tmux that writes what capture-pane is asked for."""
+        from hansa import up
+        tmux = self.tmp / "tmux"
+        tmux.write_text("#!/bin/sh\necho \"captured: $*\"\n")
+        tmux.chmod(0o755)
+        out = self.tmp / "pane.txt"
+        pane = up.kept_pane({"PATH": "/usr/bin:/bin"}, ["/bin/sh", "-c", "echo gone; exit 3"], str(tmux), out)
+        r = subprocess.run(["/bin/sh", "-c", pane], env={"TMUX": "/s/tmux-1/x,9,0", "TMUX_PANE": "%7"},
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual((r.returncode, r.stdout), (3, "gone\n"))  # the command's own status, its output on the pane
+        self.assertEqual(out.read_text(), "captured: -S /s/tmux-1/x capture-pane -p -J -S -100 -t %7\n")
+
+    def uuid(self, n: int) -> str:
+        return f"{n:08x}-1111-4222-8333-444455556666"
+
+    def transcript(self, sid: str, folder="-desk") -> Path:
+        path = self.tmp / ".claude" / "projects" / folder / f"{sid}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+        return path
+
+    def test_up_resumes_the_coordinators_own_conversation_by_its_id_or_starts_a_new_one(self):
+        from hansa import up
+        sid = self.uuid(1)
+        base = {"kind": "coordinator", "words": ["--model", "opus"], "folder": str(self.desk.root),
+                "session": {"pid": 0}}
+        coordinator = [up.hansa_command(), "--desk", str(self.desk.root), "coordinator", "--model", "opus"]
+        cases = {  # the record's conversation: claude's words that pick it, and what hansa up says
+            "its own": ({"id": sid, "transcript": str(self.transcript(sid))}, ["--resume", sid],
+                        f"conversation: it resumed the coordinator's own, session id {sid}"),
+            "own, transcript unknown": ({"id": sid, "transcript": ""}, ["--resume", sid],
+                                        f"conversation: it resumed the coordinator's own, session id {sid}"),
+            "never typed into": (None, [], "conversation: a new one; the coordinator's last session had none to "
+                                           "resume (it was never typed into)"),
+            "gone": ({"id": sid, "transcript": str(self.tmp / "gone" / f"{sid}.jsonl")}, [],
+                     f"conversation: a new one; the coordinator's conversation {sid} is gone (its transcript "
+                     f"{self.tmp / 'gone' / sid}.jsonl is not there)"),
+            "an older record": ("-", ["--continue"], "conversation: it continued the most recent one in "
+                                                     f"{self.desk.root} (--continue): hansa's record of the "
+                                                     "coordinator's start is older"),
+        }
+        for case, (conv, pick, line) in cases.items():
+            with self.subTest(case=case):
+                rec = {**base, **({} if conv == "-" else {"conversation": conv})}
+                said, calls, ok = self.coordinator_up(rec)
+                self.assertTrue(ok, said)
+                self.assertEqual(self.pane_words(calls[1]), [*coordinator, *pick])
+                self.assertIn(line, said)
+                self.assertNotIn("--continue", said if pick != ["--continue"] else "")
+                # the by-hand hint and hansa status give the same words
+                said, _, ok = self.coordinator_up(rec, tmux="")
+                self.assertIn(shlex.join([*coordinator, *pick]) + "\n", said)
+                self.assertIn("with " + shlex.join([*coordinator, *pick]), up.coordinator_line(self.desk))
+
+    def test_hansa_up_started_coordinator_that_was_never_typed_into_starts_again_without_continue(self):
+        """A new desk; hansa up starts hansa coordinator, which records its start; the session ends without a turn;
+        hansa up again starts it without --continue, which would find no conversation."""
+        from hansa import up
+        said, calls, ok = self.coordinator_up()
+        started = self.pane_words(calls[1])
+        self.assertEqual(started[3:], ["coordinator"])
+        self.assertIn("conversation: a new one", said)
+        with unittest.mock.patch.object(up, "record_tmux", return_value={}):
+            self.assertEqual(up.record_coordinator(self.desk, "", started[4:]), "")  # as hansa coordinator does
+        self.assertIsNone(up.read_coordinator(self.desk)["conversation"])
+        with unittest.mock.patch.object(up, "alive", return_value=False):  # that session ended
+            said, calls, ok = self.coordinator_up()
+        self.assertTrue(ok, said)
+        self.assertEqual(self.pane_words(calls[1])[3:], ["coordinator"])
+        self.assertIn("none to resume", said)
+        with unittest.mock.patch.object(up, "alive", return_value=False):
+            said, _, _ = self.coordinator_up(answers=(1, "%5\n", "ended"), pane_said="Error: something\n")
+        self.assertIn("  Error: something\n", said)
+        self.assertNotIn("--continue", said)
+
+    def test_the_coordinators_hooks_keep_the_conversation_it_runs_in_its_start_record(self):
+        """coordinator-turn as the session's Stop, StopFailure and SessionStart (after a /clear) hooks: the id and
+        the transcript of the session's conversation, kept only for the recorded session, and a new id after a
+        /clear; hansa up then resumes that one."""
+        from hansa import up
+        me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "coordinator", "words": [], "folder": str(self.desk.root), "session": me,
+                    "conversation": None})
+        first, cleared = self.uuid(1), self.uuid(2)
+
+        def hook(event, sid, pid=os.getpid(), **more):
+            data = {"hook_event_name": event, "session_id": sid, "transcript_path": str(self.transcript(sid)), **more}
+            with unittest.mock.patch("sys.stdin", io.StringIO(json.dumps(data))):
+                main(["--desk", str(self.desk.root), "coordinator-turn", "--pid", str(pid)])
+            return up.read_coordinator(self.desk).get("conversation")
+        self.assertEqual(hook("Stop", first), {"id": first, "transcript": str(self.transcript(first))})
+        self.assertTrue((self.desk.state_dir / "coordinator-turns" / f"{os.getpid()}.json").is_file())  # as before
+        self.assertEqual(hook("SessionStart", cleared, source="clear"),
+                         {"id": cleared, "transcript": str(self.transcript(cleared))})
+        self.assertEqual(hook("StopFailure", first, error="rate_limit")["id"], first)
+        self.assertEqual(hook("Stop", "not-an-id")["id"], first)  # nothing that is not a session's id
+        self.assertEqual(hook("Stop", cleared, pid=4242)["id"], first)  # another session's: not the recorded one
+        with unittest.mock.patch.object(up, "alive", return_value=False):  # after a restart
+            said, calls, _ = self.coordinator_up()
+        self.assertEqual(self.pane_words(calls[1])[-2:], ["--resume", first])
+        # the hooks hansa coordinator and the launcher give: a SessionStart after a /clear runs coordinator-turn too
+        hooks = cli.turn_hooks(self.desk, 77)
+        self.assertEqual(hooks["SessionStart"], [{"matcher": "clear", "hooks": hooks["Stop"][0]["hooks"]}])
+
+    def test_a_session_recorded_by_notify_on_comes_back_to_its_own_conversation(self):
+        """Started with --resume ID or --session-id ID, or named by the id Claude Code gives a command run in it:
+        hansa up starts it with --resume ID, through the launcher, which keeps the same conversation in the record."""
+        from hansa import up
+        sid, other = self.uuid(3), self.uuid(4)
+        path = self.transcript(sid, "-own-folder")
+        for words in (["--resume", sid], ["--session-id", sid], ["-r", sid], ["--resume=" + sid]):
+            with self.subTest(words=words):
+                said, rec, _ = self.notify_on(["claude", "--name", "shop coordinator", *words, "--model", "opus"])
+                self.assertEqual(rec["argv"], ["claude", "--name", "shop coordinator", "--model", "opus"])
+                self.assertEqual(rec["conversation"]["id"], sid)
+                self.assertIn(f"claude --name 'shop coordinator' --model opus --resume {sid}.", said)
+                said, calls, ok = self.coordinator_up()
+                self.assertTrue(ok, said)
+                launched = self.pane_words(calls[1])
+                self.assertEqual(launched[launched.index("notify-launch") + 1:],
+                                 ["claude", "--name", "shop coordinator", "--model", "opus", "--resume", sid])
+                self.assertIn(f"it resumed the coordinator's own, session id {sid}", said)
+        # the id Claude Code gives the session's commands names it, whatever its words: its transcript is found
+        said, rec, _ = self.notify_on(["claude", "--continue"], CLAUDE_CODE_SESSION_ID=sid)
+        self.assertEqual(rec["conversation"], {"id": sid, "transcript": str(path)})
+        del os.environ["CLAUDE_CODE_SESSION_ID"]
+        # the launcher keeps the conversation it starts, with its transcript
+        with unittest.mock.patch.object(notify, "socket_path", return_value=str(self.tmp / "c.sock")), \
+                unittest.mock.patch.object(notify, "start", return_value="started"), \
+                unittest.mock.patch.object(up, "record_tmux", return_value={}), \
+                unittest.mock.patch("os.execvpe", lambda prog, argv, env: None):
+            self.say("notify-launch", "claude", "--resume", sid)
+            self.assertEqual(up.read_coordinator(self.desk)["conversation"], {"id": sid, "transcript": str(path)})
+            self.say("notify-launch", "claude", "--resume", other)
+            self.assertEqual(up.read_coordinator(self.desk)["conversation"], {"id": other, "transcript": ""})
+            self.say("notify-launch", "claude", "--name", "n")
+            self.assertIsNone(up.read_coordinator(self.desk)["conversation"])
+        # words that pick a conversation hansa cannot name, with no id given: as before, --continue
+        for words in (["--continue"], ["--resume", "my name"], ["-r"], ["--resume", sid, "--fork-session"]):
+            with self.subTest(words=words):
+                _, rec, _ = self.notify_on(["claude", *words])
+                self.assertNotIn("conversation", rec)
 
     def test_up_runs_the_server_then_the_coordinator_and_neither_on_another_accounts_desk(self):
         from hansa import up
@@ -4245,7 +4450,8 @@ class CoordinatorUpTest(unittest.TestCase):
         # what it did before stays: the deny rules, the turn hooks, and the record without the mod's folder
         rules = cli.launch_rules(self.desk, str(self.tmp))
         self.assertEqual(words[words.index("--disallowedTools") + 1:words.index("--settings")], rules)
-        self.assertEqual(json.loads(words[words.index("--settings") + 1])["hooks"].keys(), {"Stop", "StopFailure"})
+        self.assertEqual(json.loads(words[words.index("--settings") + 1])["hooks"].keys(),
+                         {"Stop", "StopFailure", "SessionStart"})
         rec = up.read_coordinator(self.desk)
         self.assertNotIn("--plugin-dir", rec["argv"])
         self.assertNotIn(str(copy), json.dumps(rec))
@@ -4276,7 +4482,8 @@ class CoordinatorUpTest(unittest.TestCase):
         plan = up.restart_plan(self.desk, rec)
         again = self.launch(*plan["cmd"][plan["cmd"].index("notify-launch") + 1:])
         self.assertEqual(again.count("--settings"), 1, again)
-        self.assertEqual(json.loads(again[again.index("--settings") + 1])["hooks"].keys(), {"Stop", "StopFailure"})
+        self.assertEqual(json.loads(again[again.index("--settings") + 1])["hooks"].keys(),
+                         {"Stop", "StopFailure", "SessionStart"})
         said, rec, _ = self.notify_on(again, folder, me)  # and recorded once more: still none in the record
         self.assertNotIn("--settings", rec["argv"])
 
@@ -4509,6 +4716,9 @@ class CoordinatorUpTest(unittest.TestCase):
         (self.desk.state_dir / "coordinator-start.json").unlink()
         self.assertEqual(up.coordinator_line(self.desk), "")  # a new desk: hansa up starts a first one
         (self.desk.tasks_dir / "t0001").mkdir()
+        write_json(self.desk.tasks_dir / "t0001" / "meta.json", {"id": "t0001"})  # added by hand: still new
+        self.assertEqual(up.coordinator_line(self.desk), "")
+        write_json(self.desk.tasks_dir / "t0001" / "meta.json", {"id": "t0001", "session": self.SESS})
         line = up.coordinator_line(self.desk)
         self.assertIn("hansa up starts no coordinator's session", line)
         self.assertIn("not recorded yet", line)
@@ -21252,6 +21462,12 @@ def save():'''))
         self.assertNotIn("caller-key", json.dumps(rec))
         self.assertNotIn("hansa up will not start", said)
         self.assertIn("--resume", argv)  # claude itself gets the words as given
+        self.assertNotIn("conversation", rec)  # -c: a conversation hansa cannot name; hansa up continues as before
+        # the conversation it starts with: a new one, or the one --resume names (as hansa up gives it)
+        sid = "0b6c2b1e-1111-4222-8333-444455556666"
+        for words, conv in (((), None), (("--resume", sid), {"id": sid, "transcript": ""})):
+            self.start_with_mod(*words)
+            self.assertEqual(up.read_coordinator(self.desk)["conversation"], conv)
         # a word holding a key: nothing recorded, and the start says so
         key = "sk-desk-secret-123456"
         (self.desk.secrets_dir / "claude.key").write_text(key)
