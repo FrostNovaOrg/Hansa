@@ -220,17 +220,17 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   asking. While the desk is paused only a release they said yes to runs.
 - They answer on the page, or in the conversation with the one-time code their alert carries (6
   characters, right after the desk's name: `release #1 (lane a, target staging) · code K7P3QX: ...`).
-  hansa makes it only when the alert command gets the batch, while that request still waits; queued alerts hold no code.
+  hansa makes it only when the alert command or a Bark entry that encrypts gets the batch, while that request still waits; queued alerts hold no code.
   A plain yes does not count: ask for the code or page. Pass it with `hansa
   release yes ID CODE` (or `no ID CODE [reason]`). The code is one word (dashes allowed, no spaces):
   pass `K7P 3QX` as `K7P3QX`: that is not guessing. A yes with a word too many is refused, and
-  nothing is counted. After 3 wrong codes only the page answers. Without an alert command the page
-  alone answers.
+  nothing is counted. After 3 wrong codes only the page answers. Without an alert command or enabled
+  Bark entry that encrypts the page alone answers.
 - If the base branch, the command, or a file the command runs outside the repository changed since
   the principal saw it, the release is void and says why: ask again. hansa tells you their answer
   and its end; `hansa release` lists them.
 - hansa sends each gathered batch to the principal's alert command and/or push addresses, side by side when set up;
-  the coordinator does not send alerts. Push addresses never receive release codes. `coordinator`
+  the coordinator does not send alerts. Only the alert command and Bark entries that encrypt receive release codes. `coordinator`
   alerts say your session has not heard hansa, waits on a dialog, or leaves a finished task waiting
   for review; when they mention it, run `hansa status`. Push addresses and their secrets are also the
   principal's, set and tested on the page (Settings, Alerts). More: `hansa help alerts`.

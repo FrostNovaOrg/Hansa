@@ -149,7 +149,7 @@ class Bark:
         if secret and not _key_valid(secret):
             raise ValueError(ENCRYPTION_PROBLEM)
 
-    def requests(self, address, secret, title, body, level):
+    def requests(self, address, secret, title, body, level, *, texts=None):
         parsed = urlsplit(address)
         payload = {"device_key": parsed.path[1:], "title": title, "body": body,
                    "group": title, "level": self.levels[level]}
@@ -168,6 +168,8 @@ class Bark:
 
             if not _fit(payload, encrypted_size):
                 raise ValueError("too_big")
+            if texts is not None:
+                texts.append(payload["body"])  # final plaintext, after the byte bound, in memory only
             envelope["ciphertext"] = base64.b64encode(cbc_encrypt(
                 secret.encode("ascii"), iv.encode("ascii"), _json(payload))).decode("ascii")
             payload = envelope

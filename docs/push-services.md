@@ -8,8 +8,10 @@ Self-hosted servers always need HTTPS. Save the entry and use its test button;
 the result appears beside the entry and in `hansa status`.
 
 Hansa sends the desk name and alert text. Your saved alert language controls the
-wording. It never sends the one-time codes used to approve releases: answer
-those on the desk's page. Addresses and extra secrets are stored privately on
+wording. One-time codes used to approve releases go to the alert command and to Bark entries that encrypt,
+inside their ciphertext only. All other push entries get code-free wording asking for an answer on the page.
+Answering on the page is always available; the code is a second way to answer, by giving it to the coordinator
+in the conversation. Addresses and extra secrets are stored privately on
 this machine, with secret parts hidden on the page and in status. Do not put a
 key, topic or token in an entry's name.
 
@@ -28,6 +30,13 @@ Service rate limits still apply, including to test pushes and transport retries;
 hansa does not pace requests to each service's quota.
 
 ## Bark
+
+An enabled Bark entry with an encryption key receives a waiting release's one-time code with the same wording
+as the alert command: immediately after the desk name, followed by how to use it. One code per release per batch
+is shared by every eligible channel. Without an alert command or enabled encrypted Bark entry, no code is made.
+Removing the encryption key makes later batches to that entry code-free. The entry's test push never makes or
+carries a release code. Hansa records whether a channel carrying the code sent; it keeps no response text from a
+code-bearing push, even on failure. A code cut from every channel's final text is void; answer on the page.
 
 Install Bark and copy the address on its home screen, such as
 `https://api.day.app/YOUR_DEVICE_KEY`. A ready-made curl command containing
@@ -388,9 +397,12 @@ Any HTTP 2xx means sent; no response-body check is required. The transport's
 ## Reading a failed result
 
 `refused_by_service` means the server answered but did not acknowledge the
-push in the way its service requires. Hansa retains only a numeric error code
-or an ASCII word up to 40 characters, never the response's message or contents.
-The code appears in the entry's last result and in `hansa status`.
+push in the way its service requires. For a push without a release code, Hansa
+retains only a numeric error code or an ASCII word up to 40 characters, never
+the response's message or contents. The code appears in the entry's last result
+and in `hansa status`. For a push that carried a release code, Hansa keeps none
+of the service's answer, including its error code; the entry's last result and
+`hansa status` show only how the send ended.
 
 `http_4xx` usually needs an address, token or permission fix; `http_429` means
 rate limiting; `http_5xx` means a server error. `tls`, `network`, `timeout` and
