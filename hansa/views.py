@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import re
+import shlex
 import statistics
 import sys
 import time
@@ -13,7 +14,7 @@ from pathlib import Path
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, installed, installed_text, memory, notify, plugin, release, up
 from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError)
-from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
+from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
                   credit_text, provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_detail, waiting_looks, write_list)
@@ -911,7 +912,9 @@ def desks_text(st: dict) -> str:
     blocks = []
     for row in st["desks"]:
         if row.get("problem"):
-            blocks.append(f"desk {row['desk']}: {row['problem']}")
+            blocks.append(f"desk {row['desk']}: {row['problem']}"
+                          + (f"; to take it off the list: hansa desks --forget {shlex.quote(row['desk'])}"
+                             if row["problem"] == "folder is gone" else ""))
             continue
         server = "not running" if row["server"] == "gone" else f"running ({row['server']})"
         blocks.append(f"desk {row['desk_name']} ({row['desk']})\n  server: {server}; hansa {row['version'] or 'unknown'}\n"
@@ -1132,7 +1135,7 @@ def status_text(st: dict) -> str:
                       if ln.get("merge_lane") else "")
                    + (f" · verify lane for lanes {', '.join(ln['verify_for'])}; takes only verifications"
                       if ln.get("verify_for") else "")
-                   + "".join(f"\n      {sandbox_held_text(h, short=True)}" for h in (ln.get("held") or {}).values())
+                   + "".join(f"\n      {sandbox_held_text(h, short=True, lane=ln['name'])}" for h in (ln.get("held") or {}).values())
                    + ("\n      More: hansa help sandbox-probe" if "work" in (ln.get("held") or {}) else ""))
     if st["running"]:
         out.append("running:")
@@ -1935,6 +1938,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         return "\n".join([
             f"lane {name} ({lane_origin(desk, name)}; not by the principal on the web page)",
             f"  repo: {ln['repo']} · base branch: {ln.get('base', 'main')} · worktree: {wt}",
+            *([f"  WARNING: {repo_gone_text(name, ln['repo'])}"] if not Path(ln["repo"]).is_dir() else []),
             *([merge_lane_text(s, name)] if merge_lane_text(s, name) else []),
             *(["  WARNING: " + why] if (why := merge_targets_problem(name, ln)) else []),
             *([verify_lane_text(s, name)] if verify_lane_text(s, name) else []),
@@ -2110,7 +2114,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "say the sandbox could not start (sandbox-exec: or bwrap: before any call succeeded), hansa stops the "
             "run and holds its task the same way.",
             *([f"  {LINUX_TRY_NOTE[0].upper()}{LINUX_TRY_NOTE[1:]}."] if account.LINUX else []),
-            *[f"  held: lane {ln} cannot run, {sandbox_held_text(h)}" for ln, groups in sorted(sandbox_held(desk).items())
+            *[f"  held: lane {ln} cannot run, {sandbox_held_text(h, lane=ln)}" for ln, groups in sorted(sandbox_held(desk).items())
               for h in groups.values()],
             "  More: hansa help sandbox-probe",
             *disk.explain_lines(desk, desk.settings()), *memory.explain_lines(desk, desk.settings())])

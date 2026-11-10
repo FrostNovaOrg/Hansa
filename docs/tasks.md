@@ -673,7 +673,7 @@ A task that cannot start for a reason of the machine or of its lane, not its own
 |---|---|---|
 | no `claude` where `hansa serve` looks | every lane that takes work | once `hansa serve` finds it (install Claude Code on its PATH; `HANSA_CLAUDE` is read as `hansa serve` starts, so after setting it, restart `hansa serve`) |
 | `HANSA_CLAUDE` names a file that does not exist or cannot be run | every lane that takes work; no other `claude` runs in its place | once that file can be run, or after `hansa serve` is restarted with `HANSA_CLAUDE` set right or unset |
-| the lane's repository folder is not there (moved or removed) | that lane | once the folder is there again |
+| the lane's repository folder is not there (moved or removed) | that lane | once the folder is there again; if it was moved or renamed, after `hansa lane remove L`, then `hansa lane add L --repo NEW_PATH`, in a fresh worktree ([a lane's repository moved or renamed](desk.md#a-lanes-repository-moved-or-renamed)) |
 | git cannot prepare the lane's worktree (a file in it git cannot read, say) | that lane; the others go on | `hansa serve` tries again every minute; they start once git can prepare it |
 
 A task that cannot start for a reason of its own (a file it was given is gone, say) fails, as before; `hansa show` then says to fix what kept it from starting first, then `hansa retry ID`.
