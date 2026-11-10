@@ -469,7 +469,7 @@ def trim(desk: Desk, at: float | None = None) -> list:
             if size is not None:
                 releases.append((r["id"], name, size))
             watch = r.get("watch_run") or {}
-            if watch.get("state") in ("passed", "failed", "timed_out") and at - (watch.get("ended") or at) >= TRIM_AFTER:
+            if watch.get("state") in ("passed", "failed", "timed_out", "stopped") and at - (watch.get("ended") or at) >= TRIM_AFTER:
                 name = f"{r['id']}.watch.log"
                 size = _trim_one(release.log_dir(desk) / name, at)
                 if size is not None:

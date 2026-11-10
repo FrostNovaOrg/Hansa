@@ -144,8 +144,9 @@ the passing target, unless U already sent that commit or has a release waiting,
 approved, starting or running. A target
 with `--after` runs only when asked; the hint does not ask for it or start it.
 `hansa release` lists them. Void (including replaced) and stopped requests take one line each,
-with their number, target, outcome and reason. Outside-path warnings appear there only while a
-request waits for the principal's yes; the ask and `hansa explain lane L` still show them.
+with their number, target, outcome and reason. Outside-path warnings appear in the list and in
+`hansa release --show ID` only while a request waits for the principal's yes; the ask and
+`hansa explain lane L` still show them.
 The ask puts the waiting instruction directly after the head, before commit details.
 `hansa explain lane L` gives each target short lines for its command and whether it goes out
 without asking, then its last successful release (number, commit and time) and the latest request
@@ -176,7 +177,11 @@ this prevents a watch from sending words the principal forbids.
 
 hansa posts a line for that release to the coordinator's session: watch passed
 (exit 0), failed (its exit code and last lines, keys removed), or timed out.
-The page's release list and `hansa release` show the state and result; output
+The page's release list and `hansa release` show the state and result; `hansa release --show ID`
+shows the request and all retained release and watch output (up to 15 lines each), keys removed,
+including output so far while running. It shows waiting, void and stopped requests too. Failed release lists
+and posted lines keep their last five lines and name this command for more. The whole log stays
+the principal's and is not printed by `--show`. Watch output
 is kept in `.hansa/releases/<id>.watch.log`, with the same last-line and daily
 trimming limits as release output. The page shows the watch command beside
 the target's command before approval. Changing, adding or removing it voids
@@ -282,6 +287,14 @@ it runs, also what leaves its process group, and what of it still runs is
 stopped at any end (a stop, the time limit, a failure, done). The principal's
 alert command is told when the coordinator stops one (`release_stopped`); the
 coordinator hears when the principal does.
+
+When the release is done and its watch still runs, the same `--stop ID [reason]`
+or Stop on the page stops the watch, leaving the release done. The watch records
+stopped, by whom and why, and keeps its output so far; a server restart does not
+start it again. A release whose watch has ended, or that has no watch, is still
+refused as already ended. If the watch's command has already written its exit
+code when the stop is handled, hansa keeps its passed or failed result and says
+the stop came after its command had ended, as for a release.
 
 The request lists direct commits among its outgoing commits, with their count (at most 200 SHAs and
 subjects): walk the base's first-parent line; a task's recorded `merge_commit` that hansa landed in

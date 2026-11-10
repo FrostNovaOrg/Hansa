@@ -63,6 +63,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 
 from . import outside, without_session
@@ -1285,7 +1286,8 @@ def stop_release(desk: Desk, rid, reason: str = "", by: str = "cli") -> dict:
     """Call a release off (the coordinator's hansa release --stop, the principal's Stop on the page): one that has not
     started yet (waiting, approved) is closed as stopped now; a starting or running one is marked, and hansa serve
     stops its command (TERM to its process group, KILL STOP_GRACE seconds later) and records it as stopped when it
-    has ended. {ok, state} or {ok: False, problems}."""
+    has ended. After the release ends, an open watch can be stopped separately, keeping the release's result.
+    {ok, state} or {ok: False, problems}."""
     reason = desk.redact(str(reason or "").strip())[:2000]
     with desk.lock():
         r = get(desk, rid)
@@ -1293,6 +1295,13 @@ def stop_release(desk: Desk, rid, reason: str = "", by: str = "cli") -> dict:
             return {"ok": False, "problems": [f"there is no release #{rid}"]}
         st = r.get("state")
         if st not in OPEN:
+            if watch_open(r):
+                w = r["watch_run"]
+                if w.get("stop_asked"):
+                    return {"ok": False, "problems": [f"release #{rid}'s watch is already being stopped (asked by "
+                                                      f"{w.get('stopped_by') or '?'})"]}
+                _watch_change(desk, rid, {"stop_asked": now(), "stopped_by": by, "stop_reason": reason})
+                return {"ok": True, "state": "watch_stopping"}
             return {"ok": False, "problems": [f"release #{rid} has already ended: it is {st}"]}
         if r.get("stop_asked"):
             return {"ok": False, "problems": [f"release #{rid} is already being stopped (asked by "
@@ -1701,16 +1710,23 @@ def _finish_watch(desk: Desk, rid, problem: str = "") -> None:
         text = desk.redact(log.read_text(encoding="utf-8", errors="replace")) if log.exists() else ""
         if log.exists():
             write_text(log, text)
-        result = ("timed_out" if w.get("timed_out") else "passed" if code == 0 and not problem else "failed")
+        # As for releases, a stop after the command's exit file was written keeps its real result.
+        # The stop path records termed before signalling, so recovery cannot mistake that exit for a late stop.
+        stopped = bool(w.get("stop_asked")) and bool(w.get("termed"))
+        late = bool(w.get("stop_asked")) and not stopped
+        result = ("stopped" if stopped else "timed_out" if w.get("timed_out") else
+                  "passed" if code == 0 and not problem else "failed")
         ended = _watch_change(desk, rid, {"state": result, "exit": code, "ended": now(),
                                          "tail": text.strip().splitlines()[-TAIL:],
+                                         **({"stop_late": w.get("stop_late") or now()} if late else {}),
                                          "problem": desk.redact(problem)[:600], "pid": None, "pid_start": ""})
     (d / f"{rid}.watch.exit").unlink(missing_ok=True)
     drop_checkout(desk, rid, r.get("repo"))
     if ended:
         desk.failed_starts.pop(("release-watch", rid, w.get("launch")), None)
         desk.event("release_watch_ended", id=rid, lane=r.get("lane"), target=r.get("target"),
-                   commit=r.get("commit"), state=result, exit=code)
+                   commit=r.get("commit"), state=result, exit=code,
+                   **({"stop_late": True, "stopped_by": w.get("stopped_by") or ""} if late else {}))
 
 
 def _watch_tick(desk: Desk, rs, procs: dict, starting: bool, pending: dict) -> None:
@@ -1722,6 +1738,18 @@ def _watch_tick(desk: Desk, rs, procs: dict, starting: bool, pending: dict) -> N
         with serve_step():
             rid, w = r["id"], r["watch_run"]
             proc = procs.get(rid)
+            if w.get("stop_asked"):
+                # Keep the durable stop request through recovery: an unfinished watch normally starts over.
+                if not w.get("termed") and not w.get("stop_late"):
+                    field = "stop_late" if (log_dir(desk) / f"{rid}.watch.exit").exists() else "termed"
+                    _watch_change(desk, rid, {field: now()})
+                pid = w.get("pid")
+                if not pid and w.get("launch"):
+                    pid = leader(pids_with_arg(w["launch"], w.get("started")))
+                stop(pid, w.get("pid_start", ""), proc)
+                _finish_watch(desk, rid)
+                procs.pop(rid, None)
+                continue
             if proc is None:
                 if w.get("state") in ("starting", "running"):
                     pid, start = w.get("pid"), w.get("pid_start", "")
@@ -2147,14 +2175,62 @@ def watch_text(r: dict, zh: bool = False) -> str:
     st = w.get("state")
     if not st:
         return "发布成功后监测" if zh else "watch after successful release"
+    if st == "stopped":
+        return ((f"发布监测已由{_who(w, True)}停止" if zh else f"watch stopped by {_who(w)}")
+                + (f": {w['stop_reason']}" if w.get("stop_reason") else ""))
+    if w.get("stop_asked") and st in WATCH_OPEN:
+        return ((f"发布监测正在停止（{_who(w, True)}请求）" if zh else f"watch stopping (asked by {_who(w)})")
+                + (f": {w['stop_reason']}" if w.get("stop_reason") else ""))
+    late = ((f"；{_who(w, True)}在 {when(w.get('stop_asked'))} 叫停时，它的命令已经结束了" if zh else
+             f"; the stop {_who(w)} asked at {when(w.get('stop_asked'))} came after its command had ended")
+            if w.get("stop_late") else "")
     if st == "timed_out":
-        return "发布监测超时" if zh else "watch timed out"
+        return ("发布监测超时" if zh else "watch timed out") + late
     if st == "failed":
         return (("发布监测失败" if zh else "watch failed")
                 + (f" (exit {w['exit']})" if w.get("exit") is not None else "")
-                + (f": {w['problem']}" if w.get("problem") else ""))
+                + (f": {w['problem']}" if w.get("problem") else "")) + late
     return ({"waiting": "发布监测等待运行", "starting": "发布监测正在启动", "running": "发布监测正在运行",
-             "passed": "发布监测通过"}.get(st, st) if zh else "watch " + st)
+             "passed": "发布监测通过"}.get(st, st) if zh else "watch " + st) + late
+
+
+def _output_tail(desk: Desk, r: dict, watch: bool = False) -> list:
+    """Only the retained lines; while running, take the same number from the current output."""
+    run = (r.get("watch_run") or {}) if watch else r
+    if run.get("state") in (WATCH_OPEN if watch else ("starting", "running")):
+        path = log_dir(desk) / f"{r['id']}{'.watch' if watch else ''}.log"
+        try:
+            with path.open(encoding="utf-8", errors="replace") as f:
+                return desk.redact("".join(deque(f, TAIL))).strip().splitlines()[-TAIL:]
+        except OSError:
+            pass
+    return run.get("tail") or []
+
+
+def _detail_lines(desk: Desk, r: dict, show: bool = False) -> list:
+    out = [f"command: {r.get('command')} ({runs_text(r)})" + (f" · note: {r['note']}" if r.get("note") else "")]
+    if r.get("watch"):
+        out.append(f"watch: {r['watch']} [{r.get('watch_timeout_min', 90)} min]; {watch_text(r)}")
+        tail = _output_tail(desk, r, watch=True) if show else (r.get("watch_run") or {}).get("tail", [])[-5:]
+        out += [f"| {x}" for x in tail]
+    out.append(checked_text(r))
+    if r.get("state") == "waiting":
+        out += outside.lines(r)
+    out += direct_lines(r)
+    if r.get("state") == "forbidden":
+        out += hits_text(r.get("hits", [])).splitlines()
+    if show:
+        out += [f"| {x}" for x in _output_tail(desk, r)]
+    elif r.get("state") in ("done", "failed", "stopped"):
+        out += [f"| {x}" for x in (r.get("tail") or [])[-5:]]
+    if r.get("state") == "failed" and not show:
+        out.append(f"more: hansa release --show {r['id']}")
+    return out
+
+
+def show_text(desk: Desk, r: dict) -> str:
+    """A request and all its kept output, never the principal's whole log."""
+    return "\n".join([line(desk, r), f"commit: {r.get('commit', '')}", *_detail_lines(desk, r, show=True)])
 
 
 def list_text(desk: Desk) -> str:
@@ -2174,18 +2250,7 @@ def list_text(desk: Desk) -> str:
             out.append("  " + line(desk, r, s))
             if r.get("state") in ("void", "stopped"):
                 continue
-            out.append(f"      command: {r.get('command')} ({runs_text(r)})" + (f" · note: {r['note']}" if r.get("note") else ""))
-            if r.get("watch"):
-                out.append(f"      watch: {r['watch']} [{r.get('watch_timeout_min', 90)} min]; {watch_text(r)}")
-                out += [f"      | {x}" for x in (r.get("watch_run") or {}).get("tail", [])[-5:]]
-            out.append(f"      {checked_text(r)}")
-            if r.get("state") == "waiting":
-                out += ["      " + x for x in outside.lines(r)]
-            out += ["      " + x for x in direct_lines(r)]
-            if r.get("state") == "forbidden":
-                out += [f"      {x}" for x in hits_text(r.get("hits", [])).splitlines()]
-            if r.get("state") in ("done", "failed", "stopped") and r.get("tail"):
-                out += [f"      | {x}" for x in r["tail"][-5:]]
+            out += ["      " + x for x in _detail_lines(desk, r)]
     out.append("the whole output of a release: .hansa/releases/<id>.log (the principal's; hansa release shows its last lines)")
     return "\n".join(out)
 
@@ -2272,7 +2337,8 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
         if r.get("watch"):
             row.update(watch=r["watch"], watch_timeout_min=r.get("watch_timeout_min", 90),
                        watch_run={k: v for k, v in (r.get("watch_run") or {}).items()
-                                  if k in ("state", "exit", "started", "ended", "tail", "problem")},
+                                  if k in ("state", "exit", "started", "ended", "tail", "problem",
+                                           "stop_asked", "stopped_by", "stop_reason")},
                        watch_what=watch_text(r), watch_what_zh=watch_text(r, zh=True))
         row.update({k: r[k] for k in ("direct", "direct_count", "direct_reason", "direct_hold") if k in r})
         c = r.get("code") or {}  # whether a code went out, and when; never the code, nor its hash

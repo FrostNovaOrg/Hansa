@@ -39446,6 +39446,26 @@ else if (ask === "principal-folds") (async () => {
   for (const key of [...opened, ...closed]) check(fold(key) && !fold(key).open, "departed item's fold state survived: " + key);
   console.log(JSON.stringify({ok:true}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "stop-watch") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  await run("loadStatus()");
+  const root = ids["#tab-status"], label = run("T.releaseStop");
+  const button = descendants(root, "button").find(el => el.textContent === label);
+  check(button, "no Stop for a done release with a running watch");
+  descendants(root, "input").find(el => el.attrs.placeholder === run("T.releaseStopReason")).value = "CI is stuck";
+  await button.click();
+  check(apiPosts.some(p => p.path === "/api/release/stop" && p.body.id === 17 && p.body.reason === "CI is stuck"),
+    "watch Stop payload lost");
+  const r = given["/api/status"].releases[0];
+  r.watch_run.stop_asked = 1;
+  await run("loadStatus(true)");
+  check(!descendants(root, "button").some(el => el.textContent === label), "Stop retained while stopping watch");
+  delete r.watch_run.stop_asked; r.watch_run.state = "stopped";
+  await run("loadStatus(true)");
+  check(!descendants(root, "button").some(el => el.textContent === label), "Stop retained after watch stopped");
+  console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(async () => {
   const check = (ok, why) => { if (!ok) throw new Error(why); };
   const run = code => vm.runInContext(code, ctx);
@@ -43738,12 +43758,257 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.commit_in_repo("new.txt", "new\n")
         self.assertNotIn("Nothing new", self.hansa("release", "a", "public"))
 
+    def test_release_show_failed_keeps_all_retained_lines_and_request(self):
+        from hansa import release
+        self.desk.write_key("demo", "sk-demo-release-show")
+        os.environ["SHOW_KEY"] = "sk-demo-release-show"
+        self.with_targets(push='echo principal-only; seq 1 20; echo "ERROR: disk full $SHOW_KEY"; '
+                               'seq 1 6 | sed "s/^/cleanup /"; exit 3')
+        self.tick_targets("push")
+        self.hansa("release", "a", "push", "repair disk")
+        r = self.settle_release(Dispatcher(self.desk), 1)
+        shown = self.hansa("release", "--show", "1")
+        for text in ("lane a target push", r["commit"], "repair disk", "FAILED", "exit 3", *r["tail"]):
+            self.assertIn(text, shown)
+        self.assertEqual(len(r["tail"]), release.TAIL)
+        self.assertNotIn("| principal-only", shown)
+        self.assertNotIn("sk-demo-release-show", shown)
+        self.assertIn("[key of demo]", shown)
+        self.assertEqual(shown, self.hansa("release", "--show", "#1"))
+
+    def test_release_show_void_and_stopped_keep_details_and_output(self):
+        from hansa import release
+        self.with_targets(push="echo release-output")
+        for state in ("void", "stopped"):
+            with self.subTest(state=state):
+                self.hansa("release", "a", "push", "show closed request")
+                r = release.releases(self.desk)[-1]
+                if state == "void":
+                    release.void(self.desk, r["id"], "commit moved")
+                else:
+                    self.hansa("release", "--stop", str(r["id"]), "hold this back")
+                release.change(self.desk, r["id"], lambda x: {"tail": ["retained output"]})
+                shown = self.hansa("release", "--show", str(r["id"]))
+                for text in (r["commit"], "command: echo release-output", "show closed request",
+                             "| retained output", "commit moved" if state == "void" else "hold this back"):
+                    self.assertIn(text, shown)
+                listed = self.hansa("release")
+                self.assertNotIn("command:", listed)
+                self.assertNotIn("retained output", listed)
+
+    def test_release_show_and_list_outside_warning_only_while_waiting(self):
+        from hansa import release
+        script = self.tmp / "release.sh"
+        script.write_text("true\n")
+        self.with_targets(push=f"sh {script}")
+        self.hansa("release", "a", "push")
+        for state in ("waiting", "approved", "starting", "running", "done", "failed", "void", "stopped", "forbidden"):
+            with self.subTest(state=state):
+                release.change(self.desk, 1, lambda x: {"state": state})
+                shown = self.hansa("release", "--show", "1")
+                self.assertIn(f"command: sh {script}", shown)
+                listed = self.hansa("release")
+                for text in (shown, listed):
+                    if state == "waiting":
+                        self.assertIn("outside file:", text)
+                    else:
+                        self.assertNotIn("outside file:", text)
+
+    def test_failed_release_list_and_post_point_to_show_and_keep_five_lines(self):
+        self.with_targets(push='seq 1 20; echo "ERROR: disk full"; seq 1 6 | sed "s/^/cleanup /"; exit 3')
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        self.settle_release(Dispatcher(self.desk), 1)
+        [heard] = notify.items_for(self.desk, self.events("release_ended"), {"key": "k", "session": None})
+        for shown in (self.hansa("release"), heard["line"]):
+            self.assertIn("cleanup 2", shown)
+            self.assertIn("cleanup 6", shown)
+            self.assertNotIn("| ERROR: disk full", shown)
+            self.assertIn("hansa release --show 1", shown)
+
+    def test_release_show_waiting_void_and_running_with_output_so_far(self):
+        from hansa import release
+        go, ready = self.tmp / "show-go", self.tmp / "show-ready"
+        self.with_targets(push=f'echo principal-only; seq 1 20; touch {ready}; '
+                               f'while [ ! -f {go} ]; do sleep 0.1; done')
+        self.hansa("release", "a", "push", "show progress")
+        for state in ("waiting", "void"):
+            if state == "void":
+                release.void(self.desk, 1, "commit moved")
+            r = release.get(self.desk, 1)
+            shown = self.hansa("release", "--show", "1")
+            self.assertIn(release.line(self.desk, r), shown)
+            self.assertIn("show progress", shown)
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        try:
+            d.tick()
+            self.soon(ready.exists, timeout=30)
+            shown = self.hansa("release", "--show", "2")
+            self.assertIn(release.line(self.desk, release.get(self.desk, 2)), shown)
+            self.assertEqual([x.strip() for x in shown.splitlines() if x.strip().startswith("|")],
+                             [f"| {i}" for i in range(6, 21)])
+            self.assertNotIn("| principal-only", shown)
+        finally:
+            go.touch()
+            self.settle_release(d, 2)
+
+    def test_release_show_done_with_running_then_ended_watch_keeps_both_tails(self):
+        from hansa import release
+        go, ready = self.tmp / "show-go", self.tmp / "show-ready"
+        self.desk.write_key("demo", "sk-demo-show-watch")
+        os.environ["SHOW_KEY"] = "sk-demo-show-watch"
+        self.hansa("lane", "target", "a", "push", "echo release-output", "--watch",
+                   f'echo principal-only; seq 1 20; echo "$SHOW_KEY"; touch {ready}; '
+                   f'while [ ! -f {go} ]; do sleep 0.1; done; exit 7')
+        self.tick_targets("push")
+        self.hansa("release", "a", "push", "watch progress")
+        d = Dispatcher(self.desk)
+        try:
+            r = self.settle_release(d, 1)
+            self.soon(ready.exists, timeout=30)
+            shown = self.hansa("release", "--show", "1")
+            for text in ("done", "exit 0", r["commit"], "release-output", "watch running", "[key of demo]"):
+                self.assertIn(text, shown)
+            self.assertNotIn("| principal-only", shown)
+            self.assertNotIn("sk-demo-show-watch", shown)
+        finally:
+            go.touch()
+            w = self.settle_watch(d, 1)
+        shown = self.hansa("release", "--show", "1")
+        for text in ("release-output", "watch failed", "exit 7", *w["tail"]):
+            self.assertIn(text, shown)
+        self.assertNotIn("| principal-only", shown)
+        self.assertNotIn("sk-demo-show-watch", shown)
+
+    def test_release_show_refuses_unknown_id_and_invalid_forms(self):
+        self.assertIn("there is no release #9", self.refused("release", "--show", "9"))
+        for args in (("--show", "wrong"), ("--show", "1", "a"), ("--show", "1", "--stop", "1"),
+                     ("--show", "1", "--direct", "why")):
+            with self.subTest(args=args):
+                self.refused("release", *args)
+
+    def test_release_stop_running_watch_and_restart_preserve_done(self):
+        from hansa import release, run
+        go, ready = self.tmp / "watch-go", self.tmp / "watch-ready"
+        self.hansa("lane", "target", "a", "push", "true", "--watch",
+                   f'echo watching; echo start >> {ready}; while [ ! -f {go} ]; do sleep 0.1; done')
+        self.tick_targets("push")
+        for rid, restart_pending in ((1, False), (2, True), (3, "unrecorded")):
+            with self.subTest(restart_pending=restart_pending):
+                self.hansa("release", "a", "push")
+                old = Dispatcher(self.desk)
+                d = old
+                try:
+                    self.settle_release(old, rid)
+                    self.soon(lambda: ready.exists() and len(ready.read_text().splitlines()) == rid, timeout=30)
+                    pid = release.get(self.desk, rid)["watch_run"]["pid"]
+                    if restart_pending == "unrecorded":
+                        release._watch_change(self.desk, rid, {"state": "starting", "pid": None, "pid_start": ""})
+                    with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "coordinator"}):
+                        told = self.hansa("release", "--stop", str(rid), "CI is stuck")
+                    self.assertIn("watch", told)
+                    self.assertIn("done", told)
+                    self.assertIn("watch stopping", self.hansa("release"))
+                    self.assertIn("already being stopped", self.refused("release", "--stop", str(rid), "again"))
+                    if restart_pending:
+                        d = Dispatcher(self.desk)
+                    self.soon(lambda: (d.tick() or True) and
+                              release.get(self.desk, rid)["watch_run"]["state"] == "stopped", timeout=30)
+                    r = release.get(self.desk, rid)
+                    self.assertEqual(r["state"], "done")
+                    self.assertEqual((r["watch_run"]["stopped_by"], r["watch_run"]["stop_reason"]),
+                                     ("coordinator", "CI is stuck"))
+                    self.assertIn("watching", r["watch_run"]["tail"])
+                    self.assertFalse(run.group_running(pid))
+                    Dispatcher(self.desk).tick()
+                    self.assertEqual(len(ready.read_text().splitlines()), rid)
+                    for shown in (self.hansa("release"), self.hansa("release", "--show", str(rid))):
+                        self.assertIn("watch stopped", shown)
+                        self.assertIn("coordinator", shown)
+                        self.assertIn("CI is stuck", shown)
+                finally:
+                    go.touch()
+                    self.soon(lambda: (d.tick() or True) and not release.watch_open(release.get(self.desk, rid)), timeout=30)
+                    for proc in old.release_watch_procs.values():
+                        proc.wait(timeout=30)
+                    go.unlink()
+
+    def test_release_stop_refuses_ended_watch_or_no_watch(self):
+        self.hansa("lane", "target", "a", "push", "true", "--watch", "true")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        self.settle_watch(Dispatcher(self.desk), 1)
+        self.assertIn("already ended: it is done", self.refused("release", "--stop", "1"))
+        self.hansa("lane", "target", "a", "push", "--watch", "none")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        self.settle_release(Dispatcher(self.desk), 2)
+        self.assertIn("already ended: it is done", self.refused("release", "--stop", "2"))
+
+    def test_release_stop_open_watch_before_launch_never_starts_it(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "push", "true", "--watch", "echo watched")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(release, "_watch_tick"):
+            self.settle_release(d, 1)
+        self.hansa("release", "--stop", "1", "CI is stuck")
+        with unittest.mock.patch.object(release, "_start_watch") as start, \
+                unittest.mock.patch.object(release, "pids_with_arg") as lookup:
+            Dispatcher(self.desk).tick()
+        start.assert_not_called()
+        lookup.assert_not_called()
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["watch_run"]["state"]), ("done", "stopped"))
+
+    def test_release_watch_stop_after_command_ended_records_its_real_end(self):
+        from hansa import release
+        for rid, (code, restarted) in enumerate(((0, False), (7, False), (0, True), (7, True)), 1):
+            with self.subTest(code=code, restarted=restarted):
+                self.hansa("lane", "target", "a", "push", "true", "--watch", f"echo watched; exit {code}")
+                self.tick_targets("push")
+                self.hansa("release", "a", "push")
+                old = Dispatcher(self.desk)
+                try:
+                    self.settle_release(old, rid)
+                    self.soon(lambda: (release.log_dir(self.desk) / f"{rid}.watch.exit").exists(), timeout=30)
+                    with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "coordinator"}):
+                        self.hansa("release", "--stop", str(rid), "too late")
+                    d = Dispatcher(self.desk) if restarted else old
+                    w = self.settle_watch(d, rid)
+                    self.assertEqual((w["state"], w["exit"]), ("passed" if code == 0 else "failed", code))
+                    self.assertTrue(w.get("stop_late"))
+                    self.assertEqual((w["stopped_by"], w["stop_reason"], w["tail"]),
+                                     ("coordinator", "too late", ["watched"]))
+                    self.assertEqual(release.get(self.desk, rid)["state"], "done")
+                    self.assertIsNone(w.get("termed"))
+                    for shown in (self.hansa("release"), self.hansa("release", "--show", str(rid))):
+                        self.assertIn("watch passed" if code == 0 else "watch failed (exit 7)", shown)
+                        self.assertIn("came after its command had ended", shown)
+                        self.assertNotIn("watch stopping", shown)
+                    row = next(r for r in views.status(self.desk)["releases"] if r["id"] == rid)
+                    self.assertIn("came after its command had ended", row["watch_what"])
+                    self.assertIn("命令已经结束", row["watch_what_zh"])
+                    ev = next(e for e in self.events("release_watch_ended") if e["id"] == rid)
+                    self.assertTrue(ev.get("stop_late"))
+                    [heard] = notify.items_for(self.desk, [ev], {"key": "k", "session": None})
+                    self.assertIn("came after its command had ended", heard["line"])
+                    self.assertNotIn("watch stopping", heard["line"])
+                    Dispatcher(self.desk).tick()
+                    self.assertEqual(release.get(self.desk, rid)["watch_run"], w)
+                finally:
+                    for proc in old.release_watch_procs.values():
+                        proc.wait(timeout=30)
+
     def settle_watch(self, d, rid):
         from hansa import release
         def ended():
             d.tick()
             return (release.get(self.desk, rid).get("watch_run") or {}).get("state") in (
-                "passed", "failed", "timed_out")
+                "passed", "failed", "timed_out", "stopped")
         self.soon(ended, timeout=30)
         return release.get(self.desk, rid)["watch_run"]
 
@@ -43966,14 +44231,15 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         rs = [{"id": rid, "state": "done", "ended": at - 40 * 86400,
                "watch_run": {"state": state, "ended": at - days * 86400}}
               for rid, state, days in ((1, "passed", 31), (2, "failed", 31), (3, "timed_out", 31),
-                                       (4, "passed", 29), (5, "running", 31))]
+                                       (4, "passed", 29), (5, "running", 31),
+                                       (6, "stopped", 31), (7, "stopped", 29))]
         release._write(self.desk, rs)
         for r in rs:
             (folder / f"{r['id']}.watch.log").write_bytes(big)
         disk.trim(self.desk, at)
         for r in rs:
             data = (folder / f"{r['id']}.watch.log").read_bytes()
-            if r["id"] <= 3:
+            if r["id"] in (1, 2, 3, 6):
                 header, tail = data.split(b"\n", 1)
                 self.assertTrue(header.startswith(b"[hansa trimmed"))
                 self.assertLessEqual(len(tail), disk.TRIM_KEEP)
@@ -45059,6 +45325,47 @@ else:
         self.assertNotIn("had run", release.state_text(self.desk, r))
         heard = [x["line"] for x in notify.items_for(self.desk, [ev], {"key": "k", "session": None})]
         self.assertTrue(any("nothing was run" in x for x in heard), heard)
+
+    def test_the_pages_stop_button_for_a_running_watch(self):
+        from hansa import release
+        skip_unless_ports(self)
+        go, ready = self.tmp / "watch-go", self.tmp / "watch-ready"
+        self.hansa("lane", "target", "a", "push", "true", "--watch",
+                   f'echo watching; touch {ready}; while [ ! -f {go} ]; do sleep 0.1; done')
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        try:
+            self.settle_release(d, 1)
+            self.soon(ready.exists, timeout=30)
+            req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/api/release/stop",
+                                         data=json.dumps({"id": 1, "reason": "CI is stuck"}).encode(),
+                                         headers={"Content-Type": "application/json", "X-Hansa": "1",
+                                                  "Authorization": "Bearer " + self.desk.web_token()})
+            with urllib.request.urlopen(req) as resp:
+                self.assertTrue(json.load(resp)["ok"])
+            self.soon(lambda: (d.tick() or True) and
+                      release.get(self.desk, 1)["watch_run"]["state"] == "stopped", timeout=30)
+            r = release.get(self.desk, 1)
+            self.assertEqual(r["state"], "done")
+            self.assertEqual((r["watch_run"]["stopped_by"], r["watch_run"]["stop_reason"]), ("page", "CI is stuck"))
+            [row] = views.status(self.desk)["releases"]
+            self.assertIn("watch stopped", row["watch_what"])
+            self.assertIn("principal", row["watch_what"])
+            self.assertIn("CI is stuck", row["watch_what"])
+            self.assertIn("你", row["watch_what_zh"])
+        finally:
+            go.touch()
+            self.soon(lambda: (d.tick() or True) and not release.watch_open(release.get(self.desk, 1)), timeout=30)
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_the_page_offers_stop_for_a_running_watch(self):
+        for result in self.principal_layout_page(
+                releases=[{"state": "done", "watch": "watch CI", "watch_run": {"state": "running"}}],
+                scenario="stop-watch"):
+            self.assertTrue(result["ok"])
 
     def test_the_pages_stop_button(self):
         from hansa import release
