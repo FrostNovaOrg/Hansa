@@ -21,6 +21,11 @@ a web page for the principal (the person directing the work), and task workers. 
   See [queuing after another task](docs/tasks.md#queuing-after-another-task).
 - When hansa cannot inspect a process, its task keeps running and its lane stays taken.
 - Retry with a note, updating from the base or moving lanes on the same repository and base; findings carry over.
+- Cancelling a follow-up before it starts restores the task it replaced, including its verification.
+- Retrying a follow-up the machine kept from starting preserves the earlier work, report and standing verification report.
+- Closed and cancelled tasks can be replaced only once; another retry points to their follow-up.
+- Once a prerequisite is merged, later follow-ups do not hold tasks queued with `--after`.
+- Follow-ups of merged work count as new work in goals; the merged task keeps its releases and evidence.
 - Request verification by another worker, optionally on another lane or model. `add --verify`
   and `retry --verify` queue it after a passing check, or with no check, for completed work
   with changes. “Holds, with notes” permits merging; saved notes can be tracked as known gaps.
@@ -51,6 +56,8 @@ a web page for the principal (the person directing the work), and task workers. 
   read restrictions; invalid rules stop new runs, while repository or PATH conflicts are reported.
 - Lane caches stay separate from installed tools and shared configuration. Lane environment settings
   reach sandboxed commands, not hansa itself. Git metadata and protected paths are checked.
+- A lane's write list refuses every lane's repository on the desk, folders inside it and folders above it, through links too.
+  Runs leave out such entries saved earlier; adding a lane refuses a repository overlapping an existing write entry.
 - Runs get private temporary storage; Linux lane commands normally use the desk's disk.
   Java and Maven receive temporary-directory and proxy settings; sandbox startup failures hold workers.
   See [the sandbox guide](docs/sandbox.md).
@@ -64,6 +71,9 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Merging and checks
 
+- File names from git keep non-ASCII characters, spaces, quotes and backslashes in task records,
+  release file matching and lists, text-only detection, word scans and conflict reports;
+  `hansa show`, `hansa diff` and `hansa git` show them correctly.
 - A task's check runs after its worker. A merge check tests the combined tree when the base has
   changes absent from the task, or a separate command is needed, with its own limit or check lane.
 - Merges queue per repository and base. Compatible merges can share a check; a failed batch
@@ -72,6 +82,14 @@ a web page for the principal (the person directing the work), and task workers. 
 - `hansa merge --recheck` checks again; `--despite-check` can override a check failure.
   Stored keys and conflict markers always block merging. Configured release files require
   a holding verification, including “holds, with notes”.
+- The last definite verification verdict stands until another definite verdict replaces it.
+  An `unsure`, cancelled or failed verification, or one without a verdict, does not clear it;
+  `hansa show`, the page and goals show the standing verdict.
+- Lane base changes refuse running or merging tasks and finished work waiting for review.
+  `hansa merge` refuses a base that no longer holds the task's starting commit, counts the extra history
+  and points to `hansa retry --fresh`; `--despite-check` cannot override this.
+- After a task check failed or could not run, `hansa merge --recheck` reruns it before the merge check and stops at the first failure.
+  Identical commands run once; `hansa show` names each check, whether it ran and its result.
 - **Forbidden words support safe `re:` patterns.** Optional mailbox rules also check outgoing changes
   at merge and release. `hansa lane try` tests a lane without a worker.
 - Push checks run on GitHub's Ubuntu machine for tests a sandbox cannot run, plus adapter and plugin
@@ -83,7 +101,13 @@ a web page for the principal (the person directing the work), and task workers. 
 
 - Named targets have commands, time limits and optional dependencies on another target releasing
   the same commit. Requests show outgoing changes and direct commits, which can require approval.
-- Approve on the page or pass the one-time code from the principal's alert command through the coordinator.
+- `hansa release` refuses an unknown target word even on a lane with only one target;
+  name the target before a one-word note, or give a quoted note with spaces.
+- A repeated release request names the waiting request it replaces and says its code no longer works.
+  At the last release's commit, it first says there is nothing new and the release was asked to run again.
+- A target's first release with several remotes counts, shows and scans every commit missing from at least one remote,
+  including for fixed-checkout targets; the request and page show how many each remote lacks.
+- Approve on the page or pass the one-time code from the principal's alert through the coordinator.
   A target ticked on the page may run without asking, including after merges settle; changes
   to commands, inputs or permissions invalidate approval.
   Settings shows each target's last release time and outcome; missing descriptions prompt `--about` there and in `hansa lane target`.
@@ -91,11 +115,12 @@ a web page for the principal (the person directing the work), and task workers. 
   targets let merges continue. Releases can be stopped; results return to the coordinator.
 - After a push, a target's `--watch` command follows CI without holding other work and posts whether it passed.
   The [CI watch example](docs/releases.md#watching-ci-after-a-push) keeps waiting through network errors until the run ends.
+- Watch commands warn about forbidden words when saved and refuse releases containing them.
 - The principal sets the alert command. Alerts are grouped and rate-limited; closed to-dos are omitted
   and failures shown. Low disk space holds new work until space recovers, with a floor scaled to
   the volume. See [releases and alerts](docs/releases.md).
 - Alerts use English or Chinese, carry attention levels and keep the release's description.
-  Push addresses and the alert command send independently; codes are made only for the command as it sends.
+  Push addresses and the alert command send independently.
   Save up to ten private push addresses on the page; paste an address to recognize its service, or choose it.
   Switch each on or off, send a test push and see its last result. A saved Bark key moves into the list.
   An old Bark setting with no key to move is cleared instead of reported.
@@ -107,6 +132,12 @@ a web page for the principal (the person directing the work), and task workers. 
   An unreadable entry does not stop the others from sending.
   Deleted Discord webhooks are named as such in `hansa status` and on the page.
   `hansa help push-services` explains setup.
+- Bark entries can encrypt alerts with the key set in the app and on the page, using AES-128, -192 or -256 in CBC mode.
+  Bark's server and Apple see ciphertext; entries without a key send as before. The page and status mark encrypted entries,
+  and test pushes explain key mismatches. English and Chinese guides cover setup and privacy.
+- Encrypted Bark entries receive the same one-time release code as the alert command; other push entries ask for approval on the page.
+  Code delivery status counts every eligible channel, and saved results omit service responses for pushes carrying codes.
+  If making a code fails, the whole alert batch still goes out, asking for an answer on the page.
 - `hansa changelog` collects workers' release notes, missing notes and direct commits.
 
 ### The web page
@@ -146,9 +177,14 @@ a web page for the principal (the person directing the work), and task workers. 
 
 - `hansa init` and `hansa lane add` create a repository with an empty first commit for a new or empty project.
   A folder already holding files is refused, with the commands to commit them.
+- `hansa init` refuses a desk folder that already holds files and gives a command using a separate folder.
+  It also refuses lane names that `hansa lane add` refuses. A desk inside a git repository is kept out of its commits,
+  both at init and when adding that repository as a lane.
 - In a terminal, `hansa` or `hansa up` outside a desk opens the desk menu: select desks to start,
   join a coordinator, open the page, pause dispatch or stop a server. `hansa desks` lists desk state;
   `hansa up --all` starts all listed desks, restoring recorded server and coordinator starts.
+- Outside a desk without a terminal, `hansa up` starts nothing and lists the account's desks with
+  `hansa --desk DIR up` and `hansa up --all`. Stopped-server notices to sessions outside the desk give the `--desk` form.
 - Serving without an explicit port finds a free one and remembers it.
   Hansa starts no second server when it cannot inspect the one holding the desk.
   A symbolic link to `bin/hansa` on PATH works. [Getting started](docs/getting-started.md) covers local and SSH use.
