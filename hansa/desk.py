@@ -869,7 +869,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                   "from reading (the web page, Settings)" for d in kept if _above(d, ln["repo"])][:1]
         env = ln.get("env", {})
         p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, provs, kept, env,
-                                                   other_envs(lanes, ln))]
+                                                   other_envs(lanes, ln), lanes=lanes)]
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
         else:
@@ -1977,14 +1977,25 @@ def _breaks(path: str) -> bool:
 BREAKS_WHY = f"a name in it (or where its link leads) has one of {RULE_BREAKERS} or a look-alike of one"
 
 
+def _repo_fences(lanes, contents=False) -> list:
+    """The lanes' repositories, as fences: no hide entry may be one or above one (runs read them), and no write
+    entry may be one, inside one or above one (contents): hansa runs git there outside the sandbox, so a hook or
+    a git setting a worker put there would run outside it."""
+    relation = "inside or above" if contents else "above"
+    return [(repo, _overlaps if contents else _above,
+             f"it is {repo}, lane {name}'s repository, or a folder {relation} it")
+            for name, repo in lane_repos({"lanes": lanes}) if repo.startswith("/")]
+
+
 @_one_look
-def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=None, others=None) -> list:
+def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=None, others=None, lanes=None) -> list:
     """What is wrong with a lane's write list: the folders its workers may write besides the worktree.
     None may open what the sandbox otherwise keeps closed, or what hansa runs from outside it. denied: what
     the principal keeps workers from reading (deny_split's good ones). env: the lane's env, which reaches
     the lane's commands in the sandbox: what it names is closed as what hansa's own environment names is, so
     workers cannot write where a lane's commands look. others: the env of each other lane on the desk
-    (other_envs), whose PATH folders and named paths are closed the same way."""
+    (other_envs), whose PATH folders and named paths are closed the same way. lanes: all lanes on this desk,
+    whose repositories, contents and parents no write entry may open."""
     if not isinstance(paths, list) or len(paths) > MAX_WRITE or \
             not all(isinstance(x, str) and x.startswith("/") and "\0" not in x and len(x) <= 1000 for x in paths):
         return [f"write must be a list of up to {MAX_WRITE} full paths starting with /, such as "
@@ -2004,6 +2015,7 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
                        "it is the repository's .git folder, whose history hansa keeps"))
         fenced.append((repo, _overlaps, f"it would open {repo}, the lane's repository; workers change code "
                                         "only in their worktree"))
+    fenced += _repo_fences(lanes, contents=True)
     for name, pv in (providers if isinstance(providers, dict) else {}).items():
         if isinstance(pv, dict) and isinstance(pv.get("config_dir", ""), str) \
                 and (root or pv.get("kind") == "subscription"):
@@ -2112,11 +2124,9 @@ def deny_parts(paths, root=None, lanes=None, for_lanes=None) -> tuple:
     code = os.path.dirname(os.path.abspath(__file__))
     for p in (code, os.path.join(code, "srt_output.py")):
         fenced.append((p, _above, f"it hides {p}, hansa's output relay: setups and checks need to read it"))
-    settled = set()  # the reasons for which an entry is left out of runs rather than stopping them
-    for name, ln in (lanes if isinstance(lanes, dict) else {}).items():
-        if isinstance(ln, dict) and isinstance(ln.get("repo"), str) and ln["repo"].startswith("/"):
-            fenced.append((ln["repo"], _above, f"it is {ln['repo']}, lane {name}'s repository, or a folder above it"))
-            settled.add(fenced[-1][2])
+    repos = _repo_fences(lanes)
+    fenced += repos
+    settled = {why for _, _, why in repos}  # left out of runs rather than stopping them
     # said along with any other reason, as which folders are on the PATH differs from machine to machine
     path_fenced = [(d, _above, f"it is {d}, a folder on the PATH hansa runs with, or a folder above it: workers "
                                 "could not run their tools")

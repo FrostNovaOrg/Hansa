@@ -2259,7 +2259,7 @@ def write_list(desk: Desk, lane: dict) -> tuple:
     kept = kept_from_workers(s, desk.root)[0]
     for x in given:
         said = write_problems([x], lane.get("repo"), desk.root, s["providers"], kept, lane.get("env"),
-                              other_envs(s["lanes"], lane))
+                              other_envs(s["lanes"], lane), lanes=s["lanes"])
         if said:
             left.append(f"left out of this run: {said[0].removeprefix('write cannot include ')} "
                         "(the write list is changed with hansa lane set)")

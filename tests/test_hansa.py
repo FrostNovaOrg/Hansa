@@ -24203,6 +24203,128 @@ def save():'''))
             with self.subTest(path=path):
                 self.assertTrue(self.read_ruled(rules, path), rules)
 
+    def write_repository_relations(self):
+        """A second repository, its contents and parents, including aliases outside its folder."""
+        repo = self.tmp / "projects" / "other"
+        repo.parent.mkdir()
+        sh("git", "clone", "-q", str(self.repo), str(repo), cwd=self.tmp)
+        link, above = self.tmp / "repo-link", self.tmp / "projects-link"
+        link.symlink_to(repo, target_is_directory=True)
+        above.symlink_to(repo.parent, target_is_directory=True)
+        return repo, [repo, repo / "src", repo / ".git", repo / ".git" / "hooks", repo.parent,
+                      link, link / ".git" / "hooks", above]
+
+    def test_write_list_refuses_every_other_lanes_repository_relation(self):
+        repo, paths = self.write_repository_relations()
+        self.hansa("lane", "add", "c", "--repo", str(repo))
+        cache = self.tmp / "cache"
+        self.hansa("lane", "set", "a", "write", str(cache))
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        for path in paths:
+            with self.subTest(path=path):
+                with self.assertRaises(SystemExit) as e:
+                    self.hansa("lane", "set", "a", "write", str(self.tmp / "new-cache"), str(path))
+                for word in ("nothing was changed", "lane a: write cannot include", str(path), "lane c's repository"):
+                    self.assertIn(word, str(e.exception.code))
+                self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+
+    def test_own_repository_relations_stay_refused_on_the_write_list(self):
+        from hansa.desk import deny_split
+        repo, paths = self.write_repository_relations()
+        self.hansa("lane", "add", "c", "--repo", str(repo))
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        for path in paths:
+            with self.subTest(path=path):
+                with self.assertRaises(SystemExit) as e:
+                    self.hansa("lane", "set", "c", "write", str(path))
+                self.assertIn(f"lane c: write cannot include {path}", str(e.exception.code))
+                self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+        # hide closes reads: it refuses the repository and parents, but permits individual contents.
+        for path in (repo, repo.parent, paths[5], paths[-1]):
+            with self.subTest(hide=path):
+                good, bad = deny_split([str(path)], self.desk.root, self.desk.settings()["lanes"])
+                self.assertEqual(good, [])
+                self.assertIn("lane c's repository", "\n".join(bad))
+        for path in (repo / "src", repo / ".git", repo / ".git" / "hooks", paths[6]):
+            with self.subTest(hide=path):
+                self.assertEqual(deny_split([str(path)], self.desk.root, self.desk.settings()["lanes"])[1], [])
+
+    def test_saved_write_repository_entries_are_explained_and_left_out_of_runs(self):
+        from hansa import run
+        repo, paths = self.write_repository_relations()
+        self.hansa("lane", "add", "c", "--repo", str(repo))
+        seen, cache = self.tmp / "argv.jsonl", self.tmp / "cache"
+        s = self.desk.settings()
+        s["lanes"]["a"].update(write=[str(x) for x in paths] + [str(cache)], env={"FAKE_SHOW_ARGV": str(seen)})
+        write_json(self.desk.settings_path, s)  # a write list saved before this fence
+        good, left = run.write_list(self.desk, s["lanes"]["a"])
+        with self.subTest(write_list=True):
+            self.assertEqual(good, [str(cache)])
+            self.assertEqual(len(left), len(paths))
+        explained = self.hansa("explain", "lane", "a")
+        for path in paths:
+            with self.subTest(explain=path):
+                line = next((x for x in explained.splitlines() if f"a run leaves out {path}:" in x), "")
+                self.assertIn("lane c's repository", line)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)  # invalid writes are omitted; they do not stop a run
+        self.assertEqual(m["write_left_out"], left)
+        self.assertEqual([e["why"] for e in self.events("write_left_out")], left)
+        worker_fs = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]
+        check_fs = run.srt_settings(self.desk, s["lanes"]["a"], "claude", s["providers"]["claude"],
+                                    self.repo, str(self.tmp / "run-tmp"))["filesystem"]
+        for fs in (worker_fs, check_fs):
+            self.assertIn(str(cache), fs["allowWrite"])
+            for path in paths:
+                with self.subTest(sandbox=path):
+                    self.assertNotIn(str(path), fs["allowWrite"])
+
+    def test_lane_add_refuses_a_repository_overlapping_an_existing_write_entry(self):
+        repo, paths = self.write_repository_relations()
+        original = self.desk.settings()
+        for i, path in enumerate(paths):
+            with self.subTest(path=path):
+                s = json.loads(json.dumps(original))
+                s["lanes"]["a"]["write"] = [str(path)]
+                write_json(self.desk.settings_path, s)
+                before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+                name = f"c{i}"
+                with self.assertRaises(SystemExit) as e:
+                    self.hansa("lane", "add", name, "--repo", str(repo))
+                for word in ("nothing was changed", "lane a", str(path), f"lane {name}'s repository"):
+                    self.assertIn(word, str(e.exception.code))
+                self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+                self.assertFalse((self.desk.lanes_dir / name).exists())
+
+    def test_lane_add_write_conflict_is_refused_before_initializing_a_repository(self):
+        repo = self.tmp / "future-project"
+        self.hansa("lane", "set", "a", "write", str(repo / ".git" / "hooks"))
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("lane", "add", "c", "--repo", str(repo))
+        for word in ("nothing was changed", "lane a", str(repo / ".git" / "hooks"), "lane c's repository"):
+            self.assertIn(word, str(e.exception.code))
+        self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+        self.assertFalse(repo.exists())
+        self.assertFalse((self.desk.lanes_dir / "c").exists())
+
+    def test_documented_write_cache_folders_stay_allowed_with_multiple_repositories(self):
+        from hansa import run
+        repo, _ = self.write_repository_relations()
+        self.hansa("lane", "add", "c", "--repo", str(repo))
+        home = (self.tmp / "home").resolve()
+        home.mkdir()
+        paths = [home / "hansa-cache" / "shop-desk" / "a" / tool for tool in ("pip", "npm", "cargo", "m2")]
+        paths += [home / "work" / "cache", self.tmp / "tools" / "xdg-cache" / "pnpm", self.tmp / "cache"]
+        with as_home(home):
+            self.hansa("lane", "set", "a", "env", f"PIP_CACHE_DIR={paths[0]}", f"npm_config_cache={paths[1]}",
+                       f"CARGO_HOME={paths[2]}", f"MAVEN_OPTS=-Dmaven.repo.local={paths[3]}")
+            self.hansa("lane", "set", "a", "write", *map(str, paths))
+            self.assertEqual(run.write_list(self.desk, self.desk.settings()["lanes"]["a"]),
+                             ([str(x) for x in paths], []))
+            self.assertNotIn("a run leaves out", self.hansa("explain", "lane", "a"))
+
     def test_a_run_leaves_out_a_saved_write_folder_that_no_longer_passes_the_fences(self):
         from hansa import run
         cache, lk = self.tmp / "m2", self.tmp / "lk"
