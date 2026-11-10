@@ -33369,14 +33369,14 @@ def save():'''))
         self.assertIn("lane a", header)
         self.assertIn("target default", header)
         self.assertIn("no done release yet", header)
-        self.assertIn("every commit up to", header)
+        self.assertIn("since the first hansa landing", header)
         self.assertIn("main's tip", header)
         tip = self.git_out("rev-parse", "HEAD")
         self.assertIn(tip[:7], header)
         self.assertNotIn(tip, header)
         self.assertLess(out.index(f"- Adds X. ({first})"), out.index(f"- Adds Y. ({second})"))
         initial = self.git_out("rev-list", "--max-parents=0", "HEAD")
-        self.assertIn(f"- [no task] init ({initial[:7]})", out)
+        self.assertNotIn(f"- [no task] init ({initial[:7]})", out)
         self.assertNotIn("Landing without", out)
         self.assertNotIn("[no task] Adds", out)
 
@@ -33620,6 +33620,184 @@ def save():'''))
         s = self.desk.settings()
         s["lanes"]["a"].update(targets={"default": {"command": command}}, **lane)
         self.assertEqual(self.desk.save_settings(s), [])
+
+    def release_listing_history(self):
+        self.with_targets(pub="true")
+        tip = self.git_out("rev-parse", "HEAD")
+        for i in range(24):
+            tip = self.changelog_commit(f"Old work {i}", tip)
+        self.git_out("update-ref", "refs/heads/main", tip)
+
+    def test_release_listing_direct_preview_and_git_pointer(self):
+        from hansa import release
+        self.release_listing_history()
+        asked = self.hansa("release", "a", "pub")
+        r = release.releases(self.desk)[-1]
+        for text in (asked, self.hansa("release")):
+            with self.subTest(view=text.splitlines()[0]):
+                self.assertIn("25 direct commit(s) (the first 10 shown)", text)
+                self.assertIn("Old work 23", text)
+                self.assertIn("Old work 14", text)
+                self.assertNotIn("Old work 13", text)
+                self.assertIn("log --oneline", text)
+                self.assertIn(r["commit"], text)
+        # Run the pointer exactly as printed: it must list the omitted subjects.
+        pointer = next(x.strip().removeprefix("all commits in this range (including direct commits): ") for x in asked.splitlines()
+                       if x.strip().startswith("all commits in this range (including direct commits): "))
+        result = subprocess.run(shlex.split(pointer), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Old work 13", result.stdout)
+
+    def test_release_listing_wait_instruction_follows_head(self):
+        self.release_listing_history()
+        text = self.hansa("release", "a", "pub")
+        self.assertIn("It waits for the principal's yes", text.splitlines()[1])
+
+    def test_release_listing_closed_requests_are_one_line(self):
+        from hansa import release
+        self.release_listing_history()
+        self.hansa("release", "a", "pub")
+        self.hansa("release", "a", "pub")  # replaces #1
+        release.void(self.desk, 2, "base moved", ("waiting",))
+        self.hansa("release", "a", "pub")
+        self.hansa("release", "--stop", "3", "hold this back")
+        text = self.hansa("release")
+        self.assertIn("#1 lane a target pub", text)
+        self.assertIn("replaced by release #2", text)
+        self.assertIn("base moved", text)
+        self.assertIn("hold this back", text)
+        self.assertEqual(len(text.splitlines()), 5)  # heading, three requests, log pointer
+
+    def test_changelog_uses_release_pre_hansa_cutoff(self):
+        from hansa import release
+        self.release_listing_history()
+        # A side branch brought in by the first landing is older in topo order, but belongs to the task.
+        task = self.changelog_task("Changelog: First managed change.")
+        direct = self.changelog_commit("New direct work", self.git_out("rev-parse", "HEAD"))
+        self.git_out("update-ref", "refs/heads/main", direct)
+        r = release.ask(self.desk, "a", target="pub")
+        self.assertEqual([c["subject"] for c in r["direct"]], ["New direct work"])
+        for args in (("a",), ("a", "pub")):
+            text = self.hansa("changelog", *args)
+            self.assertNotIn("Old work", text)
+            self.assertNotIn("[no task] init", text)
+            self.assertIn(f"First managed change. ({task})", text)
+            self.assertIn("[no task] New direct work", text)
+        # Remote-tracking history and a previous done release retain their existing range rules.
+        self.git_out("update-ref", "refs/remotes/origin/main", direct)
+        self.assertIn("[no task] Old work", self.hansa("changelog", "a", "pub"))
+
+    def test_explain_release_target_separates_last_sent_and_request(self):
+        from hansa import release
+        self.with_targets(pub="true", empty="true")
+        self.hansa("release", "a", "pub")
+        self.assertEqual(self.settle_release_after_yes(1)["state"], "done")
+        sent = release.get(self.desk, 1)
+        self.hansa("release", "a", "pub")
+        self.hansa("release", "--stop", "2")
+        text = self.hansa("explain", "lane", "a")
+        self.assertIn("last release of pub: #1", text)
+        self.assertIn(sent["commit"][:10], text)
+        self.assertIn(release.when(sent["ended"]), text)
+        self.assertIn("last request of pub: #2", text)
+        self.assertIn("last release of empty: none", text)
+        target_line = next(x for x in text.splitlines() if "release target pub:" in x)
+        self.assertEqual(target_line.strip(), "release target pub: true")
+
+    def settle_release_after_yes(self, rid):
+        from hansa import release
+        r = release.get(self.desk, rid)
+        self.assertTrue(release.answer(self.desk, rid, True, commit=r["commit"])["ok"])
+        return self.settle_release(Dispatcher(self.desk), rid)
+
+    def test_release_target_tick_is_shown_for_every_target(self):
+        self.with_targets(pub="true", manual="true")
+        self.tick_targets("pub")
+        for args in (("lane", "target", "a"), ("explain", "lane", "a")):
+            text = self.hansa(*args)
+            self.assertIn("goes out without asking: yes", text)
+            self.assertIn("goes out without asking: no", text)
+
+    def test_release_ask_and_target_views_explain_lapsed_tick(self):
+        script = self.tmp / "release.sh"
+        script.write_text("true\n")
+        self.with_targets(pub=f"sh {script}")
+        self.tick_targets("pub")
+        script.write_text("true\n# changed\n")
+        for args in (("release", "a", "pub"), ("lane", "target", "a"), ("explain", "lane", "a")):
+            text = self.hansa(*args)
+            self.assertIn("principal's tick lapsed", text)
+            self.assertIn(f"outside file {script.resolve()} changed", text)
+        self.assertIn("It waits for the principal's yes", self.hansa("release", "a", "pub"))
+
+    def test_release_push_destination_words_and_advice(self):
+        destination = self.tmp / "outside.git"
+        self.git_out("init", "--bare", "-q", str(destination))
+        command = f"git push {shlex.quote(str(destination))} main"
+        text = self.hansa("lane", "target", "a", "pub", command)
+        self.assertIn("outside destination the command sends to: " + str(destination.resolve()), text)
+        self.assertNotIn("outside folder the command runs in", text)
+        self.assertNotIn("move the files", text)
+        for args in (("release", "a", "pub"), ("explain", "lane", "a")):
+            self.assertIn("outside destination the command sends to: " + str(destination.resolve()), self.hansa(*args))
+        # Existing cwd and script words and advice stay as they are, even alongside a push.
+        script = self.tmp / "release.sh"
+        script.write_text("true\n")
+        text = self.hansa("lane", "target", "a", "pub", f"sh {script} && {command}")
+        self.assertIn("outside file: " + str(script.resolve()), text)
+        self.assertIn("move the files into the repository", text)
+        text = self.hansa("lane", "target", "a", "cwd", f"cd {destination} && true")
+        self.assertIn("outside folder the command runs in: " + str(destination.resolve()), text)
+        self.assertIn("move the files into the repository", text)
+
+    def test_release_push_destination_preserves_other_path_roles(self):
+        from hansa import outside
+        destination = self.tmp / "outside repo.git"
+        destination.mkdir()
+        path = str(destination.resolve())
+        quoted = shlex.quote(str(destination))
+        for command in (f"git push {quoted} main", f"git push --repo={quoted} main",
+                        f"git -c push.default=simple push --repo {quoted} main",
+                        f"git push --receive-pack pack {quoted} main", "sh -c " + shlex.quote(f"git push {quoted} main")):
+            with self.subTest(command=command):
+                found = outside.inspect(command, self.repo)
+                self.assertIn("outside destination the command sends to: " + path, "\n".join(outside.lines(found)))
+                self.assertEqual(found["outside_folders"], [path])
+        for command in (f"cd {quoted} && git push {quoted} main", f"echo git push {quoted} main"):
+            text = "\n".join(outside.lines(outside.inspect(command, self.repo)))
+            self.assertIn("outside folder the command runs in: " + path, text)
+            self.assertNotIn("outside destination", text)
+
+        # Display classification must keep inspection's tolerance of paths that cannot be resolved.
+        loop = self.tmp / "loop"
+        loop.symlink_to(loop)
+        self.assertEqual(outside.inspect(f"git push {loop} main", self.repo),
+                         {"outside": [], "outside_folders": []})
+
+    def test_release_posted_line_already_omits_commit_subjects(self):
+        # The posted completion line already gives no commit subjects; leave that path unchanged.
+        from hansa import release
+        self.release_listing_history()
+        r = release.ask(self.desk, "a", target="pub")
+        release.change(self.desk, r["id"], lambda x: {"state": "done", "ended": now(), "exit": 0})
+        posted = notify._release_item(self.desk, {"event": "release_ended", "id": r["id"], "ok": True})[1]
+        self.assertIn("release #1", posted)
+        self.assertNotIn("Old work", posted)
+        self.assertEqual(len(posted.splitlines()), 1)
+
+    def test_release_listing_outside_warning_only_while_waiting(self):
+        from hansa import release
+        script = self.tmp / "release.sh"
+        script.write_text("true\n")
+        self.with_targets(pub=f"sh {script}")
+        self.hansa("release", "a", "pub")
+        self.assertIn("outside file:", self.hansa("release"))
+        r = release.get(self.desk, 1)
+        self.assertTrue(release.answer(self.desk, 1, True, commit=r["commit"])["ok"])
+        self.assertNotIn("outside file:", self.hansa("release"))
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.assertNotIn("outside file:", self.hansa("release"))
+        self.assertIn("outside file:", self.hansa("explain", "lane", "a"))
 
     def test_release_pointers_for_a_lane_without_targets_use_lane_target_default(self):
         for said in (self.hansa("release"), self.hansa("explain", "lane", "a")):
@@ -33997,8 +34175,7 @@ def save():'''))
         [u] = public_settings(self.desk)["release_unmatched"]
         self.assertEqual((u["lane"], u["why"]), ("a", "its base branch changed since the list was saved"))
         self.assertIn("基础分支", u["why_zh"])
-        self.assertIn("releases wait for the yes until the principal takes it back in on the page (its button for "
-                      "that, or unticking and ticking it again, then Save; a plain Save keeps the old entry)",
+        self.assertIn("Take it back in on the page, or untick and tick it again, then Save; a plain Save keeps the old entry.",
                       self.hansa("explain", "lane", "a"))
         self.assertEqual(self.desk.settings()["releases_without_asking"], [entry])  # hansa leaves the list as it is
         take_back_in()
@@ -44141,8 +44318,8 @@ else:
         self.assertIn("release #1 of lane a target test", heard[0])
         explained = self.hansa("explain", "lane", "a")
         self.assertIn("release target push: touch", explained)
-        self.assertIn("hansa release a push asks for it", explained)
-        self.assertIn("the principal lets it go out without asking", explained)
+        self.assertIn("asks for it: hansa release a push", explained)
+        self.assertIn("goes out without asking: yes", explained)
         self.assertIn("last release of test: #1 lane a target test", explained)
         self.assertIn("lanes a target test, which the principal lets go out without asking", self.hansa("explain"))
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()

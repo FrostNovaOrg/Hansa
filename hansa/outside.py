@@ -115,7 +115,47 @@ def _input_paths(command: str, directory_change):
                 pending.append((word, locations))
 
 
-def _paths(command: str):
+def _push_words(words: list) -> set:
+    """Indices of explicit git-push destinations, using already tokenized shell words for display only."""
+    found = set()
+    state, value, output = "command", "", False
+    for index, (word, spelling) in enumerate(words):
+        if output:
+            output = False
+            continue
+        if spelling in (">", ">>", ">|", "&>", "&>>", ">&", "<", "<>"):
+            output = True
+            continue
+        if spelling and all(c in ";&|()<>" for c in spelling):
+            state, value = "command", ""
+        elif value:
+            if value == "destination":
+                found.add(index)
+                state = "other"
+            value = ""
+        elif state == "command":
+            if re.match(r"^[a-zA-Z_][a-zA-Z_0-9]*=", word) or word in ("command", "exec", "env"):
+                continue
+            state = "git" if Path(word).name == "git" else "other"
+        elif state == "git":
+            if word == "push":
+                state = "push"
+            elif word in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+                value = "option"
+            elif not word.startswith("-"):
+                state = "other"
+        elif state == "push":
+            if word == "--repo":
+                value = "destination"
+            elif word in ("--receive-pack", "--exec", "-o", "--push-option"):
+                value = "option"
+            elif word.startswith("--repo=") or not word.startswith("-"):
+                found.add(index)
+                state = "other"
+    return found
+
+
+def _paths(command: str, pushes: bool | None = None):
     """Read quoted words too, including a shell command passed as one word to bash -c."""
     pending, seen = [command], set()
     while pending:
@@ -139,8 +179,9 @@ def _paths(command: str):
                 words.append((word, line[start:end].strip()))
         except ValueError:
             words = [(word, word) for word in line.split()]
+        sending = _push_words(words) if pushes is not None else set()
         output = False
-        for word, spelling in words:
+        for index, (word, spelling) in enumerate(words):
             if output:
                 output = False
                 continue
@@ -153,6 +194,8 @@ def _paths(command: str):
             else:
                 values = word.split("=")[1:]
             for value in values:
+                if pushes is not None and (index in sending) != pushes:
+                    continue
                 value = value.replace("${HOME}/", str(Path.home()) + "/").replace("$HOME/", str(Path.home()) + "/")
                 if "$" in value or "`" in value or (value.startswith("~") and not value.startswith("~/")):
                     continue
@@ -161,6 +204,19 @@ def _paths(command: str):
                 yield p
             if word != line and any(c.isspace() or c in "'\"" for c in word):
                 pending.append(word)
+
+
+def destinations(command: str, repository) -> set:
+    """Explicit local git-push destinations, for wording only; path inspection and fingerprints stay unchanged."""
+    paths = {True: set(), False: set()}
+    for mode in paths:
+        for candidate in _paths(command, pushes=mode):
+            try:
+                paths[mode].add(str((Path(repository).expanduser() / candidate).resolve()))
+            except (OSError, RuntimeError, ValueError):
+                continue  # As in inspect, a path that cannot be resolved is left out.
+    # A path also run or used as a working directory keeps its original warning.
+    return paths[True] - paths[False]
 
 
 def inspect(command: str, repository, fingerprint: bool = True, directory=None) -> dict:
@@ -213,7 +269,9 @@ def inspect(command: str, repository, fingerprint: bool = True, directory=None) 
         except OSError:
             row.update(why="unreadable", why_zh="读不出来")
         files.append(row)
-    return {"outside": files, "outside_folders": folders}
+    sends = destinations(command, directory or root) & (set(folders) | {x["path"] for x in files})
+    return {"outside": files, "outside_folders": folders,
+            **({"outside_destinations": sorted(sends)} if sends else {})}
 
 
 def changed(before: list, after: list) -> str:
@@ -227,6 +285,12 @@ def changed(before: list, after: list) -> str:
 
 
 def lines(found: dict) -> list:
-    return [f"outside file: {x['path']}" + (f"; sha256 {x['sha256']}" if x.get("sha256") else
+    sends = set(found.get("outside_destinations") or [])
+    if not sends and found.get("command") and found.get("repo"):
+        sends = destinations(found["command"], found["repo"])  # requests recorded before the wording changed
+    return [(f"outside destination the command sends to: {x['path']}" if x["path"] in sends else
+             f"outside file: {x['path']}") + (f"; sha256 {x['sha256']}" if x.get("sha256") else
             f"; not fingerprinted: {x['why']}" if x.get("why") else "") for x in found.get("outside") or []] + [
-            f"outside folder the command runs in: {p}; no fingerprint" for p in found.get("outside_folders") or []]
+            (f"outside destination the command sends to: {p}" if p in sends else
+             f"outside folder the command runs in: {p}") + "; no fingerprint"
+            for p in found.get("outside_folders") or []]
