@@ -96,8 +96,9 @@ class BenchSelftestTest(unittest.TestCase):
             header = json.dumps(dict(version=1, id=request['id'], length=len(data))).encode()
             target.write(len(header).to_bytes(4, 'big') + header + data)
         with contextlib.ExitStack() as stack:
-            import os
-            fd = os.open(self.desk.root, os.O_RDONLY); stack.callback(os.close, fd)
+            import tempfile  # an empty /out, beside the desk, which holds its own files
+            out = stack.enter_context(tempfile.TemporaryDirectory())
+            fd = os.open(out, os.O_RDONLY); stack.callback(os.close, fd)
             for name, stdout in (('caps-output', b'x' * (archive.OUTPUT_BYTES + 1)),
                                  ('disk_limit', b'{"shared": true, "enospc": true}')):
                 checked = selftest.submission(Mock(connect=connect), name, probes.fixtures()[name][1], 300)

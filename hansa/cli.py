@@ -1878,9 +1878,7 @@ def cmd_up(a):
                 return cmd_menu(a)
             raise SystemExit(up.no_desk_text())
         ok = up.all_desks_up()
-    else:
-        if not (desk.settings_path.is_file() and desk.tasks_dir.is_dir()):
-            raise SystemExit(f"hansa: {desk.root} is not a desk; nothing started")
+    else:  # a named folder that is not a desk was refused by Desk.find
         ok = up.desk_up(desk)
     if not ok:
         raise SystemExit(1)

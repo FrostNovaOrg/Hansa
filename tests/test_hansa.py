@@ -3301,6 +3301,79 @@ class UpTest(unittest.TestCase):
             one.assert_not_called()
             all_desks.assert_not_called()
 
+    def test_commands_refuse_a_named_folder_that_is_not_a_desk(self):
+        """--desk or HANSA_DESK naming a missing, empty or project folder: refused before anything is written."""
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i", cwd=repo)
+        missing, empty, project = (self.tmp / n for n in ("missing", "empty", "project"))
+        empty.mkdir()
+        project.mkdir()
+        (project / "README.md").write_text("a project\n")
+        commands = [["status"], ["lane"], ["add", "do a thing"], ["goal", "add", "x"],
+                    ["lane", "add", "b", "--repo", str(repo)], ["concurrency", "2"], ["pause", "x"], ["web"]]
+        here = os.getcwd()
+        os.chdir(self.desk.root)  # the named folder wins over the desk around the current folder
+        self.addCleanup(os.chdir, here)
+        for root in (missing, empty, project):
+            before = sorted(p.name for p in root.iterdir()) if root.exists() else None
+            for source in ("--desk", "HANSA_DESK"):
+                for words in commands:
+                    with self.subTest(root=root.name, source=source, command=words[0]), \
+                            unittest.mock.patch.dict(os.environ), \
+                            unittest.mock.patch("sys.stdin", io.StringIO("")), \
+                            contextlib.redirect_stdout(io.StringIO()) as out:
+                        os.environ["HANSA_DESK"] = str(root) if source == "HANSA_DESK" else str(self.desk.root)
+                        argv = (["--desk", str(root)] if source == "--desk" else []) + words
+                        with self.assertRaises(SystemExit) as failed:
+                            main(argv)
+                        self.assertNotIn(failed.exception.code, (0, None))
+                        said = str(failed.exception.code)
+                        self.assertIn(str(root), said)
+                        self.assertIn("not a desk", said)
+                        self.assertIn("hansa init", said)
+                        self.assertEqual(out.getvalue(), "")
+                    self.assertEqual(sorted(p.name for p in root.iterdir()) if root.exists() else None, before)
+        self.assertEqual(self.desk.settings().get("concurrency"), Desk(self.tmp / "x").settings().get("concurrency"))
+        self.assertFalse(self.desk.paused_path.exists())
+
+    def test_a_named_desk_with_unreadable_settings_is_a_desk_whose_settings_are_refused(self):
+        self.desk.settings_path.write_text("{not json")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as failed:
+            main(["--desk", str(self.desk.root), "status"])
+        said = str(failed.exception.code)
+        self.assertIn("cannot read", said)
+        self.assertIn("settings.json", said)
+        self.assertNotIn("not a desk", said)
+        self.assertEqual(self.desk.settings_path.read_text(), "{not json")
+
+    def test_commands_without_a_named_desk_find_the_one_around_them(self):
+        below = self.desk.root / "notes" / "deeper"
+        below.mkdir(parents=True)
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        for folder in (self.desk.root, below):
+            with self.subTest(folder=folder.name):
+                os.chdir(folder)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    main(["lane"])
+                self.assertIn("no lanes yet", out.getvalue())
+
+    def test_commands_needing_no_desk_ignore_a_named_folder_that_is_not_one(self):
+        os.environ["HANSA_DESK"] = str(self.tmp / "missing")
+        for argv in (["desks"], ["help"], ["--version"], ["init", str(self.tmp / "new desk")]):
+            with self.subTest(argv=argv[0]), contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    main(argv)
+                except SystemExit as e:
+                    self.assertIn(e.code, (0, None))
+                self.assertNotIn("not a desk", out.getvalue())
+        self.assertTrue((self.tmp / "new desk" / "settings.json").is_file())
+        self.assertFalse((self.tmp / "missing").exists())
+
     def test_up_does_not_treat_a_lookup_error_as_no_desk(self):
         from hansa import up
         with unittest.mock.patch.object(Desk, "find", side_effect=SystemExit("lookup failed")), \

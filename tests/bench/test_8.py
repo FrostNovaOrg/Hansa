@@ -165,10 +165,9 @@ class BenchBrokerTest(unittest.TestCase):
         self.assertIsNone(self.vm.port)
 
     def test_off_during_hand_in_cancels_and_stops(self):
-        from tests.bench.test_7 import BenchManagementTest
+        from tests.bench.test_7 import BenchManagementTest, desk_at
         from hansa.bench.vm import INSTANCE
-        from hansa.desk import Desk
-        self.desk = Desk(self.root)
+        self.desk = desk_at(self.root)
         (self.desk.state_dir / "bench/lima" / INSTANCE).mkdir(parents=True)
         self.b.desk = self.desk
         settings = self.desk.settings()
