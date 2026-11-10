@@ -1149,7 +1149,7 @@ def new_code(desk: Desk, rid) -> str:
 
 
 def code_sent(desk: Desk, rid, code: str, ok: bool) -> None:
-    """Record that the alert holding a release's code went out (ok: the command exited 0), if it is still its code;
+    """Record that an alert held a release's code (ok: at least one carrying channel sent), if it is still its code;
     a code that did not go out at all (cut from the text) is void."""
     digest = _code_hash(desk, rid, code)
 
@@ -1186,7 +1186,7 @@ def answer_by_code(desk: Desk, rid, yes: bool, code: str, reason: str = "", by: 
     """The principal's answer given in the conversation with the one-time code of their alert, passed on by the
     coordinator: checked against this release's code only. A right code answers it (recorded as given through the
     coordinator, channel "code") and lapses; a wrong one is counted, and CODE_TRIES of them void the code."""
-    from .alert import command as alert_command
+    from .alert import release_codes
     with desk.lock():
         s = desk.settings()
         r = get(desk, rid)
@@ -1196,8 +1196,9 @@ def answer_by_code(desk: Desk, rid, yes: bool, code: str, reason: str = "", by: 
             return {"ok": False, "problems": [f"release #{rid} is not waiting for an answer: it is {r.get('state')}; "
                                               "its code, if it had one, has lapsed"]}
         c = r.get("code") or {}
-        if not alert_command(s) and not c.get("hash"):
-            return {"ok": False, "problems": ["the principal has set no alert command, so no code is sent: approval "
+        if not release_codes(desk, s) and not c.get("hash"):
+            return {"ok": False, "problems": ["the principal has set no alert command or enabled Bark entry that encrypts, "
+                                              "so no code is sent: approval "
                                               f"of release #{rid} is on the page only"]}
         if not c.get("hash"):
             why = c.get("void") or "no code was sent for it"
@@ -1239,9 +1240,9 @@ def code_text(r: dict, zh: bool = False) -> str:
         return f"一次性码已作废（{why}）：只能在网页上回答" if zh else f"its one-time code is void ({why}): answer it on the page"
     if c.get("sent"):
         ok = c.get("sent_ok")
-        return (f"一次性码在 {when(c['sent'])} 随提醒发出" + ("" if ok else "（提醒命令报了失败）") if zh else
+        return (f"一次性码在 {when(c['sent'])} 随提醒发出" + ("" if ok else "（提醒发送报了失败）") if zh else
                 f"a one-time code went out in the principal's alert {when(c['sent'])}"
-                + ("" if ok else " (the alert command reported a failure)"))
+                + ("" if ok else " (alert delivery reported a failure)"))
     return "一次性码在等提醒发出" if zh else "a one-time code waits to go out in the principal's alert"
 
 

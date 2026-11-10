@@ -96,6 +96,10 @@ def enabled(desk, settings) -> list[dict]:
     return [e for e in entries(settings) if e["on"] and has_address(desk, e)]
 
 
+def encrypts(desk, entry) -> bool:
+    return entry["service"] == "bark" and bool(_read(desk, entry["id"], True))
+
+
 def _write_secret(desk, id, value, extra=False):
     if not value:
         _file(desk, id, extra).unlink(missing_ok=True)
@@ -383,7 +387,7 @@ def public(desk, settings=None):
             hidden = ""
         out.append({**entry, "name": desk.redact(entry.get("name", "")), "address": hidden,
                     "address_set": bool(address), "secret_set": bool(_read(desk, entry["id"], True)),
-                    "encrypted": entry["service"] == "bark" and bool(_read(desk, entry["id"], True)),
+                    "encrypted": encrypts(desk, entry),
                     "last": last_result(desk, entry["id"])})
     return out
 
@@ -405,7 +409,8 @@ def record(desk, entry, why, code=None):
     return why
 
 
-def send(desk, entry, items, held=0, *, testing=False):
+def send(desk, entry, items, held=0, *, testing=False, deliveries=None):
+    texts, ok = [], False
     try:
         if not testing and not entry["on"]:
             return record(desk, entry, "off")
@@ -415,26 +420,36 @@ def send(desk, entry, items, held=0, *, testing=False):
         if not items:
             return record(desk, entry, "empty")
         service = alert_services.SERVICES[entry["service"]]
+        # Use the same key for eligibility and encryption: a key removed since
+        # the batch began must never turn its code-bearing text into plaintext.
+        secret = _read(desk, entry["id"], True)
+        with_codes = entry["service"] == "bark" and bool(secret) and not testing
         try:
             address = service.normalize(address)
             validate = getattr(service, "validate", None)
             if validate:
-                validate(address, _read(desk, entry["id"], True))
+                validate(address, secret)
         except ValueError:
             return record(desk, entry, "refused_url")
-        title, body = _text(desk, items, held)
+        title, body = _text(desk, items, held, with_codes=with_codes)
         level = max((x.get("level", alert.level_of(x["kind"])) for x in items), key=alert.LEVELS.index)
         if not service.levels:
             title = urgent_marker(title, level, chinese=alert.chinese(desk))
         try:
-            requests = service.requests(address, _read(desk, entry["id"], True), title, body, level)
+            requests = service.requests(address, secret, title, body, level, texts=texts) if with_codes else \
+                service.requests(address, secret, title, body, level)
         except ValueError:
             return record(desk, entry, "too_big")
         results = alert_http.send(requests, deadline_s=service.deadline_s)
         failure = next((r for r in results if r["why"] != "sent"), None)
-        return record(desk, entry, failure["why"], failure.get("code")) if failure else record(desk, entry, "sent")
+        ok = failure is None
+        code = failure.get("code") if failure and not any(x.get("code") for x in items) else None
+        return record(desk, entry, failure["why"], code) if failure else record(desk, entry, "sent")
     except Exception:
         return record(desk, entry, "network")
+    finally:
+        if deliveries is not None:
+            deliveries.extend((text, ok) for text in texts)
 
 
 def test(desk, id):
@@ -455,7 +470,7 @@ def urgent_marker(text, level, *, chinese=False):
     return (("紧急：" if chinese else "Urgent: ") + text) if level == "urgent" else text
 
 
-def _text(desk: Desk, items: list[dict], held: int) -> tuple[str, str]:
+def _text(desk: Desk, items: list[dict], held: int, *, with_codes=False) -> tuple[str, str]:
     lang = "zh" if alert.chinese(desk) else "en"
     safe = []
     codes = [x["code"] for x in items if x.get("code")]
@@ -469,9 +484,10 @@ def _text(desk: Desk, items: list[dict], held: int) -> tuple[str, str]:
         for code in codes:
             text = text.replace(code, "")
         safe.append({**item, "text": text, "code": ""})
-    # Reuse the command's language, grouping and character cap, without its codes.
+    # Reuse the command's language, grouping and character cap. Only encrypted
+    # Bark receives its code-bearing wording; every other entry uses safe text.
     title = desk.redact(alert.desk_name(desk))
     header = f"[hansa] {'工作台' if lang == 'zh' else 'desk'} {title}"
-    body = alert.text_of(desk, safe, held).removeprefix(header).removeprefix(": ").lstrip()
+    body = alert.text_of(desk, items if with_codes else safe, held).removeprefix(header).removeprefix(": ").lstrip()
     return title, body
 

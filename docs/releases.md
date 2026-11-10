@@ -80,9 +80,9 @@ unticks it and saves. The principal answers in one of two ways: on the page, or 
 in the conversation the one-time code that comes with the alert for that
 release (6 characters, no look-alikes), which the coordinator passes on
 with `hansa release yes ID CODE` (or `no ID CODE`). The code travels only
-in the principal's alert: the queue holds the release ID, request time and text
-without a code. Immediately before the alert command runs, hansa checks that the
-same request still waits, makes one code per release in that run, and rebuilds
+to the principal's alert command and enabled Bark entries that encrypt: the queue holds the release ID,
+request time and text without a code. Immediately before the channels start, hansa checks that the
+same request still waits, makes one code per release in that batch for all eligible channels, and rebuilds
 its text in memory. Re-asking after a void gets a new release ID; an old alert
 cannot acquire a code for the new request. Alerts whose requests no longer wait
 still go out, without a code. Waiting through the hourly cap or a server restart
@@ -102,8 +102,8 @@ a code went out and when. It answers that release only, once, and is
 recorded as the principal's answer given through the coordinator (channel
 `code`); three wrong codes void it, and it lapses when the release is
 answered, stopped or no longer what was asked, after 24 hours, or when a new
-alert for the release brings a new one. With no alert command there is no
-code, even with push addresses on: the page alone answers. The principal's alert command must not keep the alert's
+alert for the release brings a new one. With no alert command or enabled Bark entry that encrypts there is no
+code: the page alone answers. The principal's alert command must not keep the alert's
 text anywhere the coordinator can read it (a file, a log, a chat history):
 the code in it approves a release. No lane may be named `yes` or `no`, as
 those words begin the answer. hansa serve runs the
@@ -557,9 +557,12 @@ The desk's name and alert texts leave this machine for each address's service
 and, for phone apps, on to Apple's or Google's push service. Those services can
 read them unless Bark encryption is enabled; then Bark's server and Apple see
 ciphertext and routing information, without the desk name or alert text.
-One-time release codes never go to push addresses. Answer their
-waiting releases on the page; only the alert command receives codes, and with
-only push addresses no code is made.
+One-time release codes go to the alert command and to Bark entries that encrypt, inside the ciphertext
+only. Other push entries get code-free wording asking for an answer on the page. With no alert command
+or enabled Bark entry that encrypts, no code is made. Answering on the page is always available;
+the code is a second way to answer, by giving it to the coordinator in the conversation.
+Removing an entry's encryption key makes later batches to it code-free. Its test push never makes or
+carries a release code, even while a release waits.
 
 Each gathered batch goes to every enabled entry with an address. A command
 needs a nonblank command line. Sends run side by side with independent deadlines
@@ -635,7 +638,9 @@ K7P3QX · #2 code M4R8TW`), and the lines holding a code come first, each
 starting as a single one does. A release that waits with no code (it had
 already stopped waiting when its code was to be made) reads `release #1 of lane a, target staging
 (main at 08e2cfc99f) waits for your yes on the page: 8 commit(s), command:
-...`. The cut at 1,000 characters never takes a code. It has 30 seconds; its own exit ends the run, even if it leaves a
+...`. Codes come first to survive the 1,000-character cut. A code went out when at least one channel whose final
+text held it sent successfully. If no channel's final text held it, including after Bark's byte limit,
+the code is void and the page answers. It has 30 seconds; its own exit ends the run, even if it leaves a
 child running, and only at the limit is its process group killed. Alerts
 within 20 seconds of each other go out in one run to every channel that is set up,
 one batch at a time, and at most 20 runs an hour: beyond that, alerts are held and go out together in one
@@ -647,7 +652,8 @@ then only how it ended is kept); the command is never retried: the next alert tr
 Each push service has a separate 30-second deadline including its transport's at most three
 tries; the batch never retries it. `hansa status` shows each push entry's last result,
 `sent` or the reason it could not send. A failed push records `alert_failed` with
-`channel: "push"`, the entry's `id`, `service` and reason, never its address. Neither channel carries the other's failure.
+`channel: "push"`, the entry's `id`, `service` and reason, never its address or a code-bearing push's text,
+even when it failed or was cut. Neither channel carries the other's failure.
 The page has a button that sends a test alert through every channel that is set
 up; no coordinator command sends one.
 `hansa explain` says which channels are set up: the alert command (and what it is) and each named push address (service, hidden address and on/off).

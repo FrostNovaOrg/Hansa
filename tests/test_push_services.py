@@ -239,7 +239,7 @@ class BarkEncryptionTest(_PushServicesCase):
             alert_push.change(self.desk, [{"id": entry["id"], "secret": bark_example(device="other-device")}], by="page")
         self.assertFalse(alert_push._file(self.desk, entry["id"], True).exists())
 
-    def test_encrypted_requests_decrypt_all_fields_fresh_ivs_and_no_release_codes(self):
+    def test_encrypted_requests_decrypt_all_fields_fresh_ivs_and_release_codes(self):
         for size in (16, 24, 32):
             key = "k" * size
             entry = self.save("fixture-bark-key", "bark", secret=key)
@@ -260,7 +260,8 @@ class BarkEncryptionTest(_PushServicesCase):
             with patch.object(alert_http, "send", return_value=[{"why": "sent"}]) as sending:
                 alert_push.send(self.desk, entry, [{"kind": "release_waiting", "code": "654321",
                     "text": "approve with 654321", "translations": {"en": "release waits 654321"}}])
-            self.assertNotIn("654321", decrypt_bark(sending.call_args.args[0][0]["json"], key).decode())
+            self.assertIn("654321", decrypt_bark(sending.call_args.args[0][0]["json"], key).decode())
+            self.assertNotIn("654321", json.dumps(sending.call_args.args[0]))
 
     def test_encrypted_final_bound_cuts_only_body_and_refuses_fixed_fields(self):
         from hansa import alert_bark

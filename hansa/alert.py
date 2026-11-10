@@ -28,8 +28,9 @@ Each gathered batch goes to every enabled entry with an address, even with no al
 and alert texts leave this machine for each address's service; for phone apps they go on to Apple's or Google's
 push service. Those services can read the text unless Bark encryption is enabled: then Bark's server and Apple
 see ciphertext and routing information, without the desk name or alert text.
-One-time release codes never go to push addresses: answer those
-release alerts on the page. Only the alert command gets codes. The sends run side by side with independent
+One-time release codes go to the alert command and to Bark entries that encrypt. Other push entries get
+code-free wording. The principal may always answer on the page, or give the code to the coordinator in the
+conversation. The sends run side by side with independent
 deadlines and results, so one slow or failed destination does not delay another's send or change its result.
 Hansa status shows each service, hidden address, on/off switch and last result (sent or its reason).
 
@@ -107,9 +108,14 @@ which hansa status reads); the command is never retried. Each push entry records
 Bark has its own 30-second deadline,
 including alert_http's at most three tries; the alert run adds no retries. A
 release_waiting alert queues only its release ID, request time and text without a code. Just before sending,
-the command's text is rebuilt in memory with a new code (release.new_code), only while that request still waits
-and a command gets the batch. Push addresses get the gathered text without codes; push addresses alone make no code. Neither
-the code nor what the command printed for such an alert is written to a file (only how it ended is kept). A phone
+the text is rebuilt in memory with a new code (release.new_code), only while that request still waits
+and an alert command or enabled Bark entry that encrypts gets the batch. Make it once per release before the
+channels start, sharing the same code across eligible channels; other push entries get the gathered text without
+codes. With neither eligible channel, no code is made. A code went out when any channel carrying it sent;
+when no channel's final text held it, including after character or byte cuts, it is void. Neither
+the code, what the command printed for such an alert, nor a code-bearing push's response text is written to a
+file (only how it ended is kept). Removing a Bark encryption key makes later batches to that entry code-free.
+An entry's test push never makes or carries a release code. A phone
 shows the first hundred characters or so, so the code and what to do with it come right after the desk's name:
 "[hansa] desk NAME: release #1 (lane a, target staging) · code K7P3QX: to release it, give this code to the coordinator
 in the conversation (this release only, once, 24 hours; send it nowhere else), or answer on the page · main at
@@ -195,6 +201,13 @@ def configured(desk: Desk, s: dict | None = None) -> bool:
     from . import alert_push
     s = desk.settings() if s is None else s
     return bool(command(s) or alert_push.enabled(desk, s))
+
+
+def release_codes(desk: Desk, s: dict | None = None) -> bool:
+    """Whether a configured channel may carry a waiting release's code."""
+    from . import alert_push
+    s = desk.settings() if s is None else s
+    return bool(command(s) or any(alert_push.encrypts(desk, e) for e in alert_push.enabled(desk, s)))
 
 
 def chinese(desk: Desk) -> bool:
@@ -537,29 +550,33 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
         # its own result as soon as it finishes, without waiting for its sibling.
         write_json(last_file(desk), {**{k: v for k, v in rec.items() if k != "held_since"},
                                      "runs": _runs(rec, t) + [t]})
+        items = [dict(x) for x in q]
+        codes = _with_codes(desk, items) if cmd or any(alert_push.encrypts(desk, e) for e in pushes) else []
+        deliveries = []  # in memory only: each channel's final text and whether it sent
 
         def send_command():
-            items = [dict(x) for x in q]  # _with_codes must never alter a push batch
-            codes, text = [], ""
+            text = ""
             try:
-                codes = _with_codes(desk, items)
                 text = text_of(desk, items, held)
                 result = run(desk, cmd, kinds, text, timeout, codes=[x["code"] for x in codes], level=level)
             except Exception:  # setup failures also belong only to this channel; never log a possible code
                 result = {"ok": False, "exit": None, "timed_out": False, "limit": timeout,
                           "tail": [], "at": now(), "kinds": kinds}
-            _codes_went(desk, codes, text, result["ok"])
+            deliveries.append((text, result["ok"]))
             _record(desk, result, len(items))
             return result
 
         def send_push(entry):
-            why = alert_push.send(desk, entry, q, held)
+            batch = items if alert_push.encrypts(desk, entry) else q
+            why = alert_push.send(desk, entry, batch, held, deliveries=deliveries)
             return {"ok": why == "sent", "why": why}
 
         with ThreadPoolExecutor(max_workers=len(pushes) + bool(cmd), thread_name_prefix="hansa-alert-channel") as pool:
             push_runs = [pool.submit(send_push, entry) for entry in pushes]
             command_run = pool.submit(send_command) if cmd else None
-            return command_run.result() if command_run else push_runs[0].result()
+            result = command_run.result() if command_run else push_runs[0].result()
+        _codes_went(desk, codes, deliveries)
+        return result
 
 
 def _with_codes(desk: Desk, items: list) -> list:
@@ -585,13 +602,13 @@ def _with_codes(desk: Desk, items: list) -> list:
     return codes
 
 
-def _codes_went(desk: Desk, codes: list, text: str, ok: bool) -> None:
-    """Record on each release whether its code went out; one that did not (no command to send it with, or cut from
-    the text) is void: the page answers that release."""
+def _codes_went(desk: Desk, codes: list, deliveries: list) -> None:
+    """A code went out if any channel carrying it sent; void it only when no channel's final text held it."""
     from . import release
     for x in codes:
-        if x["code"] in text:
-            release.code_sent(desk, x.get("release"), x["code"], ok)
+        carried = [ok for text, ok in deliveries if x["code"] in text]
+        if carried:
+            release.code_sent(desk, x.get("release"), x["code"], any(carried))
         else:
             release.code_unsent(desk, x.get("release"), x["code"])
 
@@ -938,19 +955,21 @@ def explain_line(s: dict, desk: Desk | None = None) -> str:
         f"{'on' if e['on'] else 'off'}{'; encrypted' if e.get('encrypted') else ''})"
         for e in destinations) if destinations else "No push addresses are set up")
     a = s.get("alert") if isinstance(s.get("alert"), dict) else {}
+    code_channels = ("One-time codes go to the alert command and to Bark entries that encrypt. "
+                     "Other push entries get code-free wording. The principal answers on the page, or says the code "
+                     "in the conversation, and you pass it on with hansa release yes ID CODE (or no ID CODE). "
+                     "Never guess one.")
     if not cmd:
         return (f"Alerts: no alert command is set. {pushes}. The principal sets these up on the page, Settings, Alerts; hansa "
                 "alerts through those set up when a release waits for the principal or ends, a request is filed, and "
-                "the rest hansa help alerts lists; you send no alerts and cannot set them up. With no alert command, "
-                "no release gets a one-time code (push addresses never carry one): the principal approves releases on the page "
-                "only.")
+                "the rest hansa help alerts lists; you send no alerts and cannot set them up. "
+                + (code_channels if desk and release_codes(desk, s) else
+                   "With no alert command or enabled Bark entry that encrypts, no release gets a one-time code: "
+                   "the principal approves releases on the page only."))
     return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
             "filed (hansa ask), a lane's runs cannot start because their sandbox cannot, free space goes under the "
             "floor (hansa disk-floor), hansa serve finishes no round for a long time, or what hansa posts to your "
             "session cannot reach it (no session hears from hansa, its inbox refuses posts, your session waits on a "
             "permission dialog or a question, or a task posted to it waits for review while it is idle). You send no "
-            f"alerts and cannot set it. {pushes} (set up on the page, Settings, Alerts; they never carry codes). A release waiting for "
-            "the principal gets a one-time code that only that alert carries: the principal answers on the page, or "
-            "says the code in the conversation, and you pass it on with hansa release yes ID CODE (or no ID CODE). "
-            "Never guess one.")
+            f"alerts and cannot set it. {pushes} (set up on the page, Settings, Alerts). " + code_channels)

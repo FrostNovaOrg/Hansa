@@ -44907,6 +44907,303 @@ else:
         self.assertEqual(a["kind"], "release_waiting")
         self.assertIn("release #3 (lane a, target prod) · code ", a["text"])
 
+    def encrypted_bark_fake(self, why="sent"):
+        sender, http = self.bark_fake(why)
+        entry = self.desk.settings()["alert_push"][-1]
+        alert_push.change(self.desk, [{"id": entry["id"], "secret": "1234567890123456"}], by="page")
+        return entry, http
+
+    def decrypted_bark(self, http):
+        from tests.test_push_services import decrypt_bark
+        [request] = http.call_args.args[0]
+        payload = request["json"]
+        self.assertEqual(set(payload), {"device_key", "ciphertext", "iv"})
+        return json.loads(decrypt_bark(payload, "1234567890123456"))
+
+    def test_encrypted_bark_only_makes_a_code_in_ciphertext_with_command_wording(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        self.hansa("lane", "target", "a", "staging", "true")
+        for rid, lang in enumerate(("en", "zh"), 1):
+            with self.subTest(language=lang):
+                self.page_save(lambda s: s.update(alert_language=lang))
+                self.hansa("release", "a", "staging")
+                self.assertNotIn("code", release.get(self.desk, rid))
+                self.assertTrue(all(not x.get("code") for x in alert.queued(self.desk)))
+                with unittest.mock.patch.object(release, "new_code", wraps=release.new_code) as make:
+                    self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+                make.assert_called_once_with(self.desk, rid)
+                inside = self.decrypted_bark(http)
+                code = re.search(r"(?:code |一次性码 )([A-Z2-9]{6})", inside["body"])[1]
+                text = alert._release_text(self.desk, rid, True, code, zh=lang == "zh")
+                self.assertEqual(inside["body"], text)
+                self.assertEqual(inside["title"], alert.desk_name(self.desk))
+                self.assertIn(code, inside["body"][:80])
+                self.assertNotIn(code, json.dumps(http.call_args.args[0]))
+                r = release.get(self.desk, rid)
+                self.assertEqual(r["code"]["hash"], release._code_hash(self.desk, rid, code))
+                self.assertTrue(r["code"]["sent_ok"])
+                self.assertTrue(views.status(self.desk)["release_codes"])
+                self.assertNotIn(code, json.dumps(views.status(self.desk)))
+                self.assertEqual(release.answer(self.desk, rid, False, "later", r["commit"], r["command"]), {"ok": True})
+
+    def test_encrypted_bark_disabled_or_plain_pushes_make_no_code(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        alert_push.change(self.desk, [{"id": entry["id"], "on": False},
+            {"address": "https://api.day.app/plain-device"},
+            {"address": "https://ntfy.sh/fixture-private-topic", "secret": "tk-fixture-auth-token"}], by="page")
+        self.with_release("true")
+        self.hansa("release", "a")
+        with unittest.mock.patch.object(release, "new_code") as make:
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        make.assert_not_called()
+        self.assertNotIn("code", release.get(self.desk, 1))
+        self.assertFalse(views.status(self.desk)["release_codes"])
+        for call in http.call_args_list:
+            self.assertNotIn("ciphertext", json.dumps(call.args[0]))
+            self.assertIn("waits for your yes on the page", json.dumps(call.args[0]))
+
+    def test_encrypted_bark_mixed_pushes_only_encrypting_entries_hold_the_code(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        alert_push.change(self.desk, [{"address": "https://api.day.app/plain-device"},
+            {"address": "https://ntfy.sh/fixture-private-topic"}], by="page")
+        self.with_release("true")
+        self.hansa("release", "a")
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        from tests.test_push_services import decrypt_bark
+        payloads = [c.args[0][0] for c in http.call_args_list]
+        [encrypted] = [p for p in payloads if "ciphertext" in p.get("json", {})]
+        body = json.loads(decrypt_bark(encrypted["json"], "1234567890123456"))["body"]
+        match = re.search(r"code ([A-Z2-9]{6})", body)
+        self.assertIsNotNone(match, body)
+        code = match[1]
+        for request in payloads:
+            self.assertNotIn(code, json.dumps(request))
+            if request is not encrypted:
+                self.assertIn("waits for your yes on the page", json.dumps(request))
+                self.assertNotIn("code ", json.dumps(request))
+        self.assertTrue(release.answer_by_code(self.desk, 1, True, code)["ok"])
+
+    def test_encrypted_bark_and_command_share_one_code_per_release_before_sending(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        entry, http = self.encrypted_bark_fake()
+        alert_push.change(self.desk, [{"address": "https://api.day.app/second-device",
+            "secret": "1234567890123456"}], by="page")
+        self.with_targets(staging="true", prod="true")
+        self.hansa("release", "a", "staging")
+        self.hansa("release", "a", "prod")
+        q = alert.queued(self.desk)
+        write_json(alert.queue_file(self.desk), q + q)
+        with unittest.mock.patch.object(release, "new_code", wraps=release.new_code) as make:
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertEqual(make.call_args_list, [unittest.mock.call(self.desk, 1), unittest.mock.call(self.desk, 2)])
+        from tests.test_push_services import decrypt_bark
+        for call in http.call_args_list:
+            body = json.loads(decrypt_bark(call.args[0][0]["json"], "1234567890123456"))["body"]
+            for rid in (1, 2):
+                self.assertIn(f"#{rid} code {self.sent_code(rid)}", body)
+        for rid in (1, 2):
+            self.assertTrue(release.answer_by_code(self.desk, rid, True, self.sent_code(rid))["ok"])
+
+    def test_encrypted_bark_delivery_success_survives_failed_or_cut_siblings(self):
+        from hansa import alert, release
+        self.alert_fake("sys.exit(1)\n")
+        entry, http = self.encrypted_bark_fake()
+        self.with_release("true")
+        for rid, (command_ok, push_ok, cut) in enumerate(((False, True, False), (True, False, False),
+                (False, False, False), (False, True, True)), 1):
+            with self.subTest(command_ok=command_ok, push_ok=push_ok, cut=cut):
+                self.alert_fake("sys.exit(0)\n" if command_ok else "sys.exit(1)\n")
+                if cut:
+                    alert_push.change(self.desk, [{"address": "https://api.day.app/" + "d" * 3300,
+                        "secret": "1234567890123456"}], by="page")
+                http.return_value = [{"why": "sent" if push_ok else "network"}]
+                self.hansa("release", "a")
+                alert.send_due(self.desk, gather=0)
+                code = self.sent_code(rid)
+                c = release.get(self.desk, rid)["code"]
+                self.assertTrue(c.get("sent"))
+                self.assertEqual(c["sent_ok"], command_ok or push_ok)
+                self.assertIn("hash", c)
+                if cut:
+                    from tests.test_push_services import decrypt_bark
+                    [short] = [json.loads(decrypt_bark(call.args[0][0]["json"], "1234567890123456"))["body"]
+                        for call in http.call_args_list if len(call.args[0][0]["json"]["device_key"]) == 3300]
+                    self.assertNotIn(code, short)
+                http.reset_mock()
+
+    def test_encrypted_bark_failed_code_delivery_is_not_success_when_plain_push_sends(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        alert_push.change(self.desk, [{"address": "https://api.day.app/plain-device"}], by="page")
+        self.with_release("true")
+        self.hansa("release", "a")
+        def sending(requests, **kwargs):
+            return [{"why": "network" if "ciphertext" in requests[0]["json"] else "sent"}]
+        http.side_effect = sending
+        self.assertFalse(alert.send_due(self.desk, gather=0)["ok"])
+        c = release.get(self.desk, 1)["code"]
+        self.assertTrue(c["sent"])
+        self.assertFalse(c["sent_ok"])
+        row = release.page_rows(self.desk, self.desk.settings())[0]
+        self.assertIn("delivery reported a failure", row["code"])
+        self.assertIn("提醒发送报了失败", row["code_zh"])
+        self.assertNotIn("alert command", row["code"])
+
+    def test_encrypted_bark_failed_or_cut_push_keeps_no_text_in_results_events_status_or_page(self):
+        from hansa import alert, release, web
+        entry, http = self.encrypted_bark_fake("network")
+        cases = ("failed", "exception", "character_cut", "byte_cut", "too_big")
+        self.with_targets(**{case.replace("_", "-"): "true" for case in cases})
+        for rid, case in enumerate(cases, 1):
+            with self.subTest(case=case):
+                length = 3300 if case == "byte_cut" else 3500 if case == "too_big" else 20
+                alert_push.change(self.desk, [{"id": entry["id"], "address": "https://api.day.app/" + "d" * length}], by="page")
+                self.hansa("release", "a", case.replace("_", "-"))
+                if case == "character_cut":
+                    release.change(self.desk, rid, lambda r: {"lane": "x" * 1100})
+                made = []
+                original = release.new_code
+                def capture(desk, id):
+                    code = original(desk, id)
+                    made.append(code)
+                    return code
+                http.side_effect = RuntimeError("private release text K7P3QX") if case == "exception" else None
+                http.return_value = [{"why": "network" if case == "failed" else "sent",
+                                      "body": "private release text K7P3QX", "code": "K7P3QX"}]
+                with unittest.mock.patch.object(release, "new_code", side_effect=capture):
+                    result = alert.send_due(self.desk, gather=0)
+                self.assertEqual(len(made), 1)
+                [code] = made
+                c = release.get(self.desk, rid)["code"]
+                if "cut" in case or case == "too_big":
+                    self.assertNotIn("hash", c)
+                    self.assertIn("did not go out", c["void"])
+                else:
+                    self.assertTrue(c["sent"])
+                    self.assertFalse(c["sent_ok"])
+                said = json.dumps([result, views.status(self.desk), web._events(self.desk, 200, ""),
+                    alert_push.last_result(self.desk, entry["id"])]) + self.hansa("status")
+                for private in (code, "private release text", "K7P3QX"):
+                    self.assertNotIn(private, said)
+                self.assertNotIn("code", alert_push.last_result(self.desk, entry["id"]))
+                for f in self.desk.root.rglob("*"):
+                    if f.is_file() and self.desk.secrets_dir not in f.parents:
+                        self.assertNotIn(code.encode(), f.read_bytes(), f)
+
+    def test_encrypted_bark_removing_key_while_waiting_makes_later_batches_code_free(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        alert.send_due(self.desk, gather=0)
+        self.assertIn("code ", self.decrypted_bark(http)["body"])
+        self.desk.event("release_waits", id=1, lane="a", why="waiting again")
+        alert_push.change(self.desk, [{"id": entry["id"], "secret": ""}], by="page")
+        with unittest.mock.patch.object(release, "new_code") as make:
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        make.assert_not_called()
+        body = http.call_args.args[0][0]["json"]["body"]
+        self.assertIn("waits for your yes on the page", body)
+        self.assertNotIn("code ", body)
+        self.assertFalse(views.status(self.desk)["release_codes"])
+        r = release.get(self.desk, 1)
+        self.assertTrue(release.answer(self.desk, 1, True, "", r["commit"], r["command"])["ok"])
+
+    def test_encrypted_bark_key_removed_after_code_creation_cannot_send_it_in_plaintext(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        original = alert_push.send
+        def remove_key(desk, entry, items, *args, **kwargs):
+            alert_push.change(desk, [{"id": entry["id"], "secret": ""}], by="page")
+            return original(desk, entry, items, *args, **kwargs)
+        with unittest.mock.patch.object(alert_push, "send", side_effect=remove_key), \
+                unittest.mock.patch.object(release, "new_code", wraps=release.new_code) as make:
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        make.assert_called_once_with(self.desk, 1)
+        body = http.call_args.args[0][0]["json"]["body"]
+        self.assertIn("waits for your yes on the page", body)
+        self.assertNotIn("code ", body)
+        c = release.get(self.desk, 1)["code"]
+        self.assertNotIn("hash", c)
+        self.assertIn("did not go out", c["void"])
+
+    def test_encrypted_bark_page_test_push_neither_creates_nor_carries_a_code(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        queued = alert.queue_file(self.desk).read_bytes()
+        with unittest.mock.patch.object(release, "new_code") as make:
+            self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
+        make.assert_not_called()
+        self.assertNotIn("code", self.decrypted_bark(http)["body"])
+        self.assertEqual(alert.queue_file(self.desk).read_bytes(), queued)
+        alert.send_due(self.desk, gather=0)
+        code = re.search(r"code ([A-Z2-9]{6})", self.decrypted_bark(http)["body"])[1]
+        before = release.get(self.desk, 1)["code"]
+        for language in ("en", "zh"):
+            self.page_save(lambda s: s.update(alert_language=language))
+            with unittest.mock.patch.object(release, "new_code") as make:
+                self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
+            make.assert_not_called()
+            body = self.decrypted_bark(http)["body"]
+            for word in (code, "code ", "一次性码", "K7P3QX"):
+                self.assertNotIn(word, body)
+            self.assertEqual(release.get(self.desk, 1)["code"], before)
+
+    def test_encrypted_bark_explain_page_flag_and_guidance_describe_both_code_channels(self):
+        from hansa import alert
+        entry, http = self.encrypted_bark_fake()
+        self.assertTrue(views.status(self.desk)["release_codes"])
+        explanation = self.hansa("explain")
+        self.assertIn("one-time code", explanation.lower())
+        self.assertIn("Bark entries that encrypt", explanation)
+        self.assertNotIn("no release gets", explanation)
+        self.alert_fake()
+        self.assertIn("Bark entries that encrypt", self.hansa("explain"))
+        self.assertIn("Bark entries that encrypt", self.hansa("help", "alerts"))
+        root = Path(hansa.__file__).parent.parent
+        for file in ("hansa/card.md", "docs/releases.md", "docs/push-services.md"):
+            self.assertIn("Bark entries that encrypt", (root / file).read_text())
+        self.assertIn("代码会发给提醒命令", (root / "docs/zh-CN/push-services.md").read_text())
+        alert_push.change(self.desk, [{"id": entry["id"], "on": False}], by="page")
+        self.assertTrue(views.status(self.desk)["release_codes"])
+        self.page_save(lambda s: s.update(alert={"command": ""}))
+        self.assertFalse(views.status(self.desk)["release_codes"])
+
+    def test_encrypted_bark_code_keeps_wrong_attempt_void_day_and_page_answer_rules(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        self.with_targets(wrong="true", day="true", changed="true", page="true")
+        for rid, target in enumerate(("wrong", "day", "changed", "page"), 1):
+            self.hansa("release", "a", target)
+            alert.send_due(self.desk, gather=0)
+            code = re.search(r"code ([A-Z2-9]{6})", self.decrypted_bark(http)["body"])[1]
+            if target == "wrong":
+                wrong = "ABCDEF" if code != "ABCDEF" else "ABCDEG"
+                for _ in range(3):
+                    self.assertFalse(release.answer_by_code(self.desk, rid, True, wrong)["ok"])
+                self.assertFalse(release.answer_by_code(self.desk, rid, True, code)["ok"])
+                self.assertEqual(release.get(self.desk, rid)["code"]["wrong"], 3)
+            elif target == "day":
+                with unittest.mock.patch.object(release.time, "time", return_value=time.time() + release.CODE_LIFE + 1):
+                    self.assertFalse(release.answer_by_code(self.desk, rid, True, code)["ok"])
+            elif target == "changed":
+                self.hansa("lane", "target", "a", target, "echo changed")
+                self.assertFalse(release.answer_by_code(self.desk, rid, True, code)["ok"])
+                self.assertEqual(release.get(self.desk, rid)["state"], "void")
+                continue
+            r = release.get(self.desk, rid)
+            self.assertEqual(r["state"], "waiting")
+            self.assertTrue(release.answer(self.desk, rid, True, "", r["commit"], r["command"])["ok"])
+            self.assertFalse(release.answer_by_code(self.desk, rid, True, code)["ok"])
+
     # -- the one-time code of a release's alert --
 
     def sent_code(self, rid) -> str:
@@ -45312,7 +45609,8 @@ else:
         self.assertEqual(alert.queued(self.desk), [])
         self.assertNotIn("code", release.get(self.desk, 1))
         refused = self.code_answer("yes", "1", "ABCDEF")[1]
-        self.assertIn("no alert command, so no code is sent: approval of release #1 is on the page only", refused)
+        self.assertIn("no alert command or enabled Bark entry that encrypts, so no code is sent", refused)
+        self.assertIn("approval of release #1 is on the page only", refused)
         self.assertEqual(release.get(self.desk, 1)["state"], "waiting")
         self.assertIn("answers on the page only: no alert command is set", self.hansa("status"))
         self.assertIn("no release gets a one-time code", self.hansa("explain"))
@@ -45320,7 +45618,8 @@ else:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             main(["release", "--help"])
-        self.assertIn("With no alert command there is no code", " ".join(out.getvalue().split()))
+        self.assertIn("With no alert command or enabled Bark entry that encrypts there is no code",
+                      " ".join(out.getvalue().split()))
 
     def test_hansa_release_no_with_the_code_refuses_the_release(self):
         from hansa import alert, release
@@ -48456,8 +48755,9 @@ class AlertPushPageTest(unittest.TestCase):
         for one, other in zip(flat(en), flat(zh)):
             self.assertNotEqual(one, other)
             self.assertRegex(other, r"[一-鿿]")
-        for language, words in (("en", ["desk's name", "alert texts", "Apple", "Google", "release codes never", "on this page"]),
-                                ("zh", ["工作台名称", "提醒正文", "苹果", "谷歌", "发布码从不", "这个网页"])):
+        for language, words in (("en", ["desk's name", "alert texts", "Apple", "Google", "Bark entries that encrypt",
+                                         "ciphertext", "answer on this page", "coordinator"]),
+                                ("zh", ["工作台名称", "提醒正文", "苹果", "谷歌", "加密的 Bark", "密文", "网页上回答", "协调员"])):
             shown = self.page(language=language)["before"]["text"]
             for word in words:
                 self.assertIn(word, shown)

@@ -3518,7 +3518,8 @@ def main(argv=None):
                 f"refused and counted, and after {release.CODE_TRIES} the code is void and only the page answers. A "
                 f"code lapses when the release is answered (on the page too), stopped or no longer what was asked, after "
                 f"{release.CODE_LIFE // 3600} hours, and when a new waiting alert for it gives a new one. With no alert "
-                "command there is no code: the principal answers on the page. yes and no are not lane names, so this "
+                "command or enabled Bark entry that encrypts there is no code: the principal answers on the page. "
+                "yes and no are not lane names, so this "
                 "form is always an answer. Never guess a code, nor ask the principal to send it anywhere else. "
                 + see_more("release-flow", "forbidden-words", "alerts"))
     p.add_argument("--stop", metavar="ID", help="call release ID off (the rest of the line is the reason): TERM to a "
