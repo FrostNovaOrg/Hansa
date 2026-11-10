@@ -364,6 +364,12 @@ Advice, not a rule hansa enforces:
 
 ## Merging, the merge check and conflicts
 
+File names read from git are kept as written, including non-ASCII characters, spaces, quotes and
+backslashes, regardless of the repository's or account's `core.quotePath` setting. This applies to
+new task file records, release file matching, conflict reports and the files given to an `--update`
+worker. `hansa show` uses the recorded names; `hansa diff --stat` and `hansa git` show non-ASCII
+names as written. Names already saved by an older hansa are left as saved.
+
 `hansa verify ID` chooses a verify lane listing the task's lane: free first, then fewest queued,
 then lanes' order; otherwise its own lane. `--lane L` overrides this.
 

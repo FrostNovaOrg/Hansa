@@ -45,6 +45,7 @@ A stopped release went out for no `--after`: like a failed one, it lets no other
 """
 from __future__ import annotations
 
+import codecs
 import contextlib
 import glob
 import hashlib
@@ -407,8 +408,8 @@ def outgoing(repo, since: str, commit: str) -> tuple:
     rng = _range(since, commit)
     rows = _git_bytes(repo, "log", "--format=%H%x1f%s", *rng)
     commits = [dict(zip(("sha", "subject"), x.split("\x1f", 1))) for x in rows.splitlines() if "\x1f" in x]
-    names = _git_bytes(repo, "log", "--cc", "--format=", "--name-only", "--no-renames", *rng)
-    return commits, sorted({x for x in names.splitlines() if x})
+    names = _git_bytes(repo, "log", "--cc", "--format=", "--name-only", "--no-renames", "-z", *rng)
+    return commits, sorted({x for x in names.split("\0") if x})
 
 
 def hansa_merges(desk: Desk, s: dict, a: dict, tasks=None) -> set:
@@ -481,6 +482,14 @@ def _binary_blobs(repo):
             p.wait()
 
 
+def _git_path(path: str) -> str:
+    """A path in git's line-oriented output: quotePath=false still quotes quotes, backslashes and controls.
+    Git's C escapes describe UTF-8 bytes; use NUL-separated output instead where no patch headers are needed."""
+    if path.startswith('"') and path.endswith('"'):
+        return codecs.escape_decode(path[1:-1].encode("utf-8"))[0].decode("utf-8", "replace")
+    return path
+
+
 def _added(lines, binary_blob):
     """(commit, file, line) for each line the patches of `git log -p --cc --format=%x00%H -U0` add: an ordinary
     commit's added lines, and a merge's lines in none of its parents (what the merge itself adds, such as a
@@ -509,7 +518,7 @@ def _added(lines, binary_blob):
         elif line.startswith("index "):
             blob = line.split()[1].split("..")[-1]
         elif line.startswith("+++ "):
-            p = line[4:].rstrip("\t")
+            p = _git_path(line[4:].rstrip("\t"))
             path = None if p == "/dev/null" else p[2:] if p.startswith("b/") else p
             binary = binary_blob(blob) if path else False
         else:
@@ -583,7 +592,7 @@ def _words_in(repo, rng, texts, mailboxes, mailbox_allow, scan):
         if line.startswith("\0"):
             sha = line[1:].strip()
         elif line:
-            look(sha, "file name", line)
+            look(sha, "file name", _git_path(line))
     patch = _git_lines(repo, "log", "-p", "--cc", "--text", "--no-ext-diff", "--no-textconv", "--no-color",
                        "--unified=0", "--no-renames", "--full-index", "--format=%x00%H", *rng)
     try:

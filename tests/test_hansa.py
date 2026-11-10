@@ -14138,6 +14138,148 @@ def save():'''))
         self.assertEqual(runs.read_text(), "run\n")
         self.assertEqual(len(self.events("merge_check_started")), 1)
 
+    def test_git_paths_release_gate(self):
+        from hansa.cli import _release_files_touched
+        for quote in ("true", "false"):
+            self.git_out("config", "core.quotePath", quote)
+            for name in ("部署.sh", "发布/run.sh"):
+                with self.subTest(quote=quote, name=name):
+                    tid = self.done_with(release_files=["部署.sh", "发布/*.sh"],
+                                         env={"FAKE_HELLO": name, "FAKE_VERDICT": "holds"})
+                    m = self.desk.meta(tid)
+                    # The gate also reads git itself: a saved file list must not mask that read.
+                    with self.subTest(read="diff"):
+                        self.assertEqual(_release_files_touched(self.repo, {**m, "files": []},
+                                                               self.desk.settings()["lanes"]["a"]), [name])
+                    for flags in ([], ["--despite-check"]):
+                        with self.subTest(flags=flags):
+                            said = self.refused("merge", tid, *flags)
+                            self.assertIn(name, said)
+                            self.assertIn("no flag overrides this", said)
+                    if self.desk.meta(tid)["state"] == "merged":
+                        continue  # the regression already failed above
+                    self.hansa("verify", tid)
+                    vid = self.desk.meta(tid)["verify"]
+                    self.assertEqual(self.settle(Dispatcher(self.desk), vid)["verdict"], "holds")
+                    self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+
+    def test_git_paths_text_only(self):
+        for quote in ("true", "false"):
+            with self.subTest(quote=quote):
+                self.git_out("config", "core.quotePath", quote)
+                tid = self.done_with(env={"FAKE_HELLO": "文档/说明.md"})
+                with self.subTest(read="record"):
+                    self.assertEqual(self.desk.meta(tid)["files"], ["文档/说明.md"])
+                said = self.hansa("merge", tid)
+                self.assertIn(f"{tid} merged into main", said)
+                self.assertNotIn("nothing verified", said)
+
+    def test_git_paths_conflicts(self):
+        for quote in ("true", "false"):
+            with self.subTest(quote=quote):
+                self.git_out("config", "core.quotePath", quote)
+                t1 = self.done_with(env={"FAKE_HELLO": "说明.md"})
+                t2 = self.done_with(env={"FAKE_HELLO": "说明.md"})
+                self.hansa("merge", t1)
+                said = self.refused("merge", t2)
+                with self.subTest(read="markers"):
+                    self.assertIn("说明.md, lines 1-5:", said)
+                    self.assertIn(f"hello from {t1}", said)
+                    self.assertIn(f"hello from {t2}", said)
+                    self.assertNotIn("no conflict markers", said)
+                argv = self.tmp / f"argv-{quote}.jsonl"
+                s = self.desk.settings()
+                s["lanes"]["a"]["env"]["FAKE_SHOW_ARGV"] = str(argv)
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.hansa("retry", t2, "--update", "settle the greeting")
+                t3 = self.desk.meta(t2)["replaced_by"]
+                m = self.settle(Dispatcher(self.desk), t3)
+                self.assertEqual(m["state"], "done", m)
+                with self.subTest(read="update list"):
+                    self.assertEqual(m["update_conflicts"], ["说明.md"])
+                prompt = json.loads(argv.read_text().splitlines()[-1])
+                prompt = prompt[prompt.index("--append-system-prompt") + 1]
+                self.assertIn("conflicts in these files", prompt)
+                self.assertIn("说明.md", prompt)
+                self.hansa("merge", t3)
+
+    def test_git_paths_show_and_diff(self):
+        for quote in ("true", "false"):
+            with self.subTest(quote=quote):
+                self.git_out("config", "core.quotePath", quote)
+                tid = self.done_with(env={"FAKE_HELLO": "文档/说明.md"})
+                for args in (("show", tid), ("diff", tid, "--stat"), ("diff", tid)):
+                    with self.subTest(command=args):
+                        self.assertIn("文档/说明.md", self.hansa(*args))
+
+    def test_git_paths_special_characters(self):
+        from hansa import run
+        names = (" leading space.md", '文档/说明 "draft".md', "文档/说明\\copy.md")
+        for quote in ("true", "false"):
+            self.git_out("config", "core.quotePath", quote)
+            for name in names:
+                with self.subTest(quote=quote, name=name):
+                    tid = self.done_with(env={"FAKE_HELLO": name})
+                    m = self.desk.meta(tid)
+                    with self.subTest(read="record"):
+                        self.assertEqual(m["files"], [name])
+                    with self.subTest(read="NUL list"):
+                        self.assertEqual(run.git("diff", "--name-only", "-z", m["base"], m["head"],
+                                                 cwd=self.repo), name + "\0")
+                    with self.subTest(read="show"):
+                        self.assertIn(name, self.hansa("show", tid))
+                    with self.subTest(read="merge"):
+                        self.assertNotIn("nothing verified", self.hansa("merge", tid))
+
+    def test_git_paths_shared_reads_ignore_config(self):
+        from hansa import run
+        base = self.git_out("rev-parse", "HEAD")
+        head = self.commit_in_repo("文档/说明.md", "notes\n", "Add notes")
+        (self.repo / "文档/说明.md").write_text("changed\n")
+        global_config = self.tmp / "gitconfig"
+        commands = (("diff", "--name-only"), ("status", "--porcelain"), ("ls-files",),
+                    ("show", "--format=", "--name-only", head),
+                    ("log", "--format=", "--name-only", f"{base}..{head}"))
+        for quote in ("true", "false"):
+            for scope in ("global", "local"):
+                with self.subTest(quote=quote, scope=scope):
+                    global_config.write_text(f"[core]\n\tquotePath = {quote}\n")
+                    with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(global_config)}):
+                        self.git_out("config", "core.quotePath", quote)
+                        if scope == "global":
+                            self.git_out("config", "--unset", "core.quotePath")
+                        for args in commands:
+                            with self.subTest(command=args[0]):
+                                self.assertIn("文档/说明.md", run.git(*args, cwd=self.repo))
+                                self.assertIn("文档/说明.md", self.hansa("git", "a", *args))
+
+    def test_git_paths_release_history(self):
+        from hansa import release
+        names = ("文档/说明.md", "space name.md", '文档/说明 "draft".md', "文档/说明\\copy.md")
+        base = self.git_out("rev-parse", "HEAD")
+        for name in names:
+            head = self.commit_in_repo(name, "find-me\n", "Add notes")
+        for quote in ("true", "false"):
+            self.git_out("config", "core.quotePath", quote)
+            with self.subTest(quote=quote, read="outgoing"):
+                self.assertEqual(release.outgoing(self.repo, base, head)[1], sorted(names))
+            for name in names:
+                with self.subTest(quote=quote, read="filename scan", name=name):
+                    hits, _ = release.words_in(self.repo, [f"{base}..{head}", "--"], [name])
+                    self.assertTrue(any(h["where"] == "file name" and h["line"] == name for h in hits), hits)
+            with self.subTest(quote=quote, read="patch paths"):
+                hits, _ = release.words_in(self.repo, [f"{base}..{head}", "--"], ["find-me"])
+                self.assertEqual(sorted(h["where"] for h in hits), sorted(names))
+
+    def test_git_paths_saved_names_left_alone(self):
+        tid = self.desk.new_task("An earlier task")
+        quoted = '"\\346\\226\\207\\346\\241\\243/\\350\\257\\264\\346\\230\\216.md"'
+        self.desk.update(tid, state="done", files=[quoted])
+        before = (self.desk.tasks_dir / tid / "meta.json").read_bytes()
+        self.assertIn(quoted, self.hansa("show", tid))
+        self.assertEqual(self.desk.meta(tid)["files"], [quoted])
+        self.assertEqual((self.desk.tasks_dir / tid / "meta.json").read_bytes(), before)
+
     def test_a_conflict_lists_its_files_and_lines(self):
         d = Dispatcher(self.desk)
         t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")

@@ -1042,14 +1042,15 @@ def git(*args, cwd, env=None) -> str:
     check_main_checkout(cwd)  # a linked worktree's git folder is checked with its .git file (check_git_file)
     e = {**without_session(os.environ), **GIT_ID, **(env or {})}
     linked = os.path.isfile(os.path.join(str(cwd), ".git")) and not os.path.islink(os.path.join(str(cwd), ".git"))
-    r = subprocess.run(["git", *(worktree_git_settings() if linked else ()), *args], cwd=str(cwd), env=e,
-                       capture_output=True, text=True, errors="replace")
+    r = subprocess.run(["git", "-c", "core.quotePath=false", *(worktree_git_settings() if linked else ()), *args],
+                       cwd=str(cwd), env=e, capture_output=True, text=True, errors="replace")
     if r.returncode:
         refused = account.git_refusal(r.stderr or "", cwd)
         if refused:
             raise RuntimeError(refused)
         raise RuntimeError(f"git {' '.join(args[:2])} failed: {(r.stderr or r.stdout).strip()[:300]}")
-    return r.stdout.strip()
+    # NUL-delimited names may start or end in whitespace; only scalar/human output is stripped.
+    return r.stdout if "-z" in args else r.stdout.strip()
 
 
 def repo_identity(repo) -> tuple:
@@ -3657,7 +3658,7 @@ def merge_in_progress(desk: Desk, wt: Path) -> bool:
 def conflicted_files(run) -> list:
     """The files a failed merge left unmerged; run: git in the checkout where it failed."""
     try:
-        return run("diff", "--name-only", "--diff-filter=U").splitlines()
+        return [f for f in run("diff", "--name-only", "--diff-filter=U", "-z").split("\0") if f]
     except GitFileChanged:
         raise
     except RuntimeError:
@@ -4307,7 +4308,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         # link (a leftover the sweep could not find may still write there), and from now on hansa verifies,
         # merges, continues from and shows exactly this commit (branch_holds)
         fields.update(head=head, commits=int(wgit(desk, wt, "rev-list", "--count", f"{meta['base']}..{head}") or 0),
-                      files=wgit(desk, wt, "diff", "--name-only", meta["base"], head).splitlines(),
+                      files=[f for f in wgit(desk, wt, "diff", "--name-only", "-z", meta["base"], head).split("\0") if f],
                       stat=wgit(desk, wt, "diff", "--shortstat", meta["base"], head))
         check_git_file(desk, wt)  # keys_in_change runs git there too
         fields["leaked"] = keys_in_change(desk, wt, meta["base"], head)  # it would travel with the merge
