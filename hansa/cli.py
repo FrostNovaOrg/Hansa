@@ -951,6 +951,11 @@ def _retry(desk: Desk, a) -> None:
     m = desk.meta(a.id)
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {a.id} is a verification; send back the task it checked: hansa retry {m.get('parent')} \"...\"")
+    if m.get("restored_parent"):
+        raise SystemExit(f"hansa: {a.id} was cancelled before it started and restored {m['restored_parent']}; "
+                         f"send that task back instead: hansa retry {m['restored_parent']} \"...\"")
+    if m["state"] == "replaced":
+        raise SystemExit(f"hansa: {a.id} was already replaced by {m.get('replaced_by')}; send that one back instead")
     if m["state"] in ("queued", "running", "merging"):
         raise SystemExit(f"hansa: {a.id} is {m['state']}; a follow-up is for a task that has ended. "
                          f"{_wait_for(desk, a.id)}, or cancel it first (hansa cancel {a.id})")
@@ -978,25 +983,31 @@ def _retry(desk: Desk, a) -> None:
             raise SystemExit(f"hansa: lane {lane} merges into {lanes[lane].get('base', 'main')}, not "
                              f"{own.get('base', 'main')}, the base branch of {a.id}'s lane {m['lane']}; "
                              "nothing was queued")
-    if a.update and not m.get("head"):
+    start = m.get("head") or m.get("start_from")
+    earlier = m
+    if not m.get("head") and start:
+        # A machine failure can end a follow-up before it has a head or report. Its saved start still
+        # carries the work; use the round that made that commit for its report and branch check too.
+        earlier = next((r for r in reversed(rounds_of(desk, m)[:-1]) if r.get("head") == start), m)
+    if a.update and not start:
         raise SystemExit(f"hansa: {a.id} has no branch to bring up to date; start over with hansa retry {a.id} --fresh "
                          f"\"...\". Nothing was queued")
-    if not a.fresh and m.get("head") and m.get("kind") != "verify":  # it continues from the recorded commit
-        held = branch_holds(own["repo"], m) if own else ""
+    if not a.fresh and earlier.get("head"):  # it continues from the recorded commit
+        held = branch_holds(own["repo"], earlier) if own else ""
         if held:
             raise SystemExit(f"hansa: {held}; nothing was queued. Start over from the base: hansa retry {a.id} "
                              f"--fresh \"...\"")
-    if m["state"] == "replaced":
-        raise SystemExit(f"hansa: {a.id} was already replaced by {m.get('replaced_by')}; send that one back instead")
     if a.file and a.note:
         raise SystemExit("hansa: give the note as words or with --file, not both. Nothing was queued")
     note = (_text(a) if a.file else " ".join(a.note)).strip()
     text = (_follow_up_start(desk, m) + f"\nFollow-up to {a.id} ({m['state']})."
             + (f" What to change: {note}" if note else ""))
     report = desk.tasks_dir / a.id / "result.md"
+    if not report.exists() or not report.read_text(encoding="utf-8").strip():
+        report = desk.tasks_dir / earlier["id"] / "result.md"
     if report.exists() and report.read_text(encoding="utf-8").strip():
         text += "\nThe earlier task's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
-    vid = m.get("verify")  # the latest verification of the attempt, whatever it found, given whole
+    vid = m.get("verify") or earlier.get("verify")  # the latest verification of the work, given whole
     vreport = desk.tasks_dir / vid / "result.md" if vid else None
     if vreport and vreport.exists() and vreport.read_text(encoding="utf-8").strip():
         verdict = desk.meta(vid).get("verdict") or "none"
@@ -1010,15 +1021,15 @@ def _retry(desk: Desk, a) -> None:
         opts.update(after=m["after"], after_target=m["after_target"])
     base = (own or {}).get("base") or "main"
     if a.update:  # the base's tip when it starts is merged into its branch then (run.prepare)
-        opts.update(start_from=m["head"], update=True)
-        text += (f"\nYou start from the earlier task's last commit ({m['head'][:10]}), with {base} as it is now "
+        opts.update(start_from=start, update=True)
+        text += (f"\nYou start from the earlier task's last commit ({start[:10]}), with {base} as it is now "
                  f"merged into it.")
-    elif not a.fresh and m.get("head"):
-        opts.update(start_from=m["head"], base=m["base"])
-        text += f"\nYou start from the earlier task's last commit ({m['head'][:10]})."
+    elif not a.fresh and start:
+        opts.update(start_from=start, base=m.get("base") or earlier.get("base"))
+        text += f"\nYou start from the earlier task's last commit ({start[:10]})."
     tid = desk.new_task(text, attach=a.attach, attachments_from=a.id, **opts)
     write_text(desk.tasks_dir / tid / NOTE_FILE, desk.redact(note) + "\n")  # later rounds quote it
-    if m["state"] in ("done", "failed"):  # the follow-up carries the work on; the original leaves the review list
+    if m["state"] in ("done", "failed", "cancelled"):  # one replacement carries unmerged work on
         desk.update(a.id, state="replaced", replaced_by=tid, ended_as=m["state"])
         close_verification(desk, m, f"closed: {a.id} was replaced by {tid}")
     print(f"{tid} queued as a follow-up to {a.id}" + (f" on lane {lane}" if lane != m.get("lane", "") else "")
@@ -1064,10 +1075,20 @@ def _follow_up_start(desk: Desk, m: dict) -> str:
 def cmd_cancel(a):
     desk = Desk.find(a.desk)
     by = notify.session_here()  # the session that cancelled it hears nothing of it; others do
+    restored = None
     with desk.lock():  # the state read here is the state changed here
         m = desk.meta(a.id)
         if m["state"] == "queued":
-            desk.update(a.id, state="cancelled", error="cancelled before it started", finished=now(), cancel_by=by)
+            if (m.get("parent") and m.get("kind") != "verify" and not m.get("started")
+                    and not m.get("attempts") and not m.get("head")):
+                parent = desk.meta(m["parent"])
+                if (parent["state"] == "replaced" and parent.get("replaced_by") == a.id
+                        and parent.get("ended_as") in ("done", "failed", "cancelled")):
+                    restored = parent
+            desk.update(a.id, state="cancelled", error="cancelled before it started", finished=now(), cancel_by=by,
+                        **({"restored_parent": restored["id"]} if restored else {}))
+            if restored:
+                desk.update(restored["id"], state=restored["ended_as"], replaced_by=None, ended_as=None)
         elif m["state"] == "running":  # hansa serve stops it; stopping it here as well is only quicker
             m = desk.update(a.id, cancel=True, cancel_by=by)
         elif m["state"] == "done":
@@ -1103,7 +1124,8 @@ def cmd_cancel(a):
         print(f"{a.id}'s merge check stopped; nothing was merged, and {a.id} is back waiting for review")
         return
     desk.event("task_cancel", task=a.id)
-    print(f"{a.id} cancelled")
+    print(f"{a.id} cancelled" + (f"; {restored['id']} restored to "
+          + ("waiting for review" if restored["ended_as"] == "done" else restored["ended_as"]) if restored else ""))
 
 
 def cmd_close(a):

@@ -26445,6 +26445,212 @@ def save():'''))
         self.assertNotIn(m["id"], [r["id"] for r in views.status(self.desk)["review"]])
         self.assertEqual(self.desk.meta(old["replaced_by"])["parent"], m["id"])
 
+    def test_retry_records_queued_cancel_restores_parent(self):
+        from hansa import after, goals
+        self.hansa("goal", "add", "Keep earlier work")
+        for state in ("done", "failed", "cancelled"):
+            with self.subTest(state=state):
+                first = self.desk.new_task("Add hello.txt", lane="a", goal="g1")
+                self.settle(Dispatcher(self.desk), first)
+                self.desk.update(first, state=state)
+                before = self.desk.meta(first)
+                follow = self.hansa("retry", first, "wrong note").split()[0]
+                dependent = self.hansa("add", "Needs the change", "--lane", "a", "--after", first).split()[0]
+                reply = self.hansa("cancel", follow)
+                restored = self.desk.meta(first)
+                self.assertEqual(restored["state"], state)
+                self.assertFalse(restored.get("replaced_by"))
+                for field in ("head", "base", "check", "finished", "files"):
+                    self.assertEqual(restored.get(field), before.get(field))
+                for word in (follow, "cancelled", first, "restored", "waiting for review" if state == "done" else state):
+                    self.assertIn(word, reply)
+                self.assertIn(first, [m["id"] for m in goals.latest_tasks(self.desk.tasks(), "g1")])
+                [waiting] = after.pending(self.desk.meta(dependent), self.desk.tasks())
+                self.assertEqual(waiting["latest"], first)
+                count = len(self.desk.tasks())
+                refused = self.refused("retry", follow, "right note")
+                self.assertIn(f"hansa retry {first}", refused)
+                self.assertEqual(len(self.desk.tasks()), count)
+                if state == "done":
+                    self.assertIn(first, [m["id"] for m in views.status(self.desk)["review"]])
+                    self.assertIn("merged into main", self.hansa("merge", first))
+                else:
+                    next_ = self.hansa("retry", first, "right note").split()[0]
+                    self.assertEqual(self.desk.meta(next_)["start_from"], before["head"])
+                    self.hansa("cancel", next_)
+                self.hansa("cancel", dependent)
+
+    def test_retry_records_machine_failure_keeps_start_and_report(self):
+        from hansa import run
+        d = Dispatcher(self.desk)
+        first = self.desk.new_task("Add hello.txt", lane="a")
+        earlier = self.settle(d, first)
+        report = (self.desk.tasks_dir / first / "result.md").read_text().strip()
+        follow = self.hansa("retry", first, "Add second.txt").split()[0]
+        # A real dispatch reaches not_started, before a worktree or head exists.
+        with unittest.mock.patch.object(run, "prepare", side_effect=run.SrtCannotRun("sandbox unavailable")):
+            failed = self.settle(d, follow)
+        self.assertEqual(failed["state"], "failed")
+        self.assertTrue(failed["machine_problem"])
+        self.assertFalse(failed.get("head"))
+        self.assertIn(f"hansa retry {follow}", self.hansa("show", follow))
+        last = self.hansa("retry", follow).split()[0]
+        text = (self.desk.tasks_dir / last / "task.md").read_text()
+        self.assertEqual(self.desk.meta(last).get("start_from"), earlier["head"])
+        self.assertIn("You start from", text)
+        self.assertIn(earlier["head"][:10], text)
+        self.assertIn(report, text)
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_HELLO": "second.txt"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        finished = self.settle(d, last)
+        self.assertEqual(finished["state"], "done", finished)
+        self.assertEqual(self.git_out("show", f"{finished['head']}:hello.txt"), f"hello from {first}")
+        self.assertEqual(self.git_out("show", f"{finished['head']}:second.txt"), f"hello from {last}")
+        self.assertIn(f"run started from: earlier task's commit {earlier['head'][:12]}", self.hansa("show", last))
+
+    def test_retry_records_started_failure_and_cancel_keep_head(self):
+        for ending in ("setup failed", "cancelled running"):
+            with self.subTest(ending=ending):
+                d = Dispatcher(self.desk)
+                first = self.desk.new_task("Add hello.txt", lane="a")
+                earlier = self.settle(d, first)
+                follow = self.hansa("retry", first, "Continue").split()[0]
+                ready, release = self.tmp / (follow + "-ready"), self.tmp / (follow + "-release")
+                s = self.desk.settings()
+                s["lanes"]["a"]["setup"] = "exit 3" if ending == "setup failed" else (
+                    f"touch {shlex.quote(str(ready))}; "
+                    f"while test ! -f {shlex.quote(str(release))}; do sleep 0.05; done")
+                self.assertEqual(self.desk.save_settings(s), [])
+                if ending == "cancelled running":
+                    try:
+                        deadline = time.time() + 30
+                        while not ready.exists() and time.time() < deadline:
+                            d.tick()
+                            time.sleep(0.05)
+                        self.assertTrue(ready.exists(), self.desk.meta(follow))
+                        self.assertEqual(self.desk.meta(follow)["state"], "running")
+                        self.hansa("cancel", follow)
+                    finally:
+                        release.touch()
+                ended = self.settle(d, follow)
+                self.assertEqual(ended["state"], "failed" if ending == "setup failed" else "cancelled")
+                self.assertEqual(ended["head"], earlier["head"])
+                self.assertEqual(self.desk.meta(first)["state"], "replaced")
+                s["lanes"]["a"]["setup"] = ""
+                self.assertEqual(self.desk.save_settings(s), [])
+                last = self.hansa("retry", follow, "Continue").split()[0]
+                self.assertEqual(self.desk.meta(last)["start_from"], ended["head"])
+                self.assertEqual(self.settle(d, last)["state"], "done")
+
+    def test_retry_records_closed_and_cancelled_replace_once(self):
+        for ending in ("closed", "cancelled"):
+            with self.subTest(ending=ending):
+                first = self.desk.new_task("Earlier work", lane="a")
+                if ending == "closed":
+                    self.desk.update(first, state="done")
+                    self.hansa("close", first)
+                else:
+                    self.hansa("cancel", first)
+                follow = self.hansa("retry", first, "Try again").split()[0]
+                before = len(self.desk.tasks())
+                self.assertEqual(self.desk.meta(first)["state"], "replaced")
+                self.assertEqual(self.desk.meta(first)["ended_as"], "cancelled")
+                refused = self.refused("retry", first, "Try again")
+                for word in (first, "already replaced", follow, "send that one back"):
+                    self.assertIn(word, refused)
+                self.assertEqual(len(self.desk.tasks()), before)
+
+    def test_retry_records_merged_allows_independent_followups(self):
+        d = Dispatcher(self.desk)
+        first = self.desk.new_task("Add hello.txt", lane="a")
+        self.settle(d, first)
+        self.hansa("merge", first)
+        before = self.desk.meta(first)
+        one = self.hansa("retry", first, "More work").split()[0]
+        two = self.hansa("retry", first, "Other work").split()[0]
+        self.assertNotEqual(one, two)
+        self.assertEqual(self.desk.meta(first), before)
+        for tid in (one, two):
+            self.assertEqual(self.desk.meta(tid)["start_from"], before["head"])
+            self.hansa("cancel", tid)
+        self.assertEqual(self.desk.meta(first), before)
+
+    def test_retry_records_merged_prerequisite_ignores_later_work(self):
+        from hansa import after
+        for state in ("queued", "cancelled", "closed"):
+            with self.subTest(state=state):
+                first = self.desk.new_task("Merged work", lane="a", state="merged")
+                other = self.desk.new_task("Another prerequisite", lane="a", state="done")
+                dependent = self.hansa("add", "Needs both", "--lane", "a", "--after", first,
+                                       "--after", other).split()[0]
+                follow = self.hansa("retry", first, "More on top").split()[0]
+                if state == "cancelled":
+                    self.hansa("cancel", follow)
+                elif state == "closed":
+                    self.desk.update(follow, state="done")
+                    self.hansa("close", follow)
+                self.desk.update(other, state="merged")
+                self.assertEqual(after.pending(self.desk.meta(dependent), self.desk.tasks()), [])
+                later = self.hansa("add", "Queued after the follow-up", "--lane", "a", "--after", first).split()[0]
+                self.assertEqual(after.pending(self.desk.meta(later), self.desk.tasks()), [])
+                # Exercise dispatch without starting the unrelated follow-up.
+                with unittest.mock.patch("hansa.run.start") as start:
+                    Dispatcher(self.desk).tick()
+                self.assertIn(dependent, [c.args[1] for c in start.call_args_list])
+                for tid in (dependent, later):
+                    self.assertNotIn("HELD", self.hansa("show", tid))
+                    self.hansa("cancel", tid)
+                if state == "queued":
+                    self.hansa("cancel", follow)
+
+    def test_retry_records_dependency_uses_recorded_replacement(self):
+        from hansa import after
+        for ending in ("closed", "cancelled"):
+            with self.subTest(ending=ending):
+                first = self.desk.new_task("Earlier work", lane="a")
+                dependent = self.hansa("add", "Needs earlier work", "--lane", "a", "--after", first).split()[0]
+                if ending == "closed":
+                    self.desk.update(first, state="done")
+                    self.hansa("close", first)
+                else:
+                    self.hansa("cancel", first)
+                follow = self.hansa("retry", first, "Finish it").split()[0]
+                self.settle(Dispatcher(self.desk), follow)
+                self.hansa("merge", follow)
+                # Older desks can already hold two children. The saved replacement wins.
+                self.desk.update(first, state="replaced", replaced_by=follow, ended_as="cancelled")
+                stray = self.desk.new_task("Old duplicate retry", lane="a", parent=first, state="cancelled")
+                self.assertEqual(after.pending(self.desk.meta(dependent), self.desk.tasks()), [])
+                self.assertNotIn(stray, self.hansa("show", dependent))
+                self.assertEqual(self.settle(Dispatcher(self.desk), dependent)["state"], "done")
+
+    def test_retry_records_goal_keeps_merged_release_and_evidence(self):
+        from hansa import goals, release
+        self.hansa("goal", "add", "Export reports")
+        first = self.goal_evidence_task(unverified="Recorded missing evidence")
+        write_json(release.releases_file(self.desk), [self.goal_evidence_release([first])])
+        original = goals.show(self.desk, "g1")["chains"][0]
+        follow = self.hansa("retry", first, "More on top").split()[0]
+        for state in ("queued", "cancelled"):
+            with self.subTest(state=state):
+                if state == "cancelled":
+                    self.hansa("cancel", follow)
+                shown = json.loads(self.hansa("goal", "show", "g1", "--json"))
+                chains = {m["id"]: m for m in shown["chains"]}
+                self.assertIn(first, chains)
+                self.assertEqual(chains[first], original)
+                self.assertEqual(chains[follow]["state"], state)
+                self.assertIn(f"retry of {first}", chains[follow]["title"])
+                self.assertEqual((chains[follow]["rounds"], shown["rounds"]), (1, 2))
+                self.assertIn("1 merged, 1 merged missing evidence, 1 released", self.hansa("goal", "list"))
+                text = self.hansa("goal", "show", "g1")
+                for word in (first + " merged", follow + " " + state, "release #1", "Recorded missing evidence"):
+                    self.assertIn(word, text)
+                [page] = goals.page_list(self.desk)
+                self.assertEqual([page["counts"][k] for k in ("merged", "missing", "released")], [1, 1, 1])
+                self.assertEqual(page["chains"], shown["chains"])
+
     def test_retry_keeps_a_long_explicit_title_whole(self):
         title = self.LONG_RETRY_TITLE
         self.assertEqual(len(title), 96)

@@ -94,8 +94,8 @@ def decide(desk: Desk, text: str, why: str, *, gid: str = "", by: str = "coordin
 
 def latest_tasks(tasks: list, gid: str) -> list:
     linked = [m for m in tasks if m.get("goal") == gid]
-    parents = {m.get("parent") for m in linked if m.get("kind") != "verify"}
-    return [m for m in linked if m.get("kind") == "verify" or m["id"] not in parents]
+    parents = {m.get("parent") for m in linked if m.get("kind") != "verify" and not m.get("restored_parent")}
+    return [m for m in linked if m.get("kind") == "verify" or m["state"] == "merged" or m["id"] not in parents]
 
 
 def summaries(desk: Desk, tasks: list | None = None, *, all_: bool = False, evidence: bool = False,
@@ -226,8 +226,13 @@ def task_evidence(desk: Desk, m: dict, context: dict) -> dict:
             merge = "merged without one"
         if marks.get("merge_not_checked"):
             missing.append("merge not checked")
+    rounds = rounds_of(desk, m)
+    # Merged work stays a chain of its own. Count only rounds after its merge in a follow-up's chain,
+    # and count an abandoned, never-started follow-up separately from the parent it restored.
+    boundary = max((i + 1 for i, r in enumerate(rounds[:-1]) if r["state"] == "merged"), default=0)
+    count = 1 if m.get("restored_parent") else len(rounds) - boundary
     return {"id": m["id"], "title": m["title"], "state": m["state"], "lane": m.get("lane"),
-            "rounds": len(rounds_of(desk, m)), "check": checked, "verification": verdict,
+            "rounds": count, "check": checked, "verification": verdict,
             "verification_task": v["id"] if v else None, "merge": merge, "merge_commit": m.get("merge_commit"),
             "merge_checked": merge_checked, "despite_check": bool(marks.get("despite_check")),
             "merge_not_checked": bool(marks.get("merge_not_checked")), "missing": missing,
