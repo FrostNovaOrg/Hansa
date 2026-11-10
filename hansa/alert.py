@@ -779,15 +779,72 @@ def _short(line: str) -> str:
 
 
 def _waiting(rec: dict) -> list:
-    """What the record says waits unheard, the oldest first: [{at, line}]."""
+    """What the record says waits unheard, the oldest first: [{what, at, line, event}]."""
     waits = rec.get("waits") if isinstance(rec.get("waits"), dict) else {}
-    return sorted((x for x in waits.values() if isinstance(x, dict) and _at(x.get("at"))), key=lambda x: x["at"])
+    return sorted(({**x, "what": k} for k, x in waits.items() if isinstance(x, dict) and _at(x.get("at"))),
+                  key=lambda x: x["at"])
+
+
+def _task_waits(desk: Desk, tid: str) -> bool:
+    """Whether a task a line was about still waits for the coordinator: done and waiting for review (not merged,
+    closed, or being verified), or failed; a verification's, while it is not closed and its task waits."""
+    from . import notify
+    try:
+        m = desk.meta(tid)
+        if m.get("kind") == "verify":
+            if m.get("closed"):
+                return False
+            m = desk.meta(m.get("parent") or "")
+    except SystemExit:  # its folder is gone
+        return False
+    return m.get("state") == "failed" or notify.waits_review(desk, m["id"])
+
+
+def _still(desk: Desk, waits) -> dict:
+    """Of what the record says waits unheard ({what: {at, line, event}}), what still waits for the coordinator now: a
+    task while it waits (_task_waits), the server's stop while hansa serve is not running (a follower drops it as no
+    news once it runs), anything else while its latest event still says something (notify._item). An entry an older
+    hansa recorded, without its event, stays as it was."""
+    from . import notify
+    from .run import server_state
+    out = {}
+    for what, x in (waits.items() if isinstance(waits, dict) else ()):
+        if not isinstance(x, dict) or not _at(x.get("at")):
+            continue
+        if what.startswith("task "):
+            if not _task_waits(desk, what[5:]):
+                continue
+        elif what == "server":
+            if server_state(desk)["state"] != "gone":
+                continue
+        elif isinstance(x.get("event"), dict):
+            it = notify._item(desk, x["event"])
+            if not it or it[4]:
+                continue
+        out[what] = x
+    return out
+
+
+def _line_now(desk: Desk, x: dict) -> str:
+    """What waits (an entry of _waiting), as a follower would say it now: a task as it is now (as a follower's summary
+    says it), anything else as its latest event says it now."""
+    from . import notify
+    try:
+        if x["what"].startswith("task "):
+            return _short(desk.redact(notify.task_line(desk, desk.meta(x["what"][5:]))))
+        it = notify._item(desk, x["event"]) if isinstance(x.get("event"), dict) else None
+        if it:
+            return _short(desk.redact(it[1]))
+    except SystemExit:  # its folder is gone
+        pass
+    return str(x.get("line") or "")
 
 
 def unheard_check(desk: Desk, t: float | None = None) -> dict:
     """hansa serve's look at the first case of the `coordinator` alert: something a follower would post (notify._item)
     has waited no_session_min in the event log, and the desk has no live follower. What waits since a follower last
-    posted is kept in unheard_file ({pos, waits: {what: {at, line}}, told}); told: when it was alerted. A live
+    posted is kept in unheard_file ({pos, waits: {what: {at, line, event}}, told}), only while it still waits (_still),
+    and said as it reads now (_line_now); told: when it was alerted. A live
     follower, or the case turned off, clears it: the case begins anew. So does a follower the register shows started
     after the alert, live or not (one may start and end between two looks): what waits is then read again from where
     it got to. Returns the record as it is now."""
@@ -815,13 +872,15 @@ def unheard_check(desk: Desk, t: float | None = None) -> dict:
                 it = notify._item(desk, e)
                 if it and not it[4]:  # not a cancel the session made itself: that one knows
                     key = f"task {it[0][1]}" if it[0][0] in ("task", "merge") else " ".join(map(str, it[0]))
-                    waits.setdefault(key, {"at": e["ts"] if _at(e.get("ts")) else t,
-                                           "line": _short(desk.redact(it[1]))})
-        new = {"pos": pos, "waits": waits, **({"told": rec["told"]} if _at(rec.get("told")) else {})}
+                    old = waits.get(key) if isinstance(waits.get(key), dict) else {}
+                    waits[key] = {"at": old["at"] if _at(old.get("at")) else e["ts"] if _at(e.get("ts")) else t,
+                                  "line": _short(desk.redact(it[1])), "event": e}  # its latest event
+        new = {"pos": pos, "waits": _still(desk, waits), **({"told": rec["told"]} if _at(rec.get("told")) else {})}
         items = _waiting(new)
-        if items and "told" not in new and t - items[0]["at"] >= mins * 60 and configured(desk, s) \
-                and add(desk, "coordinator", unheard_text(desk, items, t), zh=unheard_text(desk, items, t, zh=True)):
-            new["told"] = t
+        if items and "told" not in new and t - items[0]["at"] >= mins * 60 and configured(desk, s):
+            items[0] = {**items[0], "line": _line_now(desk, items[0])}
+            if add(desk, "coordinator", unheard_text(desk, items, t), zh=unheard_text(desk, items, t, zh=True)):
+                new["told"] = t
     if new != stored:
         desk.state_dir.mkdir(mode=0o700, exist_ok=True)
         write_json(unheard_file(desk), new)
@@ -886,13 +945,14 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
         text_zh = (f"协调员未收到：会话 {who_zh} 的收件箱已拒收 {_mins(t - since)} 分钟 · hansa 保留消息并重试")
     elif req.get("case") == "window":
         since = req["since"] if _at(req.get("since")) else t
+        posted = req["posted"] if _at(req.get("posted")) and req["posted"] else since  # the first thing's post
         count = req["count"] if isinstance(req.get("count"), int) else 0
         text = (f"the coordinator's session {who} has waited on its window (a permission dialog or a question) for "
                 f"{_mins(t - since)} min, so it cannot act on what hansa posted to it: {count} thing(s) since "
-                f"{time.strftime('%H:%M', time.localtime(since))}, the oldest: {_short(req.get('oldest') or '')} · "
+                f"{time.strftime('%H:%M', time.localtime(posted))}, the oldest: {_short(req.get('oldest') or '')} · "
                 "answer it in that session")
         text_zh = (f"协调员的会话 {who_zh} 已在窗口上等了 {_mins(t - since)} 分钟（权限对话框或提问），"
-                   f"无法处理 hansa 发来的消息：从 {time.strftime('%H:%M', time.localtime(since))} 起共 {count} 件，"
+                   f"无法处理 hansa 发来的消息：从 {time.strftime('%H:%M', time.localtime(posted))} 起共 {count} 件，"
                    f"最早的是：{_short(req.get('oldest') or '')} · 请在那个会话里回答")
     elif req.get("case") == "review" and notify.TASK_ID.match(str(req.get("task") or "")):
         tid = req["task"]
@@ -902,10 +962,11 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
             return ""
         title = m.get("title", "")
         posted = req["posted"] if _at(req.get("posted")) else t
+        ended = bool(req.get("ended"))  # a follower started afresh: it waits since it ended (notify.Watch.restore)
         text = (f"the coordinator's session {who} is idle while {tid} has waited for review for {_mins(t - posted)} "
-                f"min since hansa posted it there: {title} · hansa does not post it again")
-        text_zh = (f"协调员的会话 {who_zh} 空闲，但 {tid} 自 hansa 发到那里后已等了 {_mins(t - posted)} 分钟待审："
-                   f"{title} · hansa 不会重复发送")
+                f"min since {'it ended' if ended else 'hansa posted it there'}: {title} · hansa does not post it again")
+        text_zh = (f"协调员的会话 {who_zh} 空闲，但 {tid} 自{'结束' if ended else ' hansa 发到那里'}后已等了 "
+                   f"{_mins(t - posted)} 分钟待审：{title} · hansa 不会重复发送")
         with desk.lock():
             try:
                 told = read_json(reviews_file(desk), {})
@@ -953,11 +1014,23 @@ def turn_text(req: dict, who: str, who_zh: str, t: float) -> tuple:
     error = str(req.get("error") or "unknown")[:40]
     at = time.strftime("%H:%M", time.localtime(since))
     en, zh = TURN_ADVICE.get(error, ("", ""))
+    if req.get("principal"):  # the principal's own request failed; nothing says the session's turns keep failing
+        failed = time.strftime("%H:%M", time.localtime(req["at"] if _at(req.get("at")) else since))
+        return (f"the coordinator's session {who}: {principal_turn_text(error, failed)}" + (f" · {en}" if en else ""),
+                f"协调员的会话 {who_zh}：{principal_turn_text(error, failed, zh=True)}" + (f" · {zh}" if zh else ""))
     text = (f"the coordinator's session {who} cannot work: its turns end with an API error ({error}) since {at} "
             f"({_mins(t - since)} min) · {count} thing(s) hansa posted to it wait unhandled" + (f" · {en}" if en else ""))
     text_zh = (f"协调员的会话 {who_zh} 无法工作：自 {at} 起（{_mins(t - since)} 分钟）轮次一直以 API 错误（{error}）结束 · "
                f"hansa 发去的 {count} 件事尚未处理" + (f" · {zh}" if zh else ""))
     return text, text_zh
+
+
+def principal_turn_text(error: str, at: str, zh: bool = False) -> str:
+    """A turn the principal started ended with an API error at HH:MM (notify.Turns' principal): what it says."""
+    if zh:
+        return f"负责人自己的请求在 {at} 因 API 错误（{error}）结束，没有完成 · 请在那个会话里再输入一次"
+    return (f"the principal's own request ended with an API error ({error}) at {at} and was not done · type it again "
+            "in that session")
 
 
 def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
@@ -970,10 +1043,11 @@ def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
     mins = coordinator_alert_settings(s)
     lives, out = notify.live_records(desk), []
     turn_on = bool(mins["turn_min"]) and configured(desk, s)
-    items = _waiting(_unheard(desk)) if not lives and mins["no_session_min"] else []
+    rec = _unheard(desk) if not lives and mins["no_session_min"] else {}
+    items = _waiting({"waits": _still(desk, rec.get("waits"))}) if rec.get("waits") else []  # what still waits now
     if items and t - items[0]["at"] >= mins["no_session_min"] * 60:
         out.append(f"no session hears from hansa, so the coordinator's session cannot be reached: {len(items)} "
-                   f"thing(s) wait for it, the oldest for {_mins(t - items[0]['at'])} min ({items[0]['line']})")
+                   f"thing(s) wait for it, the oldest for {_mins(t - items[0]['at'])} min ({_line_now(desk, items[0])})")
     for r in lives:
         holds = r.get("coordinator") if isinstance(r.get("coordinator"), dict) else {}
         who = notify.who((r.get("session") or {}).get("pid"), r.get("name") or "")
@@ -1007,6 +1081,10 @@ def turn_line(turn, who: str, t: float, on: bool) -> str:
             else "the principal is not alerted yet" if on
             else "the principal is not alerted: turn alerts are off (no alert channel, or turn_min 0)")
     error = str(turn.get("error") or "unknown")[:40]
+    if turn.get("principal"):  # until the next turn that ends well
+        failed = turn["at"] if _at(turn.get("at")) else since
+        return (f"the coordinator's session {who}: "
+                f"{principal_turn_text(error, time.strftime('%H:%M', time.localtime(failed)))} · {told}")
     return (f"the coordinator's session {who}: its turns end with an API error ({error})"
             f" since {time.strftime('%H:%M', time.localtime(since))} ({_mins(t - since)} min) · hansa posted again "
             f"what waits {reposts} time(s) · {told}")

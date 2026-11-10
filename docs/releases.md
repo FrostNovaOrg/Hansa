@@ -733,6 +733,10 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   in the event log, and no session hears from hansa (its session ended, or notifications were turned off).
   `hansa serve` sends it once, and again only after a follower has run since, live when it looks or started and
   ended between two of its looks, and the case begins anew.
+  Only what still waits for the coordinator counts, said as it reads now: a task while it waits for review or has
+  failed (not once it is merged, closed or cancelled, nor while a verification of it runs), and the server's stop
+  only while `hansa serve` is not running, so a server that starts again after a stop does not alert of its own stop.
+  `hansa status` counts the same way.
   A session that starts hearing still first gets what was missed, as before.
   The same minutes also cover a running session whose inbox refuses posts: its follower alerts once, saying that
   the inbox refuses posts, and keeps the lines to try again. A successful post ends that stretch; a later stretch
@@ -741,13 +745,19 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   refusals while lines wait count; a failed post an older hansa recorded starts none. While its follower tries
   again, the session still counts as heard, and `hansa status` keeps the line.
 - **The session waits on its window** (10 minutes): `claude agents --json` lists the session as `waiting` (a
-  permission dialog or a question is open) that long after something was posted to it. Once per stretch of waiting.
-  Only `waiting` counts: `busy`, `idle`, `shell`, a status hansa does not know, or no answer sends nothing, and a
-  lookup that fails is written in the follower's log.
+  permission dialog or a question is open) that long, with something posted to it that it has not finished. The wait
+  counts from the first lookup that saw it `waiting`, or from the post when the dialog was already open. A session that
+  takes a post (`busy`) and then stops on a dialog counts too, however long it was busy first; once a lookup sees it
+  otherwise than `busy` or `waiting` (`idle`, say), what was posted before counts as finished. Once per stretch of
+  waiting. Only `waiting` alerts: `busy`, `idle`, `shell`, a status hansa does not know, or no answer sends nothing,
+  and a lookup that fails is written in the follower's log.
 - **Posted work sits untouched** (120 minutes): a task hansa posted to the session has waited that long for review
   (done, not merged or closed), and the session is `idle` at a lookup after that. Once per task across the desk,
   however many followers watch it (a task that records no session goes to each); its next round may alert again.
-  hansa does not post it again.
+  hansa does not post it again. A task does not wait for review while a verification of it is queued or running,
+  whoever asked for it; its verdict's post starts the wait again. A follower started afresh (the session quit and
+  opened again, a reboot, `hansa up`) takes the tasks that already wait for review and would be posted to its
+  session, as waiting since they ended (or their verification did): the alert says `since it ended`.
 - **Its turns fail** (30 minutes, `turn_min`): API errors keep ending the session's turns (case `turn`).
   Errors only the principal can fix alert at once. After an alert, a normal turn
   sends one quiet recovery notice (case `turn_ok`, passive). This also works with push addresses alone.
@@ -757,8 +767,9 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   reposts in a stretch of failures, one per failed turn, none once the principal was alerted, and none for a
   turn the principal started (that one alerts after the minutes). By the error:
   - `rate_limit`, `overloaded`, `server_error`, `unknown` (waiting may cure them): reposts 2, 10 and 30 minutes
-    after the stretch began; the alert after the minutes. For `rate_limit` it adds that a usage limit may only
-    reset hours later.
+    after the stretch began; the alert after the minutes, but not while the turn a repost started may still end
+    well: it waits until that turn ends with an error too, or until no turn has started 3 minutes after the repost
+    (the session is not seen busy or waiting). For `rate_limit` it adds that a usage limit may only reset hours later.
   - `billing_error`, `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `model_not_found`,
     `cloud_credential_error`, `invalid_request` (only the principal can fix them): the alert at once, and no
     repost until a turn ends normally. For `invalid_request` it adds that `/compact` or `/clear` in that session
@@ -767,17 +778,21 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
     after it fails too, or after 2 minutes when nothing waits. It says to log in again in that session.
   - `max_output_tokens`: one repost at once, ending `go on`; the alert if the next failure is that too.
 
-  The alert names the session, the error, since when and how many things posted to it wait unhandled. 0 turns the
-  `turn` and `turn_ok` alerts off; the reposts still go. While a stretch holds, `hansa status` shows one line for
-  the session, such as `the coordinator's session pid 4242 (desk-b4): its turns end with an API error (overloaded)
-  since 14:02 (12 min) · hansa posted again what waits 2 time(s) · the principal is not alerted yet`; none once a
-  turn ends normally.
+  The alert names the session, the error, since when and how many things posted to it wait unhandled. When only the
+  principal's own request failed in the stretch (no turn hansa started did), it says that instead, with no minutes:
+  `the principal's own request ended with an API error (overloaded) at 16:00 and was not done · type it again in
+  that session`. 0 turns the `turn` and `turn_ok` alerts off; the reposts still go. While a stretch holds, `hansa
+  status` shows one line for the session, such as `the coordinator's session pid 4242 (desk-b4): its turns end with
+  an API error (overloaded) since 14:02 (12 min) · hansa posted again what waits 2 time(s) · the principal is not
+  alerted yet`, or the principal's own request in the same words as its alert; none once a turn ends normally.
 
 The session's follower looks the last two up, at most once a minute counting its lookup of the session's name (one
 run of `claude agents --json` serves both), and only while one could hold: something was
-posted in the minutes of the second case or waits to be posted, or a task it posted has waited the minutes of the
-third. It looks nothing up in an idle round with nothing waiting, nor while no alert channel is set up, and what it has
-alerted stays alerted when it restarts on new code. `hansa status` shows a line while a case holds, such as
+posted in the minutes of the second case or waits to be posted, or the session was last seen `busy` or `waiting` with
+something posted it has not finished, or a task it posted has waited the minutes of the third, or was alerted of and
+still waits for review (so that its status line shows only while the session is `idle`). It looks nothing up in an
+idle round with nothing waiting, nor while no alert channel is set up, and what it has alerted stays alerted when it
+restarts on new code. `hansa status` shows a line while a case holds, such as
 `the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`.
 
 ### Push addresses and services
