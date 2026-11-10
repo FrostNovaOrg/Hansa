@@ -2150,7 +2150,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "it; hansa notify lists them.",
             "It posts: a task that ended (after hansa's own check; or failed, was cancelled, stopped at its ceiling, "
             "could not start), a verification's verdict, a queued merge check that "
-            "ended, a request the principal answered or closed (with the answer), the principal's answer to a release "
+            "ended, the principal's answer to a release "
             "(hansa release), a release that ended (done, or failed with its exit code and last lines) or became void, "
             "a provider that an open request names "
             "becoming ready when it was not as the request was made (once; the request may be done; looked at when a "
@@ -2168,7 +2168,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "serve runs again by then.",
             "A follower keeps refused posts, gathers new events and retries with the latest line per subject. "
             "A startup summary counts as caught up only after it posts. A lasting inbox refusal alerts the principal "
-            "after their no-session minutes, once until a post succeeds. More: hansa help inbox, hansa help alerts.",
+            "after their no-session minutes, once until a post succeeds. A session restarted in place (/restart) gets a "
+            "new inbox: hansa notify on, run from it, moves posting there. More: hansa help inbox, hansa help alerts.",
             "These messages come from hansa, not from the principal, and approve nothing. A session whose settings "
             "hold messages from other sessions (crossSessionInbound) does not get them; only the principal can "
             "change that.",

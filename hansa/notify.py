@@ -55,7 +55,7 @@ from .run import alive, claude_bin, proc_cwd, proc_start, rethink_text, server_s
 
 LIVE_SECONDS = 30  # a follower not seen for this long is not live (it polls every second or two)
 SEEN_EVERY = 10  # a feed that changes nothing else in the follower's record writes its seen this often
-MOST_LINES = 10  # past this many events in one message, the rest are counted, and hansa status has them
+MOST_LINES = 10  # past this many lines in one message, the older ones are given short, on one line (message)
 POST_WAIT = 60  # seconds to try a post before gathering new lines and trying again
 KEEP_DAYS = 7  # ended followers' records are kept this long
 KEY = re.compile(r"^[0-9]+-[0-9a-f]{8}$")
@@ -256,6 +256,14 @@ def _item(desk: Desk, e: dict, me=None):
     or None. The session that cancelled a task with hansa cancel does not hear that it was cancelled.
     me: the follower's record, for what the server-stopped line tells its session to run."""
     kind, tid = e.get("event"), e.get("task")
+    if kind == "task_cancel" and e.get("ended"):  # hansa cancel of a queued task, hansa close of a done one: no
+        try:                                       # task_finished follows (a running one's comes from hansa serve)
+            m = desk.meta(tid)
+        except SystemExit:
+            return None
+        if m.get("state") != "cancelled":
+            return None
+        return ("task", tid), task_line(desk, m), m.get("session"), False, m.get("cancel_by")
     if kind == "task_after_held":
         from . import after
         try:
@@ -468,7 +476,7 @@ def items_for(desk: Desk, events: list, me: dict) -> list:
             continue  # its own session hears it
         review = _review_task(desk, key)
         out.pop(key, None)  # the latest line of a task comes last
-        out[key] = {"key": list(key), "line": desk.redact(line),  # review: the task waits for review (Watch)
+        out[key] = {"key": list(key), "line": clean(desk.redact(line)),  # review: the task waits for review (Watch)
                     **({"review": review} if review else {})}
     return list(out.values())
 
@@ -606,7 +614,8 @@ def handle(desk: Desk, req: dict) -> dict:
                     continue  # it runs now: that it stopped while this session was away is not news
                 seen.add(k)
                 try:
-                    summary.append(desk.redact(task_line(desk, desk.meta(k[1]))) if k[0] == "task" else x["line"])
+                    summary.append(clean(desk.redact(task_line(desk, desk.meta(k[1])))) if k[0] == "task"
+                                   else x["line"])
                 except SystemExit:  # a task folder gone meanwhile
                     continue
                 summary_items.append({**x, "key": list(k), "line": summary[-1]})
@@ -697,9 +706,20 @@ def private_dir(desk: Desk) -> Path:
 
 
 # -- posting --------------------------------------------------------------------------------------------
+def clean(text: str) -> str:
+    """Text that can be written as UTF-8: a byte that was not UTF-8 (a task title given as `$'caf\\xe9'`, which
+    Python holds as a lone surrogate) becomes U+FFFD. One such line must not stop a follower, nor the next one,
+    which would stop at the same line as it caught up."""
+    return SURROGATE.sub("\ufffd", text)
+
+
+SURROGATE = re.compile("[\ud800-\udfff]")
+
+
 def post(path: str, text: str) -> None:
     """Post one message to a session's inbox: one line of JSON, then close. HANSA_NOTIFY_CAPTURE names a
     file that gets what would be sent instead (the tests' sandbox cannot make a Unix socket)."""
+    text = clean(text)
     line = json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False) + "\n"
     capture = os.environ.get("HANSA_NOTIFY_CAPTURE")
     if capture:
@@ -712,10 +732,19 @@ def post(path: str, text: str) -> None:
         s.sendall(line.encode("utf-8"))
 
 
+def short(line: str) -> str:
+    """A line as its subject and what happened: up to its first ': ' or ' · ' (`t0001 done`)."""
+    cut = min((i for i in (line.find(": "), line.find(" · ")) if i >= 0), default=len(line))
+    return line[:cut] if cut <= 80 else line[:77] + "..."
+
+
 def message(desk_root: str, lines: list, head: str = "") -> str:
-    shown = lines if len(lines) <= MOST_LINES else lines[:MOST_LINES]
-    more = [f"- and {len(lines) - len(shown)} more: hansa status"] if len(lines) > len(shown) else []
-    return "\n".join([f"[hansa] desk {desk_root}" + (f": {head}" if head else "")] + [f"- {x}" for x in shown] + more)
+    """One message: the header, then a line per subject, oldest first. Past MOST_LINES the newest are shown whole,
+    and those before them in one line, each as its subject and what happened (short), so none is left out."""
+    older, shown = lines[:-MOST_LINES], lines[-MOST_LINES:]
+    before = [f"- {len(older)} earlier: " + "; ".join(short(x) for x in older)] if older else []
+    return "\n".join([f"[hansa] desk {desk_root}" + (f": {head}" if head else "")] + before
+                     + [f"- {x}" for x in shown])
 
 
 # -- the follower ---------------------------------------------------------------------------------------
@@ -1143,10 +1172,10 @@ def repost_text(desk_root: str, r: dict, zh: bool = False) -> str:
     at = time.strftime("%H:%M", time.localtime(r["at"]))
     lines = r["lines"]
     if zh:
-        head = f"你的上一轮在 {at} 因 API 错误（{r['error']}）结束。" + ("此后发来、尚未处理的：" if lines else "")
-    else:
+        head = f"你的上一轮在 {at} 因 API 错误（{r['error']}）结束。" + ("已发来、尚未处理的：" if lines else "")
+    else:  # the lines were posted before that turn (they started it), not since
         head = (f"Your last turn ended with an API error ({r['error']}) at {at}."
-                + (" Posted since then and not yet handled:" if lines else ""))
+                + (" Posted and not yet handled:" if lines else ""))
     text = message(desk_root, lines, head)
     return text + ("\n" + ("请继续" if zh else "go on") if r.get("go_on") else "")
 
@@ -1161,7 +1190,7 @@ def refused_since(last_post, pending: bool):
 
 
 def _say(text: str) -> None:
-    print(time.strftime("%Y-%m-%d %H:%M:%S ") + text, flush=True)
+    print(time.strftime("%Y-%m-%d %H:%M:%S ") + clean(text), flush=True)
 
 
 def missed_head(m) -> str:
@@ -1401,6 +1430,7 @@ def _deliver(sock: str, text: str, sess: dict, me: dict, beat=None, wait: float 
     beat: called at each refused try, to keep the follower's record live while this blocks.
     wait=0: try a startup-only notice once, so its refusal never delays reading task events."""
     wait = POST_WAIT if wait is None else wait
+    text = clean(text)
     end = time.time() + wait
     failed = me.get("last_post") or {}
     failed = failed if refused_since(failed, True) is not None else {}  # an older follower's failure: a new stretch
@@ -1420,8 +1450,11 @@ def _deliver(sock: str, text: str, sess: dict, me: dict, beat=None, wait: float 
             if beat:
                 beat()
             if time.time() >= end:
-                me["last_post"] = {**failed, "at": now(), "text": f"could not post: {e}", "failed": True,
-                                   "since": since}
+                # gone: no inbox at that path, as after the session's restart in place (/restart), which gives it
+                # a new one; hansa status says so, and that hansa notify on from the session moves posting there
+                me["last_post"] = {**{k: v for k, v in failed.items() if k != "gone"}, "at": now(),
+                                   "text": f"could not post: {e}", "failed": True, "since": since,
+                                   **({"gone": True} if isinstance(e, FileNotFoundError) else {})}
                 _say(f"inbox still refuses posts after {wait} s; keeping the lines to try again ({e}): "
                      + text.replace("\n", " | ")[:500])
                 time.sleep(2)  # the next batch's first try must not come faster than the tries within this one
@@ -1543,6 +1576,14 @@ def turn_on(desk: Desk) -> str:
         raise SystemExit("hansa: notify on starts hansa posting to the Claude Code session it is run from, and this "
                          "is not run from one (CLAUDE_PID and CLAUDE_CODE_MESSAGING_SOCKET are not set); nothing was "
                          "started. Run it with the coordinator session's Bash tool")
+    st = running(desk, key_of(sess))
+    old = st.get("socket") if st and st.get("socket") != sock else ""
+    if old:  # it posts to an inbox the session no longer has: restarted in place (Claude Code's /restart), the
+        _stop(st)  # session got a new one. The next follower first posts what this one could not
+        if running(desk, key_of(sess)):
+            raise SystemExit(f"hansa: the follower that posts to this session's earlier inbox {old} did not stop "
+                             f"within 10 s (pid {st['pid']}); nothing was started. hansa notify lists the desk's "
+                             "followers")
     how = start(desk, sess, sock)  # its follower looks the name up; this command starts no claude
     name = next((r.get("name") or "" for r in records(desk) if same(r.get("session"), sess)), "")
     if how == "already":
@@ -1554,7 +1595,22 @@ def turn_on(desk: Desk) -> str:
     said = (f"hansa now posts to this session, {who(sess['pid'], name)}, through its inbox: its own tasks and requests, and "
             "those no other session hears. Do not keep hansa wait running in the background meanwhile. "
             "Stop it with hansa notify off")
+    if old:
+        said = (f"hansa posted to this session's earlier inbox, {old}, which it no longer has (a restart in place "
+                f"gives a session a new one); it posts to {sock} now, first what the earlier one could not post. "
+                + said)
     return said
+
+
+def _stop(st: dict) -> None:
+    """Stop a follower (its state, as running gives it), waiting up to 10 s for it to end."""
+    try:
+        os.kill(st["pid"], signal.SIGTERM)
+    except OSError:
+        pass
+    end = time.time() + 10
+    while time.time() < end and alive(st["pid"], st.get("start", "")):
+        time.sleep(0.1)
 
 
 def turn_off(desk: Desk) -> str:
@@ -1565,13 +1621,7 @@ def turn_off(desk: Desk) -> str:
     st = running(desk, key_of(sess))
     if not st:
         return "hansa does not notify this session; nothing to stop"
-    try:
-        os.kill(st["pid"], signal.SIGTERM)
-    except OSError:
-        pass
-    end = time.time() + 10
-    while time.time() < end and alive(st["pid"], st.get("start", "")):
-        time.sleep(0.1)
+    _stop(st)
     return ("hansa no longer posts to this session. To hear when tasks end, run hansa wait in the background, "
             "or hansa notify on again")
 

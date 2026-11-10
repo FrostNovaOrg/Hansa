@@ -19734,6 +19734,90 @@ def save():'''))
         self.assertEqual(heard[b], ["t0001", "t0003", "t0004", vid])
         self.assertEqual(self.desk.meta(vid)["cancel_by"], sess[a])
 
+    def test_a_queued_cancel_or_a_done_close_from_elsewhere_is_posted_to_the_session_that_made_it(self):
+        # as the commands log them: a queued task's cancel and a done task's close write task_cancel and no
+        # task_finished; a running task's cancel is posted when hansa serve has stopped it (its task_finished)
+        (a, sa), (b, sb) = self.session(), self.session()
+        with self.in_session(a, sa):
+            for title in ("Cancelled by b", "Cancelled from a shell", "Closed by b", "Cancelled by a", "Running"):
+                self.hansa_out("add", title)
+        self.desk.update("t0003", state="done", finished=time.time())
+        self.desk.update("t0005", state="running")
+        start = notify.log_end(self.desk)
+        with self.in_session(b, sb):
+            self.hansa_out("cancel", "t0001")
+            self.hansa_out("close", "t0003")
+            self.hansa_out("cancel", "t0005")  # still running: hansa serve stops it and writes its end
+        self.hansa_out("cancel", "t0002")
+        with self.in_session(a, sa):
+            self.hansa_out("cancel", "t0004")
+        events, _ = notify.read_log(self.desk, start)
+        sess = {p: {"pid": p.pid, "start": notify.proc_start(p.pid)} for p in (a, b)}
+        heard = {p: {x["key"][1]: x["line"] for x in notify.items_for(self.desk, events, {"key": "k", "session": sess[p]})}
+                 for p in (a, b)}
+        self.assertEqual(sorted(heard[a]), ["t0001", "t0002", "t0003"])
+        self.assertIn("t0001 cancelled: Cancelled by b (cancelled before it started) · next: hansa show t0001",
+                      heard[a]["t0001"])
+        self.assertIn("t0002 cancelled: Cancelled from a shell (cancelled before it started)", heard[a]["t0002"])
+        self.assertIn("t0003 cancelled: Closed by b (closed without merging)", heard[a]["t0003"])
+        self.assertEqual(sorted(heard[b]), ["t0002", "t0004"])  # not what b cancelled or closed itself
+
+    def test_a_long_message_shows_the_newest_lines_and_the_older_ones_short(self):
+        lines = [f"t{i:04d} {'failed' if i == 2 else 'done'}: Task {i} (check passed) · next: hansa show t{i:04d}"
+                 for i in range(1, 15)]
+        text = notify.message("/desk", lines, "head").splitlines()
+        self.assertEqual(text[:2], ["[hansa] desk /desk: head",
+                                    "- 4 earlier: t0001 done; t0002 failed; t0003 done; t0004 done"])
+        self.assertEqual(text[2:], [f"- {x}" for x in lines[4:]])  # the newest ten, whole
+        self.assertEqual(notify.message("/desk", lines[:10]).splitlines()[1:], [f"- {x}" for x in lines[:10]])
+        self.assertEqual(notify.short("hansa serve stopped: no task starts"), "hansa serve stopped")
+        self.assertEqual(notify.short("t0001: Title · waits for t0002"), "t0001")
+        self.assertEqual(len(notify.short("x" * 200)), 80)
+
+    def test_explain_notify_lists_only_what_is_posted(self):
+        text = views.explain_text(self.desk, "notify")
+        self.assertNotIn("answered or closed", text)
+        self.assertIn("hansa notify on, run from it, moves posting there", text)
+
+    def test_a_title_that_is_not_utf8_is_posted_with_the_byte_replaced_and_posting_goes_on(self):
+        a, sa = self.session()
+        with self.in_session(a, sa):
+            self.hansa_out("notify", "on")
+            # as `hansa add --title $'fix caf\xe9 menu'` gives it from a shell
+            self.hansa_out("add", "--title", os.fsdecode(b"fix caf\xe9 menu"), "Fix the menu")
+        self.settle(Dispatcher(self.desk), "t0001")
+        said = self.soon(lambda: [x for x in self.posts(sa) if "t0001" in x], timeout=60)
+        self.assertIn("- t0001 done: fix caf\ufffd menu", said[0])
+        with self.in_session(a, sa):
+            self.hansa_out("add", "Then this")
+        self.settle(Dispatcher(self.desk), "t0002")
+        self.assertIn("- t0002 done: Then this", self.soon(lambda: [x for x in self.posts(sa) if "t0002" in x],
+                                                           timeout=60)[0])
+        self.assertTrue(notify.live_records(self.desk))
+        self.assertEqual(notify.clean("caf\udce9 \ud800"), "caf\ufffd \ufffd")
+
+    def test_notify_on_from_a_session_restarted_in_place_posts_to_its_new_inbox(self):
+        a, sa = self.session()
+        key = notify.key_of({"pid": a.pid, "start": notify.proc_start(a.pid)})
+        with self.in_session(a, sa):
+            self.hansa_out("notify", "on")
+        old = notify.running(self.desk, key)
+        self.assertEqual(old["socket"], sa)
+        new = sa.replace(".sock", "-restarted.sock")  # the same process, a new inbox: Claude Code's /restart
+        with self.in_session(a, new):
+            said = self.hansa_out("notify", "on")
+        self.assertIn(f"earlier inbox, {sa}, which it no longer has", said)
+        self.assertIn(f"it posts to {new} now", said)
+        self.assertEqual(notify.running(self.desk, key)["socket"], new)
+        self.assertNotEqual(notify.running(self.desk, key)["pid"], old["pid"])
+        with self.in_session(a, new):
+            self.assertIn("already notifies this session", self.hansa_out("notify", "on"))
+            self.hansa_out("add", "After the restart")
+        self.settle(Dispatcher(self.desk), "t0001")
+        self.assertIn("- t0001 done: After the restart",
+                      self.soon(lambda: [x for x in self.posts(new) if "t0001" in x], timeout=60)[0])
+        self.assertEqual([x for x in self.posts(sa) if "t0001" in x], [])
+
     def test_a_feed_with_nothing_new_reads_no_records_and_writes_the_followers_only_on_a_change_or_every_ten_s(self):
         t0 = time.time()
         clock = [t0]
@@ -48673,9 +48757,10 @@ else:
             return self.hansa_out("status")
 
     def follow_with_refusing_inbox(self, seconds, accepts, at=None, sess=None, resume=None, restart_at=None,
-                                   start=None) -> dict:
+                                   start=None, error=None) -> dict:
         """A real follower and desk feed, with only its inbox and clock replaced. Sleeps advance the clock and
-        run due desk changes; every post attempt is recorded, including those the inbox refuses."""
+        run due desk changes; every post attempt is recorded, including those the inbox refuses. error: what a
+        refused post raises (by default, ConnectionRefusedError)."""
         from hansa import alert
         sess = sess or dict(self.WATCHED)
         t0 = float(int(time.time())) if start is None else start
@@ -48691,7 +48776,7 @@ else:
             elapsed = clock[0] - t0
             got["attempts"].append((elapsed, text))
             if not accepts(elapsed):
-                raise ConnectionRefusedError("test inbox refuses posts")
+                raise error() if error else ConnectionRefusedError("test inbox refuses posts")
             got["posts"].append((elapsed, text))
 
         def ask(req):
@@ -48934,6 +49019,20 @@ else:
         tries = [t for t, _ in got["attempts"]]
         self.assertTrue(all(b - a >= 2 for a, b in zip(tries, tries[1:])), tries)
         self.assertEqual([("Refused while live" in text) for _, text in got["posts"]], [True])
+
+    def test_status_says_an_inbox_that_is_gone_and_the_way_out(self):
+        # a session restarted in place (Claude Code's /restart) has a new inbox: the old path is no more
+        self.coordinator_desk("inbox-gone", no_session_min=2, window_min=0, review_min=0)
+        statuses = []
+        at = {1: lambda: self.coordinator_task_ended("Posted to a gone inbox"),
+              200: lambda: statuses.append(self.hansa_out("status"))}
+        got = self.follow_with_refusing_inbox(240, lambda t: t >= 230, at=at,
+                                              error=lambda: FileNotFoundError(2, "No such file or directory"))
+        self.assertRegex(statuses[0], r"its inbox fake-inbox is gone \(no such file\) for \d+ min")
+        self.assertIn("next: hansa notify on, from that session", statuses[0])
+        self.assertNotIn("inbox refuses posts", statuses[0])
+        self.assertEqual([("Posted to a gone inbox" in text) for _, text in got["posts"] if "\n- t" in text], [True])
+        self.assertNotIn("gone", got["requests"][-1]["me"]["last_post"])  # posted since: no longer gone
 
     def follow_on_a_clock(self, minutes, at=None, start=None, restart_at=None, resume=None, step=10.0, namer=False,
                           also=()) -> tuple:
@@ -49711,10 +49810,10 @@ else:
         r = {"why": "wait", "error": "overloaded", "at": at, "lines": ["t0001 done: Add a", "t0002 failed: Add b"],
              "go_on": False}
         self.assertEqual(notify.repost_text("/d", r), "[hansa] desk /d: Your last turn ended with an API error "
-                         "(overloaded) at 14:02. Posted since then and not yet handled:\n- t0001 done: Add a\n"
+                         "(overloaded) at 14:02. Posted and not yet handled:\n- t0001 done: Add a\n"
                          "- t0002 failed: Add b")
         self.assertEqual(notify.repost_text("/d", {**r, "go_on": True}, zh=True),
-                         "[hansa] desk /d: 你的上一轮在 14:02 因 API 错误（overloaded）结束。此后发来、尚未处理的：\n"
+                         "[hansa] desk /d: 你的上一轮在 14:02 因 API 错误（overloaded）结束。已发来、尚未处理的：\n"
                          "- t0001 done: Add a\n- t0002 failed: Add b\n请继续")
         self.assertEqual(notify.repost_text("/d", {**r, "lines": [], "go_on": True}),
                          "[hansa] desk /d: Your last turn ended with an API error (overloaded) at 14:02.\ngo on")
@@ -49778,7 +49877,7 @@ else:
         posted = self.posts(str(self.tmp / f"inbox-{self.desk.root.name}.sock"))
         self.assertEqual(len(posted), 2, (posted, log))
         self.assertIn("Your last turn ended with an API error (overloaded) at ", posted[1])
-        self.assertIn("Posted since then and not yet handled:\n- t0001 done: Add a", posted[1])
+        self.assertIn("Posted and not yet handled:\n- t0001 done: Add a", posted[1])
         self.assertEqual(carried["turns"]["reposts"], 1)
         # after the restart: no repost again; the alert at turn_min, once
         log, end, carried = self.follow_on_a_clock(9, start=end, resume=carried, restart_at=4)

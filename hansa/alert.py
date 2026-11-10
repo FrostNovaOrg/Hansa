@@ -1052,7 +1052,13 @@ def coordinator_lines(desk: Desk, s: dict, t: float | None = None) -> list:
         holds = r.get("coordinator") if isinstance(r.get("coordinator"), dict) else {}
         who = notify.who((r.get("session") or {}).get("pid"), r.get("name") or "")
         since = holds.get("inbox")
-        if mins["no_session_min"] and _at(since) and t - since >= mins["no_session_min"] * 60:
+        lp = r.get("last_post") if isinstance(r.get("last_post"), dict) else {}
+        if mins["no_session_min"] and _at(since) and t - since >= mins["no_session_min"] * 60 and lp.get("gone"):
+            out.append(f"the coordinator's session {who} cannot be reached: its inbox {r.get('socket')} is gone (no "
+                       f"such file) for {_mins(t - since)} min, as after a restart of the session in place (Claude "
+                       "Code's /restart gives it a new inbox); hansa keeps the lines · next: hansa notify on, from "
+                       "that session")
+        elif mins["no_session_min"] and _at(since) and t - since >= mins["no_session_min"] * 60:
             out.append(f"the coordinator's session {who} cannot be reached: its inbox refuses posts for "
                        f"{_mins(t - since)} min; hansa keeps the lines and tries again")
         since = holds.get("window")

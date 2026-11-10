@@ -1206,7 +1206,9 @@ def cmd_cancel(a):
         desk.event("merge_check_cancel", task=a.id)
         print(f"{a.id}'s merge check stopped; nothing was merged, and {a.id} is back waiting for review")
         return
-    desk.event("task_cancel", task=a.id)
+    # ended: it ended here, cancelled before it started, and no task_finished follows (a running task's comes from
+    # hansa serve as it stops it): the follower posts this event (notify._item), to any session but this one
+    desk.event("task_cancel", task=a.id, **({"ended": True} if m["state"] == "queued" else {}))
     print(f"{a.id} cancelled" + (f"; {restored['id']} restored to "
           + ("waiting for review" if restored["ended_as"] == "done" else restored["ended_as"]) if restored else ""))
 
@@ -1231,8 +1233,8 @@ def cmd_close(a):
             desk.event("verification_closed", task=a.id, by="hansa close")
         print((f"{had}; it stays failed, and hansa show {a.id} still says why" if had else
                f"{a.id} closed; it stays done" + (f", verdict: {m['verdict']}" if m.get("verdict") else "")))
-    else:
-        desk.event("task_cancel", task=a.id)
+    else:  # finished work closed ends cancelled here: posted to any session but this one, as hansa cancel's is
+        desk.event("task_cancel", task=a.id, **({"ended": True} if m["state"] == "done" else {}))
         print(f"{had} without merging; hansa show {a.id} still says why it failed" if had else
               f"{a.id} closed without merging")
 
