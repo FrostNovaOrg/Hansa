@@ -21867,8 +21867,11 @@ def save():'''))
         self.assertEqual(self.desk.save_settings(s, by="page"), [])
         write_json(alert.last_file(self.desk), {"failed": {"at": 100, "exit": 1}, "last": {"at": 50, "ok": True}})
         self.assertEqual(plugin.summary(self.desk)["push_failed"], ["command"])
+        self.assertIn("alert command FAILED", alert.failure_line(self.desk))
         write_json(alert.last_file(self.desk), {"failed": {"at": 100, "exit": 1}, "last": {"at": 200, "ok": True}})
         self.assertEqual(plugin.summary(self.desk)["push_failed"], [])
+        self.assertEqual(alert.failure_line(self.desk), "")
+        self.assertEqual(views.status(self.desk)["alert_failed"], "")
 
     def test_the_status_lines_summary_holds_no_code_key_token_address_or_title(self):
         self.summary_desk()
@@ -45934,8 +45937,7 @@ else:
             rows = [
                 ("release_waiting", "release_waits", {"state": "waiting", "direct_count": 1},
                  "1 direct commit(s)", "直接提交：1 个", "active"),
-                ("release_waiting", "release_waits", {"state": "void"},
-                 "waits for your yes on the page", "等你在网页上点头", "active"),
+
                 ("release_ended", "release_ended", {"state": "done", "ended": 100, "seconds": 2},
                  "(exit 0, 2 s)", "完成（退出码 0，2 秒）", "passive"),
                 ("release_ended", "release_ended", {"state": "done", "ended": 100, "seconds": 2,
@@ -46023,11 +46025,124 @@ else:
             self.assertEqual(release.get(self.desk, rid)["about"], "Original description")
             self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
             text = self.alerted(out)[-1]["text"]
-            self.assertIn(": Original description · " + ("发布" if language == "zh" else "release"), text)
+            self.assertIn(" · Original description · ", text)
+            self.assertTrue(text.startswith("[hansa] " + ("工作台 " if language == "zh" else "desk ")))
+            self.assertLess(text.index("一次性码" if language == "zh" else "code "), text.index("Original description"))
             self.assertNotIn("Changed description", text)
             release.void(self.desk, rid, "finished")
             alert.send_due(self.desk, gather=0)
-            self.assertIn("Original description · ", self.alerted(out)[-1]["text"])
+            self.assertIn(" · Original description", self.alerted(out)[-1]["text"])
+
+    def test_long_alert_batch_keeps_every_start_with_urgent_first(self):
+        from hansa import alert
+        out = self.alert_fake()
+        _, http = self.bark_fake()
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                self.assertTrue(self.page_save(lambda s: s.update(alert_language=language))["ok"])
+                for n in range(1, 4):
+                    self.desk.add_ask(f"Question {n}: " + "long text " * 45)
+                self.desk.event("disk_low", floor=10, volumes=["/volume"])
+                self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+                command = self.alerted(out)[-1]["text"]
+                body = http.call_args.args[0][0]["json"]["body"]
+                for text in (command, body):
+                    self.assertLessEqual(len(text), alert.MOST_TEXT)
+                    self.assertIn("4 条提醒" if language == "zh" else "4 alerts", text)
+                    lines = text.splitlines()[1:]
+                    self.assertEqual(len(lines), 4)
+                    self.assertIn("磁盘空间" if language == "zh" else "free space", lines[0])
+                    for n, line in enumerate(lines[1:], 1):
+                        self.assertIn(f"Question {n}:", line)
+
+        text = alert.text_of(self.desk, [
+            {"kind": "release_waiting", "text": "release #7 code K7P3QX: answer " + "x" * 900,
+             "code": "K7P3QX", "release": 7},
+            {"kind": "ask", "text": "to-do #9: " + "y" * 900},
+            {"kind": "disk", "text": "free space warning"}])
+        self.assertEqual(len(text), 1000)
+        self.assertIn("#7 一次性码 K7P3QX", text.splitlines()[0])
+        self.assertEqual(text.splitlines()[1], "- free space warning")
+        self.assertTrue(text.splitlines()[2].startswith("- release #7 code K7P3QX: answer"))
+        self.assertTrue(text.splitlines()[3].startswith("- to-do #9:"))
+
+    def test_release_description_follows_request_code_action_and_result(self):
+        from hansa import alert, release
+        out = self.alert_fake()
+        about = ("install the new build on the test server; " + "office only " * 6).strip()
+        self.assertTrue(self.page_save(lambda s: s.update(desk_name="Shop"))["ok"])
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                self.assertTrue(self.page_save(lambda s: s.update(alert_language=language))["ok"])
+                self.hansa("lane", "target", "a", "default", "true", "--about", about)
+                self.hansa("release", "a")
+                rid = release.releases(self.desk)[-1]["id"]
+                self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+                text = self.alerted(out)[-1]["text"]
+                marker = "一次性码 " if language == "zh" else "code "
+                action = "要发布" if language == "zh" else "to release it"
+                plain = alert._release_text(self.desk, rid, True, zh=language == "zh")
+                r = release.get(self.desk, rid)
+                self.assertTrue(release.answer(self.desk, rid, True, commit=r["commit"], command=r["command"])["ok"])
+                self.settle_release(Dispatcher(self.desk), rid)
+                self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+                ended = self.alerted(out)[-1]["text"]
+                result = "完成" if language == "zh" else "done"
+                self.assertIn(marker, text[:100])
+                self.assertIn(action, text[:100])
+                self.assertLess(text.index(action), text.index(about))
+                self.assertLess(plain.index("网页" if language == "zh" else "on the page"), plain.index(about))
+                self.assertIn(result, ended[:100])
+                self.assertLess(ended.index(result), ended.index(about))
+
+    def test_failed_code_alert_says_it_may_not_have_reached_the_principal(self):
+        from hansa import alert, release
+        self.with_release("true")
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "exit 7"}))["ok"])
+        self.hansa("release", "a")
+        self.assertFalse(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertIn("alert command FAILED", self.hansa("status"))
+        row = release.page_rows(self.desk, self.desk.settings())[0]
+        self.assertNotIn("went out", row["code"])
+        self.assertIn("alert carrying its one-time code", row["code"])
+        self.assertIn("may not have reached", row["code"])
+        self.assertIn("page", row["code"])
+        self.assertIn("可能没有送达", row["code_zh"])
+        self.assertIn("网页", row["code_zh"])
+        # The failed batch stays consumed, including its code-bearing alert.
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        failed_code = release.get(self.desk, 1)["code"]
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "true"}))["ok"])
+        self.assertTrue(alert.test(self.desk)["ok"])
+        self.assertEqual(release.get(self.desk, 1)["code"], failed_code)
+        self.assertEqual(release.page_rows(self.desk, self.desk.settings())[0]["code"], row["code"])
+        self.assertEqual(views.status(self.desk)["alert_failed"], "")
+        self.assertNotIn("alert command FAILED", self.hansa("status"))
+
+    def test_malformed_release_code_words_are_never_counted(self):
+        from hansa import alert, release
+        self.alert_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        alert.send_due(self.desk, gather=0)
+        code = self.sent_code(1)
+        for answer in ("yes", "no"):
+            for words in ((code[:3], code[3:]), (code[:3] + " " + code[3:],),
+                          ("ABCDE",), ("ABCDEFG",), ("ABCDIO",), ("234567",), ("ABC!EF",)):
+                with self.subTest(answer=answer, words=words):
+                    refused = self.code_answer(answer, "1", *words)[1]
+                    self.assertIn("Nothing was checked or counted", refused)
+                    self.assertEqual(release.get(self.desk, 1)["code"]["wrong"], 0)
+                    self.assertEqual(self.events("release_code_wrong"), [])
+            # The shared API also refuses malformed words without consuming a try.
+            self.assertFalse(release.answer_by_code(self.desk, 1, answer == "yes", "bad")["ok"])
+            self.assertEqual(release.get(self.desk, 1)["code"]["wrong"], 0)
+        wrong = "ABCDEF" if code != "ABCDEF" else "ABCDEG"
+        self.assertIn("1 of 3 wrong", self.code_answer("yes", "1", wrong)[1])
+        self.assertIn("2 of 3 wrong", self.code_answer("no", "1", wrong, "a reason")[1])
+        self.assertEqual(self.code_answer("no", "1", code[:3].lower() + "-" + code[3:].lower(), "not today")[1], "")
+        self.assertEqual(release.get(self.desk, 1)["state"], "refused")
 
     def test_alert_batch_uses_the_highest_level_and_current_language(self):
         from hansa import alert, release
@@ -46050,7 +46165,9 @@ else:
                                          {"text": "另一条"}], held=2)
         self.assertIn("#1 一次性码 AB3DE9", text.splitlines()[0])
         self.assertIn("每小时最多 20 次，2 条提醒因此暂缓", text)
-        self.assertEqual((len(text), text[-1]), (1000, "…"))
+        self.assertEqual(len(text), 1000)
+        self.assertTrue(text.splitlines()[1].endswith("…"))
+        self.assertEqual(text.splitlines()[2], "- 另一条")
 
     def test_the_alert_command_is_the_principals_alone(self):
         from hansa import alert
@@ -46140,7 +46257,7 @@ else:
             self.assertEqual(release.answer(self.desk, rid, True, "", r["commit"], r["command"]), {"ok": True})
             self.settle_release(d, rid)
             alert.send_due(self.desk, gather=0)
-            self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting,release_ended")
+            self.assertEqual(self.alerted(out)[-1]["kind"], "release_ended")
             self.assertIn(f"release #{rid} of lane a, target default (main at", self.alerted(out)[-1]["text"])
             self.assertIn(end, self.alerted(out)[-1]["text"])
         self.assertIn("(exit 4)", self.alerted(out)[-1]["text"])
@@ -46349,10 +46466,11 @@ else:
         self.assertEqual((r["ok"], r["timed_out"]), (False, True))
         self.assertTrue(self.events("alert_failed")[-1]["timed_out"])
         self.assertIn("timed out after", self.hansa("status"))
-        # the next that goes out says so beside the failure; the page's test reports a failure too
+        # The next that goes out clears the warning; another failure starts a new one.
         self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "true"})), {"ok": True, "problems": []})
         self.assertTrue(alert.test(self.desk)["ok"])
-        self.assertIn("a later one went out", self.hansa("status"))
+        self.assertNotIn("alert command FAILED", self.hansa("status"))
+        self.assertEqual(views.status(self.desk)["alert_failed"], "")
         self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "exit 9"})), {"ok": True, "problems": []})
         self.assertEqual(alert.test(self.desk)["exit"], 9)
 
@@ -46481,7 +46599,7 @@ else:
         self.assertEqual(sent["kind"], "ask,disk")
         self.assertIn("2 alerts (2 held back by the limit of 20 runs an hour)", sent["text"])
         self.assertEqual(sent["text"].splitlines()[1:],
-                         [f"- to-do #{n} for you: Still needed", "- free space warning"])
+                         ["- free space warning", f"- to-do #{n} for you: Still needed"])
         self.assertEqual(self.events("alert_sent")[-1]["alerts"], 2)
         self.assertNotIn("held_since", alert._last(self.desk))
 
@@ -47005,9 +47123,10 @@ else:
         self.assertIn("1 held back", self.alerted(out)[-1]["text"])
         self.assertEqual(alert.queued(self.desk), [])
 
-    def test_an_answered_void_or_stopped_release_alert_still_sends_without_a_code(self):
+    def test_nonwaiting_release_alert_is_omitted_but_its_end_still_sends(self):
         from hansa import alert, release
         out = self.alert_fake()
+        _, http = self.bark_fake()
         self.hansa("lane", "target", "a", "default", "true")
         for rid, state in enumerate(("approved", "refused", "void", "stopped"), 1):
             with self.subTest(state=state):
@@ -47022,16 +47141,23 @@ else:
                 else:
                     release.stop_release(self.desk, rid)
                 with unittest.mock.patch.object(release, "new_code", wraps=release.new_code) as make:
-                    self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
-                make.assert_not_called()
-                sent = self.alerted(out)[-1]
-                self.assertIn("release_waiting", sent["kind"])
-                self.assertIn(q["text"], sent["text"])
-                self.assertNotIn("· code ", sent["text"])
-                self.assertNotIn("code", release.get(self.desk, rid))
-                # Approved requests would otherwise prevent the next request in this fixture.
+                    result = alert.send_due(self.desk, gather=0)
+                sent = self.alerted(out)[-1] if result else None
+                if result:
+                    self.assertNotIn(q["text"], http.call_args.args[0][0]["json"]["body"])
+                # Clear approved requests before assertions so every subcase can run on the base too.
                 release.void(self.desk, rid, "finished this case", states=("approved",))
                 alert.send_due(self.desk, gather=0)
+                make.assert_not_called()
+                if state in ("approved", "refused"):
+                    self.assertIsNone(result)
+                else:
+                    self.assertTrue(result["ok"])
+                    self.assertNotIn("release_waiting", sent["kind"])
+                    self.assertNotIn(q["text"], sent["text"])
+                    self.assertIn(state, sent["text"])
+                    self.assertNotIn("· code ", sent["text"])
+                self.assertNotIn("code", release.get(self.desk, rid))
 
     def test_a_stale_alert_cannot_get_a_code_for_a_different_request(self):
         from hansa import alert, release
@@ -47045,13 +47171,15 @@ else:
             self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
         make.assert_called_once_with(self.desk, 2)
         self.assertNotIn("#1 code ", self.alerted(out)[-1]["text"])
+        self.assertNotIn("original", self.alerted(out)[-1]["text"])
+        self.assertIn("void: ask again", self.alerted(out)[-1]["text"])
         self.desk.event("release_waits", id=2)
         # Even a record replaced under the same ID cannot lend its code to the old queued request.
         release.change(self.desk, 2, lambda r: {"asked": r["asked"] + 1})
         with unittest.mock.patch.object(release, "new_code", wraps=release.new_code) as make:
-            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+            self.assertIsNone(alert.send_due(self.desk, gather=0))
         make.assert_not_called()
-        self.assertNotIn("· code ", self.alerted(out)[-1]["text"])
+        self.assertEqual(alert.queued(self.desk), [])
 
     def test_an_old_queue_code_is_removed_and_revoked_at_the_next_read(self):
         from hansa import alert, release
@@ -47203,7 +47331,7 @@ else:
         self.hansa("release", "a")
         alert.send_due(self.desk, gather=0)
         code = self.sent_code(1)
-        said, refused = self.code_answer("yes", "1", f"{code[:3].lower()} {code[3:]}")  # as said: any case, a space
+        said, refused = self.code_answer("yes", "1", f"{code[:3].lower()}-{code[3:]}")  # any case, optional dashes
         self.assertEqual(refused, "")
         self.assertIn("release #1 of lane a target default is approved", said)
         self.assertNotIn(code, said)

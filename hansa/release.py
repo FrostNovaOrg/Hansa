@@ -1157,12 +1157,18 @@ def _code_hash(desk: Desk, rid, code: str) -> str:
 
 
 def plain_code(code: str) -> str:
-    """A code as the principal may say it: any case, with spaces or dashes."""
+    """Normalize a code for hashing and redaction, including spaced-out appearances."""
     return re.sub(r"[\s-]", "", str(code or "")).upper()
 
 
+def code_word(code: str) -> bool:
+    """An answer is one code word, optionally dashed; malformed input never consumes a wrong-code try."""
+    word = str(code or "").replace("-", "").upper()
+    return len(word) == CODE_LENGTH and all(c in CODE_ALPHABET for c in word) and not word.isdigit()
+
+
 def hide_codes(text: str, codes) -> str:
-    """text with each of codes replaced by [code], in any case and with the spaces or dashes answers accept; called
+    """text with each of codes replaced by [code], in any case and with spaces or dashes; called
     before any cut, so that no part of a code is left."""
     for c in codes:
         c = plain_code(c)
@@ -1223,6 +1229,10 @@ def answer_by_code(desk: Desk, rid, yes: bool, code: str, reason: str = "", by: 
     coordinator: checked against this release's code only. A right code answers it (recorded as given through the
     coordinator, channel "code") and lapses; a wrong one is counted, and CODE_TRIES of them void the code."""
     from .alert import release_codes
+    if not code_word(code):
+        return {"ok": False, "problems": ["pass the code as one word (dashes allowed, no spaces), "
+                                           f"with {CODE_LENGTH} characters from {CODE_ALPHABET} and at least one letter. "
+                                           "Nothing was checked or counted"]}
     with desk.lock():
         s = desk.settings()
         r = get(desk, rid)
@@ -1276,9 +1286,12 @@ def code_text(r: dict, zh: bool = False) -> str:
         return f"一次性码已作废（{why}）：只能在网页上回答" if zh else f"its one-time code is void ({why}): answer it on the page"
     if c.get("sent"):
         ok = c.get("sent_ok")
-        return (f"一次性码在 {when(c['sent'])} 随提醒发出" + ("" if ok else "（提醒发送报了失败）") if zh else
-                f"a one-time code went out in the principal's alert {when(c['sent'])}"
-                + ("" if ok else " (alert delivery reported a failure)"))
+        if not ok:
+            return (f"{when(c['sent'])} 携带一次性码的提醒发送报了失败：代码可能没有送达你；请在网页上回答" if zh else
+                    f"the alert carrying its one-time code {when(c['sent'])}: alert delivery reported a failure; "
+                    "the code may not have reached the principal; answer it on the page")
+        return (f"一次性码在 {when(c['sent'])} 随提醒发出" if zh else
+                f"a one-time code went out in the principal's alert {when(c['sent'])}")
     return "一次性码在等提醒发出" if zh else "a one-time code waits to go out in the principal's alert"
 
 

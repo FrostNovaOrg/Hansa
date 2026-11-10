@@ -130,7 +130,7 @@ JSON 里的布尔值 `ok: true` 表示已发送。失败时 hansa 会保留 `err
 
 在频道设置里的**整合（Integrations）**中创建一个 webhook，然后粘贴 `https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN`。识别依据是这个主机和 `/api/webhooks/ID/TOKEN` 路径。令牌和整个地址都是保密的；没有额外密钥。Discord 和频道成员都能读到提醒内容。
 
-hansa 向该地址 POST JSON `{"content":"DESK\nBODY"}`，并带上 `User-Agent: DiscordBot (https://github.com/FrostNovaOrg/Hansa, VERSION)`，其中的版本号用 hansa 自己的版本；Discord 可能会拦下 urllib 默认的 User-Agent。被动提醒会加上 `"flags":4096`，以不发出推送通知。紧急文字用上面共用的标记，并使用普通通知。内容最多 **2,000 个字符**，超长时用 `…` 缩短；Discord 的 webhook 频率限制仍然有效。
+hansa 向该地址 POST JSON `{"content":"DESK\nBODY","allowed_mentions":{"parse":[]}}`，并带上 `User-Agent: DiscordBot (https://github.com/FrostNovaOrg/Hansa, VERSION)`，其中的版本号用 hansa 自己的版本；Discord 可能会拦下 urllib 默认的 User-Agent。被动提醒会加上 `"flags":4096`，以不发出推送通知。紧急文字用上面共用的标记，并使用普通通知。内容最多 **2,000 个字符**，超长时用 `…` 缩短；Discord 的 webhook 频率限制仍然有效。`@everyone`、`@here`、用户和角色提及都保留为文字，不会通知任何人。
 
 任何 HTTP 2xx 都表示已发送，包括 Discord 正常的 **204** 响应。**HTTP 404 且 Discord code 为 10015 表示 webhook 已不存在**：请创建一个新的，并粘贴它的地址。上次结果保留 `http_4xx` 和 code **10015**；status 和网页会说明这个地址已不存在，并提示粘贴新地址。hansa 不保留 Discord 响应里的消息文字。
 
@@ -140,7 +140,7 @@ hansa 向该地址 POST JSON `{"content":"DESK\nBODY"}`，并带上 `User-Agent:
 
 在你的 Slack 应用里启用 **Incoming Webhooks**，给频道添加一个，然后粘贴 `https://hooks.slack.com/services/T…/B…/…`。主机会被识别，路径也要符合这个形状。路径是保密的；没有额外密钥。Slack 和频道成员都能读到提醒内容。
 
-hansa POST JSON `{"text":"DESK\nBODY"}`。这里没有级别；紧急文字用上面共用的标记。hansa 把文字控制在 **4,000 个字符**以内，超长时用 `…` 缩短。Slack 允许每秒 **1 条消息**。
+hansa POST JSON `{"text":"DESK\nBODY","mrkdwn":false,"link_names":false,"parse":"none"}`。文字中的 `&`、`<`、`>` 会转义，使 `<!channel>` 和 `<@USER>` 等显式提及也按普通文字显示。自动解析提及和格式均关闭，不会通知任何人。这里没有级别；紧急文字用上面共用的标记。hansa 把文字控制在 **4,000 个字符**以内，超长时用 `…` 缩短。Slack 允许每秒 **1 条消息**。
 
 成功要求 **HTTP 200**，而且整个响应体恰好是 **`ok`**。失败时会返回 `invalid_payload`、`channel_not_found` 这样的纯文本单词；hansa 把这个单词当作 code 保留，响应为 400/404 时用 `http_4xx`，HTTP 200 但确认不成功时用 `refused_by_service`。
 

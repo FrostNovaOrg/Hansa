@@ -84,13 +84,18 @@ others, said as such with the command it had when saved, until the principal
 unticks it and saves. The principal answers in one of two ways: on the page, or by saying
 in the conversation the one-time code that comes with the alert for that
 release (6 characters, no look-alikes), which the coordinator passes on
-with `hansa release yes ID CODE` (or `no ID CODE`). The code travels only
+with `hansa release yes ID CODE` (or `no ID CODE [reason]`). Pass the code as one word,
+with optional dashes and any letter case. A word that, after removing dashes, is not
+six characters from `ABCDEFGHJKMNPQRSTUVWXYZ23456789` with at least one letter is
+refused without counting a wrong try, for either answer. This check is needed while
+split or malformed input could use up the principal's three tries. A wrong code of that
+form still counts. The code travels only
 to the principal's alert command and enabled Bark entries that encrypt: the queue holds the release ID,
 request time and text without a code. Immediately before the channels start, hansa checks that the
 same request still waits, makes one code per release in that batch for all eligible channels, and rebuilds
 its text in memory. Re-asking after a void gets a new release ID; an old alert
-cannot acquire a code for the new request. Alerts whose requests no longer wait
-still go out, without a code. Waiting through the hourly cap or a server restart
+cannot acquire a code for the new request. Waiting alerts whose requests no longer wait,
+or whose request time has changed, are left out; alerts reporting their end still go out. Waiting through the hourly cap or a server restart
 creates no code. Older queues that contain codes are rewritten on their next
 read under the desk lock: the old code is revoked and both it and its text are
 replaced by a code-free entry, ready for a fresh code when sent. This migration
@@ -628,9 +633,10 @@ the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
 out together)
 and the level in `HANSA_ALERT_LEVEL` (the highest in a batch; see
 [alert settings](desk.md#settings-on-the-web-page)), and the text on standard input: UTF-8, in the saved
-`alert_language` (`en` by default, or `zh`; set only by the principal beside the command), keys removed, cut at 1,000
-characters; a release's text names its lane and target, preceded by its description
-as kept when the release was asked, if any. Alerts use the
+`alert_language` (`en` by default, or `zh`; set only by the principal beside the command), keys removed,
+within 1,000 characters. A long batch shortens each alert separately so every alert shows its start;
+urgent alerts come first, and the header counts the whole batch. A release's text names its lane and target;
+its description, as kept when asked, follows the request, code and instructions, or the result. Alerts use the
 [desk name saved by the principal](desk.md#settings-on-the-web-page), as the
 page title does: `[hansa] desk NAME: ...`. With no name set, they use the last
 two folders of its path: `shop/desk` for `/work/shop/desk`, or `desk` for `/desk`.
@@ -672,11 +678,10 @@ code gives the code, and what to do with it, right after the desk's name:
 
 When several alerts go out in one run, the first line also gives each
 waiting release's number and code (`[hansa] desk NAME: 3 alerts · #1 code
-K7P3QX · #2 code M4R8TW`), and the lines holding a code come first, each
-starting as a single one does. A release that waits with no code (it had
-already stopped waiting when its code was to be made) reads `release #1 of lane a, target staging
+K7P3QX · #2 code M4R8TW`). Urgent alerts come first, then other lines holding a code,
+each starting as a single one does. A release that waits with no code reads `release #1 of lane a, target staging
 (main at 08e2cfc99f) waits for your yes on the page: 8 commit(s), command:
-...`. Codes come first to survive the 1,000-character cut. A code went out when at least one channel whose final
+...`. The header keeps codes early within the 1,000-character limit. A code went out when at least one channel whose final
 text held it sent successfully. If no channel's final text held it, including after Bark's byte limit,
 the code is void and the page answers. It has 30 seconds; its own exit ends the run, even if it leaves a
 child running, and only at the limit is its process group killed. Alerts
@@ -686,7 +691,11 @@ run when the hour frees a run, with a line saying how many were held back
 (the page's test button is not held). A run that fails or times out is recorded
 (event `alert_failed` with `channel: "command"`) and `hansa status` shows the last failure with its exit
 code and last lines (none for an alert that held a release's one-time code:
-then only how it ended is kept); the command is never retried: the next alert tries again.
+then only how it ended is kept). The status and page warning clears at the next successful command run.
+A waiting release whose code-bearing alert failed says that the alert carrying its code reported a failure,
+that the code may not have reached the principal, and to answer on the page. A later successful run
+clears the general warning but does not change that release's delivery record.
+The failed alert is never retried: the next alert tries again.
 Each push service has a separate 30-second deadline including its transport's at most three
 tries; the batch never retries it. `hansa status` shows each push entry's last result,
 `sent` or the reason it could not send. A failed push records `alert_failed` with

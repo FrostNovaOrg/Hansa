@@ -339,12 +339,13 @@ Recognition uses that host and `/api/webhooks/ID/TOKEN` path. The token and
 the whole address are secret; there is no extra secret. Discord and the
 channel's members can read the alert.
 
-Hansa POSTs JSON `{"content":"DESK\nBODY"}` to that address, with
+Hansa POSTs JSON `{"content":"DESK\nBODY","allowed_mentions":{"parse":[]}}` to that address, with
 `User-Agent: DiscordBot (https://github.com/FrostNovaOrg/Hansa, VERSION)`
 using hansa's version; Discord may block urllib's default agent. A passive
 batch adds `"flags":4096` to suppress push notifications. Urgent text uses
 the shared marker and normal notifications. Content is limited to
 **2,000 characters**, shortening with `…`; Discord's webhook rate limits apply.
+Mentions such as `@everyone`, `@here`, users and roles remain text and ping no one.
 
 Any HTTP 2xx means sent, including Discord's normal **204** response.
 **HTTP 404 with Discord code 10015 means the webhook no longer exists**:
@@ -362,7 +363,10 @@ paste `https://hooks.slack.com/services/T…/B…/…`. The host and that path s
 are recognized. The path is secret; there is no extra secret. Slack and the
 channel's members can read the alert.
 
-Hansa POSTs JSON `{"text":"DESK\nBODY"}`. There are no levels; urgent text
+Hansa POSTs JSON `{"text":"DESK\nBODY","mrkdwn":false,"link_names":false,"parse":"none"}`.
+It escapes `&`, `<` and `>` in the text so explicit mentions such as `<!channel>` and `<@USER>`
+arrive as plain text. Automatic mention parsing and formatting are off; mentions ping no one.
+There are no levels; urgent text
 uses the shared marker. Hansa keeps text within **4,000 characters**,
 shortening with `…`. Slack allows **1 message a second**.
 

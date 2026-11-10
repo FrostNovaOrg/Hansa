@@ -92,8 +92,10 @@ as the desk's account, outside the sandbox, in a folder of its own under the des
 with hansa's own environment (not a lane's env),
 the kinds in HANSA_ALERT_KIND (comma-separated when several go out together), the level in HANSA_ALERT_LEVEL,
 and the text on standard input (UTF-8,
-keys removed, cut at MOST_TEXT characters), stopped after TIMEOUT seconds. Alerts that come within GATHER seconds
-of each other go out in one run (none waits more than MOST_WAIT); to-dos closed before that run are left out.
+keys removed, within MOST_TEXT characters), stopped after TIMEOUT seconds. Long batches shorten each alert
+separately, urgent ones first, retaining each start and the total count. Alerts that come within GATHER seconds
+of each other go out in one run (none waits more than MOST_WAIT); closed to-dos and release requests that no longer
+wait as asked are left out, while their end alerts still go out.
 Each queued alert has a level: passive for a release that finished successfully; active for release_waiting, ask,
 a failed, void or forbidden release, release_stopped and test; urgent for server_stuck, coordinator, sandbox, disk
 and credit. A batch takes the highest (passive < active < urgent); Bark maps that level to its own attention levels.
@@ -103,7 +105,7 @@ line saying how many were held back. An entry of the queue that cannot be read i
 (event alert_dropped); the others go. The command's own exit ends its run, even when it leaves a child behind;
 only at the time limit is its process group killed. A run
 that fails or times out is recorded (event alert_failed with channel command, and .hansa/alert-last.json,
-which hansa status reads); the command is never retried. Each push entry records its last result in
+which hansa status and the page read until the next successful command run); the command is never retried. Each push entry records its last result in
 .hansa/alert-push-ID-last.json, and alert_failed with channel push, id and service on failure, never its address.
 Bark has its own 30-second deadline,
 including alert_http's at most three tries; the alert run adds no retries. A
@@ -122,12 +124,12 @@ shows the first hundred characters or so, so the code and what to do with it com
 "[hansa] desk NAME: release #1 (lane a, target staging) · code K7P3QX: to release it, give this code to the coordinator
 in the conversation (this release only, once, 24 hours; send it nowhere else), or answer on the page · main at
 08e2cfc99f, 8 commit(s), command: ...; note: ..."; several in one run: "[hansa] desk NAME: 3 alerts · #1 code K7P3QX
-· #2 code M4R8TW", then one line each, those holding a code first.
+· #2 code M4R8TW", then one line each, urgent alerts first, then other lines holding a code.
 That folder is removed when the command ends, and what a stopped
 or killed hansa serve left there is swept when it starts (sweep_runs): secrets/ is closed to the coordinator, workers,
 verifiers, so a leftover that holds the alert's text is never theirs to read. Text is in the saved alert_language;
-English wording is unchanged when there is no target description. A release alert starts with its target's
-description, if any, kept in the request as it was when asked, followed by the usual release text.
+English wording is unchanged when there is no target description. A release alert puts its target's description,
+kept as it was when asked, after the request, code and instructions, or the result.
 """
 from __future__ import annotations
 
@@ -305,7 +307,7 @@ def _release_text(desk: Desk, rid, waiting: bool, code: str = "", zh: bool = Fal
     r = release.get(desk, rid)
     if not r:
         return ""
-    about = (r["about"] + " · ") if r.get("about") else ""
+    about = (" · " + r["about"]) if r.get("about") else ""
     target = r.get("target") or ""  # "": the lane's one unnamed target, its release command
     if zh:
         at = f"{r.get('base')} 的 {str(r.get('commit') or '')[:10]}"
@@ -314,12 +316,12 @@ def _release_text(desk: Desk, rid, waiting: bool, code: str = "", zh: bool = Fal
         if waiting and r.get("direct_count"):
             rest = f"直接提交：{r['direct_count']} 个，" + rest
         if waiting and code:
-            return (about + f"发布 #{r['id']}（工作线 {r.get('lane')}，发布目标 {target or '（未命名）'}）· 一次性码 {code}："
+            return (f"发布 #{r['id']}（工作线 {r.get('lane')}，发布目标 {target or '（未命名）'}）· 一次性码 {code}："
                     f"要发布，请在对话里把这个码告诉协调员（仅限这次发布，只能用一次，{release.CODE_LIFE // 3600} 小时内有效；"
-                    f"不要发到别处），或在网页上点头 · {at}，{rest}")
-        head = about + f"工作线 {r.get('lane')} 的发布 #{r['id']}，发布目标 {target or '（未命名）'}（{at}）"
-        return (f"{head} 等你在网页上点头：{rest}" if waiting else
-                f"{head}：{release.state_text(desk, r, zh=True)}")
+                    f"不要发到别处），或在网页上点头{about} · {at}，{rest}")
+        head = f"工作线 {r.get('lane')} 的发布 #{r['id']}，发布目标 {target or '（未命名）'}（{at}）"
+        return (f"{head} 等你在网页上点头：{rest}{about}" if waiting else
+                f"{head}：{release.state_text(desk, r, zh=True)}{about}")
     at = f"{r.get('base')} at {str(r.get('commit') or '')[:10]}"
     rest = (f"{r.get('count', 0)} commit(s), command: {r.get('command')}"
             + (f"; note: {r['note']}" if r.get("note") else ""))
@@ -327,13 +329,13 @@ def _release_text(desk: Desk, rid, waiting: bool, code: str = "", zh: bool = Fal
         rest = f"{r['direct_count']} direct commit(s), " + rest
     if waiting and code:  # the code and what to do with it first: a phone shows the first hundred characters or so,
         # and no cut of a long text takes it
-        return (about + f"release #{r['id']} (lane {r.get('lane')}, target {target or '(unnamed)'}) · code {code}: to release "
+        return (f"release #{r['id']} (lane {r.get('lane')}, target {target or '(unnamed)'}) · code {code}: to release "
                 f"it, give this code to the coordinator in the conversation (this release only, once, "
-                f"{release.CODE_LIFE // 3600} hours; send it nowhere else), or answer on the page · {at}, {rest}")
-    head = about + f"release #{r['id']} of lane {r.get('lane')}, target {target or '(unnamed)'} ({at})"
+                f"{release.CODE_LIFE // 3600} hours; send it nowhere else), or answer on the page{about} · {at}, {rest}")
+    head = f"release #{r['id']} of lane {r.get('lane')}, target {target or '(unnamed)'} ({at})"
     if waiting:
-        return f"{head} waits for your yes on the page: {rest}"
-    return f"{head}: {release.state_text(desk, r)}"
+        return f"{head} waits for your yes on the page: {rest}{about}"
+    return f"{head}: {release.state_text(desk, r)}{about}"
 
 
 def from_event(desk: Desk, kind: str, fields: dict) -> None:
@@ -397,10 +399,11 @@ def desk_name(desk: Desk) -> str:
 
 
 def text_of(desk: Desk, items: list, held: int = 0) -> str:
-    """What the command reads on its standard input: one line per alert, keys removed, cut at MOST_TEXT characters.
+    """What the command reads: keys removed, urgent alerts first, each line sharing MOST_TEXT characters.
     held: how many of them the limit of MOST_RUNS runs an hour held back."""
-    items = sorted(items, key=lambda x: not x.get("code"))  # those holding a code first: no cut takes it
-    lines = [" ".join(str(x.get("text") or "").split()) for x in items]
+    items = sorted(items, key=lambda x: (x.get("level", level_of(x.get("kind"))) != "urgent",
+                                        not x.get("code")))
+    lines = [desk.redact(" ".join(str(x.get("text") or "").split())) for x in items]
     codes = [x for x in items if x.get("code")]
     zh = chinese(desk)
     name = desk_name(desk)
@@ -414,6 +417,19 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
                 + "".join(f" · #{x.get('release')} {'一次性码' if zh else 'code'} {x['code']}" for x in codes)
                 + held_text + "\n" + "\n".join(f"- {x}" for x in lines))
     text = desk.redact(text)
+    if len(text) <= MOST_TEXT:
+        return text
+    if len(lines) > 1:
+        # Reserve a share for every alert before shortening any line. Small alerts use only what they
+        # need; the remaining space is shared by longer ones. Keep this while a batch has one text cap.
+        header = text.split("\n", 1)[0]
+        budget = max(0, MOST_TEXT - len(header) - 3 * len(lines))  # newline and "- " per line
+        sizes = [0] * len(lines)
+        for remaining, i in zip(range(len(lines), 0, -1), sorted(range(len(lines)), key=lambda i: len(lines[i]))):
+            sizes[i] = min(len(lines[i]), budget // remaining)
+            budget -= sizes[i]
+        text = header + "".join("\n- " + (line if len(line) <= size else line[:max(0, size - 1)] + "…" if size else "")
+                                for line, size in zip(lines, sizes))
     return text if len(text) <= MOST_TEXT else text[:MOST_TEXT - 1] + "…"
 
 
@@ -496,7 +512,7 @@ def _runs(rec: dict, t: float) -> list:
 
 def _record(desk: Desk, result: dict, count: int) -> None:
     last = _last(desk)
-    rec = {**last, "last": result, "failed": last.get("failed") if result["ok"] else result}
+    rec = {**last, "last": result, "failed": None if result["ok"] else result}
     write_json(last_file(desk), rec)
     if result["ok"]:
         desk.event("alert_sent", kinds=result["kinds"], alerts=count)
@@ -528,9 +544,19 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
                 write_json(last_file(desk), {**rec, "held_since": t})
                 desk.event("alert_held", alerts=len(good), most_runs=MOST_RUNS)
             return None
+        from . import release
         with desk.lock():
             closed = {a["id"] for a in desk.asks() if "id" in a and a.get("closed")}
-            q = [x for x in _clean(desk) if x["kind"] != "ask" or x.get("ask") not in closed]
+            q = []
+            for x in _clean(desk):
+                if x["kind"] == "ask" and x.get("ask") in closed:
+                    continue
+                if x["kind"] == "release_waiting":
+                    r = release.get(desk, x.get("release")) or {}
+                    # Queued wording belongs to this request, and must not say a closed or replaced one waits.
+                    if r.get("state") != "waiting" or not x.get("asked") or r.get("asked") != x["asked"]:
+                        continue
+                q.append(x)
             write_json(queue_file(desk), [])
         s = desk.settings()
         from . import alert_push
@@ -944,19 +970,20 @@ def _when(t) -> str:
 
 
 def failure_line(desk: Desk) -> str:
-    """For hansa status: the last failed alert run (when, exit code, a short tail); '' when none failed."""
+    """For status and the page: a failed command run, until a later run sends successfully."""
     rec = _last(desk)
     f = rec.get("failed")
     if not isinstance(f, dict):
         return ""
+    last = rec.get("last") or {}
+    if last.get("ok") and (last.get("at") or 0) >= (f.get("at") or 0):
+        return ""  # also clear warnings in records saved before successful runs cleared "failed"
+
     limit = f.get("limit") if isinstance(f.get("limit"), (int, float)) and not isinstance(f.get("limit"), bool) \
         else TIMEOUT  # recorded before the limit was: the default
     how = f"timed out after {limit:g} s" if f.get("timed_out") else f"exit {f.get('exit')}"
     tail = " | ".join(f.get("tail") or []) or (WITHHELD if f.get("withheld") else "")
-    last = rec.get("last") or {}
-    later = (f"; a later one went out {_when(last.get('at'))}" if last.get("ok") and (last.get("at") or 0) > (f.get("at") or 0)
-             else "")
-    return (f"alert command FAILED {_when(f.get('at'))} ({how})" + (f": {tail}" if tail else "") + later
+    return (f"alert command FAILED {_when(f.get('at'))} ({how})" + (f": {tail}" if tail else "")
             + " · the principal's, on the page")
 
 
