@@ -2283,7 +2283,7 @@ class DesksTest(unittest.TestCase):
 
     def test_desks_missing_list_and_unreadable_list_use_the_shared_reason(self):
         from hansa.desk import desks_list_problem
-        self.assertEqual(self.say().strip(), "No desks listed")
+        self.assertEqual(self.say().strip(), "No desks listed. Make one with: hansa init DIR")
         self.assertEqual(json.loads(self.say("--json")), {"desks": [], "problem": ""})
         self.listed.mkdir()
         self.assertEqual(self.say().strip(), desks_list_problem())
@@ -2299,11 +2299,52 @@ class DesksTest(unittest.TestCase):
         write_json(self.listed, [{"desk": str(d.root)}])
         write_json(d.state_dir / "serve-code", {"pid": 1, "build": "old-version"})
         (d.state_dir / "web-host").write_text("::")
+        (d.state_dir / "web-port").write_text("8765")
         with unittest.mock.patch.object(views, "server_state", return_value={"state": "stuck", "pid": 2}):
             row = json.loads(self.say("--json"))["desks"][0]
         self.assertEqual(row["server"], "stuck")
         self.assertIsNone(row["version"])
         self.assertEqual(row["address"], "http://[::1]:8765/")
+
+    def test_desks_gives_no_page_address_for_a_desk_whose_server_never_ran(self):
+        running, new = self.desk("running"), self.desk("new")
+        write_json(self.listed, [{"desk": str(d.root)} for d in (running, new)])
+        (running.state_dir / "web-port").write_text("8765")  # the default port, which the new desk's would be
+        with unittest.mock.patch.object(views, "server_state", side_effect=lambda d: {
+                "state": "up" if d.root == running.root else "gone", "pid": 7}):
+            said, raw = self.say(), self.say("--json")
+        rows = json.loads(raw)["desks"]
+        self.assertEqual([r["address"] for r in rows], ["http://127.0.0.1:8765/", None])
+        first, second = said.split("\n\n")
+        self.assertIn("page: http://127.0.0.1:8765/", first)
+        self.assertIn("page: no address: not started", second)
+        self.assertNotIn("http://", second)
+
+    def test_init_with_a_repository_says_what_lane_add_says_of_the_lane_and_its_check(self):
+        repo = self.tmp / "repo"
+        sh("git", "init", "-q", "-b", "main", str(repo), cwd=self.tmp)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "init", cwd=repo)
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            main(["init", str(self.tmp / "made"), "--repo", str(repo)])
+        said = out.getvalue()
+        lane = Desk(self.tmp / "made").settings()["lanes"]["a"]
+        self.assertIn(f"lane a added: {lane['repo']}, base main, providers claude, stopped at 200 turns or 240 minutes",
+                      said)
+        self.assertIn("Lane a has no check, so its tasks will be merged untested", said)
+        self.assertIn('hansa lane set a check "<the command that runs the tests>"', said)
+        # the same lines hansa lane add gives for the same lane
+        other = self.desk("other")
+        write_json(other.settings_path, {**json.loads((self.tmp / "made" / "settings.json").read_text()), "lanes": {}})
+        with contextlib.redirect_stdout(io.StringIO()) as added, contextlib.redirect_stderr(io.StringIO()):
+            main(["--desk", str(other.root), "lane", "add", "a", "--repo", str(repo)])
+        lines = [x for x in added.getvalue().splitlines() if x.startswith(("lane a added", "Lane a has no check"))]
+        self.assertEqual(len(lines), 2, added.getvalue())
+        for line in lines:
+            self.assertIn(line, said.splitlines())
+        with contextlib.redirect_stdout(io.StringIO()) as out:  # without --repo, no lane and nothing of one
+            main(["init", str(self.tmp / "bare")])
+        self.assertNotIn("lane a added", out.getvalue())
+        self.assertNotIn("has no check", out.getvalue())
 
     def test_forget_takes_that_one_entry_off_the_list_and_deletes_no_file(self):
         first, second = self.desk("first"), self.desk("second")
@@ -2680,14 +2721,12 @@ class UpTest(unittest.TestCase):
 
     def test_up_preserves_new_explicit_default_port_conflicts(self):
         from hansa import up
-        bind = unittest.mock.Mock(side_effect=OSError(errno.EADDRINUSE, "taken"))
-        with self.assertRaisesRegex(SystemExit, "port 8765 is in use"):
-            self.fake_serve(bind, "--port", "8765")
+        self.fake_serve(lambda desk, host, port: types.SimpleNamespace(server_address=(host, port)), "--port", "8765")
         rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
         command = up.serve_command(self.desk, rec)
         self.assertEqual(command[command.index("--port") + 1], "8765")
-        bind.reset_mock()
-        with self.assertRaisesRegex(SystemExit, "port 8765 is in use"):
+        bind = unittest.mock.Mock(side_effect=OSError(errno.EADDRINUSE, "taken"))
+        with self.assertRaisesRegex(SystemExit, "port 8765: taken; perhaps another desk's hansa serve"):
             self.fake_serve(bind, *command[4:])
         bind.assert_called_once()
         self.assertEqual(bind.call_args.args[1:], ("127.0.0.1", 8765))
@@ -2717,21 +2756,79 @@ class UpTest(unittest.TestCase):
             attempted.append(port)
             raise OSError(errno.EADDRINUSE, "taken")
 
-        with self.assertRaisesRegex(SystemExit, "port 9876 is in use"):
+        with self.assertRaisesRegex(SystemExit, "port 9876: taken; perhaps another desk's hansa serve"):
             self.fake_serve(bind, "--port", "9876")
         self.assertEqual(attempted, [9876])
         self.assertFalse((self.desk.state_dir / "web-port").exists())
 
     def test_serve_does_not_retry_other_bind_errors_or_wrap_the_last_port(self):
-        with self.assertRaises(PermissionError):
-            self.fake_serve(unittest.mock.Mock(side_effect=PermissionError(errno.EACCES, "refused")))
+        refused = unittest.mock.Mock(side_effect=PermissionError(errno.EACCES, "refused"))
+        with self.assertRaisesRegex(SystemExit, "port 8765: refused"):
+            self.fake_serve(refused)
+        refused.assert_called_once()
         (self.desk.state_dir / "web-port").write_text("65535")
         bind = unittest.mock.Mock(side_effect=OSError(errno.EADDRINUSE, "taken"))
-        with self.assertRaisesRegex(SystemExit, "port 65535 is in use"):
+        with self.assertRaisesRegex(SystemExit, "port 65535: taken"):
             self.fake_serve(bind)
         bind.assert_called_once()
 
-    def test_serve_records_launch_before_starting_the_page_without_keys_or_session_identity(self):
+    def test_a_serve_that_cannot_bind_keeps_the_saved_start_and_says_why_in_one_line(self):
+        self.record()  # the last start that served the page
+        saved = (self.desk.state_dir / "serve-start.json").read_bytes()
+        for error, args, host, port, words in (
+                (OSError(errno.EADDRINUSE, "Address already in use"), ("--port", "9876"), "127.0.0.1", 9876,
+                 "Address already in use; perhaps another desk's hansa serve holds that port"),
+                (PermissionError(errno.EPERM, "Operation not permitted"), ("--port", "80"), "127.0.0.1", 80,
+                 "Operation not permitted. Nothing was started or recorded"),
+                (socket.gaierror(socket.EAI_NONAME, "Name or service not known"), ("--host", "lcalhost"), "lcalhost",
+                 8765, "Name or service not known. Nothing was started or recorded")):
+            with self.subTest(error=error):
+                bind = unittest.mock.Mock(side_effect=error)
+                with self.assertRaises(SystemExit) as e:
+                    self.fake_serve(bind, *args)
+                said = str(e.exception.code)
+                self.assertEqual(len(said.splitlines()), 1, said)
+                self.assertIn(f"hansa serve could not serve the page on host {host}, port {port}: {words}", said)
+                bind.assert_called_once()
+                self.assertEqual((self.desk.state_dir / "serve-start.json").read_bytes(), saved)
+                self.assertFalse((self.desk.state_dir / "web-port").exists())
+
+    def test_a_second_hansa_up_at_once_waits_for_the_first_and_says_the_server_is_running(self):
+        from hansa import up
+        self.record()
+        now = {"state": self.gone}
+        done, result = threading.Event(), {}
+
+        def second():
+            try:
+                result["ok"] = up.desk_up(self.desk)
+            finally:
+                done.set()
+
+        with open(self.desk.state_dir / "up.lock", "a") as first, \
+                unittest.mock.patch.object(up, "server_state", side_effect=lambda desk: now["state"]), \
+                unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                unittest.mock.patch.object(up, "launch_tmux", side_effect=subprocess.CalledProcessError(
+                    1, ["tmux"], stderr="duplicate session: serve")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            fcntl.flock(first, fcntl.LOCK_EX)  # the first hansa up, starting the server
+            runs = threading.Thread(target=second)
+            runs.start()
+            end = time.monotonic() + 30
+            while "Another hansa up" not in out.getvalue() and not done.is_set() and time.monotonic() < end:
+                time.sleep(0.02)
+            now["state"] = self.running  # the first started it, and ends
+            fcntl.flock(first, fcntl.LOCK_UN)
+            runs.join(30)
+        said = out.getvalue()
+        self.assertTrue(done.is_set())
+        self.assertIn("Another hansa up is starting this desk's server and coordinator; waiting", said)
+        self.assertIn("server already running (pid 123)", said)
+        self.assertNotIn("duplicate session", said)
+        self.assertNotIn("server failed", said)
+        self.assertTrue(result["ok"])
+
+    def test_serve_records_launch_once_the_page_is_bound_without_keys_or_session_identity(self):
         from hansa import up, web
         key = "sk-desk-secret-123456"
         (self.desk.secrets_dir / "provider.key").write_text(key)
@@ -2745,13 +2842,9 @@ class UpTest(unittest.TestCase):
                           LC_SECRET=key, LC_EMBEDDED="prefix:" + key, UNRELATED="omit",
                           CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="session-secret",
                           CLAUDE_CODE_MESSAGING_TOKEN="messaging-secret")
-        with cli.hold_server_lock(self.desk) as held, \
-                unittest.mock.patch.object(cli, "hold_server_lock", return_value=held), \
-                unittest.mock.patch.object(cli, "desk_paths_problem", return_value=""), \
-                unittest.mock.patch.object(web, "start_web", side_effect=RuntimeError("after record")), \
-                self.assertRaisesRegex(RuntimeError, "after record"):
-            main(["--desk", str(self.desk.root), "serve", "--host", self.options.host,
-                  "--port", str(self.options.port), "--every", str(self.options.every)])
+        self.fake_serve(lambda desk, host, port: types.SimpleNamespace(server_address=(host, port)),
+                        "--host", self.options.host, "--port", str(self.options.port),
+                        "--every", str(self.options.every))
         rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
         self.assertEqual(rec["hansa"], up.hansa_command())
         self.assertTrue(Path(rec["hansa"]).is_absolute())
@@ -15204,8 +15297,9 @@ def save():'''))
         self.assertNotIn("Traceback", r.stdout + r.stderr)
         self.assertEqual(r.stdout, "")
         self.assertEqual(r.stderr.strip().splitlines(), [
-            f"hansa: port {port} is in use, perhaps by another desk's hansa serve; start this desk's server on a free "
-            f"port with hansa serve --port N (hansa web then finds it)"])
+            f"hansa: hansa serve could not serve the page on host 127.0.0.1, port {port}: Address already in use; "
+            f"perhaps another desk's hansa serve holds that port. Start this desk's server on a free port with hansa "
+            f"serve --port N (hansa web then finds it)"])
 
     def test_the_web_command_opens_the_port_this_desks_server_serves_on(self):
         skip_unless_ports(self)
@@ -21260,6 +21354,58 @@ def save():'''))
                       "of the desk's keys; nothing was recorded", said)
         self.assertEqual(up.read_coordinator(self.desk)["kind"], "unrecorded")
         self.assertNotIn(key, (self.desk.state_dir / "coordinator-start.json").read_text())
+
+    def test_a_second_coordinator_is_refused_while_the_first_runs_and_starts_once_it_has_ended(self):
+        from hansa import up
+        first = subprocess.Popen(["sleep", "120"])  # the coordinator's session hansa up started in tmux
+        self.addCleanup(first.wait)
+        self.addCleanup(first.kill)
+        sess = {"pid": first.pid, "start": hansa.run.proc_start(first.pid)}
+        rec = {"kind": "coordinator", "hansa": up.hansa_command(), "clear_daily": "", "words": ["--name", "shop"],
+               "folder": str(self.desk.root), "tmux": {"server": ["-L", "hansa-shop"], "session": "coordinator"},
+               "env": {}, "session": sess, "turn_hooks": True}
+        start = self.desk.state_dir / "coordinator-start.json"
+        write_json(start, rec)
+        notify.register_dir(self.desk).mkdir(parents=True, exist_ok=True)
+        write_json(notify.register_dir(self.desk) / f"{notify.key_of(sess)}.json",
+                   {"key": notify.key_of(sess), "session": sess, "name": "shop", "seen": time.time()})
+        kept = start.read_bytes()
+        with self.assertRaises(SystemExit) as e:
+            self.start_with_mod()
+        said = str(e.exception.code)
+        self.assertIn(f"the desk's coordinator already runs: pid {first.pid} (shop)", said)
+        self.assertIn("Nothing was started", said)
+        self.assertIn("-L hansa-shop attach -t coordinator", said)
+        self.assertEqual(start.read_bytes(), kept)  # nothing recorded of the refused start
+        self.assertFalse((self.desk.state_dir / "coordinator.json").exists())
+        # a session not in tmux, which hansa posts to without a start record naming it
+        write_json(start, {**rec, "session": {"pid": 1, "start": "other"}})
+        with self.assertRaises(SystemExit) as e:
+            self.start_with_mod()
+        self.assertIn(f"pid {first.pid} (shop)", str(e.exception.code))
+        self.assertIn("It does not run in tmux: go to the terminal it runs in", str(e.exception.code))
+        self.start_with_mod("-p", "hello")  # a one-off run beside it is no second session
+        first.kill()
+        first.wait()
+        argv, _, _ = self.start_with_mod("--name", "shop")  # once it has ended, it starts as before
+        self.assertIn("--name", argv)
+        self.assertEqual(up.read_coordinator(self.desk)["session"]["pid"], os.getpid())
+
+    def test_a_one_off_coordinator_run_leaves_the_records_of_the_interactive_start_alone(self):
+        from hansa import up
+        self.start_with_mod("--clear-daily", "04-09", "--name", "shop")
+        files = (self.desk.state_dir / "coordinator-start.json", self.desk.state_dir / "coordinator.json",
+                 self.desk.mod_dir / "start.json")
+        kept = {f: f.read_bytes() for f in files}
+        for words in (["-p", "hello"], ["--print", "hello"], ["--version"]):
+            with self.subTest(words=words):
+                argv, _, _ = self.start_with_mod(*words)
+                self.assertIn(words[0], argv)  # claude gets them as given
+                self.assertEqual({f: f.read_bytes() for f in files}, kept)
+        plan = up.restart_plan(self.desk, up.read_coordinator(self.desk))
+        self.assertEqual(plan["words"], ["--name", "shop"])
+        self.assertFalse(up.prints(plan["words"]))
+        self.assertEqual(plugin.status(self.desk)["clear"]["window"], "04-09")
 
     def test_status_says_how_hansa_up_starts_the_coordinators_session_while_none_hears(self):
         folder = self.desk.root / "own folder"  # below the desk, so it reads the card

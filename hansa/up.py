@@ -25,6 +25,7 @@ LOG_LIMIT = 20 * 1024 * 1024
 START_WAIT = 8.0
 COORDINATOR_START = "coordinator-start.json"
 COORDINATOR_WAIT = 3.0  # seconds a started coordinator's pane must last to count as started
+UP_LOCK = "up.lock"  # in .hansa/: held while hansa up starts the desk (desk_up)
 LAUNCHER = "notify-launch"  # hansa's hidden command that starts a session hansa notify on recorded (cli.py)
 # claude's words that pick a conversation, or give a session's inbox, and whether each takes a value (None: one
 # that does not start with -, if any). A start again drops them and continues the folder's latest conversation
@@ -158,7 +159,8 @@ def forget_desk(folder) -> tuple:
 
 
 def record_start(desk: Desk, options) -> None:
-    """Called after serve removes session identity, while it holds serve.lock."""
+    """Called after serve removes session identity and binds the page, while it holds serve.lock: a start that
+    fails to bind (a port in use, a mistyped --host) leaves the last good start's record."""
     rec = {"hansa": hansa_command(), "options": {k: getattr(options, k) for k in DEFAULTS},
            "port_explicit": options.port is not None,
            "env": start_env(desk, os.environ), "tmux": record_tmux(), "at": now()}
@@ -525,6 +527,49 @@ def resumed(words: list) -> list:
 def prints(words: list) -> bool:
     """Whether these words start claude with --print: a run that ends, not an interactive session."""
     return any(x in PRINTS for x in words[:words.index("--") if "--" in words else len(words)])
+
+
+# claude's words for a run that ends by itself: --print, and those that only print help or the version
+ONE_OFF = (*PRINTS, "-h", "--help", "-v", "--version")
+
+
+def interactive(words: list) -> bool:
+    """Whether these words start claude as an interactive session: none of ONE_OFF before `--`. A run that is not
+    interactive (hansa coordinator -p ...) leaves the records of the coordinator's start alone."""
+    return not any(x in ONE_OFF for x in words[:words.index("--") if "--" in words else len(words)])
+
+
+def running_coordinator(desk: Desk) -> dict:
+    """The desk's coordinator's session that runs now, other than this process: the recorded one while its process
+    still runs (still_runs), else a session hansa posts to whose process runs. {pid, name, attach}: name as its
+    follower last recorded it ('' none yet); attach, the tmux command that reaches it when its start record says it
+    runs in tmux, else ''. {} when none runs."""
+    rec = read_coordinator(desk)
+    lives = [r for r in notify.live_records(desk) if isinstance(r.get("session"), dict) and not notify.gone(r["session"])]
+    sess = rec.get("session") if still_runs(rec) not in (None, os.getpid()) else None
+    if sess is None:
+        sess = next((r["session"] for r in lives if r["session"].get("pid") != os.getpid()), None)
+    if not sess:
+        return {}
+    name = next((r.get("name") or "" for r in lives if notify.same(r.get("session"), sess)), "")
+    saved = rec.get("tmux") if notify.same(rec.get("session"), sess) and isinstance(rec.get("tmux"), dict) else {}
+    server, session = saved.get("server"), saved.get("session")
+    attach = ""
+    if isinstance(server, list) and len(server) == 2 and all(isinstance(x, str) for x in server) \
+            and isinstance(session, str) and session:
+        launch = rec.get("env") if isinstance(rec.get("env"), dict) else {}
+        tmux = program("tmux") or program("tmux", env=launch) or "tmux"
+        attach = attach_command(tmux, server, session, {k: v for k, v in launch.items() if k == "TMUX_TMPDIR"})
+    return {"pid": sess.get("pid"), "name": name, "attach": attach}
+
+
+def running_text(found: dict) -> str:
+    """What hansa coordinator says when the desk's coordinator already runs (running_coordinator's)."""
+    reach = (f"Reach it with: {found['attach']}" if found["attach"] else
+             "It does not run in tmux: go to the terminal it runs in.")
+    return (f"the desk's coordinator already runs: {notify.who(found['pid'], found['name'])}. hansa posts to that "
+            "session; a second one would work beside it, and hansa would post to both. Nothing was started; once it "
+            f"has ended, hansa coordinator starts a new one. {reach}")
 
 
 def unsafe(desk: Desk, words: list) -> str:
@@ -1121,8 +1166,18 @@ def desk_up(desk: Desk) -> bool:
         command = shlex.join([hansa_command(), "--desk", str(desk.root), "up"])
         print(f"This desk belongs to {theirs}; run as {theirs}: {command}")
         return False
-    ok = server_up(desk)
-    return coordinator_up(desk) and ok
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)
+    # One hansa up at a time per desk: two at once would each start the server (tmux: "duplicate session: serve")
+    # and the coordinator. The second waits for the first, then finds what it started
+    with open(desk.state_dir / UP_LOCK, "a") as held:
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("Another hansa up is starting this desk's server and coordinator; waiting for it to finish.",
+                  flush=True)
+            fcntl.flock(held, fcntl.LOCK_EX)
+        ok = server_up(desk)
+        return coordinator_up(desk) and ok
 
 
 def installation_up(command: str) -> bool:
