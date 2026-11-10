@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import stat
 import subprocess
@@ -22,7 +23,7 @@ from .desk import (EFFORTS, Desk, SettingsError, validate, allow_fix, default_la
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
-from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
+from .run import (HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
@@ -496,6 +497,12 @@ def cmd_init(a):
         _init_for(a)
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base)
     print(f"desk ready at {desk.root}")
+    s = desk.settings()
+    ln = s["lanes"].get(a.lane)
+    if ln:  # with --repo: what hansa lane add says of the lane it makes, as init made it
+        print(_lane_added(a.lane, ln["repo"], ln["base"], ln))
+        if not ln.get("check") and not ln.get("merge_check"):
+            print(_no_check(s, a.lane, ln, ln["base"]))
     keep_desk_out(desk)
     if desk.root.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         print(f"warning: others may write in {desk.root}; run chmod go-w {shlex.quote(str(desk.root))}", file=sys.stderr)
@@ -567,6 +574,9 @@ def _runs_when(desk: Desk, tid: str, base: str) -> str:
 def _waits(desk: Desk, tid: str, *, all_reasons: bool = False) -> str:
     """A just-queued task's wait, in hansa status's words; add also shows dispatch holds."""
     m = desk.meta(tid)
+    ln = desk.settings()["lanes"].get(m.get("lane") or "")
+    if ln and not Path(ln["repo"]).is_dir():  # before hansa serve has tried it and held the lane (run.start)
+        return f"\n{tid} waits: lane {m['lane']}'s {repo_gone_text(m['lane'], ln['repo']).removeprefix('its ')}"
     busy = ({occupied_lane(t) for t in desk.tasks() if lane_occupied(t)} | tried_lanes(desk)
             if all_reasons else set())
     detail = waiting_detail(desk, desk.settings(), m, busy)
@@ -1392,6 +1402,10 @@ def _stop_release(desk: Desk, a) -> None:
     if not out["ok"]:
         raise SystemExit("hansa: " + "; ".join(out["problems"]) + ". Nothing was changed")
     r = release.get(desk, int(rid)) or {}
+    if out["state"] == "watch_stopping":
+        print(desk.redact(f"release #{rid} of {release.what(r)} stays {r.get('state')}; its watch is being stopped "
+                          "by hansa serve, with who stopped it and why and its output so far kept"))
+        return
     if out["state"] == "stopped":
         print(desk.redact(f"release #{rid} of {release.what(r)} is stopped; nothing was run"))
         return
@@ -1536,6 +1550,17 @@ def cmd_changelog(a):
 
 def cmd_release(a):
     desk = Desk.find(a.desk)
+    if a.show is not None:
+        if a.lane or a.note or a.direct is not None:
+            raise SystemExit("hansa: --show takes only a release's number. Nothing was changed")
+        rid = a.show.lstrip("#")
+        if not rid.isdigit():
+            raise SystemExit(f"hansa: --show takes a release's number (hansa release lists them), not {a.show!r}")
+        r = release.get(desk, int(rid))
+        if not r:
+            raise SystemExit(f"hansa: there is no release #{rid}. Nothing was changed")
+        print(desk.redact(release.show_text(desk, r)))
+        return
     if a.stop is not None:
         _stop_release(desk, a)
         return
@@ -1571,14 +1596,14 @@ def cmd_release(a):
                f"{r['count']} commit(s) on no remote-tracking branch (no release of it went out before)")
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
             f"({release.runs_text(r)})")
-    head += "".join("\n" + x for x in release.outside.lines(r))
-    head += "".join("\n" + x for x in release.direct_lines(r))
+    details = "".join("\n" + x for x in [*release.outside.lines(r), *release.direct_lines(r)])
     if r.get("since_release") and r["since"] == r["commit"]:
         head = (f"Nothing new on {who}: same commit as release #{r['since_release']}, asked to run again.\n"
                 + head)
     for rid in r.get("_replaced", []):
-        head += f"\nReplaces waiting release #{rid}; its one-time code no longer works."
+        details += f"\nReplaces waiting release #{rid}; its one-time code no longer works."
     if r["state"] == "forbidden":
+        head += details
         mailbox = release.mailbox_refusal(r["hits"])
         if mailbox:
             raise SystemExit(desk.redact(
@@ -1595,6 +1620,7 @@ def cmd_release(a):
     after = ("hansa tells this session when it is answered and when it ends" if heard else
              "hansa release shows how it goes")
     if r["state"] == "approved":
+        head += details
         paused = desk.paused()
         listed = (f"{who} is on the principal's list of releases without asking" if r.get("target") else
                   f"lane {a.lane} is on the principal's list of lanes released without asking")
@@ -1607,10 +1633,13 @@ def cmd_release(a):
                           + (f"once it gets through its rounds; {gone}. {after}" if gone else f"within seconds. {after}")))
         return
     named = f"\nThe command names changed files: {', '.join(r['named'])}." if r.get("named") else ""
-    print(desk.redact(f"{head}{named}\nIt waits for the principal's yes on the web page; only then does hansa serve run "
+    lapsed = release.tick_lapsed(desk.settings(), a.lane, r.get("target") or "default")
+    if lapsed:
+        details = "\n" + lapsed + details
+    print(desk.redact(f"{head}\nIt waits for the principal's yes on the web page; only then does hansa serve run "
                       f"it, and only while {r['base']} is still at {r['commit'][:10]} and the command is the same. "
                       f"Do not push or deploy yourself. {after}; tell the principal, in the conversation, that it waits "
-                      f"for them."))
+                      f"for them.{named}{details}"))
 
 
 def cmd_notify(a):
@@ -1632,16 +1661,20 @@ def cmd_notify(a):
 def turn_hooks(desk: Desk, pid: int) -> dict:
     """The Stop and StopFailure hooks that record how each turn of the session with this pid ends (hansa
     coordinator-turn), hansa's own code, never the desk's files. Not async: the next turn's end may follow at once,
-    and each record counts on the one before it."""
+    and each record counts on the one before it. They and a SessionStart hook after a /clear (which gives the
+    session a new id) also keep the conversation the session runs in its start record, for hansa up."""
     cmd = (f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
            f"{shlex.quote(str(desk.root))} coordinator-turn --pid {int(pid)}")
-    return {event: [{"hooks": [{"type": "command", "command": cmd}]}] for event in up.TURN_EVENTS}
+    return {**{event: [{"hooks": [{"type": "command", "command": cmd}]}] for event in up.TURN_EVENTS},
+            "SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": cmd}]}]}
 
 
 def cmd_coordinator_turn(a):
     """The coordinator's Stop and StopFailure hook: how its turn ended, in .hansa/coordinator-turns/<pid>.json.
-    Keeps only the event and the error type of its input; never fails loudly or slowly: on any problem it writes
-    nothing and exits 0. As root on the account's desk, the account's hansa writes it, given only those two.
+    Keeps only the event and the error type of its input there; and, as its SessionStart hook after a /clear does,
+    the conversation's id and transcript in the start record of the session with this pid (up.record_conversation).
+    Never fails loudly or slowly: on any problem it writes nothing and exits 0. As root on the account's desk, the
+    account's hansa writes the turn's record, given only those two, and no start record is kept (root keeps none).
     --forget: remove the record of this pid instead (forget_turns), reading no input."""
     if a.forget:
         try:
@@ -1656,16 +1689,21 @@ def cmd_coordinator_turn(a):
             pass
         return
     try:
-        given = up.turn_input(sys.stdin.read(1 << 20))
-        if given is None or a.pid <= 0:
+        raw = sys.stdin.read(1 << 20)
+        given, conv = up.turn_input(raw), up.conversation_input(raw)
+        if (given is None and conv is None) or a.pid <= 0:
             return
         desk = Desk.find(a.desk)
         theirs = account.desk_account(desk.root)
         if theirs:  # as the existing coordinator paths do for root (account.run)
-            account.run(theirs, ["coordinator-turn", "--pid", str(a.pid)], desk.root, input=json.dumps(given),
-                        text=True, capture_output=True, timeout=20)
+            if given is not None:
+                account.run(theirs, ["coordinator-turn", "--pid", str(a.pid)], desk.root, input=json.dumps(given),
+                            text=True, capture_output=True, timeout=20)
             return
-        up.record_turn(desk, a.pid, given)
+        if given is not None:
+            up.record_turn(desk, a.pid, given)
+        if conv is not None:
+            up.record_conversation(desk, a.pid, conv)
     except (Exception, SystemExit):  # noqa: BLE001 - a hook's record is never worth a failed turn
         return
 
@@ -1823,7 +1861,6 @@ def cmd_serve(a):
     record_serve_code(desk)  # which code this server runs, for hansa status to tell from what is installed later
     record_serve_locale(desk)  # the locale its lanes' commands get, for hansa explain lane to say
     dropped = record_serve_session(desk)  # a Claude Code session's identity, which nothing it starts gets
-    up.record_start(desk, a)  # how hansa up brings this server back, and this account's list of desks
     alert.sweep_runs(desk)  # the folders of alert runs a stopped or killed server left (none runs now: one server)
     up.sweep_turns(desk)  # the turn records of coordinator's sessions whose process is gone (hansa coordinator-turn)
     try:  # a desk whose coordinator only runs hansa notify on gets hansa's card (and its copy) only here
@@ -1837,14 +1874,19 @@ def cmd_serve(a):
         try:
             port = start_web(desk, a.host, port).server_address[1]
             break
-        except OSError as e:
-            if e.errno != errno.EADDRINUSE:
-                raise
-            if a.port is not None or port >= 65535:
-                raise SystemExit(f"hansa: port {port} is in use, perhaps by another desk's hansa serve; start this desk's "
-                                 f"server on a free port with hansa serve --port N (hansa web then finds it)")
-            port += 1
-            port_note = f" ({first_port} was taken)"
+        except (OSError, OverflowError) as e:  # OverflowError: a port past 65535
+            in_use = isinstance(e, OSError) and e.errno == errno.EADDRINUSE
+            if in_use and a.port is None and port < 65535:
+                port += 1
+                port_note = f" ({first_port} was taken)"
+                continue
+            said = f"hansa: hansa serve could not serve the page on host {a.host}, port {port}: " \
+                   f"{(e.strerror if isinstance(e, OSError) else '') or e}"
+            raise SystemExit(said + ("; perhaps another desk's hansa serve holds that port. Start this desk's server "
+                                     "on a free port with hansa serve --port N (hansa web then finds it)" if in_use else
+                                     ". Nothing was started or recorded: hansa up starts the server as before"))
+    # how hansa up brings this server back, and this account's list of desks: only a start that bound the page
+    up.record_start(desk, a)
 
     def stopped(*_):  # TERM ends it as Ctrl+C does: the alert run's folder goes with it (the thread is a daemon)
         raise KeyboardInterrupt
@@ -1949,18 +1991,20 @@ def cmd_coordinator(a):
     """Start the coordinator's interactive session in the desk, on the coordinator provider."""
     clear, rest = _clear_daily(a.rest)
     desk = Desk.find(a.desk)
+    # a run that ends by itself (-p ...): neither refused beside a running session nor recorded as the session's start
+    talk = up.interactive(rest)
     theirs = account.desk_account(desk.root)
     if theirs:
         # root on the account's desk: the account may have put links where hansa expects files, so root
         # neither reads nor writes there. The account's hansa does the desk's part and says how to start
-        r = account.run(theirs, ["coordinator-desk", "--by", str(account.uid())], desk.root,
-                        capture_output=True, text=True)
+        r = account.run(theirs, ["coordinator-desk", "--by", str(account.uid())] + ([] if talk else ["--one-off"]),
+                        desk.root, capture_output=True, text=True)
         if r.returncode:
             sys.stderr.write(r.stderr)
             raise SystemExit(r.returncode)
         plan = json.loads(r.stdout)
     else:
-        plan = coordinator_desk(desk, account.uid())
+        plan = coordinator_desk(desk, account.uid(), talk)
     from .run import PROVIDER_VARS, claude_bin, no_read_rules
     # the plan may be the account's to write, and it goes on root's command line and into root's environment
     model, effort = plan.get("model"), plan.get("effort") or ""
@@ -2000,7 +2044,10 @@ def cmd_coordinator(a):
     dirs = repos
     no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir]]
     no_builtin = [f"Agent({n})" for n in BUILTIN_HELPERS]
-    claude = claude_bin()
+    try:
+        claude = claude_bin()
+    except RuntimeError as e:
+        raise SystemExit(f"hansa: {e}") from None
     if "DISABLE_AUTOUPDATER" not in env and not can_update(claude):  # it would fail and say so at every start
         env["DISABLE_AUTOUPDATER"] = "1"
     argv = [claude] + (["--add-dir", *dirs] if dirs else []) + ["--disallowedTools", *no_edit, *no_builtin, *no_read]
@@ -2035,10 +2082,10 @@ def cmd_coordinator(a):
     # after a /clear (the mod's daily one, or anyone's) the fresh context starts from the desk's state, and the desk's
     # owner records the clear (plugin.record_clear); root on the account's desk records none. The hook is hansa's own
     # code, never the desk's files
-    hooks = {"SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
+    turns = turn_hooks(desk, os.getpid())  # how each turn ends, for this process, which becomes the session
+    hooks = {**turns, "SessionStart": [{"matcher": "clear", "hooks": [{"type": "command", "command": (
         f"{shlex.quote(str(Path(__file__).resolve().parent.parent / 'bin' / 'hansa'))} --desk "
-        f"{shlex.quote(str(desk.root))} {'status' if theirs else 'coordinator-cleared'}")}]}],
-        **turn_hooks(desk, os.getpid())}  # how each turn ends, for this process, which becomes the session
+        f"{shlex.quote(str(desk.root))} {'status' if theirs else 'coordinator-cleared'}")}]}, *turns["SessionStart"]]}
     own = own_folder_rules(env)  # the folder Claude Code runs from for this session: root's, when root runs it
     if theirs:  # the desk's .claude/settings.json is the account's, and its hooks would run as root: root's own
         rules = permissions(desk)
@@ -2053,12 +2100,12 @@ def cmd_coordinator(a):
     # what hansa did at this start, kept in the desk by its owner (root's, by the account's hansa) for status and the
     # page, with the --autocompact options of the whole command line, the caller's too, as given, and the window
     rec = plugin.start_record(mod, argv + rest, plan.get("started"), clear)
-    unrecorded = _record_roots_mod(theirs, desk, rec) if theirs else plugin.record(desk, rec)
+    unrecorded = "" if not talk else _record_roots_mod(theirs, desk, rec) if theirs else plugin.record(desk, rec)
     if unrecorded:
         print(f"hansa: {unrecorded}", file=sys.stderr)
     # how hansa up starts this session again; root on the account's desk writes nothing there, and hansa up runs
     # as the account
-    unrecorded = "" if theirs else up.record_coordinator(desk, clear, rest)
+    unrecorded = "" if theirs or not talk else up.record_coordinator(desk, clear, rest)
     if unrecorded:
         print(f"hansa: hansa up will not start this session again after a restart: {unrecorded}; nothing was "
               "recorded", file=sys.stderr)
@@ -2167,10 +2214,16 @@ def _notified(desk: Desk, rest: list) -> list:
     return [] if given else ["--messaging-socket-path", sock]
 
 
-def coordinator_desk(desk: Desk, by: int) -> dict:
+def coordinator_desk(desk: Desk, by: int, talk: bool = True) -> dict:
     """The coordinator's part in the desk, done as the desk's owner: the card, the helpers and the
     permissions brought up to date, who runs the coordinator recorded. Returns
-    what starting it needs from the desk: the lanes' checkouts, model, effort and the provider's environment."""
+    what starting it needs from the desk: the lanes' checkouts, model, effort and the provider's environment.
+    talk: an interactive session, refused while the desk's coordinator runs; a run that ends by itself (-p) is
+    neither refused nor recorded as the coordinator's start."""
+    if talk:
+        found = up.running_coordinator(desk)
+        if found:
+            raise SystemExit(desk.redact(f"hansa: {up.running_text(found)}"))
     s = desk.settings()
     co = s["coordinator"]
     p = s["providers"][co["provider"]]
@@ -2184,9 +2237,11 @@ def coordinator_desk(desk: Desk, by: int) -> dict:
     if not desk.notes_dir.exists() and not desk.notes_dir.is_symlink():  # a desk made before notes/
         desk.notes_dir.mkdir()
     desk.state_dir.mkdir(mode=0o700, exist_ok=True)  # who runs the coordinator: hansa cost says when it cannot read its records
-    plugin.forget(desk)  # the earlier start's record of the mod, before this start prepares it
-    started = now()  # and when: this start's record of the mod is tied to it (plugin.status)
-    write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": started})
+    started = None
+    if talk:  # a one-off run leaves the interactive session's records as they are
+        plugin.forget(desk)  # the earlier start's record of the mod, before this start prepares it
+        started = now()  # and when: this start's record of the mod is tied to it (plugin.status)
+        write_json(desk.state_dir / "coordinator.json", {"uid": by, "user": account.name_of(by), "at": started})
     kept, unkept, stops = no_read_parts(s, desk.root)
     if stops:  # Read would be open there to the session: it does not start
         raise SystemExit(f"hansa: {stop_text(stops)}")
@@ -2225,7 +2280,7 @@ def cmd_coordinator_cleared(a):
 def cmd_coordinator_desk(a):
     desk = Desk.find(a.desk)
     if not a.mod:
-        print(json.dumps(coordinator_desk(desk, a.by)))
+        print(json.dumps(coordinator_desk(desk, a.by, not a.one_off)))
         return
     try:  # root's start, recorded by the account
         plugin.record_start(desk, json.loads(a.mod), root=True)
@@ -2418,6 +2473,27 @@ def _changed_from(name: str, ln: dict, other: str, theirs: dict) -> list:
             for f in dict.fromkeys([*theirs, *ln]) if ln.get(f, blank.get(f)) != theirs.get(f, blank.get(f))]
 
 
+def _lane_added(name: str, repo: str, base: str, ln: dict) -> str:
+    """The line hansa lane add, and hansa init with --repo, give of the lane they made."""
+    return (f"lane {name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
+            f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes"
+            + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "network", "setup", "check", "merge_check",
+                                                        "release_files", "merge_timeout_min", "identity") if ln.get(f)))
+
+
+def _no_check(s: dict, name: str, ln: dict, base: str) -> str:
+    """What hansa lane add, and hansa init with --repo, say of a lane made with neither check nor merge_check."""
+    check_name = merge_lane(s, name)
+    if ln.get("merge_lane"):
+        return (f"Lane {name} has no check to run before merges; set one with: "
+                f"hansa lane set {name} merge_check \"<the command that runs the tests>\"")
+    if check_name != name:
+        return f"Lane {name} has no check after each task; merge checks use lane {check_name}"
+    return (f"Lane {name} has no check, so its tasks will be merged untested: hansa merge checks nothing "
+            f"before it merges them, not even when {base} has moved since a task was made. Set one with: "
+            f"hansa lane set {name} check \"<the command that runs the tests>\"")
+
+
 def cmd_lane(a):
     desk = Desk.find(a.desk)
     if not a.action:
@@ -2429,6 +2505,8 @@ def cmd_lane(a):
         widths = [max((len(r[i]) for r in rows), default=0) for i in range(3)]
         for r in rows:
             print("  ".join(f"{x:<{w}}" for x, w in zip(r, widths)) + "  " + r[3])
+            if not Path(lanes[r[0]]["repo"]).is_dir():
+                print(f"  {r[0]}: {repo_gone_text(r[0], lanes[r[0]]['repo'])}")
         print("no lanes yet: hansa lane add L --repo PATH" if not lanes else "more on one: hansa explain lane L")
         return
     if a.action == "try":
@@ -2500,6 +2578,7 @@ def cmd_lane(a):
                 base = ln["base"] = make_lane_repo(repo, new_repo, ln, "no lane was added")
             _save(desk, new, "hansa lane add")
             desk.event("lane_added", lane=a.name, **({"like": a.like} if a.like else {}))
+            aside_wt = _fresh_worktree(desk, a.name, repo)
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
             brief = desk.lanes_dir / a.name / "brief.md"
             aside = None
@@ -2515,10 +2594,9 @@ def cmd_lane(a):
                                {"lanes": {a.name: {"brief": text}}}, "coordinator", "hansa lane add")
             elif not brief.exists():
                 write_text(brief, "")
-            print(f"lane {a.name} added: {repo}, base {base}, providers {' > '.join(ln['providers'])}, "
-                  f"stopped at {ln['max_turns']} turns or {ln['timeout_min']} minutes"
-                  + "".join(f"; {f} {_shown(ln[f])}" for f in ("allow", "network", "setup", "check", "merge_check", "release_files",
-                                                              "merge_timeout_min", "identity") if ln.get(f)))
+            print(_lane_added(a.name, repo, base, ln))
+            if aside_wt:
+                print(aside_wt)
             if aside:
                 print(f"An earlier lane {a.name} left standing instructions in {brief}; lane {a.name} now has "
                       f"{a.like}'s, and the earlier ones are kept in {aside}")
@@ -2542,16 +2620,7 @@ def cmd_lane(a):
                 print("The lane's setup and check run outside the worker, so they are recorded. Tell the principal, "
                       "in the conversation, what they run and why.")
             if not ln.get("check") and not ln.get("merge_check"):
-                check_name = merge_lane(new, a.name)
-                if ln.get("merge_lane"):
-                    print(f"Lane {a.name} has no check to run before merges; set one with: "
-                          f"hansa lane set {a.name} merge_check \"<the command that runs the tests>\"")
-                elif check_name != a.name:
-                    print(f"Lane {a.name} has no check after each task; merge checks use lane {check_name}")
-                else:
-                    print(f"Lane {a.name} has no check, so its tasks will be merged untested: hansa merge checks nothing "
-                          f"before it merges them, not even when {base} has moved since a task was made. Set one with: "
-                          f"hansa lane set {a.name} check \"<the command that runs the tests>\"")
+                print(_no_check(new, a.name, ln, base))
             changed = []
             if a.like:
                 changed = _changed_from(a.name, ln, a.like, s["lanes"][a.like])
@@ -2679,7 +2748,7 @@ def _worktree_state(desk: Desk, wt: Path, repos: list) -> dict:
     repo = _worktree_repo(desk, wt, repos)
     if repo is None:
         return {"why": "no repository hansa knows of lists it as a worktree, so hansa cannot tell whose it is "
-                       "and runs no git there"}
+                       "and runs no git there", "unreached": True}
     try:
         check_git_file(desk, wt, repo)  # no git through a .git file hansa did not see git write
         left = set(sandbox_leftovers(desk, wt))
@@ -2726,6 +2795,100 @@ def _remove_worktree(desk: Desk, lane: str, wt: Path, st: dict, keep: bool, ln: 
     return kept
 
 
+def _worktree_of(desk: Desk, wt: Path, repo) -> bool:
+    """Whether the worktree is the repository's own: git there lists it, and its .git file, and the line hansa
+    remembers of it if any, name that git folder. A worktree whose repository was moved is not: its .git names the
+    old place."""
+    from .run import _known_git_files, _read_git_file, git_admin_dirs
+    try:
+        dirs = git_admin_dirs(Path(repo), wt)
+    except (RuntimeError, OSError):
+        return False
+    if len(dirs) != 1:
+        return False
+
+    def names(line) -> bool:
+        if not line or not line.startswith("gitdir:"):
+            return False
+        named = Path(line[len("gitdir:"):].strip())
+        return (named if named.is_absolute() else wt / named).resolve() == dirs[0]
+    known = _known_git_files(desk).get(str(wt))
+    return names(_read_git_file(wt)[0]) and (known is None or names(known))
+
+
+def _move_aside(desk: Desk, lane: str, wt: Path, why: str) -> Path:
+    """Move a lane's worktree that git cannot remove (its repository is gone, or it is not the lane's repository's)
+    aside within the desk, beside it in worktrees/, nothing in it deleted; hansa forgets its .git line, so the lane
+    gets a fresh worktree. Returns where it went."""
+    from .run import _remember_git_file
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    aside, n = wt.with_name(f"{wt.name}-aside-{stamp}"), 1
+    while os.path.lexists(aside):
+        n += 1
+        aside = wt.with_name(f"{wt.name}-aside-{stamp}-{n}")
+    os.rename(wt, aside)
+    _remember_git_file(desk, wt, None)
+    desk.event("lane_worktree_aside", lane=lane, worktree=str(wt), aside=str(aside), why=why)
+    return aside
+
+
+def _fresh_worktree(desk: Desk, lane: str, repo) -> str:
+    """hansa lane add: a worktree left at worktrees/LANE (by an earlier version's lane remove, say) that is not the
+    repository's own is moved aside (_move_aside), so the lane's tasks start in a fresh one. The line that says so,
+    or ''."""
+    wt = desk.worktrees_dir / lane
+    said = ""
+    if os.path.lexists(wt) and not _worktree_of(desk, wt, repo):
+        why = f"it is not a worktree of {repo}"
+        lister = _listing_repo(desk, wt, repo)
+        try:
+            aside = _move_aside(desk, lane, wt, why)
+        except OSError as e:
+            return (f"A worktree {wt} is left from an earlier lane {lane}, and {why}; it could not be moved aside "
+                    f"({e.strerror or e}), so the lane's tasks cannot start until the principal moves it")
+        said = (f"A worktree {wt} was left from an earlier lane {lane}, and {why}: it is moved aside to {aside}, "
+                f"with nothing in it deleted; the lane's tasks start in a fresh worktree"
+                + (f"; git in {lister} still lists that worktree at {wt} until git worktree prune is run in "
+                   f"{lister}" if lister else ""))
+    _forget_missing_worktree(repo, wt)
+    return said
+
+
+def _listing_repo(desk: Desk, wt: Path, repo) -> str:
+    """The repository, other than `repo` and still there, whose git lists the worktree: the folder its .git line (or
+    the line hansa remembers of it) names, read as files and never through git, when that git folder's gitdir names
+    the worktree back. '' when none."""
+    from .run import _known_git_files, _read_git_file
+    for line in (_read_git_file(wt)[0], _known_git_files(desk).get(str(wt))):
+        if not line or not line.startswith("gitdir:"):
+            continue
+        try:
+            admin = Path(line[len("gitdir:"):].strip())
+            admin = (admin if admin.is_absolute() else wt / admin).resolve()
+            back = Path((admin / "gitdir").read_text(encoding="utf-8").strip())
+            if (back if back.is_absolute() else admin / back).resolve() != (wt / ".git").resolve():
+                continue
+            common = Path((admin / "commondir").read_text(encoding="utf-8").strip())
+            common = (common if common.is_absolute() else admin / common).resolve()
+        except (OSError, ValueError):
+            continue
+        folder = common.parent if common.name == ".git" else common
+        if common.is_dir() and folder != Path(repo).resolve():
+            return str(folder)
+    return ""
+
+
+def _forget_missing_worktree(repo, wt: Path) -> None:
+    """git's record of the worktree in the repository, when the worktree's folder is no longer there (moved aside,
+    or removed by hand): cleared, as git worktree add refuses a folder git still lists as a missing worktree."""
+    from .run import git_admin_dirs
+    try:
+        if not os.path.lexists(wt) and git_admin_dirs(Path(repo), wt):
+            git("worktree", "remove", "--force", str(wt), cwd=repo)
+    except (RuntimeError, OSError):
+        pass  # the task's start says what git refuses
+
+
 def _target_text(name: str, t: dict, ln: dict) -> str:
     return (f"{name or '(unnamed: the release command)'}: {t.get('command')}  "
             f"[{t.get('timeout_min') or ln.get('timeout_min', 240)} min"
@@ -2744,6 +2907,7 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
         shown = lane_targets(ln)
         for name, t in sorted(shown.items()):
             print(_target_text(name, t, ln))
+            print("\n".join("  " + x for x in release.tick_text(new, a.name, name).splitlines()))
             if t.get("after_merge_min"):
                 print("  " + release.after_merge_text(new, a.name, name))
             for line in release.outside.lines(release.outside.inspect(t.get("command") or "", ln["repo"],
@@ -2891,8 +3055,11 @@ def _say_forbidden(desk: Desk, name: str, ln: dict, only: str | None = None) -> 
                          + "\nNo worker can change them, and no verification covers them. A change to a "
                          "fingerprinted outside file voids a waiting release and unticks the target on the "
                          "principal's list of releases without asking. Folders have no fingerprint; files recorded "
-                         "without a fingerprint do not void or untick anything. Better: move the files into "
-                         "the repository and list them in release_files. " + see_more("release-files")))
+                         "without a fingerprint do not void or untick anything. "
+                         + ("Better: move the files into the repository and list them in release_files. "
+                            if any(x["path"] not in found.get("outside_destinations", []) for x in found["outside"])
+                            or any(p not in found.get("outside_destinations", []) for p in found["outside_folders"])
+                            else "") + see_more("release-files")))
 
 
 def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
@@ -2959,7 +3126,11 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
         print(f"lane {name} removed; its standing instructions stay in {desk.lanes_dir / name}")
         for n in verifiers:
             print(f"lane {name} removed from lane {n}'s verify_for")
+    gone = ln["repo"] if ln and not Path(ln["repo"]).is_dir() else ""
     for wt, st in states.items():
+        if st.get("unreached") and gone:  # git cannot remove it: there is no repository to run it in
+            _gone_worktree(desk, name, wt, gone, a)
+            continue
         if st.get("why"):
             print(f"Its worktree {wt} stays: {st['why']}. The principal can look at it and delete it; if git in its "
                   f"repository still lists it, git worktree prune there clears that")
@@ -2972,6 +3143,34 @@ def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
         print(f"Its worktree {wt} is removed, with git worktree remove in {st['repo']}, as the desk's account"
               + (f"; what it held that no branch kept is on branch {kept} there" if kept else
                  "; what it held that no branch kept is dropped" if held.get(wt) else ""))
+    if gone and known:
+        print(f"To add it again on the repository's new folder: hansa lane add {name} --repo NEW_PATH, then queue "
+              f"its tasks again; they start in a fresh worktree. It is added with the default settings: set its "
+              f"check, setup and the rest again")
+
+
+def _gone_worktree(desk: Desk, name: str, wt: Path, repo: str, a) -> None:
+    """hansa lane remove, for the worktree of a lane whose repository folder is gone, which git cannot remove:
+    moved aside within the desk, or deleted with --discard."""
+    why = f"its repository folder {repo} is gone, so git cannot remove it"
+    try:
+        aside = _move_aside(desk, name, wt, why)
+    except OSError as e:
+        print(f"Its worktree {wt} stays: {why}, and it could not be moved aside ({e.strerror or e}). The principal "
+              f"can look at it and delete it")
+        return
+    if a.discard:
+        shutil.rmtree(aside, ignore_errors=True)
+        if os.path.lexists(aside):
+            print(f"Its worktree {wt} could not all be deleted (--discard): {why}; what is left of it is moved "
+                  f"aside to {aside}, for the principal to look at and delete")
+        else:
+            desk.event("lane_worktree_removed", lane=name, worktree=str(wt), deleted=True)
+            print(f"Its worktree {wt} is deleted (--discard), with all it held: {why}")
+        return
+    print(("--keep keeps nothing on a branch: there is no repository to keep a branch in. " if a.keep else "")
+          + f"Its worktree {wt} is moved aside to {aside}, with nothing in it deleted: {why}. Delete it when "
+            f"nothing in it is needed")
 
 
 def _lane_try(desk: Desk, a) -> None:
@@ -3548,10 +3747,14 @@ def main(argv=None):
                      "page and hansa serve go on meanwhile), each commit's own change once (a merge's: only what it "
                      "adds beyond its parents); hansa serve checks again at the start only when the commit, the "
                      "starting point, the words or the command changed since. hansa release alone lists the open and "
-                     "recent releases, including direct base commits and hand merges. The principal's release_direct "
+                     "recent releases, including direct base commits and hand merges; --show ID shows a request and "
+                     "all kept release and watch output, keys removed, without printing the principal's whole log. "
+                     "The principal's release_direct "
                      "setting defaults to record; hold requires --direct \"<why>\" and their yes for these commits, "
                      "even for a ticked target. --direct with no direct commits is refused. Only the coordinator asks. "
-                     "hansa release --stop ID [reason] calls one off: one "
+                     "hansa release --stop ID [reason] also stops a running watch, leaving the release done and "
+                     "recording who stopped the watch and why; a stopped watch stays stopped after a server restart. "
+                     "Otherwise it calls a release off: one "
                      "waiting for the principal or approved and waiting its turn is closed as stopped; a running one "
                      f"gets TERM to its command's whole process group, then KILL {release.STOP_GRACE} seconds later to "
                      "what still runs, and is recorded as stopped, with who stopped it and why, its output so far kept "
@@ -3573,7 +3776,10 @@ def main(argv=None):
                 "yes and no are not lane names, so this "
                 "form is always an answer. Never guess a code, nor ask the principal to send it anywhere else. "
                 + see_more("release-flow", "forbidden-words", "alerts"))
-    p.add_argument("--stop", metavar="ID", help="call release ID off (the rest of the line is the reason): TERM to a "
+    release_action = p.add_mutually_exclusive_group()
+    release_action.add_argument("--show", metavar="ID", help="show the request and all kept release and watch output, keys removed")
+    release_action.add_argument("--stop", metavar="ID", help="call release ID off, or stop its running watch "
+                   "(the rest of the line is the reason): TERM to a "
                    f"running one's command, KILL {release.STOP_GRACE} s later")
     p.add_argument("--direct", metavar="WHY", help="record why direct base commits go out; required when the "
                    "principal's release_direct setting is hold, then waits for their yes even for a ticked target; "
@@ -3822,7 +4028,9 @@ def main(argv=None):
         "Remove a lane with no task queued, running or waiting for review, and its worktrees (git worktree remove, "
         "as the desk's account). When a worktree holds changes not committed or commits no branch keeps, nothing is "
         "removed unless --keep or --discard says what to do with them. For a lane that is gone but whose worktree "
-        "is still there, it removes the worktree the same way. The lane's standing instructions stay."))
+        "is still there, it removes the worktree the same way. The worktree of a lane whose repository folder is gone, "
+        "which git cannot remove, is moved aside within the desk (--discard deletes it). The lane's standing "
+        "instructions stay."))
     q.add_argument("name")
     q.add_argument("--keep", action="store_true", help="put what the worktree holds that no branch keeps on a new "
                    "branch hansa-kept/NAME-DATE of the lane's repository, then remove it")
@@ -3972,6 +4180,7 @@ def main(argv=None):
     p.set_defaults(fn=cmd_coordinator_desk)
     p.add_argument("--mod", default="")  # only this: record root's start of the mod (plugin.start_record), as JSON
     p.add_argument("--by", type=int, required=True)
+    p.add_argument("--one-off", action="store_true")  # hansa coordinator -p ...: neither refused nor recorded
     p = sub.add_parser("notify-follow")  # hidden: a follower (hansa/notify.py), started detached
     p.set_defaults(fn=cmd_notify_follow)
     for opt in ("--key", "--socket", "--nonce"):

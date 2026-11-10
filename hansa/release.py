@@ -55,6 +55,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -62,6 +63,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 
 from . import outside, without_session
@@ -446,17 +448,25 @@ def hansa_merges(desk: Desk, s: dict, a: dict, tasks=None) -> set:
     return found
 
 
+def history_cutoff(repo, since: str, commit: str, merges: set) -> str:
+    """Before the first hansa landing on a first release with no remote history; otherwise no cutoff."""
+    if since or not merges or _git_bytes(repo, "for-each-ref", "--format=%(refname)", "refs/remotes").strip():
+        return ""
+    rows = _git_bytes(repo, "log", "--first-parent", "--format=%H %P", commit, "--").splitlines()
+    oldest = next((row.split() for row in reversed(rows) if row.split()[0] in merges), [])
+    return oldest[1] if len(oldest) > 1 else ""
+
+
 def direct_commits(repo, since: str, commit: str, commits: list, merges: set) -> list:
     """Outgoing first-parent commits other than hansa landings, and what their merges brought in."""
-    rows = _git_bytes(repo, "log", "--first-parent", "--format=%H %P", *_range(repo, since, commit))
-    line = [row.split() for row in rows.splitlines()]
-    if not since and not _git_bytes(repo, "for-each-ref", "--format=%(refname)", "refs/remotes").strip():
-        oldest = [i for i, row in enumerate(line) if row[0] in merges]
-        if oldest:
-            line = line[:oldest[-1] + 1]  # before hansa's first landing is the repository's earlier history
+    rng = _range(repo, since, commit)
+    cutoff = history_cutoff(repo, since, commit, merges)
+    if cutoff:
+        rng.insert(1, f"^{cutoff}")
+    rows = _git_bytes(repo, "log", "--first-parent", "--format=%H %P", *rng)
     direct = set()
-    for row in line:
-        sha, *parents = row
+    for row in rows.splitlines():
+        sha, *parents = row.split()
         if sha in merges:
             continue
         direct.add(sha)
@@ -1276,7 +1286,8 @@ def stop_release(desk: Desk, rid, reason: str = "", by: str = "cli") -> dict:
     """Call a release off (the coordinator's hansa release --stop, the principal's Stop on the page): one that has not
     started yet (waiting, approved) is closed as stopped now; a starting or running one is marked, and hansa serve
     stops its command (TERM to its process group, KILL STOP_GRACE seconds later) and records it as stopped when it
-    has ended. {ok, state} or {ok: False, problems}."""
+    has ended. After the release ends, an open watch can be stopped separately, keeping the release's result.
+    {ok, state} or {ok: False, problems}."""
     reason = desk.redact(str(reason or "").strip())[:2000]
     with desk.lock():
         r = get(desk, rid)
@@ -1284,6 +1295,13 @@ def stop_release(desk: Desk, rid, reason: str = "", by: str = "cli") -> dict:
             return {"ok": False, "problems": [f"there is no release #{rid}"]}
         st = r.get("state")
         if st not in OPEN:
+            if watch_open(r):
+                w = r["watch_run"]
+                if w.get("stop_asked"):
+                    return {"ok": False, "problems": [f"release #{rid}'s watch is already being stopped (asked by "
+                                                      f"{w.get('stopped_by') or '?'})"]}
+                _watch_change(desk, rid, {"stop_asked": now(), "stopped_by": by, "stop_reason": reason})
+                return {"ok": True, "state": "watch_stopping"}
             return {"ok": False, "problems": [f"release #{rid} has already ended: it is {st}"]}
         if r.get("stop_asked"):
             return {"ok": False, "problems": [f"release #{rid} is already being stopped (asked by "
@@ -1692,16 +1710,23 @@ def _finish_watch(desk: Desk, rid, problem: str = "") -> None:
         text = desk.redact(log.read_text(encoding="utf-8", errors="replace")) if log.exists() else ""
         if log.exists():
             write_text(log, text)
-        result = ("timed_out" if w.get("timed_out") else "passed" if code == 0 and not problem else "failed")
+        # As for releases, a stop after the command's exit file was written keeps its real result.
+        # The stop path records termed before signalling, so recovery cannot mistake that exit for a late stop.
+        stopped = bool(w.get("stop_asked")) and bool(w.get("termed"))
+        late = bool(w.get("stop_asked")) and not stopped
+        result = ("stopped" if stopped else "timed_out" if w.get("timed_out") else
+                  "passed" if code == 0 and not problem else "failed")
         ended = _watch_change(desk, rid, {"state": result, "exit": code, "ended": now(),
                                          "tail": text.strip().splitlines()[-TAIL:],
+                                         **({"stop_late": w.get("stop_late") or now()} if late else {}),
                                          "problem": desk.redact(problem)[:600], "pid": None, "pid_start": ""})
     (d / f"{rid}.watch.exit").unlink(missing_ok=True)
     drop_checkout(desk, rid, r.get("repo"))
     if ended:
         desk.failed_starts.pop(("release-watch", rid, w.get("launch")), None)
         desk.event("release_watch_ended", id=rid, lane=r.get("lane"), target=r.get("target"),
-                   commit=r.get("commit"), state=result, exit=code)
+                   commit=r.get("commit"), state=result, exit=code,
+                   **({"stop_late": True, "stopped_by": w.get("stopped_by") or ""} if late else {}))
 
 
 def _watch_tick(desk: Desk, rs, procs: dict, starting: bool, pending: dict) -> None:
@@ -1713,6 +1738,18 @@ def _watch_tick(desk: Desk, rs, procs: dict, starting: bool, pending: dict) -> N
         with serve_step():
             rid, w = r["id"], r["watch_run"]
             proc = procs.get(rid)
+            if w.get("stop_asked"):
+                # Keep the durable stop request through recovery: an unfinished watch normally starts over.
+                if not w.get("termed") and not w.get("stop_late"):
+                    field = "stop_late" if (log_dir(desk) / f"{rid}.watch.exit").exists() else "termed"
+                    _watch_change(desk, rid, {field: now()})
+                pid = w.get("pid")
+                if not pid and w.get("launch"):
+                    pid = leader(pids_with_arg(w["launch"], w.get("started")))
+                stop(pid, w.get("pid_start", ""), proc)
+                _finish_watch(desk, rid)
+                procs.pop(rid, None)
+                continue
             if proc is None:
                 if w.get("state") in ("starting", "running"):
                     pid, start = w.get("pid"), w.get("pid_start", "")
@@ -2103,9 +2140,15 @@ def direct_lines(r: dict) -> list:
     n = r.get("direct_count", 0)
     if not n:
         return []
-    commits = r.get("direct") or []
+    commits = (r.get("direct") or [])[:10]
     out = [f"{n} direct commit(s)" + (f" (the first {len(commits)} shown)" if len(commits) < n else "")]
     out += [f"  {c['sha'][:10]} {c['subject']}" for c in commits]
+    if len(commits) < n:
+        command = ["git", "-C", r["repo"], "log", "--oneline", r["commit"]]
+        if r.get("since"):
+            command.append(f"^{r['since']}")
+        command.append("--")
+        out.append("all commits in this range (including direct commits): " + shlex.join(command))
     if r.get("direct_reason"):
         out.append(f"reason for direct commits: {r['direct_reason']}")
     if r.get("direct_hold") and r.get("state") == "waiting":
@@ -2132,14 +2175,62 @@ def watch_text(r: dict, zh: bool = False) -> str:
     st = w.get("state")
     if not st:
         return "发布成功后监测" if zh else "watch after successful release"
+    if st == "stopped":
+        return ((f"发布监测已由{_who(w, True)}停止" if zh else f"watch stopped by {_who(w)}")
+                + (f": {w['stop_reason']}" if w.get("stop_reason") else ""))
+    if w.get("stop_asked") and st in WATCH_OPEN:
+        return ((f"发布监测正在停止（{_who(w, True)}请求）" if zh else f"watch stopping (asked by {_who(w)})")
+                + (f": {w['stop_reason']}" if w.get("stop_reason") else ""))
+    late = ((f"；{_who(w, True)}在 {when(w.get('stop_asked'))} 叫停时，它的命令已经结束了" if zh else
+             f"; the stop {_who(w)} asked at {when(w.get('stop_asked'))} came after its command had ended")
+            if w.get("stop_late") else "")
     if st == "timed_out":
-        return "发布监测超时" if zh else "watch timed out"
+        return ("发布监测超时" if zh else "watch timed out") + late
     if st == "failed":
         return (("发布监测失败" if zh else "watch failed")
                 + (f" (exit {w['exit']})" if w.get("exit") is not None else "")
-                + (f": {w['problem']}" if w.get("problem") else ""))
+                + (f": {w['problem']}" if w.get("problem") else "")) + late
     return ({"waiting": "发布监测等待运行", "starting": "发布监测正在启动", "running": "发布监测正在运行",
-             "passed": "发布监测通过"}.get(st, st) if zh else "watch " + st)
+             "passed": "发布监测通过"}.get(st, st) if zh else "watch " + st) + late
+
+
+def _output_tail(desk: Desk, r: dict, watch: bool = False) -> list:
+    """Only the retained lines; while running, take the same number from the current output."""
+    run = (r.get("watch_run") or {}) if watch else r
+    if run.get("state") in (WATCH_OPEN if watch else ("starting", "running")):
+        path = log_dir(desk) / f"{r['id']}{'.watch' if watch else ''}.log"
+        try:
+            with path.open(encoding="utf-8", errors="replace") as f:
+                return desk.redact("".join(deque(f, TAIL))).strip().splitlines()[-TAIL:]
+        except OSError:
+            pass
+    return run.get("tail") or []
+
+
+def _detail_lines(desk: Desk, r: dict, show: bool = False) -> list:
+    out = [f"command: {r.get('command')} ({runs_text(r)})" + (f" · note: {r['note']}" if r.get("note") else "")]
+    if r.get("watch"):
+        out.append(f"watch: {r['watch']} [{r.get('watch_timeout_min', 90)} min]; {watch_text(r)}")
+        tail = _output_tail(desk, r, watch=True) if show else (r.get("watch_run") or {}).get("tail", [])[-5:]
+        out += [f"| {x}" for x in tail]
+    out.append(checked_text(r))
+    if r.get("state") == "waiting":
+        out += outside.lines(r)
+    out += direct_lines(r)
+    if r.get("state") == "forbidden":
+        out += hits_text(r.get("hits", [])).splitlines()
+    if show:
+        out += [f"| {x}" for x in _output_tail(desk, r)]
+    elif r.get("state") in ("done", "failed", "stopped"):
+        out += [f"| {x}" for x in (r.get("tail") or [])[-5:]]
+    if r.get("state") == "failed" and not show:
+        out.append(f"more: hansa release --show {r['id']}")
+    return out
+
+
+def show_text(desk: Desk, r: dict) -> str:
+    """A request and all its kept output, never the principal's whole log."""
+    return "\n".join([line(desk, r), f"commit: {r.get('commit', '')}", *_detail_lines(desk, r, show=True)])
 
 
 def list_text(desk: Desk) -> str:
@@ -2157,17 +2248,9 @@ def list_text(desk: Desk) -> str:
         out.append(f"{title}:")
         for r in group:
             out.append("  " + line(desk, r, s))
-            out.append(f"      command: {r.get('command')} ({runs_text(r)})" + (f" · note: {r['note']}" if r.get("note") else ""))
-            if r.get("watch"):
-                out.append(f"      watch: {r['watch']} [{r.get('watch_timeout_min', 90)} min]; {watch_text(r)}")
-                out += [f"      | {x}" for x in (r.get("watch_run") or {}).get("tail", [])[-5:]]
-            out.append(f"      {checked_text(r)}")
-            out += ["      " + x for x in outside.lines(r)]
-            out += ["      " + x for x in direct_lines(r)]
-            if r.get("state") == "forbidden":
-                out += [f"      {x}" for x in hits_text(r.get("hits", [])).splitlines()]
-            if r.get("state") in ("done", "failed", "stopped") and r.get("tail"):
-                out += [f"      | {x}" for x in r["tail"][-5:]]
+            if r.get("state") in ("void", "stopped"):
+                continue
+            out += ["      " + x for x in _detail_lines(desk, r)]
     out.append("the whole output of a release: .hansa/releases/<id>.log (the principal's; hansa release shows its last lines)")
     return "\n".join(out)
 
@@ -2176,12 +2259,6 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
     """For hansa explain lane: the release targets and the last release of each."""
     s = desk.settings()
     targets = lane_targets(ln)
-    how = {False: f"it runs in {ln['repo']} at the base branch's commit, as the desk's account, outside the sandbox, "
-                  "with hansa's environment (not the lane's env), holding the repository (merges there wait for it), "
-                  "only after the principal says yes on the page",
-           True: "it runs from a checkout of the base branch's commit made for it (removed when it ends), as the "
-                 "desk's account, outside the sandbox, with hansa's environment (not the lane's env), holding nothing "
-                 f"(merges in {ln['repo']} go on meanwhile), only after the principal says yes on the page"}
     files = ln.get("release_files") or []
     listed = (["  release files (built and run by its releases outside the sandbox; hansa merge refuses a change "
                "touching one until a verification of it holds): " + " ".join(files)] if files else
@@ -2197,13 +2274,20 @@ def lane_lines(desk: Desk, name: str, ln: dict) -> list:
         rs = [r for r in releases(desk) if r.get("lane") == name and (r.get("target") or "") == target]
         limit = t.get("timeout_min") or ln.get("timeout_min", 240)
         head = f"  release target {target}" if target else "  release"
-        out += [f"{head}: {t.get('command')} (hansa release {name}{' ' + target if target else ''} asks for it; "
-                f"{how[bool(t.get('fixed'))]}; {limit} min as its limit"
-                + (f"; only for a commit target {t['after']} already sent out" if t.get("after") else "")
-                + ("; " + after_merge_text(s, name, target) if t.get("after_merge_min") else "")
-                + (": the principal lets it go out without asking" if lane_listed(s, name, target)
-                   else unlisted(s, name, target)) + ")",
-                f"  last release{' of ' + target if target else ''}: " + (line(desk, rs[-1], s) if rs else "none")]
+        sent = last_out(desk, name, ln["repo"], ln.get("base") or "main", target)
+        out += [f"{head}: {t.get('command')}",
+                f"    asks for it: hansa release {name}{' ' + target if target else ''}",
+                f"    {runs_text(t)}; {limit} min as its limit",
+                "    as the desk's account, outside the sandbox, with hansa's environment (not the lane's env)"]
+        out += ["    " + x for x in tick_text(s, name, target).splitlines()]
+        if t.get("after"):
+            out.append(f"    only for a commit target {t['after']} already sent out")
+        if t.get("after_merge_min"):
+            out.append("    " + after_merge_text(s, name, target))
+        out.append(f"  last release{' of ' + target if target else ''}: "
+                   + (line(desk, sent, s) if sent else "none"))
+        if rs and (not sent or rs[-1]["id"] != sent["id"]):
+            out.append(f"  last request{' of ' + target if target else ''}: " + line(desk, rs[-1], s))
         out += ["    " + x for x in outside.lines(outside.inspect(t.get("command") or "", ln["repo"],
                                                                  fingerprint=False))]
         if t.get("watch"):
@@ -2218,13 +2302,21 @@ def after_merge_text(s: dict, lane: str, target: str) -> str:
     return f"after merges: {delay} min; {gate}"
 
 
-def unlisted(s: dict, name: str, target: str = "") -> str:
-    """For hansa explain lane: a target on the principal's list that no longer goes out without asking, and why."""
+def tick_lapsed(s: dict, name: str, target: str) -> str:
+    """Why a saved tick no longer counts, for the ask and target views."""
     why = next((listed_mismatch(s, x) for x in s.get("releases_without_asking") or []
                 if listed_key(x) == (name, target)), "")
-    return (f": it is on the principal's list of releases without asking, but {why}, so its releases wait for the "
-            "yes until the principal takes it back in on the page (its button for that, or unticking and ticking "
-            "it again, then Save; a plain Save keeps the old entry)") if why else ""
+    return f"the principal's tick lapsed: {why}" if why else ""
+
+
+def tick_text(s: dict, name: str, target: str) -> str:
+    """A short, separate line for every target, including ones without an after-merge setting."""
+    if lane_listed(s, name, target):
+        return "goes out without asking: yes"
+    lapsed = tick_lapsed(s, name, target)
+    return ("goes out without asking: no" + ("\n" + lapsed
+            + "\nTake it back in on the page, or untick and tick it again, then Save; a plain Save keeps the old entry."
+            if lapsed else "; needs the principal's yes on the page"))
 
 
 def page_rows(desk: Desk, s: dict, tasks=None) -> list:
@@ -2245,11 +2337,13 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
         if r.get("watch"):
             row.update(watch=r["watch"], watch_timeout_min=r.get("watch_timeout_min", 90),
                        watch_run={k: v for k, v in (r.get("watch_run") or {}).items()
-                                  if k in ("state", "exit", "started", "ended", "tail", "problem")},
+                                  if k in ("state", "exit", "started", "ended", "tail", "problem",
+                                           "stop_asked", "stopped_by", "stop_reason")},
                        watch_what=watch_text(r), watch_what_zh=watch_text(r, zh=True))
         row.update({k: r[k] for k in ("direct", "direct_count", "direct_reason", "direct_hold") if k in r})
         c = r.get("code") or {}  # whether a code went out, and when; never the code, nor its hash
         row["code_sent"] = c.get("sent") if code_live(r) else None
+        row["code_live"] = code_live(r)  # whether a code of this release can answer it now
         waits = r.get("state") == "waiting"
         row["code"], row["code_zh"] = (code_text(r), code_text(r, zh=True)) if waits else ("", "")
         row["runs"], row["runs_zh"] = runs_text(r), runs_text(r, zh=True)

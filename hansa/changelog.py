@@ -5,7 +5,7 @@ import re
 import subprocess
 
 from .desk import Desk, lane_targets
-from .release import _git_bytes, last_out, repo_key
+from .release import _git_bytes, last_out, repo_key, hansa_merges, history_cutoff
 
 
 MARKER = re.compile(
@@ -50,9 +50,12 @@ def lines(desk: Desk, lane: str, target: str | None = None):
     tip = _git_bytes(repo, "rev-parse", "--verify", f"refs/heads/{base}^{{commit}}").strip()
     previous = last_out(desk, lane, repo, base, target)
     since = previous["commit"] if previous else ""
-    rng = f"{since}..{tip}" if since else tip
+    tasks = desk.tasks()
+    cutoff = history_cutoff(repo, since, tip, hansa_merges(desk, settings, {"repo": repo, "base": base}, tasks))
+    rng = f"{since or cutoff}..{tip}" if since or cutoff else tip
     counted = f"from release #{previous['id']}; range {rng}" if previous else (
-        f"no done release yet; every commit up to {base}'s tip ({tip[:7]})")
+        f"no done release yet; " + ("since the first hansa landing, up to " if cutoff else "every commit up to ")
+        + f"{base}'s tip ({tip[:7]})")
     if since and subprocess.run(["git", "merge-base", "--is-ancestor", since, tip], cwd=repo,
                                 capture_output=True, stdin=subprocess.DEVNULL).returncode:
         counted += f"; release commit {since} is not in {base}'s history"
@@ -62,7 +65,7 @@ def lines(desk: Desk, lane: str, target: str | None = None):
     commits = [row.split("\x1f", 2) for row in rows.splitlines()]
     parents = {sha: ps.split() for sha, ps, _ in commits}
     entries, owned, unknown = {}, set(), []
-    for task in desk.tasks():
+    for task in tasks:
         if task.get("kind") == "verify" or not (task.get("merged") or task.get("state") == "merged"):
             continue
         own_lane = settings["lanes"].get(task.get("lane"), {})

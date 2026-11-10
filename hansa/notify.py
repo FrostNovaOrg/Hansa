@@ -431,6 +431,8 @@ def _release_item(desk: Desk, e: dict):
                     "that task's merge")
         if e.get("stop_late"):
             line += " · the stop came after its command had ended, so it ended as its exit says"
+        if not e.get("ok"):
+            line += f" · more: hansa release --show {rid}"
     elif kind == "release_stopped":
         key = ("release", rid)
         who = "the principal" if e.get("by") == "page" else e.get("by") or "?"

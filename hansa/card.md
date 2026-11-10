@@ -97,7 +97,7 @@ they show what is merged, missing evidence and released; `show` also gives the g
 | `hansa memory-floor [GB]` | available memory under which nothing new starts |
 | `hansa cost [--days N \| --since HH:MM] [--by seat\|lane\|task\|...]` | tokens and their worth at the principal's prices |
 | `hansa ask "<what>" [--why "<why only the principal can do it>"] [--holds]` / `--close N "<outcome>"` | record a principal to-do / close #N with its outcome |
-| `hansa release [L [TARGET] ["<note>"]]`, `--stop ID`, `yes\|no ID CODE` | ask for, list, call off or answer a release |
+| `hansa release [L [TARGET] ["<note>"]]`, `--show ID`, `--stop ID`, `yes\|no ID CODE` | ask for, list, call off or answer a release; `--show` prints its kept output; `--stop` also stops a running watch |
 | `hansa changelog L [TARGET]` | list workers' changelog lines for the next release |
 | `hansa notes [PATH]` / `notes archive FILE HEADING` | notes/ with headings / move a section out |
 | `hansa gaps [--all]` / `gaps show ID` / `gaps mark ID fixed\|later\|wontfix "why"` | notes |

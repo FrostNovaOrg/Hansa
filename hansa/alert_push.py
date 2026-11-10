@@ -79,12 +79,21 @@ def _file(desk, id: str, extra=False) -> Path:
     return desk.secrets_dir / f"alert-push-{id}.{'secret' if extra else 'address'}"
 
 
-def _read(desk, id, extra=False):
+def _read(desk, id, extra=False, *, strip=None):
+    """A saved value. hansa writes each with one newline at the end. An address is read stripped; an extra secret
+    less only that newline (strip=None), as a Bark encryption key may begin or end with spaces. _secret reads
+    another service's secret stripped, as a file written by hand or by another program may hold more."""
     try:
         value = _file(desk, id, extra).read_text(encoding="utf-8")
-        return value.removesuffix("\n") if extra else value.strip()
+        return value.strip() if (not extra if strip is None else strip) else value.removesuffix("\n")
     except FileNotFoundError:
         return ""
+
+
+def _secret(desk, entry):
+    """An entry's extra secret: a Bark entry's encryption key as it is, another service's token or signing secret
+    stripped."""
+    return _read(desk, entry["id"], True, strip=entry["service"] != "bark")
 
 
 def has_address(desk, entry) -> bool:
@@ -97,7 +106,10 @@ def enabled(desk, settings) -> list[dict]:
 
 
 def encrypts(desk, entry) -> bool:
-    return entry["service"] == "bark" and bool(_read(desk, entry["id"], True))
+    """A Bark entry with a valid encryption key: only such an entry carries release codes. A key file edited by
+    hand to a key the page refuses sends nothing (bad_key), so it carries none."""
+    from .alert_bark import _key_valid
+    return entry["service"] == "bark" and _key_valid(_secret(desk, entry))
 
 
 def _write_secret(desk, id, value, extra=False):
@@ -154,11 +166,12 @@ def keys(desk) -> dict:
     except SettingsError:
         saved = []  # keep whole private values even when metadata cannot be read
     services = {_file(desk, e["id"]): alert_services.SERVICES[e["service"]] for e in saved}
+    bark_keys = {_file(desk, e["id"], True) for e in saved if e["service"] == "bark"}
     out = {}
     for path in sorted(desk.secrets_dir.glob("alert-push-*.*")):
         try:
             value = path.read_text(encoding="utf-8")
-            value = value.removesuffix("\n") if path.suffix == ".secret" else value.strip()
+            value = value.removesuffix("\n") if path in bark_keys else value.strip()  # read as _read does
         except OSError:
             continue
         if len(value) < 8:  # like Desk.keys: short strings match ordinary task text
@@ -300,7 +313,7 @@ def prepare(desk, settings, changes, *, by=""):
         validate = getattr(service, "validate", None)
         if validate and any(id == entry["id"] for id, _, _ in writes):
             address = pending.get((entry["id"], False), _read(desk, entry["id"]))
-            secret = pending.get((entry["id"], True), _read(desk, entry["id"], True))
+            secret = pending.get((entry["id"], True), _secret(desk, entry))
             validate(address, secret)
     # A name must never become another copy of a pasted credential in settings.
     private = []
@@ -386,15 +399,16 @@ def public(desk, settings=None):
         except ValueError:
             hidden = ""
         out.append({**entry, "name": desk.redact(entry.get("name", "")), "address": hidden,
-                    "address_set": bool(address), "secret_set": bool(_read(desk, entry["id"], True)),
-                    "encrypted": encrypts(desk, entry),
+                    "address_set": bool(address), "secret_set": bool(_secret(desk, entry)),
+                    # set to encrypt: such an entry never sends in plain text, even with a key that is not valid
+                    "encrypted": entry["service"] == "bark" and bool(_secret(desk, entry)),
                     "last": last_result(desk, entry["id"])})
     return out
 
 
 def record(desk, entry, why, code=None):
     # Neither service builders nor transport exceptions may add arbitrary text.
-    allowed = {"off", "no_address", "empty", "too_big", "refused_url", "sent", "network", "timeout", "tls",
+    allowed = {"off", "no_address", "empty", "too_big", "refused_url", "bad_key", "sent", "network", "timeout", "tls",
                "redirect", "http_429", "http_4xx", "http_5xx", "deadline", "refused_by_service"}
     why = why if isinstance(why, str) and why in allowed else "network"
     with desk.lock():
@@ -422,15 +436,20 @@ def send(desk, entry, items, held=0, *, testing=False, deliveries=None):
         service = alert_services.SERVICES[entry["service"]]
         # Use the same key for eligibility and encryption: a key removed since
         # the batch began must never turn its code-bearing text into plaintext.
-        secret = _read(desk, entry["id"], True)
+        secret = _secret(desk, entry)
         with_codes = entry["service"] == "bark" and bool(secret) and not testing
         try:
             address = service.normalize(address)
+        except ValueError:
+            return record(desk, entry, "refused_url")
+        try:
             validate = getattr(service, "validate", None)
             if validate:
                 validate(address, secret)
         except ValueError:
-            return record(desk, entry, "refused_url")
+            # Bark refuses only its encryption key: a key file edited by hand to one the page refuses. Nothing
+            # is sent, and never in plain text.
+            return record(desk, entry, "bad_key" if entry["service"] == "bark" else "refused_url")
         title, body = _text(desk, items, held, with_codes=with_codes)
         level = max((x.get("level", alert.level_of(x["kind"])) for x in items), key=alert.LEVELS.index)
         if not service.levels:
@@ -456,7 +475,7 @@ def test(desk, id):
     entry = next((e for e in entries(desk.settings()) if e["id"] == id), None)
     if entry is None:
         return "no_address"
-    if entry["service"] == "bark" and _read(desk, id, True):
+    if entry["service"] == "bark" and _secret(desk, entry):
         en = 'an encrypted test alert from hansa; "Decryption Failed" on the phone means the two keys differ'
         zh = '来自 hansa 的加密测试提醒；手机显示“Decryption Failed”表示两边的密钥不同'
         return send(desk, entry, [{"kind": "test", "level": "active", "text": en,

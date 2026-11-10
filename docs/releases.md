@@ -143,8 +143,16 @@ and when the release ends. When a release passes, the posted line includes
 the passing target, unless U already sent that commit or has a release waiting,
 approved, starting or running. A target
 with `--after` runs only when asked; the hint does not ask for it or start it.
-`hansa release` lists them; `hansa explain lane L`
-shows each target's command and its last release.
+`hansa release` lists them. Void (including replaced) and stopped requests take one line each,
+with their number, target, outcome and reason. Outside-path warnings appear in the list and in
+`hansa release --show ID` only while a request waits for the principal's yes; the ask and
+`hansa explain lane L` still show them.
+The ask puts the waiting instruction directly after the head, before commit details.
+`hansa explain lane L` gives each target short lines for its command and whether it goes out
+without asking, then its last successful release (number, commit and time) and the latest request
+if different. `hansa lane target L` shows whether every target goes out without asking, including
+targets without `--after-merge`. When a saved tick has lapsed, both views and a new release ask
+name the reason.
 
 Put a step that cannot be taken back (pushing a tag, publishing a package) last in a target's
 command, after the build it depends on has passed, so that a target that fails halfway has published
@@ -169,7 +177,11 @@ this prevents a watch from sending words the principal forbids.
 
 hansa posts a line for that release to the coordinator's session: watch passed
 (exit 0), failed (its exit code and last lines, keys removed), or timed out.
-The page's release list and `hansa release` show the state and result; output
+The page's release list and `hansa release` show the state and result; `hansa release --show ID`
+shows the request and all retained release and watch output (up to 15 lines each), keys removed,
+including output so far while running. It shows waiting, void and stopped requests too. Failed release lists
+and posted lines keep their last five lines and name this command for more. The whole log stays
+the principal's and is not printed by `--show`. Watch output
 is kept in `.hansa/releases/<id>.watch.log`, with the same last-line and daily
 trimming limits as release output. The page shows the watch command beside
 the target's command before approval. Changing, adding or removing it voids
@@ -212,7 +224,10 @@ Follow-ups describe the whole branch change; verifications supply no line.
 `hansa changelog L [TARGET]` lists changes since that target's last done release,
 across lanes sharing the repository and base, for one task to write up once per release.
 TARGET is required with several targets. The header names the range; without a done
-release, all history counts. A release outside base history is noted; git's range still applies.
+release and without remote-tracking history, commits before the first hansa landing are left out,
+using the release ask's cutoff. Without a hansa landing, all history still counts. With remote-tracking
+history or a previous done release, the existing range applies. A release outside base history is noted;
+git's range still applies.
 The last marker counts, ignoring case and accepting bold or bullet formatting.
 `none` (with optional backticks or period) and `-` ids appear last. Missing lines,
 direct commits and unidentifiable task commits are flagged. Verification reports are never read.
@@ -273,6 +288,14 @@ stopped at any end (a stop, the time limit, a failure, done). The principal's
 alert command is told when the coordinator stops one (`release_stopped`); the
 coordinator hears when the principal does.
 
+When the release is done and its watch still runs, the same `--stop ID [reason]`
+or Stop on the page stops the watch, leaving the release done. The watch records
+stopped, by whom and why, and keeps its output so far; a server restart does not
+start it again. A release whose watch has ended, or that has no watch, is still
+refused as already ended. If the watch's command has already written its exit
+code when the stop is handled, hansa keeps its passed or failed result and says
+the stop came after its command had ended, as for a release.
+
 The request lists direct commits among its outgoing commits, with their count (at most 200 SHAs and
 subjects): walk the base's first-parent line; a task's recorded `merge_commit` that hansa landed in
 this repository and base, from any lane, and what it brought in are not direct. Every other commit
@@ -289,7 +312,11 @@ targets going out without asking; `hold` (also used for an unknown setting value
 with them unless asked with `--direct "<why>"`, then records the reason and waits for the principal's
 yes even for a ticked target. The refusal names the first ten commits and their count and records
 nothing; `--direct` with no direct commits is refused. The page and `hansa release` show the recorded
-commits and reason; waiting alerts give only their count, never subjects. Older requests show as before.
+commits and reason. The ask and `hansa release` show the count and at most the first ten direct
+commits, with a copyable `git -C REPO log --oneline COMMIT [^SINCE] --` command for the full
+commit range (including task commits). This also reaches commits beyond the 200 stored on a request;
+the full range is read from git, so the repository must still have those commits. Waiting alerts
+give only their count, never subjects; posted completion lines already omit commit subjects.
 
 For checks that need another machine, system or the project's CI, the coordinator can set
 `hansa lane target L NAME --after-merge MINUTES` (1–1440; `none` turns it off), refused on a target
@@ -503,8 +530,9 @@ makes that tick stop counting; the page names the file, and taking
 changed entries back in records their new fingerprints. An older request
 or tick that did not record an outside file is void or stops counting
 too, saying it did not record the file; one with no outside file keeps
-counting. Outside folders named as where the command runs are shown
-without a fingerprint; files over 16 MB or unreadable are named as not
+counting. An explicit local `git push` destination is described as where the command sends to,
+without advice to move it into the repository; a file it runs or folder it runs in keeps its existing
+warning and advice. Outside folders are shown without a fingerprint; files over 16 MB or unreadable are named as not
 fingerprinted, and a file recorded without a fingerprint is not compared.
 Devices, binaries, bare names found on PATH, variables other than HOME,
 and what a script runs in turn are not looked into. Fingerprints are taken
@@ -572,7 +600,8 @@ the code is a second way to answer, by giving it to the coordinator in the conve
 If making any code fails, hansa voids the codes already made for that batch, records an
 `alert_error`, and sends the whole batch to every channel without codes, asking for an answer on the page.
 Removing an entry's encryption key makes later batches to it code-free. Its test push never makes or
-carries a release code, even while a release waits.
+carries a release code, even while a release waits. A key file edited by hand to a key the page would
+refuse makes the entry send nothing (`bad_key`) and carry no code.
 
 Each gathered batch goes to every enabled entry with an address. A command
 needs a nonblank command line. Sends run side by side with independent deadlines
@@ -650,7 +679,9 @@ already stopped waiting when its code was to be made) reads `release #1 of lane 
 (main at 08e2cfc99f) waits for your yes on the page: 8 commit(s), command:
 ...`. Codes come first to survive the 1,000-character cut. A code went out when at least one channel whose final
 text held it sent successfully. If no channel's final text held it, including after Bark's byte limit,
-the code is void and the page answers. It has 30 seconds; its own exit ends the run, even if it leaves a
+the code is void and the page answers. `hansa status`'s line under the waiting releases follows them, not
+the set-up: when none has a live code (none was made, making it failed, or it was voided), it says the
+principal answers on the page. It has 30 seconds; its own exit ends the run, even if it leaves a
 child running, and only at the limit is its process group killed. Alerts
 within 20 seconds of each other go out in one run to every channel that is set up,
 one batch at a time, and at most 20 runs an hour: beyond that, alerts are held and go out together in one
@@ -661,7 +692,8 @@ code and last lines (none for an alert that held a release's one-time code:
 then only how it ended is kept); the command is never retried: the next alert tries again.
 Each push service has a separate 30-second deadline including its transport's at most three
 tries; the batch never retries it. `hansa status` shows each push entry's last result,
-`sent` or the reason it could not send. A failed push records `alert_failed` with
+`sent` or the reason it could not send (`bad_key`: a Bark entry's encryption key is not valid; set it
+again on the page). A failed push records `alert_failed` with
 `channel: "push"`, the entry's `id`, `service` and reason, never its address or a code-bearing push's text,
 even when it failed or was cut. Neither channel carries the other's failure.
 The page has a button that sends a test alert through every channel that is set

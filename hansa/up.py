@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import SESSION, SESSION_PREFIXES, account, notify, without_session
+from . import SESSION, SESSION_PREFIXES, account, notify, session_value, without_session
 from .desk import Desk, _desks_entries, desks_file, desks_list_problem, listed_desks, now, program, read_json, write_json, write_text
 from .run import alive, proc_args, proc_cwd, proc_start, server_state
 
@@ -25,14 +25,24 @@ LOG_LIMIT = 20 * 1024 * 1024
 START_WAIT = 8.0
 COORDINATOR_START = "coordinator-start.json"
 COORDINATOR_WAIT = 3.0  # seconds a started coordinator's pane must last to count as started
+# in .hansa/: what the coordinator's pane showed last as it ended, written by the pane itself, so the reason a start
+# failed is not lost with the pane
+PANE_OUTPUT = "coordinator-pane.txt"
+# seconds: a pane whose command ended within these of its start keeps its screen in PANE_OUTPUT (a start that
+# failed); one that ran longer, a session that was used, keeps none
+PANE_KEPT_WITHIN = 60
+UP_LOCK = "up.lock"  # in .hansa/: held while hansa up starts the desk (desk_up)
 LAUNCHER = "notify-launch"  # hansa's hidden command that starts a session hansa notify on recorded (cli.py)
 # claude's words that pick a conversation, or give a session's inbox, and whether each takes a value (None: one
-# that does not start with -, if any). A start again drops them and continues the folder's latest conversation
+# that does not start with -, if any). A start again drops them and picks the conversation its record names
+# (restart_plan)
 PICKS = {"-c": False, "--continue": False, "--fork-session": False, "-r": None, "--resume": None,
          "--session-id": True, "--messaging-socket-path": True}
+# A Claude Code session's id, as its hooks, --session-id and CLAUDE_CODE_SESSION_ID give it: a UUID
+CONVERSATION_ID = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
 PRINTS = ("-p", "--print")  # claude's words for a run that is not an interactive session
-# With no record on a desk that has tasks or followers, its coordinator ran before hansa recorded starts: maybe a
-# session in another folder, so a fresh hansa coordinator would be a second one, in the wrong folder
+# With no record on a desk that had a coordinator (new_desk), it ran before hansa recorded starts: maybe a session
+# in another folder, so a fresh hansa coordinator would be a second one, in the wrong folder
 NOT_YET = ("its start is not recorded yet: this desk had a coordinator before hansa recorded its start, maybe a "
            "session in another folder")
 EXTERNAL_ASK = "Allow external CLAUDE.md file imports?"  # Claude Code's question for imports from outside the folder
@@ -158,7 +168,8 @@ def forget_desk(folder) -> tuple:
 
 
 def record_start(desk: Desk, options) -> None:
-    """Called after serve removes session identity, while it holds serve.lock."""
+    """Called after serve removes session identity and binds the page, while it holds serve.lock: a start that
+    fails to bind (a port in use, a mistyped --host) leaves the last good start's record."""
     rec = {"hansa": hansa_command(), "options": {k: getattr(options, k) for k in DEFAULTS},
            "port_explicit": options.port is not None,
            "env": start_env(desk, os.environ), "tmux": record_tmux(), "at": now()}
@@ -219,6 +230,30 @@ def pane_command(env: dict, cmd: list, log: Path = None) -> str:
         return "exec " + pane_env + " " + shlex.join(cmd)
     script = shlex.join(cmd) + " 2>&1 | /usr/bin/tee -a " + shlex.quote(str(log))
     return "exec " + pane_env + " /bin/sh -c " + shlex.quote(script)
+
+
+def kept_pane(env: dict, cmd: list, tmux: str, out: Path) -> str:
+    """What the coordinator's pane runs: the command as pane_command gives it, on the terminal (an interactive
+    session), and, when it ends within PANE_KEPT_WITHIN seconds of its start (a start that failed: hansa up looks
+    after COORDINATOR_WAIT), the pane's last screen written to out by tmux, before the pane closes. A session that
+    ran longer and ended leaves no copy of its screen on disk."""
+    keep = (shlex.quote(tmux) + ' -S "${TMUX%%,*}" capture-pane -p -J -S -100 -t "$TMUX_PANE" > '
+            + shlex.quote(str(out)) + " 2>/dev/null")
+    # POSIX sh, which has no $SECONDS: the time by which it must end, from date and expr. A date that gives no number
+    # leaves t empty or not a number, and test then fails, so nothing is kept
+    began = f't=$(expr "$(date +%s)" + {PANE_KEPT_WITHIN} 2>/dev/null) ; '
+    soon = '[ "$(date +%s)" -lt "$t" ] 2>/dev/null'
+    return (began + pane_command(env, cmd)[len("exec "):] + " ; s=$? ; if " + soon + " ; then " + keep
+            + " ; fi ; exit $s")
+
+
+def pane_output(out: Path, lines: int = 12) -> list:
+    """The last lines a coordinator's pane showed as it ended (kept_pane): none when it wrote none."""
+    try:
+        text = out.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [x.rstrip() for x in text.splitlines() if x.strip()][-lines:]
 
 
 def new_pane(prefix: list, session: str, window: str, folder: str, pane: str, env: dict):
@@ -515,16 +550,177 @@ def _turn_said(desk: Desk, pid) -> str:
     return f", the last {rec.get('fails')} ended with an API error ({rec.get('error')})"
 
 
-def resumed(words: list) -> list:
-    """The words to start claude again with: --continue in place of the words that picked a conversation."""
+def resumed(words: list, pick: list = ("--continue",)) -> list:
+    """The words to start claude again with: pick (--continue, --resume ID, or nothing for a new conversation) in
+    place of the words that picked a conversation."""
     words = unpicked(words)
     at = words.index("--") if "--" in words else len(words)
-    return words[:at] + ["--continue"] + words[at:]
+    return words[:at] + list(pick) + words[at:]
+
+
+UNKNOWN = "unknown"  # picked's answer for words that pick a conversation hansa cannot name
+
+
+def picked(words: list):
+    """Which conversation claude's words start with: its id (--resume ID, --session-id ID), None for a new one (no
+    word picks one), or UNKNOWN (--continue, the picker, a name, a fork: a conversation, but not one hansa knows)."""
+    words = words[:words.index("--")] if "--" in words else words
+    got, i = None, 0
+    while i < len(words):
+        name, eq, value = words[i].partition("=") if words[i].startswith("--") else (words[i], "", "")
+        if name in ("-c", "--continue", "--fork-session"):
+            return UNKNOWN
+        if name in ("-r", "--resume", "--session-id"):
+            if not eq:
+                value = words[i + 1] if i + 1 < len(words) else ""
+                i += 1 if value and not value.startswith("-") else 0
+            if not CONVERSATION_ID.fullmatch(value):
+                return UNKNOWN
+            got = value
+        i += 1
+    return got
+
+
+def conversation_of(desk: Desk, sid, transcript: str = "") -> dict:
+    """What a start record keeps of the conversation a session runs (key 'conversation'): {'id', 'transcript'} for a
+    known one (the transcript '' when its path is not known; the earlier record's when it is of the same id), None
+    for a new one, and nothing (the key left out) for one hansa cannot name: hansa up then continues the folder's
+    latest, as before records named it."""
+    if sid is UNKNOWN:
+        return {}
+    if sid is None:
+        return {"conversation": None}
+    old = read_coordinator(desk).get("conversation")
+    if not transcript and isinstance(old, dict) and old.get("id") == sid and isinstance(old.get("transcript"), str):
+        transcript = old["transcript"]
+    return {"conversation": {"id": sid, "transcript": transcript}}
+
+
+def conversation_input(raw: str) -> dict | None:
+    """Of a coordinator's hook's input (Stop, StopFailure, or SessionStart after a /clear), the conversation it
+    names: {'id': its session id, 'transcript': its transcript's absolute path, or ''}. None when it names none."""
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or data.get("hook_event_name") not in (*TURN_EVENTS, "SessionStart"):
+        return None
+    sid, path = data.get("session_id"), data.get("transcript_path")
+    if not isinstance(sid, str) or not CONVERSATION_ID.fullmatch(sid):
+        return None
+    return {"id": sid, "transcript": path if isinstance(path, str) and os.path.isabs(path) else ""}
+
+
+def record_conversation(desk: Desk, pid: int, conv: dict) -> None:
+    """Keep in the coordinator's start record the conversation its session runs now (conversation_input's), as its
+    hooks give it: at each turn's end, and after a /clear, which gives the session a new id. Only for the recorded
+    session (this pid, started when the record says), and only when it changed."""
+    rec = read_coordinator(desk)
+    if rec.get("kind") not in ("coordinator", "notify") or still_runs(rec) != pid or rec.get("conversation") == conv:
+        return
+    write_json(desk.state_dir / COORDINATOR_START, {**rec, "conversation": conv})
+
+
+def transcript_of(env: dict, sid: str) -> str:
+    """The transcript of the conversation with this id under the Claude Code folder of this environment
+    (CLAUDE_CONFIG_DIR, else ~/.claude): projects/<folder>/<id>.jsonl; '' when none is found."""
+    home = env.get("CLAUDE_CONFIG_DIR") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".claude")
+    try:
+        found = sorted(Path(os.path.expanduser(home), "projects").glob(f"*/{sid}.jsonl"))
+    except OSError:
+        return ""
+    return str(found[0]) if found else ""
+
+
+def conversation_plan(rec: dict) -> dict:
+    """How a start again picks the coordinator's conversation, by its record: {'how': 'resume', 'id'} its own,
+    by its id; {'how': 'new', 'id', 'why'} none, as it had none to resume ('none') or its transcript is gone
+    ('gone'); or {'how': 'continue'} the folder's latest, for a record that does not say (an older one)."""
+    if "conversation" not in rec:
+        return {"how": "continue"}
+    conv = rec["conversation"]
+    sid = conv.get("id") if isinstance(conv, dict) else None
+    if not isinstance(sid, str) or not CONVERSATION_ID.fullmatch(sid):
+        return {"how": "new", "why": "none"}
+    path = conv.get("transcript")
+    if isinstance(path, str) and path:
+        try:
+            os.stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return {"how": "new", "id": sid, "why": "gone", "transcript": path}
+        except OSError:  # cannot tell: it may well be there
+            pass
+    return {"how": "resume", "id": sid}
+
+
+def pick_words(conv: dict) -> list:
+    """claude's words for conversation_plan's choice."""
+    return {"resume": ["--resume", conv.get("id", "")], "continue": ["--continue"]}.get(conv["how"], [])
+
+
+def conversation_line(plan: dict) -> str:
+    """For hansa up: which conversation the coordinator's session came back with."""
+    conv = plan.get("conversation") or {"how": "new"}
+    if conv["how"] == "resume":
+        return f"conversation: it resumed the coordinator's own, session id {conv['id']}"
+    if conv["how"] == "continue":
+        return (f"conversation: it continued the most recent one in {plan['folder']} (--continue): hansa's record of "
+                "the coordinator's start is older and does not name its conversation; it does from the session's next "
+                "turn")
+    if conv.get("why") == "gone":
+        return (f"conversation: a new one; the coordinator's conversation {conv['id']} is gone (its transcript "
+                f"{conv['transcript']} is not there)")
+    if conv.get("why") == "none":
+        return "conversation: a new one; the coordinator's last session had none to resume (it was never typed into)"
+    return "conversation: a new one"
 
 
 def prints(words: list) -> bool:
     """Whether these words start claude with --print: a run that ends, not an interactive session."""
     return any(x in PRINTS for x in words[:words.index("--") if "--" in words else len(words)])
+
+
+# claude's words for a run that ends by itself: --print, and those that only print help or the version
+ONE_OFF = (*PRINTS, "-h", "--help", "-v", "--version")
+
+
+def interactive(words: list) -> bool:
+    """Whether these words start claude as an interactive session: none of ONE_OFF before `--`. A run that is not
+    interactive (hansa coordinator -p ...) leaves the records of the coordinator's start alone."""
+    return not any(x in ONE_OFF for x in words[:words.index("--") if "--" in words else len(words)])
+
+
+def running_coordinator(desk: Desk) -> dict:
+    """The desk's coordinator's session that runs now, other than this process: the recorded one while its process
+    still runs (still_runs), else a session hansa posts to whose process runs. {pid, name, attach}: name as its
+    follower last recorded it ('' none yet); attach, the tmux command that reaches it when its start record says it
+    runs in tmux, else ''. {} when none runs."""
+    rec = read_coordinator(desk)
+    lives = [r for r in notify.live_records(desk) if isinstance(r.get("session"), dict) and not notify.gone(r["session"])]
+    sess = rec.get("session") if still_runs(rec) not in (None, os.getpid()) else None
+    if sess is None:
+        sess = next((r["session"] for r in lives if r["session"].get("pid") != os.getpid()), None)
+    if not sess:
+        return {}
+    name = next((r.get("name") or "" for r in lives if notify.same(r.get("session"), sess)), "")
+    saved = rec.get("tmux") if notify.same(rec.get("session"), sess) and isinstance(rec.get("tmux"), dict) else {}
+    server, session = saved.get("server"), saved.get("session")
+    attach = ""
+    if isinstance(server, list) and len(server) == 2 and all(isinstance(x, str) for x in server) \
+            and isinstance(session, str) and session:
+        launch = rec.get("env") if isinstance(rec.get("env"), dict) else {}
+        tmux = program("tmux") or program("tmux", env=launch) or "tmux"
+        attach = attach_command(tmux, server, session, {k: v for k, v in launch.items() if k == "TMUX_TMPDIR"})
+    return {"pid": sess.get("pid"), "name": name, "attach": attach}
+
+
+def running_text(found: dict) -> str:
+    """What hansa coordinator says when the desk's coordinator already runs (running_coordinator's)."""
+    reach = (f"Reach it with: {found['attach']}" if found["attach"] else
+             "It does not run in tmux: go to the terminal it runs in.")
+    return (f"the desk's coordinator already runs: {notify.who(found['pid'], found['name'])}. hansa posts to that "
+            "session; a second one would work beside it, and hansa would post to both. Nothing was started; once it "
+            f"has ended, hansa coordinator starts a new one. {reach}")
 
 
 def unsafe(desk: Desk, words: list) -> str:
@@ -583,26 +779,33 @@ def record_coordinator(desk: Desk, clear: str, words: list) -> str:
     rec = {"kind": "coordinator", "hansa": hansa_command(), "clear_daily": clear, "words": unpicked(words),
            "folder": str(desk.root), "tmux": record_tmux(), "env": start_env(desk, os.environ),
            "session": {"pid": os.getpid(), "start": proc_start(os.getpid())},
-           "turn_hooks": True}  # hansa coordinator gives every session it starts the Stop and StopFailure hooks
-    # the words kept: those --continue replaces (as --resume <its id>) are not recorded, so they refuse nothing
+           "turn_hooks": True,  # hansa coordinator gives every session it starts the Stop and StopFailure hooks
+           # the conversation it starts with (--resume <its id>, as hansa up gives it), or a new one; its hooks keep
+           # it up to date (record_conversation)
+           **conversation_of(desk, picked(words))}
+    # the words kept: those that pick a conversation (as --resume <its id>) are not, so they refuse nothing
     return _keep(desk, rec, unsafe(desk, [clear, *rec["words"], str(desk.root)]))
 
 
 def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None, rules: list = None,
-                   settings: str = None) -> str:
+                   settings: str = None, sid: str = "") -> str:
     """How a session hansa did not start began, for hansa up: its claude's exact arguments and folder, read from
     its process unless given (notify-launch gives its own), tmux, and the launch settings of this command's
     environment, which it has from the session. rules: the deny rules notify-launch starts it with (launch_rules),
     kept in the record, which so says the session has them, and left out of its arguments; settings: the --settings
-    with the Stop and StopFailure hooks notify-launch gave it (turn_hooks), kept and left out the same way. '' when
-    recorded, else why not."""
+    with the Stop and StopFailure hooks notify-launch gave it (turn_hooks), kept and left out the same way. sid: the
+    session's id, as Claude Code gives it to a command run in the session (hansa notify on); else the conversation
+    is the one its words pick. '' when recorded, else why not."""
     argv = proc_args(sess["pid"]) if argv is None else argv
     folder = proc_cwd(sess["pid"]) if folder is None else folder
     words = without_settings(without_rules(unpicked(argv[1:]), rules or []), settings) if argv else []
+    env = start_env(desk, os.environ)
+    conv = conversation_of(desk, sid, transcript_of(os.environ, sid)) if CONVERSATION_ID.fullmatch(sid or "") else \
+        conversation_of(desk, picked(argv[1:]) if argv else UNKNOWN)
     rec = {"kind": "notify", "hansa": hansa_command(), "argv": argv and [argv[0], *words],
-           "folder": folder, "tmux": record_tmux(), "env": start_env(desk, os.environ), "session": sess,
+           "folder": folder, "tmux": record_tmux(), "env": env, "session": sess,
            **({"launch_rules": rules} if rules is not None else {}),
-           **({"launch_settings": settings, "turn_hooks": True} if isinstance(settings, str) else {})}
+           **({"launch_settings": settings, "turn_hooks": True} if isinstance(settings, str) else {}), **conv}
     if not argv:
         return _keep(desk, rec, "the arguments of its claude process cannot be read", unread=True)
     if not folder or not os.path.isdir(folder):
@@ -611,28 +814,33 @@ def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None
     return _keep(desk, rec, unsafe(desk, [*rec["argv"], folder]))
 
 
-def restart_plan(desk: Desk, rec: dict) -> dict:
+def restart_plan(desk: Desk, rec: dict, conv: dict = None) -> dict:
     """What hansa up runs to start the coordinator's session again, from its record: the command, the folder, the
-    words claude was given, and the command to run by hand."""
+    words claude was given, the command to run by hand, and which conversation it comes back with
+    (conversation_plan, unless conv gives it, as {'how': 'new'} for the same start with a new conversation)."""
     words = [x for x in (rec.get("words") if isinstance(rec.get("words"), list) else []) if isinstance(x, str)]
     argv = [x for x in (rec.get("argv") if isinstance(rec.get("argv"), list) else []) if isinstance(x, str)]
     hansa = rec.get("hansa") if isinstance(rec.get("hansa"), str) and rec.get("hansa") else hansa_command()
     desk_words = ["--desk", str(desk.root)]
+    conv = conv or conversation_plan(rec)
     if rec.get("kind") == "coordinator":
         clear = ["--clear-daily", rec["clear_daily"]] if isinstance(rec.get("clear_daily"), str) and \
             rec.get("clear_daily") else []
-        cmd = [hansa, *desk_words, "coordinator", *clear, *resumed(words)]
-        return {"cmd": cmd, "hand": cmd, "folder": str(desk.root), "words": words, "kind": "coordinator"}
+        cmd = [hansa, *desk_words, "coordinator", *clear, *resumed(words, pick_words(conv))]
+        return {"cmd": cmd, "hand": cmd, "folder": str(desk.root), "words": words, "kind": "coordinator",
+                "conversation": conv}
     if rec.get("kind") == "notify" and argv and isinstance(rec.get("folder"), str):
-        claude = [argv[0], *resumed(argv[1:])]
+        claude = [argv[0], *resumed(argv[1:], pick_words(conv))]
         return {"cmd": [hansa, *desk_words, LAUNCHER, *claude], "hand": claude, "folder": rec["folder"],
-                "words": argv[1:], "kind": "notify"}
+                "words": argv[1:], "kind": "notify", "conversation": conv}
     cmd = [hansa_command(), *desk_words, "coordinator"]  # a new desk's first start, so nothing to continue
-    return {"cmd": cmd, "hand": cmd, "folder": str(desk.root), "words": [], "kind": ""}
+    return {"cmd": cmd, "hand": cmd, "folder": str(desk.root), "words": [], "kind": "", "conversation": {"how": "new"}}
 
 
 def new_desk(desk: Desk) -> bool:
-    """A desk that never had a coordinator, as after hansa init: no task, and nothing under .hansa/followers/."""
+    """A desk that never had a coordinator, as after hansa init: hansa coordinator never prepared it
+    (.hansa/coordinator.json), no session ever heard from it (nothing under .hansa/followers/), and no task was
+    added from a Claude Code session (one has 'session'). Tasks added by hand, from a shell, are no coordinator's."""
     def has(d: Path, what) -> bool:
         try:
             return any(what(x) for x in d.iterdir())
@@ -640,7 +848,19 @@ def new_desk(desk: Desk) -> bool:
             return False
         except OSError:
             return True  # cannot tell: not new
-    return not has(desk.tasks_dir, Path.is_dir) and not has(notify.register_dir(desk), lambda x: True)
+
+    def from_session(d: Path) -> bool:
+        if not d.is_dir():
+            return False
+        try:
+            m = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError):
+            return True  # cannot tell: not new
+        return not isinstance(m, dict) or bool(m.get("session"))
+    return not (desk.state_dir / "coordinator.json").exists() and not has(desk.tasks_dir, from_session) \
+        and not has(notify.register_dir(desk), lambda x: True)
 
 
 def by_hand(plan: dict) -> str:
@@ -681,7 +901,7 @@ def notify_on_line(desk: Desk, card: bool | None = None) -> str:
     rules = rec.get("launch_rules") if rec.get("kind") == "notify" and notify.same(rec.get("session"), sess) \
         and isinstance(rec.get("launch_rules"), list) else None
     settings = rec.get("launch_settings") if rules is not None and isinstance(rec.get("launch_settings"), str) else None
-    why = record_session(desk, sess, rules=rules, settings=settings)
+    why = record_session(desk, sess, rules=rules, settings=settings, sid=session_value("CLAUDE_CODE_SESSION_ID"))
     rec = read_coordinator(desk)
     kept = rec.get("kind") == "notify" and notify.same(rec.get("session"), sess)
     if why and not kept:
@@ -1045,9 +1265,11 @@ def attach_command(tmux: str, server: list, session: str, env: dict) -> str:
 
 
 def pane_ended(prefix: list, pane: str, env: dict) -> bool:
+    """Whether the pane ended: only one tmux says is there and not dead (0) runs. For a pane that ended and closed,
+    tmux may say nothing and exit 0."""
     r = subprocess.run([*prefix, "display-message", "-p", "-t", pane, "#{pane_dead}"], env=env,
                        capture_output=True, text=True, timeout=5)
-    return r.returncode != 0 or r.stdout.strip() == "1"
+    return r.returncode != 0 or r.stdout.strip() != "0"
 
 
 def coordinator_up(desk: Desk) -> bool:
@@ -1094,8 +1316,11 @@ def coordinator_up(desk: Desk) -> bool:
     server = saved.get("server") or (serve.get("server") if isinstance(serve, dict) else None) or desk_server(desk)
     session = saved.get("session") or "coordinator"
     prefix = [tmux, *server]
+    out = desk.state_dir / PANE_OUTPUT
     try:
-        made = new_pane(prefix, session, "coordinator", plan["folder"], pane_command(env, plan["cmd"]), env)
+        desk.state_dir.mkdir(mode=0o700, exist_ok=True)
+        out.unlink(missing_ok=True)  # an earlier pane's: not this start's reason
+        made = new_pane(prefix, session, "coordinator", plan["folder"], kept_pane(env, plan["cmd"], tmux, out), env)
         pane = (made.stdout or "").strip()
         if not pane:  # no pane: tmux did not start (it exits 0 when it cannot make its server's socket)
             raise subprocess.CalledProcessError(made.returncode, made.args, made.stdout,
@@ -1104,10 +1329,20 @@ def coordinator_up(desk: Desk) -> bool:
         while not pane_ended(prefix, pane, env):
             if time.monotonic() >= end:
                 print(f"coordinator started in tmux, in {plan['folder']}: {shlex.join(plan['hand'])}")
+                print(conversation_line(plan))
                 print("attach: " + attach_command(tmux, server, session, env))
                 return True
             time.sleep(0.25)
-        print(f"coordinator failed to start: its pane ended. Run it by hand: {by_hand(plan)}")
+        said = pane_output(out)
+        print(desk.redact(
+            f"coordinator failed to start: its pane ended. Its last output (kept in {out}):\n"
+            + "\n".join("  " + x for x in said) if said else
+            "coordinator failed to start: its pane ended and left no output"))
+        print(desk.redact(f"Run it by hand: {by_hand(plan)}"))
+        if plan["conversation"]["how"] == "resume":  # its conversation may be gone though its record names it
+            new = restart_plan(desk, rec, {"how": "new"})
+            print(desk.redact(f"If Claude Code says no conversation was found with the id "
+                              f"{plan['conversation']['id']}, start a new one instead: {by_hand(new)}"))
     except (OSError, subprocess.SubprocessError) as e:
         detail = e.stderr if isinstance(e, subprocess.CalledProcessError) else str(e)
         print(desk.redact(f"coordinator failed to start: {str(detail).strip()}. Run it by hand: {by_hand(plan)}"))
@@ -1121,8 +1356,18 @@ def desk_up(desk: Desk) -> bool:
         command = shlex.join([hansa_command(), "--desk", str(desk.root), "up"])
         print(f"This desk belongs to {theirs}; run as {theirs}: {command}")
         return False
-    ok = server_up(desk)
-    return coordinator_up(desk) and ok
+    desk.state_dir.mkdir(mode=0o700, exist_ok=True)
+    # One hansa up at a time per desk: two at once would each start the server (tmux: "duplicate session: serve")
+    # and the coordinator. The second waits for the first, then finds what it started
+    with open(desk.state_dir / UP_LOCK, "a") as held:
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("Another hansa up is starting this desk's server and coordinator; waiting for it to finish.",
+                  flush=True)
+            fcntl.flock(held, fcntl.LOCK_EX)
+        ok = server_up(desk)
+        return coordinator_up(desk) and ok
 
 
 def installation_up(command: str) -> bool:

@@ -2280,10 +2280,11 @@ class DesksTest(unittest.TestCase):
         self.assertIn(str(good.root), said)
         self.assertNotIn("private failure text", said + raw)
         self.assertEqual(sum(str(gone) in line for line in said.splitlines()), 1)
+        self.assertIn(f"hansa desks --forget {shlex.quote(str(gone))}", said)
 
     def test_desks_missing_list_and_unreadable_list_use_the_shared_reason(self):
         from hansa.desk import desks_list_problem
-        self.assertEqual(self.say().strip(), "No desks listed")
+        self.assertEqual(self.say().strip(), "No desks listed. Make one with: hansa init DIR")
         self.assertEqual(json.loads(self.say("--json")), {"desks": [], "problem": ""})
         self.listed.mkdir()
         self.assertEqual(self.say().strip(), desks_list_problem())
@@ -2299,11 +2300,52 @@ class DesksTest(unittest.TestCase):
         write_json(self.listed, [{"desk": str(d.root)}])
         write_json(d.state_dir / "serve-code", {"pid": 1, "build": "old-version"})
         (d.state_dir / "web-host").write_text("::")
+        (d.state_dir / "web-port").write_text("8765")
         with unittest.mock.patch.object(views, "server_state", return_value={"state": "stuck", "pid": 2}):
             row = json.loads(self.say("--json"))["desks"][0]
         self.assertEqual(row["server"], "stuck")
         self.assertIsNone(row["version"])
         self.assertEqual(row["address"], "http://[::1]:8765/")
+
+    def test_desks_gives_no_page_address_for_a_desk_whose_server_never_ran(self):
+        running, new = self.desk("running"), self.desk("new")
+        write_json(self.listed, [{"desk": str(d.root)} for d in (running, new)])
+        (running.state_dir / "web-port").write_text("8765")  # the default port, which the new desk's would be
+        with unittest.mock.patch.object(views, "server_state", side_effect=lambda d: {
+                "state": "up" if d.root == running.root else "gone", "pid": 7}):
+            said, raw = self.say(), self.say("--json")
+        rows = json.loads(raw)["desks"]
+        self.assertEqual([r["address"] for r in rows], ["http://127.0.0.1:8765/", None])
+        first, second = said.split("\n\n")
+        self.assertIn("page: http://127.0.0.1:8765/", first)
+        self.assertIn("page: no address: not started", second)
+        self.assertNotIn("http://", second)
+
+    def test_init_with_a_repository_says_what_lane_add_says_of_the_lane_and_its_check(self):
+        repo = self.tmp / "repo"
+        sh("git", "init", "-q", "-b", "main", str(repo), cwd=self.tmp)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "init", cwd=repo)
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            main(["init", str(self.tmp / "made"), "--repo", str(repo)])
+        said = out.getvalue()
+        lane = Desk(self.tmp / "made").settings()["lanes"]["a"]
+        self.assertIn(f"lane a added: {lane['repo']}, base main, providers claude, stopped at 200 turns or 240 minutes",
+                      said)
+        self.assertIn("Lane a has no check, so its tasks will be merged untested", said)
+        self.assertIn('hansa lane set a check "<the command that runs the tests>"', said)
+        # the same lines hansa lane add gives for the same lane
+        other = self.desk("other")
+        write_json(other.settings_path, {**json.loads((self.tmp / "made" / "settings.json").read_text()), "lanes": {}})
+        with contextlib.redirect_stdout(io.StringIO()) as added, contextlib.redirect_stderr(io.StringIO()):
+            main(["--desk", str(other.root), "lane", "add", "a", "--repo", str(repo)])
+        lines = [x for x in added.getvalue().splitlines() if x.startswith(("lane a added", "Lane a has no check"))]
+        self.assertEqual(len(lines), 2, added.getvalue())
+        for line in lines:
+            self.assertIn(line, said.splitlines())
+        with contextlib.redirect_stdout(io.StringIO()) as out:  # without --repo, no lane and nothing of one
+            main(["init", str(self.tmp / "bare")])
+        self.assertNotIn("lane a added", out.getvalue())
+        self.assertNotIn("has no check", out.getvalue())
 
     def test_forget_takes_that_one_entry_off_the_list_and_deletes_no_file(self):
         first, second = self.desk("first"), self.desk("second")
@@ -2680,14 +2722,12 @@ class UpTest(unittest.TestCase):
 
     def test_up_preserves_new_explicit_default_port_conflicts(self):
         from hansa import up
-        bind = unittest.mock.Mock(side_effect=OSError(errno.EADDRINUSE, "taken"))
-        with self.assertRaisesRegex(SystemExit, "port 8765 is in use"):
-            self.fake_serve(bind, "--port", "8765")
+        self.fake_serve(lambda desk, host, port: types.SimpleNamespace(server_address=(host, port)), "--port", "8765")
         rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
         command = up.serve_command(self.desk, rec)
         self.assertEqual(command[command.index("--port") + 1], "8765")
-        bind.reset_mock()
-        with self.assertRaisesRegex(SystemExit, "port 8765 is in use"):
+        bind = unittest.mock.Mock(side_effect=OSError(errno.EADDRINUSE, "taken"))
+        with self.assertRaisesRegex(SystemExit, "port 8765: taken; perhaps another desk's hansa serve"):
             self.fake_serve(bind, *command[4:])
         bind.assert_called_once()
         self.assertEqual(bind.call_args.args[1:], ("127.0.0.1", 8765))
@@ -2717,21 +2757,79 @@ class UpTest(unittest.TestCase):
             attempted.append(port)
             raise OSError(errno.EADDRINUSE, "taken")
 
-        with self.assertRaisesRegex(SystemExit, "port 9876 is in use"):
+        with self.assertRaisesRegex(SystemExit, "port 9876: taken; perhaps another desk's hansa serve"):
             self.fake_serve(bind, "--port", "9876")
         self.assertEqual(attempted, [9876])
         self.assertFalse((self.desk.state_dir / "web-port").exists())
 
     def test_serve_does_not_retry_other_bind_errors_or_wrap_the_last_port(self):
-        with self.assertRaises(PermissionError):
-            self.fake_serve(unittest.mock.Mock(side_effect=PermissionError(errno.EACCES, "refused")))
+        refused = unittest.mock.Mock(side_effect=PermissionError(errno.EACCES, "refused"))
+        with self.assertRaisesRegex(SystemExit, "port 8765: refused"):
+            self.fake_serve(refused)
+        refused.assert_called_once()
         (self.desk.state_dir / "web-port").write_text("65535")
         bind = unittest.mock.Mock(side_effect=OSError(errno.EADDRINUSE, "taken"))
-        with self.assertRaisesRegex(SystemExit, "port 65535 is in use"):
+        with self.assertRaisesRegex(SystemExit, "port 65535: taken"):
             self.fake_serve(bind)
         bind.assert_called_once()
 
-    def test_serve_records_launch_before_starting_the_page_without_keys_or_session_identity(self):
+    def test_a_serve_that_cannot_bind_keeps_the_saved_start_and_says_why_in_one_line(self):
+        self.record()  # the last start that served the page
+        saved = (self.desk.state_dir / "serve-start.json").read_bytes()
+        for error, args, host, port, words in (
+                (OSError(errno.EADDRINUSE, "Address already in use"), ("--port", "9876"), "127.0.0.1", 9876,
+                 "Address already in use; perhaps another desk's hansa serve holds that port"),
+                (PermissionError(errno.EPERM, "Operation not permitted"), ("--port", "80"), "127.0.0.1", 80,
+                 "Operation not permitted. Nothing was started or recorded"),
+                (socket.gaierror(socket.EAI_NONAME, "Name or service not known"), ("--host", "lcalhost"), "lcalhost",
+                 8765, "Name or service not known. Nothing was started or recorded")):
+            with self.subTest(error=error):
+                bind = unittest.mock.Mock(side_effect=error)
+                with self.assertRaises(SystemExit) as e:
+                    self.fake_serve(bind, *args)
+                said = str(e.exception.code)
+                self.assertEqual(len(said.splitlines()), 1, said)
+                self.assertIn(f"hansa serve could not serve the page on host {host}, port {port}: {words}", said)
+                bind.assert_called_once()
+                self.assertEqual((self.desk.state_dir / "serve-start.json").read_bytes(), saved)
+                self.assertFalse((self.desk.state_dir / "web-port").exists())
+
+    def test_a_second_hansa_up_at_once_waits_for_the_first_and_says_the_server_is_running(self):
+        from hansa import up
+        self.record()
+        now = {"state": self.gone}
+        done, result = threading.Event(), {}
+
+        def second():
+            try:
+                result["ok"] = up.desk_up(self.desk)
+            finally:
+                done.set()
+
+        with open(self.desk.state_dir / "up.lock", "a") as first, \
+                unittest.mock.patch.object(up, "server_state", side_effect=lambda desk: now["state"]), \
+                unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                unittest.mock.patch.object(up, "launch_tmux", side_effect=subprocess.CalledProcessError(
+                    1, ["tmux"], stderr="duplicate session: serve")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            fcntl.flock(first, fcntl.LOCK_EX)  # the first hansa up, starting the server
+            runs = threading.Thread(target=second)
+            runs.start()
+            end = time.monotonic() + 30
+            while "Another hansa up" not in out.getvalue() and not done.is_set() and time.monotonic() < end:
+                time.sleep(0.02)
+            now["state"] = self.running  # the first started it, and ends
+            fcntl.flock(first, fcntl.LOCK_UN)
+            runs.join(30)
+        said = out.getvalue()
+        self.assertTrue(done.is_set())
+        self.assertIn("Another hansa up is starting this desk's server and coordinator; waiting", said)
+        self.assertIn("server already running (pid 123)", said)
+        self.assertNotIn("duplicate session", said)
+        self.assertNotIn("server failed", said)
+        self.assertTrue(result["ok"])
+
+    def test_serve_records_launch_once_the_page_is_bound_without_keys_or_session_identity(self):
         from hansa import up, web
         key = "sk-desk-secret-123456"
         (self.desk.secrets_dir / "provider.key").write_text(key)
@@ -2745,13 +2843,9 @@ class UpTest(unittest.TestCase):
                           LC_SECRET=key, LC_EMBEDDED="prefix:" + key, UNRELATED="omit",
                           CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="session-secret",
                           CLAUDE_CODE_MESSAGING_TOKEN="messaging-secret")
-        with cli.hold_server_lock(self.desk) as held, \
-                unittest.mock.patch.object(cli, "hold_server_lock", return_value=held), \
-                unittest.mock.patch.object(cli, "desk_paths_problem", return_value=""), \
-                unittest.mock.patch.object(web, "start_web", side_effect=RuntimeError("after record")), \
-                self.assertRaisesRegex(RuntimeError, "after record"):
-            main(["--desk", str(self.desk.root), "serve", "--host", self.options.host,
-                  "--port", str(self.options.port), "--every", str(self.options.every)])
+        self.fake_serve(lambda desk, host, port: types.SimpleNamespace(server_address=(host, port)),
+                        "--host", self.options.host, "--port", str(self.options.port),
+                        "--every", str(self.options.every))
         rec = json.loads((self.desk.state_dir / "serve-start.json").read_text())
         self.assertEqual(rec["hansa"], up.hansa_command())
         self.assertTrue(Path(rec["hansa"]).is_absolute())
@@ -4021,8 +4115,9 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertFalse(up.prints(["--", "-p"]))
         self.assertFalse(up.prints(["--name", "n"]))
 
-    def coordinator_up(self, rec=None, tmux="/tools/tmux", answers=(1, "%5\n", "0\n"), hearing=()):
-        """hansa up's coordinator part with this record: what it said, the tmux calls it made, and its answer."""
+    def coordinator_up(self, rec=None, tmux="/tools/tmux", answers=(1, "%5\n", "0\n"), hearing=(), pane_said=None):
+        """hansa up's coordinator part with this record: what it said, the tmux calls it made, and its answer.
+        pane_said: what the pane writes as it ends (up.kept_pane), written as tmux makes it."""
         from hansa import up
         if rec is not None:
             write_json(self.desk.state_dir / "coordinator-start.json", rec)
@@ -4030,19 +4125,26 @@ class CoordinatorUpTest(unittest.TestCase):
                    if isinstance(a, int) else subprocess.CompletedProcess([], 0, a, "") for a in answers]
         if answers[2:] and answers[2] == "ended":
             replies[2] = subprocess.CompletedProcess([], 1, "", "can't find pane: %5")
+        replies = iter(replies)
+
+        def run(argv, **kw):
+            if pane_said is not None and ("new-session" in argv or "new-window" in argv):
+                (self.desk.state_dir / up.PANE_OUTPUT).write_text(pane_said)
+            return next(replies)
         with unittest.mock.patch.object(up, "program", return_value=tmux), \
                 unittest.mock.patch.object(up, "COORDINATOR_WAIT", 0), \
                 unittest.mock.patch.object(notify, "names", return_value=list(hearing)), \
-                unittest.mock.patch.object(up.subprocess, "run", side_effect=replies) as ran, \
+                unittest.mock.patch.object(up.subprocess, "run", side_effect=run) as ran, \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             ok = up.coordinator_up(self.desk)
         return out.getvalue(), ran.call_args_list, ok
 
     @staticmethod
     def pane_words(call) -> list:
-        """The command a new pane runs, after the clean environment it is given."""
+        """The command a new pane runs, after the clean environment it is given (up to what keeps its output)."""
         pane = shlex.split(call.args[0][-1])
-        return pane[pane.index("COLORTERM=${COLORTERM-}") + 1:]
+        pane = pane[pane.index("COLORTERM=${COLORTERM-}") + 1:]
+        return pane[:pane.index(";")] if ";" in pane else pane
 
     def test_up_starts_nothing_while_a_session_hears_or_the_recorded_one_still_runs(self):
         said, calls, ok = self.coordinator_up({"kind": "notify", "argv": ["claude"], "folder": str(self.tmp)},
@@ -4141,13 +4243,15 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertIn("No recorded coordinator start", said)
         self.assertIn("trust", said)
         self.assertIn("attach and answer", said)
-        # with tmux or without, a desk that had a coordinator before starts were recorded starts nothing
-        for had in ("a task", "a follower"):
+        # with tmux or without, a desk that had a coordinator before starts were recorded starts nothing: a task added
+        # from a session, a session that heard from hansa, or hansa coordinator's preparing of the desk
+        for had in ("a task from a session", "a follower", "hansa coordinator's start"):
             with self.subTest(had=had):
-                made = self.desk.tasks_dir / "t0001" if had == "a task" else \
-                    notify.register_dir(self.desk) / ("a" * 16 + ".json")
+                made = {"a task from a session": self.desk.tasks_dir / "t0001" / "meta.json",
+                        "a follower": notify.register_dir(self.desk) / ("a" * 16 + ".json"),
+                        "hansa coordinator's start": self.desk.state_dir / "coordinator.json"}[had]
                 made.parent.mkdir(parents=True, exist_ok=True)
-                made.mkdir() if had == "a task" else made.write_text("{}")
+                write_json(made, {"id": "t0001", "session": self.SESS} if had.startswith("a task") else {})
                 for tmux in ("/tools/tmux", ""):
                     said, calls, ok = self.coordinator_up(tmux=tmux)
                     self.assertEqual((calls, ok), ([], False))
@@ -4156,12 +4260,301 @@ class CoordinatorUpTest(unittest.TestCase):
                     self.assertIn("hansa notify on in it", said)
                     self.assertIn("start it with hansa coordinator", said)
                     self.assertNotIn("trust", said)
-                shutil.rmtree(made) if had == "a task" else made.unlink()
+                made.unlink()
         # a record that says why the last start was not recorded starts nothing, and says why
         said, calls, ok = self.coordinator_up({"kind": "unrecorded", "why": "a word of its command holds one of the "
                                                "desk's keys", "session": {"pid": 0}})
         self.assertEqual((calls, ok), ([], False))
         self.assertIn("not recorded (a word of its command holds one of the desk's keys); nothing started", said)
+
+    def test_up_starts_the_coordinator_on_a_desk_whose_tasks_were_added_by_hand(self):
+        """The guide's way there: hansa up without tmux (the server starts, the coordinator not), a task queued by
+        hand from a shell, tmux installed, hansa up again. No coordinator ever ran: it starts one."""
+        from hansa import up
+        self.say("add", "--lane", "a", "Add hello.txt")
+        self.assertEqual([("session" in m) for m in self.desk.tasks()], [False])  # by hand: no session
+        said, calls, ok = self.coordinator_up(tmux="")
+        self.assertIn("nothing started. In a terminal of your own: ", said)
+        self.assertNotIn("not recorded yet", said)
+        said, calls, ok = self.coordinator_up()
+        self.assertTrue(ok, said)
+        self.assertNotIn("not recorded yet", said)
+        self.assertEqual(self.pane_words(calls[1]), [up.hansa_command(), "--desk", str(self.desk.root), "coordinator"])
+        self.assertIn("No recorded coordinator start, and a new desk", said)
+        self.assertIn("coordinator started in tmux", said)
+
+    def test_up_says_the_coordinator_failed_when_its_pane_ended_and_closed_with_its_last_words(self):
+        """tmux answers for a pane that ended and closed with nothing, and exits 0: that is no running pane. The
+        pane keeps its last screen in .hansa/ as it ends, and hansa up prints it."""
+        from hansa import up
+        said, calls, ok = self.coordinator_up(answers=(1, "%5\n", ""),
+                                              pane_said="\nhansa: claude was not found on the PATH\n\n")
+        self.assertFalse(ok, said)
+        self.assertNotIn("coordinator started", said)
+        self.assertNotIn("attach:", said)
+        out = self.desk.state_dir / up.PANE_OUTPUT
+        self.assertIn(f"coordinator failed to start: its pane ended. Its last output (kept in {out}):\n"
+                      "  hansa: claude was not found on the PATH\n", said)
+        self.assertIn("Run it by hand: " + shlex.join(["cd", str(self.desk.root)]), said)
+        # what the pane runs: the command, then tmux's copy of its screen into that file, in its own pane
+        pane = calls[1].args[0][-1]
+        self.assertIn(shlex.join([up.hansa_command(), "--desk", str(self.desk.root), "coordinator"]) + " ; s=$? ; ",
+                      pane)
+        self.assertIn("/tools/tmux -S \"${TMUX%%,*}\" capture-pane -p -J -S -100 -t \"$TMUX_PANE\" > "
+                      + shlex.quote(str(out)), pane)
+        self.assertTrue(pane.endswith("; exit $s"))
+        # an earlier pane's output is not this start's: removed before the pane starts
+        said, _, ok = self.coordinator_up(answers=(1, "%5\n", "1\n"))
+        self.assertFalse(ok)
+        self.assertIn("coordinator failed to start: its pane ended and left no output", said)
+        # through hansa up: exit 1
+        with unittest.mock.patch.object(up, "server_up", return_value=True), \
+                unittest.mock.patch.object(up, "program", return_value="/tools/tmux"), \
+                unittest.mock.patch.object(up, "COORDINATOR_WAIT", 0), \
+                unittest.mock.patch.object(up.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess([], rc, o, "") for rc, o in ((1, ""), (0, "%5\n"), (0, ""))]):
+            with self.assertRaises(SystemExit) as e:
+                self.say("up")
+        self.assertEqual(e.exception.code, 1)
+
+    def test_the_pane_keeps_its_last_output_as_it_ends(self):
+        """kept_pane's shell, run here with a stand-in tmux that writes what capture-pane is asked for."""
+        from hansa import up
+        tmux = self.tmp / "tmux"
+        tmux.write_text("#!/bin/sh\necho \"captured: $*\"\n")
+        tmux.chmod(0o755)
+        out = self.tmp / "pane.txt"
+        pane = up.kept_pane({"PATH": "/usr/bin:/bin"}, ["/bin/sh", "-c", "echo gone; exit 3"], str(tmux), out)
+        r = subprocess.run(["/bin/sh", "-c", pane], env={"TMUX": "/s/tmux-1/x,9,0", "TMUX_PANE": "%7"},
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual((r.returncode, r.stdout), (3, "gone\n"))  # the command's own status, its output on the pane
+        self.assertEqual(out.read_text(), "captured: -S /s/tmux-1/x capture-pane -p -J -S -100 -t %7\n")
+
+    def test_the_pane_keeps_its_screen_only_when_its_command_ended_within_its_first_minute(self):
+        """A start that failed ends at once and keeps its screen; a session that ran longer, then ended, keeps
+        none (its conversation is not left on disk). A stand-in date gives the times the pane's shell reads."""
+        from hansa import up
+        tmux, date = self.tmp / "bin" / "tmux", self.tmp / "bin" / "date"
+        tmux.parent.mkdir()
+        tmux.write_text("#!/bin/sh\necho \"captured: $*\"\n")
+        times = self.tmp / "times"
+        date.write_text(f"#!/bin/sh\n/usr/bin/head -n 1 {times} ; /usr/bin/tail -n +2 {times} > {times}.n ; "
+                        f"/bin/mv {times}.n {times}\n")
+        for f in (tmux, date):
+            f.chmod(0o755)
+        out = self.tmp / "pane.txt"
+        pane = up.kept_pane({"PATH": "/usr/bin:/bin"}, ["/bin/sh", "-c", "exit 3"], str(tmux), out)
+        for began, ended, kept in ((1000, 1000, True), (1000, 1059, True), (1000, 1060, False), (1000, 90000, False),
+                                   ("not a number", 1000, False), (1000, "not a number", False)):
+            with self.subTest(after=f"{began} to {ended}"):
+                out.unlink(missing_ok=True)
+                times.write_text(f"{began}\n{ended}\n")
+                r = subprocess.run(["/bin/sh", "-c", pane], capture_output=True, text=True, timeout=30,
+                                   env={"TMUX": "/s/tmux-1/x,9,0", "TMUX_PANE": "%7",
+                                        "PATH": f"{tmux.parent}:/usr/bin:/bin"})
+                self.assertEqual(r.returncode, 3)  # the command's own status either way
+                self.assertEqual(out.is_file(), kept)
+                self.assertEqual(times.read_text(), "")  # the shell asked the time at the start and at the end
+
+    def uuid(self, n: int) -> str:
+        return f"{n:08x}-1111-4222-8333-444455556666"
+
+    def transcript(self, sid: str, folder="-desk") -> Path:
+        path = self.tmp / ".claude" / "projects" / folder / f"{sid}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+        return path
+
+    def test_up_resumes_the_coordinators_own_conversation_by_its_id_or_starts_a_new_one(self):
+        from hansa import up
+        sid = self.uuid(1)
+        base = {"kind": "coordinator", "words": ["--model", "opus"], "folder": str(self.desk.root),
+                "session": {"pid": 0}}
+        coordinator = [up.hansa_command(), "--desk", str(self.desk.root), "coordinator", "--model", "opus"]
+        cases = {  # the record's conversation: claude's words that pick it, and what hansa up says
+            "its own": ({"id": sid, "transcript": str(self.transcript(sid))}, ["--resume", sid],
+                        f"conversation: it resumed the coordinator's own, session id {sid}"),
+            "own, transcript unknown": ({"id": sid, "transcript": ""}, ["--resume", sid],
+                                        f"conversation: it resumed the coordinator's own, session id {sid}"),
+            "never typed into": (None, [], "conversation: a new one; the coordinator's last session had none to "
+                                           "resume (it was never typed into)"),
+            "gone": ({"id": sid, "transcript": str(self.tmp / "gone" / f"{sid}.jsonl")}, [],
+                     f"conversation: a new one; the coordinator's conversation {sid} is gone (its transcript "
+                     f"{self.tmp / 'gone' / sid}.jsonl is not there)"),
+            "an older record": ("-", ["--continue"], "conversation: it continued the most recent one in "
+                                                     f"{self.desk.root} (--continue): hansa's record of the "
+                                                     "coordinator's start is older"),
+        }
+        for case, (conv, pick, line) in cases.items():
+            with self.subTest(case=case):
+                rec = {**base, **({} if conv == "-" else {"conversation": conv})}
+                said, calls, ok = self.coordinator_up(rec)
+                self.assertTrue(ok, said)
+                self.assertEqual(self.pane_words(calls[1]), [*coordinator, *pick])
+                self.assertIn(line, said)
+                self.assertNotIn("--continue", said if pick != ["--continue"] else "")
+                # the by-hand hint and hansa status give the same words
+                said, _, ok = self.coordinator_up(rec, tmux="")
+                self.assertIn(shlex.join([*coordinator, *pick]) + "\n", said)
+                self.assertIn("with " + shlex.join([*coordinator, *pick]), up.coordinator_line(self.desk))
+
+    def test_hansa_up_started_coordinator_that_was_never_typed_into_starts_again_without_continue(self):
+        """A new desk; hansa up starts hansa coordinator, which records its start; the session ends without a turn;
+        hansa up again starts it without --continue, which would find no conversation."""
+        from hansa import up
+        said, calls, ok = self.coordinator_up()
+        started = self.pane_words(calls[1])
+        self.assertEqual(started[3:], ["coordinator"])
+        self.assertIn("conversation: a new one", said)
+        with unittest.mock.patch.object(up, "record_tmux", return_value={}):
+            self.assertEqual(up.record_coordinator(self.desk, "", started[4:]), "")  # as hansa coordinator does
+        self.assertIsNone(up.read_coordinator(self.desk)["conversation"])
+        with unittest.mock.patch.object(up, "alive", return_value=False):  # that session ended
+            said, calls, ok = self.coordinator_up()
+        self.assertTrue(ok, said)
+        self.assertEqual(self.pane_words(calls[1])[3:], ["coordinator"])
+        self.assertIn("none to resume", said)
+        with unittest.mock.patch.object(up, "alive", return_value=False):
+            said, _, _ = self.coordinator_up(answers=(1, "%5\n", "ended"), pane_said="Error: something\n")
+        self.assertIn("  Error: something\n", said)
+        self.assertNotIn("--continue", said)
+
+    def test_the_coordinators_hooks_keep_the_conversation_it_runs_in_its_start_record(self):
+        """coordinator-turn as the session's Stop, StopFailure and SessionStart (after a /clear) hooks: the id and
+        the transcript of the session's conversation, kept only for the recorded session, and a new id after a
+        /clear; hansa up then resumes that one."""
+        from hansa import up
+        me = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
+        write_json(self.desk.state_dir / "coordinator-start.json",
+                   {"kind": "coordinator", "words": [], "folder": str(self.desk.root), "session": me,
+                    "conversation": None})
+        first, cleared = self.uuid(1), self.uuid(2)
+
+        def hook(event, sid, pid=os.getpid(), **more):
+            data = {"hook_event_name": event, "session_id": sid, "transcript_path": str(self.transcript(sid)), **more}
+            with unittest.mock.patch("sys.stdin", io.StringIO(json.dumps(data))):
+                main(["--desk", str(self.desk.root), "coordinator-turn", "--pid", str(pid)])
+            return up.read_coordinator(self.desk).get("conversation")
+        self.assertEqual(hook("Stop", first), {"id": first, "transcript": str(self.transcript(first))})
+        self.assertTrue((self.desk.state_dir / "coordinator-turns" / f"{os.getpid()}.json").is_file())  # as before
+        self.assertEqual(hook("SessionStart", cleared, source="clear"),
+                         {"id": cleared, "transcript": str(self.transcript(cleared))})
+        self.assertEqual(hook("StopFailure", first, error="rate_limit")["id"], first)
+        self.assertEqual(hook("Stop", "not-an-id")["id"], first)  # nothing that is not a session's id
+        self.assertEqual(hook("Stop", cleared, pid=4242)["id"], first)  # another session's: not the recorded one
+        with unittest.mock.patch.object(up, "alive", return_value=False):  # after a restart
+            said, calls, _ = self.coordinator_up()
+        self.assertEqual(self.pane_words(calls[1])[-2:], ["--resume", first])
+        # the hooks hansa coordinator and the launcher give: a SessionStart after a /clear runs coordinator-turn too
+        hooks = cli.turn_hooks(self.desk, 77)
+        self.assertEqual(hooks["SessionStart"], [{"matcher": "clear", "hooks": hooks["Stop"][0]["hooks"]}])
+
+    def test_a_session_recorded_by_notify_on_comes_back_to_its_own_conversation(self):
+        """Started with --resume ID or --session-id ID, or named by the id Claude Code gives a command run in it:
+        hansa up starts it with --resume ID, through the launcher, which keeps the same conversation in the record."""
+        from hansa import up
+        sid, other = self.uuid(3), self.uuid(4)
+        path = self.transcript(sid, "-own-folder")
+        for words in (["--resume", sid], ["--session-id", sid], ["-r", sid], ["--resume=" + sid]):
+            with self.subTest(words=words):
+                said, rec, _ = self.notify_on(["claude", "--name", "shop coordinator", *words, "--model", "opus"])
+                self.assertEqual(rec["argv"], ["claude", "--name", "shop coordinator", "--model", "opus"])
+                self.assertEqual(rec["conversation"]["id"], sid)
+                self.assertIn(f"claude --name 'shop coordinator' --model opus --resume {sid}.", said)
+                said, calls, ok = self.coordinator_up()
+                self.assertTrue(ok, said)
+                launched = self.pane_words(calls[1])
+                self.assertEqual(launched[launched.index("notify-launch") + 1:],
+                                 ["claude", "--name", "shop coordinator", "--model", "opus", "--resume", sid])
+                self.assertIn(f"it resumed the coordinator's own, session id {sid}", said)
+        # the id Claude Code gives the session's commands names it, whatever its words: its transcript is found
+        said, rec, _ = self.notify_on(["claude", "--continue"], CLAUDE_CODE_SESSION_ID=sid)
+        self.assertEqual(rec["conversation"], {"id": sid, "transcript": str(path)})
+        del os.environ["CLAUDE_CODE_SESSION_ID"]
+        # the launcher keeps the conversation it starts, with its transcript
+        with unittest.mock.patch.object(notify, "socket_path", return_value=str(self.tmp / "c.sock")), \
+                unittest.mock.patch.object(notify, "start", return_value="started"), \
+                unittest.mock.patch.object(up, "record_tmux", return_value={}), \
+                unittest.mock.patch("os.execvpe", lambda prog, argv, env: None):
+            self.say("notify-launch", "claude", "--resume", sid)
+            self.assertEqual(up.read_coordinator(self.desk)["conversation"], {"id": sid, "transcript": str(path)})
+            self.say("notify-launch", "claude", "--resume", other)
+            self.assertEqual(up.read_coordinator(self.desk)["conversation"], {"id": other, "transcript": ""})
+            self.say("notify-launch", "claude", "--name", "n")
+            self.assertIsNone(up.read_coordinator(self.desk)["conversation"])
+        # words that pick a conversation hansa cannot name, with no id given: as before, --continue
+        for words in (["--continue"], ["--resume", "my name"], ["-r"], ["--resume", sid, "--fork-session"]):
+            with self.subTest(words=words):
+                _, rec, _ = self.notify_on(["claude", *words])
+                self.assertNotIn("conversation", rec)
+
+    def test_a_session_with_its_own_claude_config_dir_is_found_there_and_comes_back_to_its_conversation(self):
+        """hansa notify on in a session whose Claude Code folder is CLAUDE_CONFIG_DIR's: its transcript is found
+        there, and hansa up resumes it by its id, or starts a new one when that transcript is gone. One that is only
+        under HOME/.claude is not looked for: its path is not known, and hansa up resumes it by its id all the same."""
+        from hansa import up
+        sid, other = self.uuid(5), self.uuid(6)
+        config = self.tmp / "own-claude"
+        path = config / "projects" / "-own-folder" / f"{sid}.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}\n")
+        self.transcript(sid, "-own-folder")  # the home folder's has the same id: not the one this session uses
+        said, rec, _ = self.notify_on(["claude", "--model", "opus"], CLAUDE_CONFIG_DIR=str(config),
+                                      CLAUDE_CODE_SESSION_ID=sid)
+        self.assertEqual(rec["conversation"], {"id": sid, "transcript": str(path)})
+        self.assertEqual(rec["env"]["CLAUDE_CONFIG_DIR"], str(config))
+        said, calls, ok = self.coordinator_up()
+        self.assertTrue(ok, said)
+        launched = self.pane_words(calls[1])
+        self.assertEqual(launched[launched.index("notify-launch") + 1:], ["claude", "--model", "opus", "--resume", sid])
+        self.assertIn(f"conversation: it resumed the coordinator's own, session id {sid}", said)
+        path.unlink()  # the conversation is gone from CLAUDE_CONFIG_DIR's folder, though the home folder has one
+        said, calls, ok = self.coordinator_up()
+        launched = self.pane_words(calls[1])
+        self.assertEqual(launched[launched.index("notify-launch") + 1:], ["claude", "--model", "opus"])
+        self.assertIn(f"conversation: a new one; the coordinator's conversation {sid} is gone (its transcript {path} "
+                      "is not there)", said)
+        # only under HOME/.claude while CLAUDE_CONFIG_DIR is set: not found, so not known to be gone
+        self.transcript(other, "-own-folder")
+        said, rec, _ = self.notify_on(["claude"], CLAUDE_CONFIG_DIR=str(config), CLAUDE_CODE_SESSION_ID=other)
+        self.assertEqual(rec["conversation"], {"id": other, "transcript": ""})
+        said, calls, ok = self.coordinator_up()
+        self.assertEqual(self.pane_words(calls[1])[-2:], ["--resume", other])
+        self.assertIn(f"conversation: it resumed the coordinator's own, session id {other}", said)
+
+    def test_a_failed_start_that_resumed_by_id_also_gives_the_command_for_a_new_conversation(self):
+        """Its conversation may be gone though the record names it (no transcript path known): the failure lines
+        give the by-hand command as before, and the one that starts a new conversation, to use when Claude Code
+        says no conversation was found with that id. A start that resumed nothing gives no such line."""
+        from hansa import up
+        sid = self.uuid(7)
+        coordinator = [up.hansa_command(), "--desk", str(self.desk.root), "coordinator", "--model", "opus"]
+        rec = {"kind": "coordinator", "words": ["--model", "opus"], "folder": str(self.desk.root),
+               "session": {"pid": 0}, "conversation": {"id": sid, "transcript": ""}}
+        said, calls, ok = self.coordinator_up(rec, answers=(1, "%5\n", ""),
+                                              pane_said=f"No conversation found with session ID: {sid}\n")
+        self.assertFalse(ok)
+        self.assertIn(f"  No conversation found with session ID: {sid}\n", said)
+        cd = shlex.join(["cd", str(self.desk.root)]) + " && "
+        self.assertIn(f"Run it by hand: {cd}{shlex.join([*coordinator, '--resume', sid])}\n", said)
+        self.assertIn(f"If Claude Code says no conversation was found with the id {sid}, start a new one instead: "
+                      f"{cd}{shlex.join(coordinator)}\n", said)
+        # a session hansa notify on recorded: its own claude, then hansa notify on in it, either way
+        folder = str(self.own_folder())
+        said, calls, ok = self.coordinator_up(
+            {"kind": "notify", "argv": ["claude", "--model", "opus"], "folder": folder, "session": {"pid": 0},
+             "conversation": {"id": sid, "transcript": ""}}, answers=(1, "%5\n", ""), pane_said="Error\n")
+        cd = shlex.join(["cd", folder]) + " && "
+        self.assertIn(f"Run it by hand: {cd}claude --model opus --resume {sid}, then hansa notify on in it\n", said)
+        self.assertIn(f"start a new one instead: {cd}claude --model opus, then hansa notify on in it\n", said)
+        # nothing resumed by id: no such line
+        for conv in (None, "-"):
+            with self.subTest(conversation=conv):
+                base = {k: v for k, v in rec.items() if k != "conversation"}
+                said, _, ok = self.coordinator_up({**base, **({} if conv == "-" else {"conversation": conv})},
+                                                  answers=(1, "%5\n", ""), pane_said="Error\n")
+                self.assertIn("coordinator failed to start", said)
+                self.assertNotIn("start a new one instead", said)
 
     def test_up_runs_the_server_then_the_coordinator_and_neither_on_another_accounts_desk(self):
         from hansa import up
@@ -4245,7 +4638,8 @@ class CoordinatorUpTest(unittest.TestCase):
         # what it did before stays: the deny rules, the turn hooks, and the record without the mod's folder
         rules = cli.launch_rules(self.desk, str(self.tmp))
         self.assertEqual(words[words.index("--disallowedTools") + 1:words.index("--settings")], rules)
-        self.assertEqual(json.loads(words[words.index("--settings") + 1])["hooks"].keys(), {"Stop", "StopFailure"})
+        self.assertEqual(json.loads(words[words.index("--settings") + 1])["hooks"].keys(),
+                         {"Stop", "StopFailure", "SessionStart"})
         rec = up.read_coordinator(self.desk)
         self.assertNotIn("--plugin-dir", rec["argv"])
         self.assertNotIn(str(copy), json.dumps(rec))
@@ -4276,7 +4670,8 @@ class CoordinatorUpTest(unittest.TestCase):
         plan = up.restart_plan(self.desk, rec)
         again = self.launch(*plan["cmd"][plan["cmd"].index("notify-launch") + 1:])
         self.assertEqual(again.count("--settings"), 1, again)
-        self.assertEqual(json.loads(again[again.index("--settings") + 1])["hooks"].keys(), {"Stop", "StopFailure"})
+        self.assertEqual(json.loads(again[again.index("--settings") + 1])["hooks"].keys(),
+                         {"Stop", "StopFailure", "SessionStart"})
         said, rec, _ = self.notify_on(again, folder, me)  # and recorded once more: still none in the record
         self.assertNotIn("--settings", rec["argv"])
 
@@ -4509,6 +4904,9 @@ class CoordinatorUpTest(unittest.TestCase):
         (self.desk.state_dir / "coordinator-start.json").unlink()
         self.assertEqual(up.coordinator_line(self.desk), "")  # a new desk: hansa up starts a first one
         (self.desk.tasks_dir / "t0001").mkdir()
+        write_json(self.desk.tasks_dir / "t0001" / "meta.json", {"id": "t0001"})  # added by hand: still new
+        self.assertEqual(up.coordinator_line(self.desk), "")
+        write_json(self.desk.tasks_dir / "t0001" / "meta.json", {"id": "t0001", "session": self.SESS})
         line = up.coordinator_line(self.desk)
         self.assertIn("hansa up starts no coordinator's session", line)
         self.assertIn("not recorded yet", line)
@@ -15204,8 +15602,9 @@ def save():'''))
         self.assertNotIn("Traceback", r.stdout + r.stderr)
         self.assertEqual(r.stdout, "")
         self.assertEqual(r.stderr.strip().splitlines(), [
-            f"hansa: port {port} is in use, perhaps by another desk's hansa serve; start this desk's server on a free "
-            f"port with hansa serve --port N (hansa web then finds it)"])
+            f"hansa: hansa serve could not serve the page on host 127.0.0.1, port {port}: Address already in use; "
+            f"perhaps another desk's hansa serve holds that port. Start this desk's server on a free port with hansa "
+            f"serve --port N (hansa web then finds it)"])
 
     def test_the_web_command_opens_the_port_this_desks_server_serves_on(self):
         skip_unless_ports(self)
@@ -21268,6 +21667,12 @@ def save():'''))
         self.assertNotIn("caller-key", json.dumps(rec))
         self.assertNotIn("hansa up will not start", said)
         self.assertIn("--resume", argv)  # claude itself gets the words as given
+        self.assertNotIn("conversation", rec)  # -c: a conversation hansa cannot name; hansa up continues as before
+        # the conversation it starts with: a new one, or the one --resume names (as hansa up gives it)
+        sid = "0b6c2b1e-1111-4222-8333-444455556666"
+        for words, conv in (((), None), (("--resume", sid), {"id": sid, "transcript": ""})):
+            self.start_with_mod(*words)
+            self.assertEqual(up.read_coordinator(self.desk)["conversation"], conv)
         # a word holding a key: nothing recorded, and the start says so
         key = "sk-desk-secret-123456"
         (self.desk.secrets_dir / "claude.key").write_text(key)
@@ -21276,6 +21681,58 @@ def save():'''))
                       "of the desk's keys; nothing was recorded", said)
         self.assertEqual(up.read_coordinator(self.desk)["kind"], "unrecorded")
         self.assertNotIn(key, (self.desk.state_dir / "coordinator-start.json").read_text())
+
+    def test_a_second_coordinator_is_refused_while_the_first_runs_and_starts_once_it_has_ended(self):
+        from hansa import up
+        first = subprocess.Popen(["sleep", "120"])  # the coordinator's session hansa up started in tmux
+        self.addCleanup(first.wait)
+        self.addCleanup(first.kill)
+        sess = {"pid": first.pid, "start": hansa.run.proc_start(first.pid)}
+        rec = {"kind": "coordinator", "hansa": up.hansa_command(), "clear_daily": "", "words": ["--name", "shop"],
+               "folder": str(self.desk.root), "tmux": {"server": ["-L", "hansa-shop"], "session": "coordinator"},
+               "env": {}, "session": sess, "turn_hooks": True}
+        start = self.desk.state_dir / "coordinator-start.json"
+        write_json(start, rec)
+        notify.register_dir(self.desk).mkdir(parents=True, exist_ok=True)
+        write_json(notify.register_dir(self.desk) / f"{notify.key_of(sess)}.json",
+                   {"key": notify.key_of(sess), "session": sess, "name": "shop", "seen": time.time()})
+        kept = start.read_bytes()
+        with self.assertRaises(SystemExit) as e:
+            self.start_with_mod()
+        said = str(e.exception.code)
+        self.assertIn(f"the desk's coordinator already runs: pid {first.pid} (shop)", said)
+        self.assertIn("Nothing was started", said)
+        self.assertIn("-L hansa-shop attach -t coordinator", said)
+        self.assertEqual(start.read_bytes(), kept)  # nothing recorded of the refused start
+        self.assertFalse((self.desk.state_dir / "coordinator.json").exists())
+        # a session not in tmux, which hansa posts to without a start record naming it
+        write_json(start, {**rec, "session": {"pid": 1, "start": "other"}})
+        with self.assertRaises(SystemExit) as e:
+            self.start_with_mod()
+        self.assertIn(f"pid {first.pid} (shop)", str(e.exception.code))
+        self.assertIn("It does not run in tmux: go to the terminal it runs in", str(e.exception.code))
+        self.start_with_mod("-p", "hello")  # a one-off run beside it is no second session
+        first.kill()
+        first.wait()
+        argv, _, _ = self.start_with_mod("--name", "shop")  # once it has ended, it starts as before
+        self.assertIn("--name", argv)
+        self.assertEqual(up.read_coordinator(self.desk)["session"]["pid"], os.getpid())
+
+    def test_a_one_off_coordinator_run_leaves_the_records_of_the_interactive_start_alone(self):
+        from hansa import up
+        self.start_with_mod("--clear-daily", "04-09", "--name", "shop")
+        files = (self.desk.state_dir / "coordinator-start.json", self.desk.state_dir / "coordinator.json",
+                 self.desk.mod_dir / "start.json")
+        kept = {f: f.read_bytes() for f in files}
+        for words in (["-p", "hello"], ["--print", "hello"], ["--version"]):
+            with self.subTest(words=words):
+                argv, _, _ = self.start_with_mod(*words)
+                self.assertIn(words[0], argv)  # claude gets them as given
+                self.assertEqual({f: f.read_bytes() for f in files}, kept)
+        plan = up.restart_plan(self.desk, up.read_coordinator(self.desk))
+        self.assertEqual(plan["words"], ["--name", "shop"])
+        self.assertFalse(up.prints(plan["words"]))
+        self.assertEqual(plugin.status(self.desk)["clear"]["window"], "04-09")
 
     def test_status_says_how_hansa_up_starts_the_coordinators_session_while_none_hears(self):
         folder = self.desk.root / "own folder"  # below the desk, so it reads the card
@@ -22821,6 +23278,66 @@ def save():'''))
         self.assertIn("--strict-mcp-config", seen["argv"])
         self.assertIn(str(self.desk.root / "CLAUDE.md"),
                       json.loads(seen["argv"][seen["argv"].index("--settings") + 1])["claudeMdExcludes"])
+
+    def invalid_claude_overrides(self):
+        missing = self.tmp / ("missing-" + "x" * 180)
+        unrunnable = self.tmp / "unrunnable-claude"
+        unrunnable.write_text("#!/bin/sh\nexit 99\n")
+        unrunnable.chmod(0o644)
+        return ((missing, "does not exist"), (unrunnable, "cannot be run"))
+
+    def claude_refusal(self, given, words):
+        from hansa import run
+        os.environ["HANSA_CLAUDE"] = str(given)
+        with self.assertRaises(RuntimeError) as raised:
+            run.claude_bin()
+        why = str(raised.exception)
+        self.assertIn(str(given), why)
+        self.assertIn(words, why)
+        return why
+
+    def test_coordinator_reports_invalid_hansa_claude_without_a_traceback(self):
+        for given, words in self.invalid_claude_overrides():
+            with self.subTest(given=given):
+                why = self.claude_refusal(given, words)
+                r = subprocess.run([sys.executable, "-m", "hansa", "--desk", str(self.desk.root), "coordinator"],
+                                   capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 1)
+                self.assertEqual(r.stderr.strip(), f"hansa: {why}")
+
+    def test_ping_reports_invalid_hansa_claude_as_a_failed_check(self):
+        self.assertFalse((self.desk.state_dir / "serve-start.json").exists())
+        for given, words in self.invalid_claude_overrides():
+            with self.subTest(given=given):
+                why = self.claude_refusal(given, words)
+                self.assertEqual(self.hansa("ping", "claude").strip(), f"claude: NOT ok - {why}")
+                saved = self.desk.provider_state()["claude"]["check"]
+                self.assertFalse(saved["ok"])
+                self.assertEqual(saved["detail"], why)
+
+    def test_page_check_reports_invalid_hansa_claude_as_a_failed_check(self):
+        for given, words in self.invalid_claude_overrides():
+            with self.subTest(given=given):
+                why = self.claude_refusal(given, words)
+                reply = self.page_post("/api/check", {"provider": "claude"})
+                self.assertFalse(reply["ok"])
+                self.assertEqual(reply["detail"], why)
+                self.assertEqual(self.desk.provider_state()["claude"]["check"], reply)
+
+    def test_start_holds_tell_the_coordinator_without_alerting_the_principal(self):
+        from hansa import alert, run
+        with unittest.mock.patch("hansa.alert.command", return_value="true"):
+            s = self.desk.settings()
+            s["alert_language"] = "zh"
+            self.assertEqual(self.desk.save_settings(s, by="page"), [])
+            for cause, why in (("claude", "claude was not found"), ("claude", "HANSA_CLAUDE is /missing"),
+                               ("repo", "its repository folder /repo is gone"),
+                               ("worktree", "git cannot prepare the worktree")):
+                with self.subTest(cause=cause, why=why):
+                    tid = self.desk.new_task("Wait for the lane")
+                    run.start_hold(self.desk, tid, "a", run.LaneCannotStart(why, cause))
+                    self.assertIn(why, self.told_starts()[-1])
+                    self.assertEqual(alert.queued(self.desk), [])
 
     def ping_on(self, model: str) -> dict:
         """`hansa ping` of a compatible provider whose model is `model`, with the fake claude."""
@@ -26405,7 +26922,7 @@ def save():'''))
                 self.desk.new_task("Add three.txt", lane="b")]
         fake = os.environ.pop("HANSA_CLAUDE")
         d = Dispatcher(self.desk)
-        with unittest.mock.patch("hansa.run.program_candidates", lambda name, env=None: []):
+        with unittest.mock.patch("hansa.desk.program_candidates", lambda name, env=None: []):
             d.tick()
             d.tick()
             for tid in tids:
@@ -26472,6 +26989,117 @@ def save():'''))
         m = self.settle(d, tid)
         self.assertEqual(m["state"], "done", m)
         self.assertEqual(run.sandbox_held(self.desk), {})
+
+    def test_a_lane_whose_repository_folder_is_gone_says_so_and_the_way_out(self):
+        repo = self.desk.settings()["lanes"]["a"]["repo"]
+        self.repo.rename(self.tmp / "repo-moved")
+        # in order: the lane's tasks cleared first (lane remove refuses otherwise), and queued again after
+        way_out = ("cancel its queued tasks and close those waiting for review (hansa cancel, hansa close), then "
+                   "hansa lane remove a, then hansa lane add a --repo NEW_PATH, then queue the tasks again")
+        for shown in (self.hansa("explain", "lane", "a"), self.hansa("lane")):
+            self.assertIn(f"its repository folder {repo} is gone", shown)
+            self.assertIn(way_out, shown)
+            self.assertNotIn("then start in a fresh worktree", shown)  # as if the waiting tasks carried over
+        out = self.hansa("add", "--lane", "a", "Add hello.txt")  # queued, and told why it waits
+        tid = re.search(r"(t\d+) queued", out).group(1)
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        self.assertIn(f"{tid} waits: lane a's repository folder {repo} is gone", out)
+        self.assertIn(way_out, out)
+        Dispatcher(self.desk).tick()
+        self.assertIn(way_out, views.status_text(views.status(self.desk)))
+        self.assertIn(way_out, self.hansa("show", tid))
+        self.assertIn(way_out, self.told_starts()[0])
+
+    def test_a_lane_whose_repository_folder_moved_is_removed_and_added_on_the_new_folder(self):
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.desk.update(tid, state="cancelled")
+        wt = self.desk.worktrees_dir / "a"
+        (wt / "mine.txt").write_text("not committed\n")
+        moved = self.tmp / "repo moved"
+        self.repo.rename(moved)
+        out = self.hansa("lane", "remove", "a")
+        self.assertNotIn("a", self.desk.settings()["lanes"])
+        self.assertFalse(os.path.lexists(wt))
+        aside = Path(re.search(r"moved aside to (\S+?)(?:[;,]|$)", out, re.M).group(1))
+        self.assertTrue(aside.is_relative_to(self.desk.root), out)
+        self.assertEqual((aside / "mine.txt").read_text(), "not committed\n")  # nothing in it deleted
+        self.assertTrue((aside / "hello.txt").exists())
+        self.assertIn("hansa lane add a --repo NEW_PATH, then queue its tasks again", out)
+        out = self.hansa("lane", "add", "a", "--repo", str(moved))
+        self.assertNotIn("moved aside", out)  # nothing left at worktrees/a
+        m = self.settle(d, self.desk.new_task("Add two.txt", lane="a"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertEqual(m["worktree"], str(wt))
+        self.assertFalse((wt / "mine.txt").exists())  # a fresh worktree
+
+    def test_lane_remove_discard_and_keep_on_a_lane_whose_repository_folder_is_gone(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        d = Dispatcher(self.desk)
+        for ln in ("a", "b"):
+            tid = self.desk.new_task("Add hello.txt", lane=ln)
+            self.assertEqual(self.settle(d, tid)["state"], "done")
+            self.desk.update(tid, state="cancelled")
+        self.repo.rename(self.tmp / "repo-moved")
+        out = self.hansa("lane", "remove", "a", "--discard")
+        self.assertFalse(os.path.lexists(self.desk.worktrees_dir / "a"))
+        self.assertIn(f"Its worktree {self.desk.worktrees_dir / 'a'} is deleted", out)
+        self.assertEqual([p.name for p in self.desk.worktrees_dir.iterdir()], ["b"])
+        out = self.hansa("lane", "remove", "b", "--keep")
+        self.assertIn("there is no repository to keep a branch in", out)
+        aside = Path(re.search(r"moved aside to (\S+?)(?:[;,]|$)", out, re.M).group(1))
+        self.assertTrue((aside / "hello.txt").exists())
+        self.assertFalse(os.path.lexists(self.desk.worktrees_dir / "b"))
+
+    def test_lane_add_sets_aside_a_worktree_left_of_another_or_an_unreachable_repository(self):
+        other = self.tmp / "other"
+        shutil.copytree(self.repo, other)
+        d = Dispatcher(self.desk)
+        wt = self.desk.worktrees_dir / "a"
+
+        def leave_worktree():  # as an earlier version's lane remove left it: the lane gone, its worktree not
+            tid = self.desk.new_task("Add hello.txt", lane="a")
+            self.assertEqual(self.settle(d, tid)["state"], "done")
+            self.desk.update(tid, state="cancelled")
+            (wt / "mine.txt").write_text("left\n")
+            s = self.desk.settings()
+            del s["lanes"]["a"]
+            self.assertEqual(self.desk.save_settings(s), [])
+
+        leave_worktree()  # its own repository: kept as it is
+        out = self.hansa("lane", "add", "a", "--repo", str(self.repo))
+        self.assertNotIn("moved aside", out)
+        self.assertTrue((wt / "mine.txt").exists())
+        (wt / "mine.txt").unlink()
+        renamed = self.tmp / "repo-renamed"
+        # renamed: git there still lists the worktree, whose .git names the old folder; then a repository of its own
+        for name, rename, new in (("a repository moved", True, renamed), ("another repository", False, other)):
+            with self.subTest(name):
+                leave_worktree()
+                if rename:
+                    self.repo.rename(renamed)
+                out = self.hansa("lane", "add", "a", "--repo", str(new))
+                said = [x for x in out.splitlines() if "moved aside" in x]
+                self.assertEqual(len(said), 1, out)
+                aside = Path(re.search(r"moved aside to (\S+?)(?:[;,]|$)", said[0]).group(1))
+                self.assertTrue(aside.is_relative_to(self.desk.root))
+                self.assertEqual((aside / "mine.txt").read_text(), "left\n")
+                # another repository, still there, lists the worktree until pruned; a moved one's old folder is gone
+                pruned = f"until git worktree prune is run in {renamed.resolve()}"
+                if rename:
+                    self.assertNotIn("git worktree prune", said[0])
+                else:
+                    self.assertIn(pruned, said[0])
+                    self.assertIn(f"still lists that worktree at {wt} ", said[0])
+                    listed = lambda: subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=renamed,
+                                                    capture_output=True, text=True, check=True).stdout
+                    self.assertIn(f"worktree {wt.resolve()}\n", listed())  # as said
+                    subprocess.run(["git", "worktree", "prune"], cwd=renamed, check=True)
+                    self.assertNotIn(f"worktree {wt.resolve()}\n", listed())
+                m = self.settle(d, self.desk.new_task("Add two.txt", lane="a"))
+                self.assertEqual(m["state"], "done", m)
+                self.assertFalse((wt / "mine.txt").exists())
 
     def test_a_worktree_git_cannot_prepare_holds_its_lane_alone_until_it_is_fixed(self):
         from hansa import run
@@ -33660,14 +34288,14 @@ def save():'''))
         self.assertIn("lane a", header)
         self.assertIn("target default", header)
         self.assertIn("no done release yet", header)
-        self.assertIn("every commit up to", header)
+        self.assertIn("since the first hansa landing", header)
         self.assertIn("main's tip", header)
         tip = self.git_out("rev-parse", "HEAD")
         self.assertIn(tip[:7], header)
         self.assertNotIn(tip, header)
         self.assertLess(out.index(f"- Adds X. ({first})"), out.index(f"- Adds Y. ({second})"))
         initial = self.git_out("rev-list", "--max-parents=0", "HEAD")
-        self.assertIn(f"- [no task] init ({initial[:7]})", out)
+        self.assertNotIn(f"- [no task] init ({initial[:7]})", out)
         self.assertNotIn("Landing without", out)
         self.assertNotIn("[no task] Adds", out)
 
@@ -33911,6 +34539,184 @@ def save():'''))
         s = self.desk.settings()
         s["lanes"]["a"].update(targets={"default": {"command": command}}, **lane)
         self.assertEqual(self.desk.save_settings(s), [])
+
+    def release_listing_history(self):
+        self.with_targets(pub="true")
+        tip = self.git_out("rev-parse", "HEAD")
+        for i in range(24):
+            tip = self.changelog_commit(f"Old work {i}", tip)
+        self.git_out("update-ref", "refs/heads/main", tip)
+
+    def test_release_listing_direct_preview_and_git_pointer(self):
+        from hansa import release
+        self.release_listing_history()
+        asked = self.hansa("release", "a", "pub")
+        r = release.releases(self.desk)[-1]
+        for text in (asked, self.hansa("release")):
+            with self.subTest(view=text.splitlines()[0]):
+                self.assertIn("25 direct commit(s) (the first 10 shown)", text)
+                self.assertIn("Old work 23", text)
+                self.assertIn("Old work 14", text)
+                self.assertNotIn("Old work 13", text)
+                self.assertIn("log --oneline", text)
+                self.assertIn(r["commit"], text)
+        # Run the pointer exactly as printed: it must list the omitted subjects.
+        pointer = next(x.strip().removeprefix("all commits in this range (including direct commits): ") for x in asked.splitlines()
+                       if x.strip().startswith("all commits in this range (including direct commits): "))
+        result = subprocess.run(shlex.split(pointer), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Old work 13", result.stdout)
+
+    def test_release_listing_wait_instruction_follows_head(self):
+        self.release_listing_history()
+        text = self.hansa("release", "a", "pub")
+        self.assertIn("It waits for the principal's yes", text.splitlines()[1])
+
+    def test_release_listing_closed_requests_are_one_line(self):
+        from hansa import release
+        self.release_listing_history()
+        self.hansa("release", "a", "pub")
+        self.hansa("release", "a", "pub")  # replaces #1
+        release.void(self.desk, 2, "base moved", ("waiting",))
+        self.hansa("release", "a", "pub")
+        self.hansa("release", "--stop", "3", "hold this back")
+        text = self.hansa("release")
+        self.assertIn("#1 lane a target pub", text)
+        self.assertIn("replaced by release #2", text)
+        self.assertIn("base moved", text)
+        self.assertIn("hold this back", text)
+        self.assertEqual(len(text.splitlines()), 5)  # heading, three requests, log pointer
+
+    def test_changelog_uses_release_pre_hansa_cutoff(self):
+        from hansa import release
+        self.release_listing_history()
+        # A side branch brought in by the first landing is older in topo order, but belongs to the task.
+        task = self.changelog_task("Changelog: First managed change.")
+        direct = self.changelog_commit("New direct work", self.git_out("rev-parse", "HEAD"))
+        self.git_out("update-ref", "refs/heads/main", direct)
+        r = release.ask(self.desk, "a", target="pub")
+        self.assertEqual([c["subject"] for c in r["direct"]], ["New direct work"])
+        for args in (("a",), ("a", "pub")):
+            text = self.hansa("changelog", *args)
+            self.assertNotIn("Old work", text)
+            self.assertNotIn("[no task] init", text)
+            self.assertIn(f"First managed change. ({task})", text)
+            self.assertIn("[no task] New direct work", text)
+        # Remote-tracking history and a previous done release retain their existing range rules.
+        self.git_out("update-ref", "refs/remotes/origin/main", direct)
+        self.assertIn("[no task] Old work", self.hansa("changelog", "a", "pub"))
+
+    def test_explain_release_target_separates_last_sent_and_request(self):
+        from hansa import release
+        self.with_targets(pub="true", empty="true")
+        self.hansa("release", "a", "pub")
+        self.assertEqual(self.settle_release_after_yes(1)["state"], "done")
+        sent = release.get(self.desk, 1)
+        self.hansa("release", "a", "pub")
+        self.hansa("release", "--stop", "2")
+        text = self.hansa("explain", "lane", "a")
+        self.assertIn("last release of pub: #1", text)
+        self.assertIn(sent["commit"][:10], text)
+        self.assertIn(release.when(sent["ended"]), text)
+        self.assertIn("last request of pub: #2", text)
+        self.assertIn("last release of empty: none", text)
+        target_line = next(x for x in text.splitlines() if "release target pub:" in x)
+        self.assertEqual(target_line.strip(), "release target pub: true")
+
+    def settle_release_after_yes(self, rid):
+        from hansa import release
+        r = release.get(self.desk, rid)
+        self.assertTrue(release.answer(self.desk, rid, True, commit=r["commit"])["ok"])
+        return self.settle_release(Dispatcher(self.desk), rid)
+
+    def test_release_target_tick_is_shown_for_every_target(self):
+        self.with_targets(pub="true", manual="true")
+        self.tick_targets("pub")
+        for args in (("lane", "target", "a"), ("explain", "lane", "a")):
+            text = self.hansa(*args)
+            self.assertIn("goes out without asking: yes", text)
+            self.assertIn("goes out without asking: no", text)
+
+    def test_release_ask_and_target_views_explain_lapsed_tick(self):
+        script = self.tmp / "release.sh"
+        script.write_text("true\n")
+        self.with_targets(pub=f"sh {script}")
+        self.tick_targets("pub")
+        script.write_text("true\n# changed\n")
+        for args in (("release", "a", "pub"), ("lane", "target", "a"), ("explain", "lane", "a")):
+            text = self.hansa(*args)
+            self.assertIn("principal's tick lapsed", text)
+            self.assertIn(f"outside file {script.resolve()} changed", text)
+        self.assertIn("It waits for the principal's yes", self.hansa("release", "a", "pub"))
+
+    def test_release_push_destination_words_and_advice(self):
+        destination = self.tmp / "outside.git"
+        self.git_out("init", "--bare", "-q", str(destination))
+        command = f"git push {shlex.quote(str(destination))} main"
+        text = self.hansa("lane", "target", "a", "pub", command)
+        self.assertIn("outside destination the command sends to: " + str(destination.resolve()), text)
+        self.assertNotIn("outside folder the command runs in", text)
+        self.assertNotIn("move the files", text)
+        for args in (("release", "a", "pub"), ("explain", "lane", "a")):
+            self.assertIn("outside destination the command sends to: " + str(destination.resolve()), self.hansa(*args))
+        # Existing cwd and script words and advice stay as they are, even alongside a push.
+        script = self.tmp / "release.sh"
+        script.write_text("true\n")
+        text = self.hansa("lane", "target", "a", "pub", f"sh {script} && {command}")
+        self.assertIn("outside file: " + str(script.resolve()), text)
+        self.assertIn("move the files into the repository", text)
+        text = self.hansa("lane", "target", "a", "cwd", f"cd {destination} && true")
+        self.assertIn("outside folder the command runs in: " + str(destination.resolve()), text)
+        self.assertIn("move the files into the repository", text)
+
+    def test_release_push_destination_preserves_other_path_roles(self):
+        from hansa import outside
+        destination = self.tmp / "outside repo.git"
+        destination.mkdir()
+        path = str(destination.resolve())
+        quoted = shlex.quote(str(destination))
+        for command in (f"git push {quoted} main", f"git push --repo={quoted} main",
+                        f"git -c push.default=simple push --repo {quoted} main",
+                        f"git push --receive-pack pack {quoted} main", "sh -c " + shlex.quote(f"git push {quoted} main")):
+            with self.subTest(command=command):
+                found = outside.inspect(command, self.repo)
+                self.assertIn("outside destination the command sends to: " + path, "\n".join(outside.lines(found)))
+                self.assertEqual(found["outside_folders"], [path])
+        for command in (f"cd {quoted} && git push {quoted} main", f"echo git push {quoted} main"):
+            text = "\n".join(outside.lines(outside.inspect(command, self.repo)))
+            self.assertIn("outside folder the command runs in: " + path, text)
+            self.assertNotIn("outside destination", text)
+
+        # Display classification must keep inspection's tolerance of paths that cannot be resolved.
+        loop = self.tmp / "loop"
+        loop.symlink_to(loop)
+        self.assertEqual(outside.inspect(f"git push {loop} main", self.repo),
+                         {"outside": [], "outside_folders": []})
+
+    def test_release_posted_line_already_omits_commit_subjects(self):
+        # The posted completion line already gives no commit subjects; leave that path unchanged.
+        from hansa import release
+        self.release_listing_history()
+        r = release.ask(self.desk, "a", target="pub")
+        release.change(self.desk, r["id"], lambda x: {"state": "done", "ended": now(), "exit": 0})
+        posted = notify._release_item(self.desk, {"event": "release_ended", "id": r["id"], "ok": True})[1]
+        self.assertIn("release #1", posted)
+        self.assertNotIn("Old work", posted)
+        self.assertEqual(len(posted.splitlines()), 1)
+
+    def test_release_listing_outside_warning_only_while_waiting(self):
+        from hansa import release
+        script = self.tmp / "release.sh"
+        script.write_text("true\n")
+        self.with_targets(pub=f"sh {script}")
+        self.hansa("release", "a", "pub")
+        self.assertIn("outside file:", self.hansa("release"))
+        r = release.get(self.desk, 1)
+        self.assertTrue(release.answer(self.desk, 1, True, commit=r["commit"])["ok"])
+        self.assertNotIn("outside file:", self.hansa("release"))
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.assertNotIn("outside file:", self.hansa("release"))
+        self.assertIn("outside file:", self.hansa("explain", "lane", "a"))
 
     def test_release_pointers_for_a_lane_without_targets_use_lane_target_default(self):
         for said in (self.hansa("release"), self.hansa("explain", "lane", "a")):
@@ -34288,8 +35094,7 @@ def save():'''))
         [u] = public_settings(self.desk)["release_unmatched"]
         self.assertEqual((u["lane"], u["why"]), ("a", "its base branch changed since the list was saved"))
         self.assertIn("基础分支", u["why_zh"])
-        self.assertIn("releases wait for the yes until the principal takes it back in on the page (its button for "
-                      "that, or unticking and ticking it again, then Save; a plain Save keeps the old entry)",
+        self.assertIn("Take it back in on the page, or untick and tick it again, then Save; a plain Save keeps the old entry.",
                       self.hansa("explain", "lane", "a"))
         self.assertEqual(self.desk.settings()["releases_without_asking"], [entry])  # hansa leaves the list as it is
         take_back_in()
@@ -39354,6 +40159,26 @@ else if (ask === "principal-folds") (async () => {
   for (const key of [...opened, ...closed]) check(fold(key) && !fold(key).open, "departed item's fold state survived: " + key);
   console.log(JSON.stringify({ok:true}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "stop-watch") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  await run("loadStatus()");
+  const root = ids["#tab-status"], label = run("T.releaseStop");
+  const button = descendants(root, "button").find(el => el.textContent === label);
+  check(button, "no Stop for a done release with a running watch");
+  descendants(root, "input").find(el => el.attrs.placeholder === run("T.releaseStopReason")).value = "CI is stuck";
+  await button.click();
+  check(apiPosts.some(p => p.path === "/api/release/stop" && p.body.id === 17 && p.body.reason === "CI is stuck"),
+    "watch Stop payload lost");
+  const r = given["/api/status"].releases[0];
+  r.watch_run.stop_asked = 1;
+  await run("loadStatus(true)");
+  check(!descendants(root, "button").some(el => el.textContent === label), "Stop retained while stopping watch");
+  delete r.watch_run.stop_asked; r.watch_run.state = "stopped";
+  await run("loadStatus(true)");
+  check(!descendants(root, "button").some(el => el.textContent === label), "Stop retained after watch stopped");
+  console.log(JSON.stringify({ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "status-controls") vm.runInContext("loadStatus()", ctx).then(async () => {
   const check = (ok, why) => { if (!ok) throw new Error(why); };
   const run = code => vm.runInContext(code, ctx);
@@ -43646,12 +44471,257 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.commit_in_repo("new.txt", "new\n")
         self.assertNotIn("Nothing new", self.hansa("release", "a", "public"))
 
+    def test_release_show_failed_keeps_all_retained_lines_and_request(self):
+        from hansa import release
+        self.desk.write_key("demo", "sk-demo-release-show")
+        os.environ["SHOW_KEY"] = "sk-demo-release-show"
+        self.with_targets(push='echo principal-only; seq 1 20; echo "ERROR: disk full $SHOW_KEY"; '
+                               'seq 1 6 | sed "s/^/cleanup /"; exit 3')
+        self.tick_targets("push")
+        self.hansa("release", "a", "push", "repair disk")
+        r = self.settle_release(Dispatcher(self.desk), 1)
+        shown = self.hansa("release", "--show", "1")
+        for text in ("lane a target push", r["commit"], "repair disk", "FAILED", "exit 3", *r["tail"]):
+            self.assertIn(text, shown)
+        self.assertEqual(len(r["tail"]), release.TAIL)
+        self.assertNotIn("| principal-only", shown)
+        self.assertNotIn("sk-demo-release-show", shown)
+        self.assertIn("[key of demo]", shown)
+        self.assertEqual(shown, self.hansa("release", "--show", "#1"))
+
+    def test_release_show_void_and_stopped_keep_details_and_output(self):
+        from hansa import release
+        self.with_targets(push="echo release-output")
+        for state in ("void", "stopped"):
+            with self.subTest(state=state):
+                self.hansa("release", "a", "push", "show closed request")
+                r = release.releases(self.desk)[-1]
+                if state == "void":
+                    release.void(self.desk, r["id"], "commit moved")
+                else:
+                    self.hansa("release", "--stop", str(r["id"]), "hold this back")
+                release.change(self.desk, r["id"], lambda x: {"tail": ["retained output"]})
+                shown = self.hansa("release", "--show", str(r["id"]))
+                for text in (r["commit"], "command: echo release-output", "show closed request",
+                             "| retained output", "commit moved" if state == "void" else "hold this back"):
+                    self.assertIn(text, shown)
+                listed = self.hansa("release")
+                self.assertNotIn("command:", listed)
+                self.assertNotIn("retained output", listed)
+
+    def test_release_show_and_list_outside_warning_only_while_waiting(self):
+        from hansa import release
+        script = self.tmp / "release.sh"
+        script.write_text("true\n")
+        self.with_targets(push=f"sh {script}")
+        self.hansa("release", "a", "push")
+        for state in ("waiting", "approved", "starting", "running", "done", "failed", "void", "stopped", "forbidden"):
+            with self.subTest(state=state):
+                release.change(self.desk, 1, lambda x: {"state": state})
+                shown = self.hansa("release", "--show", "1")
+                self.assertIn(f"command: sh {script}", shown)
+                listed = self.hansa("release")
+                for text in (shown, listed):
+                    if state == "waiting":
+                        self.assertIn("outside file:", text)
+                    else:
+                        self.assertNotIn("outside file:", text)
+
+    def test_failed_release_list_and_post_point_to_show_and_keep_five_lines(self):
+        self.with_targets(push='seq 1 20; echo "ERROR: disk full"; seq 1 6 | sed "s/^/cleanup /"; exit 3')
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        self.settle_release(Dispatcher(self.desk), 1)
+        [heard] = notify.items_for(self.desk, self.events("release_ended"), {"key": "k", "session": None})
+        for shown in (self.hansa("release"), heard["line"]):
+            self.assertIn("cleanup 2", shown)
+            self.assertIn("cleanup 6", shown)
+            self.assertNotIn("| ERROR: disk full", shown)
+            self.assertIn("hansa release --show 1", shown)
+
+    def test_release_show_waiting_void_and_running_with_output_so_far(self):
+        from hansa import release
+        go, ready = self.tmp / "show-go", self.tmp / "show-ready"
+        self.with_targets(push=f'echo principal-only; seq 1 20; touch {ready}; '
+                               f'while [ ! -f {go} ]; do sleep 0.1; done')
+        self.hansa("release", "a", "push", "show progress")
+        for state in ("waiting", "void"):
+            if state == "void":
+                release.void(self.desk, 1, "commit moved")
+            r = release.get(self.desk, 1)
+            shown = self.hansa("release", "--show", "1")
+            self.assertIn(release.line(self.desk, r), shown)
+            self.assertIn("show progress", shown)
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        try:
+            d.tick()
+            self.soon(ready.exists, timeout=30)
+            shown = self.hansa("release", "--show", "2")
+            self.assertIn(release.line(self.desk, release.get(self.desk, 2)), shown)
+            self.assertEqual([x.strip() for x in shown.splitlines() if x.strip().startswith("|")],
+                             [f"| {i}" for i in range(6, 21)])
+            self.assertNotIn("| principal-only", shown)
+        finally:
+            go.touch()
+            self.settle_release(d, 2)
+
+    def test_release_show_done_with_running_then_ended_watch_keeps_both_tails(self):
+        from hansa import release
+        go, ready = self.tmp / "show-go", self.tmp / "show-ready"
+        self.desk.write_key("demo", "sk-demo-show-watch")
+        os.environ["SHOW_KEY"] = "sk-demo-show-watch"
+        self.hansa("lane", "target", "a", "push", "echo release-output", "--watch",
+                   f'echo principal-only; seq 1 20; echo "$SHOW_KEY"; touch {ready}; '
+                   f'while [ ! -f {go} ]; do sleep 0.1; done; exit 7')
+        self.tick_targets("push")
+        self.hansa("release", "a", "push", "watch progress")
+        d = Dispatcher(self.desk)
+        try:
+            r = self.settle_release(d, 1)
+            self.soon(ready.exists, timeout=30)
+            shown = self.hansa("release", "--show", "1")
+            for text in ("done", "exit 0", r["commit"], "release-output", "watch running", "[key of demo]"):
+                self.assertIn(text, shown)
+            self.assertNotIn("| principal-only", shown)
+            self.assertNotIn("sk-demo-show-watch", shown)
+        finally:
+            go.touch()
+            w = self.settle_watch(d, 1)
+        shown = self.hansa("release", "--show", "1")
+        for text in ("release-output", "watch failed", "exit 7", *w["tail"]):
+            self.assertIn(text, shown)
+        self.assertNotIn("| principal-only", shown)
+        self.assertNotIn("sk-demo-show-watch", shown)
+
+    def test_release_show_refuses_unknown_id_and_invalid_forms(self):
+        self.assertIn("there is no release #9", self.refused("release", "--show", "9"))
+        for args in (("--show", "wrong"), ("--show", "1", "a"), ("--show", "1", "--stop", "1"),
+                     ("--show", "1", "--direct", "why")):
+            with self.subTest(args=args):
+                self.refused("release", *args)
+
+    def test_release_stop_running_watch_and_restart_preserve_done(self):
+        from hansa import release, run
+        go, ready = self.tmp / "watch-go", self.tmp / "watch-ready"
+        self.hansa("lane", "target", "a", "push", "true", "--watch",
+                   f'echo watching; echo start >> {ready}; while [ ! -f {go} ]; do sleep 0.1; done')
+        self.tick_targets("push")
+        for rid, restart_pending in ((1, False), (2, True), (3, "unrecorded")):
+            with self.subTest(restart_pending=restart_pending):
+                self.hansa("release", "a", "push")
+                old = Dispatcher(self.desk)
+                d = old
+                try:
+                    self.settle_release(old, rid)
+                    self.soon(lambda: ready.exists() and len(ready.read_text().splitlines()) == rid, timeout=30)
+                    pid = release.get(self.desk, rid)["watch_run"]["pid"]
+                    if restart_pending == "unrecorded":
+                        release._watch_change(self.desk, rid, {"state": "starting", "pid": None, "pid_start": ""})
+                    with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "coordinator"}):
+                        told = self.hansa("release", "--stop", str(rid), "CI is stuck")
+                    self.assertIn("watch", told)
+                    self.assertIn("done", told)
+                    self.assertIn("watch stopping", self.hansa("release"))
+                    self.assertIn("already being stopped", self.refused("release", "--stop", str(rid), "again"))
+                    if restart_pending:
+                        d = Dispatcher(self.desk)
+                    self.soon(lambda: (d.tick() or True) and
+                              release.get(self.desk, rid)["watch_run"]["state"] == "stopped", timeout=30)
+                    r = release.get(self.desk, rid)
+                    self.assertEqual(r["state"], "done")
+                    self.assertEqual((r["watch_run"]["stopped_by"], r["watch_run"]["stop_reason"]),
+                                     ("coordinator", "CI is stuck"))
+                    self.assertIn("watching", r["watch_run"]["tail"])
+                    self.assertFalse(run.group_running(pid))
+                    Dispatcher(self.desk).tick()
+                    self.assertEqual(len(ready.read_text().splitlines()), rid)
+                    for shown in (self.hansa("release"), self.hansa("release", "--show", str(rid))):
+                        self.assertIn("watch stopped", shown)
+                        self.assertIn("coordinator", shown)
+                        self.assertIn("CI is stuck", shown)
+                finally:
+                    go.touch()
+                    self.soon(lambda: (d.tick() or True) and not release.watch_open(release.get(self.desk, rid)), timeout=30)
+                    for proc in old.release_watch_procs.values():
+                        proc.wait(timeout=30)
+                    go.unlink()
+
+    def test_release_stop_refuses_ended_watch_or_no_watch(self):
+        self.hansa("lane", "target", "a", "push", "true", "--watch", "true")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        self.settle_watch(Dispatcher(self.desk), 1)
+        self.assertIn("already ended: it is done", self.refused("release", "--stop", "1"))
+        self.hansa("lane", "target", "a", "push", "--watch", "none")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        self.settle_release(Dispatcher(self.desk), 2)
+        self.assertIn("already ended: it is done", self.refused("release", "--stop", "2"))
+
+    def test_release_stop_open_watch_before_launch_never_starts_it(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "push", "true", "--watch", "echo watched")
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(release, "_watch_tick"):
+            self.settle_release(d, 1)
+        self.hansa("release", "--stop", "1", "CI is stuck")
+        with unittest.mock.patch.object(release, "_start_watch") as start, \
+                unittest.mock.patch.object(release, "pids_with_arg") as lookup:
+            Dispatcher(self.desk).tick()
+        start.assert_not_called()
+        lookup.assert_not_called()
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["state"], r["watch_run"]["state"]), ("done", "stopped"))
+
+    def test_release_watch_stop_after_command_ended_records_its_real_end(self):
+        from hansa import release
+        for rid, (code, restarted) in enumerate(((0, False), (7, False), (0, True), (7, True)), 1):
+            with self.subTest(code=code, restarted=restarted):
+                self.hansa("lane", "target", "a", "push", "true", "--watch", f"echo watched; exit {code}")
+                self.tick_targets("push")
+                self.hansa("release", "a", "push")
+                old = Dispatcher(self.desk)
+                try:
+                    self.settle_release(old, rid)
+                    self.soon(lambda: (release.log_dir(self.desk) / f"{rid}.watch.exit").exists(), timeout=30)
+                    with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "coordinator"}):
+                        self.hansa("release", "--stop", str(rid), "too late")
+                    d = Dispatcher(self.desk) if restarted else old
+                    w = self.settle_watch(d, rid)
+                    self.assertEqual((w["state"], w["exit"]), ("passed" if code == 0 else "failed", code))
+                    self.assertTrue(w.get("stop_late"))
+                    self.assertEqual((w["stopped_by"], w["stop_reason"], w["tail"]),
+                                     ("coordinator", "too late", ["watched"]))
+                    self.assertEqual(release.get(self.desk, rid)["state"], "done")
+                    self.assertIsNone(w.get("termed"))
+                    for shown in (self.hansa("release"), self.hansa("release", "--show", str(rid))):
+                        self.assertIn("watch passed" if code == 0 else "watch failed (exit 7)", shown)
+                        self.assertIn("came after its command had ended", shown)
+                        self.assertNotIn("watch stopping", shown)
+                    row = next(r for r in views.status(self.desk)["releases"] if r["id"] == rid)
+                    self.assertIn("came after its command had ended", row["watch_what"])
+                    self.assertIn("命令已经结束", row["watch_what_zh"])
+                    ev = next(e for e in self.events("release_watch_ended") if e["id"] == rid)
+                    self.assertTrue(ev.get("stop_late"))
+                    [heard] = notify.items_for(self.desk, [ev], {"key": "k", "session": None})
+                    self.assertIn("came after its command had ended", heard["line"])
+                    self.assertNotIn("watch stopping", heard["line"])
+                    Dispatcher(self.desk).tick()
+                    self.assertEqual(release.get(self.desk, rid)["watch_run"], w)
+                finally:
+                    for proc in old.release_watch_procs.values():
+                        proc.wait(timeout=30)
+
     def settle_watch(self, d, rid):
         from hansa import release
         def ended():
             d.tick()
             return (release.get(self.desk, rid).get("watch_run") or {}).get("state") in (
-                "passed", "failed", "timed_out")
+                "passed", "failed", "timed_out", "stopped")
         self.soon(ended, timeout=30)
         return release.get(self.desk, rid)["watch_run"]
 
@@ -43874,14 +44944,15 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         rs = [{"id": rid, "state": "done", "ended": at - 40 * 86400,
                "watch_run": {"state": state, "ended": at - days * 86400}}
               for rid, state, days in ((1, "passed", 31), (2, "failed", 31), (3, "timed_out", 31),
-                                       (4, "passed", 29), (5, "running", 31))]
+                                       (4, "passed", 29), (5, "running", 31),
+                                       (6, "stopped", 31), (7, "stopped", 29))]
         release._write(self.desk, rs)
         for r in rs:
             (folder / f"{r['id']}.watch.log").write_bytes(big)
         disk.trim(self.desk, at)
         for r in rs:
             data = (folder / f"{r['id']}.watch.log").read_bytes()
-            if r["id"] <= 3:
+            if r["id"] in (1, 2, 3, 6):
                 header, tail = data.split(b"\n", 1)
                 self.assertTrue(header.startswith(b"[hansa trimmed"))
                 self.assertLessEqual(len(tail), disk.TRIM_KEEP)
@@ -44432,8 +45503,8 @@ else:
         self.assertIn("release #1 of lane a target test", heard[0])
         explained = self.hansa("explain", "lane", "a")
         self.assertIn("release target push: touch", explained)
-        self.assertIn("hansa release a push asks for it", explained)
-        self.assertIn("the principal lets it go out without asking", explained)
+        self.assertIn("asks for it: hansa release a push", explained)
+        self.assertIn("goes out without asking: yes", explained)
         self.assertIn("last release of test: #1 lane a target test", explained)
         self.assertIn("lanes a target test, which the principal lets go out without asking", self.hansa("explain"))
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
@@ -44967,6 +46038,47 @@ else:
         self.assertNotIn("had run", release.state_text(self.desk, r))
         heard = [x["line"] for x in notify.items_for(self.desk, [ev], {"key": "k", "session": None})]
         self.assertTrue(any("nothing was run" in x for x in heard), heard)
+
+    def test_the_pages_stop_button_for_a_running_watch(self):
+        from hansa import release
+        skip_unless_ports(self)
+        go, ready = self.tmp / "watch-go", self.tmp / "watch-ready"
+        self.hansa("lane", "target", "a", "push", "true", "--watch",
+                   f'echo watching; touch {ready}; while [ ! -f {go} ]; do sleep 0.1; done')
+        self.tick_targets("push")
+        self.hansa("release", "a", "push")
+        d = Dispatcher(self.desk)
+        httpd = start_web(self.desk, "127.0.0.1", 0)
+        try:
+            self.settle_release(d, 1)
+            self.soon(ready.exists, timeout=30)
+            req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/api/release/stop",
+                                         data=json.dumps({"id": 1, "reason": "CI is stuck"}).encode(),
+                                         headers={"Content-Type": "application/json", "X-Hansa": "1",
+                                                  "Authorization": "Bearer " + self.desk.web_token()})
+            with urllib.request.urlopen(req) as resp:
+                self.assertTrue(json.load(resp)["ok"])
+            self.soon(lambda: (d.tick() or True) and
+                      release.get(self.desk, 1)["watch_run"]["state"] == "stopped", timeout=30)
+            r = release.get(self.desk, 1)
+            self.assertEqual(r["state"], "done")
+            self.assertEqual((r["watch_run"]["stopped_by"], r["watch_run"]["stop_reason"]), ("page", "CI is stuck"))
+            [row] = views.status(self.desk)["releases"]
+            self.assertIn("watch stopped", row["watch_what"])
+            self.assertIn("principal", row["watch_what"])
+            self.assertIn("CI is stuck", row["watch_what"])
+            self.assertIn("你", row["watch_what_zh"])
+        finally:
+            go.touch()
+            self.soon(lambda: (d.tick() or True) and not release.watch_open(release.get(self.desk, 1)), timeout=30)
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_the_page_offers_stop_for_a_running_watch(self):
+        for result in self.principal_layout_page(
+                releases=[{"state": "done", "watch": "watch CI", "watch_run": {"state": "running"}}],
+                scenario="stop-watch"):
+            self.assertTrue(result["ok"])
 
     def test_the_pages_stop_button(self):
         from hansa import release
@@ -46419,6 +47531,86 @@ else:
         c = release.get(self.desk, 1)["code"]
         self.assertNotIn("hash", c)
         self.assertIn("did not go out", c["void"])
+
+    def test_encrypted_bark_key_not_valid_carries_no_code_and_none_is_made(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        for text in ("k" * 10 + "\n", "k" * 15 + "\n", "1234567890123456\n\n"):
+            with self.subTest(text=text):
+                alert_push._file(self.desk, entry["id"], True).write_text(text)  # by hand: the page refuses it
+                self.assertFalse(alert.release_codes(self.desk))
+                self.assertFalse(views.status(self.desk)["release_codes"])
+                self.desk.event("release_waits", id=1, lane="a", why="waiting again")
+                http.reset_mock()
+                with unittest.mock.patch.object(release, "new_code") as make:
+                    alert.send_due(self.desk, gather=0)
+                make.assert_not_called()
+                http.assert_not_called()  # nothing is sent, and never in plain text
+                self.assertEqual(alert_push.last_result(self.desk, entry["id"])["why"], "bad_key")
+                self.assertNotIn("code", release.get(self.desk, 1))
+                self.assertIn("answers on the page only", self.hansa("status"))
+
+    def test_status_release_summary_follows_the_waiting_releases_live_codes(self):
+        from hansa import alert, release
+        self.alert_fake()
+        self.with_targets(staging="true", prod="true")
+        self.hansa("release", "a", "staging")
+        self.hansa("release", "a", "prod")
+        said = "or says the one-time code of their alert in the conversation"
+        self.assertTrue(alert.release_codes(self.desk))
+        # No code made yet: the page answers.
+        self.assertNotIn(said, self.hansa("status"))
+        self.assertIn("answers on the page", self.hansa("status"))
+        queued = alert.queued(self.desk)
+        with unittest.mock.patch.object(release, "new_code", side_effect=OSError("fixture releases write failed")):
+            alert.send_due(self.desk, gather=0)
+        status = self.hansa("status")
+        self.assertNotIn(said, status)
+        self.assertIn("the principal answers on the page: no waiting release has a live one-time code", status)
+        # A code made then voided (it did not go out) is no live code either.
+        new_code = release.new_code
+        made = []
+
+        def second_fails(desk, rid):
+            if made:
+                raise OSError("fixture releases write failed")
+            made.append(new_code(desk, rid))
+            return made[-1]
+        write_json(alert.queue_file(self.desk), queued)
+        with unittest.mock.patch.object(release, "new_code", side_effect=second_fails):
+            alert.send_due(self.desk, gather=0)
+        self.assertIn("did not go out", release.get(self.desk, 1)["code"]["void"])
+        self.assertNotIn(said, self.hansa("status"))
+        # One live code: the conversation answers too.
+        write_json(alert.queue_file(self.desk), queued)
+        alert.send_due(self.desk, gather=0)
+        self.assertTrue(release.code_live(release.get(self.desk, 1)))
+        self.assertIn(said, self.hansa("status"))
+
+    def test_encrypted_bark_code_text_failure_after_the_code_is_made_voids_it(self):
+        from hansa import alert, release
+        entry, http = self.encrypted_bark_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        original = alert._release_text
+
+        def fail_with_code(desk, rid, waiting, code="", zh=False):
+            if code:
+                raise RuntimeError("fixture text failed")
+            return original(desk, rid, waiting, code, zh)
+        with unittest.mock.patch.object(alert, "_release_text", side_effect=fail_with_code), \
+                unittest.mock.patch.object(release, "new_code", wraps=release.new_code) as make:
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        make.assert_called_once_with(self.desk, 1)
+        body = self.decrypted_bark(http)["body"]
+        self.assertIn("waits for your yes on the page", body)
+        self.assertNotIn("code ", body)
+        c = release.get(self.desk, 1)["code"]
+        self.assertNotIn("hash", c)  # the code the principal never received approves nothing
+        self.assertIn("did not go out", c["void"])
+        self.assertFalse(release.code_live(release.get(self.desk, 1)))
 
     def test_encrypted_bark_page_test_push_neither_creates_nor_carries_a_code(self):
         from hansa import alert, release
