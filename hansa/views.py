@@ -14,7 +14,7 @@ from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build
 from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError)
 from .run import (disk_short, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
-                  markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of,
+                  markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
                   credit_text, provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_detail, waiting_looks, write_list)
 
@@ -241,18 +241,26 @@ def as_closed_now(m: dict) -> dict:
     return m
 
 
-def verification(desk: Desk, m: dict):
-    """The latest verification of a task: {task, state, verdict, lane}, or None."""
+def verification(desk: Desk, m: dict, *, latest: bool = False):
+    """The standing verification, with the newest attempt alongside it; latest=True for run/cancel guards."""
     vid = m.get("verify")
     if not vid:
         return None
-    v = as_closed_now(desk.meta(vid))
-    return {"task": vid, "state": v["state"], "verdict": v.get("verdict", ""), "lane": v.get("lane", "")}
+    def row(v):
+        v = as_closed_now(v)
+        return {"task": v["id"], "state": v["state"], "verdict": v.get("verdict", ""), "lane": v.get("lane", "")}
+    newest = row(desk.meta(vid))
+    if latest:
+        return newest
+    v = row(standing_verification(desk, m))
+    if v["task"] != vid and newest["state"] in ("queued", "running"):
+        return {**newest, "standing": v}
+    return {**v, **({"latest": newest} if v["task"] != vid else {})}
 
 
 def task_list(desk: Desk, *, page: int = 1, state: str = "", lane: str = "", words: str = "",
               days: int | None = None) -> dict:
-    """One page of work tasks, from metadata only; the verify pointer names the latest verification."""
+    """One page of work tasks, from metadata only, showing their standing verdicts."""
     records = desk.tasks()
     by_id = {m.get("id"): m for m in records}
     tasks = [m for m in records if m.get("kind") != "verify"]
@@ -268,12 +276,17 @@ def task_list(desk: Desk, *, page: int = 1, state: str = "", lane: str = "", wor
     pages = max(1, (len(tasks) + 49) // 50)
     page = max(1, min(page, pages))
     rows = [{**{k: m.get(k) for k in ("id", "title", "lane", "state", "created", "finished")},
-             "verdict": (by_id.get(m.get("verify")) or {}).get("verdict", "")}
+             "verdict": (standing_verification(desk, m, by_id) or {}).get("verdict", "")}
             for m in tasks[(page - 1) * 50:page * 50]]
     return {"rows": rows, "page": page, "pages": pages, "total": len(tasks), "states": states, "lanes": lanes}
 
 
 def _verification_line(v) -> str:
+    if v.get("standing"):
+        return (_verification_line(v["standing"]) + "; latest: "
+                + _verification_line({k: value for k, value in v.items() if k != "standing"}))
+    if v.get("latest"):
+        return _verification_line({k: value for k, value in v.items() if k != "latest"}) + "; latest: " + _verification_line(v["latest"])
     if v["state"] in ("queued", "running"):
         return f"{v['task']} {v['state']}"
     return f"{v['task']}: {v['verdict']}" if v["verdict"] else f"{v['task']} {v['state']} without a verdict"
@@ -398,6 +411,15 @@ def waited_text(r: dict) -> str:
 
 
 def merge_result_lines(m: dict, log: str = "") -> list:
+    lines = _merge_result_lines(m, log)
+    for step in (m.get("merge_check_result") or {}).get("steps", []):
+        how = "passed (exit 0)" if step.get("ok") else (
+            f"FAILED (exit {step['exit']})" if step.get("exit") is not None else "did not run or was interrupted")
+        lines.append(f"  at merge, {step['what']}: {how}: {step['command']}")
+    return lines
+
+
+def _merge_result_lines(m: dict, log: str = "") -> list:
     """What the last merge check found, for hansa show. log: its whole output, when it is kept."""
     r = m.get("merge_check_result")
     if not r:
@@ -416,6 +438,16 @@ def merge_result_lines(m: dict, log: str = "") -> list:
         return [f"merge check: {r['note']}; nothing was merged", "  " + machine_hint(r)]
     how = f"FAILED ({r['note']})" if r.get("note") else f"FAILED (exit {r.get('exit')})"
     hint = machine_hint(r)
+    if r.get("steps"):  # a --recheck's steps: named as the per-step lines below name them (merge_result_lines)
+        ran = [s for s in r["steps"] if s.get("exit") is not None]
+        failed = [s for s in ran if not s.get("ok")]
+        not_run = [s for s in r["steps"] if s.get("exit") is None]
+        did = (f" and ran the {', then the '.join(s['what'] for s in ran)} there" if ran else "") + (
+            f"; the {' and the '.join(s['what'] for s in not_run)} did not run or was interrupted" if not_run else "")
+        if failed and not r.get("note"):
+            how = f"{failed[0]['what']} FAILED (exit {failed[0]['exit']})"
+        return ([f"merge check ({where}{did}): {how} in {r.get('seconds', 0)} s; nothing was merged"]
+                + failed_check_lines(log, r.get("tail", []), m["id"], "--merge-check-log") + (["  " + hint] if hint else []))
     return ([f"merge check ({where} and ran the lane's {'merge check' if r.get('own') else 'check'} there): {how}"
              + (f" in {r['seconds']} s: {r['command']}" if r.get("command") else "") + "; nothing was merged"]
             + failed_check_lines(log, r.get("tail", []), m["id"], "--merge-check-log") + (["  " + hint] if hint else []))
@@ -1639,8 +1671,9 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
            "queued": "hansa status shows what it is waiting for", "running": f"hansa cancel {tid} to stop it"}
     if v and v["verdict"] == "does not hold" and m["state"] == "done":
         nxt["done"] = f"hansa retry {tid} \"fix what {v['task']} found: ...\" · hansa merge {tid} --despite-check"
-    if v and v["state"] in ("queued", "running") and m["state"] == "done":
-        nxt["done"] = (f"wait for the verification: {notify.wait_step(desk, v['task'], heard)} "
+    newest = (v.get("latest") or v) if v else None
+    if newest and newest["state"] in ("queued", "running") and m["state"] == "done":
+        nxt["done"] = (f"wait for the verification: {notify.wait_step(desk, newest['task'], heard)} "
                        f"(hansa merge {tid} is held until it ends)")
     from .run import verification_due
     if verification_due(m):

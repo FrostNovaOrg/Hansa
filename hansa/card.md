@@ -73,7 +73,7 @@ they show what is merged, missing evidence and released; `show` also gives the g
 | `hansa show <id> [--full \| --report \| --check \| --check-log \| --merge-check-log]` | report, changes, refused calls, check (failing tests, last lines), next step |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base; `--new`: only what a follow-up added |
 | `hansa git L [--worktree] <git command>` | a git command that reads, in lane L's repository (with every `task/<id>` branch) or worktree, keys hidden |
-| `hansa merge <id> [--recheck \| --despite-check]` | merge into the lane's base branch (Merging) |
+| `hansa merge <id> [--recheck] [--despite-check]` | merge into the lane's base branch (Merging) |
 | `hansa retry <id> "<what to change>" [--lane L] [--fresh \| --update] [...]` | a follow-up (new id) from this task's last commit, which it replaces |
 | `hansa verify <id> ["what to look at"] [--lane L] [...]` | a worker runs the change to see whether it holds |
 | `hansa cancel <id>` | stop a queued or running task or verification, or a merge check (back to review) |
@@ -181,7 +181,8 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   of its own, the task becomes `merging`: hansa merges onto the
   current base, runs the setup and merge check there, and moves the base to that exact merge commit
   if it passes. You are told how it ended; `hansa cancel <id>` stops it and returns the task to review.
-  `--recheck` does the same even if the base has not moved.
+  `--recheck` does the same even if the base has not moved, repeating a failed task check there too;
+  `--despite-check` skips both checks when combined.
 - `hansa lane set L merge_check "<command>"` (limit: `merge_timeout_min`) is for checks too slow to
   run after every task; it runs before every merge of a changed task. Try `hansa lane try L --merge-check`.
   A merge lane releases nothing. For slow checks:

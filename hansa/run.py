@@ -185,6 +185,22 @@ shift 3; exec "$@"
 # Its output goes into a pipe, and cat (outside srt) copies it to the log the script writes to (see SETUP_SCRIPT).
 # sh -c CHECK_SCRIPT <token> <check> <exit file> <temporary folder> <srt> <srt settings> <its own temporary folder>
 CHECK_SCRIPT = WRITE_FILE + '{ "$4" --settings "$5" -- ' + SRT_OUTPUT + ' sh -c "$1" 2>&1; write_file "$2" "$?"; } | cat; rm -rf "$3" "$6"'
+# A failed task's --recheck must pass its check as well as the merge check. Keep each exit outside srt,
+# independently of command output, and stop at the first failure. The sandbox and worktree are the merge lane's.
+# sh -c MERGE_RECHECK_SCRIPT <token> <srt> <settings> <tmp> <own tmp> <overall exit> [<command> <step exit>]...
+MERGE_RECHECK_SCRIPT = WRITE_FILE + '''srt=$1 settings=$2 tmp=$3 own=$4 result=$5
+shift 5
+{ while [ "$#" -ge 2 ]; do
+    "$srt" --settings "$settings" -- ''' + SRT_OUTPUT + ''' sh -c "$1" 2>&1
+    rc=$?
+    write_file "$2" "$rc"
+    shift 2
+    [ "$rc" = 0 ] || break
+  done
+  write_file "$result" "$rc"
+} | cat
+rm -rf "$tmp" "$own"
+'''
 # `hansa lane try`: the lane's setup, then its check, each in srt as for a task; the first that fails ends it.
 # Each writes <folder>/<name>.log (through a pipe, see SETUP_SCRIPT) and <folder>/<name>.exit: its exit code
 # and the seconds it took. Each step's temporary folder is removed after it, or when it does not run.
@@ -1042,14 +1058,15 @@ def git(*args, cwd, env=None) -> str:
     check_main_checkout(cwd)  # a linked worktree's git folder is checked with its .git file (check_git_file)
     e = {**without_session(os.environ), **GIT_ID, **(env or {})}
     linked = os.path.isfile(os.path.join(str(cwd), ".git")) and not os.path.islink(os.path.join(str(cwd), ".git"))
-    r = subprocess.run(["git", *(worktree_git_settings() if linked else ()), *args], cwd=str(cwd), env=e,
-                       capture_output=True, text=True, errors="replace")
+    r = subprocess.run(["git", "-c", "core.quotePath=false", *(worktree_git_settings() if linked else ()), *args],
+                       cwd=str(cwd), env=e, capture_output=True, text=True, errors="replace")
     if r.returncode:
         refused = account.git_refusal(r.stderr or "", cwd)
         if refused:
             raise RuntimeError(refused)
         raise RuntimeError(f"git {' '.join(args[:2])} failed: {(r.stderr or r.stdout).strip()[:300]}")
-    return r.stdout.strip()
+    # NUL-delimited names may start or end in whitespace; only scalar/human output is stripped.
+    return r.stdout if "-z" in args else r.stdout.strip()
 
 
 def repo_identity(repo) -> tuple:
@@ -2242,7 +2259,7 @@ def write_list(desk: Desk, lane: dict) -> tuple:
     kept = kept_from_workers(s, desk.root)[0]
     for x in given:
         said = write_problems([x], lane.get("repo"), desk.root, s["providers"], kept, lane.get("env"),
-                              other_envs(s["lanes"], lane))
+                              other_envs(s["lanes"], lane), lanes=s["lanes"])
         if said:
             left.append(f"left out of this run: {said[0].removeprefix('write cannot include ')} "
                         "(the write list is changed with hansa lane set)")
@@ -3657,7 +3674,7 @@ def merge_in_progress(desk: Desk, wt: Path) -> bool:
 def conflicted_files(run) -> list:
     """The files a failed merge left unmerged; run: git in the checkout where it failed."""
     try:
-        return run("diff", "--name-only", "--diff-filter=U").splitlines()
+        return [f for f in run("diff", "--name-only", "--diff-filter=U", "-z").split("\0") if f]
     except GitFileChanged:
         raise
     except RuntimeError:
@@ -4307,7 +4324,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         # link (a leftover the sweep could not find may still write there), and from now on hansa verifies,
         # merges, continues from and shows exactly this commit (branch_holds)
         fields.update(head=head, commits=int(wgit(desk, wt, "rev-list", "--count", f"{meta['base']}..{head}") or 0),
-                      files=wgit(desk, wt, "diff", "--name-only", meta["base"], head).splitlines(),
+                      files=[f for f in wgit(desk, wt, "diff", "--name-only", "-z", meta["base"], head).split("\0") if f],
                       stat=wgit(desk, wt, "diff", "--shortstat", meta["base"], head))
         check_git_file(desk, wt)  # keys_in_change runs git there too
         fields["leaked"] = keys_in_change(desk, wt, meta["base"], head)  # it would travel with the merge
@@ -4654,9 +4671,35 @@ def base_moved(repo, tip: str, head: str) -> bool:
     return r.returncode != 0
 
 
+def task_base_problem(repo, m: dict, base: str) -> str:
+    """Stop an old or rewritten base bringing unrelated history with a task. Fresh retries need no exception."""
+    started = m.get("base")
+    if not started or not base_moved(repo, started, base):
+        return ""
+    extra = git("rev-list", "--count", started, "--not", base, cwd=repo)
+    return (f"{m['id']} started from {started}, but base {base} does not hold that commit; "
+            f"a merge would bring {extra} commit(s) beside the task's own. Nothing was merged, and "
+            f"--despite-check does not override this. Start from the current base: hansa retry {m['id']} --fresh \"...\"")
+
+
 def merge_command(lane: dict) -> str:
     """The command a lane's merge check runs: its merge_check, else its check; '' when it has neither."""
     return lane.get("merge_check") or lane.get("check") or ""
+
+
+def merge_recheck_steps(m: dict, task_lane: dict, check_lane: dict) -> list:
+    """Only a failed/unrunnable task check needs repeating alongside the merge command; identical commands run once."""
+    steps = []
+    check = m.get("check") or {}
+    if check and not check.get("ok") and task_lane.get("check"):
+        steps.append({"what": "task check", "command": task_lane["check"]})
+    command = merge_command(check_lane)
+    if command:
+        if steps and steps[0]["command"] == command:
+            steps[0]["what"] = "task check and merge check"
+        else:
+            steps.append({"what": "merge check", "command": command})
+    return steps
 
 
 def merge_minutes(lane: dict) -> int:
@@ -4787,6 +4830,31 @@ def close_verification(desk: Desk, m: dict, why: str, by=None) -> None:
         desk.update(v["id"], closed=why)
 
 
+def standing_verification(desk: Desk, m: dict, records: dict | None = None) -> dict | None:
+    """A definite verdict stands until another definite verdict. Unsure and missing verdicts retract nothing.
+    Read existing verification records too, so desks queued before this rule keep their standing verdict."""
+    vid = m.get("verify")
+    if not vid:
+        return None
+    try:
+        latest = records.get(vid) if records is not None else desk.meta(vid)
+    except SystemExit:
+        return None
+    definite = (*HOLDING_VERDICTS, "does not hold")
+    if not latest or latest.get("verdict") in definite:
+        return latest
+    records = records if records is not None else {v["id"]: v for v in desk.tasks()}
+    earlier = sorted((v for v in records.values() if v.get("kind") == "verify" and v.get("parent") == m["id"]
+                      and int(v["id"][1:]) <= int(vid[1:])), key=lambda v: int(v["id"][1:]), reverse=True)
+    unsure = latest if latest.get("verdict") else None
+    for v in earlier:
+        if v.get("verdict") in definite:
+            return v
+        if not unsure and v.get("verdict"):
+            unsure = v
+    return unsure or latest
+
+
 TEXT_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".adoc", ".org")
 TEXT_NAMES = ("LICENSE", "LICENCE", "README", "CHANGELOG", "NOTICE", "AUTHORS", "COPYING", "CONTRIBUTING")
 
@@ -4804,7 +4872,7 @@ def unverified_note(desk: Desk, m: dict) -> str:
     one retries (parent, its parent, ...) and names the nearest verdict there, whether it held or not: an older
     one that held says nothing of the code after a later one that did not."""
     def verdict(t):
-        v = desk.meta(t["verify"]) if t and t.get("verify") else None
+        v = standing_verification(desk, t) if t else None
         return v if v and v.get("verdict") else None
 
     def found(v):
@@ -4867,11 +4935,8 @@ def rounds_of(desk: Desk, m: dict) -> list:
 
 
 def _latest_verdict(desk: Desk, m: dict) -> str:
-    """The verdict of a task's latest verification; '' when it has none, or it is gone."""
-    try:
-        return (desk.meta(m["verify"]).get("verdict") or "") if m.get("verify") else ""
-    except SystemExit:
-        return ""
+    """The task's standing verdict; '' when it has none, or its verification is gone."""
+    return (standing_verification(desk, m) or {}).get("verdict") or ""
 
 
 def rounds_line(desk: Desk, m: dict) -> str:
@@ -4977,7 +5042,7 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
             desk.update(tid, merge_check={"phase": "queued", "queued": mc.get("queued"), "moves": 0})
             desk.event("merge_check_queued", task=tid, onto=tip, waited=True, command=merge_command(check_lane))
             return "check"
-        why = branch_holds(repo, m)  # what is merged is the commit recorded as the task's work, still its branch's
+        why = branch_holds(repo, m) or task_base_problem(repo, m, name)
         current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
         if why:
             pass
@@ -5031,7 +5096,7 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
     None when it did not start (cancelled meanwhile), or ended at once (a conflict; or no command any more, and
     so merged)."""
     raw = desk.raw_dir(tid)
-    for f in ("merge-check.exit", "merge-setup.log.done", *MERGE_FILES):
+    for f in ("merge-check.exit", "merge-step-0.exit", "merge-step-1.exit", "merge-setup.log.done", *MERGE_FILES):
         (raw / f).unlink(missing_ok=True)
     (raw / "merge-check.err").touch()  # publish an empty error over the previous run's setup failure
     token = f"hansa-merge-{tid}-{uuid.uuid4().hex[:8]}"  # on its command line, for a restarted server
@@ -5051,7 +5116,7 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         repo, name = Path(lane["repo"]), lane.get("base") or "main"
         wt = desk.worktrees_dir / lane_name
         tip = git("rev-parse", name, cwd=repo)
-        held = branch_holds(repo, m)  # what is merged is the commit recorded as the task's work, still its branch's
+        held = branch_holds(repo, m) or task_base_problem(repo, m, name)
         if held:
             end_merge_check(desk, tid, {"ok": False, "onto": tip, "at": now(), "note": f"{held}; nothing was merged"})
             return None
@@ -5074,17 +5139,24 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         commit = wgit(desk, wt, "rev-parse", "HEAD")
         said = message_fallback(task_lane, m["lane"], "merge_message")  # the message this merge commit was given
         command = merge_command(lane)
+        steps = merge_recheck_steps(m, task_lane, lane) if mc.get("recheck") else []
+        if steps:
+            command = steps[0]["command"] if len(steps) == 1 else " && ".join(f"({s['command']})" for s in steps)
         entries = [{"task": tid, "onto": tip, "commit": commit, "message_note": said}]
-        if command and not mc.get("alone"):
+        repeat_task_check = mc.get("recheck") and m.get("check") and not m["check"].get("ok")
+        if command and not mc.get("alone") and not repeat_task_check:
             waiting = sorted((x for x in desk.tasks() if x["state"] == "merging"
                               and merge_target(s, x.get("lane")) == merge_target(s, m["lane"])
                               and merge_order(x) > merge_order(m)), key=merge_order)
             for other in waiting[:lane.get("merge_batch", 4) - 1]:
                 omc = other.get("merge_check") or {}
                 if (omc.get("phase") != "queued" or omc.get("alone") or omc.get("plain")
-                        or merge_check_lane(s, other) != lane_name or branch_holds(repo, other)):
+                        or merge_check_lane(s, other) != lane_name
+                        or branch_holds(repo, other) or task_base_problem(repo, other, name)):
                     break
                 other_lane = s["lanes"][other["lane"]]
+                if omc.get("recheck") and other.get("check") and not other["check"].get("ok"):
+                    break  # keep this task's repeated check and its results on its own merged tree
                 before = entries[-1]["commit"]
                 try:
                     wgit(desk, wt, "merge", "--no-ff", "--no-verify", "-m",
@@ -5119,6 +5191,10 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         srt, settings, tmp, own = in_srt(desk, tid, "check", lane, pname, p, wt)
         argv = ["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, command), str(raw / "merge-check.exit"), tmp, srt,
                 settings, own]
+        if len(steps) > 1:
+            argv = ["/bin/sh", "-c", MERGE_RECHECK_SCRIPT, token, srt, settings, tmp, own, str(raw / "merge-check.exit")]
+            for index, step in enumerate(steps):
+                argv.extend([in_sandbox(desk, lane, step["command"]), str(raw / f"merge-step-{index}.exit")])
         if lane.get("setup"):
             ssrt, ssettings, stmp, sown = in_srt(desk, tid, "setup", lane, pname, p, wt)
             argv = ["/bin/sh", "-c", SETUP_SCRIPT, token, in_sandbox(desk, lane, lane["setup"]), str(raw / "merge-setup.log"),
@@ -5128,6 +5204,7 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
                "CLAUDE_CODE_TMPDIR": tmp}
         memory = oom_begin(mc)
         mc = {**mc, "phase": "starting", "launch": token, "onto": tip, "commit": commit, "command": command,
+              **({"steps": steps} if steps else {}),
               "own": own_merge_check(lane, task_lane), "message_note": said,
               "setup": lane.get("setup", ""), "started": now(), "worktree": str(wt),
               **memory}
@@ -5190,6 +5267,16 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
               "onto": mc.get("onto", ""), "commit": mc.get("commit", ""), "at": now(),
               "seconds": round(now() - (mc.get("started") or now())),
               "tail": read("merge-setup.log" if setup else "merge-check.log").strip().splitlines()[-15:]}
+    if mc.get("steps"):
+        steps = []
+        for index, step in enumerate(mc["steps"]):
+            try:
+                exit_code = int((raw / f"merge-step-{index}.exit").read_text().strip()) if len(mc["steps"]) > 1 else code
+            except (OSError, ValueError):
+                exit_code = None
+            steps.append({**step, "exit": exit_code, "ok": exit_code == 0})
+        result["steps"] = steps
+        result["ok"] = result["ok"] and all(step["ok"] for step in steps)
     if len(mc.get("members", [])) > 1:
         result.update(batch=mc["members"], output_task=tid, batch_commits=mc["batch_commits"],
                       checked_commit=mc.get("commit"))
@@ -5226,6 +5313,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
             result["note"] = killed_twice(result["retried"], result)
     note = result["note"]
     desk.event("merge_checked", task=tid, ok=result["ok"], exit=code, note=note, command=result["command"],
+               **({"steps": result["steps"]} if result.get("steps") else {}),
                **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     try:
         if mc.get("cancel"):
@@ -5241,7 +5329,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
 
 def merge_landing_problem(desk: Desk, m: dict, repo, name: str, onto: str, commit: str) -> str:
     """Each task's own landing checks, against only what its merge adds."""
-    why = branch_holds(repo, m)
+    why = branch_holds(repo, m) or task_base_problem(repo, m, name)
     current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
     if why:
         return why
@@ -5395,6 +5483,7 @@ def land_merge(desk: Desk, tid: str, result: dict) -> dict | None:
                         merge_message_note=result.get("message_note") or mc.get("message_note") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
     desk.event("task_merged", ts=m["merged"], task=tid, into=name, merge_checked=True, onto=result["onto"],
+               **({"steps": result["steps"]} if result.get("steps") else {}),
                **({"command": result["command"]} if result.get("command") else {}),
                **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
     return m

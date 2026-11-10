@@ -179,19 +179,21 @@ async function clear($, st, opened) {
 
 // When a turn ends and when a wait ends: decide, from the context, the settings file and the window as they are now.
 // No compact once one was asked for, skipped or refused, and no clear once one failed, until another turn starts
-// (whatever comes in between: a Stop)
+// (whatever comes in between: a Stop). While a clear has not returned none starts, and one under way reads nothing more
 async function check($, st) {
   cancel(st)
   if (!idle(st) || st.clearing) return
   const tried = st.tried
+  const moved = () => !idle(st) || st.clearing || st.tried !== tried // a turn started, or another check acted, meanwhile
   try {
     if (await $.env.get('HANSA_MOD_LINE_ONLY') === '1') return // the launcher's session: the line alone
     const win = st.clearFailed ? null : window(await $.env.get('HANSA_MOD_CLEAR_DAILY'))
     if (tried && !win) return
+    if (moved()) return // not even a read of the settings
     const t = tried ? null : await thresholds($)
     const { context } = await $.session.usage()
     const now = await $.clock.now()
-    if (!idle(st) || st.clearing || st.tried !== tried) return // a turn started, or another check acted, meanwhile
+    if (moved()) return
     if (st.made === null) st.made = now // made before anything said when: as if now, so not in this window
     const tokens = context.tokens ?? 0
     const plan = daily(win, now, st)

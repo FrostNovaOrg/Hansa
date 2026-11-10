@@ -45,6 +45,7 @@ A stopped release went out for no `--after`: like a failed one, it lets no other
 """
 from __future__ import annotations
 
+import codecs
 import contextlib
 import glob
 import hashlib
@@ -407,8 +408,8 @@ def outgoing(repo, since: str, commit: str) -> tuple:
     rng = _range(since, commit)
     rows = _git_bytes(repo, "log", "--format=%H%x1f%s", *rng)
     commits = [dict(zip(("sha", "subject"), x.split("\x1f", 1))) for x in rows.splitlines() if "\x1f" in x]
-    names = _git_bytes(repo, "log", "--cc", "--format=", "--name-only", "--no-renames", *rng)
-    return commits, sorted({x for x in names.splitlines() if x})
+    names = _git_bytes(repo, "log", "--cc", "--format=", "--name-only", "--no-renames", "-z", *rng)
+    return commits, sorted({x for x in names.split("\0") if x})
 
 
 def hansa_merges(desk: Desk, s: dict, a: dict, tasks=None) -> set:
@@ -481,6 +482,14 @@ def _binary_blobs(repo):
             p.wait()
 
 
+def _git_path(path: str) -> str:
+    """A path in git's line-oriented output: quotePath=false still quotes quotes, backslashes and controls.
+    Git's C escapes describe UTF-8 bytes; use NUL-separated output instead where no patch headers are needed."""
+    if path.startswith('"') and path.endswith('"'):
+        return codecs.escape_decode(path[1:-1].encode("utf-8"))[0].decode("utf-8", "replace")
+    return path
+
+
 def _added(lines, binary_blob):
     """(commit, file, line) for each line the patches of `git log -p --cc --format=%x00%H -U0` add: an ordinary
     commit's added lines, and a merge's lines in none of its parents (what the merge itself adds, such as a
@@ -509,7 +518,7 @@ def _added(lines, binary_blob):
         elif line.startswith("index "):
             blob = line.split()[1].split("..")[-1]
         elif line.startswith("+++ "):
-            p = line[4:].rstrip("\t")
+            p = _git_path(line[4:].rstrip("\t"))
             path = None if p == "/dev/null" else p[2:] if p.startswith("b/") else p
             binary = binary_blob(blob) if path else False
         else:
@@ -583,7 +592,7 @@ def _words_in(repo, rng, texts, mailboxes, mailbox_allow, scan):
         if line.startswith("\0"):
             sha = line[1:].strip()
         elif line:
-            look(sha, "file name", line)
+            look(sha, "file name", _git_path(line))
     patch = _git_lines(repo, "log", "-p", "--cc", "--text", "--no-ext-diff", "--no-textconv", "--no-color",
                        "--unified=0", "--no-renames", "--full-index", "--format=%x00%H", *rng)
     try:
@@ -842,8 +851,10 @@ def _askable(desk: Desk, s: dict, lane: str, target: str | None) -> dict:
                              f"say which: hansa release {lane} TARGET [note]. Nothing was asked")
         target = next(iter(targets))
     if target not in targets:
+        note_hint = (f" For a one-word note, name the target: hansa release {lane} {next(iter(targets))} {target}."
+                     if len(targets) == 1 else "")
         raise SystemExit(f"hansa: lane {lane} has no release target {target}; its targets: "
-                         f"{', '.join(sorted(x or '(unnamed)' for x in targets))}. Nothing was asked")
+                         f"{', '.join(sorted(x or '(unnamed)' for x in targets))}.{note_hint} Nothing was asked")
     command = targets[target].get("command") or ""
     repo, base = ln["repo"], ln.get("base") or "main"
     try:
@@ -922,7 +933,7 @@ def ask(desk: Desk, lane: str, note: str = "", by: str = "", session=None, targe
     target, commit, hits = r["target"], r["commit"], r.get("hits")
     desk.event("release_asked", id=r["id"], lane=lane, target=target, commit=commit, state=r["state"], by=by,
                **({"replaced": r["_replaced"]} if r.get("_replaced") else {}))
-    for n in r.pop("_replaced", []):
+    for n in r.get("_replaced", []):
         desk.event("release_void", id=n, lane=lane, target=target, why=f"replaced by release #{r['id']}", quiet=True)
     if hits:
         desk.event("release_forbidden", id=r["id"], lane=lane, target=target, commit=commit, found=len(hits),

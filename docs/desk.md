@@ -57,6 +57,24 @@ desk folder, init still makes the desk and warns:
 `warning: others may write in <folder>; run chmod go-w <folder>`.
 The command quotes a path containing spaces or shell characters.
 
+The desk's folder must be new or empty (a `.DS_Store` is ignored). `hansa init`
+refuses one that holds anything (files, folders, links, or what an interrupted
+init left) before anything is made, naming up to three of the entries and
+giving a `hansa init` command with the desk in a folder of its own beside the
+project (`~/shop-desk` for `~/shop`); so it never writes over a project's own
+`CLAUDE.md` or `.claude/settings.json`. A desk may lie inside a git
+repository's work tree (the lane's or another), though a folder beside the
+project is the better place: `hansa init`, and `hansa lane add --repo R` for a
+desk inside R's work tree, write the desk's path into that repository's
+`info/exclude` (never into a tracked `.gitignore`), so `git add` there takes none
+of its settings, tasks, `secrets/` or `.hansa/`, and say so in one line. A line
+already there, or a path git ignores already, is left as it is and not
+mentioned. When the line cannot be written (the desk is the work tree's top
+folder, say), the command warns that the desk's files must stay out of that
+repository's commits. `--lane NAME` is judged by the same settings check as
+`hansa lane add`, so a name it refuses (a capital, `_`, a space, a path) is
+refused before anything is made.
+
 Settings and JSON state files use UTF-8. Filename bytes that are not UTF-8,
 as Linux permits, are stored as JSON escapes and restored when the file is
 read. Ordinary Unicode text stays readable, and saved command lines keep
@@ -141,9 +159,11 @@ place. This tab only reads records; changes are recorded through the commands.
 
 All tasks lists every work task, newest queued first, 50 per page through to the
 oldest. Each line shows its number, title, lane, current state, queued time,
-ended time and latest verification verdict. These come from
+ended time and standing verification verdict. These come from
 `tasks/<id>/meta.json`: `id`, `title`, `lane`, `state`, `created`,
-`finished`, and the `verdict` in the task named by `verify`. Ended is the saved
+`finished`, and the last definite verification verdict (`holds`, `holds, with
+notes`, or `does not hold`). Later `unsure` or missing verdicts do not replace it;
+with no definite verdict, the latest verdict given is shown. Ended is the saved
 worker finish time, not the merge time. Missing fields stay blank. Original tasks
 and their follow-ups both appear; an original's state remains Replaced.
 Verification tasks have no rows of their own. Click a line or its number to open
@@ -889,11 +909,13 @@ link that leads nowhere, unreadable) is left as it is, with the reason on
 stderr: rewriting it would drop the other desks, whose runs wait until the
 list is fixed. A missing list is made.
 Outside any desk, with no `--desk` or `HANSA_DESK`, `hansa up` opens this menu
-when stdin and stdout are terminals. `hansa up --all` instead visits every
-listed folder that is still a desk, printing a block for each. Without those
-terminals, or with `HANSA_ROLE`, `HANSA_TASK` or Claude Code session variables
-set, `hansa up` still starts every listed desk. `--all` is refused inside a
-desk or when `--desk` or `HANSA_DESK` names one. Each is started by its own installation with
+when stdin and stdout are terminals. Without those terminals, or with
+`HANSA_ROLE`, `HANSA_TASK` or Claude Code session variables set, the menu cannot
+open: `hansa up` starts nothing and says so, lists the account's desks by folder,
+and gives the two forms that work, `hansa --desk DIR up` and `hansa up --all`.
+`hansa up --all` visits every listed folder that is still a desk, printing a
+block for each; it is refused inside a desk or when `--desk` or `HANSA_DESK`
+names one. Each is started by its own installation with
 `<saved hansa> --desk <folder> up`. If that installation is missing or too old
 to have `up`, nothing starts there and hansa prints the last server command
 instead. `hansa init` puts the new desk on this account's list, stopped. If the

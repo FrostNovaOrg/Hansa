@@ -370,6 +370,12 @@ Advice, not a rule hansa enforces:
 
 ## Merging, the merge check and conflicts
 
+File names read from git are kept as written, including non-ASCII characters, spaces, quotes and
+backslashes, regardless of the repository's or account's `core.quotePath` setting. This applies to
+new task file records, release file matching, conflict reports and the files given to an `--update`
+worker. `hansa show` uses the recorded names; `hansa diff --stat` and `hansa git` show non-ASCII
+names as written. Names already saved by an older hansa are left as saved.
+
 `hansa verify ID` chooses a verify lane listing the task's lane: free first, then fewest queued,
 then lanes' order; otherwise its own lane. `--lane L` overrides this.
 
@@ -419,6 +425,27 @@ check blocks it unless the coordinator says `--despite-check` (recorded), and
 so does a verification that does not hold. That flag skips the merge check
 even when the base moved; it never overrides release files or a key.
 
+The last definite verdict (`holds`, `holds, with notes`, or `does not hold`)
+stands until a later verification gives another definite verdict. A cancelled
+or failed verification, one ending without a verdict, or `unsure` takes nothing
+back. This keeps a second opinion that gave no answer from clearing a refusal;
+it is needed while verification can end without a definite verdict.
+`hansa show` names the standing verification and the newest attempt when they
+differ. The page's task list, goal evidence, the count of rounds that did not
+hold, and the verification report given to a follow-up use that standing verdict.
+A newest verification still queued or running continues to hold the merge.
+
+The base must still hold the commit the task started from. If the lane was
+repointed on an older desk, or its history rewritten, hansa refuses the merge,
+names that starting commit, and counts the commits beside the task's own that
+would come with it. `--despite-check` cannot override this: use
+`hansa retry ID --fresh "<the change on the current base>"`. This guard prevents
+bringing old-base history into another base; it is needed while tasks can
+outlive base changes or history rewrites. `hansa lane set L base NEW` refuses
+while that lane has running or merging tasks, or finished work waiting for
+review: merge or close them first (cancel running work first). Queued tasks that
+have not started do not hold a base change.
+
 A [merge lane](desk.md) serves its repository and base's checks with its own worktree, sandbox, env, setup, command and limit; otherwise they use the task's lane as below. With a merge lane, a command of its own means its merge command differs from the task lane's check, which the task already passed. For long merge checks and busy task lanes: `hansa lane add m --like a` (the copy has no release targets: a merge lane releases nothing), its own caches through `write` and `env`, then `hansa lane set m merge_lane true`. One per repository and base, it takes no work (a lane with work queued or running cannot become one) and holds only itself, keeping the task lane free; it keeps the task lane's merge message and identity. It is chosen when the check starts: unmarking or removing it while queued restores the task lane, and a check already running keeps the lane it recorded. With every concurrency slot busy, a merge check takes the next slot before new work when a task ends anywhere, and that task's lane waits about one merge check; raising concurrency by one removes the wait if the machine can run the check beside the lanes' work.
 
 - **When it merges at once.** When the base's tip is already in the task's
@@ -446,7 +473,8 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   itself). Set `hansa lane set L merge_batch N` to 1–10; `none` restores 4 and
   1 checks each task separately. This is the merge lane's setting when one serves
   the base, otherwise the task lane's. It stops before an `alone` task, a merge
-  needing no check (`plain`), a different check lane, or a conflict. An `alone`
+  needing no check (`plain`), a failed task's `--recheck`, a different check lane,
+  or a conflict. An `alone`
   first task takes none. Each member gets its own merge commit, message and
   identity, on top of the preceding member; setup and check run once on the last.
   After a pass, each member's branch, checkout, keys and forbidden words in what
@@ -471,10 +499,18 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   while keeping its verdict. `cancel` on finished work refuses and points to `close`.
 - **`--recheck`.** `hansa merge ID --recheck` goes the same way whether or not
   the base has moved: the task merged onto the base's tip, the lane's setup and
-  merge check run there when the lane is free, and exactly that merged if it
-  passes. Use it for a task whose check failed or could not run for the
-  machine's sake, once that is fixed. The event log records that the check was
-  run again, and by whom. Not with `--despite-check`.
+  merge check run there when the lane is free, and exactly that merged if what
+  ran passed. If the task's check failed or could not run, its lane's check runs
+  there too, before the merge check, using the same worktree, sandbox and env
+  (the merge lane's when one serves it). Identical commands run once. A failed
+  command stops the sequence and nothing merges. This prevents a different
+  merge command from bypassing a failed task check; it is needed while the two
+  commands can differ. A failed task's recheck runs separately so each task keeps
+  the results of its own repeated check. A passed task check needs only the merge
+  check, as before.
+  Use it once the machine problem is fixed. `hansa show` and the event log keep
+  the commands and each exit; the event log also records who asked.
+  With `--despite-check`, the checks are skipped and the override recorded.
 - **`merge_check` and `merge_timeout_min`.** A lane's merge check runs its check
   unless the lane has a command of its own for it: `hansa lane set L
   merge_check "<command>"`, for what is too slow to run after every task (the
@@ -514,7 +550,7 @@ earlier task's last commit; the earlier task becomes replaced. Its title keeps t
 task's own title whole, followed by ` (retry of ID)`, naming only the immediately
 earlier task; another follow-up replaces that suffix. The follow-up's worker gets the
 original task, one line per earlier round (its id, how it ended, the start of
-its note), this round's note, the previous report and the latest
+its note), this round's note, the previous report and the standing
 verification's report, with its verdict. Earlier notes are not carried, so
 what still holds of them is said again in the new note. Each round's note is
 kept on its own beside its task, as `note.md` in the task's folder (keys
@@ -529,7 +565,9 @@ as it was (waiting for review, failed, or closed), and `hansa cancel` says so; `
 the cancelled follow-up is then refused and points to that task. A follow-up the machine kept from
 starting (`next:` says `hansa retry` it once the machine is fixed) has no commit of its own; its
 retry starts where it would have started, the earlier task's last commit, and is given that
-earlier task's report.
+earlier task's report and, if the never-started round has no standing verification, the
+earlier task's standing verification report. Closing that verification because the earlier
+task was replaced does not discard its verdict or report.
 
 A verification of a follow-up judges each ask in the original task together with
 this round's note, which restates what still holds of earlier rounds' notes and

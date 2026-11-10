@@ -18,16 +18,17 @@ import uuid
 from pathlib import Path
 
 from . import account, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
-from .desk import (EFFORTS, Desk, SettingsError, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
+from .desk import (EFFORTS, Desk, SettingsError, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
-                   PROJECT_INTRO, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
+                   PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
 from .run import (HOLDING_VERDICTS, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
                   not_looking, own_merge_check, proc_start, provider_env, pulse,
                   quiet_text, read_try, record_serve_code, record_serve_locale, record_serve_session, serve_session_text, server_state, stop, try_file, try_log, try_srt_at_start, unverified_note, waiting_detail, words_in_merge, words_text, write_try,
+                  merge_recheck_steps, standing_verification, task_base_problem,
                   is_local, mac_loopback_listeners, worktree_git_settings)
 
 CARD = Path(__file__).with_name("card.md")
@@ -116,12 +117,58 @@ def answer_lane_refused(name: str) -> str:
             "the principal's answer; nothing was changed")
 
 
+def held(folder: Path) -> list:
+    """What an existing folder holds, sorted, but Finder's .DS_Store; [] for a missing or an empty folder.
+    OSError when it cannot be read."""
+    return sorted(p.name for p in folder.iterdir() if p.name != ".DS_Store") if folder.is_dir() else []
+
+
+def beside_project(folder: Path, repo: str, lane: str, base: str | None) -> str:
+    """A hansa init that works, for a folder that holds something: the desk in a new folder of its own beside the
+    project (the repository given, else the work tree folder is in, else folder), named after it with -desk."""
+    project = Path(os.path.realpath(os.path.expanduser(repo))) if repo else Path(up.git_top(folder) or folder)
+    at, n = project.with_name(f"{project.name}-desk"), 1
+    while os.path.lexists(at) and (not at.is_dir() or held(at) or (at / "settings.json").exists()):
+        n += 1
+        at = project.with_name(f"{project.name}-desk-{n}")
+    return shlex.join(["hansa", "init", str(at)] + (["--repo", str(project)] if repo else [])
+                      + (["--lane", lane] if lane != "a" else []) + (["--base", base] if base is not None else []))
+
+
+def keep_desk_out(desk: Desk, repo: str = "") -> None:
+    """A desk inside the work tree of a git repository (with repo, only of that one): its path in the repository's
+    info/exclude, so that `git add` there takes none of the desk's settings, tasks, secrets/ and .hansa/. Said in one
+    line when written; a warning when it cannot be; nothing when git already leaves it out."""
+    top = up.git_top(desk.root)
+    if not top or repo and os.path.realpath(up.git_top(repo) or repo) != os.path.realpath(top):
+        return
+    done, detail = up.exclude_path(top, desk.root)
+    better = "a folder of its own beside the project is the better place for a desk"
+    if done == "added":
+        print(f"The desk at {desk.root} lies inside the git work tree at {top}: hansa wrote its path into {detail}, "
+              f"which keeps `git add` there from taking the desk's files; {better}.")
+    elif done == "failed":
+        print(f"warning: the desk at {desk.root} lies inside the git work tree at {top}, and hansa could not write "
+              f"its path into the repository's info/exclude ({detail}): keep the desk's files (its settings, tasks, "
+              f"secrets/ and .hansa/) out of that repository's commits; {better}.", file=sys.stderr)
+
+
 def init_desk(root: Path, repo: str = "", lane: str = "a", base: str | None = None, *, command: str = "hansa init") -> Desk:
     if answer_name(lane):
         raise SystemExit(answer_lane_refused(lane))
     desk = Desk(root)
     if desk.settings_path.exists():
         raise SystemExit(f"hansa: {desk.root} already has a desk")
+    try:  # a project's own CLAUDE.md and .claude/settings.json would be written over
+        there = held(desk.root) if desk.root.is_dir() or not os.path.lexists(desk.root) else [desk.root.name]
+    except OSError as e:
+        raise SystemExit(f"hansa: cannot read {desk.root} ({e.strerror or e}); no desk was made")
+    if there:
+        named = ", ".join(there[:3]) + (f" and {len(there) - 3} more" if len(there) > 3 else "")
+        what = f"holds {named}" if desk.root.is_dir() else "is not a folder"
+        raise SystemExit(f"hansa: {desk.root} {what}: a desk needs a new or an empty folder of its own; "
+                         f"no desk was made. Make it in a folder of its own beside the project: "
+                         f"{beside_project(desk.root, repo, lane, base)}")
     for x in dict.fromkeys([str(desk.root), str(desk.given)]):  # every rule for the desk's folders starts with it
         if path_rule_problem(x):
             raise SystemExit(f"hansa: {path_rule_problem(x)}; no desk was made")
@@ -138,6 +185,9 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str | None = No
             raise SystemExit(f"hansa: {why}; no desk was made")
         new_repo = {}
         base = lane_base(repo, base, "no desk was made", new_repo=new_repo)
+        s = default_settings()  # judged as every later change is (hansa lane add's lane name among it)
+        s["lanes"][lane] = default_lane(repo, base)
+        _settings_refused(validate(s, desk.root), "no desk was made")
         if new_repo:
             base = make_lane_repo(repo, new_repo, default_lane(repo, base), "no desk was made")
     for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir, desk.secrets_dir):
@@ -446,6 +496,7 @@ def cmd_init(a):
         _init_for(a)
     desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base)
     print(f"desk ready at {desk.root}")
+    keep_desk_out(desk)
     if desk.root.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         print(f"warning: others may write in {desk.root}; run chmod go-w {shlex.quote(str(desk.root))}", file=sys.stderr)
     problem = up.list_desk(desk)
@@ -709,8 +760,8 @@ def cmd_git(a):
     # before git has written the signed text to it, and git then dies of SIGPIPE
     args = [args[0], *GIT_NO_PROGRAMS.get(args[0], ()), *args[1:]]
     no_sig = str(NO_SIGNATURE)
-    no_programs = ["-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", f"gpg.program={no_sig}",
-                   "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
+    no_programs = ["-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false",
+                   "-c", f"gpg.program={no_sig}", "-c", f"gpg.ssh.program={no_sig}", "-c", f"gpg.x509.program={no_sig}"]
     r = subprocess.run(["git", "--no-pager", *no_programs, *args],
                        cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
     sys.stdout.write(desk.redact(r.stdout))
@@ -724,9 +775,6 @@ def cmd_merge(a):
     # Nothing changes the task, its verification, the keys or another merge until this one is done.
     # The repository's merge hooks run inside it: hansa serve waits for them, and a hansa command in a hook
     # that would change the desk stops at once (HANSA_MERGING) instead of waiting for this merge forever.
-    if a.recheck and a.despite_check:
-        raise SystemExit("hansa: --recheck runs the lane's check again before merging and --despite-check merges without "
-                         "it; choose one. Nothing was merged")
     with desk.lock():
         m, v, chk, repo, base, lane = _mergeable(desk, a)
         verification_note = (f"; verification {v['task']}: holds, with notes (report: hansa show {v['task']} --report)"
@@ -735,16 +783,20 @@ def cmd_merge(a):
         check_lane = desk.settings()["lanes"][check_name]
         sess = notify.recorded(notify.session_here())  # the session that hears how a merge check ends
         tip = git("rev-parse", base, cwd=repo)
-        if a.recheck:
-            if not merge_command(check_lane):
+        if a.recheck and not a.despite_check:
+            steps = merge_recheck_steps(m, lane, check_lane)
+            if not steps:
                 raise SystemExit(f"hansa: lane {check_name} has no check to run again; nothing was merged")
+            commands = "; then ".join(f"{s['what']} ({s['command']})" for s in steps)
             by = os.environ.get("HANSA_ROLE", "cli")
             desk.update(a.id, state="merging", merge_check_result=None,
                         merge_check={"phase": "queued", "queued": now(), "moves": 0, "recheck": True, "by": by}, **sess)
-            desk.event("check_rerun_queued", task=a.id, onto=tip, by=by, command=merge_command(check_lane))
-            print(f"{a.id} is not merged yet: hansa runs the lane's {_merge_what(check_lane, lane)} again. It merges {a.id} onto "
-                  f"{base} as it is now in lane {check_name}'s worktree, runs {_merge_step(check_lane, lane)} there, and merges "
-                  f"exactly that if it passes. {_runs_when(desk, a.id, base)} "
+            desk.event("check_rerun_queued", task=a.id, onto=tip, by=by, command=merge_command(check_lane), steps=steps)
+            what = "check again" if len(steps) == 1 and not own_merge_check(check_lane, lane) else "checks"
+            print(f"{a.id} is not merged yet: hansa runs the lane's {what}. It merges {a.id} onto "
+                  f"{base} as it is now in lane {check_name}'s worktree, runs "
+                  f"{'its setup, then ' if check_lane.get('setup') else ''}{commands} there, and merges "
+                  f"exactly that if what ran passed. {_runs_when(desk, a.id, base)} "
                   f"{_wait_for(desk, a.id)} (hansa show {a.id} says where it is; hansa cancel {a.id} stops it)"
                   + verification_note + _unverified_later(desk, m))
             return
@@ -868,6 +920,9 @@ def _mergeable(desk: Desk, a):
     if held:
         raise SystemExit(f"hansa: {held}; nothing was merged. hansa show {a.id} says what it holds; hansa retry "
                          f"{a.id} \"...\" continues from the recorded commit")
+    problem = task_base_problem(repo, m, base)
+    if problem:
+        raise SystemExit("hansa: " + problem)
     leaked = keys_in_change(desk, repo, m["base"], m["head"]) or m.get("leaked")  # a key saved since counts too
     if leaked:
         if leaked != m.get("leaked"):
@@ -887,9 +942,10 @@ def _mergeable(desk: Desk, a):
     if words:
         desk.event("merge_forbidden", task=a.id, found=len(words))
         raise SystemExit(desk.redact(f"hansa: {words_text(a.id, words)}. Nothing was merged"))
-    v = views.verification(desk, m)
+    v = views.verification(desk, m, latest=True)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is still verifying {a.id}; nothing was merged. {_wait_for(desk, v['task'])}")
+    v = views.verification(desk, m)
     touched = _release_files_touched(repo, m, lane)
     if touched and not (v and v["verdict"] in HOLDING_VERDICTS):
         beyond = len(touched) - 10
@@ -935,7 +991,8 @@ def _release_files_touched(repo, m: dict, lane: dict) -> list:
         return []
     files = list(m.get("files") or [])
     try:
-        files += git("diff", "--name-only", "--no-renames", m["base"], m["head"], cwd=repo).splitlines()
+        files += [f for f in git("diff", "--name-only", "--no-renames", "-z", m["base"], m["head"],
+                                cwd=repo).split("\0") if f]
     except (RuntimeError, KeyError):
         pass
     return release_files_in(files, patterns)
@@ -1007,7 +1064,10 @@ def _retry(desk: Desk, a) -> None:
         report = desk.tasks_dir / earlier["id"] / "result.md"
     if report.exists() and report.read_text(encoding="utf-8").strip():
         text += "\nThe earlier task's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
-    vid = m.get("verify") or earlier.get("verify")  # the latest verification of the work, given whole
+    verification = standing_verification(desk, m)
+    if verification is None and earlier is not m:
+        verification = standing_verification(desk, earlier)
+    vid = verification["id"] if verification else None
     vreport = desk.tasks_dir / vid / "result.md" if vid else None
     if vreport and vreport.exists() and vreport.read_text(encoding="utf-8").strip():
         verdict = desk.meta(vid).get("verdict") or "none"
@@ -1055,7 +1115,8 @@ def _follow_up_start(desk: Desk, m: dict) -> str:
     lines = []
     for r in rounds:
         state = m["state"] if r is m else r.get("ended_as") or r["state"]
-        vid = r.get("verify")
+        verification = standing_verification(desk, r)
+        vid = verification["id"] if verification else None
         how = state + (f", verified by {vid} (verdict: {desk.meta(vid).get('verdict') or 'none'})" if vid
                        else ", not verified")
         f = desk.tasks_dir / r["id"] / NOTE_FILE
@@ -1178,7 +1239,7 @@ def queue_verification(desk: Desk, tid: str, *, lane="", effort="", note="", ses
     if m["state"] != "done" or not m.get("commits"):
         raise SystemExit(f"hansa: only a finished task with changes can be verified; {tid} is {m['state']}"
                          + ("" if m.get("commits") else ", with nothing to merge"))
-    v = views.verification(desk, m)
+    v = views.verification(desk, m, latest=True)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is already verifying {tid}")
     target, lane = lane, m.get("lane", "")
@@ -1473,8 +1534,10 @@ def cmd_release(a):
         _answer_by_code(desk, a)
         return
     note, target = list(a.note), None
-    if note and note[0] and note[0] in lane_targets(desk.settings()["lanes"].get(a.lane)):
-        target = note.pop(0)  # hansa release L TARGET [note]; with one target, L [note] is enough
+    targets = lane_targets(desk.settings()["lanes"].get(a.lane))
+    # On a one-target lane, a mistyped target must not become a note and release the only target.
+    if note and note[0] and (note[0] in targets or len(targets) == 1 and NAME.match(note[0])):
+        target = note.pop(0)
     r = release.ask(desk, a.lane, " ".join(note), by=os.environ.get("HANSA_ROLE", "cli"),
                     session=notify.session_here(), target=target, direct=a.direct)
     who = release.what(r)
@@ -1486,6 +1549,11 @@ def cmd_release(a):
             f"({release.runs_text(r)})")
     head += "".join("\n" + x for x in release.outside.lines(r))
     head += "".join("\n" + x for x in release.direct_lines(r))
+    if r.get("since_release") and r["since"] == r["commit"]:
+        head = (f"Nothing new on {who}: same commit as release #{r['since_release']}, asked to run again.\n"
+                + head)
+    for rid in r.get("_replaced", []):
+        head += f"\nReplaces waiting release #{rid}; its one-time code no longer works."
     if r["state"] == "forbidden":
         mailbox = release.mailbox_refusal(r["hits"])
         if mailbox:
@@ -1796,9 +1864,11 @@ def cmd_up(a):
     if getattr(a, "all", False) and desk is not None:
         raise SystemExit("hansa: up --all is for outside a desk, without --desk or HANSA_DESK")
     if desk is None:
-        from . import menu
-        if not getattr(a, "all", False) and menu.available():
-            return cmd_menu(a)
+        if not getattr(a, "all", False):
+            from . import menu
+            if menu.available():
+                return cmd_menu(a)
+            raise SystemExit(up.no_desk_text())
         ok = up.all_desks_up()
     else:
         if not (desk.settings_path.is_file() and desk.tasks_dir.is_dir()):
@@ -2191,10 +2261,14 @@ def _save_topic(problem: str) -> str:
 def _save(desk: Desk, new: dict, command: str, *, dry: bool = False) -> None:
     """Save the coordinator's change, checked as the page's are; on problems print them, with a pointer for each
     field they are about, and change nothing. Callers name their command for settings history."""
-    problems = desk.save_settings(new, by="coordinator", command=command, dry=dry)
+    _settings_refused(desk.save_settings(new, by="coordinator", command=command, dry=dry))
+
+
+def _settings_refused(problems: list, nothing: str = "nothing was changed") -> None:
+    """Refuse settings with problems: print them, with a pointer for each field they are about."""
     if problems:
         topics = dict.fromkeys(filter(None, map(_save_topic, problems)))
-        raise SystemExit("hansa: nothing was changed:\n" + "\n".join(f"  {x}" for x in problems)
+        raise SystemExit(f"hansa: {nothing}:\n" + "\n".join(f"  {x}" for x in problems)
                          + "".join(f"\n{see_more(x)}" for x in topics))
 
 
@@ -2426,6 +2500,7 @@ def cmd_lane(a):
             if aside:
                 print(f"An earlier lane {a.name} left standing instructions in {brief}; lane {a.name} now has "
                       f"{a.like}'s, and the earlier ones are kept in {aside}")
+            keep_desk_out(desk, repo)
             for f in OUTSIDE_WORKER:
                 if ln.get(f):
                     desk.event("lane_command_changed", lane=a.name, field=f, old="", new=ln[f])
@@ -3363,9 +3438,10 @@ def main(argv=None):
     p.add_argument("--despite-check", action="store_true", help="merge now with no merge check, despite a failed check "
                    "or a 'does not hold' verdict (recorded); never past release files or a key")
     p.add_argument("--recheck", action="store_true", help="run the merge check (the lane's merge_check when set) "
+                   "and, if the task's check failed or could not run, its lane's check too (same command: once), "
                    "on the task merged onto the base "
                    "as it is now, and merge exactly that if it passes (after a check that failed or could not run for "
-                   "the machine's sake, once that is fixed; recorded)")
+                   "the machine's sake, once that is fixed; recorded); --despite-check skips these checks")
     p.epilog = see_more("merge-check")
     p = add("retry", cmd_retry, "queue a follow-up task (new id) that continues from this task's last commit with "
             "your note; this task becomes replaced unless it is merged")
@@ -3425,7 +3501,8 @@ def main(argv=None):
             "after the principal's yes on the page), or list the releases")
     p.description = ("hansa release L [TARGET] [note]: ask for a release of lane L's base branch as it is now, by "
                      "one of its named release targets (hansa lane target L NAME \"...\"); TARGET is needed when "
-                     "the lane has more than one. "
+                     "the lane has more than one; name the target before a one-word note that could be a target "
+                     "name (hansa release L TARGET hotfix). "
                      "hansa records the commit, the target and its command, the note, the commits that go out (on no "
                      "remote-tracking branch and not in that target's last release) and the files they change; a word "
                      "the principal keeps from going out, in the command line or in a line, a file name or a message "

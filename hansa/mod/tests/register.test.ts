@@ -19,12 +19,19 @@ const HELD = 'called from a classic.Stop hook, it would wait on the turn this ho
 function setup(on, tokens: { value: number }, thresholds: Record<string, unknown> = {},
   { now = 1_760_000_000_000, clear = undefined as string | undefined, env = {} as Record<string, string> } = {}) {
   const clock = mock.clock(on, { now })
-  mock.env(on, { HANSA_MOD_SETTINGS: SETTINGS, ...(clear === undefined ? {} : { HANSA_MOD_CLEAR_DAILY: clear }), ...env })
+  const variables: Record<string, string> = { HANSA_MOD_SETTINGS: SETTINGS,
+    ...(clear === undefined ? {} : { HANSA_MOD_CLEAR_DAILY: clear }), ...env }
   const files: Record<string, string> = { [SETTINGS]: desk(thresholds) }
-  const calls = { compact: 0, refuse: '', skip: '', shrinks: true, reads: 0, writes: 0, logs: [] as string[],
+  const calls = { compact: 0, refuse: '', skip: '', shrinks: true, reads: 0, envReads: 0, writes: 0, logs: [] as string[],
     clears: [] as { command: string, args?: string, at: number }[], clearFails: 0,
     during: null as null | (($) => Promise<unknown>), usage: null as null | (() => Promise<unknown>),
+    env: null as null | ((name: string) => Promise<unknown>),
     lines: [] as (string | undefined)[], model: 'Opus 5.5', steps: [] as Record<string, unknown>[] }
+  on('env.get', async ($, e) => { // as mock.env answers, with a moment for what comes while the mod waits for a variable
+    calls.envReads += 1 // any variable: what the mod asks of its environment
+    if (calls.env) await calls.env(e.name)
+    return { value: typeof variables[e.name] === 'string' ? variables[e.name] : undefined }
+  })
   on('fs.read', async ($, e) => {
     calls.reads += 1 // one each decision
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
@@ -585,20 +592,45 @@ test('a state made mid-turn at the very hour the window opens: made inside it, n
   expect(calls.clears.map(c => c.at)).toEqual([local(1, 4)])
 })
 
+// The clear held until the test lets it return. What the test does between `asked` and `release` comes while the
+// clear has not returned, and the test looks at it from its own body, never from inside a hook of its own: the clock's
+// advance and settle cannot wait for a hook of the test's that is waiting itself (the kit stops waiting for one once
+// nothing moves for a moment), so what such a hook did may not have happened yet when the test looks
+function holdClear(calls) {
+  let ask = () => {}, release = () => {}
+  const asked = new Promise<void>(r => { ask = r })
+  const released = new Promise<void>(r => { release = r })
+  calls.during = async () => {
+    calls.during = null
+    ask()
+    await released
+  }
+  return { asked, release }
+}
+
+// Settle until what the test waits for is so: the thing itself, not a number of turns of the event loop
+async function settled(clock, isSo: () => boolean) {
+  for (let i = 0; i < 200 && !isSo(); i++) await clock.settle()
+  expect(isSo()).toBe(true)
+}
+
 test('a Stop while the clear has not returned: nothing else is decided meanwhile', async ($, on) => {
   const tokens = { value: 450_000 }
   const { clock, calls } = await started($, on, '04-09', 0, 3, 0, tokens)
   await until(clock, 0, 4, 10)
   await turn($, 't1')
-  calls.during = async () => { // the clear waits on Claude Code; a Stop with nothing waiting comes meanwhile
-    calls.during = null
-    await held($, stopped())
-    expect(calls.compact).toBe(0)
-  }
-  await clock.advance(5 * MIN)
+  const clear = holdClear(calls)
+  await clock.advance(5 * MIN) // the clear's wait ends; the clear waits on Claude Code
+  await clear.asked
+  await held($, stopped()) // a Stop with nothing waiting, while the clear has not returned
+  await clock.advance(10 * MIN) // the Stop's decision, and any wait it could set, all come due
   expect(calls.clears.length).toBe(1)
-  expect(calls.compact).toBe(0) // the context is still large: compaction counts from the clear
-  await clock.advance(MIN)
+  expect(calls.compact).toBe(0) // the context is large and idle past the minute, but the clear has not returned
+  clear.release()
+  await settled(clock, () => calls.logs.some(l => l.includes('cleared the session')))
+  await clock.advance(MIN - 1) // the context is still large: compaction counts from the clear's return
+  expect(calls.compact).toBe(0)
+  await clock.advance(1)
   expect(calls.compact).toBe(1)
 })
 
@@ -606,17 +638,31 @@ test('a Stop while the clear has not returned: no decision starts, not even a re
   const { clock, calls } = await started($, on, '04-09', 0, 3)
   await until(clock, 0, 4, 10)
   await turn($, 't1')
-  let read = -1
-  calls.during = async () => {
-    calls.during = null
-    const reads = calls.reads
-    await held($, stopped())
-    await clock.settle() // the Stop's decision, once its hook has returned
-    read = calls.reads - reads // said after the clear: what fails in here fails the clear, not the test
-  }
+  const clear = holdClear(calls)
   await clock.advance(5 * MIN)
-  expect(calls.clears.length).toBe(1)
-  expect(read).toBe(0)
+  await clear.asked
+  const reads = calls.reads
+  await held($, stopped())
+  await clock.advance(10 * MIN) // the Stop's decision, once its hook has returned, and any wait it could set
+  expect(calls.reads).toBe(reads)
+  clear.release()
+  await settled(clock, () => calls.reads > reads) // the decision once the clear has returned: it reads them
+  expect(calls.reads).toBe(reads + 1)
+})
+
+test('a Stop while the clear has not returned: no decision starts, not even a read of the environment', async ($, on) => {
+  const { clock, calls } = await started($, on, '04-09', 0, 3)
+  await until(clock, 0, 4, 10)
+  await turn($, 't1')
+  const clear = holdClear(calls)
+  await clock.advance(5 * MIN)
+  await clear.asked
+  const envReads = calls.envReads
+  await held($, stopped())
+  await clock.advance(10 * MIN) // the Stop's decision, once its hook has returned, and any wait it could set
+  expect(calls.envReads).toBe(envReads)
+  clear.release()
+  await settled(clock, () => calls.envReads > envReads) // the decision once the clear has returned: it reads them
 })
 
 test('a decision under way when the clear starts: it decides nothing once it sees the clear', async ($, on) => {
@@ -624,26 +670,50 @@ test('a decision under way when the clear starts: it decides nothing once it see
   const { clock, calls } = await started($, on, '04-09', 0, 3, 0, tokens)
   await until(clock, 0, 4, 10)
   await turn($, 't1')
-  let asked = () => {}, release = () => {}
-  const clearAsked = new Promise<void>(r => { asked = r })
-  const released = new Promise<void>(r => { release = r })
+  const clear = holdClear(calls)
   let again: Promise<unknown> = Promise.resolve()
   calls.usage = async () => { // the decision at 5 minutes asks the context's size; meanwhile another decides and clears
     calls.usage = null
     again = $.turn.complete(done('t1')) // the turn's end again (a Stop's decision may not run a command)
-    await clearAsked
-  }
-  calls.during = async () => { // the clear has not returned when the first decision goes on
-    calls.during = null
-    asked()
-    await released
+    await clear.asked
   }
   await clock.advance(5 * MIN)
+  await clear.asked // the clear has not returned when the first decision goes on
+  await clock.settle()
   expect(calls.clears.length).toBe(1)
   expect(calls.compact).toBe(0) // the context is large and idle past the minute, but a clear is under way
-  release()
+  clear.release()
   await again
   expect(calls.compact).toBe(0)
+  await clock.advance(MIN) // compaction counts from the clear
+  expect(calls.compact).toBe(1)
+})
+
+test('a decision under way, not yet at the settings, when another starts the clear: it reads them no more', async ($, on) => {
+  const tokens = { value: 450_000 }
+  const { clock, calls } = await started($, on, '04-09', 0, 3, 0, tokens)
+  await until(clock, 0, 4, 10)
+  await turn($, 't1')
+  const clear = holdClear(calls)
+  let again: Promise<unknown> = Promise.resolve()
+  let readsAtClear = -1, goOn = () => {}
+  const wentOn = new Promise<void>(r => { goOn = r })
+  calls.env = async (name) => { // the decision at 5 minutes asks for the window; meanwhile another decides and clears
+    if (name !== 'HANSA_MOD_CLEAR_DAILY') return
+    calls.env = null
+    again = $.turn.complete(done('t1'))
+    await clear.asked
+    readsAtClear = calls.reads // the other's read, before its clear
+    goOn()
+  }
+  await clock.advance(5 * MIN)
+  await clear.asked
+  await wentOn
+  await clock.settle() // the first decision goes on, the clear still not returned
+  expect(calls.clears.length).toBe(1)
+  expect(calls.reads).toBe(readsAtClear)
+  clear.release()
+  await again
   await clock.advance(MIN) // compaction counts from the clear
   expect(calls.compact).toBe(1)
 })

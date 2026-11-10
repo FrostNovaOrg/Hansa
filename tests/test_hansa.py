@@ -6,6 +6,7 @@ import email.message
 import errno
 import fcntl
 import functools
+import importlib
 import inspect
 import io
 import json
@@ -3206,7 +3207,7 @@ class UpTest(unittest.TestCase):
         up.desks_file().parent.mkdir(parents=True)
         write_json(up.desks_file(), entries)
         with self.outside_desk(), contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
-            main(["up"])
+            main(["up", "--all"])
         said = out.getvalue()
         rows = [json.loads(x) for x in calls.read_text().splitlines()]
         for name in ("first", "second"):
@@ -3236,9 +3237,37 @@ class UpTest(unittest.TestCase):
             self.assertEqual(one.call_args.args[0].root, self.desk.root)
             all_desks.assert_not_called()
             with self.outside_desk():
-                main(["up"])
+                main(["up", "--all"])
             all_desks.assert_called_once()
             self.assertEqual(one.call_count, 2)
+
+    def test_up_outside_a_desk_without_a_menu_refuses_and_names_the_desks_and_the_two_forms(self):
+        from hansa import menu, up
+        roots = []
+        entries = []
+        for name in ("first", "second"):
+            root = self.tmp / name
+            root.mkdir()
+            (root / "tasks").mkdir()
+            write_json(root / "settings.json", {})
+            roots.append(root)
+            entries.append({"desk": str(root), "hansa": up.hansa_command(), "at": "then"})
+        up.desks_file().parent.mkdir(parents=True, exist_ok=True)
+        write_json(up.desks_file(), entries)
+        with self.outside_desk(), unittest.mock.patch.object(menu, "available", return_value=False), \
+                unittest.mock.patch.object(up, "all_desks_up") as all_desks, \
+                unittest.mock.patch.object(up, "desk_up") as one, \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as failed:
+            main(["up"])
+        self.assertNotEqual(failed.exception.code, 0)
+        said = str(failed.exception)
+        self.assertIn("no desk here", said)
+        for root in roots:
+            self.assertIn(str(root), said)
+        self.assertIn("hansa --desk DIR up", said)
+        self.assertIn("hansa up --all", said)
+        all_desks.assert_not_called()  # nothing started
+        one.assert_not_called()
 
     def test_empty_desk_list_explains_how_to_register_one(self):
         from hansa import up
@@ -6677,8 +6706,10 @@ def save():'''))
         root = self.tmp / "other"
         (root / "notes").mkdir(parents=True)
         (root / "notes" / "PROJECT.md").write_text("ours\n")
-        init_desk(root)
+        with self.assertRaisesRegex(SystemExit, "holds notes: a desk needs a new or an empty folder"):
+            init_desk(root)  # a folder that holds something is no folder for a new desk
         self.assertEqual((root / "notes" / "PROJECT.md").read_text(), "ours\n")
+        self.assertEqual(sorted(p.name for p in root.iterdir()), ["notes"])
 
     def test_status_says_the_project_file_size_and_when_it_is_long(self):
         project = self.desk.project_path
@@ -7009,16 +7040,16 @@ def save():'''))
     def test_init_refuses_a_missing_base_before_making_a_desk(self):
         for existing in (False, True):
             root = self.tmp / f"new-{existing}"
-            if existing:
+            if existing:  # a folder that holds only Finder's .DS_Store counts as empty
                 root.mkdir()
-                (root / "keep.txt").write_text("keep me\n")
+                (root / ".DS_Store").write_text("keep me\n")
             with self.assertRaises(SystemExit) as e:
                 main(["init", str(root), "--repo", str(self.repo), "--base", "does-not-exist"])
             for word in ("does-not-exist", str(self.repo), "commit", "branch", "no desk was made"):
                 self.assertIn(word, str(e.exception))
             if existing:
-                self.assertEqual(list(root.iterdir()), [root / "keep.txt"])
-                self.assertEqual((root / "keep.txt").read_text(), "keep me\n")
+                self.assertEqual(list(root.iterdir()), [root / ".DS_Store"])
+                self.assertEqual((root / ".DS_Store").read_text(), "keep me\n")
             else:
                 self.assertFalse(root.exists())
 
@@ -7223,6 +7254,157 @@ def save():'''))
                 self.assertFalse((self.tmp / f"{name}-desk").exists())
                 self.assertNotIn(name, self.desk.settings()["lanes"])
                 self.assertFalse((self.desk.lanes_dir / name).exists())
+
+    def init_says(self, *args):
+        """hansa init's (or another command's) exit, stdout and stderr."""
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                main(list(args))
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_init_refuses_a_folder_that_holds_something_and_names_a_command_that_works(self):
+        # run in the project's own folder, init wrote over its CLAUDE.md and .claude/settings.json
+        (self.repo / "CLAUDE.md").write_text("# My project rules\n")
+        (self.repo / ".claude").mkdir()
+        (self.repo / ".claude" / "settings.json").write_text('{"model":"opus"}')
+        interrupted = self.tmp / "interrupted"  # an interrupted hansa init's own empty folders, no settings.json
+        for d in ("tasks", "lanes", ".hansa", "notes", "secrets"):
+            (interrupted / d).mkdir(parents=True)
+        linked = self.tmp / "linked"
+        linked.mkdir()
+        (linked / "elsewhere").symlink_to(self.tmp / "nowhere")
+        folders = self.tmp / "folders"
+        (folders / "sub").mkdir(parents=True)
+        a_file = self.tmp / "a-file"
+        a_file.write_text("")
+        repo = str(self.repo.resolve())
+        works = shlex.join(["hansa", "init", str(self.tmp.resolve() / "repo-desk"), "--repo", repo])
+        for root, said in ((self.repo, "holds .claude, .git, CLAUDE.md and 1 more"),
+                           (interrupted, "holds .hansa, lanes, notes and 2 more"), (linked, "holds elsewhere:"),
+                           (folders, "holds sub:"), (a_file, "is not a folder")):
+            with self.subTest(root=root.name):
+                before = sorted(p.name for p in root.iterdir()) if root.is_dir() else None
+                code, _, _ = self.init_says("init", str(root), "--repo", str(self.repo))
+                self.assertIn(said, str(code))
+                self.assertIn("a desk needs a new or an empty folder of its own; no desk was made", str(code))
+                self.assertIn(works, str(code))
+                self.assertEqual(sorted(p.name for p in root.iterdir()) if root.is_dir() else None, before)
+        self.assertEqual((self.repo / "CLAUDE.md").read_text(), "# My project rules\n")
+        self.assertEqual((self.repo / ".claude" / "settings.json").read_text(), '{"model":"opus"}')
+        code, out, _ = self.init_says(*shlex.split(works)[1:])  # the command it gives works
+        self.assertEqual(code, 0)
+        self.assertIn("desk ready", out)
+        code, _, _ = self.init_says("init", str(self.repo), "--repo", str(self.repo), "--lane", "web")
+        self.assertIn(shlex.join(["hansa", "init", str(self.tmp.resolve() / "repo-desk-2"), "--repo", repo,
+                                  "--lane", "web"]), str(code))  # that one is taken now
+        code, _, _ = self.init_says("init", str(folders))  # with no repository: beside the folder
+        self.assertIn(shlex.join(["hansa", "init", str(self.tmp.resolve() / "folders-desk")]), str(code))
+
+    def test_init_takes_a_missing_an_empty_or_a_finder_only_folder(self):
+        empty, finder = self.tmp / "empty", self.tmp / "finder"
+        empty.mkdir()
+        finder.mkdir()
+        (finder / ".DS_Store").write_bytes(b"Finder metadata")
+        for root in (self.tmp / "missing" / "desk", empty, finder):
+            with self.subTest(root=root.name):
+                code, out, _ = self.init_says("init", str(root), "--repo", str(self.repo))
+                self.assertEqual(code, 0)
+                self.assertTrue((root / "settings.json").is_file())
+        self.assertEqual((finder / ".DS_Store").read_bytes(), b"Finder metadata")
+
+    def test_init_refuses_the_lane_names_lane_add_refuses_before_making_anything(self):
+        new = self.tmp / "new-project"  # a repository hansa would make
+        for name in ("Main", "web_app", "my lane", "../x"):
+            for repo in (self.repo, new):
+                with self.subTest(name=name, repo=repo.name):
+                    root = self.tmp / "named"
+                    code, _, _ = self.init_says("init", str(root), "--repo", str(repo), "--lane", name)
+                    self.assertIn(f"no desk was made:\n  lane {name}: use lowercase letters, digits and '-'",
+                                  str(code))
+                    self.assertFalse(root.exists())
+                    self.assertFalse(new.exists())
+                    self.assertFalse((self.tmp / "x").exists())
+            code, _, _ = self.init_says("--desk", str(self.desk.root), "lane", "add", name, "--repo", str(self.repo))
+            self.assertIn(f"lane {name}: use lowercase letters, digits and '-'", str(code))
+
+    def test_a_desk_inside_a_repository_is_kept_out_of_its_commits_once(self):
+        exclude = self.repo / ".git" / "info" / "exclude"
+
+        def clean(repo):
+            return subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout
+
+        def said_once(out, desk_root, top, exclude):
+            lines = [x for x in out.splitlines() if "lies inside the git work tree" in x]
+            self.assertEqual(len(lines), 1, out)
+            for words in (str(Path(desk_root).resolve()), f"work tree at {Path(top).resolve()}",
+                          os.path.realpath(exclude), "keeps `git add` there from taking the desk's files",
+                          "a folder of its own beside the project is the better place"):
+                self.assertIn(words, lines[0])
+
+        before = clean(self.repo)
+        code, out, _ = self.init_says("init", str(self.repo / "desk"), "--repo", str(self.repo))
+        self.assertEqual(code, 0)
+        said_once(out, self.repo / "desk", self.repo, exclude)
+        self.assertEqual(exclude.read_text().splitlines().count("/desk"), 1)
+        self.assertEqual(clean(self.repo), before)
+        self.assertEqual((self.repo / ".gitignore").exists(), False)  # never a tracked .gitignore
+        # the line is there: lane add writes and says nothing a second time
+        code, out, _ = self.init_says("--desk", str(self.repo / "desk"), "lane", "add", "b", "--repo", str(self.repo))
+        self.assertEqual(code, 0)
+        self.assertNotIn("lies inside", out)
+        self.assertEqual(exclude.read_text().splitlines().count("/desk"), 1)
+        # lane add on a desk inside the lane's repository that has no line yet
+        inner = init_desk(self.repo / "inner", "", "a")
+        other = self.tmp / "other"
+        other.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=other)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i", cwd=other)
+        code, out, _ = self.init_says("--desk", str(inner.root), "lane", "add", "o", "--repo", str(other))
+        self.assertNotIn("lies inside", out)  # not the repository it lies in
+        code, out, _ = self.init_says("--desk", str(inner.root), "lane", "add", "b", "--repo", str(self.repo))
+        self.assertEqual(code, 0)
+        said_once(out, inner.root, self.repo, exclude)
+        self.assertEqual(clean(self.repo), before)
+        # inside another repository than --repo's, or with no --repo
+        for root, args in ((other / "with-repo", ["--repo", str(self.repo)]), (other / "alone", [])):
+            with self.subTest(root=root.name):
+                code, out, _ = self.init_says("init", str(root), *args)
+                self.assertEqual(code, 0)
+                said_once(out, root, other, other / ".git" / "info" / "exclude")
+        self.assertEqual(clean(other), "")
+        # inside the repository hansa makes for --repo
+        fresh = self.tmp / "fresh"
+        code, out, _ = self.init_says("init", str(fresh / "desk"), "--repo", str(fresh))
+        self.assertEqual(code, 0, out)
+        said_once(out, fresh / "desk", fresh, fresh / ".git" / "info" / "exclude")
+        self.assertEqual(clean(fresh), "")
+        # beside the repository: nothing said
+        code, out, err = self.init_says("init", str(self.tmp / "beside"), "--repo", str(self.repo))
+        self.assertNotIn("lies inside", out + err)
+
+    def test_a_desk_hansa_cannot_keep_out_of_a_repository_is_made_with_a_warning(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        sh("git", "init", "-q", "-b", "main", cwd=other)
+        (other / ".git" / "info").mkdir(exist_ok=True)
+        if (other / ".git" / "info" / "exclude").exists():
+            (other / ".git" / "info" / "exclude").unlink()
+        (other / ".git" / "info" / "exclude").mkdir()  # cannot be written
+        top = self.tmp / "top"  # an empty folder that becomes both the repository and the desk
+        top.mkdir()
+        for root, args, why in ((other / "desk", [], "could not be written"),
+                                (top, ["--repo", str(top)], "is the top folder of that work tree")):
+            with self.subTest(root=root.name):
+                code, out, err = self.init_says("init", str(root), *args)
+                self.assertEqual(code, 0)
+                self.assertIn("desk ready", out)
+                [warned] = [x for x in err.splitlines() if "lies inside the git work tree" in x]
+                for words in ("warning:", why, "keep the desk's files", "out of that repository's commits"):
+                    self.assertIn(words, warned)
 
     def test_init_and_lane_add_refuse_uncommitted_files_or_index_entries(self):
         for mode in ("init", "add"):
@@ -12361,7 +12543,11 @@ def save():'''))
         self.assertEqual(self.desk.meta(t1)["merge_check"]["phase"], "running")
         self.hansa("merge", t2)
         self.hansa("lane", "set", "m", "base", "other")
-        self.hansa("lane", "set", "b", "base", "other")
+        # An older desk could already have changed this base with t2 merging.
+        # The command now refuses that change; retain this old-desk fixture for the busy-lane check.
+        settings = self.desk.settings()
+        settings["lanes"]["b"]["base"] = "other"
+        write_json(self.desk.settings_path, settings)
         d.tick()  # merge_checks must see that m is held, even though these bases may run together
         self.assertEqual(self.desk.meta(t2)["merge_check"]["phase"], "queued")
         self.assertEqual([e["task"] for e in self.events("merge_check_started")], [t1])
@@ -13106,6 +13292,182 @@ def save():'''))
         self.assertIn("still broken", views.show_text(self.desk, tid))
         self.assertNotIn("lane", m["merge_check_result"])
 
+    def test_recheck_failed_task_runs_both_commands_on_the_merge_tree(self):
+        for separate in (False, True):
+            for missing in (False, True):
+                with self.subTest(merge_lane=separate, could_not_run=missing):
+                    self.hansa("lane", "set", "a", "check", "echo unit-failed; exit 1")
+                    name = f"recheck-{separate}-{missing}.txt"
+                    self.hansa("lane", "set", "a", "env", f"FAKE_HELLO={name}")
+                    d = Dispatcher(self.desk)
+                    tid = self.settle(d, self.desk.new_task("Add " + name))["id"]
+                    if missing:
+                        self.desk.update(tid, check={**self.desk.meta(tid)["check"], "could_not_run": True,
+                                                    "note": "could not run"})
+                    more = "more-" + name
+                    unit = f"test -f {name} && test -f {more} && echo unit-ran"
+                    package = f"test -f {more} && echo packaging-ran"
+                    self.hansa("lane", "set", "a", "check", unit)
+                    self.hansa("lane", "set", "a", "env", "none")
+                    if separate:
+                        if "m" in self.desk.settings()["lanes"]:
+                            self.hansa("lane", "remove", "m")
+                        self.merge_lane_for_checks(package)
+                    else:
+                        self.hansa("lane", "set", "a", "merge_check", package)
+                    (self.repo / more).write_text("Only on the merged tree\n")
+                    sh("git", "add", more, cwd=self.repo)
+                    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "advance", cwd=self.repo)
+                    calls = len(self.srt_calls())
+                    said = self.hansa("merge", tid, "--recheck")
+                    m = self.settle_merge(d, tid)
+                    self.assertEqual(m["state"], "merged", m)
+                    self.assertEqual([self.ran(c) for c in self.srt_calls()[calls:]], [unit, package])
+                    self.assertIn(unit, said)
+                    self.assertNotIn("merge check again", said)
+                    shown = self.hansa("show", tid)
+                    for command in (unit, package):
+                        self.assertIn(command, shown)
+                    self.assertEqual([(s["command"], s["exit"], s["ok"]) for s in m["merge_check_result"]["steps"]],
+                                     [(unit, 0, True), (package, 0, True)])
+                    self.assertEqual(len(self.events("task_merged")[-1]["steps"]), 2)
+                    if separate:
+                        self.hansa("lane", "remove", "m")
+
+    def test_recheck_failed_unit_or_merge_command_stops_the_merge(self):
+        for unit_fails in (True, False):
+            with self.subTest(unit_fails=unit_fails):
+                d, tid = self.merge_check_lane(check="exit 1", merge_check="echo packaging-ok")
+                unit = "echo unit-still-fails; exit 7" if unit_fails else "echo unit-fixed"
+                package = "echo packaging-ok" if unit_fails else "echo packaging-fails; exit 8"
+                self.hansa("lane", "set", "a", "check", unit)
+                self.hansa("lane", "set", "a", "merge_check", package)
+                tip = self.git_out("rev-parse", "main")
+                self.hansa("merge", tid, "--recheck")
+                m = self.settle_merge(d, tid)
+                self.assertEqual((m["state"], m["merge_check_result"]["exit"]), ("done", 7 if unit_fails else 8))
+                self.assertEqual(self.git_out("rev-parse", "main"), tip)
+                steps = m["merge_check_result"]["steps"]
+                self.assertEqual([s["exit"] for s in steps], [7, None] if unit_fails else [0, 8])
+                shown = self.hansa("show", tid)
+                self.assertIn(unit, shown)
+                self.assertIn(package, shown)
+                [header] = [line for line in shown.splitlines() if line.startswith("merge check")]
+                if unit_fails:
+                    self.assertIn("ran the task check there", header)
+                    self.assertIn("the merge check did not run", header)
+                    self.assertIn("task check FAILED (exit 7)", header)
+                else:
+                    self.assertIn("ran the task check, then the merge check there", header)
+                    self.assertIn("merge check FAILED (exit 8)", header)
+                    self.assertNotIn("task check FAILED", header)
+                for word in ("&&", unit, package):
+                    self.assertNotIn(word, header)
+                self.assertIn("nothing was merged", header)
+
+    def test_recheck_deduplicates_commands_and_leaves_passed_checks_alone(self):
+        for passed in (False, True):
+            with self.subTest(task_check_passed=passed):
+                d, tid = self.merge_check_lane(check="true" if passed else "exit 1")
+                unit = "echo unit-current"
+                package = "echo merge-current" if passed else unit
+                self.hansa("lane", "set", "a", "check", unit)
+                self.hansa("lane", "set", "a", "merge_check", package)
+                self.hansa("lane", "set", "a", "env", "none")
+                calls = len(self.srt_calls())
+                self.hansa("merge", tid, "--recheck")
+                self.assertEqual(self.settle_merge(d, tid)["state"], "merged")
+                self.assertEqual([self.ran(c) for c in self.srt_calls()[calls:]], [package])
+                # Let the next worker make a change too.
+                self.hansa("lane", "set", "a", "env", "FAKE_HELLO=next.txt")
+
+    def test_recheck_with_despite_check_merges_as_a_recorded_override(self):
+        d, tid = self.merge_check_lane(check="exit 1", merge_check="exit 2")
+        calls = len(self.srt_calls())
+        said = self.hansa("merge", tid, "--recheck", "--despite-check")
+        self.assertIn("merged into main", said)
+        self.assertEqual(self.desk.meta(tid)["state"], "merged")
+        self.assertEqual(len(self.srt_calls()), calls)
+        self.assertTrue(self.events("task_merged")[-1]["despite_check"])
+
+    def test_recheck_failed_task_keeps_its_results_when_merges_wait_together(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        command = "echo merged-tree-checked"
+        self.merge_lane_for_checks(command)
+        for failed_first in (False, True):
+            with self.subTest(failed_first=failed_first):
+                settings = self.desk.settings()
+                for lane, check in (("a", "true"), ("b", "exit 1")):
+                    settings["lanes"][lane].update(check=check, merge_check=command,
+                                                   env={"FAKE_HELLO": f"{lane}-{failed_first}.txt"})
+                self.assertEqual(self.desk.save_settings(settings), [])
+                d = Dispatcher(self.desk)
+                passed = self.settle(d, self.desk.new_task("Passed task", lane="a"))["id"]
+                failed = self.settle(d, self.desk.new_task("Failed task", lane="b"))["id"]
+                self.assertFalse(self.desk.meta(failed)["check"]["ok"])
+                settings["lanes"]["b"]["check"] = command
+                for lane in ("a", "b"):
+                    settings["lanes"][lane]["env"] = {}
+                self.assertEqual(self.desk.save_settings(settings), [])
+                for tid in ([failed, passed] if failed_first else [passed, failed]):
+                    self.hansa("merge", tid, *(["--recheck"] if tid == failed else []))
+                for tid in (passed, failed):
+                    self.assertEqual(self.settle_merge(d, tid)["state"], "merged")
+                result = self.desk.meta(failed)["merge_check_result"]
+                self.assertEqual([(s["command"], s["exit"]) for s in result["steps"]], [(command, 0)])
+                self.assertEqual(self.desk.meta(passed)["merge_check_result"].get("steps", []), [])
+
+    def test_lane_base_change_refuses_running_merging_and_review_but_allows_queued(self):
+        sh("git", "branch", "dev", cwd=self.repo)
+        tid = self.desk.new_task("Work on main", lane="a")
+        self.hansa("lane", "set", "a", "base", "dev")  # not started: follows the lane
+        self.hansa("lane", "set", "a", "base", "main")
+        for state in ("running", "merging", "done"):
+            with self.subTest(state=state):
+                self.desk.update(tid, state=state)
+                with self.assertRaises(SystemExit) as refused:
+                    self.hansa("lane", "set", "a", "base", "dev")
+                said = str(refused.exception)
+                for word in (tid, "merge", "close"):
+                    self.assertIn(word, said)
+                self.assertEqual(self.desk.settings()["lanes"]["a"]["base"], "main")
+        self.desk.update(tid, state="cancelled")
+        self.hansa("lane", "set", "a", "base", "dev")
+
+    def test_merge_refuses_a_base_missing_the_start_commit_even_with_override(self):
+        sh("git", "branch", "dev", cwd=self.repo)
+        self.new_tip()
+        d = Dispatcher(self.desk)
+        start = self.git_out("rev-parse", "main")
+        # An old desk may already have repointed the lane, or git history may be rewritten.
+        for renamed in (True, False):
+            with self.subTest(base_changed=renamed):
+                sh("git", "checkout", "-q", "main", cwd=self.repo)
+                sh("git", "reset", "--hard", start, cwd=self.repo)
+                sh("git", "branch", "-f", "dev", start + "~1", cwd=self.repo)
+                settings = self.desk.settings()
+                settings["lanes"]["a"]["base"] = "main"
+                write_json(self.desk.settings_path, settings)
+                tid = self.settle(d, self.desk.new_task("Add hello.txt"))["id"]
+                m = self.desk.meta(tid)
+                settings = self.desk.settings()
+                settings["lanes"]["a"]["base"] = "dev" if renamed else "main"
+                write_json(self.desk.settings_path, settings)
+                sh("git", "checkout", "-q", settings["lanes"]["a"]["base"], cwd=self.repo)
+                if not renamed:
+                    sh("git", "reset", "--hard", "dev", cwd=self.repo)
+                tip = self.git_out("rev-parse", "HEAD")
+                for flag in ([], ["--despite-check"]):
+                    with self.assertRaises(SystemExit) as refused:
+                        self.hansa("merge", tid, *flag)
+                    said = str(refused.exception)
+                    for word in (m["base"], "does not hold", "1 commit", f"hansa retry {tid} --fresh"):
+                        self.assertIn(word, said)
+                    self.assertEqual(self.git_out("rev-parse", "HEAD"), tip)
+        fresh = self.hansa("retry", tid, "--fresh", "Redo on the current base").split()[0]
+        self.assertEqual(self.settle(d, fresh)["base"], self.git_out("rev-parse", "main"))
+        self.assertIn("merged into main", self.hansa("merge", fresh))
+
     def test_a_queued_merge_with_its_checks_removed_records_no_lane(self):
         d, tid = self.merge_check_lane(check="true", merge_check="test -f hello.txt")
         self.hansa("merge", tid)
@@ -13270,7 +13632,7 @@ def save():'''))
         # --recheck runs it too
         tid = self.desk.new_task("Add hello.txt again")
         self.settle(d, tid)
-        self.assertIn(f"{tid} is not merged yet: hansa runs the lane's merge check again",
+        self.assertIn(f"{tid} is not merged yet: hansa runs the lane's checks",
                       self.hansa("merge", tid, "--recheck"))
         self.assertEqual(self.events("check_rerun_queued")[-1]["command"], heavy)
         self.assertEqual(self.settle_merge(d, tid)["merge_check_result"]["command"], heavy)
@@ -14137,6 +14499,148 @@ def save():'''))
         self.assertEqual((m["state"], m["merge_check_result"]["ok"]), ("merged", True), m)
         self.assertEqual(runs.read_text(), "run\n")
         self.assertEqual(len(self.events("merge_check_started")), 1)
+
+    def test_git_paths_release_gate(self):
+        from hansa.cli import _release_files_touched
+        for quote in ("true", "false"):
+            self.git_out("config", "core.quotePath", quote)
+            for name in ("部署.sh", "发布/run.sh"):
+                with self.subTest(quote=quote, name=name):
+                    tid = self.done_with(release_files=["部署.sh", "发布/*.sh"],
+                                         env={"FAKE_HELLO": name, "FAKE_VERDICT": "holds"})
+                    m = self.desk.meta(tid)
+                    # The gate also reads git itself: a saved file list must not mask that read.
+                    with self.subTest(read="diff"):
+                        self.assertEqual(_release_files_touched(self.repo, {**m, "files": []},
+                                                               self.desk.settings()["lanes"]["a"]), [name])
+                    for flags in ([], ["--despite-check"]):
+                        with self.subTest(flags=flags):
+                            said = self.refused("merge", tid, *flags)
+                            self.assertIn(name, said)
+                            self.assertIn("no flag overrides this", said)
+                    if self.desk.meta(tid)["state"] == "merged":
+                        continue  # the regression already failed above
+                    self.hansa("verify", tid)
+                    vid = self.desk.meta(tid)["verify"]
+                    self.assertEqual(self.settle(Dispatcher(self.desk), vid)["verdict"], "holds")
+                    self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
+
+    def test_git_paths_text_only(self):
+        for quote in ("true", "false"):
+            with self.subTest(quote=quote):
+                self.git_out("config", "core.quotePath", quote)
+                tid = self.done_with(env={"FAKE_HELLO": "文档/说明.md"})
+                with self.subTest(read="record"):
+                    self.assertEqual(self.desk.meta(tid)["files"], ["文档/说明.md"])
+                said = self.hansa("merge", tid)
+                self.assertIn(f"{tid} merged into main", said)
+                self.assertNotIn("nothing verified", said)
+
+    def test_git_paths_conflicts(self):
+        for quote in ("true", "false"):
+            with self.subTest(quote=quote):
+                self.git_out("config", "core.quotePath", quote)
+                t1 = self.done_with(env={"FAKE_HELLO": "说明.md"})
+                t2 = self.done_with(env={"FAKE_HELLO": "说明.md"})
+                self.hansa("merge", t1)
+                said = self.refused("merge", t2)
+                with self.subTest(read="markers"):
+                    self.assertIn("说明.md, lines 1-5:", said)
+                    self.assertIn(f"hello from {t1}", said)
+                    self.assertIn(f"hello from {t2}", said)
+                    self.assertNotIn("no conflict markers", said)
+                argv = self.tmp / f"argv-{quote}.jsonl"
+                s = self.desk.settings()
+                s["lanes"]["a"]["env"]["FAKE_SHOW_ARGV"] = str(argv)
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.hansa("retry", t2, "--update", "settle the greeting")
+                t3 = self.desk.meta(t2)["replaced_by"]
+                m = self.settle(Dispatcher(self.desk), t3)
+                self.assertEqual(m["state"], "done", m)
+                with self.subTest(read="update list"):
+                    self.assertEqual(m["update_conflicts"], ["说明.md"])
+                prompt = json.loads(argv.read_text().splitlines()[-1])
+                prompt = prompt[prompt.index("--append-system-prompt") + 1]
+                self.assertIn("conflicts in these files", prompt)
+                self.assertIn("说明.md", prompt)
+                self.hansa("merge", t3)
+
+    def test_git_paths_show_and_diff(self):
+        for quote in ("true", "false"):
+            with self.subTest(quote=quote):
+                self.git_out("config", "core.quotePath", quote)
+                tid = self.done_with(env={"FAKE_HELLO": "文档/说明.md"})
+                for args in (("show", tid), ("diff", tid, "--stat"), ("diff", tid)):
+                    with self.subTest(command=args):
+                        self.assertIn("文档/说明.md", self.hansa(*args))
+
+    def test_git_paths_special_characters(self):
+        from hansa import run
+        names = (" leading space.md", '文档/说明 "draft".md', "文档/说明\\copy.md")
+        for quote in ("true", "false"):
+            self.git_out("config", "core.quotePath", quote)
+            for name in names:
+                with self.subTest(quote=quote, name=name):
+                    tid = self.done_with(env={"FAKE_HELLO": name})
+                    m = self.desk.meta(tid)
+                    with self.subTest(read="record"):
+                        self.assertEqual(m["files"], [name])
+                    with self.subTest(read="NUL list"):
+                        self.assertEqual(run.git("diff", "--name-only", "-z", m["base"], m["head"],
+                                                 cwd=self.repo), name + "\0")
+                    with self.subTest(read="show"):
+                        self.assertIn(name, self.hansa("show", tid))
+                    with self.subTest(read="merge"):
+                        self.assertNotIn("nothing verified", self.hansa("merge", tid))
+
+    def test_git_paths_shared_reads_ignore_config(self):
+        from hansa import run
+        base = self.git_out("rev-parse", "HEAD")
+        head = self.commit_in_repo("文档/说明.md", "notes\n", "Add notes")
+        (self.repo / "文档/说明.md").write_text("changed\n")
+        global_config = self.tmp / "gitconfig"
+        commands = (("diff", "--name-only"), ("status", "--porcelain"), ("ls-files",),
+                    ("show", "--format=", "--name-only", head),
+                    ("log", "--format=", "--name-only", f"{base}..{head}"))
+        for quote in ("true", "false"):
+            for scope in ("global", "local"):
+                with self.subTest(quote=quote, scope=scope):
+                    global_config.write_text(f"[core]\n\tquotePath = {quote}\n")
+                    with unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(global_config)}):
+                        self.git_out("config", "core.quotePath", quote)
+                        if scope == "global":
+                            self.git_out("config", "--unset", "core.quotePath")
+                        for args in commands:
+                            with self.subTest(command=args[0]):
+                                self.assertIn("文档/说明.md", run.git(*args, cwd=self.repo))
+                                self.assertIn("文档/说明.md", self.hansa("git", "a", *args))
+
+    def test_git_paths_release_history(self):
+        from hansa import release
+        names = ("文档/说明.md", "space name.md", '文档/说明 "draft".md', "文档/说明\\copy.md")
+        base = self.git_out("rev-parse", "HEAD")
+        for name in names:
+            head = self.commit_in_repo(name, "find-me\n", "Add notes")
+        for quote in ("true", "false"):
+            self.git_out("config", "core.quotePath", quote)
+            with self.subTest(quote=quote, read="outgoing"):
+                self.assertEqual(release.outgoing(self.repo, base, head)[1], sorted(names))
+            for name in names:
+                with self.subTest(quote=quote, read="filename scan", name=name):
+                    hits, _ = release.words_in(self.repo, [f"{base}..{head}", "--"], [name])
+                    self.assertTrue(any(h["where"] == "file name" and h["line"] == name for h in hits), hits)
+            with self.subTest(quote=quote, read="patch paths"):
+                hits, _ = release.words_in(self.repo, [f"{base}..{head}", "--"], ["find-me"])
+                self.assertEqual(sorted(h["where"] for h in hits), sorted(names))
+
+    def test_git_paths_saved_names_left_alone(self):
+        tid = self.desk.new_task("An earlier task")
+        quoted = '"\\346\\226\\207\\346\\241\\243/\\350\\257\\264\\346\\230\\216.md"'
+        self.desk.update(tid, state="done", files=[quoted])
+        before = (self.desk.tasks_dir / tid / "meta.json").read_bytes()
+        self.assertIn(quoted, self.hansa("show", tid))
+        self.assertEqual(self.desk.meta(tid)["files"], [quoted])
+        self.assertEqual((self.desk.tasks_dir / tid / "meta.json").read_bytes(), before)
 
     def test_a_conflict_lists_its_files_and_lines(self):
         d = Dispatcher(self.desk)
@@ -17851,10 +18355,10 @@ def save():'''))
         self.assertNotIn("hansa serve is not running", out.getvalue())
 
     # -- hansa posts to a coordinator's session (hansa/notify.py) ------------------------------------------
-    def session(self):
+    def session(self, folder=None):
         """A stand-in for a Claude Code session: a process that runs until it is stopped, and its inbox path. It runs
-        in the desk, as hansa coordinator starts one, so it reads the card."""
-        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], cwd=self.desk.root)
+        in the desk, as hansa coordinator starts one, so it reads the card; folder puts it elsewhere."""
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], cwd=folder or self.desk.root)
         self.addCleanup(p.wait)
         self.addCleanup(p.kill)
         return p, str(self.tmp / f"inbox-{p.pid}.sock")
@@ -19066,6 +19570,47 @@ def save():'''))
         again.wait()
         self.assertFalse(views.status(self.desk)["server_up"])
 
+    def test_a_server_stop_notice_names_the_desk_for_a_session_outside_it(self):
+        gone = {"state": "gone", "pid": None, "answers": False}
+        named = shlex.join(["hansa", "--desk", str(self.desk.root), "up"])
+        for (session, _sock), want in ((self.session(self.tmp), f"next: {named}"),
+                                       (self.session(), "next: hansa up")):
+            sess = {"pid": session.pid, "start": notify.proc_start(session.pid)}
+            me = {"key": notify.key_of(sess), "session": sess}
+            items, _, _ = notify.server_news({"server": gone}, [], True, 0, 0, self.desk, me)
+            self.assertIn(want, items[0]["line"])
+            self.assertIn(want, notify._item(self.desk, {"event": "server_stopped"}, me)[1])
+        # hansa does not know where the session is: `hansa up`, as before
+        items, _, _ = notify.server_news({"server": gone}, [], True, 0, 0)
+        self.assertIn("next: hansa up", items[0]["line"])
+        self.assertIn("next: hansa up", notify._item(self.desk, {"event": "server_stopped"})[1])
+        # a session's process cannot be read now: its recorded start folder still names the desk
+        dead = {"pid": 999999, "start": "boot:1"}
+        me = {"key": notify.key_of(dead), "session": dead}
+        folder = self.tmp / "recorded"
+        folder.mkdir()
+        write_json(self.desk.state_dir / up.COORDINATOR_START,
+                   {"kind": "notify", "folder": str(folder), "session": dead})
+        self.assertIn(f"next: {named}", notify._item(self.desk, {"event": "server_stopped"}, me)[1])
+        items, _, _ = notify.server_news({"server": gone}, [], True, 0, 0, self.desk, me)
+        self.assertIn(f"next: {named}", items[0]["line"])
+        write_json(self.desk.state_dir / up.COORDINATOR_START,
+                   {"kind": "notify", "folder": str(self.desk.root), "session": dead})
+        self.assertIn("next: hansa up", notify._item(self.desk, {"event": "server_stopped"}, me)[1])
+        items, _, _ = notify.server_news({"server": gone}, [], True, 0, 0, self.desk, me)
+        self.assertIn("next: hansa up", items[0]["line"])
+
+    def test_a_gone_server_tells_a_session_outside_the_desk_to_name_it(self):
+        srv = self.serving()
+        p, sock = self.session(self.tmp)
+        with self.in_session(p, sock):
+            self.hansa_out("notify", "on")
+        self.soon(lambda: notify.live_records(self.desk))
+        srv.kill()
+        srv.wait()  # stopped without a word: no server_stopped event
+        told = self.soon(lambda: "not running" in self.server_posts(sock) and self.server_posts(sock))
+        self.assertIn("next: " + shlex.join(["hansa", "--desk", str(self.desk.root), "up"]), told)
+
     def test_a_pid_passed_to_another_process_is_not_the_server_for_either_kind_of_lock(self):
         from hansa import run
         other, _ = self.session()  # alive, and given the number a server that stopped had
@@ -19714,8 +20259,11 @@ def save():'''))
         c = init_desk(self.tmp / "x" / "y" / "c", str(self.repo), "a")
         up.desks_file().parent.mkdir(parents=True, exist_ok=True)
         write_json(up.desks_file(), [{"desk": str(d.root), "hansa": "", "at": 0} for d in (self.desk, c)])
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["init", str(self.tmp / "x")])  # a folder that holds a desk holds something: no desk is made over it
+        self.assertIn("holds y: a desk needs a new or an empty folder", str(e.exception.code))
         for root, named, said in ((self.desk.root / "inner", self.desk.root, "holds this desk"),
-                                  (self.tmp / "x", c.root, "is inside this desk"), (self.tmp / "beside", None, "")):
+                                  (self.tmp / "beside", None, "")):
             with self.subTest(root=root):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
@@ -20504,10 +21052,10 @@ def save():'''))
         try:
             for mode in (0o775, 0o777, 0o755):
                 with self.subTest(mode=oct(mode)):
-                    root = self.tmp / f"existing desk-{mode}"
+                    # an empty desk folder and its parent (one that holds anything is refused)
+                    root = self.tmp / f"existing parent-{mode}" / "desk"
                     desk = Desk(root)
-                    folders = (root, desk.tasks_dir, desk.lanes_dir, desk.lanes_dir / "a", desk.state_dir,
-                               desk.notes_dir, desk.secrets_dir, root / ".claude")
+                    folders = (root.parent, root)
                     for folder in folders:
                         folder.mkdir(parents=True, exist_ok=True)
                         folder.chmod(mode)
@@ -23658,6 +24206,128 @@ def save():'''))
             with self.subTest(path=path):
                 self.assertTrue(self.read_ruled(rules, path), rules)
 
+    def write_repository_relations(self):
+        """A second repository, its contents and parents, including aliases outside its folder."""
+        repo = self.tmp / "projects" / "other"
+        repo.parent.mkdir()
+        sh("git", "clone", "-q", str(self.repo), str(repo), cwd=self.tmp)
+        link, above = self.tmp / "repo-link", self.tmp / "projects-link"
+        link.symlink_to(repo, target_is_directory=True)
+        above.symlink_to(repo.parent, target_is_directory=True)
+        return repo, [repo, repo / "src", repo / ".git", repo / ".git" / "hooks", repo.parent,
+                      link, link / ".git" / "hooks", above]
+
+    def test_write_list_refuses_every_other_lanes_repository_relation(self):
+        repo, paths = self.write_repository_relations()
+        self.hansa("lane", "add", "c", "--repo", str(repo))
+        cache = self.tmp / "cache"
+        self.hansa("lane", "set", "a", "write", str(cache))
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        for path in paths:
+            with self.subTest(path=path):
+                with self.assertRaises(SystemExit) as e:
+                    self.hansa("lane", "set", "a", "write", str(self.tmp / "new-cache"), str(path))
+                for word in ("nothing was changed", "lane a: write cannot include", str(path), "lane c's repository"):
+                    self.assertIn(word, str(e.exception.code))
+                self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+
+    def test_own_repository_relations_stay_refused_on_the_write_list(self):
+        from hansa.desk import deny_split
+        repo, paths = self.write_repository_relations()
+        self.hansa("lane", "add", "c", "--repo", str(repo))
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        for path in paths:
+            with self.subTest(path=path):
+                with self.assertRaises(SystemExit) as e:
+                    self.hansa("lane", "set", "c", "write", str(path))
+                self.assertIn(f"lane c: write cannot include {path}", str(e.exception.code))
+                self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+        # hide closes reads: it refuses the repository and parents, but permits individual contents.
+        for path in (repo, repo.parent, paths[5], paths[-1]):
+            with self.subTest(hide=path):
+                good, bad = deny_split([str(path)], self.desk.root, self.desk.settings()["lanes"])
+                self.assertEqual(good, [])
+                self.assertIn("lane c's repository", "\n".join(bad))
+        for path in (repo / "src", repo / ".git", repo / ".git" / "hooks", paths[6]):
+            with self.subTest(hide=path):
+                self.assertEqual(deny_split([str(path)], self.desk.root, self.desk.settings()["lanes"])[1], [])
+
+    def test_saved_write_repository_entries_are_explained_and_left_out_of_runs(self):
+        from hansa import run
+        repo, paths = self.write_repository_relations()
+        self.hansa("lane", "add", "c", "--repo", str(repo))
+        seen, cache = self.tmp / "argv.jsonl", self.tmp / "cache"
+        s = self.desk.settings()
+        s["lanes"]["a"].update(write=[str(x) for x in paths] + [str(cache)], env={"FAKE_SHOW_ARGV": str(seen)})
+        write_json(self.desk.settings_path, s)  # a write list saved before this fence
+        good, left = run.write_list(self.desk, s["lanes"]["a"])
+        with self.subTest(write_list=True):
+            self.assertEqual(good, [str(cache)])
+            self.assertEqual(len(left), len(paths))
+        explained = self.hansa("explain", "lane", "a")
+        for path in paths:
+            with self.subTest(explain=path):
+                line = next((x for x in explained.splitlines() if f"a run leaves out {path}:" in x), "")
+                self.assertIn("lane c's repository", line)
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)  # invalid writes are omitted; they do not stop a run
+        self.assertEqual(m["write_left_out"], left)
+        self.assertEqual([e["why"] for e in self.events("write_left_out")], left)
+        worker_fs = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]
+        check_fs = run.srt_settings(self.desk, s["lanes"]["a"], "claude", s["providers"]["claude"],
+                                    self.repo, str(self.tmp / "run-tmp"))["filesystem"]
+        for fs in (worker_fs, check_fs):
+            self.assertIn(str(cache), fs["allowWrite"])
+            for path in paths:
+                with self.subTest(sandbox=path):
+                    self.assertNotIn(str(path), fs["allowWrite"])
+
+    def test_lane_add_refuses_a_repository_overlapping_an_existing_write_entry(self):
+        repo, paths = self.write_repository_relations()
+        original = self.desk.settings()
+        for i, path in enumerate(paths):
+            with self.subTest(path=path):
+                s = json.loads(json.dumps(original))
+                s["lanes"]["a"]["write"] = [str(path)]
+                write_json(self.desk.settings_path, s)
+                before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+                name = f"c{i}"
+                with self.assertRaises(SystemExit) as e:
+                    self.hansa("lane", "add", name, "--repo", str(repo))
+                for word in ("nothing was changed", "lane a", str(path), f"lane {name}'s repository"):
+                    self.assertIn(word, str(e.exception.code))
+                self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+                self.assertFalse((self.desk.lanes_dir / name).exists())
+
+    def test_lane_add_write_conflict_is_refused_before_initializing_a_repository(self):
+        repo = self.tmp / "future-project"
+        self.hansa("lane", "set", "a", "write", str(repo / ".git" / "hooks"))
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("lane", "add", "c", "--repo", str(repo))
+        for word in ("nothing was changed", "lane a", str(repo / ".git" / "hooks"), "lane c's repository"):
+            self.assertIn(word, str(e.exception.code))
+        self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+        self.assertFalse(repo.exists())
+        self.assertFalse((self.desk.lanes_dir / "c").exists())
+
+    def test_documented_write_cache_folders_stay_allowed_with_multiple_repositories(self):
+        from hansa import run
+        repo, _ = self.write_repository_relations()
+        self.hansa("lane", "add", "c", "--repo", str(repo))
+        home = (self.tmp / "home").resolve()
+        home.mkdir()
+        paths = [home / "hansa-cache" / "shop-desk" / "a" / tool for tool in ("pip", "npm", "cargo", "m2")]
+        paths += [home / "work" / "cache", self.tmp / "tools" / "xdg-cache" / "pnpm", self.tmp / "cache"]
+        with as_home(home):
+            self.hansa("lane", "set", "a", "env", f"PIP_CACHE_DIR={paths[0]}", f"npm_config_cache={paths[1]}",
+                       f"CARGO_HOME={paths[2]}", f"MAVEN_OPTS=-Dmaven.repo.local={paths[3]}")
+            self.hansa("lane", "set", "a", "write", *map(str, paths))
+            self.assertEqual(run.write_list(self.desk, self.desk.settings()["lanes"]["a"]),
+                             ([str(x) for x in paths], []))
+            self.assertNotIn("a run leaves out", self.hansa("explain", "lane", "a"))
+
     def test_a_run_leaves_out_a_saved_write_folder_that_no_longer_passes_the_fences(self):
         from hansa import run
         cache, lk = self.tmp / "m2", self.tmp / "lk"
@@ -26498,7 +27168,9 @@ def save():'''))
         first = self.desk.new_task("Add hello.txt", lane="a")
         earlier = self.settle(d, first)
         report = (self.desk.tasks_dir / first / "result.md").read_text().strip()
+        vid = self.ended(first, "done", report, "holds", "The earlier work was verified.")
         follow = self.hansa("retry", first, "Add second.txt").split()[0]
+        self.assertIn("was replaced", self.desk.meta(vid)["closed"])
         # A real dispatch reaches not_started, before a worktree or head exists.
         with unittest.mock.patch.object(run, "prepare", side_effect=run.SrtCannotRun("sandbox unavailable")):
             failed = self.settle(d, follow)
@@ -26512,6 +27184,8 @@ def save():'''))
         self.assertIn("You start from", text)
         self.assertIn(earlier["head"][:10], text)
         self.assertIn(report, text)
+        self.assertIn(f"The report of {vid}, the verification of the earlier task", text)
+        self.assertIn("its verdict: holds):\nThe earlier work was verified.", text)
         s = self.desk.settings()
         s["lanes"]["a"]["env"] = {"FAKE_HELLO": "second.txt"}
         self.assertEqual(self.desk.save_settings(s), [])
@@ -26520,6 +27194,24 @@ def save():'''))
         self.assertEqual(self.git_out("show", f"{finished['head']}:hello.txt"), f"hello from {first}")
         self.assertEqual(self.git_out("show", f"{finished['head']}:second.txt"), f"hello from {last}")
         self.assertIn(f"run started from: earlier task's commit {earlier['head'][:12]}", self.hansa("show", last))
+
+    def test_retry_records_machine_failure_quotes_earlier_standing_verification(self):
+        from hansa import run
+        d = Dispatcher(self.desk)
+        first = self.desk.new_task("Add hello.txt", lane="a")
+        self.settle(d, first)
+        standing = self.ended(first, "done", "Earlier report", "does not hold", "The file needs a fix.")
+        latest = self.ended(first, "done", "Earlier report", "unsure", "The later attempt could not tell.")
+        follow = self.hansa("retry", first, "Fix the file").split()[0]
+        self.assertIn("was replaced", self.desk.meta(latest)["closed"])
+        with unittest.mock.patch.object(run, "prepare", side_effect=run.SrtCannotRun("sandbox unavailable")):
+            failed = self.settle(d, follow)
+        self.assertFalse(failed.get("head"))
+        last = self.hansa("retry", follow).split()[0]
+        text = (self.desk.tasks_dir / last / "task.md").read_text()
+        self.assertIn(f"The report of {standing}, the verification of the earlier task", text)
+        self.assertIn("its verdict: does not hold):\nThe file needs a fix.", text)
+        self.assertNotIn("The later attempt could not tell.", text)
 
     def test_retry_records_started_failure_and_cancel_keep_head(self):
         for ending in ("setup failed", "cancelled running"):
@@ -28349,7 +29041,8 @@ def save():'''))
         self.assertNotIn("next:", shown)  # nothing left to do with it
         self.assertNotIn(vid, [m["id"] for m in views.status(self.desk)["review"]])
 
-    def task_with_verdict(self, verdict, name="change.py", release_files=False):
+    def task_with_verdict(self, verdict, name="change.py", release_files=False, verify_report=""):
+        """verify_report: what the verification reports, other than the task's report, before its verdict."""
         s = self.desk.settings()
         s["lanes"]["a"].update(check="test -f README.md", env={"FAKE_HELLO": name, "FAKE_VERDICT": verdict})
         if release_files:
@@ -28357,6 +29050,10 @@ def save():'''))
         self.assertEqual(self.desk.save_settings(s), [])
         d = Dispatcher(self.desk)
         tid = self.settle(d, self.desk.new_task(f"Add {name}"))["id"]
+        if verify_report:
+            s = self.desk.settings()
+            s["lanes"]["a"]["env"]["FAKE_REPORT"] = f"{verify_report}\n\nVERDICT: {verdict}"
+            self.assertEqual(self.desk.save_settings(s), [])
         self.hansa("verify", tid)
         vid = self.desk.meta(tid)["verify"]
         self.settle(d, vid)
@@ -28370,6 +29067,93 @@ def save():'''))
         self.assertIn(f"{vid} · done", self.hansa("show", vid))
         self.assertIn("verdict: holds, with notes", self.hansa("show", vid))
         self.assertIn("VERDICT: holds, with notes", self.hansa("show", vid, "--report"))
+
+    def later_verification(self, d, tid, outcome):
+        self.hansa("lane", "set", "a", "env", *(["FAKE_VERDICT=" + outcome] if outcome in
+                   ("holds", "holds, with notes", "does not hold", "unsure") else ["none"]))
+        self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        if outcome == "cancelled":
+            self.hansa("cancel", vid)
+        elif outcome == "failed":
+            # A provider error leaves this terminal record and no verdict.
+            self.desk.update(vid, state="failed", error="I could not do it")
+        else:
+            self.settle(d, vid)
+        return vid
+
+    def test_standing_verdict_survives_inconclusive_verifications(self):
+        from hansa.run import _latest_verdict, unverified_note
+        for outcome in ("cancelled", "failed", "none", "unsure"):
+            with self.subTest(later=outcome):
+                d, tid, first = self.task_with_verdict("does not hold", name=outcome + ".py")
+                later = self.later_verification(d, tid, outcome)
+                with self.assertRaises(SystemExit) as refused:
+                    self.hansa("merge", tid)
+                self.assertIn(first, str(refused.exception))
+                self.assertEqual(_latest_verdict(self.desk, self.desk.meta(tid)), "does not hold")
+                self.assertIn(first, unverified_note(self.desk, self.desk.meta(tid)))
+                shown = self.hansa("show", tid)
+                self.assertIn(first + ": does not hold", shown)
+                self.assertIn(later, shown)
+                self.assertIn("unsure" if outcome == "unsure" else "without a verdict", shown)
+                self.assertIn("merged into main", self.hansa("merge", tid, "--despite-check"))
+                self.assertTrue(self.events("task_merged")[-1]["despite_check"])
+
+    def test_later_definite_verdict_replaces_the_standing_verdict(self):
+        for verdict in ("holds", "holds, with notes", "does not hold"):
+            with self.subTest(later=verdict):
+                d, tid, first = self.task_with_verdict("does not hold", name=verdict.replace(" ", "_") + ".py")
+                later = self.later_verification(d, tid, verdict)
+                self.assertIn(later + ": " + verdict, self.hansa("show", tid))
+                if verdict == "does not hold":
+                    with self.assertRaises(SystemExit) as refused:
+                        self.hansa("merge", tid)
+                    self.assertIn(later, str(refused.exception))
+                    self.hansa("close", tid)
+                else:
+                    self.assertIn("merged into main", self.hansa("merge", tid))
+
+    def test_standing_verdict_drives_page_goal_override_rounds_and_followup_report(self):
+        from hansa.run import rethink_text, rounds_line
+        self.hansa("goal", "add", "Hold the merge")
+        d, tid, first = self.task_with_verdict("does not hold", verify_report="The verifier found hello.py missing.")
+        self.desk.update(tid, goal="g1")
+        self.later_verification(d, tid, "cancelled")
+        row = next(r for r in views.task_list(self.desk)["rows"] if r["id"] == tid)
+        self.assertEqual(row["verdict"], "does not hold")
+        self.assertIn(f"does not hold ({first})", self.hansa("goal", "show", "g1"))
+        new = self.hansa("retry", tid, "fix the verdict").split()[0]
+        text = (self.desk.tasks_dir / new / "task.md").read_text()
+        report = (self.desk.tasks_dir / first / "result.md").read_text().strip()
+        self.assertNotIn(report, (self.desk.tasks_dir / tid / "result.md").read_text())
+        section = text[text.index(f"The report of {first},"):]
+        self.assertIn("its verdict: does not hold", section.split("\n", 1)[0])
+        self.assertIn("The verifier found hello.py missing.", section)
+        self.assertIn(report, section)
+        self.assertIn("judged 1", rounds_line(self.desk, self.desk.meta(new)))
+        self.hansa("lane", "set", "a", "env", "FAKE_VERDICT=does not hold", "FAKE_HELLO=next.py")
+        self.settle(d, new)
+        self.hansa("verify", new)
+        second = self.desk.meta(new)["verify"]
+        self.settle(d, second)
+        self.later_verification(d, new, "unsure")
+        self.assertIn("has not held 2 times", rethink_text(self.desk, self.desk.meta(new)))
+        self.assertIn("has not held 2 times", self.hansa("show", new))
+        self.assertIn("merged into main", self.hansa("merge", new, "--despite-check"))
+        self.assertTrue(self.events("task_merged")[-1]["despite_check"])
+        self.assertIn("merged despite a failed check or verdict", self.hansa("goal", "show", "g1"))
+
+    def test_standing_verdict_does_not_hide_a_pending_verification(self):
+        _, tid, first = self.task_with_verdict("does not hold")
+        self.hansa("verify", tid)
+        pending = self.desk.meta(tid)["verify"]
+        for command in ("merge", "verify"):
+            with self.assertRaises(SystemExit) as refused:
+                self.hansa(command, tid)
+            self.assertIn(pending, str(refused.exception))
+        self.assertIn(pending, self.hansa("show", tid))
+        self.assertEqual(views.verification(self.desk, self.desk.meta(tid))["state"], "queued")
 
     def gaps_verification(self, report, verdict="holds, with notes", tid=None):
         d = Dispatcher(self.desk)
@@ -32332,7 +33116,7 @@ def save():'''))
         self.assertEqual([e["field"] for e in self.events("lane_command_changed")], ["release"])
         p, sock = self.session()
         with self.in_session(p, sock):
-            told = self.hansa("release", "a", "first", "cut")
+            told = self.hansa("release", "a", "first cut")
         self.assertIn("release #1: lane a's main at", told)
         self.assertIn("2 commit(s) on no remote-tracking branch (no release of it went out before)", told)
         self.assertIn("2 outgoing commit(s) checked for forbidden words", told)
@@ -41739,6 +42523,135 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         self.assertEqual(self.page_save(lambda s: s.update(releases_without_asking=[
             {"lane": "a", "target": x} for x in ticked])), {"ok": True, "problems": []})
 
+    def refuse_unknown_release_target(self, *args):
+        from hansa import alert, release
+        sent = self.alert_fake()
+        pushed = self.repo / "pushed.txt"
+        self.with_targets(public=f"touch {pushed}")
+        for ticked in (False, True):
+            with self.subTest(ticked=ticked, args=args):
+                self.tick_targets(*(["public"] if ticked else []))
+                said = self.refused("release", "a", *args)
+                self.assertIn("lane a has no release target staging", said)
+                self.assertIn("its targets: public", said)
+                self.assertIn("hansa release a public staging", said)
+                self.assertIn("Nothing was asked", said)
+                self.assertEqual(release.releases(self.desk), [])
+                self.assertEqual(self.events("release_asked"), [])
+                self.assertEqual(alert.queued(self.desk), [])
+                Dispatcher(self.desk).tick()
+                self.assertFalse(pushed.exists())
+                self.assertEqual(self.alerted(sent), [])
+
+    def test_release_unknown_target_word(self):
+        self.refuse_unknown_release_target("staging")
+
+    def test_release_unknown_target_word_with_note(self):
+        self.refuse_unknown_release_target("staging", "ship the fix")
+
+    def test_release_quoted_note(self):
+        from hansa import release
+        self.with_targets(public="true")
+        said = self.hansa("release", "a", "ship the login fix")
+        self.assertIn("waits for the principal's yes", said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["target"], r["note"], r["state"]), ("public", "ship the login fix", "waiting"))
+
+    def test_release_without_target_or_note(self):
+        from hansa import release
+        self.with_targets(public="true")
+        said = self.hansa("release", "a")
+        self.assertIn("waits for the principal's yes", said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["target"], r["note"], r["state"]), ("public", "", "waiting"))
+
+    def test_release_explicit_target_one_word_note(self):
+        from hansa import release
+        self.with_targets(public="true")
+        said = self.hansa("release", "a", "public", "hotfix")
+        self.assertIn("waits for the principal's yes", said)
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["target"], r["note"], r["state"]), ("public", "hotfix", "waiting"))
+
+    def test_release_no_or_several_targets_keeps_argument_rules(self):
+        from hansa import release
+        for args in ((), ("staging",), ("staging", "ship the fix"), ("ship the login fix",)):
+            with self.subTest(targets=0, args=args):
+                self.assertIn("lane a has no release target; set it first", self.refused("release", "a", *args))
+        self.with_targets(public="true", preview="true")
+        for args in ((), ("staging",), ("staging", "ship the fix"), ("ship the login fix",)):
+            with self.subTest(targets=2, args=args):
+                self.assertIn("2 release targets (preview, public); say which", self.refused("release", "a", *args))
+        self.assertEqual(release.releases(self.desk), [])
+        self.hansa("release", "a", "public", "hotfix")
+        r = release.get(self.desk, 1)
+        self.assertEqual((r["target"], r["note"]), ("public", "hotfix"))
+
+    def test_release_target_word_uses_target_name_rule(self):
+        from hansa import release
+        self.with_targets(public="true")
+        for word in ("1", "a-b", "a" * 32):
+            with self.subTest(word=word):
+                # The same word is accepted when naming an actual target.
+                self.hansa("lane", "target", "a", word, "true")
+                self.hansa("lane", "target", "a", word, "none")
+                self.assertIn(f"no release target {word};", self.refused("release", "a", word))
+        for note in ("Hotfix", "hotfix!", "a" * 33, "ship the fix"):
+            with self.subTest(note=note):
+                self.hansa("release", "a", note)
+                self.assertEqual(release.releases(self.desk)[-1]["note"], note)
+
+    def test_release_reply_names_replaced_request_and_invalid_code(self):
+        from hansa import alert, release
+        sent = self.alert_fake()
+        self.with_targets(public="true", preview="true")
+        for ticked in (False, True):
+            with self.subTest(ticked=ticked):
+                self.hansa("release", "a", "public")
+                old = release.releases(self.desk)[-1]
+                alert.send_due(self.desk, gather=0, capped=False)
+                code = self.sent_code(old["id"])
+                self.hansa("release", "a", "preview")
+                if ticked:
+                    self.tick_targets("public")
+                said = self.hansa("release", "a", "public")
+                self.assertIn(f"Replaces waiting release #{old['id']}", said)
+                self.assertIn("one-time code no longer works", said)
+                self.assertEqual(release.get(self.desk, old["id"])["state"], "void")
+                self.assertIn("it is void", self.code_answer("yes", str(old["id"]), code)[1])
+                current = release.releases(self.desk)[-1]
+                alert.send_due(self.desk, gather=0, capped=False)
+                self.assertNotIn("Replaces waiting", self.alerted(sent)[-1]["text"])
+                self.hansa("release", "--stop", str(current["id"]))
+
+    def test_release_reply_starts_with_same_commit_notice(self):
+        from hansa import alert, release
+        sent = self.alert_fake()
+        self.with_targets(public="true", preview="true")
+        self.tick_targets("public")
+        said = self.hansa("release", "a", "public")
+        self.assertNotIn("Nothing new", said)
+        d = Dispatcher(self.desk)
+        self.assertEqual(self.settle_release(d, 1)["state"], "done")
+        for ticked in (False, True):
+            with self.subTest(ticked=ticked):
+                self.tick_targets(*(["public"] if ticked else []))
+                said = self.hansa("release", "a", "public")
+                r = release.releases(self.desk)[-1]
+                alert.send_due(self.desk, gather=0, capped=False)
+                alert_text = self.alerted(sent)[-1]["text"]
+                self.hansa("release", "--stop", str(r["id"]))
+                first = said.splitlines()[0]
+                self.assertTrue(first.startswith("Nothing new"), said)
+                self.assertIn("same commit as release #1", first)
+                self.assertIn("asked to run again", first)
+                self.assertEqual(r["state"], "approved" if ticked else "waiting")
+                self.assertNotIn("asked to run again", alert_text)
+        # The notice belongs to the target's successful release at this exact commit.
+        self.assertNotIn("Nothing new", self.hansa("release", "a", "preview"))
+        self.commit_in_repo("new.txt", "new\n")
+        self.assertNotIn("Nothing new", self.hansa("release", "a", "public"))
+
     def settle_watch(self, d, rid):
         from hansa import release
         def ended():
@@ -42326,7 +43239,7 @@ else:
         self.assertEqual(public_settings(self.desk)["release_unmatched"], [])
         self.assertEqual(self.desk.settings_path.read_bytes(), saved)
         self.assertEqual(self.desk.events_path.read_bytes(), events)
-        told = self.hansa("release", "a", "first", "cut")
+        told = self.hansa("release", "a", "first cut")
         self.assertIn("lane a target default is on the principal's list of releases without asking", told)
         r = release.get(self.desk, 1)
         self.assertEqual((r["state"], r["target"], r["note"]), ("approved", "default", "first cut"))
@@ -42548,7 +43461,7 @@ else:
         self.assertIn("has no release target test any more", {r["id"]: r for r in views.status(self.desk)["releases"]}[3]["moved"])
         self.assertIn("has no release target test now", public_settings(self.desk)["release_unmatched"][0]["why"])
         # with one target left, hansa release L [note] asks for it
-        self.hansa("release", "a", "the", "rest")
+        self.hansa("release", "a", "the rest")
         r = release.releases(self.desk)[-1]
         self.assertEqual((r["target"], r["note"]), ("push", "the rest"))
 
@@ -43815,7 +44728,7 @@ else:
         os.environ.pop("HANSA_TASK")
         # a release waits for the yes, and ends void
         self.hansa("lane", "target", "a", "default", "true")
-        self.hansa("release", "a", "first")
+        self.hansa("release", "a", "default", "first")
         alert.send_due(self.desk, gather=0)
         self.assertEqual(self.alerted(out)[-1]["kind"], "release_waiting")
         self.assertIn("release #1 (lane a, target default) · code ", self.alerted(out)[-1]["text"])
@@ -44260,7 +45173,7 @@ else:
         from hansa import alert, release
         out = self.alert_fake()
         self.hansa("lane", "target", "a", "default", "true")
-        self.hansa("release", "a", "first")
+        self.hansa("release", "a", "default", "first")
         queued_bytes = alert.queue_file(self.desk).read_bytes()
         [q] = json.loads(queued_bytes)
         self.assertNotIn("code", q)
@@ -44293,7 +45206,7 @@ else:
         self.assertIn("hansa release yes ID CODE", self.hansa("explain"))
         # A code goes first, so a long gathered text does not cut it.
         self.desk.add_ask("x" * 2000)
-        self.hansa("release", "a", "again")
+        self.hansa("release", "a", "default", "again")
         alert.send_due(self.desk, gather=0)
         self.assertIn(self.sent_code(2), self.alerted(out)[-1]["text"])
 
@@ -44382,9 +45295,9 @@ else:
         from hansa import alert, release
         out = self.alert_fake()
         self.hansa("lane", "target", "a", "default", "true")
-        self.hansa("release", "a", "original")
+        self.hansa("release", "a", "default", "original")
         release.void(self.desk, 1, "ask again")
-        self.hansa("release", "a", "replacement")
+        self.hansa("release", "a", "default", "replacement")
         self.assertEqual([r["id"] for r in release.releases(self.desk)], [1, 2])
         with unittest.mock.patch.object(release, "new_code", wraps=release.new_code) as make:
             self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
@@ -44533,7 +45446,7 @@ else:
                 self.assertNotIn(code.encode(), f.read_bytes(), f)
         # the same with an alert that goes out
         out = self.alert_fake()
-        self.hansa("release", "a", "again")
+        self.hansa("release", "a", "default", "again")
         alert.send_due(self.desk, gather=0)
         code = self.sent_code(2)
         self.assertIn(code, self.alerted(out)[-1]["text"])
@@ -47090,7 +48003,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn('python: ["3.9", "3.x"]', jobs["test"])
         self.assertIn("python-version: ${{ matrix.python }}", jobs["test"])
         self.assertNotIn("HANSA_TESTS_ONLY_UNSANDBOXED", jobs["test"])
-        for variable in ("HANSA_TESTS_NEED_PORTS", "HANSA_TESTS_NEED_UNIX_SOCKETS"):
+        for variable in ("HANSA_TESTS_NEED_PORTS", "HANSA_TESTS_NEED_UNIX_SOCKETS", "HANSA_TESTS_NEED_CLAUDE_PLUGIN"):
             self.assertIn(f'{variable}: "1"', jobs["test"])
         self.assertIn("HANSA_TESTS_NEED_SRT: ${{ startsWith(matrix.os, 'macos') && '1' || '' }}",
                       jobs["test"])
@@ -47099,10 +48012,31 @@ class WorkflowTest(unittest.TestCase):
                                       r"        run: npm install -g @anthropic-ai/sandbox-runtime@")
         for name, job in self.jobs:
             with self.subTest(job=name):
-                for command in ("python3 -m unittest -v tests.test_hansa",
-                                "python3 -m unittest -v contrib.codex.tests",
-                                "claude plugin validate hansa/mod", "claude plugin test hansa/mod"):
-                    self.assertIn(command, job)
+                self.assertIn("npm install -g @anthropic-ai/claude-code@", job)  # the claude tests.test_mod runs
+
+    def test_ci_runs_the_suites_a_run_of_the_runner_with_no_names_runs(self):
+        from tests import run_parallel
+        steps = re.findall(r"- name: Run the tests\n        run: python3 -m unittest -v (.+)\n", self.workflow)
+        self.assertEqual([s.split() for s in steps], [list(run_parallel.SUITES)])
+        self.assertNotIn("claude plugin", self.workflow.split("\njobs:\n", 1)[1])  # tests.test_mod runs them
+
+    def test_every_test_class_under_tests_is_in_those_suites(self):
+        # A test file the suites do not reach would run nowhere: neither in a lane's check nor on GitHub's machines
+        from tests import run_parallel
+        root = Path(__file__).resolve().parent.parent
+        reached = {type(t) for t in run_parallel.load_tests(list(run_parallel.SUITES))}
+        files = sorted(root.glob("tests/**/test_*.py")) + sorted(root.glob("contrib/codex/tests/**/test_*.py"))
+        self.assertIn(root / "tests/test_menu.py", files)
+        self.assertIn(root / "tests/bench/test_11.py", files)
+        missing = []
+        for path in files:
+            module = importlib.import_module(".".join(path.relative_to(root).with_suffix("").parts))
+            for name, case in vars(module).items():
+                if (isinstance(case, type) and issubclass(case, unittest.TestCase) and case.__module__ ==
+                        module.__name__ and unittest.defaultTestLoader.getTestCaseNames(case) and
+                        case not in reached):
+                    missing.append(f"{module.__name__}.{name}")
+        self.assertEqual(missing, [])
 
 
 class AlertBarkTest(unittest.TestCase):
