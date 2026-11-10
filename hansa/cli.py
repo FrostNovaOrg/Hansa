@@ -1555,14 +1555,14 @@ def cmd_release(a):
                f"{r['count']} commit(s) on no remote-tracking branch (no release of it went out before)")
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
             f"({release.runs_text(r)})")
-    head += "".join("\n" + x for x in release.outside.lines(r))
-    head += "".join("\n" + x for x in release.direct_lines(r))
+    details = "".join("\n" + x for x in [*release.outside.lines(r), *release.direct_lines(r)])
     if r.get("since_release") and r["since"] == r["commit"]:
         head = (f"Nothing new on {who}: same commit as release #{r['since_release']}, asked to run again.\n"
                 + head)
     for rid in r.get("_replaced", []):
-        head += f"\nReplaces waiting release #{rid}; its one-time code no longer works."
+        details += f"\nReplaces waiting release #{rid}; its one-time code no longer works."
     if r["state"] == "forbidden":
+        head += details
         mailbox = release.mailbox_refusal(r["hits"])
         if mailbox:
             raise SystemExit(desk.redact(
@@ -1579,6 +1579,7 @@ def cmd_release(a):
     after = ("hansa tells this session when it is answered and when it ends" if heard else
              "hansa release shows how it goes")
     if r["state"] == "approved":
+        head += details
         paused = desk.paused()
         listed = (f"{who} is on the principal's list of releases without asking" if r.get("target") else
                   f"lane {a.lane} is on the principal's list of lanes released without asking")
@@ -1591,10 +1592,13 @@ def cmd_release(a):
                           + (f"once it gets through its rounds; {gone}. {after}" if gone else f"within seconds. {after}")))
         return
     named = f"\nThe command names changed files: {', '.join(r['named'])}." if r.get("named") else ""
-    print(desk.redact(f"{head}{named}\nIt waits for the principal's yes on the web page; only then does hansa serve run "
+    lapsed = release.tick_lapsed(desk.settings(), a.lane, r.get("target") or "default")
+    if lapsed:
+        details = "\n" + lapsed + details
+    print(desk.redact(f"{head}\nIt waits for the principal's yes on the web page; only then does hansa serve run "
                       f"it, and only while {r['base']} is still at {r['commit'][:10]} and the command is the same. "
                       f"Do not push or deploy yourself. {after}; tell the principal, in the conversation, that it waits "
-                      f"for them."))
+                      f"for them.{named}{details}"))
 
 
 def cmd_notify(a):
@@ -2728,6 +2732,7 @@ def _lane_target(desk: Desk, a, new: dict) -> None:
         shown = lane_targets(ln)
         for name, t in sorted(shown.items()):
             print(_target_text(name, t, ln))
+            print("\n".join("  " + x for x in release.tick_text(new, a.name, name).splitlines()))
             if t.get("after_merge_min"):
                 print("  " + release.after_merge_text(new, a.name, name))
             for line in release.outside.lines(release.outside.inspect(t.get("command") or "", ln["repo"],
@@ -2875,8 +2880,11 @@ def _say_forbidden(desk: Desk, name: str, ln: dict, only: str | None = None) -> 
                          + "\nNo worker can change them, and no verification covers them. A change to a "
                          "fingerprinted outside file voids a waiting release and unticks the target on the "
                          "principal's list of releases without asking. Folders have no fingerprint; files recorded "
-                         "without a fingerprint do not void or untick anything. Better: move the files into "
-                         "the repository and list them in release_files. " + see_more("release-files")))
+                         "without a fingerprint do not void or untick anything. "
+                         + ("Better: move the files into the repository and list them in release_files. "
+                            if any(x["path"] not in found.get("outside_destinations", []) for x in found["outside"])
+                            or any(p not in found.get("outside_destinations", []) for p in found["outside_folders"])
+                            else "") + see_more("release-files")))
 
 
 def _lane_remove(desk: Desk, a, s: dict, new: dict) -> None:
