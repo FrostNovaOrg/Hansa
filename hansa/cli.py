@@ -1384,6 +1384,10 @@ def _stop_release(desk: Desk, a) -> None:
     if not out["ok"]:
         raise SystemExit("hansa: " + "; ".join(out["problems"]) + ". Nothing was changed")
     r = release.get(desk, int(rid)) or {}
+    if out["state"] == "watch_stopping":
+        print(desk.redact(f"release #{rid} of {release.what(r)} stays {r.get('state')}; its watch is being stopped "
+                          "by hansa serve, with who stopped it and why and its output so far kept"))
+        return
     if out["state"] == "stopped":
         print(desk.redact(f"release #{rid} of {release.what(r)} is stopped; nothing was run"))
         return
@@ -1520,6 +1524,17 @@ def cmd_changelog(a):
 
 def cmd_release(a):
     desk = Desk.find(a.desk)
+    if a.show is not None:
+        if a.lane or a.note or a.direct is not None:
+            raise SystemExit("hansa: --show takes only a release's number. Nothing was changed")
+        rid = a.show.lstrip("#")
+        if not rid.isdigit():
+            raise SystemExit(f"hansa: --show takes a release's number (hansa release lists them), not {a.show!r}")
+        r = release.get(desk, int(rid))
+        if not r:
+            raise SystemExit(f"hansa: there is no release #{rid}. Nothing was changed")
+        print(desk.redact(release.show_text(desk, r)))
+        return
     if a.stop is not None:
         _stop_release(desk, a)
         return
@@ -3532,10 +3547,14 @@ def main(argv=None):
                      "page and hansa serve go on meanwhile), each commit's own change once (a merge's: only what it "
                      "adds beyond its parents); hansa serve checks again at the start only when the commit, the "
                      "starting point, the words or the command changed since. hansa release alone lists the open and "
-                     "recent releases, including direct base commits and hand merges. The principal's release_direct "
+                     "recent releases, including direct base commits and hand merges; --show ID shows a request and "
+                     "all kept release and watch output, keys removed, without printing the principal's whole log. "
+                     "The principal's release_direct "
                      "setting defaults to record; hold requires --direct \"<why>\" and their yes for these commits, "
                      "even for a ticked target. --direct with no direct commits is refused. Only the coordinator asks. "
-                     "hansa release --stop ID [reason] calls one off: one "
+                     "hansa release --stop ID [reason] also stops a running watch, leaving the release done and "
+                     "recording who stopped the watch and why; a stopped watch stays stopped after a server restart. "
+                     "Otherwise it calls a release off: one "
                      "waiting for the principal or approved and waiting its turn is closed as stopped; a running one "
                      f"gets TERM to its command's whole process group, then KILL {release.STOP_GRACE} seconds later to "
                      "what still runs, and is recorded as stopped, with who stopped it and why, its output so far kept "
@@ -3557,7 +3576,10 @@ def main(argv=None):
                 "yes and no are not lane names, so this "
                 "form is always an answer. Never guess a code, nor ask the principal to send it anywhere else. "
                 + see_more("release-flow", "forbidden-words", "alerts"))
-    p.add_argument("--stop", metavar="ID", help="call release ID off (the rest of the line is the reason): TERM to a "
+    release_action = p.add_mutually_exclusive_group()
+    release_action.add_argument("--show", metavar="ID", help="show the request and all kept release and watch output, keys removed")
+    release_action.add_argument("--stop", metavar="ID", help="call release ID off, or stop its running watch "
+                   "(the rest of the line is the reason): TERM to a "
                    f"running one's command, KILL {release.STOP_GRACE} s later")
     p.add_argument("--direct", metavar="WHY", help="record why direct base commits go out; required when the "
                    "principal's release_direct setting is hold, then waits for their yes even for a ticked target; "

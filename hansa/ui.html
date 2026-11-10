@@ -606,7 +606,7 @@ const T = ZH ? {
   releaseGone:"现在没有哪条工作线有这个发布目标：取消勾选再保存，就从清单上去掉", releaseGoneWas:"当时的命令：", releaseGoneUnknown:"（保存时没记下它当时的命令）",
   releaseNoAbout:cmd => ["还没有说明：协调员可以用 ", cmd, " 加上"], releaseLast:(at, st) => `上次发布：${at}，${st}`, releaseNever:"还没发布过",
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
-  releaseStopNote:"叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。发布中途停止可能使服务处于部分更新状态：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
+  releaseStopNote:"发布完成后，叫停会停止仍在运行的监测，发布仍记为完成；监测记录由谁停止及原因，重启服务器也不会再次启动。叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。发布中途停止可能使服务处于部分更新状态：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
   releasesWithoutAsking:"每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、监测命令（--watch）、它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效：手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
   releaseForbidden:"不许发出去的字眼（每行一个词、短语或 re:Python 正则表达式，不分大小写；每项最多 200 字符，正则必须能编译且不能匹配空字符串；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
   releaseForbiddenExcept:"按 lane 豁免字眼（从上面的列表选择字眼；lane 用空格或逗号分隔；不影响邮箱规则）",
@@ -763,7 +763,7 @@ const T = ZH ? {
   releaseGone:"no lane has this release target now: untick it and Save to take it off the list", releaseGoneWas:"its command then: ", releaseGoneUnknown:"(its command then was not recorded)",
   releaseNoAbout:cmd => ["No description yet: the coordinator can add one with ", cmd], releaseLast:(at, st) => `Last release: ${at}, ${st}`, releaseNever:"Never released",
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
-  releaseStopNote:"Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
+  releaseStopNote:"After a release is done, Stop ends its running watch, keeping the release done; the watch records who stopped it and why and stays stopped after a server restart. Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
   releasesWithoutAsking:"Each target is ticked on its own. A tick stops counting once the lane's repository or base branch, the target's command or an outside file it names, its watch command (--watch), the target it must follow or the way it runs (fixed) changes: a release asked for by hand then waits for your yes, and one that runs by itself after merges waits until you tick it again.",
   releaseForbidden:"Words, phrases or re:Python patterns no release may send out (one per line, any case; at most 200 characters per entry; patterns must compile and must not match the empty string; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
   releaseForbiddenExcept:"Exceptions by lane (choose an entry from the list above; lanes separated by spaces or commas; the mailbox rule still applies)",
@@ -1725,7 +1725,8 @@ function releaseOutside(r) {
       r.direct_hold && r.state === "waiting" ? h("div", {}, T.releaseDirectWait) : null) : null);
 }
 function releaseStop(r) {
-  if (!["approved", "starting", "running"].includes(r.state) || r.stop_asked) return null;
+  const watchOpen = ["waiting", "starting", "running"].includes(r.watch_run?.state);
+  if (watchOpen ? r.watch_run.stop_asked : (!["approved", "starting", "running"].includes(r.state) || r.stop_asked)) return null;
   const reason = statusInput(`stop:${r.id}`, {placeholder:T.releaseStopReason});
   return h("div", {class:"row", style:"margin-top:4px"}, reason,
     h("button", {title:T.releaseStopNote, "data-status-focus":`release:${r.id}:stop`, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
