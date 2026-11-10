@@ -112,7 +112,7 @@ Ask the person to open a plain terminal of their own (not this session) and go t
 With only an API endpoint (no subscription login), start the server first and set the provider on the page before
 the coordinator: run `hansa serve` in that terminal and keep it running; set the provider, model and key on the page
 from another terminal ([Open the principal's page](docs/getting-started.md#open-the-principals-page)); then run
-`hansa up`.
+`hansa --desk ~/shop-desk up`.
 
 With a subscription login, run:
 

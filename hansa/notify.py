@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import socket
 import stat
@@ -49,8 +50,8 @@ import uuid
 from pathlib import Path
 
 from . import account, disk, session_value, without_session
-from .desk import Desk, event_record, lane_targets, mkdir_private, now, read_json, write_json
-from .run import alive, claude_bin, proc_start, rethink_text, server_state, srt_needed, srt_record
+from .desk import Desk, _above, event_record, lane_targets, mkdir_private, now, read_json, write_json
+from .run import alive, claude_bin, proc_cwd, proc_start, rethink_text, server_state, srt_needed, srt_record
 
 LIVE_SECONDS = 30  # a follower not seen for this long is not live (it polls every second or two)
 SEEN_EVERY = 10  # a feed that changes nothing else in the follower's record writes its seen this often
@@ -224,9 +225,36 @@ def task_line(desk: Desk, m: dict) -> str:
             + (f" · {note}" if note else ""))
 
 
-def _item(desk: Desk, e: dict):
+def _up_hint(desk: Desk, folder: str) -> str:
+    """How a session in this folder starts the desk: `hansa up` from the desk or below it, `hansa --desk DIR up`
+    from a folder hansa knows is outside, where `hansa up` opens the menu or, without one, starts nothing."""
+    if folder and not _above(str(desk.root), folder):
+        return shlex.join(["hansa", "--desk", str(desk.root), "up"])
+    return "hansa up"
+
+
+def _recorded_folder(desk: Desk, sess) -> str:
+    """The folder hansa recorded for a session's start, when the record is of that session; else ''."""
+    from . import up
+    try:
+        rec = up.read_coordinator(desk)
+    except (OSError, UnicodeError):
+        return ""
+    folder = rec.get("folder")
+    return folder if same(rec.get("session"), sess) and isinstance(folder, str) and os.path.isabs(folder) else ""
+
+
+def _process_folder(sess) -> str:
+    """The folder of the session's process, when the session still runs and hansa can read it; else ''."""
+    sess = sess if isinstance(sess, dict) else {}
+    pid = sess.get("pid")
+    return proc_cwd(pid) if isinstance(pid, int) and alive(pid, str(sess.get("start") or "")) else ""
+
+
+def _item(desk: Desk, e: dict, me=None):
     """What one event tells the coordinator: (key, line, recorded session, desk-wide, the session not to tell),
-    or None. The session that cancelled a task with hansa cancel does not hear that it was cancelled."""
+    or None. The session that cancelled a task with hansa cancel does not hear that it was cancelled.
+    me: the follower's record, for what the server-stopped line tells its session to run."""
     kind, tid = e.get("event"), e.get("task")
     if kind == "task_after_held":
         from . import after
@@ -334,8 +362,10 @@ def _item(desk: Desk, e: dict):
         return ("disk", "look"), ("hansa serve can look at the free space of " + "; ".join(e.get("places"))
                                   if e.get("places") else "hansa serve can look at free space again"), None, True, None
     if kind == "server_stopped":
+        sess = (me or {}).get("session")
+        hint = _up_hint(desk, _process_folder(sess) or _recorded_folder(desk, sess))
         return ("server",), ("hansa serve stopped: no task starts or ends until it runs again · next: "
-                             "hansa up"), None, True, None
+                             + hint), None, True, None
     if kind == "srt_tried" and not e.get("ran") and srt_needed(desk.settings()):
         said = ("found, but it could not run: " + str(e.get("said") or "")[:200]) if e.get("found") \
             else "not found on its PATH"
@@ -420,7 +450,7 @@ def items_for(desk: Desk, events: list, me: dict) -> list:
     others = [r.get("session") for r in live_records(desk) if r.get("key") != me.get("key")]
     out = {}
     for e in events:
-        it = _item(desk, e)
+        it = _item(desk, e, me)
         if not it:
             continue
         key, line, sess, desk_wide, quiet = it
@@ -1197,7 +1227,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             watch.still(r.get("review"))
             if any(x["key"] == ["server"] for x in items):
                 told_down = True
-            items, told_down, told_stuck = server_news(r, items, was_up, told_down, told_stuck)
+            items, told_down, told_stuck = server_news(r, items, was_up, told_down, told_stuck, desk, me)
             was_up = r.get("server_up")
             srt = any(x["key"] == ["srt"] for x in items)
             if srt and (told_srt or r.get("srt_ran")):  # said once until srt runs again; or it runs by now
@@ -1256,19 +1286,22 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
         held.close()
 
 
-def server_news(r: dict, items: list, was_up, told_down: float, told_stuck: float) -> tuple:
+def server_news(r: dict, items: list, was_up, told_down: float, told_stuck: float, desk=None, me=None) -> tuple:
     """What the follower says of hansa serve after a feed (run.server_state): not running only once its process
     is gone; busy or stuck once its rounds stay quiet for long; and, after either, that it runs again once it
-    finishes a round after that was said. told_down, told_stuck: when that was said, 0 if not. Returns (items,
+    finishes a round after that was said. told_down, told_stuck: when that was said, 0 if not. desk and me: the
+    desk and the follower's record, for what the stopped line tells its session to run. Returns (items,
     told_down, told_stuck)."""
     st = r.get("server") or {"state": "up" if r.get("server_up") else "gone", "quiet": 0}
     if any(x["key"] == ["server"] for x in items):  # hansa serve stopped, and said so
         told_down = told_down or time.time()
     if st["state"] == "gone":
         if was_up and not told_down:
+            sess = (me or {}).get("session")
+            hint = _up_hint(desk, _process_folder(sess) or _recorded_folder(desk, sess)) if desk else "hansa up"
             items.append({"key": ["server"], "line": "hansa serve is not running (it stopped without a word): "
                                                      "no task starts or ends until it runs again · next: "
-                                                     "hansa up"})
+                                                     + hint})
             told_down = time.time()
     elif st["state"] == "stuck":
         if not told_stuck and not told_down:

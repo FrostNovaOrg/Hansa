@@ -3206,7 +3206,7 @@ class UpTest(unittest.TestCase):
         up.desks_file().parent.mkdir(parents=True)
         write_json(up.desks_file(), entries)
         with self.outside_desk(), contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
-            main(["up"])
+            main(["up", "--all"])
         said = out.getvalue()
         rows = [json.loads(x) for x in calls.read_text().splitlines()]
         for name in ("first", "second"):
@@ -3236,9 +3236,37 @@ class UpTest(unittest.TestCase):
             self.assertEqual(one.call_args.args[0].root, self.desk.root)
             all_desks.assert_not_called()
             with self.outside_desk():
-                main(["up"])
+                main(["up", "--all"])
             all_desks.assert_called_once()
             self.assertEqual(one.call_count, 2)
+
+    def test_up_outside_a_desk_without_a_menu_refuses_and_names_the_desks_and_the_two_forms(self):
+        from hansa import menu, up
+        roots = []
+        entries = []
+        for name in ("first", "second"):
+            root = self.tmp / name
+            root.mkdir()
+            (root / "tasks").mkdir()
+            write_json(root / "settings.json", {})
+            roots.append(root)
+            entries.append({"desk": str(root), "hansa": up.hansa_command(), "at": "then"})
+        up.desks_file().parent.mkdir(parents=True, exist_ok=True)
+        write_json(up.desks_file(), entries)
+        with self.outside_desk(), unittest.mock.patch.object(menu, "available", return_value=False), \
+                unittest.mock.patch.object(up, "all_desks_up") as all_desks, \
+                unittest.mock.patch.object(up, "desk_up") as one, \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as failed:
+            main(["up"])
+        self.assertNotEqual(failed.exception.code, 0)
+        said = str(failed.exception)
+        self.assertIn("no desk here", said)
+        for root in roots:
+            self.assertIn(str(root), said)
+        self.assertIn("hansa --desk DIR up", said)
+        self.assertIn("hansa up --all", said)
+        all_desks.assert_not_called()  # nothing started
+        one.assert_not_called()
 
     def test_empty_desk_list_explains_how_to_register_one(self):
         from hansa import up
@@ -18161,10 +18189,10 @@ def save():'''))
         self.assertNotIn("hansa serve is not running", out.getvalue())
 
     # -- hansa posts to a coordinator's session (hansa/notify.py) ------------------------------------------
-    def session(self):
+    def session(self, folder=None):
         """A stand-in for a Claude Code session: a process that runs until it is stopped, and its inbox path. It runs
-        in the desk, as hansa coordinator starts one, so it reads the card."""
-        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], cwd=self.desk.root)
+        in the desk, as hansa coordinator starts one, so it reads the card; folder puts it elsewhere."""
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], cwd=folder or self.desk.root)
         self.addCleanup(p.wait)
         self.addCleanup(p.kill)
         return p, str(self.tmp / f"inbox-{p.pid}.sock")
@@ -19375,6 +19403,47 @@ def save():'''))
         again.kill()
         again.wait()
         self.assertFalse(views.status(self.desk)["server_up"])
+
+    def test_a_server_stop_notice_names_the_desk_for_a_session_outside_it(self):
+        gone = {"state": "gone", "pid": None, "answers": False}
+        named = shlex.join(["hansa", "--desk", str(self.desk.root), "up"])
+        for (session, _sock), want in ((self.session(self.tmp), f"next: {named}"),
+                                       (self.session(), "next: hansa up")):
+            sess = {"pid": session.pid, "start": notify.proc_start(session.pid)}
+            me = {"key": notify.key_of(sess), "session": sess}
+            items, _, _ = notify.server_news({"server": gone}, [], True, 0, 0, self.desk, me)
+            self.assertIn(want, items[0]["line"])
+            self.assertIn(want, notify._item(self.desk, {"event": "server_stopped"}, me)[1])
+        # hansa does not know where the session is: `hansa up`, as before
+        items, _, _ = notify.server_news({"server": gone}, [], True, 0, 0)
+        self.assertIn("next: hansa up", items[0]["line"])
+        self.assertIn("next: hansa up", notify._item(self.desk, {"event": "server_stopped"})[1])
+        # a session's process cannot be read now: its recorded start folder still names the desk
+        dead = {"pid": 999999, "start": "boot:1"}
+        me = {"key": notify.key_of(dead), "session": dead}
+        folder = self.tmp / "recorded"
+        folder.mkdir()
+        write_json(self.desk.state_dir / up.COORDINATOR_START,
+                   {"kind": "notify", "folder": str(folder), "session": dead})
+        self.assertIn(f"next: {named}", notify._item(self.desk, {"event": "server_stopped"}, me)[1])
+        items, _, _ = notify.server_news({"server": gone}, [], True, 0, 0, self.desk, me)
+        self.assertIn(f"next: {named}", items[0]["line"])
+        write_json(self.desk.state_dir / up.COORDINATOR_START,
+                   {"kind": "notify", "folder": str(self.desk.root), "session": dead})
+        self.assertIn("next: hansa up", notify._item(self.desk, {"event": "server_stopped"}, me)[1])
+        items, _, _ = notify.server_news({"server": gone}, [], True, 0, 0, self.desk, me)
+        self.assertIn("next: hansa up", items[0]["line"])
+
+    def test_a_gone_server_tells_a_session_outside_the_desk_to_name_it(self):
+        srv = self.serving()
+        p, sock = self.session(self.tmp)
+        with self.in_session(p, sock):
+            self.hansa_out("notify", "on")
+        self.soon(lambda: notify.live_records(self.desk))
+        srv.kill()
+        srv.wait()  # stopped without a word: no server_stopped event
+        told = self.soon(lambda: "not running" in self.server_posts(sock) and self.server_posts(sock))
+        self.assertIn("next: " + shlex.join(["hansa", "--desk", str(self.desk.root), "up"]), told)
 
     def test_a_pid_passed_to_another_process_is_not_the_server_for_either_kind_of_lock(self):
         from hansa import run

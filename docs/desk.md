@@ -891,11 +891,13 @@ link that leads nowhere, unreadable) is left as it is, with the reason on
 stderr: rewriting it would drop the other desks, whose runs wait until the
 list is fixed. A missing list is made.
 Outside any desk, with no `--desk` or `HANSA_DESK`, `hansa up` opens this menu
-when stdin and stdout are terminals. `hansa up --all` instead visits every
-listed folder that is still a desk, printing a block for each. Without those
-terminals, or with `HANSA_ROLE`, `HANSA_TASK` or Claude Code session variables
-set, `hansa up` still starts every listed desk. `--all` is refused inside a
-desk or when `--desk` or `HANSA_DESK` names one. Each is started by its own installation with
+when stdin and stdout are terminals. Without those terminals, or with
+`HANSA_ROLE`, `HANSA_TASK` or Claude Code session variables set, the menu cannot
+open: `hansa up` starts nothing and says so, lists the account's desks by folder,
+and gives the two forms that work, `hansa --desk DIR up` and `hansa up --all`.
+`hansa up --all` visits every listed folder that is still a desk, printing a
+block for each; it is refused inside a desk or when `--desk` or `HANSA_DESK`
+names one. Each is started by its own installation with
 `<saved hansa> --desk <folder> up`. If that installation is missing or too old
 to have `up`, nothing starts there and hansa prints the last server command
 instead. `hansa init` puts the new desk on this account's list, stopped. If the

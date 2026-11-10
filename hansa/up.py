@@ -1147,6 +1147,25 @@ def listed_desk_up(root, rec: dict, *, stream: bool = False) -> bool:
         return False
 
 
+def no_desk_text() -> str:
+    """`hansa up` outside a desk where the menu cannot open: it starts nothing, and says which desks the account
+    has and the two commands that start them."""
+    out = ["hansa: no desk here. Run inside a desk, pass --desk DIR, or set HANSA_DESK.",
+           "hansa up outside a desk opens the menu, which needs a terminal outside an agent's session; nothing was "
+           "started."]
+    roots = [str(root) for root, _ in listed_desks()]
+    problem = desks_list_problem()
+    if problem:
+        out.append(problem)
+    elif roots:
+        out.append("The account's desks:")
+        out.extend(f"  {root}" for root in roots)
+    else:
+        out.append("No desks on this account's list. A desk gets on it when its server starts once (hansa serve).")
+    out.append("Start one with hansa --desk DIR up, or every desk with hansa up --all.")
+    return "\n".join(out)
+
+
 def all_desks_up() -> bool:
     found, ok = False, True
     for root, rec in listed_desks():

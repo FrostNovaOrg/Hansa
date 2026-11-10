@@ -481,7 +481,8 @@ class MenuTest(unittest.TestCase):
                 with patch.dict(os.environ, {name: "agent"}), contextlib.redirect_stdout(out):
                     cli.main([])
                     self.assertIn("usage:", out.getvalue())
-                    cli.main(["up"])
+                    with self.assertRaisesRegex(SystemExit, "no desk here"):
+                        cli.main(["up"])  # the menu cannot open for an agent: it starts nothing
                     with self.assertRaisesRegex(SystemExit, "principal"):
                         cli.main(["menu"])
             self.assertEqual(run.call_count, 2)
@@ -492,7 +493,9 @@ class MenuTest(unittest.TestCase):
                     patch.object(Desk, "find", return_value=None), patch.object(up, "all_desks_up", return_value=True) as all_up:
                 cli.main([])
                 self.assertIn("usage:", out.getvalue())
-                cli.main(["up"])
+                with self.assertRaisesRegex(SystemExit, "no desk here"):
+                    cli.main(["up"])  # no menu without both terminals: nothing started
+                cli.main(["up", "--all"])
                 all_up.assert_called_once()
                 with self.assertRaisesRegex(SystemExit, "hansa desks or hansa up"):
                     cli.main(["menu"])
