@@ -40,7 +40,7 @@ import tests.git_env as git_env  # noqa: E402 - as hansa is imported: every git 
 git_env.apply()
 
 import hansa  # noqa: E402
-from hansa import account, alert_bark, alert_http, alert_push, cli, cost, menu, notify, plugin, up, views  # noqa: E402
+from hansa import account, alert, alert_services, alert_bark, alert_http, alert_push, cli, cost, menu, notify, plugin, up, views  # noqa: E402
 from hansa.cli import init_desk, main  # noqa: E402
 from hansa.desk import Desk, now, public_settings, read_json, validate, write_json, write_problems  # noqa: E402
 from hansa.run import (Dispatcher, provider_problem, text_only,  # noqa: E402
@@ -40534,6 +40534,12 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       }
       if ("turn_min" in step) { const el = turnInput(); el.value = step.turn_min; el.on.input({target:el}); }
       if (step.remove) find(el => "data-push-remove" in el.attrs, cards()[step.entry]).on.click();
+      if (step.clearSecret) {
+        confirmReply = step.confirm !== false;
+        const button = find(el => "data-push-clear-secret" in el.attrs, cards()[step.entry]);
+        if (button) button.on.click();
+      }
+      if (step.alertTest) await find(el => el.tag === "button" && el.textContent === run("T.alertTest")).on.click();
       if (step.save) await run("saveSettings()");
       if (step.test) await find(el => "data-push-test" in el.attrs, cards()[step.entry]).on.click();
     }
@@ -40541,7 +40547,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       .map(([k, v]) => [k, typeof v === "function" ? v("WHAT", "WHEN") : v]));
     console.log(JSON.stringify({before, after:shown(), posted, posts:apiPosts.filter(p => p.path !== "/api/settings"),
       settingsPosts:settingsPostCount, problems:run("settingsProblems"), dirty:run("settingsDirty()"),
-      settings:ids["#tab-settings"].textContent, labels}));
+      settings:ids["#tab-settings"].textContent, confirmations, labels}));
     return;
   }
   if (ask === "credit") {
@@ -46374,7 +46380,7 @@ else:
         self.assertEqual(len(self.events("alert_held")), 1)
         self.assertTrue(alert.test(self.desk)["ok"])  # the principal's test bypasses the cap for the whole batch
         self.assertEqual([x["kind"] for x in sender.call_args.args[2]], ["disk", "test"])
-        self.assertEqual(sender.call_args.args[3], 2)
+        self.assertEqual(sender.call_args.args[3], 1)
         self.assertEqual(len(alert._last(self.desk)["runs"]), alert.MOST_RUNS + 1)
 
     def test_alert_channels_slow_bark_and_sender_exception_leave_command_independent(self):
@@ -51228,6 +51234,165 @@ class AlertPushPageTest(unittest.TestCase):
         alert_push.change(self.desk, [{"address": "https://api.day.app/" + key, **edit}], by="page")
         return self.desk.settings()["alert_push"][-1]
 
+    def test_service_refusals_show_code_and_action_on_page(self):
+        cases = (("wecom", "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=fixture-key", 93000),
+                 ("dingtalk", "https://oapi.dingtalk.com/robot/send?access_token=fixture-token", 310000),
+                 ("feishu", "https://open.feishu.cn/open-apis/bot/v2/hook/fixture-hook", 19021),
+                 ("pushdeer", "fixture-pushdeer-key", 1), ("serverchan", "SCTfixture-key", 40001))
+        for service, address, code in cases:
+            entry = self.add(service=service, address=address)
+            self.http.return_value = [{"why": "refused_by_service", "code": code}]
+            self.assertEqual(alert_push.test(self.desk, entry["id"]), "refused_by_service")
+            reply = {"ok": False, "why": "refused_by_service", "last": alert_push.last_result(self.desk, entry["id"])}
+            index = len(self.desk.settings()["alert_push"]) - 1
+            for lang, words in (("en", ("refused", "check", "code")), ("zh", ("拒绝", "检查", "代码"))):
+                with self.subTest(service=service, lang=lang):
+                    shown = self.page([{"entry": index, "test": True}], lang, {"/api/alert/push-test": reply})
+                    for state in ("before", "after"):
+                        last = shown[state]["entries"][index]["last"]
+                        for word in (*words, str(code)):
+                            self.assertIn(word, last)
+                    self.assertNotIn("Try again later", shown["after"]["text"])
+
+    def test_address_refusal_keeps_safe_specific_reason(self):
+        for address, service, words in (
+                ("http://pushdeer.example:8800/message/push?pushkey=private-key", "pushdeer", ("HTTPS", "8800")),
+                ("http://ntfy.sh/private-topic", "ntfy", ("HTTPS",)),
+                ("https://user:private-key@ntfy.sh/topic", "ntfy", ("userinfo",)),
+                ("https://ntfy.sh:bad/private-topic", "ntfy", ("controls",)),
+                ("https://ntfy.sh/topic?token=private-key", "ntfy", ("without a query",))):
+            with self.subTest(address=address):
+                with self.assertRaises(ValueError) as caught:
+                    alert_services.parse(address, service)
+                for word in words:
+                    self.assertIn(word, str(caught.exception))
+                self.assertNotIn("private-key", str(caught.exception))
+                reply = save_from_page(self.desk, {"settings": self.desk.settings(),
+                    "alert_push_changes": [{"service": service, "address": address}]})
+                for lang in ("en", "zh"):
+                    shown = self.page([{"address": address, "service": service}, {"reply": reply, "save": True}], lang)
+                    problems = " ".join(shown["problems"])
+                    self.assertNotIn("private-key", problems)
+                    if lang == "en":
+                        for word in words:
+                            self.assertIn(word, problems)
+                    else:
+                        self.assertRegex(problems, "[\u4e00-\u9fff]")
+
+    def test_seven_save_refusals_are_chinese(self):
+        entry = self.add()
+        cases = (
+            [{"service": "ntfy", "address": "https://ntfy.sh/short"}],
+            [{"service": "gotify", "address": "https://gotify.example"}],
+            [{"id": entry["id"], "service": "ntfy"}],
+            [{"service": "ntfy", "address": "https://ntfy.sh/private-topic", "secret": "bad token"}],
+            [{"service": "wecom", "address": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=fixture-key", "secret": "extra"}],
+            [{"id": entry["id"], "name": self.KEY}],
+            [{"id": entry["id"], "name": "bad\nname"}],
+        )
+        for edits in cases:
+            with self.subTest(edits=edits):
+                reply = save_from_page(self.desk, {"settings": self.desk.settings(), "alert_push_changes": edits})
+                self.assertFalse(reply["ok"])
+                shown = self.page([{"entry": 0, "name": "new name"}, {"reply": reply, "save": True}], "zh")
+                for problem in shown["problems"]:
+                    self.assertRegex(problem, "[\u4e00-\u9fff]")
+                    self.assertNotIn(self.KEY, problem)
+
+    def test_replaced_address_has_no_last_result(self):
+        for service, old, new, why in (
+                ("discord", "https://discord.com/api/webhooks/123/fixture-old", "https://discord.com/api/webhooks/456/fixture-new", "http_4xx"),
+                ("ntfy", "https://ntfy.sh/fixture-old-topic", "https://ntfy.sh/fixture-new-topic", "sent")):
+            with self.subTest(service=service):
+                entry = self.add(service=service, address=old)
+                alert_push.record(self.desk, entry, why, 10015 if service == "discord" else None)
+                alert_push.change(self.desk, [{"id": entry["id"], "name": "renamed", "address": old}], by="page")
+                self.assertIsNotNone(alert_push.last_result(self.desk, entry["id"]))
+                alert_push.change(self.desk, [{"id": entry["id"], "address": new}], by="page")
+                self.assertIsNone(alert_push.last_result(self.desk, entry["id"]))
+                self.assertIn("no push yet", views.status_text(views.status(self.desk)))
+
+    def test_page_can_clear_secret_with_bark_warning_before_save(self):
+        for service, address, secret in (("bark", "https://api.day.app/fixture-device", "1234567890123456"),
+                                          ("ntfy", "https://ntfy.sh/fixture-private-topic", "tk_fixture-token")):
+            entry = self.add(service=service, address=address, secret=secret)
+            index = len(self.desk.settings()["alert_push"]) - 1
+            for lang in ("en", "zh"):
+                with self.subTest(service=service, lang=lang):
+                    cancelled = self.page([{"entry": index, "clearSecret": True, "confirm": False}], lang)
+                    if service == "bark":
+                        self.assertFalse(cancelled["dirty"])
+                        self.assertTrue(cancelled["confirmations"])
+                        warning = cancelled["confirmations"][0]
+                        for word in (("unencrypted", "release codes") if lang == "en" else ("不加密", "发布码")):
+                            self.assertIn(word, warning)
+                    undone = self.page([{"entry": index, "clearSecret": True}, {"entry": index, "clearSecret": True}], lang)
+                    self.assertFalse(undone["dirty"])
+                    replaced = self.page([{"entry": index, "clearSecret": True},
+                        {"entry": index, "secret": secret, "paste": service == "bark"}, {"save": True}], lang)
+                    self.assertEqual(replaced["posted"]["alert_push_changes"], [{"id": entry["id"], "secret": secret}])
+                    shown = self.page([{"entry": index, "clearSecret": True}, {"save": True}], lang)
+                    self.assertEqual(shown["posted"]["alert_push_changes"], [{"id": entry["id"], "secret": ""}])
+                    self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+                    self.assertEqual(alert_push._read(self.desk, entry["id"], True), "")
+                    alert_push.change(self.desk, [{"id": entry["id"], "secret": secret}], by="page")
+
+    def test_test_alert_reports_every_channel_and_any_failure(self):
+        self.add(name="Phone")
+        self.add(service="ntfy", address="https://ntfy.sh/fixture-topic", name="Backup")
+        for cmd, bark_ok in (("", True), ("", False), ("true", False), ("exit 7", True), ("true", True)):
+            with self.subTest(cmd=cmd, bark_ok=bark_ok):
+                settings = self.desk.settings()
+                settings["alert"] = {"command": cmd}
+                self.assertFalse(self.desk.save_settings(settings, by="page"))
+                ntfy_ok = cmd == "true" and bark_ok
+                def send(requests, **kwargs):
+                    ok = bark_ok if "device_key" in requests[0].get("json", {}) else ntfy_ok
+                    return [{"why": "sent" if ok else "refused_by_service", **({} if ok else {"code": 93000})}]
+                self.http.side_effect = send
+                result = alert.test(self.desk)
+                self.assertEqual(result["ok"], cmd != "exit 7" and bark_ok and ntfy_ok)
+                self.assertEqual(len(result["channels"]), 2 + bool(cmd))
+                for lang in ("en", "zh"):
+                    shown = self.page([{"alertTest": True}], lang, {"/api/alert/test": result})
+                    for word in ("Phone", "Backup", *( ("Alert command" if lang == "en" else "提醒命令",) if cmd else ())):
+                        self.assertIn(word, shown["settings"])
+                    if not ntfy_ok:
+                        self.assertIn("93000", shown["settings"])
+                    if cmd == "exit 7":
+                        self.assertIn("exit 7", shown["settings"])
+
+    def test_test_during_hold_counts_only_held_alert_and_status_names_expiry(self):
+        self.add()
+        t = time.time()
+        runs = [t - 60] * alert.MOST_RUNS
+        write_json(alert.last_file(self.desk), {"runs": runs})
+        alert.add(self.desk, "disk", "Low disk")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.assertTrue(alert.test(self.desk)["ok"])
+        body = self.http.call_args.args[0][0]["json"]["body"]
+        self.assertIn("1 held back", body)
+        self.assertNotIn("2 held back", body)
+
+    def test_status_reports_current_hold_count_and_time(self):
+        self.add()
+        t = time.time()
+        runs = [t - 60 + n for n in range(alert.MOST_RUNS + 1)]
+        write_json(alert.last_file(self.desk), {"runs": runs})
+        alert.add(self.desk, "disk", "Low disk")
+        ask = self.desk.add_ask("Already handled")
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.desk.close_ask_as_coordinator(ask, "Done")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--desk", str(self.desk.root), "status"])
+        self.assertIn("1 alert held", out.getvalue())
+        self.assertIn(time.strftime("%Y-%m-%d %H:%M", time.localtime(runs[-alert.MOST_RUNS] + alert.HOUR)), out.getvalue())
+        with unittest.mock.patch.object(alert.time, "time", return_value=t + alert.HOUR):
+            self.assertNotIn("alert held", views.status_text(views.status(self.desk)))
+        write_json(alert.queue_file(self.desk), [])
+        self.assertIsNone(alert.hold_status(self.desk))
+
     def test_push_preview_names_bare_wecom_key_as_bark_without_saving(self):
         address = "fixture-wecom-key"
         auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
@@ -52508,7 +52673,7 @@ class AlertPushTest(unittest.TestCase):
         shown = views.status_text(views.status(self.desk))
         self.assertIn("bark", shown)
         self.assertIn("bark.example/…ce", shown)
-        self.assertIn("last ok: sent", shown)
+        self.assertIn("no push yet", shown)
         self.assertTrue(self.save([{"id": entry["id"], "remove": True}])["ok"])
         self.assertEqual(self.desk.settings()["alert_push"], [])
         self.assertFalse(alert_push._file(self.desk, entry["id"]).exists())

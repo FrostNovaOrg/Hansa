@@ -702,7 +702,9 @@ child running, and only at the limit is its process group killed. Alerts
 within 20 seconds of each other go out in one run to every channel that is set up,
 one batch at a time, and at most 20 runs an hour: beyond that, alerts are held and go out together in one
 run when the hour frees a run, with a line saying how many were held back
-(the page's test button is not held). A run that fails or times out is recorded
+(the page's test button is not held and is excluded from that count).
+`hansa status` shows how many alerts are currently held and when the hourly limit
+frees a run, leaving out answered requests. A run that fails or times out is recorded
 (event `alert_failed` with `channel: "command"`) and `hansa status` shows the last failure with its exit
 code and last lines (none for an alert that held a release's one-time code:
 then only how it ended is kept). The status and page warning clears at the next successful command run.
@@ -717,7 +719,8 @@ again on the page). A failed push records `alert_failed` with
 `channel: "push"`, the entry's `id`, `service` and reason, never its address or a code-bearing push's text,
 even when it failed or was cut. Neither channel carries the other's failure.
 The page has a button that sends a test alert through every channel that is set
-up; no coordinator command sends one.
+up; its result lists every channel, and any failed channel makes the test fail.
+No coordinator command sends one.
 `hansa explain` says which channels are set up: the alert command (and what it is) and each named push address (service, hidden address and on/off).
 
 The `coordinator` alert says that what hansa posts to the coordinator's session (see [hearing from

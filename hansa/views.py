@@ -982,6 +982,7 @@ def status(desk: Desk) -> dict:
         "goals": goals.summaries(desk, tasks),
         "release_codes": alert.release_codes(desk, s),  # command or enabled encrypted Bark
         "alert_failed": alert.failure_line(desk),  # the principal's alert command's last failed run, if any
+        "alert_held": alert.hold_status(desk),
         "alert_push": alert_push.public(desk, s),
         "alert_push_problem": alert_push.migration_problem(desk),
         "alert_push_duplicates": alert_push.duplicate_names(desk, s),
@@ -1091,6 +1092,9 @@ def status_text(st: dict) -> str:
         out += [f"and {len(st['goals']) - 5} more: hansa goal list"]
     out += [st["srt_missing"]] if st.get("srt_missing") else []
     out += [st["alert_failed"]] if st.get("alert_failed") else []
+    if hold := st.get("alert_held"):
+        out.append(f"{hold['count']} alert{'s' if hold['count'] != 1 else ''} held by the hourly limit until "
+                   + time.strftime("%Y-%m-%d %H:%M", time.localtime(hold["until"])))
     out += [st["alert_push_problem"]] if st.get("alert_push_problem") else []
     for names in st.get("alert_push_duplicates", []):
         out.append("Push entries " + ", ".join(names) + " share a push address; remove one on the page (Settings, Alerts)")

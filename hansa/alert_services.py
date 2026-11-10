@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from .alert_bark import BARE_KEY_PROBLEM, Bark, _pasted_address
 from .alert_chat import DingTalk, Discord, Feishu, JsonWebhook, Slack, Telegram, WeCom
-from .alert_phone import Gotify, Ntfy, PushDeer, ServerChan
+from .alert_phone import AddressProblem, Gotify, Ntfy, PushDeer, ServerChan
 
 SERVICES = {service.id: service for service in (
     Bark(), Ntfy(), Gotify(), PushDeer(), ServerChan(),
@@ -106,6 +106,8 @@ def parse(value: str, service: str = "recognize") -> tuple[str, str]:
                 raise ValueError(f"this address looks like a {name} address; choose {name} as the push service")
     try:
         return definition.id, definition.normalize(value)
+    except AddressProblem:
+        raise
     except ValueError as error:
         if str(error) == BARE_KEY_PROBLEM:
             raise ValueError(BARE_KEY_PROBLEM) from None

@@ -6,23 +6,31 @@ import unicodedata
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 
+class AddressProblem(ValueError):
+    """A credential-free address hint safe to show on the page.
+
+    Keep parser exceptions private; use this only for hansa's fixed hints,
+    never for text copied from the address or an underlying exception.
+    """
+
+
 def _url(value, service):
     # Inspect before urlsplit can remove controls. Keep HTTPS and origin checks
     # while these addresses carry credentials, including on self-hosted servers.
     problem = f"{service} needs an HTTPS address without userinfo, fragments, spaces or controls"
     if (not value or any(c.isspace() or unicodedata.category(c) == "Cc" for c in value)
             or any(c in value for c in "#\\")):
-        raise ValueError(problem)
+        raise AddressProblem(problem)
     try:
         parsed = urlsplit(value)
         parsed.port
     except (ValueError, UnicodeError):
-        raise ValueError(problem) from None
+        raise AddressProblem(problem) from None
     if parsed.scheme != "https":
         detail = "; its default plain HTTP on port 8800 is refused" if service == "PushDeer" else ""
-        raise ValueError(f"{service} needs HTTPS, including self-hosted servers{detail}")
+        raise AddressProblem(f"{service} needs HTTPS, including self-hosted servers{detail}")
     if not parsed.hostname or "@" in parsed.netloc:
-        raise ValueError(problem)
+        raise AddressProblem(problem)
     return parsed
 
 
@@ -32,14 +40,14 @@ def _origin(parsed):
 
 def _key(value, label):
     if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
-        raise ValueError(f"paste the {label}")
+        raise AddressProblem(f"paste the {label}")
     return value
 
 
 def _query_key(parsed, field):
     query = parse_qs(parsed.query, keep_blank_values=True, errors="strict")
     if set(query) - {field} or len(query.get(field, [])) > 1:
-        raise ValueError("paste an address with just its token or key")
+        raise AddressProblem("paste an address with just its token or key")
     return query.get(field, [""])[0]
 
 
@@ -79,7 +87,7 @@ class Ntfy:
         parsed = _url(value, "ntfy")
         topic = unquote(parsed.path[1:].removesuffix("/"), errors="strict")
         if parsed.query or "?" in value:
-            raise ValueError("paste the ntfy topic address without a query")
+            raise AddressProblem("paste the ntfy topic address without a query")
         _key(topic, "ntfy topic address")
         return _origin(parsed) + "/" + topic
 

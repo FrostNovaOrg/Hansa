@@ -810,6 +810,26 @@ Object.assign(T, ZH ? {
   pushGeneralHint:"粘贴推送应用或服务显示的完整地址，其中应包含密钥。如果无法识别，请选择推送服务。",
   pushKeepAddress:"留空则保留已保存的地址。保存后只显示隐藏密钥的地址。",
   pushKeepSecret:"留空则保留已保存的额外密钥。网页从不显示已保存的密钥。",
+  pushClearSecret:"清除已保存的密钥", pushSecretClearing:"保存设置时清除密钥。", pushKeepSavedSecret:"保留已保存的密钥",
+  pushBarkClearWarning:"清除 Bark 加密密钥后，这个条目的推送将不加密，也不携带一次性发布码。要清除吗？",
+  pushCode:code => `代码 ${code}`, pushRefused:"服务拒绝了推送",
+  pushRefusedCheck:{wecom:"检查机器人的 webhook 密钥", dingtalk:"检查机器人的关键词和加签密钥", feishu:"检查机器人的关键词和签名校验密钥",
+    pushdeer:"检查 PushDeer 密钥和服务器账号", serverchan:"检查 SendKey 和每日推送配额"},
+  pushCheckDefault:"检查地址、密钥和服务的安全设置",
+  pushNeedsHttps:service => `${service} 需要 HTTPS 地址，自建服务器也一样`,
+  pushHttp8800:"；默认的 8800 端口明文 HTTP 不被接受",
+  pushUrlShape:service => `${service} 需要不含用户信息、片段、空格或控制字符的 HTTPS 地址`,
+  pushSaveProblems:{
+    "the ntfy topic is too short to keep secret; use at least 8 characters or give an access token":"ntfy 主题太短，无法保密；请使用至少 8 个字符，或提供访问令牌。",
+    "Gotify needs the application token in the address or Extra secret":"Gotify 需要应用令牌，请放在地址中或额外密钥栏。",
+    "a new push service needs its address":"更换推送服务时，请同时填写它的地址。",
+    "the extra push secret must be text without spaces or controls":"额外推送密钥必须是文字，不能含空格或控制字符。",
+    "this push service does not take an extra secret":"这个推送服务不接受额外密钥。",
+    "a push name must not contain a saved secret":"推送名称不能包含已保存的密钥。",
+    "alert_push entries need unique ids, a known service, on (boolean), and an optional name; no secrets":"推送条目需要唯一标识、已知服务和开关；名称最多 100 个字符，不能含控制字符或密钥。",
+    "paste the ntfy topic address without a query":"请粘贴不含查询参数的 ntfy 主题地址。",
+    "paste an address with just its token or key":"请粘贴只带令牌或密钥参数的地址。"
+  },
   pushEncrypted:"已加密",
   pushBarkKeyProblem:"请在 Bark 应用中选择 AES-128、AES-192 或 AES-256，模式选 CBC，并使用 16、24 或 32 个 ASCII 字符的密钥。",
   pushBarkDeviceProblem:"这个示例属于另一台 Bark 设备。",
@@ -866,6 +886,26 @@ Object.assign(T, ZH ? {
   pushGeneralHint:"Paste the whole address shown by your push app or service, including its key. If it is not recognized, choose its service.",
   pushKeepAddress:"Left empty, the saved address stays. After saving, only its hidden form is shown.",
   pushKeepSecret:"Left empty, the saved extra secret stays. The page never shows a saved secret.",
+  pushClearSecret:"Clear saved secret", pushSecretClearing:"The secret will be cleared when you save settings.", pushKeepSavedSecret:"Keep saved secret",
+  pushBarkClearWarning:"After clearing the Bark encryption key, this entry’s pushes will be unencrypted and carry no one-time release codes. Clear it?",
+  pushCode:code => `code ${code}`, pushRefused:"the service refused the push",
+  pushRefusedCheck:{wecom:"check the bot's webhook key", dingtalk:"check the bot's keyword and signing secret", feishu:"check the bot's keyword and signature secret",
+    pushdeer:"check the PushDeer key and server account", serverchan:"check the SendKey and daily push quota"},
+  pushCheckDefault:"check the address, secret and service security settings",
+  pushNeedsHttps:service => `${service} needs HTTPS, including self-hosted servers`,
+  pushHttp8800:"; its default plain HTTP on port 8800 is refused",
+  pushUrlShape:service => `${service} needs an HTTPS address without userinfo, fragments, spaces or controls`,
+  pushSaveProblems:{
+    "the ntfy topic is too short to keep secret; use at least 8 characters or give an access token":"The ntfy topic is too short to keep secret; use at least 8 characters or give an access token.",
+    "Gotify needs the application token in the address or Extra secret":"Gotify needs the application token in the address or Extra secret.",
+    "a new push service needs its address":"A new push service needs its address.",
+    "the extra push secret must be text without spaces or controls":"The extra push secret must be text without spaces or controls.",
+    "this push service does not take an extra secret":"This push service does not take an extra secret.",
+    "a push name must not contain a saved secret":"A push name must not contain a saved secret.",
+    "alert_push entries need unique ids, a known service, on (boolean), and an optional name; no secrets":"Push entries need unique ids, a known service and an on/off switch. Names allow at most 100 characters, without controls or secrets.",
+    "paste the ntfy topic address without a query":"Paste the ntfy topic address without a query.",
+    "paste an address with just its token or key":"Paste an address with just its token or key."
+  },
   pushEncrypted:"encrypted",
   pushBarkKeyProblem:"Choose AES-128, AES-192 or AES-256 with CBC in the Bark app and use a 16, 24 or 32 character ASCII key.",
   pushBarkDeviceProblem:"This example is for another Bark device.",
@@ -1791,7 +1831,7 @@ let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, REV = null, LANE_C
 let PUSH_ENTRIES = [], PUSH_SERVICES = [], PUSH_DRAFTS = {};
 const emptyPush = () => ({service:"recognize", address:"", secret:"", name:""});
 let PUSH_NEW = emptyPush();
-const pushDraft = entry => PUSH_DRAFTS[entry.id] ||= {service:entry.service, on:entry.on, name:entry.name || "", address:"", secret:"", remove:false};
+const pushDraft = entry => PUSH_DRAFTS[entry.id] ||= {service:entry.service, on:entry.on, name:entry.name || "", address:"", secret:"", remove:false, clearSecret:false};
 function pushChanges() {
   const changes = [];
   const hasSecret = draft => draft.service === "bark" ? draft.secret.length > 0 : !!draft.secret.trim();
@@ -1802,7 +1842,8 @@ function pushChanges() {
     if (d.name !== (entry.name || "")) edit.name = d.name;
     if (d.service !== entry.service || d.address.trim()) edit.service = d.service;
     if (d.address.trim()) edit.address = d.address.trim();
-    if (hasSecret(d)) edit.secret = d.service === "bark" ? d.secret : d.secret.trim();
+    if (d.clearSecret) edit.secret = "";
+    else if (hasSecret(d)) edit.secret = d.service === "bark" ? d.secret : d.secret.trim();
     if (Object.keys(edit).length > 1) changes.push(edit);
   }
   if (PUSH_NEW.address.trim() || hasSecret(PUSH_NEW)) {
@@ -1823,6 +1864,17 @@ const pushProblem = problem => {
   if (foreign) {
     const known = PUSH_SERVICES.find(s => s.name.en === foreign[1]);
     return T.pushForeign(known ? (known.name[ZH ? "zh" : "en"] || known.name.en) : foreign[1]);
+  }
+  if (ZH) {
+    if (T.pushSaveProblems[problem]) return T.pushSaveProblems[problem];
+    const https = /^(.+) needs HTTPS, including self-hosted servers(; its default plain HTTP on port 8800 is refused)?$/.exec(problem);
+    const shape = /^(.+) needs an HTTPS address without userinfo, fragments, spaces or controls$/.exec(problem);
+    const serviceName = name => PUSH_SERVICES.find(s => s.name.en === name)?.name.zh || name;
+    if (https) return T.pushNeedsHttps(serviceName(https[1])) + (https[2] ? T.pushHttp8800 : "");
+    if (shape) return T.pushUrlShape(serviceName(shape[1]));
+    const key = /^paste the (.+)$/.exec(problem);
+    if (key) return `请粘贴${({"ntfy topic address":" ntfy 主题地址", "Gotify application token":" Gotify 应用令牌",
+      "PushDeer key":" PushDeer 密钥", "Server酱 SendKey":" Server酱 SendKey", key:"机器人的密钥", access_token:"机器人的访问令牌"})[key[1]] || key[1]}。`;
   }
   return {
     "choose the push service for this address":T.pushChooseService,
@@ -2109,6 +2161,7 @@ function problemTarget(problem) {
     : /^(coordinator_alert|alert_language|the alert command|alert_push|push |a push |the extra push |this push )/.test(problem)
       || [T.pushChooseService, T.pushBadAddress, T.pushBareKeyProblem, T.pushLegacyProblem, T.pushBarkKeyProblem, T.pushBarkDeviceProblem].includes(problem)
       || problem.startsWith(T.pushDuplicate("").split("“")[0])
+      || (ZH && (Object.values(T.pushSaveProblems).includes(problem) || /需要.*HTTPS|^请粘贴/.test(problem)))
       || pushForeignProblem(problem) ? "alerts"
     : /^desk_name/.test(problem) ? "lanes" : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
     : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
@@ -2249,8 +2302,13 @@ function alertSection() {
   const said = h("span", {});
   const test = h("button", {onclick: async () => { test.disabled = true; said.textContent = T.alertTesting; said.className = "muted";
     try { const r = await api("/api/alert/test", {});
-      said.textContent = r.ok ? T.alertTestOk : T.alertTestBad + ((r.problems || []).join("; ")
-        || (r.why || (r.timed_out ? "timeout" : `exit ${r.exit}`)) + ((r.tail || []).length ? ": " + r.tail.join(" | ") : r.withheld ? ": " + r.withheld : ""));
+      said.textContent = r.channels?.length ? r.channels.map(channel => {
+        const label = channel.channel === "command" ? T.alertCommandTitle
+          : (channel.name || PUSH_SERVICES.find(s => s.id === channel.service)?.name[ZH ? "zh" : "en"] || channel.service);
+        const result = channel.channel === "push" ? pushResultText(channel.why, channel, channel.code)
+          : channel.ok ? T.pushSent : commandTestFailure(channel);
+        return `${label}: ${result}`;
+      }).join("; ") : r.ok ? T.alertTestOk : T.alertTestBad + ((r.problems || []).join("; ") || commandTestFailure(r));
       said.className = r.ok ? "ok" : "bad"; } catch (e) { err(e); }
     test.disabled = false; }}, T.alertTest);
   S.coordinator_alert = S.coordinator_alert || {};
@@ -2269,13 +2327,21 @@ function alertSection() {
       field(T.reviewShort, bind(S.coordinator_alert, "review_min", "number")),
       field(T.turnShort, bind(S.coordinator_alert, "turn_min", "number"))), help(T.alertCoordinatorNote))];
 }
+const commandTestFailure = r => (r.why || (r.timed_out ? "timeout" : `exit ${r.exit}`))
+  + ((r.tail || []).length ? ": " + r.tail.join(" | ") : r.withheld ? ": " + r.withheld : "");
+const pushResultText = (why, entry, code) => {
+  const result = entry.service === "discord" && why === "http_4xx" && code === 10015 ? T.pushDiscordGone
+    : why === "sent" ? T.pushSent : why === "refused_by_service"
+      ? T.pushRefused + "; " + (T.pushRefusedCheck[entry.service] || T.pushCheckDefault)
+      : T.pushWhy[why] || T.pushUnknown;
+  return result + (code !== undefined && code !== null ? " · " + T.pushCode(code) : "");
+};
 /* Services and hints are supplied by hansa, including services added after this page was written. */
 function pushSection() {
   const word = text => text?.[ZH ? "zh" : "en"] || text?.en || "";
   const service = id => PUSH_SERVICES.find(s => s.id === id);
   const serviceName = id => word(service(id)?.name) || id;
-  const whyText = (why, entry, code) => entry.service === "discord" && why === "http_4xx" && code === 10015
-    ? T.pushDiscordGone : why === "sent" ? T.pushSent : T.pushWhy[why] || T.pushUnknown;
+  const whyText = pushResultText;
   const editFields = (draft, fresh = false) => {
     const preview = h("p", {class:"field-note", "aria-live":"polite", "data-push-preview":""});
     let previewVersion = 0;
@@ -2302,22 +2368,28 @@ function pushSection() {
           if (key !== "secret" || draft.service !== "bark") return;
           // Password inputs strip line breaks. Preserve the copied script in
           // memory for parsing; show only its flattened, masked input value.
-          e.preventDefault(); draft[key] = e.clipboardData.getData("text");
+          e.preventDefault(); draft[key] = e.clipboardData.getData("text"); draft.clearSecret = false;
           e.target.value = draft[key].replace(/[\r\n]/g, " "); refreshSettingsState();
         },
-        oninput:async e => { draft[key] = e.target.value; refreshSettingsState();
+        oninput:async e => { draft[key] = e.target.value; if (key === "secret") draft.clearSecret = false; refreshSettingsState();
           if (key === "address") await updatePreview(); }});
       return field(label, type === "password" ? passwordControl(el) : el, hint, "", true);
     };
     const select = h("select", {value:draft.service, "data-push-field":"service", onchange:e => {
-      draft.service = e.target.value; draft.secret = ""; renderSettings();
+      draft.service = e.target.value; draft.secret = ""; draft.clearSecret = false; renderSettings();
     }}, (fresh ? [{id:"recognize", name:{en:T.pushRecognize, zh:T.pushRecognize}}] : []).concat(PUSH_SERVICES)
       .map(s => h("option", {value:s.id, selected:draft.service === s.id}, word(s.name))));
     if (draft.address.trim()) updatePreview();
     return fields(input("address", fresh ? T.pushAddress : T.pushReplacement, fresh ? "" : T.pushKeepAddress, "password"), preview,
       field(T.pushService, select, draft.service === "recognize" ? T.pushGeneralHint : word(service(draft.service)?.hint), "", true),
-      service(draft.service)?.extra_secret ? input("secret", word(service(draft.service)?.secret_label) || T.pushSecret,
-        [word(service(draft.service)?.secret_hint), fresh ? "" : T.pushKeepSecret].filter(Boolean).join(" "), "password") : null,
+      service(draft.service)?.extra_secret ? h("div", {}, input("secret", word(service(draft.service)?.secret_label) || T.pushSecret,
+        [word(service(draft.service)?.secret_hint), fresh ? "" : T.pushKeepSecret].filter(Boolean).join(" "), "password"),
+        !fresh && PUSH_ENTRIES.find(e => pushDraft(e) === draft)?.secret_set ? h("button", {
+          type:"button", "data-push-clear-secret":"", onclick:() => {
+            if (!draft.clearSecret && draft.service === "bark" && !window.confirm(T.pushBarkClearWarning)) return;
+            draft.clearSecret = !draft.clearSecret; draft.secret = ""; renderSettings();
+          }}, draft.clearSecret ? T.pushKeepSavedSecret : T.pushClearSecret) : null,
+        draft.clearSecret ? h("p", {class:"warn"}, T.pushSecretClearing) : null) : null,
       input("name", T.pushName));
   };
   const cards = PUSH_ENTRIES.map(entry => {

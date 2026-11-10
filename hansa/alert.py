@@ -551,6 +551,33 @@ def _runs(rec: dict, t: float) -> list:
     return [x for x in runs if isinstance(x, (int, float)) and t - HOUR < x <= t] if isinstance(runs, list) else []
 
 
+def _pending(desk: Desk, queue: list) -> list:
+    """Leave out asks and release requests answered since they were queued."""
+    from . import release
+    closed = {a["id"] for a in desk.asks() if "id" in a and a.get("closed")}
+    pending = []
+    for x in queue:
+        if x["kind"] == "ask" and x.get("ask") in closed:
+            continue
+        if x["kind"] == "release_waiting":
+            r = release.get(desk, x.get("release")) or {}
+            if r.get("state") != "waiting" or not x.get("asked") or r.get("asked") != x["asked"]:
+                continue
+        pending.append(x)
+    return pending
+
+
+def hold_status(desk: Desk) -> dict | None:
+    """The current hourly hold, counting only alerts still awaiting delivery."""
+    with desk.lock():
+        rec = _last(desk)
+        runs = sorted(_runs(rec, time.time()))
+        if not rec.get("held_since") or len(runs) < MOST_RUNS:
+            return None
+        count = len(_pending(desk, _read(desk)[0]))
+        return {"count": count, "until": runs[-MOST_RUNS] + HOUR} if count else None
+
+
 def _record(desk: Desk, result: dict, count: int) -> None:
     last = _last(desk)
     rec = {**last, "last": result, "failed": None if result["ok"] else result}
@@ -567,8 +594,8 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
              wait: bool = False, capped: bool = True) -> dict | None:
     """Send what is queued once it has gathered: when no alert came for `gather` seconds, or the first has waited
     `most_wait`; and, when capped, only if fewer than MOST_RUNS runs began in the last hour (else they wait, and go
-    out together when the hour frees a run). Return the command's result when set, otherwise the first push entry's;
-    None when nothing went out. Each channel records its own result independently."""
+    out together when the hour frees a run). Return the command's result when set, otherwise the first push's,
+    plus every result in channels; None when nothing went out. Each channel records independently."""
     with _one_run(desk, wait) as mine:
         if not mine:
             return None
@@ -585,19 +612,8 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
                 write_json(last_file(desk), {**rec, "held_since": t})
                 desk.event("alert_held", alerts=len(good), most_runs=MOST_RUNS)
             return None
-        from . import release
         with desk.lock():
-            closed = {a["id"] for a in desk.asks() if "id" in a and a.get("closed")}
-            q = []
-            for x in _clean(desk):
-                if x["kind"] == "ask" and x.get("ask") in closed:
-                    continue
-                if x["kind"] == "release_waiting":
-                    r = release.get(desk, x.get("release")) or {}
-                    # Queued wording belongs to this request, and must not say a closed or replaced one waits.
-                    if r.get("state") != "waiting" or not x.get("asked") or r.get("asked") != x["asked"]:
-                        continue
-                q.append(x)
+            q = _pending(desk, _clean(desk))
             write_json(queue_file(desk), [])
         s = desk.settings()
         from . import alert_push
@@ -607,7 +623,8 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
             write_json(last_file(desk), {k: v for k, v in rec.items() if k != "held_since"})
         if not (cmd or pushes) or not q:  # cleared since they were queued: nothing to send them with
             return None
-        held = len(q) if held_since else 0
+        # A page test bypasses the hold; only its queued companions were held.
+        held = sum(x["kind"] != "test" for x in q) if held_since else 0
         kinds = ",".join(dict.fromkeys(x["kind"] for x in q))
         level = max((x["level"] for x in q), key=LEVELS.index)
         lang = "zh" if chinese(desk) else "en"
@@ -650,14 +667,18 @@ def send_due(desk: Desk, gather: float = GATHER, most_wait: float = MOST_WAIT, t
         def send_push(entry):
             batch = items if alert_push.encrypts(desk, entry) else q
             why = alert_push.send(desk, entry, batch, held, deliveries=deliveries)
-            return {"ok": why == "sent", "why": why}
+            last = alert_push.last_result(desk, entry["id"]) or {}
+            return {"channel": "push", "id": entry["id"], "service": entry["service"],
+                    "name": desk.redact(entry.get("name", "")), "ok": why == "sent", "why": why,
+                    **({"code": last["code"]} if "code" in last else {})}
 
         with ThreadPoolExecutor(max_workers=len(pushes) + bool(cmd), thread_name_prefix="hansa-alert-channel") as pool:
             push_runs = [pool.submit(send_push, entry) for entry in pushes]
             command_run = pool.submit(send_command) if cmd else None
-            result = command_run.result() if command_run else push_runs[0].result()
+            channels = ([{"channel": "command", **command_run.result()}] if command_run else [])
+            channels.extend(run.result() for run in push_runs)
         _codes_went(desk, codes, deliveries)
-        return result
+        return {**channels[0], "channels": channels}
 
 
 def _with_codes(desk: Desk, items: list) -> list:
@@ -703,7 +724,9 @@ def test(desk: Desk, timeout: float = TIMEOUT) -> dict:
     add(desk, "test", "a test alert from the page: the alert command works" if cmd else "a test alert from the page",
         zh="来自网页的测试提醒：提醒命令正常" if cmd else "来自网页的测试提醒")
     result = send_due(desk, gather=0, timeout=timeout, wait=True, capped=False)  # the principal's own press
-    return result or {"ok": False, "problems": ["the test alert was not sent"]}
+    if result:
+        return {**result, "ok": all(channel["ok"] for channel in result["channels"])}
+    return {"ok": False, "problems": ["the test alert was not sent"]}
 
 
 def stuck_check(desk: Desk, told: float) -> float:

@@ -40,6 +40,17 @@ notifications. The JSON webhook carries the level as a separate field.
 Service rate limits still apply, including to test pushes and transport retries;
 hansa does not pace requests to each service's quota.
 
+Replacing an entry's address clears its last result until the new address is tried.
+Renaming it or saving the same address keeps the result. Address refusals explain
+HTTPS and URL-format requirements when those checks fail; save errors follow
+the page's language.
+
+Use **Clear saved secret**, then **Save settings**, to remove an extra token or
+key while keeping the address. A blank replacement field still keeps the secret.
+Clearing a Bark encryption key asks for confirmation first: later pushes to that
+entry are unencrypted and carry no one-time release codes. Services that require
+a token still require a valid address/token pair before a save can succeed.
+
 ## Bark
 
 An enabled Bark entry with an encryption key receives a waiting release's one-time code with the same wording
@@ -86,8 +97,8 @@ Save settings, then send a test push. Its encrypted text explains that
 The encryption key has its own 0600 file under `secrets/`, is included in
 redaction and task-change secret checks, and is never shown again. The saved
 entry says **encrypted** on the page, in `hansa status` and in `hansa explain`.
-A blank replacement field keeps the saved key; removing the entry removes its
-secrets, just as for other services. Without a key, Bark delivery stays unchanged.
+A blank replacement field keeps the saved key; **Clear saved secret** removes it
+when settings are saved. Removing the entry removes its secrets, just as for other services. Without a key, Bark delivery stays unchanged.
 Hansa writes the key file with one newline at the end and reads it less only
 that newline, as a key may begin or end with spaces. A key file edited by hand
 to a key the page would refuse (another length, or an extra blank line) sends
@@ -442,6 +453,11 @@ the response's message or contents. The code appears in the entry's last result
 and in `hansa status`. For a push that carried a release code, Hansa keeps none
 of the service's answer, including its error code; the entry's last result and
 `hansa status` show only how the send ended.
+
+`refused_by_service` on the page says the service refused the push, shows its
+retained code, and names what to check: the key for WeCom, keyword/signature
+settings for DingTalk and Feishu, key/account for PushDeer, or SendKey/quota for
+Server酱. Changing those settings may be needed before sending again.
 
 `http_4xx` usually needs an address, token or permission fix; `http_429` means
 rate limiting; `http_5xx` means a server error. `tls`, `network`, `timeout` and
