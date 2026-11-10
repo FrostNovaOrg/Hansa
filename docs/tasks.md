@@ -676,4 +676,11 @@ A task that cannot start for a reason of the machine or of its lane, not its own
 | the lane's repository folder is not there (moved or removed) | that lane | once the folder is there again; if it was moved or renamed, cancel or close the lane's tasks (`hansa cancel`, `hansa close`), then `hansa lane remove L`, then `hansa lane add L --repo NEW_PATH`, then queue the tasks again: they do not carry over, and start in a fresh worktree ([a lane's repository moved or renamed](desk.md#a-lanes-repository-moved-or-renamed)) |
 | git cannot prepare the lane's worktree (a file in it git cannot read, say) | that lane; the others go on | `hansa serve` tries again every minute; they start once git can prepare it |
 
+If a nonempty `HANSA_CLAUDE` names a missing or unrunnable file, `hansa doctor`
+reports a failed Claude Code row with the value and remedy; the same reason
+appears in `hansa status`, in `hansa coordinator`'s `hansa: ...` error (exit 1),
+and in failed `hansa ping` and page provider Check results, without substituting
+another `claude`.
+Empty or unset `HANSA_CLAUDE` keeps the usual PATH lookup.
+
 A task that cannot start for a reason of its own (a file it was given is gone, say) fails, as before; `hansa show` then says to fix what kept it from starting first, then `hansa retry ID`.

@@ -44,7 +44,8 @@ Where things are kept:
     start.json       in the desk's .hansa/coordinator-mod/, written by the desk's owner: what hansa did at this start
                      (whether it loaded the mod, and why not) and the --autocompact options of the command line, as
                      given, and the daily clear's window handed over. Removed before the mod is prepared, and tied
-                     to this start (coordinator.json's at): an earlier start's is never shown
+                     to this start (coordinator.json's at): an earlier start's is never shown. A run that is not
+                     interactive (hansa coordinator -p ...) neither removes nor writes it
     cleared.json     beside it, written by the desk's owner from the session's SessionStart hook for /clear: when the
                      session was last cleared (the daily clear or anyone's), tied to the start as start.json is, and
                      removed with it. Root's session on an account's desk records none

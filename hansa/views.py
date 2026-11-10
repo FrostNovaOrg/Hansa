@@ -893,9 +893,11 @@ def desks() -> dict:
             tasks, server = desk.tasks(), server_state(desk)
             host, port = web_address(desk)
             host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+            # none before its server first served the page: the default port may be another desk's
+            served = (desk.state_dir / "web-port").exists()
             code = read_json(desk.state_dir / "serve-code", {}) or {}
-            row.update(desk_name=alert.desk_name(desk),
-                       server=server["state"], address=f"http://{'[' + host + ']' if ':' in host else host}:{port}/",
+            row.update(desk_name=alert.desk_name(desk), server=server["state"],
+                       address=f"http://{'[' + host + ']' if ':' in host else host}:{port}/" if served else None,
                        version=code.get("build") if server["state"] != "gone" and code.get("pid") == server["pid"] else None,
                        running=sum(m.get("state") == "running" for m in tasks),
                        waiting=sum(m.get("state") == "queued" for m in tasks),
@@ -918,10 +920,10 @@ def desks_text(st: dict) -> str:
             continue
         server = "not running" if row["server"] == "gone" else f"running ({row['server']})"
         blocks.append(f"desk {row['desk_name']} ({row['desk']})\n  server: {server}; hansa {row['version'] or 'unknown'}\n"
-                      f"  page: {row['address']}\n"
+                      f"  page: {row['address'] or 'no address: not started'}\n"
                       f"  tasks: {row['running']} running, {row['waiting']} waiting, {row['review']} waiting for review\n"
                       f"  principal: {row['releases']} releases, {row['todos']} to-dos waiting")
-    return st["problem"] or "\n\n".join(blocks) or "No desks listed"
+    return st["problem"] or "\n\n".join(blocks) or "No desks listed. Make one with: hansa init DIR"
 
 
 def status(desk: Desk) -> dict:

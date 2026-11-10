@@ -67,6 +67,10 @@ Existing folders keep their modes. In an existing group- or world-writable
 desk folder, init still makes the desk and warns:
 `warning: others may write in <folder>; run chmod go-w <folder>`.
 The command quotes a path containing spaces or shell characters.
+With `--repo`, init then gives the lines `hansa lane add` gives of the lane it
+made: `lane a added: REPO, base B, providers ...`, and that the lane has no
+check, so its tasks are merged untested, with the `hansa lane set a check`
+command that gives it one.
 
 The desk's folder must be new or empty (a `.DS_Store` is ignored). `hansa init`
 refuses one that holds anything (files, folders, links, or what an interrupted
@@ -890,7 +894,8 @@ cannot look at: only `ESRCH`, or a start time that reads differently from the sa
 says it is gone. A lock naming only a number, as older servers wrote it, is still judged by
 the server's last round.
 
-Each `hansa serve` start saves `.hansa/serve-start.json`: the absolute path of
+Each `hansa serve` start saves `.hansa/serve-start.json`, once its page is
+bound: the absolute path of
 its installation's `bin/hansa`, `--host`, `--every`, whether `--port` was given
 (and its value if so), and the variables
 that were set: `PATH`, `LANG`, every `LC_*` (including `LC_ALL`), `HANSA_CLAUDE`,
@@ -899,6 +904,10 @@ and `TMUX_TMPDIR`. In tmux it also saves the server and session. A socket in
 tmux's own directory is saved by server name (`-L`), so tmux can recreate the
 directory after a reboot; a custom socket keeps its path (`-S`). A manual
 foreground `hansa serve --port N` works as before and updates this record.
+A start that cannot bind the page (a port in use, a mistyped `--host`, a port
+the system refuses) saves nothing, so `hansa up` still starts the server as it
+last ran; it exits with one line giving the host, the port and the system's
+words, and for a port in use, how to pick another.
 `hansa serve` is the dispatcher and web server that `hansa up` runs.
 The command path keeps links to the installation, so switching such a link
 makes future starts use the new installation.
@@ -941,6 +950,11 @@ Output stays in the pane and is also appended to `.hansa/serve.log`.
 Without tmux it starts a background process in its own session, with input
 from `/dev/null` and output appended to that log. Before either start, a log
 over 20 MB moves to `serve.log.1`, replacing the previous backup.
+
+One `hansa up` starts a desk at a time: it holds `.hansa/up.lock` while it
+starts the server and the coordinator. A second `hansa up` on the same desk
+says another is starting it and waits for that one to finish, then finds the
+server running (`server already running (pid N)`) and the coordinator started.
 
 With no saved start, hansa says so and uses the defaults and the current
 shell's allowed launch variables. After starting it waits up to eight seconds
@@ -1000,9 +1014,11 @@ Running and waiting count task records in `running` and `queued` respectively,
 including verifications. Review counts `done` tasks, excluding verification
 records, as `hansa status` does. Releases count those waiting for approval;
 to-dos count open requests. A stopped desk still shows its counts and its last
-page address (or the default before it has served). Missing or unreadable desk
+page address; a desk whose server has never served its page shows
+`page: no address: not started` (`address` is `null` in `--json`), since the
+default port may be another desk's. Missing or unreadable desk
 folders get one line each, and the other desks are still shown. A missing or
-empty list says `No desks listed`; an unreadable list gives the same reason as
+empty list says `No desks listed. Make one with: hansa init DIR`; an unreadable list gives the same reason as
 `hansa status`. `hansa desks --json` gives the same facts, including `desk_name`
 and the full folder in `desk`, in `desks` and a
 list-level `problem` string. Neither format includes task titles, notes,
@@ -1020,7 +1036,20 @@ leave two versions of the list.
 ### The coordinator's session
 
 Each start of the coordinator's session saves `.hansa/coordinator-start.json`;
-the latest start wins.
+the latest start wins. A `hansa coordinator` run that is not an interactive
+session (claude's `-p`/`--print`, `-h`/`--help` or `-v`/`--version` before
+`--`) saves nothing: it leaves this record, `.hansa/coordinator.json` and the
+mod's `start.json` as the interactive start left them, so `hansa up`, `hansa
+status` and the page still describe that session.
+
+`hansa coordinator` starts no second interactive session beside a running
+one. While the recorded session's process still runs (the same pid, started
+at the same time), or a session hansa posts to still runs, it starts nothing
+and exits 1, naming that session (pid and name, as `hansa status` does) and
+how to reach it: the tmux attach command when its record says it runs in tmux,
+else that it does not run in tmux. Once that session has ended, `hansa
+coordinator` starts as before. A run that is not interactive (`-p ...`) is not
+refused.
 
 - `hansa coordinator [words]` saves hansa's own option (`--clear-daily`), the
   words it gave claude, the folder (the desk), the tmux server and session when

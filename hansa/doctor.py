@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 from . import without_session
-from .desk import program
+from .desk import claude_bin, program
 from .menu import language
 
 
@@ -109,6 +109,8 @@ def check(lang=None):
             return False, tr(f"cannot start: {e}", f"无法启动：{e}"), ""
 
     def located(name):
+        if name == "claude" and env.get("HANSA_CLAUDE"):
+            return claude_bin(env), False
         path = which(name)
         return path or program(name, env), not bool(path)
 
@@ -128,7 +130,11 @@ def check(lang=None):
                                        ("node", "Node", ["--version"], NODE_MIN),
                                        ("claude", "Claude Code", ["--version"], CLAUDE_MIN),
                                        ("tmux", "tmux", ["-V"], None)):
-        path, extra = located(name)
+        try:
+            path, extra = located(name)
+        except RuntimeError as e:
+            row(label, "fails", str(e), ">= " + version_text(minimum), str(e))
+            continue
         if name == "claude":
             claude = path
         need = ">= " + version_text(minimum) if minimum else tr("present", "已安装")
