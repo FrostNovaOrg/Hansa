@@ -6,6 +6,7 @@ import email.message
 import errno
 import fcntl
 import functools
+import importlib
 import inspect
 import io
 import json
@@ -47330,7 +47331,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn('python: ["3.9", "3.x"]', jobs["test"])
         self.assertIn("python-version: ${{ matrix.python }}", jobs["test"])
         self.assertNotIn("HANSA_TESTS_ONLY_UNSANDBOXED", jobs["test"])
-        for variable in ("HANSA_TESTS_NEED_PORTS", "HANSA_TESTS_NEED_UNIX_SOCKETS"):
+        for variable in ("HANSA_TESTS_NEED_PORTS", "HANSA_TESTS_NEED_UNIX_SOCKETS", "HANSA_TESTS_NEED_CLAUDE_PLUGIN"):
             self.assertIn(f'{variable}: "1"', jobs["test"])
         self.assertIn("HANSA_TESTS_NEED_SRT: ${{ startsWith(matrix.os, 'macos') && '1' || '' }}",
                       jobs["test"])
@@ -47339,10 +47340,31 @@ class WorkflowTest(unittest.TestCase):
                                       r"        run: npm install -g @anthropic-ai/sandbox-runtime@")
         for name, job in self.jobs:
             with self.subTest(job=name):
-                for command in ("python3 -m unittest -v tests.test_hansa",
-                                "python3 -m unittest -v contrib.codex.tests",
-                                "claude plugin validate hansa/mod", "claude plugin test hansa/mod"):
-                    self.assertIn(command, job)
+                self.assertIn("npm install -g @anthropic-ai/claude-code@", job)  # the claude tests.test_mod runs
+
+    def test_ci_runs_the_suites_a_run_of_the_runner_with_no_names_runs(self):
+        from tests import run_parallel
+        steps = re.findall(r"- name: Run the tests\n        run: python3 -m unittest -v (.+)\n", self.workflow)
+        self.assertEqual([s.split() for s in steps], [list(run_parallel.SUITES)])
+        self.assertNotIn("claude plugin", self.workflow.split("\njobs:\n", 1)[1])  # tests.test_mod runs them
+
+    def test_every_test_class_under_tests_is_in_those_suites(self):
+        # A test file the suites do not reach would run nowhere: neither in a lane's check nor on GitHub's machines
+        from tests import run_parallel
+        root = Path(__file__).resolve().parent.parent
+        reached = {type(t) for t in run_parallel.load_tests(list(run_parallel.SUITES))}
+        files = sorted(root.glob("tests/**/test_*.py")) + sorted(root.glob("contrib/codex/tests/**/test_*.py"))
+        self.assertIn(root / "tests/test_menu.py", files)
+        self.assertIn(root / "tests/bench/test_11.py", files)
+        missing = []
+        for path in files:
+            module = importlib.import_module(".".join(path.relative_to(root).with_suffix("").parts))
+            for name, case in vars(module).items():
+                if (isinstance(case, type) and issubclass(case, unittest.TestCase) and case.__module__ ==
+                        module.__name__ and unittest.defaultTestLoader.getTestCaseNames(case) and
+                        case not in reached):
+                    missing.append(f"{module.__name__}.{name}")
+        self.assertEqual(missing, [])
 
 
 class AlertBarkTest(unittest.TestCase):

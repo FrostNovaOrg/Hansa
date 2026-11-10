@@ -7,8 +7,13 @@
 # - A run started by hand (workflow_dispatch) runs the whole suite on Ubuntu and macOS, with Python 3.9 and the
 #   newest, and the real srt on macOS. Start it (Actions, tests, Run workflow) before a release whose changes
 #   touch the sandbox (the settings hansa gives srt or a worker's sandbox) or the web page.
-# Every job also runs the Codex adapter's suite (worker runs skip off macOS) and the coordinator plugin's
-# validation and tests. Those use stand-ins too; installing Claude Code's test kit needs no login.
+# "The whole suite" is what `python3 tests/run_parallel.py` runs (its SUITES), named in "Run the tests":
+# tests.test_hansa, which also imports the tests of tests/test_menu.py, tests/test_doctor.py, tests/test_install.py and
+# tests/bench/ (none of them has a step of its own); tests.test_push_services; tests.test_docs; tests.test_mod, the
+# coordinator plugin's validation and tests (claude plugin validate and claude plugin test hansa/mod); and the Codex
+# adapter's suite (worker runs skip off macOS). They use stand-ins too; installing Claude Code's test kit needs no
+# login. HANSA_TESTS_NEED_CLAUDE_PLUGIN makes the plugin's two tests fail rather than skip without a claude that can
+# run them.
 # Tool versions and the upgrade checks are recorded in docs/sandbox.md, under Tools and upgrades.
 # The tests a sandboxed run cannot run are the ones that call skip_in_sandbox or skip_unless_ports
 # (tests/test_hansa.py): they listen on the loopback, make a Unix socket or run the real srt. Unlike a sandboxed
@@ -53,6 +58,7 @@ jobs:
       HANSA_TESTS_NEED_PORTS: "1"
       HANSA_TESTS_NEED_UNIX_SOCKETS: "1"
       HANSA_TESTS_NEED_SRT: ${{ startsWith(matrix.os, 'macos') && '1' || '' }}
+      HANSA_TESTS_NEED_CLAUDE_PLUGIN: "1"
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -69,10 +75,4 @@ jobs:
         if: runner.os == 'macOS'
         run: npm install -g @anthropic-ai/sandbox-runtime@0.0.79
       - name: Run the tests
-        run: python3 -m unittest -v tests.test_hansa tests.test_push_services tests.test_docs
-      - name: Run the Codex adapter's tests
-        run: python3 -m unittest -v contrib.codex.tests
-      - name: Validate the coordinator plugin
-        run: claude plugin validate hansa/mod
-      - name: Run the coordinator plugin's tests
-        run: claude plugin test hansa/mod
+        run: python3 -m unittest -v tests.test_hansa tests.test_push_services tests.test_docs tests.test_mod contrib.codex.tests

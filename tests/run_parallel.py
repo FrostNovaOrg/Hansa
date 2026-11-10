@@ -20,6 +20,11 @@ ROOT = str(Path(__file__).resolve().parent.parent)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.getcwd())  # like python -m unittest, including outside this checkout
 FIELDS = ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")
+# What a run with no names runs, and GitHub's machines too (.github/workflows/tests.yml): hansa's tests (with the
+# modules tests.test_hansa imports: tests/test_menu.py, test_doctor.py, test_install.py and tests/bench/), its
+# push services', its documentation links, the coordinator's mod (claude plugin validate and test, tests/test_mod.py),
+# then the optional Codex adapter's.
+SUITES = ("tests.test_hansa", "tests.test_push_services", "tests.test_docs", "tests.test_mod", "contrib.codex.tests")
 
 
 def load_tests(names):
@@ -419,9 +424,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jobs", type=positive, default=max(1, min(8, (os.cpu_count() or 1) // 2)))
     parser.add_argument("--slowest", type=int, default=0, metavar="K")
-    # hansa's tests, documentation links, then the optional Codex adapter's.
-    parser.add_argument("names", nargs="*", default=["tests.test_hansa", "tests.test_push_services", "tests.test_docs",
-                                                    "contrib.codex.tests"])
+    parser.add_argument("names", nargs="*", default=list(SUITES))
     args = parser.parse_args()
     if args.slowest < 0:
         parser.error("--slowest must be at least 0")
