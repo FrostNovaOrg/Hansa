@@ -11348,14 +11348,15 @@ def save():'''))
         self.desk.update(tid, worker_tmps=[{"path": str(folder)}])
         return tid, pid, root
 
-    def test_a_process_name_cut_inside_a_character_gives_no_start_and_no_state(self):
+    def test_a_process_name_cut_inside_a_character_keeps_its_start_and_state(self):
         from hansa import run
         comm = "test_集成测试运行器.sh".encode()[:15]  # the kernel's 15-byte cut, inside 试's first byte
         self.assertRaises(UnicodeDecodeError, comm.decode)
         _, pid, root = self.leftover_in_fake_proc(comm)
         with self.linux_proc(root):
-            self.assertEqual(run.proc_start(pid), "")
-            self.assertEqual(run._state(pid), "")
+            self.assertEqual(run.proc_start(pid), "boot:12345")
+            self.assertEqual(run._state(pid), "S")
+            self.assertTrue(run.same_start(pid, "boot:12345"))  # still the same process, though its name cannot decode
 
     def test_a_leftover_whose_name_is_cut_inside_a_character_is_stopped_and_listed(self):
         from hansa import run
@@ -11385,6 +11386,16 @@ def save():'''))
         self.assertEqual([x["pid"] for x in stopped], [pid])
         self.assertEqual([x["pid"] for x in self.desk.meta(tid)["left_running"]], [pid])
         self.assertIn(f"pid {pid}: ", views.show_text(self.desk, tid))
+
+    def test_process_table_lists_a_process_whose_name_is_cut_inside_a_character(self):
+        from hansa import run
+        pid = 99999999
+        comm = "test_集成测试运行器.sh".encode()[:15]  # the kernel's 15-byte cut, inside 试's first byte
+        root = self.fake_proc(pid, stat=self.fake_proc_stat(pid, comm))
+        with self.linux_proc(root):
+            table = run.process_table()
+        self.assertEqual(table[pid][:2], (1, "boot:12345"))
+        self.assertAlmostEqual(table[pid][2], 1 + 12345 / os.sysconf("SC_CLK_TCK"))
 
     def test_a_verification_is_swept_at_its_end_too(self):
         from hansa import run
@@ -11583,7 +11594,7 @@ def save():'''))
             pid = int(path.parent.name)
             if pid == 8103:
                 raise PermissionError("unreadable terminal")
-            return f"{pid} (a name with ) in it) S 1 {pid} {pid} {0 if pid == 8101 else 123}"
+            return f"{pid} (a name with ) in it) S 1 {pid} {pid} {0 if pid == 8101 else 123}".encode()
 
         def mac_proc(pid):
             if pid == 8103:
@@ -11599,7 +11610,7 @@ def save():'''))
             with self.subTest(system=system), \
                     unittest.mock.patch.object(run, "process_table", return_value=table) as listing, \
                     unittest.mock.patch.object(Path, "is_dir", return_value=system == "linux"), \
-                    unittest.mock.patch.object(Path, "read_text", linux_stat), \
+                    unittest.mock.patch.object(Path, "read_bytes", linux_stat), \
                     unittest.mock.patch.object(os, "readlink", return_value=folder), \
                     unittest.mock.patch.object(run, "_mac_proc", side_effect=mac_proc), \
                     unittest.mock.patch.object(ctypes, "CDLL", return_value=types.SimpleNamespace(proc_pidinfo=cwd)):
@@ -15573,6 +15584,7 @@ def save():'''))
         p = self.sleeper()
         with unittest.mock.patch.object(run, "_ON_MAC", False), \
                 unittest.mock.patch.object(Path, "read_text", side_effect=OSError("gone")), \
+                unittest.mock.patch.object(Path, "read_bytes", side_effect=OSError("gone")), \
                 unittest.mock.patch.object(run, "_sysctl", side_effect=AssertionError("sysctl off macOS")):
             self.assertEqual(run.proc_start(p.pid), "")
             self.assertEqual(run._state(p.pid), "")

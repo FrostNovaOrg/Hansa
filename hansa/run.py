@@ -3338,6 +3338,13 @@ def task_processes(marks: list, folders: list = ()) -> list:
 _KP_PPID, _KP_TDEV, _PROC_PIDVNODEPATHINFO, _VNODEPATHINFO_SIZE = 560, 572, 9, 2352
 
 
+def _stat_fields(pid) -> list:
+    """The fields of /proc/PID/stat after the process's name. The kernel cuts a name at 15 bytes, perhaps inside
+    a character, so the line is decoded with errors='replace': the fields after the last ')' are ASCII."""
+    line = Path(f"/proc/{pid}/stat").read_bytes().decode("utf-8", errors="replace")
+    return line.rsplit(")", 1)[1].split()
+
+
 def process_table() -> dict:
     """This account's running processes: {pid: (parent pid, start as proc_start gives it, start in seconds since
     the epoch)}. {} when the list cannot be read."""
@@ -3353,7 +3360,7 @@ def process_table() -> dict:
         for p in entries:
             try:
                 if p.name.isdigit() and p.stat().st_uid == os.getuid():
-                    f = (p / "stat").read_text().rsplit(")", 1)[1].split()
+                    f = _stat_fields(p.name)
                     if f[0] != "Z":
                         out[int(p.name)] = (int(f[1]), f"{boot}:{f[19]}", btime + int(f[19]) / hz)
             except (OSError, IndexError, ValueError):
@@ -3406,7 +3413,7 @@ def working_in(folders: list, since: float = 0, table: dict | None = None) -> di
             continue
         try:
             if lib is None:
-                fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+                fields = _stat_fields(pid)
                 if int(fields[4]) != 0:  # tty_nr: the controlling terminal, regardless of open file descriptors
                     continue
                 cwd = os.readlink(f"/proc/{pid}/cwd")
@@ -3458,7 +3465,7 @@ def group_members(pgid) -> dict:
         for p in Path("/proc").iterdir():
             try:
                 if p.name.isdigit():
-                    f = (p / "stat").read_text().rsplit(")", 1)[1].split()
+                    f = _stat_fields(p.name)
                     if f[0] != "Z" and int(f[2]) == int(pgid):
                         out[int(p.name)] = proc_start(int(p.name))
             except (OSError, IndexError, ValueError):
@@ -5691,8 +5698,8 @@ def proc_start(pid) -> str:
         return ""
     try:
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-        return boot + ":" + Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
-    except (OSError, IndexError, ValueError):  # ValueError: a name the kernel cut inside a character
+        return boot + ":" + _stat_fields(pid)[19]
+    except (OSError, IndexError):
         pass
     return _mac_start(pid) if _ON_MAC else ""
 
@@ -5723,8 +5730,8 @@ def same_start(pid, start: str) -> bool:
 def _state(pid) -> str:
     """A process's state letter (Z: ended, waiting to be reaped); '' if unknown."""
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except (OSError, IndexError, ValueError):  # ValueError: a name the kernel cut inside a character
+        return _stat_fields(pid)[0]
+    except (OSError, IndexError):
         pass
     return _mac_state(pid) if _ON_MAC else ""
 
@@ -5751,7 +5758,7 @@ def group_running(pgid) -> bool:
         for p in Path("/proc").iterdir():
             try:
                 if p.name.isdigit():
-                    f = (p / "stat").read_text().rsplit(")", 1)[1].split()
+                    f = _stat_fields(p.name)
                     if f[0] != "Z" and int(f[2]) == pgid:
                         return True
             except (OSError, IndexError, ValueError):
