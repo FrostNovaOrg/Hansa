@@ -102,7 +102,7 @@ desk for this account, so `hansa` shows it. With a subscription login,
 `hansa up` starts the server, then the coordinator in tmux.
 
 For endpoint-only setups, keep `hansa serve` running. From another terminal,
-configure the page as below, then run `hansa up`. Over SSH, use tmux
+configure the page as below, then run `hansa --desk ~/shop/desk up`. Over SSH, use tmux
 (`tmux new -s shop-server`, then `hansa serve`).
 
 Attach using the coordinator's printed `attach:` command. Answer Claude Code's

@@ -79,7 +79,7 @@ cd ~/shop/desk
 
 初始化会以项目当前检出的分支为基础创建工作线 `a`，并把尚未启动的工作台登记到这个账号下，所以打开 `hansa` 菜单就能看到它。如果已经用订阅登录，`hansa up` 会先启动服务，再在 tmux 里启动协调员。
 
-如果只用接口和密钥，先让 `hansa serve` 保持运行，在另一个终端里按下面的说明配置网页，再运行 `hansa up`。经 SSH 操作时，用 tmux 保持服务运行（先运行 `tmux new -s shop-server`，再运行 `hansa serve`）。
+如果只用接口和密钥，先让 `hansa serve` 保持运行，在另一个终端里按下面的说明配置网页，再运行 `hansa --desk ~/shop/desk up`。经 SSH 操作时，用 tmux 保持服务运行（先运行 `tmux new -s shop-server`，再运行 `hansa serve`）。
 
 用协调员启动时打印的 `attach:` 命令进入会话。Claude Code 问你是否信任这个文件夹时，选“是”，它获准使用的命令才能运行。
 

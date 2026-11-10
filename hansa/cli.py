@@ -1771,9 +1771,11 @@ def cmd_up(a):
     if getattr(a, "all", False) and desk is not None:
         raise SystemExit("hansa: up --all is for outside a desk, without --desk or HANSA_DESK")
     if desk is None:
-        from . import menu
-        if not getattr(a, "all", False) and menu.available():
-            return cmd_menu(a)
+        if not getattr(a, "all", False):
+            from . import menu
+            if menu.available():
+                return cmd_menu(a)
+            raise SystemExit(up.no_desk_text())
         ok = up.all_desks_up()
     else:
         if not (desk.settings_path.is_file() and desk.tasks_dir.is_dir()):
