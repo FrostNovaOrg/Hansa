@@ -11267,6 +11267,136 @@ def save():'''))
         self.assertIn(f"pid {pid['script']}: ", shown)
         self.assertIn(f"pid {pid['tmpdir']}: ", shown)
 
+    @contextlib.contextmanager
+    def linux_proc(self, root):
+        """Read /proc as hansa does on Linux, from `root`: a stand-in for a kernel whose stat holds raw bytes."""
+        real_is_dir, real_iterdir = Path.is_dir, Path.iterdir
+        real_read_text, real_read_bytes = Path.read_text, Path.read_bytes
+
+        def under_proc(path):
+            name = str(path)
+            return root / name[len("/proc/"):] if name.startswith("/proc/") else None
+
+        def is_dir(path, *args, **kwargs):
+            return True if str(path) == "/proc" else real_is_dir(path, *args, **kwargs)
+
+        def iterdir(path):
+            return iter(list(root.iterdir())) if str(path) == "/proc" else real_iterdir(path)
+
+        def read_text(path, *args, **kwargs):
+            fake = under_proc(path)
+            return real_read_bytes(fake).decode() if fake is not None else real_read_text(path, *args, **kwargs)
+
+        def read_bytes(path, *args, **kwargs):
+            fake = under_proc(path)
+            return real_read_bytes(fake) if fake is not None else real_read_bytes(path, *args, **kwargs)
+
+        with unittest.mock.patch.object(Path, "is_dir", is_dir), \
+                unittest.mock.patch.object(Path, "iterdir", iterdir), \
+                unittest.mock.patch.object(Path, "read_text", read_text), \
+                unittest.mock.patch.object(Path, "read_bytes", read_bytes):
+            yield
+
+    @staticmethod
+    def fake_proc_stat(pid, comm: bytes, state: bytes = b"S", start: int = 12345) -> bytes:
+        """A /proc/PID/stat line as the kernel writes it, with this raw name in it."""
+        fields = [state, b"1", str(pid).encode(), str(pid).encode(), b"0", b"-1", b"4194560", *[b"0"] * 8,
+                  b"20", b"0", b"1", b"0", str(start).encode(), b"0"]
+        return b"%d (%s) %s" % (pid, comm, b" ".join(fields))
+
+    def fake_proc(self, pid, *, stat: bytes, cmdline: bytes = b"", environ: bytes = b"") -> Path:
+        """A stand-in /proc holding this process, and nothing else that runs."""
+        root = self.tmp / "proc"
+        (root / "sys" / "kernel" / "random").mkdir(parents=True, exist_ok=True)
+        (root / "sys" / "kernel" / "random" / "boot_id").write_text("boot\n")
+        (root / "stat").write_text("btime 1\n")
+        d = root / str(pid)
+        d.mkdir(exist_ok=True)
+        (d / "stat").write_bytes(stat)
+        (d / "cmdline").write_bytes(cmdline)
+        (d / "environ").write_bytes(environ)
+        return root
+
+    @contextlib.contextmanager
+    def fake_live_process(self, pid):
+        """os.kill as it would find this process: running until it is signalled, and gone once it is."""
+        state = {"alive": True, "signals": []}
+
+        def kill(p, sig):
+            if int(p) != pid:
+                raise ProcessLookupError(p)
+            if sig == 0:
+                if not state["alive"]:
+                    raise ProcessLookupError(p)
+                return
+            state["signals"].append(sig)
+            state["alive"] = False
+
+        with unittest.mock.patch.object(os, "kill", kill):
+            yield state
+
+    def leftover_in_fake_proc(self, comm: bytes):
+        """A task whose run left a script naming the run's folder, as a stand-in /proc shows this process."""
+        pid = 99999999
+        folder = self.tmp / "run-tmp"
+        folder.mkdir(exist_ok=True)
+        script = folder / "test_集成测试运行器.sh"
+        script.write_text("#!/bin/sh\n")
+        root = self.fake_proc(pid, stat=self.fake_proc_stat(pid, comm),
+                              cmdline=b"/bin/sh\0" + str(script).encode() + b"\0", environ=b"HOME=/\0")
+        tid = self.desk.new_task("Add hello.txt")
+        self.desk.update(tid, worker_tmps=[{"path": str(folder)}])
+        return tid, pid, root
+
+    def test_a_process_name_cut_inside_a_character_keeps_its_start_and_state(self):
+        from hansa import run
+        comm = "test_集成测试运行器.sh".encode()[:15]  # the kernel's 15-byte cut, inside 试's first byte
+        self.assertRaises(UnicodeDecodeError, comm.decode)
+        _, pid, root = self.leftover_in_fake_proc(comm)
+        with self.linux_proc(root):
+            self.assertEqual(run.proc_start(pid), "boot:12345")
+            self.assertEqual(run._state(pid), "S")
+            self.assertTrue(run.same_start(pid, "boot:12345"))  # still the same process, though its name cannot decode
+
+    def test_a_leftover_whose_name_is_cut_inside_a_character_is_stopped_and_listed(self):
+        from hansa import run
+        comm = "test_集成测试运行器.sh".encode()[:15]
+        tid, pid, root = self.leftover_in_fake_proc(comm)
+        with self.linux_proc(root), self.fake_live_process(pid) as proc:
+            stopped = run.sweep(self.desk, tid)
+        self.assertEqual(proc["signals"], [signal.SIGTERM])
+        self.assertEqual([x["pid"] for x in stopped], [pid])
+        self.assertEqual([x["pid"] for x in self.desk.meta(tid)["left_running"]], [pid])
+        self.assertIn("test_集成测试运行器.sh", stopped[0]["command"])
+        self.assertIn(f"pid {pid}: ", views.show_text(self.desk, tid))
+        [e] = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+               if e["event"] == "left_running_stopped"]
+        self.assertEqual(e["task"], tid)
+
+    def test_a_leftover_whose_name_holds_spaces_and_parentheses_is_stopped_as_before(self):
+        from hansa import run
+        comm = b"test (1) run.sh"  # 15 bytes, spaces and parentheses, and every byte decodes
+        tid, pid, root = self.leftover_in_fake_proc(comm)
+        with self.linux_proc(root):
+            self.assertEqual(run.proc_start(pid), "boot:12345")
+            self.assertEqual(run._state(pid), "S")
+        with self.linux_proc(root), self.fake_live_process(pid) as proc:
+            stopped = run.sweep(self.desk, tid)
+        self.assertEqual(proc["signals"], [signal.SIGTERM])
+        self.assertEqual([x["pid"] for x in stopped], [pid])
+        self.assertEqual([x["pid"] for x in self.desk.meta(tid)["left_running"]], [pid])
+        self.assertIn(f"pid {pid}: ", views.show_text(self.desk, tid))
+
+    def test_process_table_lists_a_process_whose_name_is_cut_inside_a_character(self):
+        from hansa import run
+        pid = 99999999
+        comm = "test_集成测试运行器.sh".encode()[:15]  # the kernel's 15-byte cut, inside 试's first byte
+        root = self.fake_proc(pid, stat=self.fake_proc_stat(pid, comm))
+        with self.linux_proc(root):
+            table = run.process_table()
+        self.assertEqual(table[pid][:2], (1, "boot:12345"))
+        self.assertAlmostEqual(table[pid][2], 1 + 12345 / os.sysconf("SC_CLK_TCK"))
+
     def test_a_verification_is_swept_at_its_end_too(self):
         from hansa import run
         tmp = str(self.tmp / "worker")
@@ -11464,7 +11594,7 @@ def save():'''))
             pid = int(path.parent.name)
             if pid == 8103:
                 raise PermissionError("unreadable terminal")
-            return f"{pid} (a name with ) in it) S 1 {pid} {pid} {0 if pid == 8101 else 123}"
+            return f"{pid} (a name with ) in it) S 1 {pid} {pid} {0 if pid == 8101 else 123}".encode()
 
         def mac_proc(pid):
             if pid == 8103:
@@ -11480,7 +11610,7 @@ def save():'''))
             with self.subTest(system=system), \
                     unittest.mock.patch.object(run, "process_table", return_value=table) as listing, \
                     unittest.mock.patch.object(Path, "is_dir", return_value=system == "linux"), \
-                    unittest.mock.patch.object(Path, "read_text", linux_stat), \
+                    unittest.mock.patch.object(Path, "read_bytes", linux_stat), \
                     unittest.mock.patch.object(os, "readlink", return_value=folder), \
                     unittest.mock.patch.object(run, "_mac_proc", side_effect=mac_proc), \
                     unittest.mock.patch.object(ctypes, "CDLL", return_value=types.SimpleNamespace(proc_pidinfo=cwd)):
@@ -15454,6 +15584,7 @@ def save():'''))
         p = self.sleeper()
         with unittest.mock.patch.object(run, "_ON_MAC", False), \
                 unittest.mock.patch.object(Path, "read_text", side_effect=OSError("gone")), \
+                unittest.mock.patch.object(Path, "read_bytes", side_effect=OSError("gone")), \
                 unittest.mock.patch.object(run, "_sysctl", side_effect=AssertionError("sysctl off macOS")):
             self.assertEqual(run.proc_start(p.pid), "")
             self.assertEqual(run._state(p.pid), "")
