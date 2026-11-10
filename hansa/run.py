@@ -5692,7 +5692,7 @@ def proc_start(pid) -> str:
     try:
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         return boot + ":" + Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
-    except (OSError, IndexError):
+    except (OSError, IndexError, ValueError):  # ValueError: a name the kernel cut inside a character
         pass
     return _mac_start(pid) if _ON_MAC else ""
 
@@ -5724,7 +5724,7 @@ def _state(pid) -> str:
     """A process's state letter (Z: ended, waiting to be reaped); '' if unknown."""
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except (OSError, IndexError):
+    except (OSError, IndexError, ValueError):  # ValueError: a name the kernel cut inside a character
         pass
     return _mac_state(pid) if _ON_MAC else ""
 
