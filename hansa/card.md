@@ -77,7 +77,7 @@ they show what is merged, missing evidence and released; `show` also gives the g
 | `hansa retry <id> "<what to change>" [--lane L] [--fresh \| --update] [...]` | a follow-up (new id) from this task's last commit, which it replaces |
 | `hansa verify <id> ["what to look at"] [--lane L] [...]` | a worker runs the change to see whether it holds |
 | `hansa cancel <id>` | stop a queued or running task or verification, or a merge check (back to review) |
-| `hansa close <id>` | close a finished task or verification without merging |
+| `hansa close <id>` | close a finished or failed task or verification without merging |
 | `hansa notify [on \| off]` | the sessions hansa posts to; start or stop this one |
 | `hansa wait [id ...] [--timeout MIN]` | return when a task ends; with no tasks to watch, return at once |
 | `hansa pause "<reason>"` / `hansa resume` | stop / restart queued tasks, releases without asking and new bench runs; running work finishes; lane tries, merge checks and releases the principal said yes to can still start |

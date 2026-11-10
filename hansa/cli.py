@@ -1171,7 +1171,8 @@ def cmd_cancel(a):
                 stopping_merge = desk.meta(owner).get("merge_check") or {}
         else:
             raise SystemExit(f"hansa: {a.id} is {m['state']}; only queued, running or merging tasks "
-                             f"can be cancelled")
+                             f"can be cancelled" + (f"; hansa close {a.id} puts it away"
+                                                    if m["state"] == "failed" and not m.get("closed") else ""))
         if m["state"] != "merging":
             close_verification(desk, m, f"closed: {a.id} was cancelled", by)
     if m["state"] == "running":
@@ -1197,21 +1198,25 @@ def cmd_close(a):
     by = notify.session_here()
     with desk.lock():
         m = desk.meta(a.id)
-        if m["state"] != "done":
-            raise SystemExit(f"hansa: {a.id} is {m['state']}; only finished tasks or verifications can be closed; "
-                             "nothing was changed")
-        if m.get("kind") == "verify":
+        if m["state"] not in ("done", "failed"):
+            raise SystemExit(f"hansa: {a.id} is {m['state']}; only finished or failed tasks or verifications can be "
+                             "closed; nothing was changed")
+        if m.get("kind") == "verify":  # a failed one stays failed, with its error, as a done one stays done
             desk.update(a.id, closed=m.get("closed") or f"closed: {a.id} was closed with hansa close")
-        else:
-            desk.update(a.id, state="cancelled", error="closed without merging", cancel_by=by)
+        else:  # closed as finished work is; a failed task keeps why it failed beside that (hansa show)
+            desk.update(a.id, state="cancelled", error="closed without merging", cancel_by=by,
+                        **({"failed_error": m.get("error") or ""} if m["state"] == "failed" else {}))
         close_verification(desk, m, f"closed: {a.id} was cancelled", by)
+    had = f"{a.id} had failed; it is now closed" if m["state"] == "failed" else ""
     if m.get("kind") == "verify":
         if not m.get("closed"):
             desk.event("verification_closed", task=a.id, by="hansa close")
-        print(f"{a.id} closed; it stays done" + (f", verdict: {m['verdict']}" if m.get("verdict") else ""))
+        print((f"{had}; it stays failed, and hansa show {a.id} still says why" if had else
+               f"{a.id} closed; it stays done" + (f", verdict: {m['verdict']}" if m.get("verdict") else "")))
     else:
         desk.event("task_cancel", task=a.id)
-        print(f"{a.id} closed without merging")
+        print(f"{had} without merging; hansa show {a.id} still says why it failed" if had else
+              f"{a.id} closed without merging")
 
 
 def cmd_verify(a):
@@ -3491,7 +3496,7 @@ def main(argv=None):
     p = add("cancel", cmd_cancel, "stop a queued or running task or verification; on a merging task, stop its merge "
             "check and return it to review; finished work needs close")
     p.add_argument("id")
-    p = add("close", cmd_close, "close a finished task or verification without merging")
+    p = add("close", cmd_close, "close a finished or failed task or verification without merging")
     p.add_argument("id")
     p = add("pause", cmd_pause, "stop new tasks from starting")
     p.add_argument("reason", nargs="*")
