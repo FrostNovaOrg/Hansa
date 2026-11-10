@@ -331,6 +331,17 @@ warns, naming the folder and the other desk, when a
 folder on this desk's write lists is, holds or is inside one on a write list
 of another listed desk.
 
+No entry may be any lane's repository on this desk, a folder inside it
+(including `.git` and `.git/hooks`), or a folder above it, through links too.
+This is necessary while hansa runs git in those repositories outside the
+worker's sandbox: a worker could plant a hook or change git's configuration
+there. `hansa lane set L write ...` refuses the whole change and says why.
+`hansa lane add` also refuses a repository that overlaps an existing write
+entry, naming the lane and the entry; remove that entry first. An entry
+saved before this check is left out of the worker's, setup's and check's
+sandbox, with its reason recorded on the task and marked by
+`hansa explain lane L`; the run continues with the entries that pass.
+
 So none of the user's caches can be listed: not `~/.cache/pip`,
 `~/Library/Caches/pip`, `~/.m2/repository`, `~/.gradle/caches`,
 `~/.npm/_cacache`, `~/.cargo/registry` or any other hidden folder. They are
@@ -358,9 +369,9 @@ the whole folder that holds its package and `bin/hansa`. The folders on the
 above them (`~/bin/git` with `~/bin` on the `PATH`): hansa would run a program
 put there.
 
-The other refusals hold on top: the home folder or above it, the desk, the
-lane's repository, a provider's Claude Code folder and `~/.claude`, a login,
-key or history workers may not read (such as `~/.ssh` or
+The other refusals hold on top: the home folder or above it, the desk, every
+lane's repository on the desk, a provider's Claude Code folder and
+`~/.claude`, a login, key or history workers may not read (such as `~/.ssh` or
 `~/.cargo/credentials`), what the principal lists on the page as not for
 workers to read, a hidden folder at the top (`/.x`: such a folder can be
 another name for the whole disk, as `/.vol`, `/.nofollow` and `/.resolve` are
