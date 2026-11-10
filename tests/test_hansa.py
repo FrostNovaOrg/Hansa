@@ -4271,6 +4271,10 @@ class CoordinatorUpTest(unittest.TestCase):
         """The guide's way there: hansa up without tmux (the server starts, the coordinator not), a task queued by
         hand from a shell, tmux installed, hansa up again. No coordinator ever ran: it starts one."""
         from hansa import up
+        repo = self.tmp / "repo"
+        sh("git", "init", "-q", "-b", "main", str(repo), cwd=self.tmp)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
+        self.say("lane", "add", "a", "--repo", str(repo))
         self.say("add", "--lane", "a", "Add hello.txt")
         self.assertEqual([("session" in m) for m in self.desk.tasks()], [False])  # by hand: no session
         said, calls, ok = self.coordinator_up(tmux="")
