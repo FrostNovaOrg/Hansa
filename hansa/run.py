@@ -103,7 +103,8 @@ def with_oom_score(argv: list, cwd=None, env=None) -> list:
 
 # Only the wording providers use for "out of quota", so a task that is itself
 # about rate limits does not rest a provider when it fails for another reason.
-CREDIT = re.compile(r"credit balance is too low|API Error: 402\b|insufficient[_ ]balance|insufficient_quota|余额不足", re.I)
+CREDIT = re.compile(r"credit balance is too low|\bout of credits\b|API Error: 402\b|"
+                    r"insufficient[_ ]balance|insufficient_quota|余额不足", re.I)
 QUOTA = re.compile(r"API Error: 429|rate_limit_error|usage limit reached|"
                    r"you(?:'|’)ve hit your [\w' ]{0,40}limit|"  # Claude Code's own line for a subscription's limit
                    r"insufficient quota|quota exceeded|too many requests|额度不足|额度已用", re.I)
@@ -1461,7 +1462,9 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
         if str(st.get("reason", "")).startswith("key rejected"):
             return f"{st['reason']}; saving a new key brings it back"
         if str(st.get("reason", "")).startswith("not logged in"):
-            if p["kind"] == "compatible":  # no login of its own: the saved key did not arrive
+            if p["kind"] == "compatible":
+                if st["reason"].startswith("not logged in; "):  # an adapter supplied its own login remedy
+                    return f"{st['reason']}, then `hansa ping {name}` brings it back"
                 return f"{st['reason']}; saving a new key brings it back, or `hansa ping {name}` once it arrives"
             # start Claude Code exactly as the worker does: on macOS a login made with
             # CLAUDE_CONFIG_DIR set, even to ~/.claude, may land in another keychain entry
@@ -4408,6 +4411,9 @@ def unusable_reason(run: dict, err: str, subscription: bool = False):
     if m:
         return "key", f"key rejected ({m.group(0)})"
     if LOGIN.search(text):
+        if not subscription and run.get("login_hint"):
+            # Keep an adapter's remedy in the rest reason; provider_problem adds this provider's ping command.
+            return "login", f"not logged in; {run['login_hint']}"
         return "login", "not logged in (Please run /login)"
     return "", ""
 
