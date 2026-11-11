@@ -117,6 +117,9 @@ NO_MODEL = re.compile(r"\bmodel[_ -]not[_ -](?:found|available|supported|exist)\
                       r"\b(?:unknown|unsupported|no such)[_ -]model\b|\bis not a valid model\b|"
                       r"\bmodel\b[^\n]{0,120}?\b(?:does not exist|doesn't exist|may not exist|not found|not exist|"
                       r"(?:is |is currently )?not (?:available|supported))\b", re.I)
+# Model wording in a server error must keep the outage handling, not start an indefinite model rest.
+HTTP_STATUS = re.compile(r"(?:\b(?:API Error|Codex failed|status(?: code)?|HTTP)\s*:?\s*|^\s*)([1-5]\d\d)\b|"
+                         r"\b(5\d\d) (?:Internal|Bad Gateway|Service Unavailable|Gateway Time)", re.I | re.M)
 # A subscription's login that has run out: Claude Code says so with HTTP 401 and an authentication_error, which
 # is no key to save but a login to make again (unusable_reason gives it as "login" for a subscription provider)
 LOST_LOGIN = re.compile(r"OAuth token (?:has expired|has been revoked|is expired)", re.I)
@@ -4439,7 +4442,10 @@ def unusable_reason(run: dict, err: str, subscription: bool = False):
             # Keep an adapter's remedy in the rest reason; provider_problem adds this provider's ping command.
             return "login", f"not logged in; {run['login_hint']}"
         return "login", "not logged in (Please run /login)"
-    if NO_MODEL.search(text):
+    model_status = status
+    if model_status is None and (m := HTTP_STATUS.search(text)):
+        model_status = int(m.group(1) or m.group(2))
+    if model_status in (None, 400, 404) and NO_MODEL.search(text):
         return "model", "the provider does not know the model"
     return "", ""
 

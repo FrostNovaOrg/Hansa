@@ -18841,6 +18841,44 @@ def save():'''))
         self.assertIn("unsupported parameter", m["error"])
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
 
+    def test_unknown_model_other_http_statuses_keep_their_classification(self):
+        from hansa import run
+        for status, kind in ((200, ""), (301, ""), (401, "key"), (403, "key"), (408, ""),
+                             (422, ""), (429, "quota"), (500, ""), (503, ""), (529, "")):
+            for prefix in ("API Error: ", "HTTP ", "unexpected status ", "status code: ", "Codex failed: ", ""):
+                text = f"{prefix}{status} model_not_found"
+                for structured in (False, True):
+                    with self.subTest(text=text, structured=structured):
+                        answer = {"is_error": True, "result": text}
+                        if structured:
+                            answer["api_error_status"] = status
+                        # Only the existing API Error wording classifies auth/quota without a field.
+                        expected = kind if structured or prefix == "API Error: " else ""
+                        self.assertEqual(run.unusable_reason(answer, "")[0], expected)
+        for status, text in ((503, "API Error: 503 The model is currently not available, please try again later"),
+                             (500, "500 model temporarily not available")):
+            with self.subTest(text=text):
+                answer = {"is_error": True, "api_error_status": status, "result": text}
+                self.assertEqual(run.unusable_reason(answer, ""), ("", ""))
+                self.assertIn(f"server error (HTTP {status})", run.network_reason(answer, ""))
+                self.assertEqual(run.unusable_reason({}, text), ("", ""))
+        for text in ("model_not_found", "Unknown model: example-500", "The model is not available"):
+            self.assertEqual(run.unusable_reason({"is_error": True, "result": text}, "")[0], "model")
+
+    def test_unknown_model_server_errors_remain_outages(self):
+        for status, text in ((503, "The model is currently not available, please try again later"),
+                             (500, "model temporarily not available")):
+            with self.subTest(status=status):
+                m = self.model_run(text=f"API Error: {status} {text}")
+                self.assertEqual((m["state"], m["attempts"][-1]["kind"]), ("queued", "network"))
+                st = self.desk.provider_state()["claude"]
+                self.assertTrue(st.get("unreachable_since"))
+                self.assertFalse(st.get("model_since"))
+                self.assertIn("server error", provider_problem(self.desk, self.desk.settings(), "claude"))
+                self.assertEqual(self.events("provider_model"), [])
+                self.desk.update(m["id"], state="cancelled")
+                (self.tmp / "net-model-1").write_text("0")
+
     def credit_run(self, text="credit balance is too low", status=None):
         count = self.net_lane("402" if status == 402 else "limit", 1, FAKE_LIMIT_TEXT=text)
         count.write_text("0")

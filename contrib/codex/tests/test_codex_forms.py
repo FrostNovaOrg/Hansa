@@ -96,6 +96,32 @@ class ProviderLimits(unittest.TestCase):
 
 
 class OtherForms(unittest.TestCase):
+    def test_unknown_model_server_statuses_remain_server_errors(self):
+        for status, text in ((503, "API Error: 503 The model is currently not available, please try again later"),
+                             (500, "500 model temporarily not available"),
+                             (503, "unexpected status 503: model_not_found"),
+                             (500, "HTTP 500 model_not_found"),
+                             (503, "status code: 503 model_not_found")):
+            with self.subTest(text=text):
+                kind, net, run = read(text)
+                self.assertEqual((kind, run["api_error_status"]), ("", status))
+                self.assertIn(f"server error (HTTP {status})", net)
+
+    def test_unknown_model_other_statuses_and_no_status_keep_their_classification(self):
+        for status, expected in ((200, ""), (301, ""), (401, "login"), (403, "key"),
+                                 (408, ""), (422, ""), (429, "quota"), (529, "")):
+            with self.subTest(status=status):
+                kind, net, _ = read(f"unexpected status {status} Unauthorized: model_not_found" if status == 401
+                                    else f"unexpected status {status}: model_not_found")
+                self.assertEqual(kind, expected)
+                if status == 529:
+                    self.assertIn("overloaded", net)
+        for status in (200, 301, 408, 422):
+            with self.subTest(bare_status=status):
+                self.assertEqual(read(f"{status} model_not_found")[:2], ("", ""))
+        for text in ("model_not_found", "Unknown model: example-500", "The model is not available"):
+            self.assertEqual(read(text)[:2], ("model", ""))
+
     def test_unknown_model_400_and_404_are_model_errors(self):
         for status in (400, 404):
             for text in ("model_not_found", "The model `example` does not exist", "Unknown model: example",
