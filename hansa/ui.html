@@ -531,6 +531,9 @@ const T = ZH ? {
   rest:"歇", toppedUp:"已充值", topUpsToConfirm:"等你确认充值",
   ready:"可用", notChecked:"尚未检查", checkFailed:"上次 Ping 未通过", lastCheck:"上次 Ping", addProvider:"加一家服务商", newName:"名字（小写字母、数字、-）", remove:"删除",
   general:"总体", deskName:"工作台名称",
+  outsideTitle:"允许从本机以外更改设置",
+  outsideNote:"默认关闭。开启后，经由代理或从其他地址打开本页的请求也能保存设置和服务商密钥，和本机自己的地址（SSH 隧道）一样。查看、答复或停止发布、暂停和 Ping 无论开关如何都能从外部进行。",
+  outsideLocked:"本页是从本机以外打开的（例如经由代理）：这里能查看设置，但设置和密钥只能从本机自己的地址（SSH 隧道）更改。如需在这里更改，请在本机地址打开的页面中开启 设置 → 工作线 → 总体 里的“允许从本机以外更改设置”。",
   deskNameHint:"最多 40 个字符，任何语言均可；只用一行，不含控制字符、Unicode 格式字符或已保存的密钥。保存时去掉两端空格；留空或只填空格使用路径的最后两级文件夹。只有负责人在此保存才会更改，并记入设置历史。名称用于提醒、推送标题和分组、网页、status、工作台列表和菜单；列表和菜单同时显示文件夹，以区分同名工作台。",
   concurrency:"同时最多做几件", compactIdle:"空闲时压缩于（token）", compactWorking:"工作中压缩于（token）",
   compactNote:"一轮以回答结束、会话空闲后，若上下文达到第一个数，协调员的 mod 在空闲一分钟后压缩它，这时整个上下文还在提示缓存里。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第二个数时压缩（hansa coordinator 用 --autocompact 传给它）。两个数都在 100,000 到 1,000,000 token 之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或第一个数不小于第二个数），那个压缩就不会发生：Claude Code 自己先压缩了。第二个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。第一个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第二个数从会话下次启动起生效。协调员不能改它们。Claude Code（2.1.299 或更新的版本）还会自己压缩一个有 200,000 token 或更多、空闲了约 54 分钟的对话；这一项 Hansa 既不设置也不读取。mod 需要 Claude Code 2.1.306 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
@@ -717,6 +720,9 @@ const T = ZH ? {
   rest:"rest", toppedUp:"Topped up", topUpsToConfirm:"Top-ups to confirm",
   ready:"ready", notChecked:"not checked yet", checkFailed:"last ping failed", lastCheck:"last ping", addProvider:"Add provider", newName:"name (a-z, 0-9, -)", remove:"Remove",
   general:"General", deskName:"Desk name",
+  outsideTitle:"Allow changing settings from outside this machine",
+  outsideNote:"Off by default. On: a page opened through a proxy or from another address may save settings and provider keys, as this machine's own address (the SSH tunnel) does. Reading, answering or stopping releases, pausing and Ping work from outside either way.",
+  outsideLocked:"This page was opened from outside this machine (through a proxy, say): it shows the settings, but settings and keys change only from this machine's own address (the SSH tunnel). To change them from here, turn on “Allow changing settings from outside this machine” in Settings → Lanes → General on the page opened at this machine's own address.",
   deskNameHint:"Up to 40 characters in any language, on one line, without control or Unicode format characters or saved keys. Saving trims surrounding spaces. Leave blank or use only spaces for the last two folders of the path. Only the principal can save it here; settings history records the change. Used in alerts, push titles and groups, the page, status, desk lists and the menu. Lists and the menu also show the folder to distinguish desks with the same name.",
   concurrency:"Tasks at once", compactIdle:"Compact when idle at (tokens)", compactWorking:"Compact while working at (tokens)",
   compactNote:"Once a turn has ended with an answer and the session is idle, the coordinator's mod compacts it after a minute if its context is at or above the first figure, while the whole context is still in the prompt cache. A new turn cancels the wait. While it works nothing interrupts it: Claude Code's own auto-compact compacts it at the second (hansa coordinator gives it with --autocompact). Both figures take 100,000 to 1,000,000 tokens. The defaults suit a model with a 1M-token window. A figure at or near the model's window, or a first figure at or above the second, never comes: Claude Code compacts on its own first. A second figure above the model's window is taken as that window: Claude Code compacts at the model's own limit, as with no figure. A change to the first applies from the session's next decision (when a turn ends, or a wait ends); a change to the second from the session's next start. The coordinator cannot change them. Claude Code (2.1.299 or later) also compacts by itself a conversation of 200,000 tokens or more left idle about 54 minutes; hansa neither sets nor reads that. The mod needs Claude Code 2.1.306 or later; the status line at the top says whether the session was started with it, and why not.",
@@ -2032,6 +2038,8 @@ function checkButton(name, after) {
 
 /* ---------- settings ---------- */
 let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+// Opened from outside this machine (a proxy) while the principal's switch is off: settings and keys only shown
+let SETTINGS_LOCKED = false;
 // Public, masked entries and service instructions come from the settings reply. Private drafts stay in memory.
 let PUSH_ENTRIES = [], PUSH_SERVICES = [], PUSH_DRAFTS = {};
 const emptyPush = () => ({service:"recognize", address:"", secret:"", name:""});
@@ -2107,7 +2115,7 @@ function settingsReplyProblems(reply) {
   const labels = {cool_minutes:T.cooldown, concurrency:T.concurrency, disk_floor:T.diskFloor,
     providers:T.providers, provider:T.provider, provider_name:T.providerName, coordinator:T.coordinatorGroup, prices:T.prices,
     workers_may_not_read:T.protectedPaths, releases_without_asking:T.autoRelease, release_direct:T.directPolicy,
-    release_mailboxes:T.mailboxTitle, release_forbidden:T.forbiddenWords, release_forbidden_except:T.exceptionsTitle,
+    release_mailboxes:T.mailboxTitle, settings_from_outside:T.outsideTitle, release_forbidden:T.forbiddenWords, release_forbidden_except:T.exceptionsTitle,
     alert_language:T.alertLanguage, alert:T.alertCommandTitle, coordinator_alert:T.alertTiming,
     kind:T.kind, model:T.model, effort:T.effort, base_url:T.endpoint, config_dir:T.loginDir,
     ...Object.fromEntries(Object.entries(MINUTES_LABELS).map(([k, v]) => [k, T[v]]))};
@@ -2130,6 +2138,7 @@ function settingsReplyProblems(reply) {
       whole_number:() => labels[v.field] && T.validationWhole(labels[v.field], v.min, v.max),
       gb_number:() => labels[v.field] && T.validationGB(labels[v.field], v.min, v.max),
       desk_name:() => T.validationDeskName(v.max),
+      settings_local_only:() => T.outsideLocked,
       compact:() => T.validationCompact(v.min, v.max),
       price_required:() => T.validationPriceRequired(v.model),
       price_number:() => prices[v.field] && T.validationPrice(v.model, prices[v.field], v.min),
@@ -2214,7 +2223,7 @@ const SETTINGS_GROUPS = [
 ];
 settingsGroup = keptChoice("sessionStorage", "hansa.settingsSection", SETTINGS_GROUPS.map(([key]) => key), settingsGroup);
 const GROUP_KEYS = {
-  providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact"], lanes:["desk_name"],
+  providers:["providers", "cool_minutes"], coordinator:["coordinator", "coordinator_compact"], lanes:["desk_name", "settings_from_outside"],
   security:["workers_may_not_read", "workers_may_not_read_added"],
   releases:["releases_without_asking", "release_direct", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow"],
   alerts:["alert", "alert_language", "coordinator_alert", "alert_push"], prices:["prices"]
@@ -2264,7 +2273,7 @@ function refreshSettingsState() {
   const symbol = {pending:"pending", error:"error", dirty:"edit", success:"check", idle:"check"}[tone];
   if (settingsForm) { settingsForm.disabled = settingsSaving; settingsForm.setAttribute("aria-busy", String(settingsSaving)); }
   if (settingsSaveButton) {
-    settingsSaveButton.disabled = settingsSaving;
+    settingsSaveButton.disabled = settingsSaving || SETTINGS_LOCKED;
     settingsSaveButton.replaceChildren(icon(settingsSaving ? "pending" : "check"), h("span", {}, settingsSaving ? pending : T.save));
   }
   if (settingsDiscardButton) { settingsDiscardButton.disabled = settingsSaving; settingsDiscardButton.textContent = dirty ? T.reload : T.refresh; }
@@ -2344,6 +2353,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   CREDIT_RESTS = r.provider_credit || {}; CREDIT_MESSAGES = r.provider_credit_messages || {};
   RELEASE_UNMATCHED = r.release_unmatched || []; RELEASE_LAST = r.release_last || {}; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
+  SETTINGS_LOCKED = r.from_outside === true && r.settings.settings_from_outside !== true;
   // Rebase only fields the principal edited, so an unrelated key save or stale-tab reload keeps newer metadata.
   const pushEdits = keepKeys ? pushChanges().filter(edit => edit.id) : [];
   PUSH_ENTRIES = r.alert_push || []; PUSH_SERVICES = r.alert_push_services || []; PUSH_DRAFTS = {};
@@ -2361,7 +2371,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   renderSettings(problems && problems.length ? problems : r.problems);
 }
 async function saveSettings() {
-  if (settingsSaving || !S) return;
+  if (settingsSaving || !S || SETTINGS_LOCKED) return;
   const pendingNames = ["provider", "price"].filter(kind => (kind === "provider" ? newProviderName : newPriceName) !== "");
   const nameProblems = pendingNames.map(settingsNameProblem).filter(Boolean);
   if (nameProblems.length) { settingsFailure = "save"; renderSettings(nameProblems); return; }
@@ -2420,7 +2430,7 @@ async function discardSettings() {
   finally { settingsSaving = false; refreshSettingsState(); }
 }
 async function saveProviderKey(name, clear = false) {
-  if (settingsSaving) return;
+  if (settingsSaving || SETTINGS_LOCKED) return;
   const value = clear ? "" : KEY_DRAFTS[name] || "";
   if (!clear && !value.trim()) return;
   settingsEpoch++;
@@ -2431,7 +2441,7 @@ async function saveProviderKey(name, clear = false) {
       KEYS[name] = !!value.trim(); delete KEY_DRAFTS[name];
       if (value.trim()) delete CREDIT_RESTS[name];
     }
-    if (r.ok === false) { settingsFailure = "key"; renderSettings((r.problems || [T.problems]).map(pushProblem)); }
+    if (r.ok === false) { settingsFailure = "key"; renderSettings(r.code === "settings_local_only" ? settingsReplyProblems(r) : (r.problems || [T.problems]).map(pushProblem)); }
     else {
       if (settingsFailure === "key") { settingsProblems = []; settingsFailure = ""; }
       keyProblemProvider = ""; settingsMessage = clear ? T.keyCleared : T.keySaved; renderSettings();
@@ -2455,7 +2465,7 @@ function controlMeta(obj, key) {
   if (!S) return null;
   const prefix = (group, text) => ({group, matches:problem => problem.startsWith(text)});
   if (obj === S) return prefix(key.startsWith("release") ? "releases" : key === "alert_language" ? "alerts"
-    : key === "desk_name" ? "lanes" : key === "cool_minutes" ? "providers" : "coordinator", key);
+    : ["desk_name", "settings_from_outside"].includes(key) ? "lanes" : key === "cool_minutes" ? "providers" : "coordinator", key);
   if (obj === S.coordinator_compact) return prefix("coordinator", "coordinator_compact:");
   if (obj === S.coordinator_alert) return {group:"alerts", matches:p => p.startsWith("coordinator_alert") && (p.includes(`(${key})`) || p.startsWith("coordinator_alert must"))};
   if (obj === S.alert) return prefix("alerts", "the alert command");
@@ -2484,7 +2494,7 @@ function problemTarget(problem) {
       || problem.startsWith(T.pushDuplicate("").split("“")[0])
       || (ZH && (Object.values(T.pushSaveProblems).includes(problem) || /需要.*HTTPS|^请粘贴/.test(problem)))
       || pushForeignProblem(problem) ? "alerts"
-    : /^desk_name/.test(problem) ? "lanes" : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
+    : /^(desk_name|settings_from_outside)/.test(problem) ? "lanes" : /^cool_minutes/.test(problem) ? "providers" : /^coordinator/.test(problem) ? "coordinator"
     : /^(workers_may_not_read|workers cannot be kept from reading|what workers may not read)/.test(problem) ? "security"
     : /^(release|the releases without asking|the words no release)/.test(problem) ? "releases" : /^price/.test(problem) ? "prices" : /^lane/.test(problem) ? "lanes" : "";
   return group ? {group} : null;
@@ -2843,9 +2853,9 @@ function renderSettings(problems = settingsProblems) {
   const groups = {
     providers: [section(T.connection,
       Object.entries(S.providers).map(([name, p]) => {
-        const saveKey = h("button", {disabled:!(KEY_DRAFTS[name] || "").trim(), onclick:() => saveProviderKey(name)}, T.saveKey);
-        const keyBox = h("input", {type:"password", value:KEY_DRAFTS[name] || "", placeholder:T.keyHint, autocomplete:"off",
-          "aria-label":`${name} · ${T.key}`, oninput:e => { KEY_DRAFTS[name] = e.target.value; saveKey.disabled = !e.target.value.trim(); refreshSettingsState(); }});
+        const saveKey = h("button", {disabled:SETTINGS_LOCKED || !(KEY_DRAFTS[name] || "").trim(), onclick:() => saveProviderKey(name)}, T.saveKey);
+        const keyBox = h("input", {type:"password", value:KEY_DRAFTS[name] || "", placeholder:T.keyHint, autocomplete:"off", disabled:SETTINGS_LOCKED,
+          "aria-label":`${name} · ${T.key}`, oninput:e => { KEY_DRAFTS[name] = e.target.value; saveKey.disabled = SETTINGS_LOCKED || !e.target.value.trim(); refreshSettingsState(); }});
         const kindSel = pick(p, "kind", ["subscription", "compatible"], [T.subscription, T.compatible]);
         kindSel.addEventListener("change", () => renderSettings());
         return h("div", {class:"lane"},
@@ -2860,7 +2870,7 @@ function renderSettings(problems = settingsProblems) {
                   h("div", {}, h("div", {class:"row"}, h("span", {class:"key-status " + (KEYS[name] ? "ok" : "warn")}, icon(KEYS[name] ? "check" : "security"), KEYS[name] ? T.keySet : T.keyMissing), passwordControl(keyBox)),
                     h("div", {class:"row", style:"margin-top:8px"},
                       saveKey,
-                      KEYS[name] ? h("button", {onclick:() => saveProviderKey(name, true)}, T.clearKey) : null)),
+                      KEYS[name] ? h("button", {disabled:SETTINGS_LOCKED, onclick:() => saveProviderKey(name, true)}, T.clearKey) : null)),
                   h("div", {}, T.keySeparate, h("p", {}, T.keyUse), h("p", {class:"warn"}, T.keyTransport)), "", true,
                   {control:keyBox, group:"providers", matches:() => settingsFailure === "key" && keyProblemProvider === name})]
               : [field(T.loginDir, bind(p, "config_dir"), "", "", true)])));
@@ -2879,7 +2889,8 @@ function renderSettings(problems = settingsProblems) {
         h("p", {class:"field-note"}, T.compactHint), help(T.compactNote))],
     lanes: [
       dispatchSection(),
-      section(T.general, fields(field(T.deskName, bind(S, "desk_name"), T.deskNameHint, "", true)),
+      section(T.general, fields(field(T.deskName, bind(S, "desk_name"), T.deskNameHint, "", true),
+        field(T.outsideTitle, bind(S, "settings_from_outside", "bool"), T.outsideNote, "", true)),
         h("p", {class:"field-note"}, T.runtimeReadOnly), fields(
         field(T.concurrency, h("div", {class:"readonly-value"}, S.concurrency), "", T.concurrencyNote),
         field(T.diskFloor, h("div", {class:"readonly-value"}, S.disk_floor ? `${S.disk_floor} GB` : T.diskFloorOff),
@@ -2946,6 +2957,7 @@ function renderSettings(problems = settingsProblems) {
   settingsDiscardButton = h("button", {onclick:discardSettings}, T.reload);
   $("#tab-settings").replaceChildren(...shown([
     h("div", {class:"settings-head"}, h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T.settings), h("h1", {}, T.settings), h("p", {}, T.settingsIntro)), settingsBadge),
+    SETTINGS_LOCKED ? h("div", {class:"notice", role:"status", "data-outside-notice":""}, T.outsideLocked) : null,
     settingsRebase ? h("div", {class:"notice", role:"status"}, settingsRebase) : null,
     settingsProblems.length ? h("section", {class:"settings-errors", role:"alert"}, h("h2", {}, icon("error"), settingsFailure === "savedReload" ? T.savedReloadFailed : T.problems),
       ["stale", "savedReload", "unreached"].includes(settingsFailure) ? null : h("p", {class:"field-note"}, T.retrySave),

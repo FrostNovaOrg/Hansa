@@ -786,6 +786,18 @@ page's browser title and header, and the first line of `hansa status`.
 same name remain distinguishable. Changing the name does not rename its folder
 or tmux server.
 
+Below it, **Allow changing settings from outside this machine**
+(`settings_from_outside`, off by default) decides whether a request that reaches
+`hansa serve` from outside this machine may save settings and provider keys. A
+request counts as from outside unless its `Host` is `127.0.0.1`, `localhost` or
+`[::1]` (any port or letter case) and it has no proxy header (`Forwarded`,
+`X-Forwarded-*`, `X-Real-IP`, `Via`). While the switch is off, such a request
+can still read the page and answer releases, but saving settings or a key gets
+`ok: false` with code `settings_local_only`. A page opened that way shows the
+settings with a notice, and Save settings and the key fields are disabled. Only
+the principal's save on the page changes the switch, and settings history
+records it.
+
 In Alerts, beside the alert command, **Alert language** (`alert_language`) selects
 English (`en`, the default) or Chinese (`zh`). Before it has been saved, the select
 prefills from the page's language; alerts stay English until the principal saves

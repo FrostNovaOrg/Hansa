@@ -11583,7 +11583,7 @@ def save():'''))
         page = object.__new__(server.call_args.args[1])
         body = json.dumps({"provider": "mimo", "key": key}).encode()
         page.path = "/api/key"
-        page.headers = {"Authorization": "Bearer " + self.desk.web_token(),
+        page.headers = {"Authorization": "Bearer " + self.desk.web_token(), "Host": "127.0.0.1:8765",
                         "X-Hansa": "1", "Content-Length": str(len(body))}
         page.rfile = io.BytesIO(body)
         page._send = unittest.mock.Mock()
@@ -33105,7 +33105,9 @@ def save():'''))
         page = object.__new__(server.call_args.args[1])
         page.command = method
         page.path = path
-        page.headers = {"Content-Length": str(len(data)), **(headers or {})}
+        # as a browser on this machine sends it, through the SSH tunnel; "Host": None leaves it out
+        page.headers = {k: v for k, v in {"Host": "127.0.0.1:8765", "Content-Length": str(len(data)),
+                                          **(headers or {})}.items() if v is not None}
         page.rfile, page.wfile = io.BytesIO(data), io.BytesIO()
         page.send_response, page.send_header, page.end_headers = (unittest.mock.Mock() for _ in range(3))
         getattr(page, "do_" + method)()
@@ -33303,6 +33305,149 @@ def save():'''))
                 self.assertNotIn("ETag", headers)
                 self.assertTrue(json.loads(gzip.decompress(body)))
                 self.assertEqual(len(body), int(headers["Content-Length"]))
+
+    # Requests from outside this machine: a Host that is not a loopback name, none, or a proxy's header
+    OUTSIDE_HOSTS = ("evil.example", "127.0.0.1.evil.example", "localhost.evil.example", None)
+    PROXY_HEADERS = (("Forwarded", "for=192.0.2.1"), ("X-Forwarded-For", "192.0.2.1"),
+                     ("X-Forwarded-Host", "desk.example"), ("X-Forwarded-Proto", "https"),
+                     ("x-forwarded-port", "443"), ("X-Real-IP", "192.0.2.1"), ("Via", "1.1 proxy"))
+    LOCAL_HOSTS = ("127.0.0.1:8765", "127.0.0.1", "localhost", "LOCALHOST:8765", "LocalHost", "[::1]:8765", "[::1]")
+
+    def outside_cases(self):
+        return ([{"Host": h} for h in self.OUTSIDE_HOSTS]
+                + [{"Host": "127.0.0.1:8765", k: v} for k, v in self.PROXY_HEADERS])
+
+    def settings_post(self, path, body, headers):
+        auth = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1"}
+        return self.web_request(path, method="POST", headers={**auth, **headers}, data=json.dumps(body).encode())
+
+    def settings_and_keys(self):
+        return (self.desk.settings_path.read_bytes(),
+                sorted((p.name, p.read_bytes()) for p in self.desk.secrets_dir.glob("*.key")),
+                (self.desk.state_dir / "settings-history.jsonl").read_bytes()
+                if (self.desk.state_dir / "settings-history.jsonl").exists() else b"")
+
+    def assert_settings_refused_from_outside(self, code, body):
+        self.assertEqual(code, 200)
+        self.assertIs(body["ok"], False)
+        self.assertEqual(body["code"], "settings_local_only")
+        [said] = body["problems"]
+        for words in ("this machine's own address", "Settings", "General",
+                      "Allow changing settings from outside this machine"):
+            self.assertIn(words, said)
+
+    def test_settings_and_keys_change_from_outside_only_with_the_switch(self):
+        s = self.desk.settings()
+        self.assertIs(s["settings_from_outside"], False)
+        for headers in self.outside_cases():
+            for path, body in (("/api/settings", {"settings": {**s, "cool_minutes": 31}}),
+                               ("/api/settings", {"settings": {**s, "settings_from_outside": True}}),
+                               ("/api/key", {"provider": "mimo", "key": "sk-from-outside"})):
+                with self.subTest(headers=headers, path=path, body=body):
+                    before = self.settings_and_keys()
+                    self.assert_settings_refused_from_outside(*self.settings_post(path, body, headers)[:2])
+                    self.assertEqual(self.settings_and_keys(), before)
+
+    def test_settings_from_loopback_hosts_change_as_now(self):
+        for i, host in enumerate(self.LOCAL_HOSTS):
+            with self.subTest(host=host):
+                s = self.desk.settings()
+                code, body, _ = self.settings_post("/api/settings", {"settings": {**s, "cool_minutes": 40 + i},
+                                                                     "rev": self.desk.settings_rev()}, {"Host": host})
+                self.assertEqual((code, body["ok"]), (200, True), body)
+                self.assertEqual(self.desk.settings()["cool_minutes"], 40 + i)
+                code, body, _ = self.settings_post("/api/key", {"provider": "mimo", "key": f"sk-local-{i}"},
+                                                   {"Host": host})
+                self.assertEqual((code, body), (200, {"ok": True}))
+                self.assertEqual(self.desk.read_key("mimo"), f"sk-local-{i}")
+                code, reply, _ = self.web_request("/api/settings", headers={
+                    "Authorization": "Bearer " + self.desk.web_token(), "Host": host})
+                self.assertIs(reply["from_outside"], False)
+
+    def test_settings_reply_says_whether_the_request_is_from_outside(self):
+        for headers in self.outside_cases():
+            with self.subTest(headers=headers):
+                code, reply, _ = self.web_request("/api/settings", headers={
+                    "Authorization": "Bearer " + self.desk.web_token(), **headers})
+                self.assertEqual(code, 200)
+                self.assertIs(reply["from_outside"], True)
+                self.assertIs(reply["settings"]["settings_from_outside"], False)
+
+    def test_settings_switch_lets_outside_requests_change_settings_and_keys(self):
+        s = self.desk.settings()
+        before = len(self.history_entries()) if (self.desk.state_dir / "settings-history.jsonl").exists() else 0
+        code, body, _ = self.settings_post("/api/settings", {"settings": {**s, "settings_from_outside": True}}, {})
+        self.assertTrue(body["ok"], body)
+        self.assertIs(self.desk.settings()["settings_from_outside"], True)
+        [entry] = [e for e in self.history_entries()[before:] if e["path"] == "settings_from_outside"]
+        self.assertEqual((entry["by"], entry["old"], entry["new"]), ("principal", False, True))
+        for i, headers in enumerate(self.outside_cases()):
+            with self.subTest(headers=headers):
+                s = self.desk.settings()
+                _, body, _ = self.settings_post("/api/settings", {"settings": {**s, "cool_minutes": 50 + i}}, headers)
+                self.assertTrue(body["ok"], body)
+                self.assertEqual(self.desk.settings()["cool_minutes"], 50 + i)
+                _, body, _ = self.settings_post("/api/key", {"provider": "mimo", "key": f"sk-outside-{i}"}, headers)
+                self.assertEqual(body, {"ok": True})
+                self.assertEqual(self.desk.read_key("mimo"), f"sk-outside-{i}")
+        # turned off from outside, it is off for the next request from outside
+        outside = {"Host": "evil.example"}
+        s = self.desk.settings()
+        self.assertTrue(self.settings_post("/api/settings", {"settings": {**s, "settings_from_outside": False}},
+                                           outside)[1]["ok"])
+        self.assert_settings_refused_from_outside(*self.settings_post(
+            "/api/key", {"provider": "mimo", "key": "sk-again"}, outside)[:2])
+
+    def test_settings_switch_is_validated_and_only_the_page_saves_it(self):
+        s = self.desk.settings()
+        for value in ("yes", 1, None, []):
+            with self.subTest(value=value):
+                before = self.settings_and_keys()
+                _, body, _ = self.settings_post("/api/settings", {"settings": {**s, "settings_from_outside": value}}, {})
+                self.assertFalse(body["ok"])
+                self.assertIn("settings_from_outside must be true or false", body["problems"])
+                self.assertEqual(self.settings_and_keys(), before)
+        self.assertTrue(self.desk.save_settings({**s, "settings_from_outside": True}, by="coordinator"))
+        self.assertIs(self.desk.settings()["settings_from_outside"], False)
+        # an older page that leaves the field out keeps it
+        self.assertTrue(save_from_page(self.desk, {"settings": {**s, "settings_from_outside": True}})["ok"])
+        older = {k: v for k, v in self.desk.settings().items() if k != "settings_from_outside"}
+        self.assertTrue(save_from_page(self.desk, {"settings": {**older, "cool_minutes": 33}})["ok"])
+        self.assertIs(self.desk.settings()["settings_from_outside"], True)
+
+    def test_settings_rule_leaves_other_requests_from_outside_as_now(self):
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        for headers in self.outside_cases():
+            with self.subTest(headers=headers):
+                for path in ("/api/status", "/api/settings", "/api/events", "/api/goals", "/api/cost"):
+                    self.assertEqual(self.web_request(path, headers={**auth, **headers})[0], 200, path)
+                for path, data, target in (
+                        ("/api/pause", {}, None), ("/api/resume", {}, None),
+                        ("/api/provider/top-up", {"provider": "mimo"}, "_top_up_provider"),
+                        ("/api/check", {"provider": "mimo"}, "check_provider"),
+                        ("/api/release/answer", {"id": 1, "yes": True}, "release.answer"),
+                        ("/api/release/stop", {"id": 1}, "release.stop_release"),
+                        ("/api/alert/test", {}, "alert.test"),
+                        ("/api/alert/push-test", {"id": "x"}, "_push_test")):
+                    patch = unittest.mock.patch("hansa.web." + target, return_value={"ok": True}) if target \
+                        else contextlib.nullcontext()
+                    with patch as called:
+                        code, body, _ = self.settings_post(path, data, headers)
+                    self.assertEqual((code, body.get("ok")), (200, True), path)
+                    if target:
+                        called.assert_called_once()
+
+    def test_settings_requests_without_the_key_are_refused_before_the_rule(self):
+        for headers in [{}, *self.outside_cases()]:
+            for path in ("/api/settings", "/api/key"):
+                with self.subTest(headers=headers, path=path):
+                    before = self.settings_and_keys()
+                    code, body, _ = self.web_request(path, method="POST", headers={"X-Hansa": "1", **headers},
+                                                     data=json.dumps({"provider": "mimo", "key": "x"}).encode())
+                    self.assertEqual((code, body), (403, {"error": "forbidden"}))
+                    self.assertEqual(self.settings_and_keys(), before)
+            with self.subTest(headers=headers, path="GET /api/settings"):
+                self.assertEqual(self.web_request("/api/settings", headers=headers)[0], 403)
 
     def test_web_http11_reuses_connection_and_frames_responses_without_ports(self):
         from hansa import web
@@ -40686,6 +40831,24 @@ else if (ask === "settings-unavailable") vm.runInContext('show("settings")', ctx
   console.log(JSON.stringify(ids["#state"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {
+  if (ask === "outside-settings") {
+    const run = code => vm.runInContext(code, ctx), tab = ids["#tab-settings"];
+    const found = pred => { const out = []; walk(tab, el => { if (pred(el)) out.push(el); }); return out; };
+    const [toggle] = found(el => el.tag === "input" && el._settingMeta?.matches("settings_from_outside must"));
+    if (!toggle) throw new Error("the switch is missing");
+    const label = descendants(tab, "label").find(el => el.attrs.for === toggle.id)?.textContent;
+    const note = ids["#" + toggle.attrs["aria-describedby"]]?.textContent;
+    const group = toggle._settingMeta.group, checked = toggle.checked;
+    const notices = found(el => "data-outside-notice" in el.attrs).map(el => el.textContent);
+    const keyBoxes = found(el => el.tag === "input" && el.attrs["aria-label"]?.startsWith("mimo · ")).map(el => el.disabled);
+    const keyButtons = found(el => el.tag === "button" && [run("T.saveKey"), run("T.clearKey")].includes(el.textContent))
+      .map(el => ({text:el.textContent, disabled:el.disabled}));
+    const save = run("settingsSaveButton.disabled");
+    toggle.checked = true; toggle.on.change({target:toggle});
+    await run("saveSettings()"); await run('saveProviderKey("mimo", true)');
+    console.log(JSON.stringify({label, note, group, checked, notices, keyBoxes, keyButtons, save,
+      settingsPosts:settingsPostCount, keyPosts:keyPosts.length, posted})); return;
+  }
   if (ask === "desk-name-setting") {
     const run = code => vm.runInContext(code, ctx);
     await run("loadStatus()");
@@ -53431,6 +53594,54 @@ class PageLanguageTest(unittest.TestCase):
                     for word in words:
                         self.assertIn(word, message)
                     self.assertNotIn(terminal[0], message)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_settings_page_from_outside_shows_values_and_disables_save_and_keys(self):
+        harness = self.tmp / "outside-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        words = {"en": ("Allow changing settings from outside this machine", ("Off by default", "proxy"),
+                        ("outside this machine", "own address", "Settings → Lanes → General")),
+                 "zh": ("允许从本机以外更改设置", ("默认关闭", "代理"), ("本机以外", "本机自己的地址", "设置 → 工作线 → 总体"))}
+        for lang, (label, note, notice) in words.items():
+            for outside, switch in ((True, False), (True, True), (False, False)):
+                with self.subTest(lang=lang, outside=outside, switch=switch):
+                    reply = public_settings(self.desk)
+                    reply["settings"]["settings_from_outside"] = switch
+                    reply["settings"]["providers"]["mimo"] = {"kind": "compatible", "model": "m",
+                                                              "base_url": "https://api.example/v1"}
+                    reply.update(keys={"mimo": True}, from_outside=outside)
+                    given = {"/api/settings": reply, "/api/status": views.status(self.desk), "/api/events": []}
+                    result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"),
+                                             "outside-settings", lang], input=json.dumps(given),
+                                            capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    page = json.loads(result.stdout)
+                    self.assertEqual((page["label"], page["group"], page["checked"]), (label, "lanes", switch))
+                    for word in note:
+                        self.assertIn(word, page["note"])
+                    locked = outside and not switch
+                    self.assertEqual(len(page["notices"]), 1 if locked else 0)
+                    for word in notice if locked else ():
+                        self.assertIn(word, page["notices"][0])
+                    self.assertTrue(page["keyBoxes"])
+                    self.assertEqual(set(page["keyBoxes"]), {locked})
+                    self.assertIn({"text": "清除密钥" if lang == "zh" else "Clear key", "disabled": locked},
+                                  page["keyButtons"])
+                    self.assertTrue(all(b["disabled"] for b in page["keyButtons"]) if locked else True)
+                    self.assertEqual(page["save"], locked)
+                    self.assertEqual((page["settingsPosts"], page["keyPosts"]), (0, 0) if locked else (1, 1))
+                    if not locked:
+                        self.assertIs(page["posted"]["settings"]["settings_from_outside"], True)
+
+    def test_settings_refusal_from_outside_reads_in_the_pages_language(self):
+        from hansa import web
+        reply = {"ok": False, "code": "settings_local_only", "problems": [web.SETTINGS_LOCAL_ONLY],
+                 "problem_details": [{"code": "settings_local_only", "values": {}}]}
+        for lang, words in (("en", ("own address", "Settings → Lanes → General")), ("zh", ("本机自己的地址", "总体"))):
+            with self.subTest(lang=lang):
+                shown = self.page([{"turn_min": "45"}, {"reply": reply, "save": True}], lang)
+                for word in words:
+                    self.assertIn(word, " ".join(shown["problems"]))
 
     def test_unknown_validation_code_and_old_server_keep_english_fallback(self):
         for details in (None, [{"code": "future_check", "values": {"limit": 7}}]):
