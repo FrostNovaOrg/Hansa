@@ -755,6 +755,13 @@ press shows its error and keeps the displayed state and reason box. The header
 still reports when the desk is paused.
 The save bar applies to all editable settings groups. On narrow screens its
 status sits above two buttons; the compact heading and bar leave room for fields.
+Save validation errors name the page's field labels and use its selected language.
+The settings reply keeps the English `problems` for terminal callers and older
+pages, alongside `problem_details` (a code and values for each problem). A page
+that does not recognize a code shows the server's English explanation.
+For a pattern in **Forbidden words** that does not compile, the page names the
+entry and explains the failure in its selected language; Python's diagnostic
+follows unchanged.
 In **Settings → Lanes → General**, **Desk name** (`desk_name` in
 `settings.json`) lets the principal name the desk in any language, for example
 `网店台子`. Saving strips surrounding spaces; only spaces saves an empty name.

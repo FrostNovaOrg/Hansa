@@ -130,7 +130,9 @@ def _save_settings(desk: Desk, body: dict) -> dict:
     warnings = [] if problems else lane_warnings(new)
     # A minutes box of the coordinator alert emptied on the page leaves its key out: say which default applies now
     emptied = {} if problems else _emptied_minutes(on_disk, new)
-    return {"ok": not problems, "problems": problems, **({"lane_warnings": warnings} if warnings else {}),
+    return {"ok": not problems, "problems": problems,
+            **({"problem_details": [getattr(p, "detail", {"code": "unknown", "values": {}}) for p in problems]}
+               if problems else {}), **({"lane_warnings": warnings} if warnings else {}),
             **({"coordinator_alert_defaults": emptied} if emptied else {})}
 
 

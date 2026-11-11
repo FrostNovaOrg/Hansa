@@ -176,6 +176,6 @@ def release_problem_zh(text: str) -> str:
     v = r["values"]
     return {"release_start": lambda: f"无法启动，程序报告：“{v['reason']['text']}”；请修复后重新请求发布并答复",
             "release_lost": lambda: "hansa serve 在发布启动时停止，无法确认命令是否运行；请运行 hansa up，查看输出（hansa release），需要时重新请求并答复",
-            "release_interrupted": lambda: "发布中断，没有退出码；请确认服务器运行（hansa up），检查发布结果后重新请求并答复",
+            "release_interrupted": lambda: "发布中断，没有退出码；请确认后台在运行（hansa up），检查发布结果后重新请求并答复",
             "release_limit": lambda: (f"达到发布目标 {v['target']} 的运行时限" if v.get("target") else "达到工作线的运行时限") + f"（{v['minutes']} 分钟）；请检查发布结果和时限后重新请求并答复",
             }.get(r["code"], lambda: text)()
