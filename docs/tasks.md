@@ -313,6 +313,15 @@ started with another model or effort names its own. On a provider whose endpoint
 `compatible`: any endpoint that speaks the Anthropic API) they add that the endpoint may ignore effort: hansa
 passes it on, but some such endpoints do not act on it.
 
+The [optional Codex adapter](../contrib/codex/README.md) accepts the same five effort values from
+`HANSA_CODEX_EFFORT` and hansa's `--effort`; `--effort` takes precedence, and the adapter's default stays `high`.
+At startup it refuses an invalid effort, an unknown `HANSA_CODEX_` key in `codex.env`, or a setting whose value
+still holds an example's `(default: ...)` note, before starting Codex. These checks guard against configuration
+typos while the adapter reads user-edited env files. Unknown-key errors name the file, key and supported keys;
+missing-setting errors name the file too (`trial.env` when the older filename was read). Assignments may start
+with `export`; comments, blank lines and unrelated keys are ignored. Environment settings still override the
+file. Keep these checks while this file format is supported; they can go when validated configuration replaces it.
+
 ## Queuing after another task
 
 `hansa add` refuses a lane absent from settings and lists the desk's lanes, so a typo cannot leave a task

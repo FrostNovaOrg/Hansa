@@ -33,6 +33,7 @@ PLACEHOLDER = "http://codex.invalid"  # the Codex provider's base URL (a `compat
 CODEX_HOSTS = ("chatgpt.com", "auth.openai.com", "api.openai.com")
 DEFAULT_MODEL = "gpt-6.1-sol"
 DEFAULT_EFFORT = "high"
+EFFORT_VALUES = ("low", "medium", "high", "xhigh", "max")  # the values hansa passes with --effort
 DEFAULT_MAX_TURNS = 300  # hansa always gives --max-turns; its own default
 SETTINGS = ("HANSA_CODEX_BIN", "HANSA_CODEX_HOME", "HANSA_CODEX_MODEL", "HANSA_CODEX_EFFORT", "HANSA_CODEX_LOGS",
             "HANSA_CODEX_SRT", "HANSA_REAL_CLAUDE", "HANSA_CODEX_CA_FILE", "HANSA_CODEX_WEB_SEARCH",
@@ -120,26 +121,45 @@ INNER = ('hansa_codex_f=$1; hansa_codex_h=$2; hansa_codex_c=$3; shift 3; '
 
 # ---- settings and the call -------------------------------------------------------------------------------
 
-def settings_text() -> str:
-    """codex.env, else OLD_ENV when there is no codex.env; '' when neither can be read."""
+class Settings(dict):
+    """The settings and the file read, kept for startup diagnostics without adding a setting key."""
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+
+
+def settings_text() -> tuple:
+    """(file, text): codex.env, else OLD_ENV when there is no codex.env; '' when neither can be read."""
     for f in (CODEX_ENV, OLD_ENV):
         try:
-            return f.read_text(encoding="utf-8")
+            return f, f.read_text(encoding="utf-8")
         except FileNotFoundError:
             continue
         except OSError:
-            break
-    return ""
+            return f, ""
+    return CODEX_ENV, ""
 
 
 def settings(env) -> dict:
-    """The adapter's settings: from the environment, else from codex.env (KEY=VALUE lines) beside bin/. Empty in
-    the environment is unset, except for EMPTY_MEANS_NONE, where empty means none."""
-    out = {}
-    for line in settings_text().splitlines():
-        k, eq, v = line.strip().partition("=")
-        if eq and k.strip() in SETTINGS:
-            out[k.strip()] = os.path.expanduser(v.strip().strip("'\""))
+    """The adapter's settings: from the environment, else from codex.env ([export] KEY=VALUE lines) beside bin/.
+    Empty in the environment is unset, except for EMPTY_MEANS_NONE, where empty means none. Unknown adapter keys
+    and values still holding an example's default note raise ValueError, naming the file."""
+    source, text = settings_text()
+    out = Settings(source)
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        k, eq, v = re.sub(r"^export\s+", "", line).partition("=")
+        k = k.strip()
+        if eq and k.startswith("HANSA_CODEX_") and k not in SETTINGS:
+            raise ValueError(f"{source}: unknown setting {k}; known keys: {', '.join(SETTINGS)}")
+        if eq and k in SETTINGS:
+            v = v.strip().strip("'\"")
+            if re.search(r"\s+\(default:.*\)$", v):
+                raise ValueError(f"{source}: {k} value {v!r} still holds the example's note; remove the note")
+            out[k] = os.path.expanduser(v)
     out.update({k: env[k] for k in SETTINGS if env.get(k) or (k in EMPTY_MEANS_NONE and k in env)})
     return out
 
@@ -846,7 +866,10 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
         return emit(answer("error_during_execution", f"hansa-codex-shim: {why}", sid, model=model))
     for what, v in (("HANSA_CODEX_BIN", codex), ("HANSA_CODEX_HOME", home), ("srt (HANSA_CODEX_SRT)", srt)):
         if not v:
-            return failed(f"{what} is not set")
+            return failed(f"{what} is not set (settings file: {conf.source})")
+    if effort not in EFFORT_VALUES:
+        what = "--effort" if a.get("--effort") else "HANSA_CODEX_EFFORT"
+        return failed(f"{what} ({effort}) is not one of {', '.join(EFFORT_VALUES)}")
     web = web_options(conf)
     if isinstance(web, str):
         return failed(web)
@@ -1094,8 +1117,17 @@ def main(argv: list) -> int:
         watchdog(int(argv[1]), int(argv[2]))
         return 0
     env = given_env()
-    conf = settings(env)
     kind = call_kind(argv, env)
+    try:
+        conf = settings(env)
+    except ValueError as e:
+        why = f"hansa-codex-shim: {e}"
+        if kind == "pass":
+            raise SystemExit(why)
+        a = parse(argv)
+        return emit(answer("error_during_execution", why,
+                           a.get("--session-id") or a.get("--resume") or str(uuid.uuid4()),
+                           model=a.get("--model") or env.get("HANSA_CODEX_MODEL") or DEFAULT_MODEL))
     if kind == "pass":
         pass_through(argv, env, conf)
     if kind == "resume":
