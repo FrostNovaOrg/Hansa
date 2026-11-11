@@ -339,8 +339,6 @@ or ask `scout` when reading is enough; say what you need back.
   was too big or unclear, or the worker got stuck. It fails with the worker's notes as its report
   (at the minutes ceiling, then the last call it started and how long before the stop: a long one
   points to a stuck command): read them, then split the task or make it clearer rather than re-running it unchanged.
-  Codex keeps only its last message, counted turns and reported tokens at a ceiling or on cancellation.
-  More: `hansa help tasks`.
 - A failed write (a full disk) does not stop `hansa serve`: free space so it can record what it kept.
   More: `hansa help free-space`.
 - hansa replaces the keys it knows wherever it shows or records text. It cannot see into compressed
