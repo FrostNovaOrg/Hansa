@@ -41121,6 +41121,8 @@ const pollResponses = [];
 let confirmReply = true, dispatchPostError = null, dispatchPostReply = null;
 // foreignAnswer: what something in front of hansa serve answers instead of it (a sign-in proxy): its kind
 let foreignAnswer = null;
+// serverErrorPaths: the paths hansa serve answers with a 500
+let serverErrorPaths = [];
 const foreignReply = kind => {
   const unparsed = async () => { throw new SyntaxError(kind === "html" ? `Unexpected token '<', "<!DOCTYPE "... is not valid JSON` : "Unexpected end of JSON input"); };
   if (kind === "redirect") return {type:"opaqueredirect", status:0, ok:false, headers:{get:() => null}, json:unparsed};
@@ -41139,6 +41141,7 @@ const serveAnswer = async (path, options) => {
   else apiGets.push(path);
   if (serverGone) throw new TypeError("Failed to fetch");
   if (foreignAnswer) return {...foreignReply(foreignAnswer), foreign:true};
+  if (serverErrorPaths.some(p => path.startsWith(p))) return {status:500, json:async () => ({error:"example server failure"})};
   if (refuseToken) return {status:403, json:async () => { throw new Error("a 403 says Open the address, as text"); }};
   if (options && options.method === "POST" && path === "/api/settings") {
     posted = JSON.parse(options.body); settingsPostCount++;
@@ -41455,6 +41458,48 @@ else if (ask === "foreign-answer") (async () => {
   foreignAnswer = null;
   await advance(delay()); await flush();
   console.log(JSON.stringify({away, delays, pressed, back:{notice:notice(), header:ids["#state-text"].textContent}}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "dictionary-keys") {
+  // The keys of this language's dictionary, and the queued step of a task cancelled before it started
+  const queued = vm.runInContext('taskSteps({id:"t0001", state:"cancelled", created:1900000000, ended:1900000100}, null, [])', ctx);
+  console.log(JSON.stringify({keys:Object.keys(vm.runInContext("T", ctx)), queued:descendants(queued, "li")[0].textContent}));
+}
+else if (ask === "foreign-tabs") (async () => {
+  // Each tab's first load meets an answer from something in front of hansa serve (given.foreign), or an ordinary
+  // failure (given.failure: "gone" for no answer, "500" for hansa serve's error); what the tab says and offers.
+  const run = code => vm.runInContext(code, ctx), flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r)); };
+  foreignAnswer = given.foreign || null;
+  serverGone = given.failure === "gone";
+  if (given.failure === "500") serverErrorPaths = ["/api/notes", "/api/gaps", "/api/todos", "/api/tasks", "/api/cost"];
+  const out = {};
+  for (const tab of ["notes", "gaps", "todos", "tasks", "cost"]) {
+    await run(`show("${tab}")`).catch(() => {}); await flush();
+    const host = ids["#tab-" + tab];
+    const buttons = descendants(host, "button").filter(el => !el.hidden && !el.disabled
+      && [run("T.retry"), run("T.reloadPage")].includes(el.textContent));
+    const before = reloads, gets = apiGets.length;
+    if (buttons[0]) await buttons[0].click(); await flush();
+    out[tab] = {text:host.textContent, buttons:buttons.map(el => el.textContent), reloaded:reloads - before, asked:apiGets.length - gets};
+  }
+  console.log(JSON.stringify(out));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "foreign-settings") (async () => {
+  // Settings loads from hansa serve; then its save (or, given.first, its first load) meets an answer from something in front.
+  const run = code => vm.runInContext(code, ctx), flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r)); };
+  if (given.first) { foreignAnswer = given.foreign; serverGone = given.failure === "gone"; }
+  await run('show("settings")').catch(() => {}); await flush();
+  if (!given.first) {
+    run("S.cool_minutes = (S.cool_minutes || 0) + 7"); run("refreshSettingsState()");
+    foreignAnswer = given.foreign || null; serverGone = given.failure === "gone";
+    if (given.failure === "500") serverErrorPaths = ["/api/settings"];
+    await run("settingsSaveButton").click(); await flush();
+  }
+  const host = ids["#tab-settings"];
+  const errors = []; walk(host, el => { if (el.className === "settings-errors" || el.attrs?.["data-load-failed"] !== undefined) errors.push(el); });
+  const buttons = errors.flatMap(el => descendants(el, "button")).filter(el => el.textContent === run("T.reloadPage"));
+  const before = reloads;
+  if (buttons[0]) await buttons[0].click();
+  console.log(JSON.stringify({errors:errors.map(el => el.textContent).join(""), reloadButtons:buttons.length, reloaded:reloads - before}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "token-refused") (async () => {
   const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
@@ -45479,6 +45524,69 @@ else if (ask === "task-steps")'''))
                         self.assertEqual(out["pressed"], 1)  # the button reloads the page
                         self.assertTrue(out["back"]["notice"]["hidden"])
                         self.assertNotIn(said, out["back"]["header"])
+
+    def test_every_page_key_used_outside_a_zh_guard_is_in_both_dictionaries(self):
+        # A key only one language defines prints "undefined" on the other's page.
+        from hansa import web
+        keys = {language: self.stopped_server_page("dictionary-keys", language) for language in ("en", "zh")}
+        page = Path(web.UI).read_text(encoding="utf-8")
+        script = page[page.index("<script>"):page.rindex("</script>")]
+        lines = script.split("\n")
+        unguarded = {}
+        for number, line in enumerate(lines):
+            for key in re.findall(r'(?<![\w.$])T(?:\.([A-Za-z_]\w*)|\["([A-Za-z_]\w*)"\])', line):
+                key = key[0] or key[1]
+                # guarded: on or just under a line that chooses by ZH, or after "if (!ZH) return" in its function
+                near = "\n".join(lines[max(0, number - 2):number + 1])
+                start = max((i for i in range(number + 1) if re.match(r"(async )?function ", lines[i])), default=0)
+                body = "\n".join(lines[start:number + 1])
+                if not re.search(r"\bZH\s*(\?|&&)", near) and "if (!ZH) return" not in body:
+                    unguarded.setdefault(key, number)
+        self.assertIn("notKnown", unguarded)
+        for language, out in keys.items():
+            missing = sorted(k for k in unguarded if k not in out["keys"])
+            self.assertEqual(missing, [], f"used outside a ZH guard but not in the {language} dictionary")
+        # a task cancelled while queued: its wait is "not known", in the page's own words
+        self.assertIn("Wait: not known", keys["en"]["queued"])
+        self.assertIn("等待: 不知道", keys["zh"]["queued"])
+        for out in keys.values():
+            self.assertNotIn("undefined", out["queued"])
+
+    def test_every_tab_offers_reload_for_an_answer_not_from_hansa_serve_and_retry_otherwise_in_both_languages(self):
+        for language in ("en", "zh"):
+            zh = language == "zh"
+            said = "不是后台（hansa serve）发来的" if zh else "did not come from hansa serve"
+            sign_in = "登录" if zh else "sign-in"
+            reload, retry = ("重新加载", "重试") if zh else ("Reload", "Retry")
+            for kind in ("redirect", "html", "401"):
+                with self.subTest(language=language, kind=kind):
+                    out = self.stopped_server_page("foreign-tabs", language, foreign=kind)
+                    for tab, seen in out.items():
+                        self.assertEqual(seen["buttons"], [reload], tab)
+                        self.assertIn(said, seen["text"], tab)
+                        self.assertIn(sign_in, seen["text"], tab)
+                        for wrong in ("JSON", "Unexpected", "Try again", "请重试"):
+                            self.assertNotIn(wrong, seen["text"], tab)
+                        self.assertEqual(seen["reloaded"], 1, tab)  # the button reloads the page
+                        self.assertEqual(seen["asked"], 0, tab)  # and asks nothing more of the thing in front
+            for failure in ("gone", "500"):
+                with self.subTest(language=language, failure=failure):
+                    out = self.stopped_server_page("foreign-tabs", language, failure=failure)
+                    for tab, seen in out.items():
+                        self.assertEqual(seen["buttons"], [retry], tab)
+                        self.assertNotIn(said, seen["text"], tab)
+                        self.assertEqual(seen["reloaded"], 0, tab)
+                        self.assertGreater(seen["asked"], 0, tab)  # Retry asks hansa serve again
+            with self.subTest(language=language, tab="settings"):
+                retry_save = "修正后可重新保存" if zh else "Correct the values"
+                for first in (False, True):
+                    out = self.stopped_server_page("foreign-settings", language, foreign="html", first=first)
+                    self.assertIn(said, out["errors"])
+                    self.assertNotIn(retry_save, out["errors"])
+                    self.assertEqual((out["reloadButtons"], out["reloaded"]), (1, 1))
+                out = self.stopped_server_page("foreign-settings", language, failure="500")
+                self.assertIn(retry_save, out["errors"])  # an ordinary failed save keeps "save again"
+                self.assertEqual(out["reloadButtons"], 0)
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_recent_events_task_added_only_names_a_present_lane_in_both_languages(self):

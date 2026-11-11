@@ -186,6 +186,11 @@ an answer without it (a redirect, a 200 that is not hansa serve's, a 401 or
 hansa serve, with a Reload button. The page never reloads by itself, keeps
 polling with the same backoff as for an unreached server, and clears the
 message when hansa serve answers again.
+Every tab does so: Status and Goals in their connection notice, Notes, Gaps,
+To-dos, Tasks and Cost where a failed load shows, Settings in its error box
+(without "save again", since another save would meet the same answer). An
+ordinary failure, hansa serve down or answering with an error, still offers
+Retry.
 
 On a phone, the main tabs stay in one row; swipe the row sideways to reach
 the other tabs. Status tables scroll sideways inside their own boxes, keeping
