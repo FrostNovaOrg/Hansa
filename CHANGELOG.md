@@ -10,6 +10,9 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Tasks and workers
 
+- `hansa retry --model` changes a follow-up's model for Claude subscription providers.
+- Follow-ups skip providers that refused earlier rounds without using tries; if all refused, they run in lane order. `hansa show` names those skipped.
+- Lane provider lists accept spaces after commas and reject duplicates.
 - Queue work on lanes, each with its own git worktree, providers, instructions and limits.
   Several lanes can work at once; the coordinator sets concurrency and decides what to merge.
   Workers change files and report; hansa commits their work and cleans up processes.
@@ -274,6 +277,11 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Providers and usage limits
 
+- Expired Claude subscription logins say to log in again, then run `hansa ping`; lost Claude and Codex logins use no try.
+- A successful `hansa ping` or page check clears shared usage rests across desks for the same configured model; another model frees only that provider.
+- With no ready alternative for waiting work, `hansa serve` checks long usage rests with reset times every `cool_minutes`. Success ends the rest; another limit prevents checking the next rest. `hansa status` and `hansa explain provider` say which applies.
+- Providers rejecting their configured model with 400 or 404 rest until a check passes or the principal changes their model or saves a key on the page. Tasks move on without a try; the coordinator hears once. Server errors remain outages.
+- When a timed rest holds tasks, the coordinator hears once with the provider, reason, end time and waiting tasks; `hansa wait` shows the reason.
 - Use Claude's login or compatible providers, with per-provider models, effort and ordered lane
   selection. Known keys are redacted from published text and logs.
 - Usage limits requeue work and rest the provider until its reported reset, or a configured rest.
@@ -287,6 +295,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The terminal menu and `hansa doctor`
 
+- `hansa status` and `hansa cost` show unpriced token counts instead of `$0.00`.
+- Without a table price, Claude workers use Claude Code's recorded figure after provider renames or removal; coordinator usage needs table prices.
 - `hansa init` and `hansa lane add` create a repository with an empty first commit for a new or empty project.
   A folder already holding files is refused, with the commands to commit them.
 - `hansa init --repo` describes the lane it made and warns when it has no check, with the command to set one,
@@ -332,6 +342,10 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The Codex adapter
 
+- Lost logins ask for `codex login`, then `hansa ping`. Workspaces out of credits and plans without Codex wait for a confirmed top-up or saved key.
+- Cancelled runs and runs stopped at their time ceiling keep their last message, turns and reported usage.
+- `codex.env` accepts `export` lines; misspelt efforts and leftover example notes fail at startup.
+- Previously working `codex.env` files with unknown `HANSA_CODEX_` keys now fail until those keys are removed.
 - The optional macOS adapter runs Codex workers inside srt, translates results and live progress
   for hansa, and passes other calls to Claude. [Adapter setup and limits](contrib/codex/README.md)
   covers its own login and configuration, provider errors, login access inside its sandbox and tool-rule limits.
