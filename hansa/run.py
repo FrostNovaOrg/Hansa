@@ -5207,7 +5207,7 @@ def close_verification(desk: Desk, m: dict, why: str, by=None) -> None:
     if v["state"] == "queued":
         desk.update(v["id"], state="cancelled", error=why, cancel_by=by)
     elif v["state"] == "running":  # hansa serve stops it within seconds
-        desk.update(v["id"], cancel=True, cancel_by=by)
+        desk.update(v["id"], cancel=True, cancel_by=by, closed=v.get("closed") or why)
     elif not v.get("closed"):  # closed already (hansa cancel of the verification itself): the first note stays
         desk.update(v["id"], closed=why)
 

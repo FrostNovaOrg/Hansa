@@ -7180,6 +7180,34 @@ def save():'''))
         self.desk.event("anything", detail=f"the endpoint said: bad key {key}")
         self.assertNotIn(key, self.desk.events_path.read_text())
 
+    def test_retry_of_a_change_holding_a_known_key_requires_fresh(self):
+        key = "sk-retry-example-0123456789"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_WRITE": key}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        self.settle(Dispatcher(self.desk), tid)
+        self.desk.write_key("mimo", key)  # learned after the run; merge finds and records it
+        self.assertIn("holds the key", self.refused("merge", tid))
+        for recorded in (True, False):
+            self.desk.update(tid, leaked=["mimo"] if recorded else [])
+            for mode in ((), ("--update",)):
+                with self.subTest(recorded=recorded, mode=mode):
+                    before = self.desk.events_path.read_bytes()
+                    said = self.refused("retry", tid, "Remove the key", *mode)
+                    for part in (tid, "holds the key", "mimo", "--fresh", "nothing was queued"):
+                        self.assertIn(part, said)
+                    self.assertNotIn(key, said)
+                    self.assertEqual(self.desk.meta(tid)["state"], "done")
+                    self.assertEqual(len(self.desk.tasks()), 1)
+                    self.assertEqual(self.desk.events_path.read_bytes(), before)
+        fresh = self.hansa("retry", tid, "Redo without the key", "--fresh").split()[0]
+        self.assertFalse(self.desk.meta(fresh).get("start_from"))
+        self.assertEqual(self.desk.meta(tid)["replaced_by"], fresh)
+        self.hansa("lane", "set", "a", "env", "none")
+        self.assertEqual(self.settle(Dispatcher(self.desk), fresh)["state"], "done")
+        self.assertIn("merged into main", self.hansa("merge", fresh))
+
     def hansa_git(self, *args):
         """(exit code, standard output, standard error) of hansa git ARGS."""
         out, err, code = io.StringIO(), io.StringIO(), 0
@@ -29676,6 +29704,28 @@ def save():'''))
             replies.append(self.desk.meta(tid)["state"])
         self.assertEqual(replies, ["cancelled", "cancelled"])
 
+    def test_close_names_queued_dependents_including_those_after_an_earlier_round(self):
+        for ending in ("done", "failed"):
+            with self.subTest(ending=ending):
+                first = self.desk.new_task("Earlier change", lane="a", state="done")
+                latest = self.hansa("retry", first, "Finish it").split()[0]
+                waiting = [self.hansa("add", "Needs the change", "--lane", "a", "--after", parent).split()[0]
+                           for parent in (first, latest)]
+                unrelated = self.desk.new_task("Another prerequisite", lane="a")
+                other = self.hansa("add", "Waits elsewhere", "--after", unrelated).split()[0]
+                ended = self.hansa("add", "Already ended", "--after", latest).split()[0]
+                self.desk.update(ended, state="cancelled")
+                self.desk.update(latest, state=ending)
+                said = self.hansa("close", latest)
+                for tid in waiting:
+                    line = next((line for line in said.splitlines() if tid in line), "")
+                    for part in (tid, latest, "queued", "HELD", "closed without merging",
+                                 f"hansa cancel {tid}", f"hansa retry {latest}"):
+                        self.assertIn(part, line)
+                    self.assertEqual(self.desk.meta(tid)["state"], "queued")
+                for tid in (other, ended):
+                    self.assertNotIn(tid, said)
+
     def test_close_keeps_finished_work_unchanged_when_the_record_cannot_be_written(self):
         for kind in ("task", "verify"):
             tid = self.desk.new_task("Finished work", kind=kind, lane="a")
@@ -29765,6 +29815,39 @@ def save():'''))
         self.hansa("cancel", follow)
         self.assertFalse(self.desk.meta(vid).get("closed"))
         self.assertIn("merge or send back", self.hansa("show", vid))
+
+    def test_retry_stops_a_running_verification_with_its_reason_and_no_claim_of_a_verdict(self):
+        d = Dispatcher(self.desk)
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        self.settle(d, tid)
+        ready = self.tmp / "verification-ready"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_SEE_TMP": str(ready), "FAKE_TMP_WAIT": "60"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        deadline = time.monotonic() + 30
+        while not ready.exists() and time.monotonic() < deadline:
+            d.tick()
+            time.sleep(0.05)
+        self.assertTrue(ready.exists(), "verification worker did not become ready")
+        self.assertEqual(self.desk.meta(vid)["state"], "running")
+        self.hansa("pause")  # let cancellation finish without starting the follow-up
+        new = self.hansa("retry", tid, "Change the badge").split()[0]
+        v = self.settle(d, vid)
+        self.assertEqual(v["state"], "cancelled")
+        shown = self.hansa("show", vid)
+        for part in (tid, new, "replaced"):
+            self.assertIn(part, shown)
+            self.assertIn(part, v.get("closed", "") + v.get("error", ""))
+        text = (self.desk.tasks_dir / new / "task.md").read_text()
+        for part in (vid, "stopped before a verdict"):
+            self.assertIn(part, text)
+        self.assertNotIn(f"verified by {vid}", text)
+        self.desk.update(new, state="done")
+        _, later = self.follow_up(new, "One more change")
+        self.assertIn("stopped before a verdict", later)
+        self.assertNotIn(f"verified by {vid}", later)
 
     def test_retry_records_machine_failure_keeps_start_and_report(self):
         from hansa import run
@@ -30200,7 +30283,8 @@ def save():'''))
     # | the plain form, the first follow-up, previous not verified | test_a_follow_up_gives_the_original_one_line_per_earlier_round_this_note_and_two_reports |
     # | --fresh                                                 | the same (its second follow-up)                        |
     # | the third follow-up of a chain (and the fourth, fifth, sixth) | the same                                         |
-    # | previous verified: does not hold, holds, unsure, no verdict with a report, no report | the same          |
+    # | previous verification: does not hold, holds, unsure, no verdict with a report, no report | the same      |
+    # | a running verification stopped by retry, including in later rounds | test_retry_stops_a_running_verification_with_its_reason_and_no_claim_of_a_verdict |
     # | a chain whose first rounds were made before this change | test_a_follow_up_of_a_chain_made_before_notes_were_recorded_says_only_what_is_known |
     # | --update, and the plain form from the previous commit   | test_a_follow_up_with_update_or_from_the_previous_commit_is_built_the_same_way |
     ORIGINAL = "Add a week badge to the list page.\n\nKeep it in the header."
@@ -30268,9 +30352,17 @@ def save():'''))
             else:
                 earlier.append("the verification of the earlier task")
             self.assert_follow_up(new, text, chain, note, carried, earlier)
-            how = state + (", not verified" if verdict is None else
-                           f", verified by {vid} (verdict: {verdict or 'none'})")
-            self.assertIn(f"\n- {prev}: {how}; ", text)
+            line = next(line for line in text.splitlines() if line.startswith(f"- {prev}:"))
+            self.assertIn(state, line)
+            if verdict is None:
+                self.assertIn("not verified", line)
+            elif verdict:
+                for part in (f"verified by {vid}", f"verdict: {verdict}"):
+                    self.assertIn(part, line)
+            else:
+                for part in (vid, "without a verdict"):
+                    self.assertIn(part, line)
+                self.assertNotIn("verified by", line)
             self.assertIn(f"\n- {tid}: ", text)
             self.assertIn("; the original task, above; ", text)
             for j, t in enumerate(chain[1:]):  # each earlier follow-up's line: the start of its note, cut
@@ -36071,6 +36163,34 @@ def save():'''))
         tid = self.hansa("add", "Work", "--max-turns", "1").split()[0]
         self.assertEqual(self.desk.meta(tid)["max_turns"], 1)
         tid = self.hansa("add", "Default limit").split()[0]
+        self.assertEqual(self.desk.meta(tid)["max_turns"], 0)
+
+    def test_retry_inherits_max_turns_and_allows_an_override_with_adds_range(self):
+        argv_log = self.tmp / "turn-ceilings.jsonl"
+        self.hansa("lane", "set", "a", "env", "FAKE_SHOW_ARGV=" + str(argv_log))
+        for mode in ((), ("--fresh",), ("--update",)):
+            for override in (None, "1", "19"):
+                with self.subTest(mode=mode, override=override):
+                    parent = self.hansa("add", "Work", "--lane", "a", "--max-turns", "7").split()[0]
+                    self.settle(Dispatcher(self.desk), parent)
+                    args = ["--max-turns", override] if override else []
+                    tid = self.hansa("retry", parent, "Continue", *mode, *args).split()[0]
+                    expected = int(override) if override else 7
+                    self.assertEqual(self.desk.meta(tid)["max_turns"], expected)
+                    self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+                    argv = json.loads(argv_log.read_text().splitlines()[-1])
+                    self.assertEqual(argv[argv.index("--max-turns") + 1], str(expected))
+        parent = self.desk.new_task("Default limit", lane="a", state="done")
+        before, count = self.desk.events_path.read_bytes(), len(self.desk.tasks())
+        for limit in ("0", "-3"):
+            with self.subTest(limit=limit):
+                said = self.refused("retry", parent, "Continue", "--max-turns", limit)
+                for part in ("--max-turns", "1 or more", "nothing was queued"):
+                    self.assertIn(part, said)
+                self.assertEqual(len(self.desk.tasks()), count)
+                self.assertEqual(self.desk.events_path.read_bytes(), before)
+                self.assertEqual(self.desk.meta(parent)["state"], "done")
+        tid = self.hansa("retry", parent, "Continue").split()[0]
         self.assertEqual(self.desk.meta(tid)["max_turns"], 0)
 
     def test_add_blank_title_uses_the_first_line(self):
