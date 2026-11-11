@@ -15768,6 +15768,121 @@ def save():'''))
         self.assertIn("hello.txt", self.hansa("diff", t2, "--new", "--stat", "hello.txt"))
         self.assertNotIn("hello.txt", self.hansa("diff", t2, "--new", "notes.txt"))
 
+    def test_diff_rejects_paths_outside_the_repository(self):
+        tid = self.done_with()
+        for path in ("/etc/passwd", "../passwd", "nested/../../passwd"):
+            for flags in ((), ("--stat",)):
+                with self.subTest(path=path, flags=flags):
+                    said = self.hansa("diff", tid, path, *flags)
+                    self.assertEqual(len(said.splitlines()), 1, said)
+                    for words in ("hansa:", "paths", "relative to the repository"):
+                        self.assertIn(words, said)
+
+    def test_diff_after_lane_removal_reads_another_lanes_repository(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        tid = self.done_with()
+        before = self.hansa("diff", tid)
+        self.hansa("close", tid)
+        # A missing worktree also works while its lane is still configured.
+        wt = Path(self.desk.meta(tid)["worktree"])
+        self.git_out("worktree", "remove", str(wt))
+        said = self.hansa("diff", tid)
+        for words in ("worktree", "removed", before.strip()):
+            self.assertIn(words, said)
+        self.hansa("lane", "remove", "a")
+        self.assertFalse(Path(self.desk.meta(tid)["worktree"]).exists())
+        said = self.hansa("diff", tid)
+        for words in ("lane a", "removed", "lane b", str(self.repo), before.strip()):
+            self.assertIn(words, said)
+        self.assertIn("hello.txt", self.hansa("diff", tid, "hello.txt", "--stat"))
+        self.assertNotIn("hello.txt", self.hansa("diff", tid, "nothing.txt"))
+
+    def test_diff_after_lane_removal_names_the_branch_when_no_lane_reaches_it(self):
+        tid = self.done_with()
+        self.hansa("close", tid)
+        self.hansa("lane", "remove", "a")
+        # An unrelated lane must not be mistaken for the repository holding the task.
+        self.hansa("lane", "add", "b", "--repo", str(self.tmp / "other"))
+        said = self.hansa("diff", tid)
+        self.assertEqual(len(said.splitlines()), 1, said)
+        for words in ("hansa:", "lane a", "removed", f"task/{tid}", str(self.repo)):
+            self.assertIn(words, said)
+        self.assertNotIn("diff --git", said)
+
+    def test_diff_reports_git_errors_without_a_traceback(self):
+        tid = self.done_with()
+        said = self.hansa("diff", tid, ":(unknown)hello.txt")
+        self.assertEqual(len(said.splitlines()), 1, said)
+        for words in ("hansa:", "pathspec", "diff is not shown"):
+            self.assertIn(words, said)
+        with unittest.mock.patch("hansa.run.wgit", side_effect=FileNotFoundError("checkout disappeared")):
+            said = self.hansa("diff", tid)
+        self.assertEqual(len(said.splitlines()), 1, said)
+        self.assertIn("checkout disappeared", said)
+        self.assertIn("diff is not shown", said)
+
+    def test_diff_new_update_without_a_merge_does_not_claim_conflicts(self):
+        tid = self.done_with(env={"FAKE_WRITE": "parent's notes"})
+        self.hansa("retry", tid, "--update", "say it again")
+        follow = self.desk.meta(tid)["replaced_by"]
+        m = self.settle(Dispatcher(self.desk), follow)
+        self.assertEqual((m["state"], m["update_conflicts"]), ("done", []), m)
+        self.assertEqual(self.git_out("rev-list", "--merges", f"{m['start_from']}..{m['head']}"), "")
+        said = self.hansa("diff", follow, "--new")
+        self.assertIn(f"+hello from {follow}", said)
+        self.assertNotIn("notes.txt", said)
+        self.assertNotIn("conflicts", said)
+        self.assertNotIn("the base was merged", said)
+
+    def test_diff_new_conflicted_update_shows_resolution_and_later_work_only(self):
+        tid = self.done_with(env={"FAKE_WRITE": "parent's notes"})
+        self.commit_in_repo("hello.txt", "hello from the base\n")
+        self.commit_in_repo("base-only.txt", "only the base added this\n", "Unrelated base work")
+        self.hansa("retry", tid, "--update", "settle the greeting")
+        follow = self.desk.meta(tid)["replaced_by"]
+        m = self.settle(Dispatcher(self.desk), follow)
+        self.assertEqual((m["state"], m["update_conflicts"]), ("done", ["hello.txt"]), m)
+        # Work committed after the resolution must be included as well as the resolution itself.
+        wt = Path(m["worktree"])
+        (wt / "later.txt").write_text("work after the merge\n")
+        self.git_out("add", "later.txt", cwd=wt)
+        self.git_out("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "later work", cwd=wt)
+        self.desk.update(follow, head=self.git_out("rev-parse", "HEAD", cwd=wt))
+        for flags in ((), ("--stat",)):
+            with self.subTest(flags=flags):
+                said = self.hansa("diff", follow, "--new", *flags)
+                self.assertIn("hello.txt", said)
+                self.assertIn("later.txt", said)
+                self.assertNotIn("base-only.txt", said)
+                self.assertNotIn("notes.txt", said)
+                self.assertNotIn("what the base gained is in it too", said)
+                if not flags:
+                    self.assertIn(f"+hello from {follow}", said)
+                    self.assertIn("+work after the merge", said)
+                only = self.hansa("diff", follow, "--new", *flags, "hello.txt")
+                self.assertIn("hello.txt", only)
+                self.assertNotIn("later.txt", only)
+                only = self.hansa("diff", follow, "--new", *flags, "later.txt")
+                self.assertIn("later.txt", only)
+                self.assertNotIn("hello.txt", only)
+                empty = self.hansa("diff", follow, "--new", *flags, "base-only.txt")
+                self.assertIn("no changes", empty)
+                self.assertNotIn("diff --git", empty)
+
+    def test_diff_new_plain_follow_up_still_shows_only_its_work(self):
+        tid = self.done_with(env={"FAKE_WRITE": "parent's notes"})
+        self.commit_in_repo("base-only.txt", "only the base added this\n")
+        self.hansa("retry", tid, "say it again")
+        follow = self.desk.meta(tid)["replaced_by"]
+        m = self.settle(Dispatcher(self.desk), follow)
+        self.assertEqual(m["state"], "done", m)
+        said = self.hansa("diff", follow, "--new")
+        self.assertIn(f"-hello from {tid}", said)
+        self.assertIn(f"+hello from {follow}", said)
+        self.assertNotIn("notes.txt", said)
+        self.assertNotIn("base-only.txt", said)
+        self.assertNotIn("conflicts", said)
+
     def test_conflict_markers_a_worker_leaves_are_shown_and_never_merged(self):
         d = Dispatcher(self.desk)
         t1, t2 = self.desk.new_task("Add hello.txt"), self.desk.new_task("Add hello.txt too")

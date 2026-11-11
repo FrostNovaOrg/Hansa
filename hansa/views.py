@@ -2453,32 +2453,56 @@ def cost_turns_text(rep: dict) -> str:
 def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool = False) -> str:
     """hansa diff: a task's changes against its base, limited to these paths when given. new: only what this
     attempt added on top of the attempt it continues from (hansa retry), without the base merged into it."""
-    from .run import GitFileChanged, wgit
+    from .run import git, git_first_line, wgit
     m = desk.meta(tid)
+    # git interprets paths from the checkout where it runs, which may be another lane's repository.
+    # Reject absolute paths and traversal before git so these mistakes get the same useful explanation.
+    if any(Path(p).is_absolute() or ".." in Path(p).parts for p in paths):
+        return "hansa: diff paths are given relative to the repository, without '..'"
     if not m.get("head") or not m.get("worktree"):
         return f"{tid} has no changes recorded yet (state: {m['state']})"
     wt = Path(m["worktree"])
-    since, head = m["base"], ""
+    since, head, notice = m["base"], "", ""
+    read = lambda *args: wgit(desk, wt, *args)
+    if not wt.exists():
+        lanes = desk.settings()["lanes"]
+        notice = (f"hansa: {tid}'s lane {m['lane']} was removed" if m["lane"] not in lanes else
+                  f"hansa: {tid}'s lane {m['lane']}'s worktree {wt} was removed")
+        # A branch at the recorded commit proves that a remaining lane can reach this task, even if
+        # the repository moved. Never run git through the removed worktree or an unchecked .git file.
+        for name, lane in lanes.items():
+            if not branch_holds(lane["repo"], m):
+                read = lambda *args: git(*args, cwd=lane["repo"])
+                notice += f"; showing the diff from lane {name}'s repository {lane['repo']}\n"
+                break
+        else:
+            branch = m.get("branch") or f"task/{tid}"
+            return desk.redact(f"{notice}; no remaining lane can read its branch {branch} at the recorded commit; "
+                               f"its branch is in {m.get('repo') or 'the repository where it ran'}")
     try:  # the worktree's .git is checked first; the task working there now fails for it when it ends
+        mode, selected, parts = "--stat" if stat_only else "--patch", ["--", *paths], []
         if new:
             if not m.get("start_from") or m.get("kind") == "verify":
                 return (f"hansa: {tid} did not continue from an earlier task, so all of it is new: "
                         f"hansa diff {tid}" + (" --stat" if stat_only else ""))
             since = m["start_from"]
             head = f"what {tid} added on top of {m.get('parent') or 'the earlier task'}'s last commit ({since[:10]})"
-            if m.get("update"):  # the base's tip was merged in when it started: from that merge, when it was clean
-                rows = [x.split() for x in wgit(desk, wt, "rev-list", "--first-parent", "--parents",
+            if m.get("update"):
+                rows = [x.split() for x in read("rev-list", "--first-parent", "--parents",
                                                 f"{since}..{m['head']}").splitlines()]
                 merge = next((x[0] for x in rows if len(x) > 2 and x[1] == since), "")
-                if merge and not m.get("update_conflicts"):
+                if merge:
                     since = merge
-                    head += f", without the base merged into it at {merge[:10]}"
-                else:
-                    head += ("; the base was merged into it with conflicts the worker settled, so what the base "
-                             "gained is in it too")
-        args = ["diff", "--stat" if stat_only else "--patch", since, m["head"]] + (["--", *paths] if paths else [])
-        out = desk.redact(wgit(desk, wt, *args))
-    except GitFileChanged as e:
-        return f"hansa: {e}; the diff is not shown"
+                    if m.get("update_conflicts"):
+                        # Compare the resolved merge with git's recreated conflicted tree, then show
+                        # work after that merge. Comparing either parent would count the base's work.
+                        parts.append(read("show", "--format=", "--remerge-diff", mode, merge, *selected))
+                        head += f"; resolution of merge {merge[:10]} and later changes, without the base's own changes"
+                    else:
+                        head += f", without the base merged into it at {merge[:10]}"
+        parts.append(read("diff", mode, since, m["head"], *selected))
+        out = desk.redact("\n".join(x for x in parts if x))
+    except (RuntimeError, OSError) as e:
+        return desk.redact(f"{notice}hansa: {git_first_line(e)}; the diff is not shown")
     out = out or (f"(no changes in {', '.join(paths)})" if paths else "(no changes)")
-    return f"{head}:\n{out}" if head else out
+    return desk.redact(notice) + (f"{head}:\n{out}" if head else out)
