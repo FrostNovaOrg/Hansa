@@ -5083,7 +5083,9 @@ class DeskTest(unittest.TestCase):
                        self.hansa("explain", "history", "provider", "claude")):
             self.assertNotIn(first, output)
             self.assertNotIn(second, output)
-        self.assertIn("changed (values withheld)", output)
+        self.assertIn("set (values withheld)", output)
+        self.assertIn("cleared (values withheld)", output)
+        self.assertEqual([e.get("secret_action") for e in entries], ["set", "set", "cleared"])
 
     def test_settings_history_check_and_release_commands(self):
         self.hansa("lane", "set", "a", "check", "python3 old_tests.py")
@@ -33114,7 +33116,7 @@ def save():'''))
             self.assertNotIn(key, raw)
         for e in data["entries"][:3]:
             self.assertTrue(e["redacted"])
-            self.assertEqual(e["change"], "changed (values withheld)")
+            self.assertEqual(e["change"], "set (values withheld)" if e["path"].endswith(".key") else "changed (values withheld)")
             self.assertNotIn("old", e)
             self.assertNotIn("new", e)
 
@@ -40617,6 +40619,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         } else await el.on[key === "service" || key === "on" ? "change" : "input"]({target:el});
       }
       if ("turn_min" in step) { const el = turnInput(); el.value = step.turn_min; el.on.input({target:el}); }
+      if (step.rerender) run("renderSettings()");
       if (step.remove) find(el => "data-push-remove" in el.attrs, cards()[step.entry]).on.click();
       if (step.clearSecret) {
         confirmReply = step.confirm !== false;
@@ -40663,7 +40666,100 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     };
     const visibleText = (text, root) => !!find(el => el.textContent.includes(text) &&
       !el.kids.some(k => k instanceof El && k.textContent.includes(text)) && visible(el, root), root);
-    if (ask.startsWith("settings-fix-saved-")) {
+    if (ask === "settings-fix-remove-coordinator") {
+      run('S.coordinator.provider = "compatible"; renderSettings()');
+      const remove = name => {
+        const card = find(el => el.className === "lane" && el.textContent.startsWith(name));
+        check(card, "provider card missing");
+        return find(el => el.tag === "button" && el.textContent === run("T.remove"), card).click();
+      };
+      remove("compatible");
+      check(run('!!S.providers.compatible'), "removed coordinator's provider");
+      const message = run('settingsProblems.join(" ")');
+      for (const word of (process.argv[4] === "zh" ? ["协调员", "先", "服务商"] : ["coordinator", "choose another provider", "first"]))
+        check(message.toLowerCase().includes(word), "missing removal guidance: " + message);
+      run('S.coordinator.provider = "other"; renderSettings()'); remove("compatible");
+      check(run('!S.providers.compatible'), "unused provider cannot be removed");
+      run('S.lanes = {}; renderSettings()'); remove("claude"); remove("other");
+      check(run('Object.keys(S.providers).length === 1 && !!S.providers.other'), "last coordinator provider was removed");
+      run('S.coordinator.provider = "missing-provider"; renderSettings()');
+      const select = find(el => el.tag === "select" && el._settingMeta?.matches("coordinator: unknown provider"));
+      check(select.kids.some(o => o.value === "missing-provider" && "selected" in o.attrs), "select hides draft value");
+    } else if (ask === "settings-fix-remove-lanes") {
+      run('S.coordinator.provider = "other"; S.lanes.b = {...S.lanes.a}; renderSettings()');
+      const card = find(el => el.className === "lane" && el.textContent.startsWith("claude"));
+      await find(el => el.tag === "button" && el.textContent === run("T.remove"), card).click();
+      check(run('!!S.providers.claude'), "removed lanes' provider");
+      const message = run('settingsProblems.join(" ")');
+      for (const word of (process.argv[4] === "zh" ? ["a", "b", "工作线", "协调员", "先"] : ["a, b", "lanes", "ask the coordinator", "first"]))
+        check(message.includes(word), "missing lane removal guidance: " + message);
+    } else if (ask === "settings-fix-pending-names") {
+      const nameBox = label => find(el => el.tag === "input" && el.attrs["aria-label"] === run(label));
+      change(nameBox("T.providerName"), " kimi "); change(nameBox("T.priceName"), " kimi-k2 ");
+      settingsPostReply = {ok:false, problems:["provider kimi: model is required"]};
+      await run("saveSettings()");
+      check(posted.settings.providers.kimi?.kind === "compatible", "Save dropped the provider name");
+      check(posted.settings.prices["kimi-k2"]?.in === 0 && posted.settings.prices["kimi-k2"].out === 0, "Save dropped the price name");
+      check(run('!!S.providers.kimi && !!S.prices["kimi-k2"]'), "refused save lost added entries");
+      run('S.providers.kimi.model = "kimi-k2"'); settingsPostReply = {ok:true}; await run("saveSettings()");
+      check(run('!!S.providers.kimi && !!S.prices["kimi-k2"] && !settingsDirty()'), "retry did not save added entries");
+      change(nameBox("T.priceName"), "price-only"); await run("saveSettings()");
+      check(posted.settings.prices["price-only"]?.out === 0 && !run("newPriceName"), "price-only save lost its name");
+    } else if (ask === "settings-fix-invalid-pending-names") {
+      for (const [label, value, reason] of [["T.providerName", "Bad Name", "T.invalidName"], ["T.providerName", "claude", "T.invalidName"],
+          ["T.priceName", "example/engine", "T.invalidModel"], ["T.priceName", "   ", "T.invalidModel"]]) {
+        await run("loadSettings()");
+        const box = find(el => el.tag === "input" && el.attrs["aria-label"] === run(label)); change(box, value);
+        const posts = settingsPostCount; await run("saveSettings()");
+        check(settingsPostCount === posts, "Save accepted a name Add refuses");
+        check(run('settingsProblems.includes(' + reason + ')'), "Save lost Add's reason");
+        check(find(el => el.tag === "input" && el.attrs["aria-label"] === run(label)).value === value, "invalid name lost");
+      }
+    } else if (ask === "settings-fix-mailbox-trim") {
+      const label = find(el => el.tag === "label" && el.textContent === run("T.mailboxAllowTitle"));
+      const box = label && ids["#" + label.attrs.for];
+      change(box, " me@example.com \n  @project.example\t\n\n"); await run("saveSettings()");
+      check(JSON.stringify(posted.settings.release_mailbox_allow) === '["me@example.com","@project.example"]', "allow-list edges not trimmed");
+      change(ids["#" + find(el => el.tag === "label" && el.textContent === run("T.mailboxAllowTitle")).attrs.for], "me @example.com");
+      await run("saveSettings()"); check(posted.settings.release_mailbox_allow[0] === "me @example.com", "inner space was removed");
+    } else if (ask === "settings-fix-blank-defaults") {
+      const rest = number(); change(rest, ""); await run("saveSettings()");
+      check(posted.settings.cool_minutes === 30, "blank rest did not use default 30");
+      const labels = [["T.cooldown", "30"], ["T.compactIdle", "400"], ["T.compactWorking", "550"]];
+      for (const [label, value] of labels) {
+        const title = find(el => el.tag === "label" && el.textContent === run(label));
+        check(title?.parentElement.textContent.includes(value), "default missing beside " + run(label));
+      }
+      for (const key of ["idle_at", "working_at"]) {
+        const label = key === "idle_at" ? "T.compactIdle" : "T.compactWorking";
+        change(ids["#" + find(el => el.tag === "label" && el.textContent === run(label)).attrs.for], "");
+      }
+      for (const label of ["T.noSessionShort", "T.windowShort", "T.reviewShort", "T.turnShort"])
+        change(ids["#" + find(el => el.tag === "label" && el.textContent === run(label)).attrs.for], "");
+      await run("saveSettings()"); check(Object.keys(posted.settings.coordinator_compact).length === 0, "blank compaction did not select defaults");
+      check(Object.keys(posted.settings.coordinator_alert).length === 0, "blank alerts did not select defaults");
+    } else if (ask === "settings-fix-compact-warning") {
+      for (const idle of [600000, 550000]) {
+        run(`S.coordinator_compact = {idle_at:${idle}, working_at:550000}; refreshSettingsState()`);
+        await run("saveSettings()");
+        const text = run('settingsSaveState.textContent');
+        for (const word of (process.argv[4] === "zh" ? ["空闲", "不会", "压缩"] : ["idle", "will not", "compact"]))
+          check(text.includes(word), "missing compaction warning: " + text);
+      }
+      run('S.coordinator_compact.idle_at = 400000'); await run("saveSettings()");
+      check(!run('settingsSaveState.textContent').includes(process.argv[4] === "zh" ? "不会" : "will not"), "obsolete warning remains");
+      run('S.coordinator_compact = {idle_at:600000}'); await run("saveSettings()");
+      check(run('settingsSaveState.textContent.includes(T.compactIdleWarning)'), "warning ignored default working threshold");
+    } else if (ask === "settings-fix-history-key-actions") {
+      given["/api/history"] = {entries:[
+        {ts:1900000000, by:"principal", path:"providers.kimi.key", redacted:true, secret_action:"set", change:"set (values withheld)"},
+        {ts:1900000000, by:"principal", path:"providers.kimi.key", redacted:true, secret_action:"cleared", change:"cleared (values withheld)"},
+        {ts:1900000000, by:"principal", path:"providers.kimi.key", redacted:true, change:"changed (values withheld)"}]};
+      run('current = "settings"; historyFold.open = true'); await run('loadHistory()');
+      for (const word of (process.argv[4] === "zh" ? ["已设置", "已清除", "密钥不显示"] : ["set (values withheld)", "cleared (values withheld)"]))
+        check(run('historyBody.textContent').includes(word), "key history action missing: " + word);
+      check(run('historyBody.textContent').includes("changed (values withheld)"), "old history action was invented");
+    } else if (ask.startsWith("settings-fix-saved-")) {
       const zh = process.argv[4] === "zh";
       const cases = ask.endsWith("prices") ? [
         ['S.prices["example/engine"].in = 3; KEY_DRAFTS.compatible = "sk-unsaved"',
@@ -40731,8 +40827,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       check(has(run("T.saveFailed")) && !has(run("T.staleReloadFailed")), "a later network failure reused stale-reload advice");
       change(number(), ""); given["/api/settings"].settings.cool_minutes = 50;
       await run("saveSettings()");
-      check(run('!Object.hasOwn(S, "cool_minutes") && KEY_DRAFTS.compatible === "sk-still-typed"'),
-        "stale reload replaced a deliberately cleared top-level value");
+      check(run('S.cool_minutes === 30 && KEY_DRAFTS.compatible === "sk-still-typed"'),
+        "stale reload replaced the default selected by clearing a number");
     } else if (ask === "settings-fix-stale-problems") {
       change(number(), "38"); change(key(), "sk-keep-draft");
       const problem = "workers cannot be kept from reading /example/repo";
@@ -43048,6 +43144,30 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def test_discard_confirms_unadded_provider_and_price_names(self):
         self.run_settings_fix_scenario("discard")
 
+    def test_remove_refuses_the_coordinators_provider_and_select_shows_the_draft(self):
+        self.run_settings_fix_scenario("remove-coordinator")
+
+    def test_remove_refuses_a_lanes_provider_and_names_all_lanes(self):
+        self.run_settings_fix_scenario("remove-lanes")
+
+    def test_save_adds_pending_provider_and_price_names_and_keeps_refused_entries(self):
+        self.run_settings_fix_scenario("pending-names")
+
+    def test_save_refuses_invalid_pending_names_with_adds_reason_and_keeps_text(self):
+        self.run_settings_fix_scenario("invalid-pending-names")
+
+    def test_mailbox_allowlist_trims_line_edges_and_keeps_internal_spaces_for_validation(self):
+        self.run_settings_fix_scenario("mailbox-trim")
+
+    def test_blank_settings_numbers_use_and_show_their_defaults(self):
+        self.run_settings_fix_scenario("blank-defaults")
+
+    def test_save_warns_when_idle_compaction_cannot_happen(self):
+        self.run_settings_fix_scenario("compact-warning")
+
+    def test_settings_history_shows_set_and_cleared_in_both_languages_and_keeps_old_records(self):
+        self.run_settings_fix_scenario("history-key-actions")
+
     def test_cost_tasks_show_turns_when_they_have_runs(self):
         self.run_settings_fix_scenario("turns")
 
@@ -44414,7 +44534,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     self.assertEqual(saved["allowBefore"], "\n".join(entries))
                     self.assertEqual(saved["allowAfter"], ["Jane@RealMail.hansa", "@python.org"])
                     self.assertEqual(saved["allowBlank"], [])
-                    self.assertEqual(saved["allowSpaces"], [" a b@c.com "])
+                    self.assertEqual(saved["allowSpaces"], ["a b@c.com"])
                     self.assertEqual(saved["allowCleared"], [])
                     if language == "en":
                         self.assertNotIn("test data", saved["ruleLabel"])
@@ -52090,7 +52210,7 @@ class AlertPushPageTest(unittest.TestCase):
     def test_bark_copied_example_paste_and_literal_key_are_saved_exactly(self):
         from tests.test_push_services import bark_example
         self.add()
-        for secret in (bark_example(device=self.KEY), " abcdefghijklmn ", " " * 16):
+        for secret in (bark_example(device=self.KEY), " abcdefghijklmn "):
             shown = self.page([{"entry": 0, "secret": secret, "paste": True}, {"save": True}])
             self.assertEqual(shown["posted"]["alert_push_changes"][0]["secret"], secret)
             self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
@@ -52098,6 +52218,46 @@ class AlertPushPageTest(unittest.TestCase):
             entry = self.desk.settings()["alert_push"][0]
             self.assertEqual(alert_push._read(self.desk, entry["id"], True), expected)
             self.assertNotIn(expected, json.dumps(self.page()))
+
+    def test_bark_whitespace_only_field_keeps_the_saved_key(self):
+        key = "1234567890123456"
+        entry = self.add(secret=key)
+        for language in ("en", "zh"):
+            for spaces in (" ", " " * 16):
+                with self.subTest(language=language, spaces=len(spaces)):
+                    shown = self.page([{"entry": 0, "secret": spaces, "name": "phone-" + language + str(len(spaces))}, {"save": True}], language)
+                    [edit] = shown["posted"]["alert_push_changes"]
+                    self.assertNotIn("secret", edit)
+                    self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+                    self.assertEqual(alert_push._read(self.desk, entry["id"], True), key)
+
+    def test_bark_typing_after_example_paste_preserves_lines_through_rerender(self):
+        from tests.test_push_services import bark_example
+        entry = self.add()
+        example = bark_example(device=self.KEY)
+        for language in ("en", "zh"):
+            for edited in (example + " ", example.replace("test", "tests")):
+                with self.subTest(language=language, edited=edited):
+                    # The password input displays spaces for newlines. A service/group rerender
+                    # must keep the script in memory, including the lines unaffected by typing.
+                    shown = self.page([{"entry": 0, "secret": example, "paste": True},
+                        {"rerender": True},
+                        {"entry": 0, "secret": edited.replace("\n", " ")}, {"save": True}], language)
+                    [edit] = shown["posted"]["alert_push_changes"]
+                    self.assertEqual(edit["secret"], edited)
+                    self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
+                    self.assertEqual(alert_push._read(self.desk, entry["id"], True), "1234567890123456")
+
+    def test_push_key_history_distinguishes_set_and_cleared_without_values(self):
+        from hansa import history
+        entry = self.add(secret="1234567890123456")
+        alert_push.change(self.desk, [{"id": entry["id"], "secret": ""}], by="page")
+        entries = [e for e in history.read(self.desk)["entries"] if e["path"].endswith(".secret")]
+        self.assertEqual(entries[0]["change"], "cleared (values withheld)")
+        self.assertEqual(entries[1]["change"], "set (values withheld)")
+        for text in ((self.desk.state_dir / "settings-history.jsonl").read_text(), history.text(self.desk)):
+            self.assertNotIn("1234567890123456", text)
+            self.assertNotIn(self.KEY, text)
 
     def test_push_page_recognizes_a_pasted_bark_address_on_save_and_clears_the_input(self):
         for language in ("en", "zh"):
