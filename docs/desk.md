@@ -130,6 +130,37 @@ as Linux permits, are stored as JSON escapes and restored when the file is
 read. Ordinary Unicode text stays readable, and saved command lines keep
 their original spelling.
 
+## Opening the page from outside the machine
+
+`hansa serve` defaults to loopback (`127.0.0.1`); keep it there. The supported way in is the [SSH tunnel](getting-started.md#work-over-ssh).
+For a phone or a device without an SSH key, you may put a proxy that signs people in in front, with tools you choose and at your own responsibility.
+Examples only: Teleport's application access; Cloudflare Tunnel with Access; a server of your own running Pangolin; frp with Caddy and Authelia.
+Hansa is not adapted to, tested with or tied to any of them; these docs do not explain their setup.
+Whoever reaches the page with its key can approve releases and, with the switch below on, change provider keys and every setting the page can save. The proxy must:
+
+- Sign in every request before passing it on. A forwarding tunnel alone (frp alone or a bare port forward) leaves the page's key as the only lock: do not use one by itself.
+- Use HTTPS between the browser and the proxy.
+- Pass requests to `http://127.0.0.1:PORT` on the machine, leaving `hansa serve` on loopback.
+- Serve the page at the root of a host name of its own, not under a path.
+- Pass `X-Hansa` unchanged, and either pass `Authorization` unchanged (the first way below) or replace it (the second).
+- Return hansa serve's answers with their headers: the page recognises them by `X-Hansa-Serve: 1`. Stripping it makes every answer read as not from hansa serve.
+- Let through only the principal, with a second factor.
+
+**The browser holds it.** Open `https://HOST/#t=KEY` once in each browser tab, with the key from the address `hansa web` prints.
+The browser sends no fragment after `#`, so the proxy cannot record the key from the address; the page later sends it in `Authorization`.
+Keeping that address in a password manager is the easy way on a phone. Two locks: the proxy's sign-in and the key.
+
+**The proxy supplies it.** Choose a proxy that can set a request header; set `Authorization: Bearer KEY`, replacing the page's header. Adding a second `Authorization` beside it does not work: hansa serve reads the first.
+The address is just `https://HOST/`; no device needs to hold the key. The page still sends API requests with no key of its own, so signing in at the proxy is enough, including after its sign-in has ended and you sign in again.
+One lock: whoever passes the proxy's sign-in is in. The key also sits in its configuration; prefer this only with that configuration on a machine of your own, and turn on the proxy's own second factor.
+
+When the proxy's sign-in ends and it answers instead, the page says “This answer did not come from hansa serve.” and offers **Reload** to sign in again.
+Afterwards the same tab keeps its key in session storage (the first way) or needs none (the second); without session storage, reopen the address with `#t=KEY`.
+
+From outside, settings and keys cannot be changed unless **Allow changing settings from outside this machine** (`settings_from_outside`, off by default) is on in **Settings → Lanes → General**; turn it on from the machine's own address through the SSH tunnel.
+A request counts as from outside if its `Host` is not a loopback name (`127.0.0.1`, `localhost`, `[::1]`) or it carries `Forwarded`, `X-Forwarded-*`, `X-Real-IP` or `Via`.
+A proxy that hides both its outside host name and these headers would not be recognised as outside: do not set one up that way.
+
 ## Status, work and cost on the web page
 
 For opening the page and setting providers, models and prices, follow

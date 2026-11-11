@@ -139,6 +139,8 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=y
 
 把每一处 `8766` 都换成实际端口。在本机打开打印的地址，并保持隧道所在的终端开着；关掉它就不能访问网页了。保留服务器默认的 `127.0.0.1` 监听地址，除了 SSH，不要再开放其他入站网络端口。
 
+如需使用登录代理，请读[从本机以外打开网页](../desk.md#opening-the-page-from-outside-the-machine)（英文）。
+
 `ServerAliveInterval=30` 表示每 30 秒检查一次连接，`ServerAliveCountMax=3` 表示连续三次没有回应就断开，`ExitOnForwardFailure=yes` 表示端口转发失败就退出。如果希望隧道断开后自动重连，可以在本机安装 `autossh`，另开一个终端运行：
 
 ```sh
