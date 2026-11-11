@@ -6,6 +6,7 @@ are not printed: they write to stderr and set the exit code. @@LATER_DATE@@ and 
 time three hours from now, as Codex prints a usage limit's reset. FAKE_CODEX_RECORD: where the record goes.
 FAKE_CODEX_DELAY: seconds between lines. FAKE_CODEX_DONE: a file made after the last line.
 FAKE_CODEX_HANG: start a child and a grandchild in a session of its own (pids in the record), then wait.
+FAKE_CODEX_HANG_AFTER: the same, after replaying the fixture, before writing -o's last message.
 FAKE_CODEX_NONBLOCK: set O_NONBLOCK on stdout and write as Rust's print does: EAGAIN is a panic (exit 101).
 FAKE_CODEX_BIG: after the first line, a command's item.completed line of about this many bytes.
 FAKE_CODEX_SPLIT: write each line in two parts, this many seconds apart. FAKE_CODEX_NO_LAST_NEWLINE: the last
@@ -58,16 +59,20 @@ def save():
             json.dump(record, f)
 
 
-if os.environ.get("FAKE_CODEX_HANG"):
+def hang():
     child = subprocess.Popen(["sleep", "300"])
     grandchild = subprocess.Popen([sys.executable, "-c", "import subprocess,time; "
                                    "p=subprocess.Popen(['sleep','300'], start_new_session=True); "
                                    "print(p.pid, flush=True); time.sleep(300)"], stdout=subprocess.PIPE, text=True)
     record["children"] = [child.pid, grandchild.pid, int(grandchild.stdout.readline())]
     save()
-    print(json.dumps({"type": "thread.started", "thread_id": "hang"}), flush=True)
     time.sleep(300)
     sys.exit(0)
+
+
+if os.environ.get("FAKE_CODEX_HANG"):
+    print(json.dumps({"type": "thread.started", "thread_id": "hang"}), flush=True)
+    hang()
 save()
 
 if os.environ.get("FAKE_CODEX_NONBLOCK"):
@@ -127,6 +132,8 @@ for n, line in enumerate(lines):
         os.kill(os.getpid(), int(os.environ["FAKE_CODEX_KILL"]))
         time.sleep(30)
     time.sleep(delay)
+if os.environ.get("FAKE_CODEX_HANG_AFTER"):
+    hang()
 if "-o" in argv and last:
     with open(argv[argv.index("-o") + 1], "w") as f:
         f.write(last)

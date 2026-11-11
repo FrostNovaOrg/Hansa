@@ -628,8 +628,7 @@ def _add(desk: Desk, a, text: str) -> None:
                         **verification,
                         **notify.recorded(notify.session_here()))
     if a.model:
-        print("note: --model applies only when a Claude subscription provider runs the task; other providers use"
-              f" their own model. Which provider runs it follows the lane's order: hansa explain lane {a.lane or 'L'}")
+        _model_note(a.lane)
     first = (desk.tasks_dir / tid / "task.md").read_text(encoding="utf-8").splitlines()[0]
     forms = title_forms(s["lanes"].get(a.lane)) if not a.title and len(first) > 80 else []
     if forms:  # the title a form puts in commits, which a public repository shows
@@ -644,6 +643,11 @@ def _add(desk: Desk, a, text: str) -> None:
              else f". Follow it with: hansa show {tid}") + _waits(desk, tid, all_reasons=True))
     if down:
         print("hansa serve is not running; next: " + notify._up_hint(desk, str(Path.cwd())))
+
+
+def _model_note(lane: str | None) -> None:
+    print("note: --model applies only when a Claude subscription provider runs the task; other providers use"
+          f" their own model. Which provider runs it follows the lane's order: hansa explain lane {lane or 'L'}")
 
 
 def cmd_status(a):
@@ -1091,7 +1095,7 @@ def _retry(desk: Desk, a) -> None:
         verdict = desk.meta(vid).get("verdict") or "none"
         text += (f"\n\nThe report of {vid}, the verification of the earlier task (a worker who ran the change "
                  f"to see whether it holds; its verdict: {verdict}):\n" + vreport.read_text(encoding="utf-8").strip())
-    opts = {"lane": lane, "effort": a.effort or m.get("effort", ""), "model": m.get("model", ""),
+    opts = {"lane": lane, "effort": a.effort or m.get("effort", ""), "model": a.model or m.get("model", ""),
             "parent": a.id, "title": f"{own_title(m['title'])} (retry of {a.id})",
             **_verify_request(desk, a, {**m, "lane": lane}),
             **notify.recorded(notify.session_here())}
@@ -1117,6 +1121,8 @@ def _retry(desk: Desk, a) -> None:
     if m["state"] in ("done", "failed", "cancelled"):  # one replacement carries unmerged work on
         desk.update(a.id, state="replaced", replaced_by=tid, ended_as=m["state"])
         close_verification(desk, m, f"closed: {a.id} was replaced by {tid}")
+    if a.model:
+        _model_note(lane)
     print(f"{tid} queued as a follow-up to {a.id}" + (f" on lane {lane}" if lane != m.get("lane", "") else "")
           + _verification_follows(opts)
           + (" from the base branch" if a.fresh else
@@ -2363,18 +2369,25 @@ def _settings_refused(problems: list, nothing: str = "nothing was changed") -> N
 
 
 def _lane_value(field: str, values: list):
+    if field == "providers":
+        values = [x.strip() for v in values for x in v.split(",") if x.strip()]
     if values == ["none"]:  # the help's word for empty: what no value gives
         values = []
-    elif "none" in [x for v in values for x in (v.split(",") if field == "providers" else [v])]:
+    elif "none" in values:
         raise SystemExit(f"hansa: none means an empty {field}, so it cannot come with other values "
                          f"({' '.join(values)}): give none alone, or the values without it. Nothing was changed")
+    if field == "providers":
+        seen = set()
+        for provider in values:
+            if provider in seen:
+                raise SystemExit(f"hansa: provider {provider} is listed twice. Nothing was changed")
+            seen.add(provider)
     if field == "allow":  # a rule given twice is kept once
         return list(dict.fromkeys(x for x in values if x))
     if field == "verify_for" and not values:
         return None
     if field in LANE_LISTS:
-        return [x for v in values for x in (v.split(",") if field == "providers" else v.split()
-                                            if field == "release_files" else [v]) if x]
+        return [x for v in values for x in (v.split() if field == "release_files" else [v]) if x]
     if field == "env":
         env = {}
         for v in values:
@@ -3708,6 +3721,9 @@ def main(argv=None):
     p.add_argument("--update", action="store_true", help="continue from the earlier task with the base as it is "
                    "now merged into its branch; a conflict is left in the files for the worker to settle")
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
+    p.add_argument("--model", help="override the earlier task's model for this follow-up; as with add --model, "
+                   "it applies only when a Claude subscription provider runs the task; other providers use "
+                   "their own model")
     p.epilog = see_more("effort")
     p = add("verify", cmd_verify, "have a worker run a finished task's change to see whether it holds (never merged)")
     p.description = ("have a worker run a finished task's change to see whether it holds (never merged). "
@@ -3938,7 +3954,7 @@ def main(argv=None):
         "writes it (*. in front allowed, and it opens every name under it; a bare WebFetch, one for every site, an IP "
         "address, localhost, a name for a local or private network such as .internal or .local, or a wildcard over "
         "a shared suffix such as *.co.uk or *.github.io is refused, as are names with no dot and names such as nip.io or lvh.me that come back as this machine; any listed name can still be pointed at any address, so list only sites you know), and WebSearch, which sends search queries out "
-        "of the machine; MCP tools are refused. Each rule is its own value: one Claude Code would read as several (it splits on commas and spaces outside parentheses, and every ')' closes them), such as Bash(x),WebFetch or Bash(a(b),WebFetch,c), is refused, and a rule given twice is kept once. A change of allow is recorded. providers, allow, network and write take the whole new list (none: empty); env takes NAME=VALUE pairs and replaces the "
+        "of the machine; MCP tools are refused. Each rule is its own value: one Claude Code would read as several (it splits on commas and spaces outside parentheses, and every ')' closes them), such as Bash(x),WebFetch or Bash(a(b),WebFetch,c), is refused, and a rule given twice is kept once. A change of allow is recorded. providers, allow, network and write take the whole new list (none: empty); providers may be comma-separated, with spaces around names, but a provider listed twice is refused. env takes NAME=VALUE pairs and replaces the "
         "lane's env; base, check, merge_check, setup, commit_message, merge_message and "
         "identity take "
         "one value (none: empty); max_turns, timeout_min, merge_timeout_min and merge_batch take one whole number. "

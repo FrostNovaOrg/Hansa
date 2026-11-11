@@ -16,7 +16,7 @@ from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shar
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError)
 from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
-                  credit_text, provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
+                  credit_text, provider_problem, providers_waited_for, quota_probe_text, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_detail, waiting_looks, write_list)
 
 STATES = {
@@ -1018,7 +1018,8 @@ def status(desk: Desk) -> dict:
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
                        "rest_minutes": s.get("cool_minutes", 30),
                        "credit_since": pst.get(n, {}).get("credit_since", 0),
-                       "problem": provider_status_problem(desk, s, n, queued), "check": pst.get(n, {}).get("check")}
+                       "automatic_check": quota_probe_text(pst.get(n, {}), s),
+                       "problem": provider_status_problem(desk, s, n, tasks), "check": pst.get(n, {}).get("check")}
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
                      "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
@@ -1067,6 +1068,8 @@ def status(desk: Desk) -> dict:
         "last_24h": {"finished": sum((m.get("finished") or 0) >= day for m in tasks),
                      "merged": sum(m["state"] == "merged" and (m.get("merged") or 0) >= day for m in tasks),
                      "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
+                     "worker_unpriced_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS)
+                                                   for r in rows if r["usd"] is None),
                      "worker_usd": round(sum(r["usd"] for r in rows if r["usd"] is not None), 2)},
     })
 
@@ -1197,7 +1200,8 @@ def status_text(st: dict) -> str:
     rests = [rest_words(p) for p in st["providers"]]
     wr = max(map(len, rests), default=0)
     for p, rest in zip(st["providers"], rests):
-        out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {rest:<{wr}}  {p['problem'] or 'ready'}")
+        out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {rest:<{wr}}  {p['problem'] or 'ready'}"
+                   + (f"; {p['automatic_check']}" if p.get("automatic_check") else ""))
     shown_releases = [r for r in st.get("releases") or [] if r["state"] in release.OPEN
                       or any(h.get("kind") == "pattern_limit" for h in r.get("hits") or [])]
     if shown_releases or st.get("after_merge_waiting"):
@@ -1218,23 +1222,20 @@ def status_text(st: dict) -> str:
         out.append("open asks to the principal:")
         out += [f"  #{a['id']}: {a['text'][:100]}" + (f" · {a['note']}" if a.get("note") else "") for a in st["asks"]]
     t = st["last_24h"]
+    unpriced = t.get("worker_unpriced_tokens", 0)
+    worth = f"worth ${t['worker_usd']:.2f}; " if not unpriced or unpriced < t["worker_tokens"] else ""
+    if unpriced:
+        worth += f"{unpriced:,} tokens have no price yet; the principal sets prices on the page; "
     out.append(f"last 24 h: {t['finished']} finished, {t['merged']} merged; workers used {t['worker_tokens']:,} tokens"
-               f" (worth ${t['worker_usd']:.2f}; hansa cost for everything)")
+               f" ({worth}hansa cost for everything)")
     return "\n".join(out)
 
 
-def provider_status_problem(desk: Desk, s: dict, name: str, queued: list) -> str:
+def provider_status_problem(desk: Desk, s: dict, name: str, tasks: list) -> str:
     problem = provider_problem(desk, s, name)
     if not (desk.provider_state().get(name) or {}).get("unreachable_since"):
         return problem
-    waiting = 0
-    for m in queued:
-        lanes = [m["lane"]] if m.get("lane") else s["lanes"]
-        providers = {p for ln in lanes if ln in s["lanes"] and not work_lane_problem(s, ln,
-                     verifying=m.get("kind") == "verify" and bool(m.get("lane")))
-                     for p in task_providers(s, ln, m) if p not in refused_by(m, task_providers(s, ln, m))}
-        if name in providers and not any(not provider_problem(desk, s, p) for p in providers):
-            waiting += 1
+    waiting = providers_waited_for(desk, s, tasks).get(name, 0)
     return problem + f"; {waiting} {'task waits' if waiting == 1 else 'tasks wait'} for it"
 
 
@@ -2100,6 +2101,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"  {'login' if p['kind'] == 'subscription' else 'endpoint'}: {where}"
             + ("" if p["kind"] == "subscription" else f" · key: {'present' if desk.has_key(name) else 'missing'}"),
             f"  now: {provider_problem(desk, s, name) or 'ready'}",
+            *([f"  {quota_probe_text(st, s)}"] if quota_probe_text(st, s) else []),
             f"  last ping: {st.get('check') or 'never'}"])
     if what == "task":
         return show_text(desk, name)
@@ -2307,13 +2309,19 @@ def try_text(lane: str, t: dict) -> str:
 def cost_text(rep: dict, by: str = "day") -> str:
     rows = rep["by"].get(by, {})
     window = rep.get("window") or f"last {rep['days']} day(s)"
-    out = [f"{window}, by {by}: {rep['total']['tokens']:,} tokens, "
-           f"worth ${rep['total']['usd']:.2f}"]
+    unpriced = sum(v["unpriced_tokens"] for v in rows.values())
+    total = rep["total"]
+    worth = "no price" if unpriced and unpriced == total["tokens"] else f"worth ${total['usd']:.2f}"
+    if unpriced and unpriced < total["tokens"]:
+        worth += f" ({unpriced:,} tokens with no price)"
+    out = [f"{window}, by {by}: {total['tokens']:,} tokens, {worth}"]
     for k, v in rows.items():
-        extra = f" (+{v['unpriced_tokens']:,} tokens with no price)" if v["unpriced_tokens"] else ""
+        all_unpriced = v["unpriced_tokens"] and v["unpriced_tokens"] == v["tokens"]
+        worth = "no price" if all_unpriced else f"${v['usd']:.2f}"
+        extra = f" ({v['unpriced_tokens']:,} tokens with no price)" if v["unpriced_tokens"] and not all_unpriced else ""
         if by == "task" and v.get("runs"):  # every run of the task: its earlier tries too
             extra += f"  {v['runs']} run(s), {v.get('turns', 0):,} turn(s)"
-        out.append(f"  {k or '-':<22} {v['tokens']:>14,}  ${v['usd']:.2f}{extra}")
+        out.append(f"  {k or '-':<22} {v['tokens']:>14,}  {worth}{extra}")
     w = rep.get("work") or {}
     if w.get("coordinator_turns"):
         out.append(f"the coordinator: {w['coordinator_turns']:,} turn(s), {w['coordinator_hours']:.2f} hour(s) of work "

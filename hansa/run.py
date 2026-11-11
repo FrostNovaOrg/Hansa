@@ -1319,7 +1319,8 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
     (at most REST_CAP), else cool_minutes. Record and announce a credit rest once, across task finishes."""
     from .rests import record
     with desk.lock():
-        if (desk.provider_state().get(name) or {}).get("credit_since"):
+        st = desk.provider_state().get(name) or {}
+        if st.get("credit_since"):
             return None  # neither another failure nor a coordinator's check can end a credit rest
         t = time.time()
         if kind == "credit":
@@ -1334,6 +1335,11 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
             until = t + 60 * KEY_REST_MINUTES
             desk.set_provider_state(name, cool_until=until, reason=why, rest_how="", rest_minutes=None)
             return until
+        # A tiny request can succeed while real work still exceeds the limit. Keep this guard
+        # for that next rest, including other tasks finishing into it, until it ends or is checked.
+        blocked = st.get("quota_probe_ok", 0) > st.get("quota_probe_used", 0) or (
+            st.get("quota_probe_blocked", False) and st.get("cool_until", 0) > t)
+        desk.set_provider_state(name, quota_probe_blocked=blocked, quota_probe_used=t)
         try:
             reset = reset_time(text, t)
         except Exception as e:  # noqa: BLE001 - only a detail: the rest falls back to the fixed length
@@ -1341,12 +1347,13 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
             reset = None
         if reset is not None:
             until = min(max(reset, t) + 60, t + REST_CAP)
-            desk.set_provider_state(name, cool_until=until, reason=why, rest_how="reset", rest_minutes=None)
+            desk.set_provider_state(name, cool_until=until, cool_since=t, reason=why, rest_how="reset", rest_minutes=None)
         else:
             minutes = s.get("cool_minutes", 30)
             until = t + 60 * minutes
-            desk.set_provider_state(name, cool_until=until, reason=why, rest_how="fixed", rest_minutes=minutes)
-        record(desk, name, cool_until=until)
+            desk.set_provider_state(name, cool_until=until, cool_since=t, reason=why, rest_how="fixed", rest_minutes=minutes)
+        record(desk, name, cool_until=until, cool_since=t, cool_reset=reset or 0,
+               quota_probe_blocked=blocked)
         return until
 
 
@@ -1365,6 +1372,45 @@ def rest_text(st: dict) -> str:
     if st.get("rest_how") == "fixed" and st.get("rest_minutes"):
         return f"no reset time in its error, so its rest of {st['rest_minutes']} minutes"
     return ""
+
+
+def quota_probe_reason(st: dict, s: dict, at: float) -> str:
+    """Why a timed rest cannot be checked automatically; empty means eligible, when work waits."""
+    if st.get("credit_since") or st.get("rest_how") not in ("reset", "fixed", "shared"):
+        return "this is not a usage-limit rest"
+    if st.get("quota_probe_blocked"):
+        return "a run hit the usage limit again after a successful automatic check"
+    if st.get("rest_how") != "reset" and not st.get("cool_reset"):
+        return "no reset time was recorded"
+    if st.get("cool_until", 0) - at <= 60 * s.get("cool_minutes", 30):
+        return "the rest ends within the next check interval"
+    return ""
+
+
+def quota_probe_text(st: dict, s: dict) -> str:
+    if not st.get("credit_since") and st.get("cool_until", 0) <= time.time():
+        return ""
+    reason = quota_probe_reason(st, s, time.time())
+    if reason:
+        return f"hansa does not check this rest automatically: {reason}"
+    return f"hansa checks it automatically every {s.get('cool_minutes', 30)} minutes while work waits"
+
+
+def providers_waited_for(desk: Desk, s: dict, tasks: list) -> dict:
+    """Queued tasks with no ready alternative, using their lanes, refusals and outage affinity."""
+    waiting = {}
+    ready = {p for p in s["providers"] if not provider_problem(desk, s, p)}
+    for m in tasks:
+        if m.get("state") != "queued" or after.pending(m, tasks):
+            continue
+        lanes = [m["lane"]] if m.get("lane") else s["lanes"]
+        providers = {p for ln in lanes if ln in s["lanes"] and not work_lane_problem(s, ln,
+                     verifying=m.get("kind") == "verify" and bool(m.get("lane")))
+                     for p in task_providers(s, ln, m) if p not in refused_by(m, task_providers(s, ln, m))}
+        if not providers & ready:
+            for p in providers:
+                waiting[p] = waiting.get(p, 0) + 1
+    return waiting
 
 
 def tries_used(attempts: list) -> int:
@@ -4585,6 +4631,12 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     kind, why = ("", "") if meta.get("cancel") or setup or changed or killed else unusable_reason(run, err, subscription)
     # a report written before the connection went is the worker's finished work: that run ends as it did
     net = "" if kind or late else network_reason(run, err)
+    if not kind and not net and run and not run.get("is_error"):
+        # A real answer consumes the early-check guard; a later, unrelated limit can be probed.
+        with desk.lock():
+            st = desk.provider_state().get(meta["provider"], {})
+            if st.get("quota_probe_ok", 0) > st.get("quota_probe_used", 0):
+                desk.set_provider_state(meta["provider"], quota_probe_used=time.time())
     if changed:
         state, error = "failed", changed
     elif meta.get("cancel"):
@@ -6176,7 +6228,7 @@ class Dispatcher:
         self.release_watch_procs = {}  # CI watches, outside the repository's merge and release queue
         self.pending_stops = {}  # stop marks whose writes failed, by kind/id and launch
         self.resting = None  # the providers resting at the last round; None before the first
-        self.probes = {}  # at most one background check per unreachable provider
+        self.probes = {}  # at most one background check per provider
         self.held = {}  # (lane, group) whose runs' sandbox could not start: the desk's settings then (sandbox_waits)
         self.sandbox_seen = set()  # runs (by session) with a Bash call that succeeded: nothing more to look for
         self.retried = False  # whether the held lanes' sandbox was tried again as this server started (sandbox_retry)
@@ -6649,23 +6701,40 @@ class Dispatcher:
             self.desk.ready_news()
         self.resting = resting
 
-    def probe_providers(self, s: dict) -> None:
-        """Check unreachable providers without holding up a round, even for the check's full timeout.
+    def probe_providers(self, s: dict, *, quota_allowed: bool = True) -> None:
+        """Check unreachable providers and long usage rests without holding up a round.
         The last start is kept with provider state so restarting serve does not shorten the interval."""
+        waiting = None
         for name in s["providers"]:
             worker = self.probes.get(name)
             if worker and worker.is_alive():
                 continue
             with self.desk.lock():
                 st = self.desk.provider_state().get(name) or {}
-                if st.get("credit_since") or not st.get("unreachable_since") or st.get("cool_until", 0) > time.time() or time.time() - max(
-                        st["unreachable_since"], st.get("probe_at", 0)) < 60 * PROBE_MINUTES:
+                at = time.time()
+                quota = st.get("cool_until", 0) > at
+                if st.get("credit_since"):
                     continue
-                self.desk.set_provider_state(name, probe_at=time.time())
+                if quota:
+                    if not quota_allowed or self.desk.paused():
+                        continue
+                    if quota_probe_reason(st, s, at) or at - max(st.get("cool_since", at),
+                            st.get("quota_probe_at", 0)) < 60 * s.get("cool_minutes", 30):
+                        continue
+                    if waiting is None:
+                        waiting = providers_waited_for(self.desk, s, self.tasks())
+                    if not waiting.get(name):
+                        continue
+                    self.desk.set_provider_state(name, quota_probe_at=at)
+                else:
+                    if not st.get("unreachable_since") or at - max(st["unreachable_since"],
+                            st.get("probe_at", 0)) < 60 * PROBE_MINUTES:
+                        continue
+                    self.desk.set_provider_state(name, probe_at=at)
 
-            def probe(name=name):
+            def probe(name=name, quota=quota):
                 try:
-                    check_provider(self.desk, name)
+                    check_provider(self.desk, name, **({"quota_probe": True} if quota else {}))
                 except Exception as e:  # noqa: BLE001 - failed writes must not stop future checks or serve
                     with serve_step():
                         self.desk.event("provider_probe_failed", provider=name,
@@ -6749,8 +6818,6 @@ class Dispatcher:
         with serve_step():
             self.rests(s)
         with serve_step():
-            self.probe_providers(s)
-        with serve_step():
             if not self.retried:  # a hold an earlier server made, perhaps on earlier code: tried again, once
                 self.retried = True
                 for key in sandbox_retry(desk, s):
@@ -6767,6 +6834,8 @@ class Dispatcher:
         with serve_step():
             memory_low = self.memory(s)
         low = bool(low or memory_low or desks_list_problem())  # an unreadable list of desks holds new runs too
+        with serve_step():
+            self.probe_providers(s, quota_allowed=not low)
         with serve_step():
             desk._bench_off = True
             try:
@@ -7346,7 +7415,7 @@ def key_stamp(desk: Desk, name: str) -> tuple:
     return st.st_ino, st.st_mtime_ns
 
 
-def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -> dict:
+def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *, quota_probe: bool = False) -> dict:
     """Send one tiny request through a provider and record whether it answered, through `claude` when it is given
     (the program a recorded hansa serve start runs), else through this process's."""
     from .page_messages import annotate
@@ -7401,8 +7470,13 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -
         result = annotate(result, ("detail",))
         desk.set_provider_state(name, check=result)
         if ok and not (desk.provider_state().get(name) or {}).get("credit_since"):
-            desk.set_provider_state(name, cool_until=0, reason="", unreachable_since=0, unreachable_reason="")
-        elif kind:
+            from .rests import record
+            probe_ok = time.time() if quota_probe else 0
+            checked_rest = record(desk, name, checked=True, quota_probe_ok=probe_ok)
+            desk.set_provider_state(name, cool_until=0, quota_checked=checked_rest, reason="",
+                                    unreachable_since=0, unreachable_reason="", quota_probe_ok=probe_ok,
+                                    quota_probe_blocked=False)
+        elif kind and not quota_probe:
             desk.set_provider_state(name, unreachable_since=0, unreachable_reason="")
             rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}")
     desk.event("provider_checked", provider=name, ok=ok, detail=detail)

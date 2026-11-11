@@ -111,6 +111,11 @@ time ceiling, a line follows them: the last tool call the session record shows t
 or not it ended, and how many minutes before the stop it started (a Bash call's command on one line, cut
 to 300 characters; another tool's name and its file path or pattern). Many minutes there points to one
 long command, not a task too big. No line when the record holds no call or the provider keeps none.
+The optional Codex adapter keeps only its last message as the report at a ceiling or on cancellation, with
+its counted turns and the latest usage Codex reported in `turn.completed`; tokens without a usage event
+cannot be counted. The shim writes these in its stdout answer (`run.json`), which hansa reads at the run's end;
+Codex has no Claude Code session record to fall back to. Before any message, counted item or usage, it leaves
+no answer. See [the adapter](../contrib/codex/README.md).
 
 One Bash call of a task or verification worker may run as long as the lane's
 check may, plus 5 minutes, but never past the worker's own limit: hansa sets
@@ -201,6 +206,17 @@ lane, or waits for one.
   A time up to an hour past gives about a minute's rest, and a clock time further past means tomorrow's;
   a form hansa is unsure of, a dated time more than an hour past, or a line it cannot read gets the length below.
 - **Else for the desk's `cool_minutes`**, 30 by default.
+- **Check long usage rests while work waits.** `hansa serve` sends the same small request as
+  `hansa ping` every `cool_minutes`, starting one interval after the limit, when a queued task needs
+  that provider and has no ready alternative. This finds limits lifted early by the account's owner.
+  It checks only usage rests with a recorded reset time and more than one interval left; fixed rests,
+  credit, key and login rests are not checked. Pausing the desk or falling below its disk or memory
+  floor prevents checks. A failed automatic check records its answer but leaves the rest unchanged.
+  A good check ends the rest, including shared rests as below. If real work hits the limit again after
+  that check, hansa stops automatic checks for the new rest: wait for its end, ping, or check on the
+  page. This guard prevents a tiny successful request from repeatedly restarting work that cannot run;
+  a real answer consumes the guard. `status` and `explain provider NAME` say the interval or why
+  automatic checks are off. Checks run one at a time per provider, without holding up dispatch.
 - **No lost tries.** A task whose run ended on its provider's usage limit goes back to the queue without
   using one of its 3 tries, 5 times; after that, each such end counts as a try, so a provider that hits its
   limit again right after each rest cannot hold a task forever. Any other failure counts as before.
@@ -209,9 +225,17 @@ lane, or waits for one.
 - **Other desks on the same account learn the rest too.** Desks sharing a subscription's Claude Code
   folder, or a key provider's exact endpoint and key, hold new runs until the same time. `show` and
   `status` say when another desk found the limit. Different folders or keys do not share rests;
-  expired rests are ignored. The account's `provider-rests.json`, beside `desks.json` in
-  `$XDG_STATE_HOME/hansa` (default `~/.local/state/hansa`), holds SHA-256 login and source-desk hashes,
-  rest times and top-up confirmation times, with no key, endpoint, path or error text in clear.
+  expired rests are ignored. Providers on one desk sharing that login also share usage rests.
+  A good `hansa ping NAME` or page check ends a shared usage rest when the checked provider has the
+  same configured model as the one that found the limit. Other desks become ready on their next
+  provider read, including the desk that recorded the limit. A good check of a different model frees
+  only that provider until a new usage limit is recorded; the original model may still be limited.
+  Older records without a model count as the same model. A failed check does not clear a rest.
+  The account's `provider-rests.json`, beside `desks.json` in
+  `$XDG_STATE_HOME/hansa` (default `~/.local/state/hansa`), holds SHA-256 login, source-desk,
+  source-provider and configured-model hashes, usage-rest start/end, reset and clearing times,
+  automatic-check success times and the repeated-limit guard, and credit
+  rest/top-up times, with no key, endpoint, path, model name or error text in clear.
   Workers, setups and checks cannot read that folder. If the file is missing, unreadable or damaged,
   each desk uses its own rests as before.
 - **A refusal is not a limit.** A provider that refuses one task (its content filter) does not rest: that
@@ -243,6 +267,10 @@ still uses a try, and saving a new key brings that provider back.
 After `hansa lane set L providers ...`, queued tasks, including those waiting for a resting provider,
 use the new order: first ready provider excluding prior refusals; otherwise they wait. A
 dropped-connection retry keeps its provider if still listed. Running work keeps its provider.
+`lane set` and `lane add --providers` accept comma-separated names with spaces around them
+(quote `"claude, spare"` in the shell). Each provider must appear only once, to avoid repeating a
+fallback entry; a duplicate is refused by name before anything changes. Existing saved lists with
+duplicates still load and run.
 `hansa retry` uses its destination lane's current order, skipping providers that refused any earlier round
 in its chain, including with `--fresh`. Those refusals remain the earlier rounds' runs and tries; they
 use none of the follow-up's tries. `hansa show` names the providers left out and the rounds they refused
@@ -592,6 +620,11 @@ what still holds of them is said again in the new note. Each round's note is
 kept on its own beside its task, as `note.md` in the task's folder (keys
 removed, as from what else hansa writes there).
 
+The follow-up keeps the earlier task's model unless `--model M` overrides it. As with
+`hansa add --model M`, it is recorded on the new task and applies only when a Claude subscription
+provider runs it; other providers use their own model. Both commands print the same note about
+that limit. `--effort E` overrides the inherited effort separately.
+
 A done, failed, closed or cancelled task becomes replaced, so it can be sent back once; a second `hansa retry` of it is
 refused and names the follow-up to send back instead. A merged task stays merged: each
 `hansa retry` of it is new work on top of that merge, and it can be sent back more than once.
@@ -643,6 +676,23 @@ table of prices (on the page). With a subscription they show what the tokens
 are worth, not a bill. `hansa cost` gives them (`--days N` or `--since HH:MM`;
 `--by day`, `seat`, `lane`, `task`, `goal`, `model` or `provider`; `--json`, with
 `--rows` for every row). A task's turns and tokens are recorded when it ends.
+
+When the table has no entry for a Claude model, workers use Claude Code's
+recorded list-price total for the run. This fallback follows the model even if
+its provider was renamed, removed or changed kind. A worker's run without a
+recorded figure stays unpriced. The coordinator's own usage and its helpers need
+an entry in the table: their session records have no recorded dollar figure.
+Other models without an entry stay unpriced; a third-party model's placeholder
+dollars are never used. The principal's table takes precedence, including a
+price of zero.
+
+`hansa status` shows the worth of the priced worker tokens in the last 24 hours
+and counts any tokens with no price yet, pointing to the principal's prices on
+the page. If none have a price, it shows no dollar value. `hansa cost` shows
+`no price` in place of dollars for a wholly unpriced row; a partly priced row
+shows its priced worth and how many of its total tokens have no price.
+The JSON fields stay the same: an unpriced usage row has `usd: null` and
+`priced_by: "no price"`.
 
 To say what one job cost, note the time `hansa status` shows when it starts,
 and run `hansa cost --since HH:MM --by seat` when it is done. Spend no turns on cost.
