@@ -18709,9 +18709,10 @@ def save():'''))
                                    input=json.dumps(replies), capture_output=True, text=True, timeout=30)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 shown = json.loads(r.stdout)
-                self.assertIn("credit balance too low since", shown["before"])
+                credit = "credit balance too low since" if language == "en" else "余额不足，自"
+                self.assertIn(credit, shown["before"])
                 self.assertEqual(shown["posts"], [{"path": "/api/provider/top-up", "body": {"provider": "claude"}}])
-                self.assertNotIn("credit balance too low since", shown["after"])
+                self.assertNotIn(credit, shown["after"])
                 self.assertEqual(shown["draft"], "kept-model")
 
     def test_a_detail_reader_that_raises_does_not_keep_a_run_from_ending(self):
@@ -22552,7 +22553,7 @@ def save():'''))
                  "muted"),
                 ("2.1.200", "hansa did not load the coordinator's mod, because Claude Code 2.1.200 is older than 2.1.290; "
                  "--autocompact options of its command line: none",
-                 "hansa 没有加载协调员的 mod，因为：Claude Code 2.1.200 is older than 2.1.290；命令行里的 --autocompact 选项：无",
+                 "hansa 没有加载协调员的 mod，因为：Claude Code 2.1.200 早于 2.1.290",
                  "warn"),
                 ("caller", "--autocompact options of its command line: --autocompact 550000 --autocompact=700000.",
                  "命令行里的 --autocompact 选项：--autocompact 550000 --autocompact=700000", "muted"),
@@ -22585,6 +22586,9 @@ def save():'''))
                 self.assertIn(words, page["text"])
                 self.assertNotIn("hansa help", page["text"])  # for the coordinator, not on the page
                 self.assertEqual(page["warn"], warn, (version, lang))
+                if version == "2.1.200" and lang == "zh-CN":
+                    for word in ("升级 Claude Code", "重启协调员会话", "命令行里的 --autocompact 选项：无"):
+                        self.assertIn(word, page["text"])
                 if lang == "en":  # the settings name the thresholds in the words status uses
                     for w in ("Compact when idle at (tokens)", "Compact while working at (tokens)"):
                         self.assertIn(w, page["settings"])
@@ -22783,7 +22787,7 @@ def save():'''))
                 (none, "no daily clear, because the coordinator was started without --clear-daily.",
                  "没有每日清空，因为协调员启动时没带 --clear-daily", "muted"),
                 (unloaded, "no daily clear 04-09, because hansa did not load the coordinator's mod",
-                 "没有每日清空 04-09，因为 hansa 没有加载协调员的 mod（Claude Code 2.1.200 is older than 2.1.290）", "warn"),
+                 "没有每日清空 04-09，因为 hansa 没有加载协调员的 mod（Claude Code 2.1.200 早于 2.1.290", "warn"),
                 (last, "daily clear 04-09: last cleared 09-22 04:20.", "每日清空 04-09：上次清空在 09-22 04:20", "muted"),
                 (missed, "WARNING: daily clear 04-09: not cleared since the start at 09-20 10:00; 2 windows ended since "
                  "without a clear.", "每日清空 04-09：自 09-20 10:00 启动以来没有清空过；此后已有 2 个时段过去而没有清空",
@@ -22805,6 +22809,9 @@ def save():'''))
                 self.assertEqual(page["nulls"], [])
                 self.assertIn(words, page["text"], (make.__name__, lang))
                 self.assertEqual(page["warn"], warn, (make.__name__, lang))
+                if make is unloaded and lang == "zh-CN":
+                    for word in ("升级 Claude Code", "重启协调员会话"):
+                        self.assertIn(word, page["text"])
 
     # -- a Linux server: the desk belongs to an account, the coordinator is root ---------------------
     # Tests cannot run as root, so the lookups that decide it are replaced: hansa "runs as root" on
@@ -23416,6 +23423,42 @@ def save():'''))
                 self.assertFalse(reply["ok"])
                 self.assertEqual(reply["detail"], why)
                 self.assertEqual(self.desk.provider_state()["claude"]["check"], reply)
+
+    def test_page_provider_check_keeps_translated_detail_after_reload(self):
+        detail = "claude was not found; install Claude Code or set HANSA_CLAUDE"
+        with unittest.mock.patch("hansa.run.claude_bin", side_effect=RuntimeError(detail)):
+            reply = self.page_post("/api/check", {"provider": "claude"})
+        reloaded = Desk(self.desk.root)
+        saved = reloaded.provider_state()["claude"]["check"]
+        self.assertEqual(saved, reply)
+        self.assertEqual(saved["detail_message"]["code"], "claude_missing")
+        status = views.status(reloaded)
+        self.assertEqual(next(p["check"] for p in status["providers"] if p["name"] == "claude"), reply)
+        for language, words in (("en", detail), ("zh-CN", "找不到 claude")):
+            with self.subTest(language=language):
+                page = self.message_page(status=status, check=reply, language=language)
+                for where in ("check", "status"):
+                    self.assertIn(words, page[where])
+                    self.assertIn("HANSA_CLAUDE", page[where])
+                    if language == "zh-CN":
+                        self.assertNotIn(detail, page[where])
+
+    def test_page_provider_check_messages_for_checks_that_cannot_start(self):
+        settings = self.desk.settings()
+        settings["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": ""}
+        self.assertEqual(self.desk.save_settings(settings), [])
+        for name, code, detail in (("absent", "missing_provider", "not in settings"),
+                                   ("mimo", "no_endpoint", "no endpoint address"),
+                                   ("mimo", "no_key", "no key")):
+            with self.subTest(code=code):
+                reply = self.page_post("/api/check", {"provider": name})
+                self.assertFalse(reply["ok"])
+                self.assertEqual(reply["detail"], detail)
+                self.assertEqual(reply["detail_message"], {"code": code, "values": {}, "text": detail})
+                self.assertNotIn("check", self.desk.provider_state().get(name, {}))
+            settings["providers"]["mimo"]["base_url"] = "https://example.invalid"
+            if code == "no_endpoint":
+                self.assertEqual(self.desk.save_settings(settings), [])
 
     def test_start_holds_tell_the_coordinator_without_alerting_the_principal(self):
         from hansa import alert, run
@@ -32792,6 +32835,7 @@ def save():'''))
             r = run.check_provider(self.desk, "mimo")
         self.assertFalse(r["ok"])
         self.assertIn("changed while this check ran", r["detail"])
+        self.assertEqual(r["detail_message"]["text"], r["detail"])
         self.assertFalse(provider_problem(self.desk, self.desk.settings(), "mimo"))  # the new key is not rested
 
     def test_status_says_which_build_runs(self):
@@ -41455,7 +41499,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 """
 
-    def message_page(self, status=None, settings=None, task=None, reply=None, language="zh", samples=()):
+    def message_page(self, status=None, settings=None, task=None, reply=None, language="zh", samples=(), check=None):
         if not shutil.which("node"):
             self.skipTest("needs node to run the page's script")
         from hansa.desk import public_settings
@@ -41470,7 +41514,11 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
   const providers = ids["#tab-settings"].textContent;
   run("settingsGroup = 'releases'; renderSettings()");
   const settings = ids["#tab-settings"].textContent;
-  let task = "", answer = "";
+  let task = "", answer = "", check = "";
+  if (given["/api/check"]) {
+    const button = run('checkButton("claude")');
+    await button.click(); check = button.textContent;
+  }
   if (given["/api/task"]) {
     const [button, box] = run('taskLink("t0042")');
     ids["#tab-status"].append(button, box);
@@ -41481,7 +41529,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     const button = descendants(ids["#tab-status"], "button").find(b => b.attrs["data-status-focus"] === "release:1:yes");
     await button.click(); answer = ids["#state-list"].textContent;
   }
-  console.log(JSON.stringify({status, warnings, providers, settings, task, answer,
+  console.log(JSON.stringify({status, warnings, providers, settings, task, answer, check,
     samples:(given.messageSamples || []).map(r => run("messageText(" + JSON.stringify(r) + ")"))}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "task-steps")'''))
@@ -41491,6 +41539,8 @@ else if (ask === "task-steps")'''))
             data["/api/task"] = task
         if reply:
             data["/api/release/answer"] = reply
+        if check:
+            data["/api/check"] = check
         result = subprocess.run(["node", str(harness), str(Path(__file__).resolve().parent.parent / "hansa/ui.html"),
                                  "message-cases", language], input=json.dumps(data), capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -41593,8 +41643,14 @@ else if (ask === "task-steps")'''))
         settings["settings"].update(release_forbidden=["kept"], release_forbidden_except=[{"entry":"gone", "lanes":["a"]}])
         page = self.message_page(settings=settings)
         self.assertIn("第 1", page["settings"])
+        self.assertIn("exception 1", page["settings"])
         self.assertNotIn("names no entry", page["settings"])
         self.assertIn("names no entry", self.message_page(settings=settings, language="en")["settings"])
+        settings["settings"]["release_forbidden_except"][0]["lanes"] = ["missing-lane"]
+        page = self.message_page(settings=settings)
+        self.assertIn("missing-lane", page["settings"])
+        self.assertIn("此工作线不在工作台上", page["settings"])
+        self.assertNotIn("此 lane", page["settings"])
 
     def test_page_message_variants_and_original_values(self):
         from hansa import page_messages as pm, plugin, run

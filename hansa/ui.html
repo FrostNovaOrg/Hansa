@@ -551,7 +551,6 @@ const T = ZH ? {
   concurrencyNote:"由协调员用 hansa concurrency 设定，这里只能看；要改，在对话里跟协调员说。",
   diskFloor:"磁盘剩余空间下限", diskFloorOff:"关闭", diskFree:"工作台所在卷现在剩余",
   diskFloorNote:"任一卷（工作台、各工作线的仓库和工作区、临时文件夹）剩余空间低于它时，后台不再启动新任务，已启动的任务会继续运行到结束；每个卷都多出 1 GB 后自动恢复。小于下限四倍的卷（如 tmpfs 的 /tmp）以其大小的四分之一为下限，余量随之缩小（不超过该下限的四分之一）。由协调员用 hansa disk-floor 设定，这里只能看。",
-  diskLow:"磁盘空间不足，不开始新的事",
   laneCommands:"工作线最近改过的命令、网络和可写文件夹（最新在前，最多 20 条）",
   laneCommandsNote:"装依赖的命令和检查由 hansa 自己跑，在 srt 里，用这条工作线的沙箱（跟工作智能体一样的网络和可写范围）。网络和可写文件夹的改动，会放宽这条工作线的工作智能体（连同装依赖和检查）能做的事。",
   f_setup:"装依赖", f_check:"检查", field:"哪一项", change:"原来 -> 现在", at:"时间",
@@ -652,7 +651,7 @@ const T = ZH ? {
   releaseForbidden:"不许发出去的字眼（每行一个词、短语或 re:Python 正则表达式，不分大小写；每项最多 200 字符，正则必须能编译且不能匹配空字符串；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
   releaseForbiddenExcept:"按 lane 豁免字眼（从上面的列表选择字眼；lane 用空格或逗号分隔；不影响邮箱规则）",
   forbiddenEntry:"字眼", forbiddenLanes:"豁免的 lane", addForbiddenException:"添加豁免",
-  forbiddenEntryUnmatched:"不匹配任何项：此字眼不在禁止列表上", forbiddenLaneUnmatched:"不匹配任何项：此 lane 不在工作台上",
+  forbiddenEntryUnmatched:"不匹配任何项：此字眼不在禁止列表上", forbiddenLaneUnmatched:"不匹配任何项：此工作线不在工作台上",
   forbiddenRemove:(entry, n) => `移除 ${entry} 时，其 ${n} 项 lane 豁免也会移除`,
   releaseMailboxes:"新增行中的邮箱必须使用保留示例域名或列入允许名单（合并和发布时检查；默认关闭）",
   releaseMailboxAllow:"邮箱允许名单（每行一项，忽略大小写）：完整邮箱地址允许该地址；@域名允许该域名及其子域名",
@@ -730,7 +729,6 @@ const T = ZH ? {
   concurrencyNote:"set by the coordinator with hansa concurrency; here you can only look. To change it, ask the coordinator in the conversation.",
   diskFloor:"Free space floor", diskFloorOff:"off", diskFree:"free now on the desk's volume",
   diskFloorNote:"while any volume hansa writes on (the desk, each lane's repository and worktree, the temporary folders) has less free, hansa serve starts nothing new and lets what runs finish; it starts again once each has 1 GB more. A volume smaller than four times the floor (a tmpfs /tmp, say) has a quarter of its size as its floor, and a margin scaled with it (no more than a quarter of that floor). Set by the coordinator with hansa disk-floor; here you can only look.",
-  diskLow:"disk space low, nothing new starts",
   laneCommands:"Recent changes to lane commands, networks and write folders (newest first, at most 20)",
   laneCommandsNote:"hansa runs the setup and check commands itself, in srt with the lane's sandbox (the workers' network and folders). Network and write changes widen what the lane's workers, and its setup and check, may do.",
   f_setup:"setup", f_check:"check", field:"Field", change:"old -> new", at:"When",
@@ -2443,7 +2441,7 @@ function forbiddenExceptions() {
     editor.replaceChildren(...rows.map((row, i) => {
       const warnings = h("div", {});
       const update = () => warnings.replaceChildren(...shown([
-        row.entry && !entries.includes(row.entry) ? h("p", {class:"warn"}, ZH ? `第 ${i + 1} 条豁免（${row.lanes.length ? "工作线 " + row.lanes.join("、") : "未选工作线"}）：${T.forbiddenEntryUnmatched}`
+        row.entry && !entries.includes(row.entry) ? h("p", {class:"warn"}, ZH ? `第 ${i + 1} 条豁免（exception ${i + 1}，${row.lanes.length ? "工作线 " + row.lanes.join("、") : "未选工作线"}）：${T.forbiddenEntryUnmatched}`
           : `${T.forbiddenEntryUnmatched}. release_forbidden_except: exception ${i + 1} (${row.lanes.length ? "lanes " + row.lanes.join(", ") : "no lanes"}) names no entry in release_forbidden`) : null,
         row.lanes.filter(lane => !S.lanes[lane]).map(lane => h("p", {class:"warn"}, `${lane}: ${T.forbiddenLaneUnmatched}`))]));
       update();

@@ -7330,13 +7330,14 @@ def key_stamp(desk: Desk, name: str) -> tuple:
 def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -> dict:
     """Send one tiny request through a provider and record whether it answered, through `claude` when it is given
     (the program a recorded hansa serve start runs), else through this process's."""
+    from .page_messages import annotate
     s = desk.settings()
     p = s["providers"].get(name)
     if not p:
-        return {"ok": False, "detail": "not in settings"}
+        return annotate({"ok": False, "detail": "not in settings"}, ("detail",))
     prob = provider_problem(desk, s, name)
     if prob in ("no key", "no endpoint address"):
-        return {"ok": False, "detail": prob}
+        return annotate({"ok": False, "detail": prob}, ("detail",))
     tmp = desk.state_dir / "check"
     tmp.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
@@ -7375,8 +7376,10 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -
     with desk.lock():  # keys and settings are saved under this lock too, so nothing lands in between
         s = desk.settings()
         if (key_stamp(desk, name), json.dumps(s["providers"].get(name), sort_keys=True)) != stamp:
-            return {**result, "ok": False, "detail": "the provider's key or settings changed while this check "
-                                                     "ran, so it says nothing about them now; check again"}
+            return annotate({**result, "ok": False, "detail": "the provider's key or settings changed while this check "
+                                                            "ran, so it says nothing about them now; check again"},
+                            ("detail",))
+        result = annotate(result, ("detail",))
         desk.set_provider_state(name, check=result)
         if ok and not (desk.provider_state().get(name) or {}).get("credit_since"):
             desk.set_provider_state(name, cool_until=0, reason="", unreachable_since=0, unreachable_reason="")

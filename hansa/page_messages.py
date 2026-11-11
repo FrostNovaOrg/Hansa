@@ -1,8 +1,8 @@
 """Codes for the page, alongside the original English used by commands.
 
 Task, provider and coordinator records predate these codes and keep their English
-reasons. Decode only known, complete forms at the view boundary; never guess at
-an unfamiliar sentence. This also lets an older page show a newer server's text.
+reasons. Decode only known, complete forms when preparing page messages; never
+guess at an unfamiliar sentence. This also lets an older page show a newer server's text.
 """
 from __future__ import annotations
 

@@ -498,6 +498,8 @@ messages (`FIELD_message`, `unreached_messages`, resource `low_message`,
 `provider_credit_messages`, and release `problem_messages`). The page chooses
 the wording; unknown codes retain `text`. Historical reasons are decoded only
 when they match a known complete form, so unfamiliar messages remain readable.
+Provider checks save the same detail message returned by `/api/check`, so their
+wording survives a page reload.
 Task details carry `text_parts` for generated reason lines; user text and reports
 stay untouched. Terminal `hansa status` and `hansa show` remain English.
 Settings save errors and push-address refusals keep their existing handling.

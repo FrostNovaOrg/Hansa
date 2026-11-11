@@ -352,8 +352,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     desk.resume(by="page")
                     return self._send(200, {"ok": True})
                 if path == "/api/check":
-                    from .page_messages import annotate
-                    return self._send(200, annotate(check_provider(desk, body["provider"]), ("detail",)))
+                    return self._send(200, check_provider(desk, body["provider"]))
                 if path == "/api/release/answer":  # the principal's yes or no, to the release as the page showed it
                     return self._send(200, release.answer(desk, int(body["id"]), body.get("yes") is True,
                                                           str(body.get("reason") or ""), str(body.get("commit") or ""),
