@@ -43,7 +43,8 @@ a web page for the principal (the person directing the work), and task workers. 
   When API errors keep ending turns, hansa reposts unhandled work and alerts after 30 minutes by default,
   or at once for errors only the principal can fix; after an alert, a normal turn sends a recovery notice.
   Server startup writes missing events for saved task ends even after a long stop, without writing any twice.
-- Posts to the coordinator include tasks cancelled or closed elsewhere and survive titles with bytes that are not UTF-8.
+- Posts to the coordinator include queued or running tasks cancelled elsewhere and work closed elsewhere while waiting for review;
+  titles with bytes that are not UTF-8 still work.
   Long posts keep the newest ten lines whole and summarize each earlier result.
   After a session's `/restart`, `hansa notify on` from that session restores posting and delivers what was missed.
 - Missing Claude Code, an unusable `HANSA_CLAUDE`, a missing repository folder or git failing to prepare a worktree
@@ -157,6 +158,8 @@ a web page for the principal (the person directing the work), and task workers. 
 - `hansa release --stop ID` and Stop on the page also end a running watch, keeping the release done and recording
   who stopped the watch and why. A stopped watch stays stopped after a server restart and its log is trimmed like others;
   a stop after the command ended keeps its result. Release stops name the coordinator, the principal or a terminal command in words.
+- Stop on the page has a short, tappable warning; its full explanation stays open across status refreshes.
+- Release has its own row on the page, with the refusal reason and Refuse together on the next at every width.
 - A malformed one-time code uses none of the principal's wrong-code tries, for either `hansa release yes` or `no`.
 - Watch commands warn about forbidden words when saved and refuse releases containing them.
 - The principal sets the alert command. Alerts are grouped and rate-limited; closed to-dos are omitted
@@ -166,7 +169,7 @@ a web page for the principal (the person directing the work), and task workers. 
   before the target's description; requests that no longer wait are left out, while their results still go out.
 - A successful alert-command run clears an earlier failure warning. A waiting release whose code-bearing alert failed
   says the code may not have arrived and points to the page; status also says to use the page when no waiting release has a live code.
-- `hansa status` says how many alerts the hourly limit holds and until when, leaving out answered requests
+- `hansa status` and the page's header say how many alerts the hourly limit holds and until when, leaving out answered requests
   and excluding test alerts from the held count.
 - Recovery from low disk space, a lane's sandbox failure or a stuck server sends an all-clear with the trouble's
   start and end times. A sandbox failure alerts again after a passing try cleared the earlier hold, even for the same reason.
@@ -212,7 +215,9 @@ a web page for the principal (the person directing the work), and task workers. 
 
 - English and Chinese views show the pipeline, active lanes, waiting decisions and searchable tasks.
   Task details show each step, reports, checks and verification. Notes and known gaps are readable.
-  Tabs wrap on phones and narrow windows so every tab stays visible.
+- On phones, Status tables scroll sideways inside their own boxes with readable columns; the page itself stays within the screen.
+- Header tabs stay in one scrolling row; at phone width the mark stays visible and the desk name is hidden.
+- The header links to Hansa's repository on GitHub.
 - Name the desk on the page; alerts, push titles, the page, `hansa status`, `hansa desks` and the menu use it.
   Status, the desk list and the menu also show the folder.
 - The Goals tab shows each goal's decisions, its work's checks, merges and releases, what is missing and its cost.
@@ -223,23 +228,42 @@ a web page for the principal (the person directing the work), and task workers. 
 - Settings group providers, coordinator, lanes, read restrictions, releases, alerts and prices.
   Lanes are read-only; dispatch controls are in Settings. Drafts survive tab changes and failed saves;
   concurrent settings changes are shown before another save.
+- Remove refuses a provider used by the coordinator or a lane, explaining how to switch providers first.
+- Save settings adds typed provider and price names even if Add has not been pressed.
+- Mailbox allow-list lines are trimmed before saving.
+- Blank rest minutes, coordinator-alert minutes and compaction thresholds use the defaults shown beside their fields.
+- Saving an idle compaction threshold at or above the working threshold warns that idle compaction will not happen.
+- Settings save errors use the page's field labels and selected language.
 - Push addresses show the recognized service while typing. Bare Bark keys need at least eight characters;
   Bark and ntfy refuse each other's official addresses and name the service to choose.
 - Saving a duplicate push address names the entry that already has it. Older duplicates leave unrelated settings saves
   working, and status names the entries sharing an address.
-- Before saving an ntfy topic, the page warns that hansa hides it wherever it appears
+- When an address preview recognizes ntfy with a topic of at least eight characters, the page warns that hansa hides it wherever it appears
   and recommends a topic that is hard to guess.
 - Push-service refusals show the service's code and what to check. Malformed addresses get a specific reason;
   save refusals on the Chinese page are in Chinese.
 - Replacing a push address clears its old delivery result.
 - Clear a saved extra secret while keeping the push address. Clearing a Bark encryption key first warns that later
   pushes will be unencrypted and carry no release codes; a blank replacement field still keeps the saved secret.
+- A Bark encryption key field containing only spaces keeps the saved key.
+- Editing a pasted Bark encryption example preserves its lines.
 - “Send a test alert” reports every configured channel, and a failure in any channel makes the test fail.
 - Emptying a coordinator-alert minutes box restores the default; saving says which default applies.
 - `hansa explain history` and Settings show who changed each setting, when and old → new; filter by lane or provider. Keys stay hidden.
+- New key history entries say set or cleared while keeping values hidden; the concepts guide explains the wording.
 - The page is compressed and cached by the browser when unchanged.
   Polls stay small and back off on connection loss.
   Reconnecting keeps the last received status visible.
+- Warnings stay together in the header until they clear.
+- When the page cannot reach the server, it names `hansa serve`, offers `hansa up` and Retry, keeps the last status and recovers automatically.
+- A missing or wrong page token shows only how to reopen the page and stops polling.
+- Recent events describe everyday activity in sentences, with other records folded into one line.
+- Recent events show work put away with `hansa close` as closed, rather than cancelled.
+- Internal server failures return errors the page can show.
+- Server error details are available only to authenticated requests.
+- The Chinese page explains push-address refusals, including Bark's own reason, in Chinese.
+- Status warnings, task failure and hold reasons, provider problems and checks, credit rests and release refusals and failures use the page's language; terminal text is unchanged.
+- Chinese text consistently uses 基础分支, 后台, Hansa and 禁词, including in alerts; alert tags remain `[hansa]`.
 - Each tab keeps its token in `sessionStorage` and sends `Authorization: Bearer` on API requests;
   changes also need `X-Hansa: 1`. The token is removed from the address; cookies do not authenticate requests.
   See [the desk guide](docs/desk.md).
