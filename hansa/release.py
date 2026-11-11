@@ -1883,7 +1883,7 @@ def after_merge_rows(desk: Desk, s: dict, tasks: list) -> list:
             elif held:
                 en, zh = "held: direct commits need the principal's yes", "已暂缓：直接提交需要负责人同意"
             elif now() >= at:
-                en, zh = "starts when the server next looks", "服务器下次检查时开始"
+                en, zh = "starts when the server next looks", "后台下次检查时开始"
             else:
                 en = f"starts at {when(at)}, {delay} minute{'s' if delay != 1 else ''} after the last merge"
                 zh = f"于 {when(at)} 开始，即上次合并后 {delay} 分钟"
@@ -2145,7 +2145,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
 # hansa release --stop records "coordinator" in a Claude Code session (or with HANSA_ROLE=coordinator), "terminal"
 # outside one; "cli" was recorded for both before.
 STOPPED_BY = {"page": ("the principal", "你"), "coordinator": ("the coordinator", "协调员"),
-              "terminal": ("a command in a terminal", "终端里的命令"), "cli": ("a hansa command", "一条 hansa 命令")}
+              "terminal": ("a command in a terminal", "终端里的命令"), "cli": ("a hansa command", "一条 Hansa 命令")}
 
 
 def _who(r: dict, zh: bool = False) -> str:
