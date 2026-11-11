@@ -1410,7 +1410,10 @@ def provider_rest_news(desk: Desk, s: dict, name: str) -> None:
         how = rest_text(st)
         line = (f"provider {name}: resting until {time.strftime('%m-%d %H:%M', time.localtime(until))} ({why})"
                 + (f": {how}" if how else "") + " · waiting: " + ", ".join(waiting[:5])
-                + (f" (+{len(waiting) - 5} more)" if len(waiting) > 5 else ""))
+                + (f" (+{len(waiting) - 5} more)" if len(waiting) > 5 else "")
+                # a task still running on it returns to the queue later, and no second post names it
+                + (f" · tasks still running on {name} may join them: hansa status"
+                   if any(m["state"] == "running" and m.get("provider") == name for m in tasks) else ""))
         desk.event("provider_rested", provider=name, reason=why, until=until, tasks=waiting, text=line)
         desk.set_provider_state(name, rest_notice_reason=why)
 

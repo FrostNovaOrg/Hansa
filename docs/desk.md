@@ -77,7 +77,9 @@ refuses one that holds anything (files, folders, links, or what an interrupted
 init left) before anything is made, naming up to three of the entries and
 giving a `hansa init` command with the desk in a folder of its own beside the
 project (`~/shop-desk` for `~/shop`); so it never writes over a project's own
-`CLAUDE.md` or `.claude/settings.json`. A desk may lie inside a git
+`CLAUDE.md` or `.claude/settings.json`. When it cannot make a folder or write a
+file there (a file on the path, a folder this account may not write in), it says
+so in one line naming the path and removes what it had made. A desk may lie inside a git
 repository's work tree (the lane's or another), though a folder beside the
 project is the better place: `hansa init`, and `hansa lane add --repo R` for a
 desk inside R's work tree, write the desk's path into that repository's
@@ -166,6 +168,8 @@ A proxy that hides both its outside host name and these headers would not be rec
 For opening the page and setting providers, models and prices, follow
 [Getting started](getting-started.md#open-the-principals-page); for a remote
 desk, use its [SSH tunnel instructions](getting-started.md#work-over-ssh).
+When hansa serve is not running, `hansa web` says so under the address, with the command that
+starts it (`hansa up`): the page opens only while the server runs.
 `hansa web` prints the token after `#` (`/#t=...`): a browser sends what
 follows `#` to no server, so no proxy or server on the way records it. An
 older address with `?t=` still works; if an address has both, the token after
@@ -1609,7 +1613,10 @@ posted when queued tasks have no provider ready in their eligible lanes. Hansa
 posts after the run's final task state or the provider check is saved, so a task
 returned to the queue is included along with tasks waiting in other lanes. The
 line names the provider, reason, rest end time and up to five waiting task IDs,
-then the count of any more. It goes to the desk's coordinator sessions, with
+then the count of any more. A task still running on that provider when the
+post is made returns to the queue later and no second post names it, so the
+line then ends `· tasks still running on NAME may join them: hansa status`.
+It goes to the desk's coordinator sessions, with
 the provider as its subject; it does not alert the principal. Moving on to a
 ready provider stays quiet. The same reason stays quiet until a worker run on
 that provider finishes instead of returning to wait; this survives a server

@@ -212,6 +212,52 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str | None = No
     return desk
 
 
+def _make_problem(e: OSError) -> str:
+    """What stopped hansa init making a desk, in a clause that names the path."""
+    path = Path(e.filename) if e.filename else None
+    if isinstance(e, NotADirectoryError) and path:
+        at = path
+        while not os.path.lexists(at) and at.parent != at:
+            at = at.parent
+        while at.parent != at and at.is_dir():  # the file on the way, where the path runs through one
+            at = at.parent
+        return f"{at} is a file, not a folder"
+    if isinstance(e, PermissionError) and path:
+        return f"this account may not write in {path.parent if not os.path.lexists(path) else path} ({e.strerror})"
+    return f"{path or 'a file'}: {e.strerror or e}"
+
+
+def _unmake_desk(root: Path, first_new: Path, before) -> None:
+    """Remove what a failed hansa init made: the folders it made, or what it put in the empty folder it was given."""
+    try:
+        if before is None:
+            if os.path.lexists(first_new):
+                shutil.rmtree(first_new)
+            return
+        for name in set(os.listdir(root)) - before:
+            at = root / name
+            shutil.rmtree(at) if at.is_dir() and not at.is_symlink() else at.unlink()
+    except OSError:
+        pass
+
+
+def init_desk_or_say(root: Path, repo: str, lane: str, base) -> Desk:
+    """init_desk for hansa init: a folder or file it cannot make is one line naming the path, and what it made is removed."""
+    at = Desk(root).root
+    first_new = at  # the topmost folder this makes, removed again when making the desk fails
+    while not os.path.lexists(first_new.parent) and first_new.parent != first_new:
+        first_new = first_new.parent
+    try:
+        before = set(os.listdir(at)) if at.is_dir() else None
+    except OSError:
+        before = None  # init_desk itself says it cannot read the folder
+    try:
+        return init_desk(root, repo, lane, base)
+    except OSError as e:
+        _unmake_desk(at, first_new, before)
+        raise SystemExit(f"hansa: cannot make the desk at {at}: {_make_problem(e)}; no desk was made")
+
+
 def repo_path(path: str, nothing: str) -> str:
     """Resolve the existing prefix strictly: a missing folder is fine, a dangling or looping link is not."""
     at = Path(os.path.abspath(path))
@@ -499,7 +545,7 @@ def cmd_init(a):
         raise SystemExit(answer_lane_refused(a.lane))
     if a.user:
         _init_for(a)
-    desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base)
+    desk = init_desk_or_say(Path(a.dir), a.repo or "", a.lane, a.base)
     print(f"desk ready at {desk.root}")
     s = desk.settings()
     ln = s["lanes"].get(a.lane)
@@ -2071,6 +2117,9 @@ def cmd_web(a):
                          + see_more("session-identity"))
     # The key goes after #: a browser sends the fragment to no server, so no proxy on the way records it.
     print(f"Open http://127.0.0.1:{a.port or web_port(desk)}/#t={desk.web_token()}", flush=True)
+    if server_state(desk)["state"] == "gone":
+        print("hansa serve is not running, so the page will not open until it is: start it with "
+              + notify._up_hint(desk, str(Path.cwd())), flush=True)
     print("Keep this window open while you use the page; close it or press Ctrl+C when you are done.", flush=True)
     # This holds an ssh tunnel to the page open. Its input ends when the connection does (a closed
     # window, a laptop gone to sleep), and then it ends too instead of staying on the server.
@@ -3320,7 +3369,8 @@ def _lane_try(desk: Desk, a) -> None:
                 st = server_state(desk)
                 if st["state"] == "gone":
                     raise SystemExit("hansa: hansa serve is not running, and a try runs through it (with its environment, "
-                                     "as tasks do); nothing was run. Start it, then try again")
+                                     "as tasks do); nothing was run. Start it with "
+                                     + notify._up_hint(desk, str(Path.cwd())) + f", then hansa lane try {a.name} again")
                 if st["state"] == "stuck":
                     raise SystemExit(f"hansa: hansa serve (pid {st['pid']}) is busy or stuck: no round finished for "
                                      f"{quiet_text(st['quiet'])}, and a try runs through it; nothing was run. See hansa "
@@ -3987,7 +4037,7 @@ def main(argv=None):
                       " Also returns with the reason when every watched task is queued and dispatch is paused"
                       " or under a disk or memory floor; running and merging tasks are still waited on."
                       " Returns at once when hansa serve is not running.")
-    p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued or running task)")
+    p.add_argument("ids", nargs="*", metavar="id", help="tasks to watch (default: every queued, running or merging task)")
     p.add_argument("--timeout", type=float, default=60, help="minutes (default 60)")
     p.add_argument("--every", type=float, default=5.0, help=argparse.SUPPRESS)
     p.epilog = see_more("inbox")
