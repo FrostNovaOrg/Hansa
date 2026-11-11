@@ -96,15 +96,19 @@ Save settings, then send a test push. Its encrypted text explains that
 
 The encryption key has its own 0600 file under `secrets/`, is included in
 redaction and task-change secret checks, and is never shown again. The saved
-entry says **encrypted** on the page, in `hansa status` and in `hansa explain`.
+entry with a valid key says **encrypted** on the page, in `hansa status` and in `hansa explain`.
 A blank replacement field keeps the saved key; **Clear saved secret** removes it
 when settings are saved. Removing the entry removes its secrets, just as for other services. Without a key, Bark delivery stays unchanged.
 Hansa writes the key file with one newline at the end and reads it less only
 that newline, as a key may begin or end with spaces. A key file edited by hand
 to a key the page would refuse (another length, or an extra blank line) sends
-nothing, never plain text: the entry's result is `bad_key`, which says on the
-page and in `hansa status` that its encryption key is not valid and to set it
-again on the page. Such an entry carries no release code, and none is made for it.
+nothing, never plain text. The page, `hansa status` and `hansa explain` each say
+in one place that encryption is set but its saved key is invalid and nothing is
+sent, even before a push is attempted. Enter the key again in **Encryption key
+(optional)** under **Settings → Alerts** and save settings. Changing the address
+while retaining the invalid key is refused with the same repair advice; you can
+save a valid replacement key with the new address. An attempted push records
+`bad_key`. Such an entry carries no release code, and none is made for it.
 Other services' extra secrets (an ntfy or Gotify token, a JSON webhook's token,
 a signing secret) are read without the blank space around them, so a file
 written by hand or by another program with more than one newline still works.

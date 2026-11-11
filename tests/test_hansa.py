@@ -55220,6 +55220,53 @@ class AlertPushPageTest(unittest.TestCase):
                         self.assertIn(word, problem)
                     self.assertIn("Choose" if language == "en" else "选择", problem)
 
+    def test_invalid_saved_bark_key_is_explained_once_in_page_language(self):
+        key, damaged = "k" * 16, "k" * 15
+        entry = self.add(secret=key)
+        alert_push._file(self.desk, entry["id"], True).write_text(damaged + "\n")
+        for result in (None, "sent", "bad_key"):
+            if result:
+                alert_push.record(self.desk, entry, result)
+            for language in ("en", "zh"):
+                with self.subTest(result=result, language=language):
+                    card = self.page(language=language)["before"]["entries"][0]
+                    text = card["text"]
+                    words = (("encryption is set", "saved encryption key is not valid", "nothing is sent",
+                              "Encryption key (optional)", "Settings", "Alerts", "save settings") if language == "en"
+                             else ("已设置加密", "已保存的加密密钥无效", "不会", "发送", "加密密钥（选填）",
+                                   "设置", "提醒", "重新填写", "保存设置"))
+                    for word in words:
+                        self.assertIn(word, text)
+                    self.assertEqual(text.count("encryption key is not valid" if language == "en" else "加密密钥无效"), 1)
+                    self.assertNotIn(" · encrypted" if language == "en" else "已加密", text)
+                    self.assertTrue(all(secret not in text for secret in (key, damaged, self.KEY)))
+                    if language == "zh":
+                        for english in ("Settings", "Alerts", "encryption is set"):
+                            self.assertNotIn(english, text)
+
+    def test_invalid_saved_bark_key_address_refusal_uses_page_language(self):
+        key, damaged = "k" * 16, "k" * 15
+        entry = self.add(secret=key)
+        alert_push._file(self.desk, entry["id"], True).write_text(damaged + "\n")
+        edit = {"id": entry["id"], "address": "replacement-device"}
+        refusal = save_from_page(self.desk, {"settings": self.desk.settings(), "alert_push_changes": [edit]})
+        self.assertFalse(refusal["ok"])
+        self.assertTrue(all(secret not in json.dumps(refusal) for secret in (key, damaged, self.KEY)))
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                shown = self.page([{"entry": 0, "address": edit["address"]},
+                                   {"reply": refusal, "save": True}], language)
+                problem = " ".join(shown["problems"])
+                words = (("saved encryption key is not valid", "Encryption key (optional)", "save settings")
+                         if language == "en" else ("已保存的加密密钥无效", "加密密钥（选填）", "重新填写", "保存设置"))
+                for word in words:
+                    self.assertIn(word, problem)
+                self.assertNotIn("AES-128", problem)
+                self.assertTrue(all(secret not in problem for secret in (key, damaged, self.KEY)))
+                if language == "zh":
+                    self.assertNotIn("Settings", problem)
+                    self.assertNotIn("Alerts", problem)
+
     def test_bark_copied_example_paste_and_literal_key_are_saved_exactly(self):
         from tests.test_push_services import bark_example
         self.add()
