@@ -54,6 +54,11 @@ class Scratch(unittest.TestCase):
 
     def setUp(self):
         self.root = self.make_root()
+        # The account's state (its list of desks, the rests shared between desks on one login) under the scratch:
+        # every test's provider has the same placeholder login, so a rest one test records must not reach another.
+        state = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state")})
+        state.start()
+        self.addCleanup(state.stop)
         repo = self.root / "repo"
         repo.mkdir()
         git("init", "-q", "-b", "main", cwd=repo)

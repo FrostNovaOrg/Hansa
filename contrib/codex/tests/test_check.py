@@ -93,6 +93,15 @@ class ProviderCheck(Scratch):
         self.assertAlmostEqual(rest["cool_until"], time.time() + 3 * 3600 + 60, delta=180)
         self.assertTrue(hansa_run.provider_problem(self.desk, self.desk.settings(), "codex"))
 
+    def test_the_rests_shared_between_desks_stay_in_the_scratch(self):
+        # every test's `codex` has the same placeholder login: a credit rest another test left in the account's
+        # file would be shared into this desk, and its usage limit would start no rest of its own
+        from hansa import rests
+        self.assertEqual(rests.rests_file().parent, self.root / "state" / "hansa")
+        self.assertFalse(self.check("usage_limit.jsonl")["ok"])
+        self.assertEqual(rests.rests_file().parent, self.root / "state" / "hansa")
+        self.assertGreater(next(iter(rests.read().values()))["cool_until"], time.time())
+
     def test_a_check_with_empty_tools(self):
         r = self.check(tools="")
         self.assertTrue(r["ok"], r)
