@@ -395,6 +395,16 @@ follow the same worker read permissions as new attachment sources, following sym
 private hard links. The check applies to `add`, `retry` and `lane brief`, including before handing text
 to the desk's account. A refusal changes nothing. Inline text, pipes and here-documents remain usable.
 
+Give words or a file, not both: hansa refuses the combination so words cannot silently be dropped.
+`hansa add` refuses empty or whitespace-only task text and a `--max-turns` below 1; omit that option
+to use the lane's limit. These checks keep empty work and invalid turn limits out of the queue.
+An empty or whitespace-only `--title` uses the task text's first line, cut at 80 characters.
+An explicit title must be on one line and at most 200 characters, since it goes into commit messages
+and task lists. These input rules remain while tasks and titles serve those purposes.
+
+`--model` applies only to Claude subscription providers; other providers use their own model.
+`hansa lane` lists the lanes; `hansa explain lane NAME` shows a lane's provider order.
+
 Add screenshots, patches or logs with repeatable `--attach PATH`. Copies are saved under `.hansa/`
 when queued, so later source edits change nothing. Retry inherits them
 and accepts more with `--attach`; verification inherits them too. Each run gets copies under its

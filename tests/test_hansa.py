@@ -9230,8 +9230,10 @@ def save():'''))
                 c.assertLess(time.monotonic() - start, 4.0)  # runaway pattern backtracking
             assert_pattern_limit(c, said, entry, "release command")
             c.assertEqual(release.get(c.desk, 1)["state"], "forbidden")
-            with small_pattern_limits():
-                said = c.refused("add", "Work", "--lane", "a", "--title", "7" * 2000)
+            # Exercise the scanner directly: add refuses titles over 200 characters before scanning.
+            with small_pattern_limits(), c.assertRaises(SystemExit) as refused:
+                cli._title_allowed(c.desk, c.desk.settings(), "7" * 2000, "Work", "a")
+            said = str(refused.exception)
             assert_pattern_limit(c, said, entry, "title")
             c.assertIn("Nothing was queued", said)
 
@@ -9549,8 +9551,9 @@ def save():'''))
             c.assertEqual(r["hits"][-1]["code"], "line")
             c.assertNotIn("Falcon after limit", [h["line"] for h in r["hits"]])
             grouped(run.words_text("t0001", r["hits"]))
-            with small_pattern_limits():
-                grouped(c.refused("add", "Work", "--lane", "a", "--title", "Falcon\n" + "7" * 2000), where="title")
+            with small_pattern_limits(), c.assertRaises(SystemExit) as refused:
+                cli._title_allowed(c.desk, c.desk.settings(), "Falcon\n" + "7" * 2000, "Work", "a")
+            grouped(str(refused.exception), where="title")
             said = c.refused("add", "Work", "--lane", "a", "--title", literal)
             c.assertIn("Words found that must not go out:", said)
             c.assertNotIn("The line could not be checked:", said)
@@ -36011,6 +36014,131 @@ def save():'''))
         with unittest.mock.patch.dict(os.environ, {"LANG": "zh_CN.UTF-8"}), \
                 unittest.mock.patch.object(run, "server_state", lambda desk: up):
             self.assertIn("LANG=en_US.UTF-8, from hansa serve's environment", line())  # not this shell's
+
+    def test_add_empty_text_is_one_line_and_queues_nothing(self):
+        source = self.tmp / "empty.md"
+        source.write_text(" \n\t")
+        before = self.desk.events_path.read_bytes()
+        for args in (("",), ("   ",), ("--file", str(source)), ("--file", "-")):
+            with self.subTest(args=args):
+                result = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"),
+                                         "--desk", str(self.desk.root),
+                                         "add", *args], input="", capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                self.assertIn("hansa:", result.stderr)
+                self.assertIn("task text is empty", result.stderr)
+                self.assertEqual(self.desk.tasks(), [])
+                self.assertEqual(self.desk.events_path.read_bytes(), before)
+
+    def test_add_refuses_words_with_a_file_in_either_order(self):
+        source = self.tmp / "task.md"
+        source.write_text("File task")
+        before = self.desk.events_path.read_bytes()
+        for args in (("--file", str(source), "some", "more", "words"),
+                     ("a sentence", "--file", str(source)), ("--file", "-", "words")):
+            with self.subTest(args=args), unittest.mock.patch("sys.stdin", io.StringIO("File task")):
+                said = self.refused("add", *args)
+                for part in ("words", "--file", "not both"):
+                    self.assertIn(part, said)
+                self.assertEqual(self.desk.tasks(), [])
+                self.assertEqual(self.desk.events_path.read_bytes(), before)
+
+    def test_file_with_words_is_refused_before_account_handoff(self):
+        tid = self.desk.new_task("Earlier work", state="failed")
+        before = self.desk.events_path.read_bytes()
+        for command in (("add",), ("retry", tid), ("lane", "brief", "a")):
+            with self.subTest(command=command), \
+                    unittest.mock.patch.object(account, "desk_account", return_value="desk-account"), \
+                    unittest.mock.patch.object(account, "run") as handoff:
+                said = self.refused(*command, "words", "--file", str(self.tmp / "missing.md"))
+                for part in ("words", "--file", "not both"):
+                    self.assertIn(part, said)
+                handoff.assert_not_called()
+                self.assertEqual(len(self.desk.tasks()), 1)
+                self.assertEqual(self.desk.events_path.read_bytes(), before)
+
+    def test_add_max_turns_requires_one_or_more(self):
+        before = self.desk.events_path.read_bytes()
+        for limit in ("0", "-3"):
+            with self.subTest(limit=limit):
+                said = self.refused("add", "Work", "--max-turns", limit)
+                self.assertIn("--max-turns", said)
+                self.assertIn("1 or more", said)
+                self.assertEqual(self.desk.tasks(), [])
+                self.assertEqual(self.desk.events_path.read_bytes(), before)
+        tid = self.hansa("add", "Work", "--max-turns", "1").split()[0]
+        self.assertEqual(self.desk.meta(tid)["max_turns"], 1)
+        tid = self.hansa("add", "Default limit").split()[0]
+        self.assertEqual(self.desk.meta(tid)["max_turns"], 0)
+
+    def test_add_blank_title_uses_the_first_line(self):
+        for title in ("", "   "):
+            with self.subTest(title=title):
+                tid = self.hansa("add", "First line\nMore text", "--title", title).split()[0]
+                self.assertEqual(self.desk.meta(tid)["title"], "First line")
+        tid = self.desk.new_task("First line\nMore text", title="   ")
+        self.assertEqual(self.desk.meta(tid)["title"], "First line")
+        tid = self.hansa("add", "First line", "--title", "  Chosen title  ").split()[0]
+        self.assertEqual(self.desk.meta(tid)["title"], "  Chosen title  ")
+        self.hansa("lane", "set", "a", "commit_message", "{title}")
+        first = "x" * 81
+        said = self.hansa("add", first, "--lane", "a", "--title", "   ")
+        self.assertIn("cut at 80", said)
+        self.assertEqual(self.desk.tasks()[-1]["title"], first[:80])
+
+    def test_add_blank_title_checks_the_first_line_for_forbidden_words(self):
+        self.forbid("Falcon")
+        said = self.refused("add", "Falcon work\nMore text", "--title", "   ")
+        self.assertIn("Falcon", said)
+        self.assertIn("first line", said)
+        self.assertEqual(self.desk.tasks(), [])
+
+    def test_add_title_refuses_line_breaks(self):
+        before = self.desk.events_path.read_bytes()
+        for title in ("First\nSecond", "First\rSecond", "First\r\nSecond", "First\n", "\n", "First\u2028Second"):
+            with self.subTest(title=title):
+                said = self.refused("add", "Work", "--title", title)
+                self.assertIn("--title", said)
+                self.assertIn("line", said)
+                self.assertEqual(self.desk.tasks(), [])
+                self.assertEqual(self.desk.events_path.read_bytes(), before)
+
+    def test_add_title_limit_is_200_characters(self):
+        before = self.desk.events_path.read_bytes()
+        for title in ("题" * 201, " " + "x" * 199 + " "):
+            with self.subTest(title=title):
+                said = self.refused("add", "Work", "--title", title)
+                for part in ("--title", "200", "characters"):
+                    self.assertIn(part, said)
+                self.assertEqual(self.desk.tasks(), [])
+                self.assertEqual(self.desk.events_path.read_bytes(), before)
+        title = "题" * 200
+        tid = self.hansa("add", "Work", "--title", title).split()[0]
+        self.assertEqual(self.desk.meta(tid)["title"], title)
+        self.desk.update(tid, state="failed")
+        follow = self.hansa("retry", tid).split()[0]
+        self.assertEqual(self.desk.meta(follow)["title"], f"{title} (retry of {tid})")
+
+    def test_add_model_without_a_lane_names_the_lane_commands(self):
+        said = self.hansa("add", "Work", "--model", "sonnet")
+        note = next(line for line in said.splitlines() if line.startswith("note: --model"))
+        for part in ("hansa lane", "lists", "hansa explain lane NAME", "order"):
+            self.assertIn(part, note)
+        self.assertNotIn("hansa explain lane L", note)
+        said = self.hansa("add", "Work", "--model", "sonnet", "--lane", "a")
+        self.assertIn("hansa explain lane a", said)
+
+    def test_lane_list_and_hide_help_use_name_for_the_lane(self):
+        said = self.hansa("lane")
+        self.assertIn("hansa explain lane NAME", said)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ended:
+            main(["hide", "--help"])
+        self.assertEqual(ended.exception.code, 0)
+        said = " ".join(out.getvalue().split())
+        self.assertIn("hansa explain lane NAME", said)
 
     def test_add_says_when_a_title_put_in_commits_was_cut(self):
         long = "Make the release notes say which version of the tool each change first shipped in, by tag"
