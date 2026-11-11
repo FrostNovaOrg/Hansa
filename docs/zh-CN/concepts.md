@@ -92,7 +92,7 @@ desk/
 
 ## 日常命令
 
-这些命令由协调员运行，你也可以自己用。协调员的全部命令都在 [`hansa/card.md`（英文）](../../hansa/card.md)里，运行 `hansa help card` 可以打印这份说明。`hansa help` 列出命令和帮助主题，`hansa help <topic>` 打印 `docs/` 里对应的一篇文档。`hansa --help` 列出所有命令，包括负责人使用的 `init`、`serve`、`web`、`coordinator` 和 `ping`；`hansa <command> --help` 或 `hansa help <command>` 显示该命令的选项。
+这些命令由协调员运行，你也可以自己用。协调员的全部命令都在 [`hansa/card.md`（英文）](../../hansa/card.md)里，运行 `hansa help card` 可以打印这份说明。`hansa help` 列出命令和帮助主题，`hansa help <topic>` 打印 `docs/` 里对应的一篇文档。文档里的相对链接会打印成链接文字和查找该小节的位置，方便在终端里照着查找：如果该小节是帮助主题，就打印 `hansa help TOPIC`；否则打印 `docs/` 下的文件和标题。`hansa --help` 列出所有命令，包括负责人使用的 `init`、`serve`、`web`、`coordinator` 和 `ping`；`hansa <command> --help` 或 `hansa help <command>` 显示该命令的选项。
 
 | 命令 | 用途 |
 |---|---|

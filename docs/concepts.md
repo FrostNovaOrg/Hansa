@@ -107,7 +107,10 @@ More: [The desk: files, keys and notes](desk.md).
 
 The coordinator runs these; you can too. Every coordinator command is in
 [`hansa/card.md`](../hansa/card.md), which `hansa help card` prints. `hansa help`
-lists commands and topics, and `hansa help <topic>` prints one from `docs/`.
+lists commands and topics, and `hansa help <topic>` prints one from `docs/`. A
+relative link in a topic prints as its words and where to read the section, so
+it can be followed in a terminal: `hansa help TOPIC` when a topic prints that
+section, else the file under `docs/` and its heading.
 `hansa --help` lists every command, including the principal's `init`, `serve`,
 `web`, `coordinator` and `ping`; `hansa <command> --help` or
 `hansa help <command>` shows its options.
