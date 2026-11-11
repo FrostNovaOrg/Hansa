@@ -1234,7 +1234,8 @@ def cmd_close(a):
         print((f"{had}; it stays failed, and hansa show {a.id} still says why" if had else
                f"{a.id} closed; it stays done" + (f", verdict: {m['verdict']}" if m.get("verdict") else "")))
     else:  # finished work closed ends cancelled here: posted to any session but this one, as hansa cancel's is
-        desk.event("task_cancel", task=a.id, **({"ended": True} if m["state"] == "done" else {}))
+        # closed: the page says closed, not cancelled (its Recent events)
+        desk.event("task_cancel", task=a.id, closed=True, **({"ended": True} if m["state"] == "done" else {}))
         print(f"{had} without merging; hansa show {a.id} still says why it failed" if had else
               f"{a.id} closed without merging")
 

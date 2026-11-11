@@ -714,7 +714,7 @@ within 20 seconds of each other go out in one run to every channel that is set u
 one batch at a time, and at most 20 runs an hour: beyond that, alerts are held and go out together in one
 run when the hour frees a run, with a line saying how many were held back
 (the page's test button is not held and is excluded from that count).
-`hansa status` shows how many alerts are currently held and when the hourly limit
+`hansa status`, and the page's status line as a warning, show how many alerts are currently held and when the hourly limit
 frees a run, leaving out answered requests. A run that fails or times out is recorded
 (event `alert_failed` with `channel: "command"`) and `hansa status` shows the last failure with its exit
 code and last lines (none for an alert that held a release's one-time code:
