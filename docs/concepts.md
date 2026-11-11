@@ -125,7 +125,7 @@ lists commands and topics, and `hansa help <topic>` prints one from `docs/`.
 | `hansa release L [TARGET] ["<note>"]` | Ask for a release of lane L's base branch; it runs after the principal's yes (a target ticked to go out without asking needs none) |
 | `hansa release yes\|no ID CODE` | Pass on the principal's answer to a release, given in the conversation with their alert's one-time code |
 | `hansa lane ...`, `hansa concurrency [N]` | List, add, change or remove lanes; how many tasks run at once |
-| `hansa ask "<what>"` | Record a to-do for the principal; close it with `--close N "<outcome>"` |
+| `hansa ask "<what>"`, `hansa ask [--closed]` | Record a to-do for the principal; close it with `--close N "<outcome>"`; alone, list the open to-dos in full (`--closed`: the closed ones with their outcomes) |
 | `hansa cost [--by day\|seat\|lane\|task\|goal\|model\|provider]` | Tokens, and what they are worth at the principal's prices |
 | `hansa explain [lane L \| provider P \| server \| notify]` | This desk's current settings and state, and where each comes from |
 | `hansa explain history [lane L \| provider P] [--last N]` | Who changed each setting, when, and its old and new values |

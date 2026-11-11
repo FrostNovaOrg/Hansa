@@ -480,7 +480,7 @@ def ask_names(a: dict, ready: list) -> list:
 
 
 def ask_note(a: dict, ready: list) -> str:
-    """For an open request that may be done by now (ask_names): a hint saying so. hansa closes nothing itself."""
+    """For an open to-do that may be done by now (ask_names): a hint saying so. hansa closes nothing itself."""
     named = ask_names(a, ready)
     return f"{', '.join(named)} {'is' if len(named) == 1 else 'are'} ready now: done?" if named else ""
 
@@ -1085,6 +1085,65 @@ def todo_list(desk: Desk, page: int = 1, state: str = "") -> dict:
     return {"rows": rows[(page - 1) * 50:page * 50], "page": page, "pages": pages, "total": total}
 
 
+ASKS_PAGE = 20  # closed to-dos hansa ask --closed shows at a time
+
+
+def _ask_block(a: dict, goal_titles: dict) -> list:
+    """One to-do in full, for hansa ask: its head line, its text and why, each line indented."""
+    when = lambda ts: time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "?"
+    head = [f"#{a['id']}"]
+    if a.get("closed"):
+        head += ["work waited on it"] if a.get("holds") else []
+        head.append(f"closed {when(a['closed'])}" + (" by the coordinator" if a.get("closed_by") == "coordinator" else ""))
+    else:
+        head.append("work waits on it" if a.get("holds") else "work goes on")
+    head.append(f"asked {when(a.get('created'))}" + (f" by {a['by']}" if a.get("by") else ""))
+    if a.get("goal"):
+        title = goal_titles.get(a["goal"])
+        head.append(f"goal {a['goal']}" + (f" ({title})" if title else ""))
+    out = [" · ".join(head)]
+    out += [f"  {line}" for line in (str(a.get("text") or "").splitlines() or [""])]
+    if a.get("why"):
+        out += [f"  why only the principal: {line}" if i == 0 else f"    {line}"
+                for i, line in enumerate(str(a["why"]).splitlines())]
+    if a.get("closed"):
+        outcome = (a.get("reason") if a.get("closed_by") == "coordinator" else
+                   f"answered on the page: {a['answer']}" if a.get("answer") else "none recorded")
+        out += [f"  outcome: {line}" if i == 0 else f"    {line}" for i, line in enumerate(str(outcome).splitlines() or [""])]
+    return out
+
+
+def asks_text(desk: Desk, closed: bool = False, page: int = 1) -> str:
+    """hansa ask with no text: the open to-dos in full, oldest first; with closed, the closed ones and their
+    outcomes, newest first, ASKS_PAGE at a time."""
+    try:
+        goal_titles = {gid: g.get("title", "") for gid, g in goals.records(desk)[0].items()}
+    except (OSError, KeyError, ValueError):
+        goal_titles = {}
+    asks = desk.asks()
+    if not closed:
+        rows = sorted((a for a in asks if not a.get("closed")), key=lambda a: (a.get("created") or 0, a["id"]))
+        if not rows:
+            return "no open to-dos for the principal (hansa ask --closed lists the closed ones)"
+        out = [f"open to-dos for the principal ({len(rows)}), oldest first:"]
+        for a in rows:
+            out += _ask_block(a, goal_titles)
+        out.append('close one with its outcome: hansa ask --close N "<outcome>"')
+        return "\n".join(out)
+    rows = sorted((a for a in asks if a.get("closed")), key=lambda a: (a.get("closed") or 0, a["id"]), reverse=True)
+    if not rows:
+        return "no closed to-dos yet (hansa ask lists the open ones)"
+    pages = (len(rows) + ASKS_PAGE - 1) // ASKS_PAGE
+    if not 1 <= page <= pages:
+        raise SystemExit(f"hansa: there is no page {page} of closed to-dos; there {'is' if pages == 1 else 'are'} "
+                         f"{pages} ({len(rows)} closed to-dos, {ASKS_PAGE} a page)")
+    out = [f"closed to-dos, newest first: page {page} of {pages}, {len(rows)} in all"
+           + (f" (next: hansa ask --closed --page {page + 1})" if page < pages else "") + ":"]
+    for a in rows[(page - 1) * ASKS_PAGE:page * ASKS_PAGE]:
+        out += _ask_block(a, goal_titles)
+    return "\n".join(out)
+
+
 def status_text(st: dict) -> str:
     out = [f"desk {st['desk_name']} ({st['desk']})",
            ("PAUSED: " + st["paused"]) if st["paused"] else f"dispatch on, {st['concurrency']} at a time",
@@ -1220,8 +1279,9 @@ def status_text(st: dict) -> str:
                        "  the principal answers on the page only: no alert command is set and no enabled Bark entry "
                        "encrypts, so no code is sent")
     if st["asks"]:
-        out.append("open asks to the principal:")
-        out += [f"  #{a['id']}: {a['text'][:100]}" + (f" · {a['note']}" if a.get("note") else "") for a in st["asks"]]
+        out.append("open to-dos for the principal (hansa ask reads them whole):")
+        out += [f"  #{a['id']}{' (work waits on it)' if a.get('holds') else ''}: {' '.join(a['text'].splitlines())[:100]}"
+                + (f" · {a['note']}" if a.get("note") else "") for a in st["asks"]]
     t = st["last_24h"]
     unpriced = t.get("worker_unpriced_tokens", 0)
     worth = f"worth ${t['worker_usd']:.2f}; " if not unpriced or unpriced < t["worker_tokens"] else ""

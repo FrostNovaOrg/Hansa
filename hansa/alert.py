@@ -1276,14 +1276,14 @@ def explain_line(s: dict, desk: Desk | None = None) -> str:
                      "Never guess one.")
     if not cmd:
         return (f"Alerts: no alert command is set. {pushes}. The principal sets these up on the page, Settings, Alerts; hansa "
-                "alerts through those set up when a release waits for the principal or ends, a request is filed, and "
+                "alerts through those set up when a release waits for the principal or ends, a to-do is recorded for the principal, and "
                 "the rest hansa help alerts lists; you send no alerts and cannot set them up. "
                 + (code_channels if desk and release_codes(desk, s) else
                    "With no alert command or enabled Bark entry that encrypts, no release gets a one-time code: "
                    "the principal approves releases on the page only."))
     return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
-            "when a release waits for the principal or ends, you stop a release (hansa release --stop), a request is "
-            "filed (hansa ask), a provider runs out of credit, a lane's runs cannot start because their sandbox "
+            "when a release waits for the principal or ends, you stop a release (hansa release --stop), a to-do is "
+            "recorded for the principal (hansa ask), a provider runs out of credit, a lane's runs cannot start because their sandbox "
             "cannot, free space goes under the floor (hansa disk-floor), hansa serve finishes no round for a long time, "
             "what hansa posts to your session cannot reach it (no session hears from hansa, its inbox refuses posts, "
             "your session waits on a permission dialog or a question, or a task posted to it waits for review while it "
