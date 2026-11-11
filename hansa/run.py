@@ -1407,7 +1407,7 @@ def providers_waited_for(desk: Desk, s: dict, tasks: list) -> dict:
         lanes = [m["lane"]] if m.get("lane") else s["lanes"]
         providers = {p for ln in lanes if ln in s["lanes"] and not work_lane_problem(s, ln,
                      verifying=m.get("kind") == "verify" and bool(m.get("lane")))
-                     for p in task_providers(s, ln, m) if p not in refused_by(m)}
+                     for p in task_providers(s, ln, m) if p not in refused_by(m, task_providers(s, ln, m))}
         if not providers & ready:
             for p in providers:
                 waiting[p] = waiting.get(p, 0) + 1
@@ -1440,9 +1440,13 @@ def unreachable_text(st: dict) -> str:
     return text
 
 
-def refused_by(m: dict) -> set:
-    """Providers that refused this task; it is not offered to them again."""
-    return {a["provider"] for a in m.get("attempts", []) if a.get("kind") == "refused"}
+def refused_by(m: dict, order: list | None = None) -> set:
+    """Skip this round's refusals and its ancestors'. If every lane provider refused earlier rounds, try
+    them again; this round's own refusals still stand. Inheritance prevents spending each follow-up on
+    the same content filter, and can go when providers no longer refuse individual requests."""
+    own = {a["provider"] for a in m.get("attempts", []) if a.get("kind") == "refused"}
+    inherited = set(m.get("inherited_refusals", {}))
+    return own if order is not None and inherited.issuperset(order) else own | inherited
 
 
 def provider_problem(desk: Desk, s: dict, name: str) -> str:
@@ -4657,7 +4661,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     elif kind == "refused":
         attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "refused"})
         order = desk.settings()["lanes"].get(meta.get("lane"), {}).get("providers", [])
-        left = [p for p in order if p not in refused_by({"attempts": attempts})]
+        left = [p for p in order if p not in refused_by({**meta, "attempts": attempts}, order)]
         state = "queued" if left and tries_used(attempts) < TRIES else "failed"
         error = f"{meta['provider']}: {why}; " + (
             "queued again for the lane's next provider" if state == "queued" else "no other provider in the lane to try")
@@ -6946,8 +6950,9 @@ class Dispatcher:
                             verifying=m.get("kind") == "verify" and bool(m.get("lane"))) or self.sandbox_waits(ln, s)
                             or self.start_waits(ln, s, waits)):
                         continue
-                    pname = next((p for p in task_providers(s, ln, m)
-                                  if p not in refused_by(m) and not provider_problem(desk, s, p)), None)
+                    order = task_providers(s, ln, m)
+                    pname = next((p for p in order
+                                  if p not in refused_by(m, order) and not provider_problem(desk, s, p)), None)
                     if not pname:
                         continue
                     try:
@@ -7372,8 +7377,8 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
                 f": {waiter['id']}'s worker's process is not known to be gone (hansa could not look for it "
                 f"for {LOOK_LIMIT // 60} minutes)" if waiter else ""), lane=ln))
             continue
-        probs = {p: "refused this task" if p in refused_by(m) else lk["problems"][p]
-                 for p in task_providers(s, ln, m)}
+        order = task_providers(s, ln, m)
+        probs = {p: "refused this task" if p in refused_by(m, order) else lk["problems"][p] for p in order}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
             running = sum(lane_occupied(x) for x in lk["tasks"])

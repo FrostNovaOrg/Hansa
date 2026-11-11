@@ -1522,6 +1522,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
     if m.get("verify_after_error"):
         out.append(f"verification could not be queued: {m['verify_after_error']}")
     out += [x for x in (rounds_line(desk, m), "" if verifying else rethink_text(desk, m)) if x]
+    inherited = m.get("inherited_refusals", {})
+    order = desk.settings()["lanes"].get(m.get("lane"), {}).get("providers", [])
+    skipped = sorted(set(order) & refused_by({"inherited_refusals": inherited}, order))
+    if skipped:
+        out.append("providers left out: " + ", ".join(f"{p} (refused {inherited[p]})" for p in skipped)
+                   + "; no follow-up try used")
     if m.get("error"):
         if page_messages is not None:
             page_messages[str(len(out))] = message("task_error", f"error: {m['error']}", reason=describe(m["error"]))
@@ -1751,6 +1757,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
                       if str(m.get("error", "")).startswith("could not start:")
                       else f"hansa retry {tid} \"what to change\" (or --fresh to start over)"),
            "queued": "hansa status shows what it is waiting for", "running": f"hansa cancel {tid} to stop it"}
+    if m["state"] == "failed" and (m.get("attempts") or [{}])[-1].get("kind") == "refused":
+        nxt["failed"] += f' · hansa retry {tid} "..." --lane L to choose another lane on the same repository and base'
     if v and v["verdict"] == "does not hold" and m["state"] == "done":
         nxt["done"] = f"hansa retry {tid} \"fix what {v['task']} found: ...\" · hansa merge {tid} --despite-check"
     newest = (v.get("latest") or v) if v else None

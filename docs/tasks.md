@@ -271,7 +271,23 @@ dropped-connection retry keeps its provider if still listed. Running work keeps 
 (quote `"claude, spare"` in the shell). Each provider must appear only once, to avoid repeating a
 fallback entry; a duplicate is refused by name before anything changes. Existing saved lists with
 duplicates still load and run.
-`hansa retry` uses its destination lane's current order. Verification on L uses L's current order;
+`hansa retry` uses its destination lane's current order, skipping providers that refused any earlier round
+in its chain, including with `--fresh`. Those refusals remain the earlier rounds' runs and tries; they
+use none of the follow-up's tries. `hansa show` names the providers left out and the rounds they refused
+in one line. This avoids spending every follow-up on the same content filter; it is unnecessary if
+providers no longer refuse individual requests.
+
+If every provider in the destination lane refused earlier rounds, hansa ignores the inherited refusals
+and tries the providers in the lane's order. This includes a lane with only one provider, whether the
+lane was inherited or explicitly chosen with `hansa retry ID "..." --lane L`, and prevents a follow-up
+from waiting forever when the inherited refusals exclude its whole lane. No provider is listed as left
+out in `hansa show` in that case. A provider that refuses the follow-up itself is still excluded for the
+rest of that round; if they all refuse it, the task fails with "no other provider in the lane to try".
+A failed refusal's `next:` line offers the lane command alongside the usual retry, to choose a lane on
+the same repository and base. New tasks (`hansa add`) keep their usual provider order and do not inherit
+another task's refusals.
+
+Verification on L uses L's current order;
 on a verify lane, that lane's order. Neither inherits the parent's provider; readiness decides which runs.
 
 ## A check's output
