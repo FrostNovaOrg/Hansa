@@ -26,12 +26,17 @@ with the same counts, decisions, evidence and lifetime cost.
 | `hansa goal list [--all] [--json]` | one line per open goal: id, title, task counts, merged chains missing evidence, released chains and open to-do count; `--all` includes done and dropped goals with their outcome |
 | `hansa goal show G [--all] [--json]` | the goal, current decisions newest first (reason, who, time, task), replaced decisions naming their replacement, latest task in each retry chain, newest first, with state, rounds and evidence, total cost and rounds, and open to-dos; merged or closed tasks older than the newest twenty are counted in one line, and `--all` lists them. Times are local, in the form `hansa status` uses |
 | `hansa cost --by goal [--days N \| --since "YYYY-MM-DD HH:MM"]` | tokens and worth per goal in the same window as `hansa cost`; tasks without a goal and coordinator/helper usage are under `(no goal)` |
-| `hansa goal done G "<outcome>"` | ends an open goal as done, keeping its outcome |
-| `hansa goal drop G "<why>"` | ends an open goal as dropped, keeping the reason |
+| `hansa goal done G "<outcome>"` | ends an open goal as done, keeping its outcome; with tasks still queued, running or waiting for review, or to-dos still open under it, it ends all the same and lists them |
+| `hansa goal drop G "<why>"` | ends an open goal as dropped, keeping the reason; lists open work the same way |
+| `hansa goal reopen G "<why>"` | opens a done or dropped goal again; the earlier outcome stays on record, and `goal show` lists the end and the reopening, with its reason, under `history:` |
+| `hansa goal tie G ID [ID ...]` | ties existing tasks (`t0001`) and to-dos (`#1` or `1`) to an open goal, whatever state they are in, moving them from another goal if they had one; a task moves with its retry chain, follow-ups and verifications. One new entry records what moved and from where, and `goal show` lists it under `history:` in both goals. Ids already tied to G are left as they are; an unknown id refuses the whole tie |
 | `hansa decide "<decision>" --why "<reason>" [--goal G] [--by principal\|coordinator\|assumption] [--task T] [--replaces D]` | a decision; prints its id (`d1`, `d2`, …) as the first word, then the decision, who took it and the goal it is tied to, or that it is tied to none; `--by` defaults to `coordinator`; `assumption` means still to be confirmed |
 | `hansa decisions [--goal G] [--grep TEXT] [--all]` | current decisions newest first; `--all` includes replaced ones; `--grep` matches decision or reason, ignoring case |
 | `hansa add "<task>" --goal G` | queues a task tied to the goal; `hansa retry` and `hansa verify`, including automatic verification, keep its goal |
 | `hansa ask "<what>" --goal G` | ties a new principal to-do to the goal; closing it removes it from the goal's open to-dos |
+
+Every record is a new entry: a reopening or a tie never rewrites an earlier one. A goal's
+`history:` in `goal show` appears once it has been reopened or had work tied to it or moved away.
 
 Task counts use the latest task in each retry chain: queued/running, waiting for review (`done`
 or `merging`), merged and failed. A merged task stays a chain of its own, with its merge, releases

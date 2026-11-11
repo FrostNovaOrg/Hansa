@@ -5985,6 +5985,120 @@ class DeskTest(unittest.TestCase):
         self.assertIn("1 waiting for review", self.hansa("goal", "list"))
         self.assertIn("0 queued/running", self.hansa("goal", "list"))
 
+    def test_goal_reopen_records_why_and_keeps_the_end_on_record(self):
+        from hansa import goals
+        self.hansa("goal", "add", "Export")
+        with self.assertRaises(SystemExit) as e:
+            self.hansa("goal", "reopen", "g1", "Not ended yet")
+        self.assertIn("open", str(e.exception))
+        self.hansa("goal", "done", "g1", "shipped")
+        files = {p: p.read_bytes() for p in (self.desk.state_dir / "intent").glob("*.json")}
+        for why in ("", "   "):
+            with self.subTest(why=why), self.assertRaises(SystemExit):
+                self.hansa("goal", "reopen", "g1", why)
+        out = self.hansa("goal", "reopen", "g1", "Refunds are missing")
+        self.assertEqual(out.split()[0], "g1")
+        for part in ("reopened", "done", "shipped", "Refunds are missing"):
+            self.assertIn(part, out)
+        for p, original in files.items():  # append-only: the end is kept as it was
+            self.assertEqual(p.read_bytes(), original)
+        last = goals.entries(self.desk)[-1]
+        self.assertEqual((last["event"], last["id"], last["why"]), ("goal_reopened", "g1", "Refunds are missing"))
+        self.assertIn("g1 Export", self.hansa("goal", "list"))
+        self.hansa("add", "Add refunds", "--goal", "g1")  # an open goal takes new work again
+        shown = self.hansa("goal", "show", "g1")
+        self.assertIn("[open]", shown)
+        history = shown[shown.index("history:"):shown.index("current decisions:")]
+        self.assertIn("done: shipped", history)
+        self.assertIn("reopened", history)
+        self.assertIn("Refunds are missing", history)
+        self.assertLess(history.index("shipped"), history.index("Refunds"))
+        self.hansa("goal", "drop", "g1", "Plans changed")
+        self.assertIn("reopened", self.hansa("goal", "reopen", "g1", "Back on"))
+        with self.assertRaises(SystemExit):
+            self.hansa("goal", "reopen", "g99", "No such goal")
+
+    def test_goal_tie_ties_tasks_and_todos_in_any_state_moving_them_from_another_goal(self):
+        from hansa import goals
+        self.hansa("goal", "add", "Export")
+        self.hansa("goal", "add", "Invoices")
+        first = self.desk.new_task("Build the export", lane="a")
+        self.desk.update(first, state="done")
+        retry = self.desk.new_task("Build the export again", lane="a", parent=first)
+        merged = self.desk.new_task("Old work", lane="a", goal="g1")
+        self.desk.update(merged, state="merged")
+        n = self.desk.add_ask("Sign the contract")
+        other = self.desk.add_ask("Pick a name", goal="g1")
+        files = {p: p.read_bytes() for p in (self.desk.state_dir / "intent").glob("*.json")}
+        out = self.hansa("goal", "tie", "g2", retry, merged, f"#{n}", str(other))
+        self.assertEqual(out.split()[0], "g2")
+        for item in (first, retry, merged, f"#{n}", f"#{other}"):
+            self.assertIn(item, out)
+        self.assertIn("from g1", out)
+        for p, original in files.items():
+            self.assertEqual(p.read_bytes(), original)
+        self.assertEqual([self.desk.meta(t)["goal"] for t in (first, retry, merged)], ["g2"] * 3)
+        self.assertEqual({a["id"]: a.get("goal") for a in self.desk.asks()}, {n: "g2", other: "g2"})
+        last = goals.entries(self.desk)[-1]
+        self.assertEqual((last["event"], last["id"]), ("goal_tied", "g2"))
+        self.assertEqual(last["from"][merged], "g1")
+        shown = self.hansa("goal", "show", "g2")
+        self.assertRegex(shown, rf"(?m)^{retry} queued · 2 rounds")
+        self.assertRegex(shown, rf"(?m)^{merged} merged")
+        self.assertIn(f"#{n} Sign the contract", shown)
+        self.assertIn("history:", shown)
+        self.assertIn(f"{merged} (from g1)", shown)
+        left = self.hansa("goal", "show", "g1")
+        self.assertNotRegex(left, rf"(?m)^{merged} ")
+        self.assertNotIn("Pick a name", left)
+        self.assertIn("moved to g2", left)
+        self.assertIn("1 queued/running", self.hansa("goal", "list"))
+        # Tying it again changes and records nothing; a retry keeps the goal it was tied to.
+        before = goals.entries(self.desk)
+        self.assertIn("already", self.hansa("goal", "tie", "g2", retry))
+        self.assertEqual(goals.entries(self.desk), before)
+        self.desk.update(retry, state="done")
+        self.assertEqual(self.desk.meta(self.hansa("retry", retry, "More").split()[0])["goal"], "g2")
+        # Unknown ids, a word, or an ended goal refuse the whole tie.
+        self.hansa("goal", "done", "g1", "shipped")
+        for args in (("g2", "t9999"), ("g2", merged, "#99"), ("g2", "export"), ("g1", merged), ("g99", merged)):
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                self.hansa("goal", "tie", *args)
+            self.assertEqual(goals.entries(self.desk)[-1]["event"], "goal_ended")
+            self.assertEqual(self.desk.meta(merged)["goal"], "g2")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.hansa("goal", "tie", "g2")
+
+    def test_goal_done_with_open_work_ends_it_and_lists_what_is_open(self):
+        self.hansa("goal", "add", "Export")
+        queued = self.desk.new_task("Queued part", goal="g1")
+        running = self.desk.new_task("Running part", goal="g1")
+        review = self.desk.new_task("Review part", goal="g1")
+        settled = self.desk.new_task("Merged part", goal="g1")
+        self.desk.update(running, state="running")
+        self.desk.update(review, state="done")
+        self.desk.update(settled, state="merged")
+        n = self.desk.add_ask("Approve the layout", goal="g1")
+        out = self.hansa("goal", "done", "g1", "shipped")
+        self.assertEqual(out.split()[:2], ["g1", "done;"])
+        self.assertIn("still open", out)
+        for tid, state in ((queued, "queued"), (running, "running"), (review, "waiting for review")):
+            self.assertRegex(out, rf"(?m)^\s*{tid} {state}")
+        self.assertRegex(out, rf"(?m)^\s*#{n} .*Approve the layout")
+        self.assertNotIn(settled, out)
+        self.assertIn("[done]", self.hansa("goal", "show", "g1"))
+        self.hansa("goal", "add", "Quiet")
+        self.assertEqual(self.hansa("goal", "done", "g2", "nothing left"), "g2 done\n")
+
+    def test_goal_help_names_reopen_and_tie(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            main(["goal", "--help"])
+        for word in ("reopen", "tie"):
+            self.assertIn(word, out.getvalue())
+        topic = self.hansa("help", "intent-records")
+        self.assertIn("hansa goal reopen", topic)
+        self.assertIn("hansa goal tie", topic)
+
     def test_goal_automatic_verification_inherits_goal(self):
         self.hansa("goal", "add", "Export")
         self.hansa("add", "Add hello.txt", "--lane", "a", "--goal", "g1", "--verify")
