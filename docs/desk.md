@@ -135,7 +135,10 @@ their original spelling.
 For opening the page and setting providers, models and prices, follow
 [Getting started](getting-started.md#open-the-principals-page); for a remote
 desk, use its [SSH tunnel instructions](getting-started.md#work-over-ssh).
-The page keeps
+`hansa web` prints the token after `#` (`/#t=...`): a browser sends what
+follows `#` to no server, so no proxy or server on the way records it. An
+older address with `?t=` still works; if an address has both, the token after
+`#` is used. The page keeps
 its token in `sessionStorage`, scoped to the browser tab and origin (scheme,
 host and port), and removes it from the address before requesting desk data.
 Reloading in that tab keeps access; another desk or forwarded port has its own
@@ -144,7 +147,14 @@ load; reopen the printed address after a refresh. The token is never stored in
 `localStorage` or issued as a cookie, and responses use `Referrer-Policy: no-referrer`.
 The HTML shell can load without a token; every API request must send
 `Authorization: Bearer <token>`, and POST also requires `X-Hansa: 1`.
-Query parameters and cookies do not authenticate API requests.
+Query parameters and cookies do not authenticate API requests. The page's
+requests carry its own origin's cookies (`credentials: "same-origin"`), which
+hansa serve ignores. Every answer of hansa serve carries `X-Hansa-Serve: 1`;
+an answer without it (a redirect, a 200 that is not hansa serve's, a 401 or
+403 from something else) makes the page say the answer did not come from
+hansa serve, with a Reload button. The page never reloads by itself, keeps
+polling with the same backoff as for an unreached server, and clears the
+message when hansa serve answers again.
 
 On a phone, the main tabs stay in one row; swipe the row sideways to reach
 the other tabs. Status tables scroll sideways inside their own boxes, keeping
@@ -674,8 +684,8 @@ The page keeps navigation for the current browser tab in `sessionStorage`:
 `hansa.tab` is written whenever Status, Goals, All tasks, To-dos, Gaps, Notes, Settings or Work and cost is shown (including
 startup), `hansa.settingsSection` whenever a Settings section is shown, and
 `hansa.costPeriod` when the Work and cost range changes. Reloading restores those choices;
-a fresh browser tab starts on Status. An address containing `?t=` (or `&t=`)
-always opens Status, where releases and to-dos wait for the principal.
+a fresh browser tab starts on Status. An address containing a token (`#t=`,
+or an older `?t=`) always opens Status, where releases and to-dos wait for the principal.
 Unknown saved choices fall back to Status, Providers and 7 days.
 Scroll position and expanded Status details are not stored.
 

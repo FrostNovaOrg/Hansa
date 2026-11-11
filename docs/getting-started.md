@@ -120,7 +120,8 @@ In your terminal, go to the desk and run:
 hansa web
 ```
 
-Open the address, including `?t=...`, and keep the terminal open.
+Open the address, including `#t=...`, and keep the terminal open.
+The token sits after `#`, so the browser sends it to no server.
 The token grants page access, including release approval.
 Start the server and `hansa web` from a plain shell: `hansa web` refuses
 to expose the token in Claude Code sessions.

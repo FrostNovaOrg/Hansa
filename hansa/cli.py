@@ -1981,7 +1981,8 @@ def cmd_web(a):
                          f"not one Claude Code started: from their computer, ssh -L {port}:127.0.0.1:{port} HOST "
                          f"{shlex.quote(str(me))} --desk {shlex.quote(str(desk.root))} web; on this machine, hansa web. "
                          + see_more("session-identity"))
-    print(f"Open http://127.0.0.1:{a.port or web_port(desk)}/?t={desk.web_token()}", flush=True)
+    # The key goes after #: a browser sends the fragment to no server, so no proxy on the way records it.
+    print(f"Open http://127.0.0.1:{a.port or web_port(desk)}/#t={desk.web_token()}", flush=True)
     print("Keep this window open while you use the page; close it or press Ctrl+C when you are done.", flush=True)
     # This holds an ssh tunnel to the page open. Its input ends when the connection does (a closed
     # window, a laptop gone to sleep), and then it ends too instead of staying on the server.
