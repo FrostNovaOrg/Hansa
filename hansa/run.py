@@ -111,6 +111,9 @@ QUOTA_STATUS = {429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
 AUTH_STATUS = {401, 403}
 LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itself has no login for this provider
+# A subscription's login that has run out: Claude Code says so with HTTP 401 and an authentication_error, which
+# is no key to save but a login to make again (unusable_reason gives it as "login" for a subscription provider)
+LOST_LOGIN = re.compile(r"OAuth token (?:has expired|has been revoked|is expired)", re.I)
 # The connection to the provider failed, or the provider did (overloaded, a server error): nothing the task
 # did, and nothing that says the provider's key or quota is wrong. The provider waits for a passing check.
 # Only on Claude Code's own error lines: one that begins "API Error" (a 5xx, a connection or timeout, the provider
@@ -1365,8 +1368,8 @@ def rest_text(st: dict) -> str:
 
 
 def tries_used(attempts: list) -> int:
-    """Earlier runs except free usage-limit returns, system kills and drops during a known outage."""
-    return sum(1 for a in attempts if a.get("kind") not in ("killed", "credit")
+    """Earlier runs except free usage-limit returns, system kills, lost logins and drops during a known outage."""
+    return sum(1 for a in attempts if a.get("kind") not in ("killed", "credit", "login")
                and (a.get("kind") != "limit" or a.get("counted"))
                and (a.get("kind") != "network" or a.get("counted", True)))
 
@@ -4337,12 +4340,15 @@ def refusal_reasons(home: Path, sid: str) -> dict:
     return out
 
 
-def unusable_reason(run: dict, err: str):
-    """Why this provider cannot be used: ("credit" | "quota" | "key" | "login" | "refused" | "", words)."""
+def unusable_reason(run: dict, err: str, subscription: bool = False):
+    """Why this provider cannot be used: ("credit" | "quota" | "key" | "login" | "refused" | "", words).
+    A subscription provider (subscription) whose login has run out answers 401 too: that is a login, not a key."""
     if run.get("stop_reason") in REFUSED_STOPS:
         return "refused", f"refused the request ({run['stop_reason']})"
     status = run.get("api_error_status")
     text = f"{run.get('result') or ''} {err}" if (run.get("is_error") or not run) else ""
+    if subscription and LOST_LOGIN.search(text):  # before the 401: no key brings a subscription back
+        return "login", "not logged in (Please run /login)"
     if status == 402 or CREDIT.search(text):
         return "credit", "credit balance too low"
     if status in QUOTA_STATUS:
@@ -4571,7 +4577,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     attempts = list(meta.get("attempts", []))
     if setup:
         fields["setup_exit"] = int(setup.group(1))
-    kind, why = ("", "") if meta.get("cancel") or setup or changed or killed else unusable_reason(run, err)
+    subscription = (desk.settings()["providers"].get(meta.get("provider")) or {}).get("kind") == "subscription"
+    kind, why = ("", "") if meta.get("cancel") or setup or changed or killed else unusable_reason(run, err, subscription)
     # a report written before the connection went is the worker's finished work: that run ends as it did
     net = "" if kind or late else network_reason(run, err)
     if changed:
@@ -4608,6 +4615,13 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             f"queued again; this one used a try, since the task had already gone back {LIMIT_RETURNS} times for a "
             "provider's limit" if counted else
             "queued again without using a try; it starts again when a provider of its lane is ready")
+    elif kind == "login":  # not the task's doing, and the provider rests until a check answers: no try used
+        rest_provider(desk, desk.settings(), meta["provider"], kind, why)
+        attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "login"})
+        state = "queued" if tries_used(attempts) < TRIES else "failed"
+        error = f"{meta['provider']}: {why}; " + (
+            "queued again without using a try; it starts when a provider of its lane is ready"
+            if state == "queued" else f"gave up after {TRIES} tries")
     elif kind:
         rest_provider(desk, desk.settings(), meta["provider"], kind, why)
         attempts.append({"provider": meta["provider"], "at": now(), "error": why})
@@ -7352,7 +7366,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -
                            capture_output=True, text=True, timeout=timeout)
         run = json.loads(r.stdout) if r.stdout.strip().startswith("{") else {}
         ok = bool(run) and not run.get("is_error") and "ok" in (run.get("result") or "").lower()
-        kind, why = ("", "") if ok else unusable_reason(run, r.stderr)
+        kind, why = ("", "") if ok else unusable_reason(run, r.stderr, p["kind"] == "subscription")
         # the model answered with a tool call and the one turn ran out: it is reachable all the same, unless
         # hansa's own readings (an API error status, a usage limit, a refused key) found something first
         stopped = not ok and not kind and not run.get("api_error_status") and \
