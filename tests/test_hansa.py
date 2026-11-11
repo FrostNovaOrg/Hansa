@@ -39008,12 +39008,16 @@ let statusGetError = ask === "status-picture-initial-error" ? "status connection
 let statusFailPath = ask === "status-picture-events-initial-error" ? "/api/events" : "/api/status";
 let statusGetGate = null;
 let pollErrorStatus = 0;
+// serverGone: no answer at all, as a browser's fetch rejects then; refuseToken: hansa serve's 403 to a wrong token
+let serverGone = false, refuseToken = ask === "token-refused";  // refused from the page's first request
 const pollResponses = [];
 let confirmReply = true, dispatchPostError = null, dispatchPostReply = null;
 const fetch = async (path, options) => {
   apiRequests.push({path, headers:{...options?.headers}, credentials:options?.credentials, mode:options?.mode, cache:options?.cache});
   if (options && options.method === "POST") apiPosts.push({path, body:JSON.parse(options.body)});
   else apiGets.push(path);
+  if (serverGone) throw new TypeError("Failed to fetch");
+  if (refuseToken) return {status:403, json:async () => { throw new Error("a 403 says Open the address, as text"); }};
   if (options && options.method === "POST" && path === "/api/settings") {
     posted = JSON.parse(options.body); settingsPostCount++;
     if (settingsPostGate) await settingsPostGate;
@@ -39273,6 +39277,57 @@ else if (ask === "tunnel-polls") (async () => {
   check(apiRequests.every(r => r.cache === "no-store"), "API responses may enter the browser cache");
   check(apiRequests.filter(r => r.path === "/api/status").slice(1, -1).every(r => r.headers["If-None-Match"]), "poll lost its validator");
   console.log(JSON.stringify({delays, lastGood:!!lastGood, ok:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "server-gone") (async () => {
+  // hansa serve stops while the page is open, then comes back: what the header, Status, a press of Release, Save
+  // settings and the to-dos say, and what Retry does.
+  const run = code => vm.runInContext(code, ctx), flush = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
+  const header = () => ({text:ids["#state-text"].textContent, tone:ids["#state-text"].className, dot:ids["#state"].className,
+    parts:descendants(ids["#state-list"], "li").map(el => el.textContent)});
+  const notice = () => ({hidden:ids["#status-connection"].hidden, text:ids["#status-connection"].textContent,
+    buttons:descendants(ids["#status-connection"], "button").map(el => el.textContent)});
+  await run('show("settings")'); await run('show("status")');
+  const up = {header:header(), notice:notice()};
+  serverGone = true;
+  await advance(5000); await flush();
+  const gone = {header:header(), notice:notice()};
+  const posts = apiPosts.length;
+  await descendants(ids["#tab-status"], "button").find(el => el.textContent === run("T.releaseYes")).click(); await flush();
+  const released = {header:header(), tried:apiRequests.at(-1).path, posted:apiPosts.length - posts};
+  await run("settingsSaveButton").click(); await flush();
+  const errors = []; walk(ids["#tab-settings"], el => { if (el.className === "settings-errors") errors.push(el.textContent); });
+  await run('show("todos")'); await flush();
+  const todos = ids["#tab-todos"].textContent;
+  await run('show("status")').catch(() => {}); await flush();
+  const again = {header:header(), notice:notice()};
+  serverGone = false;
+  await descendants(ids["#status-connection"], "button")[0].click(); await flush();
+  const back = {header:header(), notice:notice()};
+  console.log(JSON.stringify({up, gone, released, saved:errors.join(""), todos, again, back}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "token-refused") (async () => {
+  const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
+  await vm.runInContext("loadStatus()", ctx).catch(() => {}); await flush();
+  const gets = apiGets.length;
+  await advance(300000);
+  for (const hidden of [true, false]) { document.hidden = hidden; windowEvents.visibilitychange.forEach(f => f()); }
+  await flush();
+  console.log(JSON.stringify({header:ids["#state-text"].textContent, parts:descendants(ids["#state-list"], "li").map(el => el.textContent),
+    notice:{hidden:ids["#status-connection"].hidden, text:ids["#status-connection"].textContent},
+    status:ids["#tab-status"].textContent, gets, after:apiGets.length}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "events-fold") (async () => {
+  // Recent events: the sentences, the fold of the other records, and the fold kept open across a poll
+  const list = () => descendants(ids["#tab-status"], "div").find(el => el.className === "event-list");
+  const read = () => { const root = list(), fold = descendants(root, "details")[0];
+    return {rows:root.kids.filter(el => el.className === "event-row").map(el => el.textContent),
+      summary:fold ? descendants(fold, "summary")[0].textContent : null, open:fold ? fold.open : null,
+      other:fold ? fold.kids.filter(el => el.className === "event-row").map(el => el.textContent) : []}; };
+  await vm.runInContext("loadStatus()", ctx);
+  const first = read(), fold = descendants(list(), "details")[0];
+  if (fold) { fold.open = true; fold.on.toggle({target:fold}); }
+  await advance(5000); await new Promise(r => setImmediate(r));
+  console.log(JSON.stringify({first, polled:read(), redrawn:fold ? descendants(list(), "details")[0] !== fold : null}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "header") (async () => {
   const run = code => vm.runInContext(code, ctx);
@@ -42779,7 +42834,173 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def header_offset(self, snapshot):
         return float(re.search(r"translateX\(-([\d.]+)px\)", snapshot["transform"] or "translateX(-0px)")[1])
 
-    def test_header_rotates_warnings_first_in_order_and_loops_in_both_languages(self):
+    def test_header_says_how_many_alerts_the_hourly_limit_holds_and_until_when_in_both_languages(self):
+        until = 1793000000
+        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(until))
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                [page] = self.interactive_header(language, alert_held={"count": 3, "until": until})["snapshots"]
+                said = (f"3 alerts held by the hourly limit until {stamp}" if language == "en"
+                        else f"3 条提醒因每小时上限暂缓，到 {stamp} 一起发出")
+                self.assertEqual(page["text"], said)  # a warning: in view, steadily
+                self.assertEqual((page["tone"], page["dot"]), ("warn", "warn"))
+                self.assertEqual(page["parts"][0], {"text": said, "tone": "warn", "warning": True})
+                [page] = self.interactive_header(language, alert_held={"count": 1, "until": until})["snapshots"]
+                self.assertTrue(page["text"].startswith("1 alert held" if language == "en" else "1 条提醒"))
+                [page] = self.interactive_header(language, alert_held=None)["snapshots"]
+                self.assertEqual(page["dot"], "muted")
+
+    def stopped_server_page(self, scenario, language):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        st = self.picture_status()
+        st.update(desk="/home/shop/desk", desk_name=None, paused="", server={"state": "up"}, server_up=True)
+        st["releases"] = [{"id": 17, "state": "waiting", "lane": "a", "target": "push", "base": "main",
+                           "commit": "a" * 40, "command": "git push origin main", "asked": 1, "runs": "in a checkout",
+                           "count": 1, "since_release": 0, "checked": 1, "files_count": 0}]
+        from hansa import web
+        harness = self.tmp / "stopped-server-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        replies = {"/api/status": st, "/api/events": [], "/api/settings": public_settings(self.desk),
+                   "/api/todos": {"page": 1, "pages": 1, "total": 0, "rows": []}}
+        result = subprocess.run(["node", str(harness), str(web.UI), scenario, language], input=json.dumps(replies),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_a_stopped_server_is_named_with_hansa_up_on_every_press_and_retry_clears_it_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                zh = language == "zh"
+                running, unreached = ("后台在运行", "连不上") if zh else ("server running", "cannot reach hansa serve")
+                not_sent = "什么也没有发出去" if zh else "nothing was sent"
+                out = self.stopped_server_page("server-gone", language)
+                self.assertIn(running, out["up"]["header"]["parts"])
+                self.assertTrue(out["up"]["notice"]["hidden"])
+                # the next poll finds no server: the header stops saying it runs, and Status says so, with a Retry
+                gone = out["gone"]
+                self.assertFalse([x for x in gone["header"]["parts"] if running in x])
+                self.assertIn(unreached, gone["header"]["text"])
+                self.assertIn("hansa up", gone["header"]["text"])
+                self.assertEqual(gone["header"]["dot"], "bad")
+                self.assertFalse(gone["notice"]["hidden"])
+                self.assertIn(unreached, gone["notice"]["text"])
+                self.assertIn("hansa up", gone["notice"]["text"])
+                self.assertIn("所示数据时间" if zh else "Data as of", gone["notice"]["text"])
+                self.assertNotIn("重新连接" if zh else "Reconnecting", gone["notice"]["text"])
+                self.assertEqual(gone["notice"]["buttons"], ["重试" if zh else "Retry"])
+                # each press says it in the page's language: nothing went, and how to start the server again
+                self.assertEqual(out["released"]["tried"], "/api/release/answer")
+                for said in (out["released"]["header"]["text"], out["saved"]):
+                    self.assertIn(not_sent, said)
+                    self.assertIn("hansa up", said)
+                self.assertIn("hansa up", out["todos"])
+                for said in (out["released"]["header"]["text"], out["saved"], out["todos"], gone["notice"]["text"]):
+                    self.assertNotIn("Failed to fetch", said)
+                self.assertNotIn("修正后可重新保存" if zh else "Correct the values", out["saved"])
+                self.assertFalse(out["again"]["notice"]["hidden"])
+                # once it is back, Retry clears the notice and the header says it runs again
+                self.assertTrue(out["back"]["notice"]["hidden"])
+                self.assertIn(running, out["back"]["header"]["parts"])
+                self.assertNotIn(unreached, out["back"]["header"]["text"])
+
+    def test_a_refused_token_says_only_how_to_open_the_page_and_stops_polling_in_both_languages(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                out = self.stopped_server_page("token-refused", language)
+                forbidden = ("没有权限：请用 hansa web 给的地址打开" if language == "zh"
+                             else "Forbidden: open the address printed by hansa web")
+                self.assertEqual(out["header"], forbidden)
+                self.assertEqual(out["parts"], [forbidden])
+                self.assertIn(forbidden, out["status"])
+                self.assertTrue(out["notice"]["hidden"])
+                for words in ("Reconnecting", "重新连接", "No data received", "尚未收到数据"):
+                    self.assertNotIn(words, out["notice"]["text"] + out["status"])
+                self.assertEqual(out["after"], out["gets"])  # five minutes and a return to the tab ask nothing more
+
+    EVERYDAY_EVENTS = [
+        ("task_added", {"task": "t0008", "lane": "a"}, ("lane a", "工作线 a")),
+        ("task_cancel", {"task": "t0006"}, ("cancelled", "已取消")),
+        ("task_cancel", {"task": "t0007", "closed": True, "ended": True}, ("closed without merging", "已关闭，未合并")),
+        ("task_not_started", {"task": "t0009", "error": "no such lane"}, ("could not start: no such lane", "没能开始：no such lane")),
+        ("task_after_held", {"task": "t0010", "after": "t0004", "latest": "t0005"}, ("t0005", "t0005")),
+        ("start_held", {"task": "t0011", "lane": "a", "why": "the sandbox did not start"},
+         ("held on lane a: the sandbox did not start", "工作线 a 上暂缓：the sandbox did not start")),
+        ("paused", {"reason": "waiting for the audit", "by": "cli"},
+         ("paused from the command line: waiting for the audit", "暂停（用命令）：waiting for the audit")),
+        ("resumed", {"by": "page"}, ("resumed on this page", "恢复（在本页）")),
+        ("ask", {"id": 2, "by": "cli"}, ("To-do #2 asked", "待办 #2 已提出")),
+        ("ask_closed", {"id": 2, "by": "cli", "coordinator": True, "reason": "done"},
+         ("To-do #2 closed by the coordinator: done", "待办 #2 已由协调员关闭：done")),
+        ("key_set", {"provider": "claude", "by": "page"}, ("Key of claude set on this page", "claude 的密钥已设置（在本页）")),
+        ("key_removed", {"provider": "claude", "by": "page"}, ("Key of claude cleared", "claude 的密钥已清除")),
+        ("settings_saved", {"by": "coordinator", "changed": ["lanes"]},
+         ("Settings saved by the coordinator: lanes", "设置已保存（协调员）：lanes")),
+        ("provider_checked", {"provider": "claude", "ok": True, "detail": "answered"},
+         ("claude checked: ready (answered)", "claude 已检查：可用（answered）")),
+        ("srt_tried", {"found": False, "path": "", "ran": False, "said": "srt is not installed"},
+         ("not found: srt is not installed", "没找到：srt is not installed")),
+        ("disk_low", {"floor": 5, "volumes": ["/ has 2 GB free"], "again": "7 GB"}, ("Disk space low: / has 2 GB free", "磁盘空间不足：/ has 2 GB free")),
+        ("disk_ok", {"floor": 5, "volumes": ["/ has 9 GB free"]}, ("Disk space back", "磁盘空间已回到")),
+    ]
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_recent_events_tell_the_everyday_ones_in_sentences_and_fold_the_rest_in_both_languages(self):
+        events = [{"ts": 1790000000 - i, "event": kind, **fields} for i, (kind, fields, _) in enumerate(self.EVERYDAY_EVENTS)]
+        events += [{"ts": 1780000000, "event": "lane_set", "lane": "a", "field": "check"},
+                   {"ts": 1780000001, "event": "alert_sent", "kinds": ["ask"], "alerts": 1}]
+        from hansa import web
+        harness = self.tmp / "events-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                result = subprocess.run(["node", str(harness), str(web.UI), "events-fold", language],
+                                        input=json.dumps({"/api/status": self.picture_status(), "/api/events": events}),
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                out = json.loads(result.stdout)
+                rows = out["first"]["rows"]
+                self.assertEqual(len(rows), len(self.EVERYDAY_EVENTS))
+                for row, (kind, fields, said) in zip(rows, self.EVERYDAY_EVENTS):
+                    self.assertIn(said[language == "zh"], row, kind)
+                    if "_" in kind:
+                        self.assertNotIn(kind, row)  # no identifier, no key=value
+                    self.assertNotIn("=", row)
+                    if fields.get("task"):
+                        self.assertIn(fields["task"], row)
+                self.assertEqual(out["first"]["summary"], "其他 2 条记录" if language == "zh" else "2 other records")
+                self.assertFalse(out["first"]["open"])
+                self.assertEqual(len(out["first"]["other"]), 2)
+                self.assertIn("lane_set", out["first"]["other"][0])  # as they show now
+                self.assertIn("field=check", out["first"]["other"][0])
+                # opened, the fold stays open through the next poll's redraw
+                self.assertTrue(out["redrawn"])
+                self.assertTrue(out["polled"]["open"])
+
+    def test_hansa_close_records_a_closed_task_so_the_page_can_say_closed(self):
+        self.hansa_out("add", "Finished work")
+        self.desk.update("t0001", state="done", finished=time.time())
+        self.hansa_out("close", "t0001")
+        [e] = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines()) if e["event"] == "task_cancel"]
+        self.assertEqual((e["task"], e.get("closed"), e.get("ended")), ("t0001", True, True))
+
+    def test_an_endpoint_that_fails_on_a_record_answers_an_error_rather_than_dropping_the_connection(self):
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        # a record from an older hansa, with no error text: the timeline read it as text
+        self.desk.event("task_finished", task="t0001", lane="a", state="failed", error=None)
+        code, body, headers = self.web_request("/api/timeline", headers=auth)
+        self.assertEqual(code, 500)
+        self.assertIn("/api/timeline", body["error"])
+        self.assertEqual(body["problems"], [body["error"]])
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        # a save with no settings in it
+        code, body, _ = self.web_request("/api/settings", method="POST", data=b"{}",
+                                         headers={**auth, "X-Hansa": "1", "Content-Type": "application/json"})
+        self.assertEqual(code, 500)
+        self.assertFalse(body["ok"])
+        self.assertIn("/api/settings", body["problems"][0])
+
+    def test_header_keeps_warnings_in_view_together_and_rotates_routine_facts_only_without_them_in_both_languages(self):
         for language in ("en", "zh"):
             with self.subTest(language=language):
                 pages = self.interactive_header(language, [{"advance": 3999}, {"advance": 1}] +
@@ -42791,21 +43012,31 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertIn("not running" if language == "en" else "没在运行", parts[1]["text"])
                 self.assertEqual(parts[2]["text"], "sandbox unavailable")
                 self.assertIn("/home/shop/desk", parts[3]["text"])
-                self.assertEqual(pages[1]["text"], pages[0]["text"])
-                self.assertEqual([p["text"] for p in [pages[0], *pages[2:-1]]], [p["text"] for p in parts])
-                self.assertEqual(pages[-1]["text"], pages[0]["text"])
+                # the three warnings, together, through 28 s: never the desk, the version, the install time or the clock
+                self.assertEqual(pages[0]["text"], " · ".join(p["text"] for p in parts[:3]))
+                self.assertTrue(all(p["text"] == pages[0]["text"] and p["tone"] == "warn" for p in pages))
                 self.assertTrue(all(p["dot"] == "warn" for p in pages))
                 self.assertEqual([p["warning"] for p in parts], [True] * 3 + [False] * 4)
+                # with none, the routine facts take turns, in order, and loop
+                pages = self.interactive_header(language, [{"advance": 4000}] * 6)["snapshots"]
+                facts = [p["text"] for p in pages[0]["parts"]]
+                self.assertEqual(len(facts), 6)
+                self.assertEqual([p["text"] for p in pages], facts + facts[:1])
+                self.assertTrue(all(p["dot"] == "muted" for p in pages))
 
     def test_header_long_part_reads_once_with_rests_before_rotating_in_both_languages(self):
         actions = [{"widths": [100, 400]}, {"advance": 800}, {"advance": 1000}, {"advance": 1000},
                    {"advance": 4000}, {"advance": 760}, {"advance": 40}]
         for language in ("en", "zh"):
             with self.subTest(language=language):
-                pages = self.interactive_header(language, actions, paused="Read shop/desk " * 20)["snapshots"]
+                pages = self.interactive_header(language, actions, desk="/home/" + "Read shop/desk " * 20)["snapshots"]
                 self.assertEqual([self.header_offset(p) for p in pages[1:]], [0, 0, 50, 100, 300, 300, 0])
                 self.assertTrue(all(p["text"] == pages[0]["text"] for p in pages[:-1]))
-                self.assertIn("/home/shop/desk", pages[-1]["text"])
+                self.assertIn("dispatch" if language == "en" else "派发任务", pages[-1]["text"])
+                # a long warning reads the same way, and then starts again rather than give way
+                pages = self.interactive_header(language, actions, paused="Read shop/desk " * 20)["snapshots"]
+                self.assertEqual([self.header_offset(p) for p in pages[1:]], [0, 0, 50, 100, 300, 300, 0])
+                self.assertTrue(all(p["text"] == pages[0]["text"] for p in pages))
 
     def test_header_single_error_stays_and_repeats_long_text_in_both_languages(self):
         for language in ("en", "zh"):
@@ -42827,33 +43058,35 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 pages = self.interactive_header(language, [
                     {"advance": 4000}, {"update": {"srt_missing": "new sandbox note", "paused": ""}, "advance": 1000},
                     {"advance": 2999}, {"advance": 1}], paused="review queue", srt_missing="old sandbox note")["snapshots"]
-                self.assertEqual([p["text"] for p in pages[1:4]], ["old sandbox note", "new sandbox note", "new sandbox note"])
+                self.assertIn("review queue", pages[1]["text"])
+                self.assertIn("old sandbox note", pages[1]["text"])
+                self.assertEqual([p["text"] for p in pages[2:]], ["new sandbox note"] * 3)
                 self.assertGreater(pages[2]["gets"], pages[1]["gets"])  # the real 5 s polling callback ran
-                self.assertIn("/home/shop/desk", pages[-1]["text"])
             with self.subTest(language=language, case="removed"):
                 pages = self.interactive_header(language, [{"advance": 4000},
                     {"update": {"srt_missing": ""}, "refresh": True}], paused="review queue", srt_missing="sandbox note")["snapshots"]
-                self.assertEqual(pages[1]["text"], "sandbox note")
-                self.assertIn("/home/shop/desk", pages[2]["text"])
+                self.assertIn("sandbox note", pages[1]["text"])
+                self.assertNotIn("sandbox note", pages[2]["text"])
+                self.assertIn("review queue", pages[2]["text"])
             with self.subTest(language=language, case="motion"):
                 pages = self.interactive_header(language, [{"widths": [100, 400]},
                     {"update": {"paused": "new long shop/desk note " * 20}, "advance": 5000}, {"advance": 1800},
                     {"refresh": True}, {"advance": 800}], paused="old long shop/desk note " * 20)["snapshots"]
                 self.assertIn("new long", pages[2]["text"])
                 self.assertEqual([self.header_offset(p) for p in pages[2:]], [210, 300, 300, 0])
-                self.assertIn("/home/shop/desk", pages[-1]["text"])
+                self.assertIn("new long", pages[-1]["text"])
             with self.subTest(language=language, case="warning cleared"):
                 pages = self.interactive_header(language, [{"advance": 1000},
-                    {"update": {"paused": ""}, "refresh": True}, {"advance": 3000}], paused="review queue")["snapshots"]
-                self.assertIn("dispatch" if language == "en" else "派发任务", pages[2]["text"])
+                    {"update": {"paused": ""}, "refresh": True}, {"advance": 4000}], paused="review queue")["snapshots"]
+                self.assertIn("/home/shop/desk", pages[2]["text"])  # the routine facts again, from the first
                 self.assertEqual(pages[2]["dot"], "muted")
-                self.assertIn("running" if language == "en" else "运行", pages[-1]["text"])
+                self.assertIn("dispatch" if language == "en" else "派发任务", pages[-1]["text"])
             with self.subTest(language=language, case="repeated notes"):
                 pages = self.interactive_header(language, [{"advance": 4000}, {"widths": [100, 400],
                     "update": {"memory": {"unknown": ["memory note", "new memory note"]}}, "advance": 1000},
                     {"advance": 1000}], memory={"unknown": ["memory note", "memory note"]})["snapshots"]
-                self.assertEqual(pages[1]["text"], "memory note")
-                self.assertEqual(pages[2]["text"], "new memory note")
+                self.assertEqual(pages[1]["text"], "memory note · memory note")
+                self.assertEqual(pages[2]["text"], "memory note · new memory note")
                 self.assertEqual([self.header_offset(p) for p in pages[2:]], [10, 60])
 
     def test_header_menus_refresh_switch_dismiss_and_return_focus_in_both_languages(self):
@@ -42909,9 +43142,13 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                     paused="Read shop/desk " * 20, srt_missing="next warning")
                 pages = output["snapshots"]
                 self.assertTrue(all(self.header_offset(p) == 0 for p in pages))
-                self.assertEqual(pages[1]["text"], pages[0]["text"])
-                self.assertEqual(pages[2]["text"], "next warning")
-                self.assertEqual(pages[3]["parts"][0]["text"], pages[0]["text"])
+                self.assertTrue(all(p["text"] == pages[0]["text"] for p in pages))
+                self.assertTrue(pages[0]["text"].endswith(" · next warning"))
+                self.assertTrue(pages[0]["text"].startswith(pages[3]["parts"][0]["text"]))
+                pages = self.interactive_header(language, [{"widths": [100, 400], "advance": 4000}],
+                    reduced_motion=True, desk="/home/" + "Read shop/desk " * 20)["snapshots"]
+                self.assertEqual(self.header_offset(pages[1]), 0)
+                self.assertIn("dispatch" if language == "en" else "派发任务", pages[1]["text"])
                 reduced_css = output["css"].split("@media (prefers-reduced-motion:reduce)")[1]
                 self.assertIn("#state-window { text-overflow:ellipsis; }", reduced_css)
                 self.assertIn("#state-text { display:inline; transform:none !important; }", reduced_css)

@@ -236,6 +236,7 @@ td .task-detail { min-width:200px; }
 .event-list { max-height:400px; overflow:auto; }
 .event-row { display:grid; grid-template-columns:160px minmax(0,1fr); gap:5px 16px; padding:12px 0; border-top:1px solid var(--line); }
 .event-row:first-child { border-top:0; padding-top:0; }
+.event-other > summary { padding:12px 0; border-top:1px solid var(--line); cursor:pointer; color:var(--muted); font-size:12px; }
 .event-time { color:var(--muted); font-size:11px; }
 .event-name { font-size:12px; font-weight:550; }
 .event-data { grid-column:2; color:var(--muted); }
@@ -603,7 +604,23 @@ const T = ZH ? {
     lane_try_queued:e => `工作线 ${e.lane} 试跑已排队`, lane_try_started:e => `工作线 ${e.lane} 试跑开始`,
     lane_tried:(e, result) => `工作线 ${e.lane} 试跑${result(e)}`, lane_try_withdrawn:e => `工作线 ${e.lane} 试跑已撤回`,
     sandbox_held:e => `工作线 ${e.lane} 沙箱暂缓：${e.why || "—"}`, sandbox_ready:e => `工作线 ${e.lane} 沙箱已恢复`,
-    provider_credit:e => `服务商 ${e.provider} 余额不足，等负责人确认充值`, server_stopped:() => "服务已停止，新任务暂停启动"
+    provider_credit:e => `服务商 ${e.provider} 余额不足，等负责人确认充值`, server_stopped:() => "服务已停止，新任务暂停启动",
+    task_added:e => `任务已添加：工作线 ${e.lane || "—"}`,
+    task_cancel:e => e.closed ? "任务已关闭，未合并" : "任务已取消",
+    task_not_started:e => `任务没能开始：${e.error || "—"}`,
+    task_after_held:e => `任务暂缓：它要跟在 ${e.latest || e.after || "—"} 之后，而那个任务没合并就结束了`,
+    start_held:e => `任务在工作线 ${e.lane || "—"} 上暂缓：${e.why || "—"}`,
+    paused:(e, result, state, by) => `派发已暂停${by(e.by)}：${e.reason || "—"}`,
+    resumed:(e, result, state, by) => `派发已恢复${by(e.by)}`,
+    ask:(e, result, state, by) => `待办 #${e.id} 已提出${by(e.by)}`,
+    ask_closed:e => `待办 #${e.id} 已由协调员关闭：${e.reason || "—"}`,
+    key_set:(e, result, state, by) => `${e.provider || "—"} 的密钥已设置${by(e.by)}`,
+    key_removed:(e, result, state, by) => `${e.provider || "—"} 的密钥已清除${by(e.by)}`,
+    settings_saved:(e, result, state, by) => `设置已保存${by(e.by)}：${(Array.isArray(e.changed) ? e.changed : []).join("、") || "—"}`,
+    provider_checked:e => `服务商 ${e.provider || "—"} 已检查：${e.ok ? "可用" : "失败"}${e.detail ? `（${e.detail}）` : ""}`,
+    srt_tried:e => `后台启动时试了沙箱（srt）：${e.ran ? "能运行" : !e.found ? "没找到" : "没能运行"}${!e.ran && e.said ? `：${e.said}` : ""}`,
+    disk_low:e => `磁盘空间不足：${(Array.isArray(e.volumes) ? e.volumes : []).join("；") || "—"}`,
+    disk_ok:() => "磁盘空间已回到下限以上"
   },
   tokensNoPrice:"token 没价目", keyInChange:"改动中包含密钥，不能合并", markersInChange:"改动里留着冲突标记，不能合并",
   mcBatch:(members, owner) => `与 ${members.join(", ")} 一起检查；运行 ${owner} 的合并检查`,
@@ -761,7 +778,24 @@ const T = ZH ? {
     lane_try_queued:e => `Lane ${e.lane} try queued`, lane_try_started:e => `Lane ${e.lane} try started`,
     lane_tried:(e, result) => `Lane ${e.lane} try ${result(e)}`, lane_try_withdrawn:e => `Lane ${e.lane} try withdrawn`,
     sandbox_held:e => `Sandbox held on lane ${e.lane}: ${e.why || "—"}`, sandbox_ready:e => `Sandbox ready on lane ${e.lane}`,
-    provider_credit:e => `Provider ${e.provider} rests until the principal confirms it is topped up`, server_stopped:() => "Server stopped; new tasks will not start"
+    provider_credit:e => `Provider ${e.provider} rests until the principal confirms it is topped up`, server_stopped:() => "Server stopped; new tasks will not start",
+    // The everyday records (see the Recent events fold in renderStatus for the rest)
+    task_added:e => `Task added on lane ${e.lane || "—"}`,
+    task_cancel:e => e.closed ? "Task closed without merging" : "Task cancelled",
+    task_not_started:e => `Task could not start: ${e.error || "—"}`,
+    task_after_held:e => `Task held: the task it follows, ${e.latest || e.after || "—"}, ended without merging`,
+    start_held:e => `Task held on lane ${e.lane || "—"}: ${e.why || "—"}`,
+    paused:(e, result, state, by) => `Dispatch paused${by(e.by)}: ${e.reason || "—"}`,
+    resumed:(e, result, state, by) => `Dispatch resumed${by(e.by)}`,
+    ask:(e, result, state, by) => `To-do #${e.id} asked${by(e.by)}`,
+    ask_closed:e => `To-do #${e.id} closed by the coordinator: ${e.reason || "—"}`,
+    key_set:(e, result, state, by) => `Key of ${e.provider || "—"} set${by(e.by)}`,
+    key_removed:(e, result, state, by) => `Key of ${e.provider || "—"} cleared${by(e.by)}`,
+    settings_saved:(e, result, state, by) => `Settings saved${by(e.by)}: ${(Array.isArray(e.changed) ? e.changed : []).join(", ") || "—"}`,
+    provider_checked:e => `Provider ${e.provider || "—"} checked: ${e.ok ? "ready" : "failed"}${e.detail ? ` (${e.detail})` : ""}`,
+    srt_tried:e => `Sandbox (srt) tried as the server started: ${e.ran ? "it runs" : !e.found ? "not found" : "it did not run"}${!e.ran && e.said ? `: ${e.said}` : ""}`,
+    disk_low:e => `Disk space low: ${(Array.isArray(e.volumes) ? e.volumes : []).join("; ") || "—"}`,
+    disk_ok:() => "Disk space back above the floor"
   },
   tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged", markersInChange:"holds conflict markers: cannot be merged",
   mcBatch:(members, owner) => `Checked with ${members.join(", ")}; ${owner}’s check runs`,
@@ -988,6 +1022,25 @@ Object.assign(T, ZH ? {
   jumpToField:"Go to this setting", retrySave:"Correct the values and save again.",
   needsAttention:"Settings need attention", keySaveFailed:"Key operation incomplete. Check the error details."
 });
+// The page's own words when the server does not answer (api): a browser's "Failed to fetch" says neither what
+// happened nor what to do, and in English only.
+Object.assign(T, ZH ? {
+  serveUnreachedRead:"页面连不上 hansa serve。用 hansa up 重新启动它。",
+  serveUnreachedSent:"页面连不上 hansa serve：什么也没有发出去。用 hansa up 重新启动它，再试一次。",
+  serverUnreached:"页面连不上后台（hansa serve）：用 hansa up 启动",
+  dataAsOf:t => t ? "所示数据时间：" + t : "尚未收到数据",
+  alertHeld:(n, until) => `${n} 条提醒因每小时上限暂缓，到 ${until} 一起发出`,
+  otherRecords:n => `其他 ${n} 条记录`,
+  eventBy:by => by ? `（${({page:"在本页", cli:"用命令", coordinator:"协调员", principal:"你"})[by] || by}）` : ""
+} : {
+  serveUnreachedRead:"This page cannot reach hansa serve. Start it again with hansa up.",
+  serveUnreachedSent:"This page cannot reach hansa serve: nothing was sent. Start it again with hansa up, then try again.",
+  serverUnreached:"cannot reach hansa serve: start it with hansa up",
+  dataAsOf:t => t ? "Data as of " + t : "No data received yet",
+  alertHeld:(n, until) => `${n} alert${n === 1 ? "" : "s"} held by the hourly limit until ${until}`,
+  otherRecords:n => `${n} other record${n === 1 ? "" : "s"}`,
+  eventBy:by => by ? " " + (({page:"on this page", cli:"from the command line", coordinator:"by the coordinator", principal:"by you"})[by] || "by " + by) : ""
+});
 Object.assign(T, ZH ? {
   statusIntro:"查看任务进展、工作线和需要你处理的事项。", costIntro:"按时间查看工作台的工作记录、token 用量及折算金额。",
   autoUpdates:"自动更新", refreshNote:"状态页可见时每 5 秒更新；编辑时暂停界面刷新，避免打断输入；其他控件刷新后仍保留原输入位置。", dispatchControl:"派发任务控制",
@@ -1169,6 +1222,8 @@ const money = n => "US$" + n.toFixed(2);
 const when = ts => ts ? new Date(ts * 1000).toLocaleString(language) : "";
 // Poll data stays in this page's memory; no authenticated response enters the HTTP cache.
 const pollReplies = new Map();
+// A refused token stays refused: the page stops polling and says only how to open it (T.forbidden).
+let pageRefused = false;
 async function api(path, body) {
   const opt = {credentials:"omit", mode:"same-origin", cache:"no-store", headers:{Authorization:"Bearer " + pageToken}};
   const conditional = body === undefined && (path === "/api/status" || path === "/api/goals" || path.startsWith("/api/history?") || path === "/api/events" || path.startsWith("/api/events?"));
@@ -1179,8 +1234,15 @@ async function api(path, body) {
     Object.assign(opt.headers, {"Content-Type":"application/json", "X-Hansa":"1"});
     opt.body = JSON.stringify(body);
   }
-  const r = await fetch(path, opt);
-  if (r.status === 403) throw new Error(T.forbidden);
+  let r;
+  try { r = await fetch(path, opt); }
+  catch (e) {
+    // A browser rejects with a TypeError ("Failed to fetch", "Load failed") only when no answer came at all.
+    if (e?.name !== "TypeError") throw e;
+    const unreached = new Error(body === undefined ? T.serveUnreachedRead : T.serveUnreachedSent);
+    unreached.unreached = true; throw unreached;
+  }
+  if (r.status === 403) { pageRefused = true; throw new Error(T.forbidden); }
   if (r.status === 304 && previous) return previous.reply;
   const reply = await r.json();
   if (reply?.code === "settings_unavailable") throw new Error((reply.problems || []).join("; "));
@@ -1228,14 +1290,19 @@ function statusFrame() {
   statusTimer = setTimeout(statusFrame, 40);
 }
 function setStatusParts(parts) {
-  const ordered = [...parts.filter(p => p.tone !== "muted"), ...parts.filter(p => p.tone === "muted")];
-  if (!ordered.some(p => p.key === statusKey)) {
+  const warnings = parts.filter(p => p.tone !== "muted");
+  const ordered = [...warnings, ...parts.filter(p => p.tone === "muted")];
+  // While a warning holds, the line shows the warnings together and stays on them (a long one scrolls, then
+  // starts again); the routine facts, which rotate when nothing is wrong, stay in the list behind the toggle.
+  const rotated = warnings.length ? [{key:"warnings", text:warnings.map(p => p.text).join(" · "),
+    tone:warnings.some(p => p.tone === "bad") ? "bad" : "warn"}] : ordered;
+  if (!rotated.some(p => p.key === statusKey)) {
     const index = statusParts.findIndex(p => p.key === statusKey);
     const next = [...statusParts.slice(index + 1), ...statusParts.slice(0, index)]
-      .find(p => ordered.some(n => n.key === p.key));
-    statusKey = (next || ordered[0])?.key; statusStarted = performance.now();
+      .find(p => rotated.some(n => n.key === p.key));
+    statusKey = (next || rotated[0])?.key; statusStarted = performance.now();
   }
-  statusParts = ordered;
+  statusParts = rotated;
   $("#state").className = parts.some(p => p.tone === "bad") ? "bad" : parts.some(p => p.tone === "warn") ? "warn" : "muted";
   $("#state-list").replaceChildren(...ordered.map(p => h("li", {class:p.tone},
     p.tone !== "muted" ? icon("error") : null, p.text)));
@@ -1387,11 +1454,20 @@ function waitingText(m) {
   const render = r => Object.hasOwn(T.waitReasons, r.code) ? T.waitReasons[r.code](r.values, render, r.text) : r.text;
   return render({code:m.waiting_code, values:m.waiting_values, text:m.waiting});
 }
+// The records a principal meets in an ordinary day read as sentences; the rest wait, as they are, in one fold
+// that stays open or closed across polls.
+let eventsOtherOpen = false;
+function eventList(events) {
+  const told = e => Object.hasOwn(T.eventSentences, e.event), other = events.filter(e => !told(e));
+  return h("div", {class:"event-list"}, events.filter(told).map(eventRow), other.length
+    ? h("details", {class:"event-other", open:eventsOtherOpen, ontoggle:e => { eventsOtherOpen = e.target.open; }},
+      h("summary", {}, T.otherRecords(other.length)), other.map(eventRow)) : null);
+}
 function eventRow(e) {
   const sentence = Object.hasOwn(T.eventSentences, e.event) ? T.eventSentences[e.event] : null;
   return h("div", {class:"event-row"}, h("span", {class:"event-time"}, when(e.ts)),
     sentence ? h("div", {class:"event-name"}, e.task ? [taskLink(e.task), " · "] : null,
-      sentence(e, T.eventResult, state => T.eventStates[state] || state || "—"))
+      sentence(e, T.eventResult, state => T.eventStates[state] || state || "—", T.eventBy))
     : [h("span", {class:"event-name"}, e.event),
       h("div", {class:"event-data mono"}, Object.entries(e).filter(([k]) => k !== "ts" && k !== "event")
         .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" "))]);
@@ -1630,17 +1706,18 @@ function keepStatusFocus(root) {
     (root.contains(active) ? active : controls[index] || controls[0])?.focus({preventScroll:true});
   };
 }
-let statusFlight = null, statusPollTimer, statusFailures = 0, statusLastGood = 0;
+let statusFlight = null, statusPollTimer, statusFailures = 0, statusLastGood = 0, statusUnreached = false, statusFacts = [];
 function pollNotice(reconnecting) {
   const notice = $("#status-connection");
-  notice.hidden = !reconnecting;
-  notice.textContent = !reconnecting ? "" : ZH
-    ? `正在重新连接… ${statusLastGood ? "所示数据时间：" + when(statusLastGood) : "尚未收到数据"}`
-    : `Reconnecting… ${statusLastGood ? "Data as of " + when(statusLastGood) : "No data received yet"}`;
+  notice.hidden = !reconnecting || pageRefused;
+  if (notice.hidden) { notice.replaceChildren(); return; }
+  const asOf = T.dataAsOf(statusLastGood ? when(statusLastGood) : "");
+  notice.replaceChildren(statusUnreached ? `${T.serveUnreachedRead} ${asOf} ` : `${ZH ? "正在重新连接…" : "Reconnecting…"} ${asOf} `,
+    h("button", {type:"button", onclick:() => loadStatus(true).catch(err)}, T.retry));
 }
 function scheduleStatusPoll() {
   clearTimeout(statusPollTimer);
-  if (current === "status" && !document.hidden) {
+  if (current === "status" && !document.hidden && !pageRefused) {
     const delay = Math.min(60000, 5000 * 2 ** Math.min(4, Math.max(0, statusFailures - 1)));
     statusPollTimer = setTimeout(() => loadStatus().catch(err), delay);
   }
@@ -1659,13 +1736,17 @@ function loadStatus(force = false) {
 }
 async function renderStatus(force) {
   const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
+  statusUnreached = [status, events].some(x => x.status === "rejected" && x.reason?.unreached);
   if (status.status === "rejected") {
     const e = status.reason;
-    if (!statusShown) {
+    if (!statusShown || pageRefused) {
       pictureError(String(e.message || e));
       err(e); throw e;
     }
-    // Keep callers' error handlers from replacing the last header status too.
+    // Keep callers' error handlers from replacing the last header status too; but with no server to reach, the
+    // header no longer says that it runs.
+    if (statusUnreached) setStatusParts([{key:"server", text:T.serverUnreached, tone:"bad"},
+      ...statusFacts.filter(p => p.key !== "server")]);
     return false;
   }
   const st = status.value, ev = events.status === "fulfilled" ? events.value : [];
@@ -1681,11 +1762,13 @@ async function renderStatus(force) {
   part("server", st.server && st.server.state === "stuck" ? T.serverStuck(st.server.pid, Math.floor(st.server.quiet / 60))
     : st.server_up ? T.serverUp : T.serverDown, !st.server_up || (st.server && st.server.state === "stuck"));
   part("version", T.version + " " + st.build);
-  part("installed", T.installed + " " + (st.installed ? `${installed.getFullYear()}-${pad(installed.getMonth() + 1)}-${pad(installed.getDate())} ${clock(installed)}` : "?"));
+  const stamp = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(d)}`;
+  part("installed", T.installed + " " + (st.installed ? stamp(installed) : "?"));
   part("now", T.summaryNow + " " + clock(now));
   part("serveCode", st.serve_code ? T.serveCodeWarning + ": " + st.serve_code : "", true);
   part("srt", st.srt_missing, true);
   part("alert", st.alert_failed ? T.alertFailedWarning + ": " + st.alert_failed : "", true);
+  part("alertHeld", st.alert_held ? T.alertHeld(st.alert_held.count, stamp(new Date(st.alert_held.until * 1000))) : "", true);
   part("disk", st.disk && st.disk.low_text ? (ZH ? T.diskLow + "：" : "") + st.disk.low_text : "", true);
   for (const [i, x] of (st.disk && st.disk.unknown || []).entries()) part("disk:" + i, x, true);
   part("memory", st.memory && st.memory.low_text || "", true);
@@ -1695,7 +1778,7 @@ async function renderStatus(force) {
   for (const [i, x] of (st.unreached || []).entries()) part("unreached:" + i, T.unreachedWarning + ": " + x, true);
   part("mod", modLine(st.mod, st.mod_line), st.mod && st.mod.kind !== "notify" && st.mod.loaded !== true);
   part("clear", clearLine(st.mod, st.clear_line), st.mod && st.mod.clear && st.mod.clear.warn);
-  setStatusParts(parts);
+  setStatusParts(statusFacts = parts);
   keepStatusDrafts(st);
   // Check after the fetch: focus may have entered while the request was in flight.
   // Leave fields and their selection in place while editing; redraw lists for other controls.
@@ -1753,7 +1836,7 @@ async function renderStatus(force) {
       checkButton(p.name, () => loadStatus(true))])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
     dashboardPanel(T.events, "status", Math.min(ev.length, 20), events.status === "rejected"
       ? h("div", {class:"bad", role:"alert"}, String(events.reason.message || events.reason))
-      : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(eventRow)) : emptyState(T.noEvents, T.noEventsNote, "status"))
+      : ev.length ? eventList(ev.slice(0, 20)) : emptyState(T.noEvents, T.noEventsNote, "status"))
   ]));
   statusShown = true;
   restoreFocus();
@@ -2135,7 +2218,7 @@ async function saveSettings() {
       renderSettings();
     } else { settingsFailure = "save"; renderSettings((r.problems || [T.problems]).map(pushProblem)); }
   } catch (e) {
-    settingsFailure = saved ? "savedReload" : settingsFailure === "stale" ? "stale" : "save";
+    settingsFailure = saved ? "savedReload" : settingsFailure === "stale" ? "stale" : e.unreached ? "unreached" : "save";
     renderSettings([String(e.message || e)]);
   }
   finally { settingsSaving = false; refreshSettingsState(); }
@@ -2676,7 +2759,7 @@ function renderSettings(problems = settingsProblems) {
     h("div", {class:"settings-head"}, h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T.settings), h("h1", {}, T.settings), h("p", {}, T.settingsIntro)), settingsBadge),
     settingsRebase ? h("div", {class:"notice", role:"status"}, settingsRebase) : null,
     settingsProblems.length ? h("section", {class:"settings-errors", role:"alert"}, h("h2", {}, icon("error"), settingsFailure === "savedReload" ? T.savedReloadFailed : T.problems),
-      ["stale", "savedReload"].includes(settingsFailure) ? null : h("p", {class:"field-note"}, T.retrySave),
+      ["stale", "savedReload", "unreached"].includes(settingsFailure) ? null : h("p", {class:"field-note"}, T.retrySave),
       h("ul", {}, settingsProblems.map(p => h("li", {class:"bad"}, problemTarget(p) ? h("button", {type:"button", onclick:() => focusProblem(p), title:T.jumpToField}, p) : p)))) : null,
     NO_READ_STOP ? section(T.noReadStop, h("p", {class:"bad"}, NO_READ_STOP)) : null,
     h("div", {class:"settings-layout"}, nav, h("div", {class:"settings-content"}, settingsForm,
@@ -2719,6 +2802,7 @@ function loadHistory() {
   if (!historyFold?.open || current !== "settings" || document.hidden) return;
   if (historyFlight) return historyFlight;
   const delay = historyDue - performance.now();
+  if (pageRefused) return;
   if (delay > 0) { historyTimer = setTimeout(loadHistory, delay); return; }
   const path = historyPath();
   historyFlight = api(path).then(data => {
@@ -2835,7 +2919,7 @@ function loadGoals() {
     if (changed) renderGoals(); else goalsNotice();
   }).catch(() => { goalsFailures++; goalsNotice(); }).finally(() => {
     goalsFlight = null;
-    if (current === "goals" && !document.hidden) {
+    if (current === "goals" && !document.hidden && !pageRefused) {
       const delay = Math.min(600000, 60000 * 2 ** Math.min(4, Math.max(0, goalsFailures - 1)));
       goalsPollTimer = setTimeout(loadGoals, delay);
     }
@@ -3255,6 +3339,7 @@ document.addEventListener("visibilitychange", () => {
   loadHistory();
   clearTimeout(statusPollTimer);
   clearTimeout(goalsPollTimer);
+  if (pageRefused) return;
   if (current === "status" && !document.hidden) loadStatus().catch(err);
   if (current === "goals" && !document.hidden) loadGoals();
 });

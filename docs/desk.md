@@ -164,6 +164,10 @@ invalid `days` query value (`invalid_query`, field `days`), malformed JSON
 (`invalid_type`, field `body`). `problems` is a list of explanations. Work and cost
 defaults to 7 days, clamps integer values to 1–90 and accepts `all`; invalid event counts
 continue to use the default of 60. An empty POST body still means `{}`.
+A request the server fails on itself (a record it cannot read, a save without its
+`settings`) gets HTTP 500 with `ok: false`, `error` and `problems` naming the path
+and the failure, and the connection closes after it; the page shows that text where
+the request's answer would go, rather than the browser's "Failed to fetch".
 
 The browser tab and the caption beside Hansa use the
 [desk name saved by the principal](#settings-on-the-web-page). With no name set,
@@ -271,13 +275,18 @@ The header shows the saved desk name under Hansa at every width, or its last
 two path folders, such as `shop/desk`, when no name is set.
 Long names are cut with an ellipsis; hovering shows the whole name.
 The summary stays one line high, on its own row in narrow windows.
-It cycles through desk, dispatch, server, version, install time, current time
-and status notes, showing warnings first and keeping each group's order.
+While a warning holds (paused, server not running or unreachable, coordinator
+unreached, low disk or memory, a failing alert command, alerts held by the hourly
+limit, and the other status notes), the summary shows every warning together, in
+order and separated by `·`, and stays on them until they clear; the routine items
+stay in the list below. With no warning, it cycles through desk, dispatch, server,
+version, install time and current time.
 Short items change about every four seconds. A long item rests briefly, moves
 from its start to its end at reading pace, and rests again before the next item;
-a lone item repeats that movement. With reduced motion, long items are cut with
-an ellipsis instead, while items still change. Refreshes keep the current item
-and its progress, updating its text; a removed item gives way to the next.
+a lone item, or the warnings, repeat that movement. With reduced motion, long items are cut with
+an ellipsis instead, while routine items still change. Refreshes keep the current item
+and its progress, updating its text; a removed item gives way to the next, and once
+the last warning clears the routine items start again from the desk.
 The dot keeps the summary's overall status colour. The list button at the end
 opens all items in full, with warnings marked, over the page below the header.
 It stays open and updates on refresh. The button again, a click elsewhere, or
@@ -349,7 +358,19 @@ are dimmed, tries are named, and sandbox holds have a held pill and show their r
 Warning pills, including sandbox holds and queued counts, use a warning triangle.
 When `hansa serve` is stopped,
 the picture still shows the desk's records; the page's status line warns once
-that new tasks will not start. When fetching `/api/status` fails, both parts show
+that new tasks will not start.
+When the page gets no answer at all (the server stopped, the tunnel closed, the
+laptop woke up), the header no longer says the server runs: it says the page
+cannot reach `hansa serve` and that `hansa up` starts it. Status keeps the last
+data with a notice saying the same, the time of the data, and a Retry button;
+polls back off up to a minute, and the next poll or Retry that gets an answer
+clears the notice. A press in that state (Release, Save settings, a to-do's
+button) says, in the page's language, that the page cannot reach `hansa serve`,
+that nothing was sent, and that `hansa up` starts it again, rather than the
+browser's "Failed to fetch".
+A page opened without its token, or with a wrong one, shows only "Forbidden: open
+the address printed by hansa web" in its language and stops polling.
+When fetching `/api/status` fails, both parts show
 an error in place of their previous figures. An events fetch failure appears in
 Recent events and leaves the status picture visible.
 At widths up to 640 px the strip's stages and lane steps take two rows; labels
@@ -484,8 +505,15 @@ carry `task`:
   `lane_try_withdrawn`.
 - Sandbox holds: `sandbox_held`, `sandbox_ready`.
 - Provider rests and the server: `provider_credit`, `server_stopped`.
+- A day's other work: `task_added`, `task_cancel` (closed, when `hansa close`
+  wrote it), `task_not_started`, `task_after_held`, `start_held`, `paused`,
+  `resumed`, `ask`, `ask_closed`, `key_set`, `key_removed`, `settings_saved`
+  (by whom, and which settings), `provider_checked`, `srt_tried` (the sandbox
+  tried as the server starts), `disk_low`, `disk_ok`.
 
-Other kinds retain their raw event name and `key=value` text. A missing check
+Other kinds are folded into one line, “N other records”, after the sentences;
+opened, it shows them with their raw event name and `key=value` text, and stays
+open across refreshes. A missing check
 result reads as unknown; a check that could not run says so.
 `release_waits` names the lane and target and says the release needs the principal's
 answer again because its target left the releases-without-asking list or no longer
