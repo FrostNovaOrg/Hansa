@@ -1676,6 +1676,16 @@ fact for the principal; it does not pause dispatch. The new-item alert is unchan
 The principal answers in the conversation. The coordinator closes the item with
 `hansa ask --close N "<outcome>"`; an outcome is required. Workers and verifications
 cannot close to-dos. Releases still take the principal's yes or no on the page.
+An empty to-do is refused.
+
+`hansa ask` with nothing after it lists the open to-dos in full, oldest first:
+each one's number, whether work waits on it, when it was asked and by whom, its
+goal, its whole text and why only the principal can do it.
+`hansa ask --closed` lists the closed ones with their outcomes, newest closed
+first, twenty at a time; `--page N` shows the next twenty. `hansa status` keeps
+one line for each open to-do, cut at 100 characters, marked
+`(work waits on it)` when it was recorded with `--holds`, and names `hansa ask`
+as the way to read them whole.
 Requests answered on the page in an older version stay closed with their answers;
 those answers are not posted to the coordinator.
 

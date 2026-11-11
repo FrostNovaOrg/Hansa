@@ -1535,18 +1535,41 @@ def cmd_wait(a):
 
 
 def cmd_ask(a):
+    if not a.text and a.close is None:  # hansa ask alone, or --closed: read the to-dos
+        print(views.asks_text(Desk.find(a.desk), closed=a.closed, page=a.page or 1))
+        return
     if a.close is not None:
         if a.goal:
             raise SystemExit("hansa: --goal links a new to-do; it cannot be used with --close; nothing was changed")
-        if os.environ.get("HANSA_TASK"):  # a worker or verification: the requests are the coordinator's
-            raise SystemExit("hansa: only the coordinator closes a request; a worker or verification "
+        if os.environ.get("HANSA_TASK"):  # a worker or verification: the to-dos are the coordinator's
+            raise SystemExit("hansa: only the coordinator closes a to-do; a worker or verification "
                              "cannot. Say in your report that it may be done")
         Desk.find(a.desk).close_ask_as_coordinator(a.close, " ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"))
-        print(f"ask #{a.close} is closed; the principal's page shows it as closed by the coordinator, with the outcome")
+        print(f"to-do #{a.close} is closed; the principal's page shows it as closed by the coordinator, with the outcome")
         return
     n = Desk.find(a.desk).add_ask(" ".join(a.text), by=os.environ.get("HANSA_ROLE", "cli"),
                                   session=notify.session_here(), why=a.why, holds=a.holds, goal=a.goal or "")
-    print(f"ask #{n} is on the principal's to-do list; they answer in the conversation")
+    print(f"to-do #{n} is on the principal's list; they answer in the conversation")
+
+
+def _ask_arguments(ap, a) -> None:
+    """Refuse a hansa ask that mixes reading with recording or closing, or records an empty to-do."""
+    reading = a.closed or a.page is not None
+    if a.page is not None and not a.closed:
+        ap.error("ask --page goes with --closed: hansa ask --closed --page N")
+    if reading and (a.text or a.close is not None or a.why or a.holds or a.goal):
+        ap.error("ask --closed only lists closed to-dos; give no text, --close, --why, --holds or --goal with it")
+    if a.close is not None:
+        if not " ".join(a.text).strip():
+            ap.error("ask --close needs the outcome: hansa ask --close N \"<outcome>\"")
+        return
+    if not a.text:
+        if a.why or a.holds or a.goal:
+            ap.error("ask: --why, --holds and --goal go with a new to-do's text: hansa ask \"<what>\" ...; "
+                     "nothing was recorded")
+        return  # hansa ask alone lists the open to-dos
+    if not " ".join(a.text).strip():
+        ap.error("ask needs what the principal must do; an empty to-do was not recorded")
 
 
 def cmd_goal(a):
@@ -3908,9 +3931,11 @@ def main(argv=None):
     p.add_argument("--grep", metavar="TEXT", help="decision or reason contains TEXT, ignoring case")
     p.add_argument("--all", action="store_true", help="also show replaced decisions and what replaced them")
     p.epilog = see_more("intent-records")
-    p = add("ask", cmd_ask, "record a to-do for the principal, or close it with its outcome (--close)")
+    p = add("ask", cmd_ask, "the principal's to-dos: list them (alone), record one, or close it with its outcome (--close)")
     p.description = ('Record what only the principal can do: hansa ask "<what>" [--why "<why only the principal '
-                     'can do it>"] [--holds]. Without --holds, work goes on. The page is read-only; the principal '
+                     'can do it>"] [--holds]. Without --holds, work goes on. hansa ask alone lists the open to-dos '
+                     'in full; hansa ask --closed lists the closed ones with their outcomes, newest first, twenty at '
+                     'a time (--page N for more). The page is read-only; the principal '
                      'answers in the conversation, and the coordinator closes the to-do: hansa ask --close N '
                      '"<outcome>". The outcome is required. Workers and verifications cannot close to-dos. '
                      'Every to-do stays on record.')
@@ -3919,6 +3944,9 @@ def main(argv=None):
     p.add_argument("--goal", type=_record_reference, metavar="G", help="tie a new to-do to an open goal (not with --close)")
     p.add_argument("--holds", action="store_true", help="work waits on this to-do (otherwise work goes on)")
     p.add_argument("--close", type=int, metavar="N", help="close open to-do #N of this desk with its outcome")
+    p.add_argument("--closed", action="store_true", help="list the closed to-dos with their outcomes, newest first, "
+                   "twenty at a time")
+    p.add_argument("--page", type=int, metavar="N", help="with --closed: the Nth twenty")
     p.epilog = see_more("inbox")
     p = add("explain", cmd_explain, "this desk's current settings and state: lane NAME | provider NAME | "
             "server | notify; history [lane L | provider P] [--last N] lists settings changes newest first: "
@@ -4291,9 +4319,8 @@ def main(argv=None):
         return 0
     if a.cmd == "add" and not a.text and not a.file:
         ap.error("add needs the task text or --file")
-    if a.cmd == "ask" and not a.text:
-        ap.error("ask needs what the principal must do" if a.close is None else
-                 "ask --close needs the outcome: hansa ask --close N \"<outcome>\"")
+    if a.cmd == "ask":
+        _ask_arguments(ap, a)
     # a follower runs as the coordinator's account, and reads the desk through the account's hansa itself
     # coordinator-turn: root keeps only what the record needs of the hook's input before the account's hansa sees it
     if a.cmd not in ("coordinator", "coordinator-turn", "init", "notify", "notify-follow", "up", "desks", "menu",

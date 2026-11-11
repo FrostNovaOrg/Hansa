@@ -11651,7 +11651,7 @@ def save():'''))
         self.assertEqual([(e["provider"], e["ids"]) for e in self.events("ask_ready")], [("mimo", [1])])
         heard = notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None})
         self.assertEqual(len(heard), 1)
-        self.assertIn("mimo is ready now: done? Still open: request #1", heard[0]["line"])
+        self.assertIn("mimo is ready now: done? Still open: to-do #1", heard[0]["line"])
 
     def test_the_key_save_reply_names_unscrubbed_files_without_the_key(self):
         from hansa import web
@@ -20819,7 +20819,7 @@ def save():'''))
         th.join()
         if broke:
             raise broke[0]
-        self.assertIn("- mimo is ready now: done? Still open: request #1", got["posts"][0])
+        self.assertIn("- mimo is ready now: done? Still open: to-do #1", got["posts"][0])
         self.assertEqual(got["name"], ["desk-87"])  # and what the lookup found is recorded once it ends
 
     def test_two_sessions_each_hear_their_own_tasks_and_both_hear_one_from_a_shell(self):
@@ -21704,6 +21704,86 @@ def save():'''))
                          ["to-do #1 for you: Review <b>x</b>",
                           "to-do #2 for you: Pick a name"])
 
+    def test_ask_alone_lists_the_open_todos_in_full(self):
+        self.hansa_out("goal", "add", "Export")
+        long = "Renew the deploy login " + "and its token " * 12 + "END"
+        self.hansa_out("ask", long, "--why", "Only you hold the account", "--holds", "--goal", "g1")
+        self.hansa_out("ask", "Pick a name")
+        self.hansa_out("ask", "Done already")
+        self.hansa_out("ask", "--close", "3", "Named it")
+        out = self.hansa_out("ask")
+        one, two = out.split("\n#2 ")
+        self.assertIn("#1 ", one)
+        self.assertIn(long, one)  # whole, not cut at 100
+        self.assertIn("work waits on it", one)
+        self.assertIn("why only the principal: Only you hold the account", one)
+        self.assertIn("goal g1 (Export)", one)
+        asked = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.desk.asks()[0]["created"]))
+        self.assertIn(f"asked {asked}", one)
+        self.assertIn("work goes on", two)
+        self.assertIn("Pick a name", two)
+        self.assertNotIn("Done already", out)  # closed: hansa ask --closed
+        self.assertIn("hansa ask --close N", out)
+        with self.assertRaises(SystemExit):  # --why with no text is no listing and records nothing
+            self.hansa_out("ask", "--why", "x")
+        self.assertEqual(len(self.desk.asks()), 3)
+        self.hansa_out("ask", "--close", "1", "Renewed")
+        self.hansa_out("ask", "--close", "2", "Named")
+        self.assertIn("no open to-dos", self.hansa_out("ask"))
+
+    def test_ask_closed_lists_outcomes_newest_first_twenty_at_a_time(self):
+        rows = [{"id": n, "text": f"Item {n}", "created": 1700000000 + n, "closed": 1700100000 + (n * 7) % 25,
+                 "answer": "", "closed_by": "coordinator", "reason": f"Outcome {n}"} for n in range(1, 26)]
+        rows.append({"id": 26, "text": "Still open", "created": 1700000100, "closed": None, "answer": ""})
+        rows.append({"id": 27, "text": "Old page item", "created": 1700000000, "closed": 1600000000, "answer": "yes"})
+        write_json(self.desk.asks_path, rows)
+        newest = [a["id"] for a in sorted(rows[:25], key=lambda a: (a["closed"], a["id"]), reverse=True)] + [27]
+        first = self.hansa_out("ask", "--closed")
+        heads = [int(line.split()[0][1:]) for line in first.splitlines() if line.startswith("#")]
+        self.assertEqual(heads, newest[:20])
+        self.assertIn(f"outcome: Outcome {newest[0]}", first)
+        self.assertIn("by the coordinator", first)
+        self.assertIn("--page 2", first)
+        self.assertNotIn("Still open", first)
+        second = self.hansa_out("ask", "--closed", "--page", "2")
+        self.assertEqual([int(line.split()[0][1:]) for line in second.splitlines() if line.startswith("#")], newest[20:])
+        self.assertIn("outcome: answered on the page: yes", second)
+        self.assertNotIn("--page 3", second)
+        with self.assertRaises(SystemExit) as e:
+            self.hansa_out("ask", "--closed", "--page", "3")
+        self.assertIn("page 3", str(e.exception.code))
+        for args in (("ask", "--closed", "More"), ("ask", "--page", "2"), ("ask", "--closed", "--close", "1", "x")):
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                self.hansa_out(*args)
+        self.assertEqual(len(self.desk.asks()), 27)
+
+    def test_ask_refuses_an_empty_todo(self):
+        for text in ("", "  ", "\n"):
+            with self.subTest(text=text), self.assertRaises(SystemExit):
+                self.hansa_out("ask", text)
+        with self.assertRaises(SystemExit) as e:
+            self.desk.add_ask("   ")
+        self.assertIn("empty", str(e.exception.code))
+        self.assertEqual(self.desk.asks(), [])
+        self.assertEqual(self.events("ask"), [])
+
+    def test_status_marks_todos_work_waits_on_and_names_hansa_ask(self):
+        self.desk.add_ask("Review access " + "x" * 200, holds=True)
+        self.desk.add_ask("Pick a name\nsecond line")
+        text = views.status_text(views.status(self.desk))
+        lines = text.splitlines()
+        head = next(i for i, line in enumerate(lines) if "to-dos for the principal" in line)
+        self.assertIn("hansa ask", lines[head])
+        self.assertNotIn("asks", lines[head])
+        first, second = lines[head + 1], lines[head + 2]
+        self.assertIn("#1", first)
+        self.assertIn("work waits", first)
+        self.assertIn("Review access " + "x" * 86, first)
+        self.assertNotIn("x" * 87, first)  # still cut at 100 characters
+        self.assertIn("#2", second)
+        self.assertNotIn("work waits", second)
+        self.assertIn("Pick a name second line", second)  # still one line
+
     def test_todos_keep_300_closed_items_and_page_filter_to_the_oldest(self):
         from hansa import disk
         history = [{"id": n, "text": f"To-do {n}", "created": n, "closed": n + 1,
@@ -21793,7 +21873,7 @@ def save():'''))
         self.assertIn("  #2: Is mimosa a good lane name?\n", text)
         self.assertEqual([a["closed"] for a in self.desk.asks()], [None, None])  # hansa closes nothing itself
         heard = notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None})
-        self.assertEqual([x["line"] for x in heard], ["mimo is ready now: done? Still open: request #1 (Please fill in "
+        self.assertEqual([x["line"] for x in heard], ["mimo is ready now: done? Still open: to-do #1 (Please fill in "
                                                       "mimo's key) (the principal answers in the conversation; "
                                                       "record the outcome: hansa ask --close N \"<outcome>\")"])
         self.desk.close_ask_as_coordinator(1, "principal completed it")
@@ -21847,7 +21927,7 @@ def save():'''))
         d.tick()
         self.assertEqual([(e["provider"], e["ids"]) for e in self.events("ask_ready")], [("mimo", [1])])
         heard = notify.items_for(self.desk, self.events("ask_ready"), {"key": "k", "session": None})
-        self.assertEqual([x["line"][:47] for x in heard], ["mimo is ready now: done? Still open: request #1"])
+        self.assertEqual([x["line"][:45] for x in heard], ["mimo is ready now: done? Still open: to-do #1"])
         Dispatcher(self.desk).tick()  # a server started again: told already, so nothing new
         self.assertEqual(len(self.events("ask_ready")), 1)
         self.desk.set_provider_state("mimo", cool_until=time.time() + 600)  # rests again, then is ready again
@@ -21866,16 +21946,16 @@ def save():'''))
             self.hansa_out("ask", "--close", "1")
         with self.assertRaises(SystemExit) as e:
             self.hansa_out("ask", "--close", "9", "done")
-        self.assertIn("there is no request #9", str(e.exception.code))
+        self.assertIn("there is no to-do #9", str(e.exception.code))
         with unittest.mock.patch.dict(os.environ, {"HANSA_TASK": "t0001"}):  # a worker, verification
             with self.assertRaises(SystemExit) as e:
                 self.hansa_out("ask", "--close", "1", "done")
-            self.assertIn("only the coordinator closes a request", str(e.exception.code))
+            self.assertIn("only the coordinator closes a to-do", str(e.exception.code))
         self.assertEqual([a["closed"] for a in self.desk.asks()], [None, None])
         self.desk.write_key("mimo", "sk-mimo-12345678")  # ready now: the note and one post
         with unittest.mock.patch.dict(os.environ, {"HANSA_ROLE": "coordinator"}):
             out = self.hansa_out("ask", "--close", "1", "The principal filled it in: sk-mimo-12345678")
-        self.assertIn("ask #1 is closed", out)
+        self.assertIn("to-do #1 is closed", out)
         a = self.desk.asks()[0]
         self.assertTrue(a["closed"])
         self.assertEqual((a["closed_by"], a["reason"]), ("coordinator", "The principal filled it in: [key of mimo]"))
@@ -21891,13 +21971,13 @@ def save():'''))
         self.assertEqual(notify.items_for(self.desk, self.events("ask_ready"), me), [])  # nor that it may be done
         with self.assertRaises(SystemExit) as e:
             self.hansa_out("ask", "--close", "1", "again")
-        self.assertIn("request #1 is already closed by the coordinator", str(e.exception.code))
+        self.assertIn("to-do #1 is already closed by the coordinator", str(e.exception.code))
         asks = self.desk.asks()  # a page answer from an older version remains on record
         asks[1].update(closed=time.time(), answer="yes")
         write_json(self.desk.asks_path, asks)
         with self.assertRaises(SystemExit) as e:
             self.hansa_out("ask", "--close", "2", "done")
-        self.assertIn("request #2 is already closed: yes", str(e.exception.code))
+        self.assertIn("to-do #2 is already closed: yes", str(e.exception.code))
         self.assertEqual(len(self.events("ask_closed")), 1)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
@@ -53136,7 +53216,7 @@ else:
         self.coordinator_desk("zh-names")
         at = time.time() - 300
         for what, line, said in (
-                ("ready kimi", "kimi is ready now: done? Still open: request #3 (Sign the form)",
+                ("ready kimi", "kimi is ready now: done? Still open: to-do #3 (Sign the form)",
                  "服务商「kimi」已就绪，待办也许已完成"),
                 ("start claude a b", "lanes a, b cannot run: no claude to run; not failed", "工作线「a」、「b」无法开始任务"),
                 ("start repo c", "lane c cannot run: its repository folder is not there; not failed",

@@ -11,7 +11,7 @@ Layout (everything under one directory):
     notes/PROJECT.md     the project's own rules, loaded with the card (it imports them); hansa never writes it after init
     events.jsonl         append-only record of everything that happened
     .hansa/settings-history.jsonl  append-only settings changes, with keys withheld (hansa explain history)
-    asks.json            requests from agents to the principal
+    asks.json            the principal's to-dos (hansa ask)
     PAUSED               present = no new work starts (holds the reason)
     statusline.json      what hansa serve last counted, for the status line of the coordinator's session (plugin.py)
     .hansa/                 runtime state: provider cooling, heartbeat, web token and port, and runs/<id>/
@@ -3332,7 +3332,7 @@ class Desk:
         return read_json(self.asks_path, []) or []
 
     def ready_news(self) -> None:
-        """Tell the open requests' askers of the providers they name that became ready (views.ready_news)."""
+        """Tell the open to-dos' askers of the providers they name that became ready (views.ready_news)."""
         from .views import ready_news
         ready_news(self)
 
@@ -3342,6 +3342,8 @@ class Desk:
         It records the providers ready then; any other name (one not set up yet too) was not, and a to-do
         naming it may be done once it is (views.ask_note)."""
         from .views import ready_now
+        if not text.strip():
+            raise SystemExit("hansa: a to-do needs what the principal must do; an empty one was not recorded")
         ready_then = ready_now(self)
         with self.lock():
             if goal:
@@ -3367,9 +3369,9 @@ class Desk:
             asks = self.asks()
             a = next((a for a in asks if a.get("id") == n), None)
             if not a:
-                raise SystemExit(f"hansa: there is no request #{n} on this desk (hansa status lists the open ones)")
+                raise SystemExit(f"hansa: there is no to-do #{n} on this desk (hansa ask lists the open ones)")
             if a.get("closed"):
-                raise SystemExit(f"hansa: request #{n} is already closed"
+                raise SystemExit(f"hansa: to-do #{n} is already closed"
                                  + (f" by the coordinator: {a['reason']}" if a.get("closed_by") == "coordinator" else
                                     f": {a['answer']}" if a.get("answer") else "")
                                  + "; nothing changed")

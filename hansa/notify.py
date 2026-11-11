@@ -325,7 +325,7 @@ def _item(desk: Desk, e: dict, me=None):
         sessions = [a.get("session") for a in named]
         return (("ready", e.get("provider")),
                 f"{e.get('provider')} is ready now: done? Still open: "
-                + "; ".join(f"request #{a['id']} ({str(a.get('text', ''))[:120]})" for a in named)
+                + "; ".join(f"to-do #{a['id']} ({str(a.get('text', ''))[:120]})" for a in named)
                 + " (the principal answers in the conversation; record the outcome: hansa ask --close N \"<outcome>\")",
                 sessions[0] if all(same(x, sessions[0]) for x in sessions) else None, False, None)
     if kind in ("release_answered", "release_ended", "release_watch_ended", "release_void", "release_forbidden",
