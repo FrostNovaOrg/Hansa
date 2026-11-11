@@ -1169,7 +1169,9 @@ def worktree_git_settings() -> list:
 
 def git(*args, cwd, env=None) -> str:
     check_main_checkout(cwd)  # a linked worktree's git folder is checked with its .git file (check_git_file)
-    e = {**without_session(os.environ), **GIT_ID, **(env or {})}
+    # Hansa reads git's diagnostics and --shortstat in English, even with a caller's locale override.
+    # Keep this in the child environment: workers and lane commands retain their own locale.
+    e = {**without_session(os.environ), **GIT_ID, **(env or {}), "LC_ALL": "C"}
     linked = os.path.isfile(os.path.join(str(cwd), ".git")) and not os.path.islink(os.path.join(str(cwd), ".git"))
     r = subprocess.run(["git", "-c", "core.quotePath=false", *(worktree_git_settings() if linked else ()), *args],
                        cwd=str(cwd), env=e, capture_output=True, text=True, errors="replace")
@@ -3089,7 +3091,8 @@ def markers_in_change(cwd, base: str, head: str) -> dict:
     calls a leftover conflict marker, less a ======= (or |||||||) line outside a <<<<<<< ... >>>>>>> block,
     such as a Markdown heading's underline."""
     r = subprocess.run(["git", "-c", "core.quotePath=false", "diff", "--check", base, head], cwd=str(cwd),
-                       capture_output=True, text=True, errors="replace")
+                       capture_output=True, text=True, errors="replace",
+                       env={**without_session(os.environ), "LC_ALL": "C"})  # MARKER_LINE reads git's English diagnostic
     flagged = {}
     for f, n in MARKER_LINE.findall(r.stdout):
         flagged.setdefault(f, []).append(int(n))

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import pwd
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -19,7 +20,7 @@ from . import build, session_value, without_session
 
 LINUX = sys.platform.startswith("linux")
 PATH_OPTIONS = ("--desk", "--repo", "--attach")  # made full paths before switching: the account starts elsewhere
-DUBIOUS = re.compile(r"dubious ownership in repository at '([^']+)'")
+DUBIOUS = re.compile(r"dubious ownership in repository at '(.+)'$", re.M)
 
 
 def uid() -> int:
@@ -143,8 +144,9 @@ def foreign_repo(repo) -> str:
     if o == uid():
         return ""
     me = name_of(uid())
+    command = shlex.join(["chown", "-R", me, str(repo)])
     return (f"{repo} belongs to {name_of(o)}, not to {me}, whom hansa runs as, so git refuses to work in it "
-            f"(\"dubious ownership\"). Give it to {me}: chown -R {me} {repo}")
+            f"(\"dubious ownership\"). Give it to {me}: {command}")
 
 
 def git_refusal(text: str, cwd) -> str:
@@ -154,4 +156,4 @@ def git_refusal(text: str, cwd) -> str:
         return ""
     return foreign_repo(m.group(1)) or foreign_repo(cwd) or (
         f"git refuses to work in {m.group(1)}: another user owns it. Give it to {name_of(uid())}: "
-        f"chown -R {name_of(uid())} {m.group(1)}")
+        + shlex.join(["chown", "-R", name_of(uid()), m.group(1)]))

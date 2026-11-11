@@ -41,6 +41,13 @@ never tells git to trust them (`safe.directory`): that would have root run what
 the account's repository settings name. Claude Code asks the principal before
 each command other than `hansa` that is not already allowed.
 
+When git refuses a repository owned by another account, hansa explains whose
+repository it is and prints a `chown` command with shell-quoted arguments, so
+paths with spaces or apostrophes can be copied as given. Git messages hansa
+parses use the `C` locale so ownership refusals, conflict-marker checks
+and saved diff statistics are recognised regardless of the user's language.
+The locale and output of workers, lane commands and `hansa git` stay as they are.
+
 ## What a lane's commands meet in Linux's sandbox
 
 What a lane's commands meet in the sandbox there (bubblewrap), which
