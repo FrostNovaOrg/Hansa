@@ -1542,21 +1542,24 @@ def cmd_ask(a):
 def cmd_goal(a):
     desk = Desk.find(a.desk)
     if a.action == "add":
-        print(goals.add(desk, a.title, a.why))
+        gid = goals.add(desk, a.title, a.why)
+        print(goals.added_text(goals.records(desk)[0][gid]))
     elif a.action == "list":
         rows = goals.summaries(desk, all_=a.all, evidence=True)
         print(json.dumps(rows, ensure_ascii=False, indent=1) if a.json else
               "\n".join(goals.summary_text(g) for g in rows))
     elif a.action == "show":
-        print(json.dumps(goals.show(desk, a.id), ensure_ascii=False, indent=1) if a.json else goals.show_text(desk, a.id))
+        print(json.dumps(goals.show(desk, a.id), ensure_ascii=False, indent=1) if a.json
+              else goals.show_text(desk, a.id, all_=a.all))
     else:
         goals.end(desk, a.id, "done" if a.action == "done" else "dropped", a.outcome)
         print(f"{a.id} {'done' if a.action == 'done' else 'dropped'}")
 
 
 def cmd_decide(a):
-    print(goals.decide(Desk.find(a.desk), a.text, a.why, gid=a.goal or "", by=a.by,
-                       task=a.task or "", replaces=a.replaces or ""))
+    desk = Desk.find(a.desk)
+    did = goals.decide(desk, a.text, a.why, gid=a.goal, by=a.by, task=a.task or "", replaces=a.replaces or "")
+    print(goals.decided_text(desk, goals.records(desk)[1][did]))
 
 
 def cmd_decisions(a):
@@ -3848,8 +3851,8 @@ def main(argv=None):
     p = add("goal", cmd_goal, "record what the principal wants; list open goals, show their decisions and work, or end a goal")
     p.epilog = see_more("intent-records")
     goal_commands = p.add_subparsers(dest="action", required=True)
-    q = goal_commands.add_parser("add", help="record a goal; prints its new gN id",
-                                 description="Record the principal's goal as said; hansa records its time and session. Prints gN.")
+    q = goal_commands.add_parser("add", help="record a goal; prints its new gN id first, then what was recorded",
+                                 description="Record the principal's goal as said; hansa records its time and session. Prints gN first, then the title and reason recorded.")
     q.add_argument("title", help="what the principal wants")
     q.add_argument("--why", default="", help="what the principal asked, in their words")
     q = goal_commands.add_parser("list", help="open goals, their task counts and open to-dos",
@@ -3857,14 +3860,16 @@ def main(argv=None):
     q.add_argument("--all", action="store_true", help="also show done and dropped goals with their outcome")
     q.add_argument("--json", action="store_true", help="the same goal records and counts as JSON")
     q = goal_commands.add_parser("show", help="a goal, current and replaced decisions, latest tasks and open to-dos",
-                                 description="Show current decisions newest first with reason, who, time and task; replaced decisions name their replacement. Each retry chain shows its latest task, state, rounds, check, verification, merge and releases by target and state. Merged chains show missing evidence using the merge's note and override marks, or missing: nothing. Then lifetime cost (including follow-ups and verifications) and total chain rounds; verifications name their task without adding chains or rounds.")
+                                 description="Show current decisions newest first with reason, who, time and task; replaced decisions name their replacement. Each retry chain, newest first, shows its latest task, state, rounds, check (not run yet while queued or running; none when its lane has no check), verification, merge and releases by target and state; merged or closed tasks older than the newest twenty are counted in one line. Times are local. Merged chains show missing evidence using the merge's note and override marks, or missing: nothing. Then lifetime cost (including follow-ups and verifications) and total chain rounds; verifications name their task without adding chains or rounds.")
     q.add_argument("id", metavar="G")
     q.add_argument("--json", action="store_true", help="the same goal, decisions, chains, evidence, cost, rounds and to-dos as JSON")
+    q.add_argument("--all", action="store_true", help=f"also list merged or closed tasks older than the newest "
+                   f"{goals.SHOWN_TASKS}, which are otherwise counted in one line")
     for action, description in (("done", "end an open goal with its outcome"), ("drop", "drop an open goal with its reason")):
         q = goal_commands.add_parser(action, help=description, description=description + "; hansa appends an entry and keeps the original.")
         q.add_argument("id", metavar="G")
         q.add_argument("outcome", help="what happened" if action == "done" else "why it was dropped")
-    p = add("decide", cmd_decide, "record a product decision with its reason and who took it; prints its new dN id")
+    p = add("decide", cmd_decide, "record a product decision with its reason and who took it; prints its new dN id first, then what was recorded")
     p.description += ". Decisions are never edited or deleted: --replaces D appends a new decision replacing a current one. Hansa records the time and session; known keys are refused, with no release word scan."
     p.add_argument("text", help="the product decision, as said")
     p.add_argument("--why", required=True, help="the reason for the decision")
@@ -3872,7 +3877,7 @@ def main(argv=None):
     p.add_argument("--by", choices=("principal", "coordinator", "assumption"), default="coordinator",
                    help="who took it; assumption: still to be confirmed (default: coordinator)")
     p.add_argument("--task", type=_record_reference, metavar="T", help="an existing task this decision concerns")
-    p.add_argument("--replaces", type=_record_reference, metavar="D", help="a current decision this one replaces; its original text stays on record")
+    p.add_argument("--replaces", type=_record_reference, metavar="D", help="a current decision this one replaces; its original text stays on record. Without --goal, the new one keeps its goal")
     p.epilog = see_more("intent-records")
     p = add("decisions", cmd_decisions, "current decisions, newest first, with their reasons, who, time and task")
     p.add_argument("--goal", type=_record_reference, metavar="G", help="only decisions for this goal (including an ended goal)")

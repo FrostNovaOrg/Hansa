@@ -1172,7 +1172,7 @@ Object.assign(T, ZH ? {
   goalCheck:"检查", goalVerification:"核验", goalMerge:"合并", goalMissing:"缺少", goalNothing:"无缺项", goalNone:"无",
   goalTodos:"未完成待办", goalReleases:n => "发布",
   goalVerificationOf:"核验对象", goalRoles:{principal:"负责人", coordinator:"协调员", assumption:"待确认的假设"},
-  goalChecks:{passed:"通过", failed:"失败", "could not run":"无法运行", none:"无"},
+  goalChecks:{passed:"通过", failed:"失败", "could not run":"无法运行", "not run yet":"尚未运行", "not run":"未运行", none:"无"},
   goalMerges:{"not merged":"尚未合并", "merged despite a failed check or verdict":"检查或核验未通过仍合并", "merged after its merge check":"合并检查通过后合并", "merged without one":"未做合并检查就合并"},
   goalReleaseStates:{waiting:"待批准", running:"运行中", done:"已完成", failed:"失败", refused:"已拒绝", stopped:"已停止", cancelled:"已取消", stale:"已变更"}
 } : {
@@ -1187,7 +1187,7 @@ Object.assign(T, ZH ? {
   goalCheck:"check", goalVerification:"verification", goalMerge:"merge", goalMissing:"missing", goalNothing:"nothing", goalNone:"none",
   goalTodos:"Open to-dos", goalReleases:n => n === 1 ? "Release" : "Releases",
   goalVerificationOf:"Verification of", goalRoles:{principal:"principal", coordinator:"coordinator", assumption:"assumption"},
-  goalChecks:{passed:"passed", failed:"failed", "could not run":"could not run", none:"none"},
+  goalChecks:{passed:"passed", failed:"failed", "could not run":"could not run", "not run yet":"not run yet", "not run":"not run", none:"none"},
   goalMerges:{"not merged":"not merged", "merged despite a failed check or verdict":"merged despite a failed check or verdict", "merged after its merge check":"merged after its merge check", "merged without one":"merged without one"},
   goalReleaseStates:{waiting:"waiting", running:"running", done:"done", failed:"failed", refused:"refused", stopped:"stopped", cancelled:"cancelled", stale:"stale"}
 });

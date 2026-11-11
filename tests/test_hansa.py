@@ -5754,7 +5754,10 @@ class DeskTest(unittest.TestCase):
         # Fix the clock on either side of the rounding boundary rather than relying on command timing.
         with unittest.mock.patch("hansa.notify.session_here", return_value=session), \
                 unittest.mock.patch("hansa.desk.time.time", return_value=1700000000.1234):
-            self.assertEqual(self.hansa("goal", "add", "Export reports", "--why", "I want my orders"), "g1\n")
+            added = self.hansa("goal", "add", "Export reports", "--why", "I want my orders")
+        self.assertEqual(added.split()[0], "g1")
+        self.assertIn("Export reports", added)
+        self.assertIn("I want my orders", added)
         g = goals.records(self.desk)[0]["g1"]
         self.assertEqual(g["created"], 1700000000.123)
         self.assertEqual(g["session"], session)
@@ -5765,7 +5768,9 @@ class DeskTest(unittest.TestCase):
         self.assertIn(summary, self.hansa("status"))
         self.assertIn("why: I want my orders", self.hansa("goal", "show", "g1"))
         with unittest.mock.patch("hansa.desk.time.time", return_value=1700000000.1236):
-            self.assertEqual(self.hansa("goal", "add", "Another goal"), "g2\n")
+            added = self.hansa("goal", "add", "Another goal")
+        self.assertEqual(added.split()[0], "g2")
+        self.assertIn("why: (none)", added)
         self.assertEqual(goals.records(self.desk)[0]["g2"]["created"], 1700000000.124)
         self.hansa("goal", "add", "  Keep\nthese words  ")
         self.assertEqual(goals.records(self.desk)[0]["g3"]["title"], "  Keep\nthese words  ")
@@ -5779,14 +5784,18 @@ class DeskTest(unittest.TestCase):
         session = {"pid": 12345, "start": "decision-session"}
         text = "Only the shop's own orders"
         with unittest.mock.patch("hansa.notify.session_here", return_value=session):
-            self.assertEqual(self.hansa("decide", text, "--why", "the principal asked", "--by", "principal",
-                                        "--goal", "g1", "--task", "t0001"), "d1\n")
+            decided = self.hansa("decide", text, "--why", "the principal asked", "--by", "principal",
+                                 "--goal", "g1", "--task", "t0001")
+        self.assertEqual(decided.split()[0], "d1")
+        for expected in (text, "principal", "g1", "Export reports"):
+            self.assertIn(expected, decided)
         shown = self.hansa("goal", "show", "g1")
-        for expected in (text, "why: the principal asked", "by: principal", "UTC", "task: t0001"):
+        local = time.strftime("%Y-%m-%d %H:%M", time.localtime(goals.records(self.desk)[1]["d1"]["created"]))
+        for expected in (text, "why: the principal asked", "by: principal", local, "task: t0001"):
             self.assertIn(expected, shown)
         files = {p: p.read_bytes() for p in (self.desk.state_dir / "intent").glob("*.json")}
         self.assertEqual(self.hansa("decide", "Include the refund column", "--why", "Show refunds",
-                                    "--goal", "g1", "--replaces", "d1"), "d2\n")
+                                    "--goal", "g1", "--replaces", "d1").split()[0], "d2")
         for p, original in files.items():
             self.assertEqual(p.read_bytes(), original)
         d1, d2 = goals.records(self.desk)[1].values()
@@ -5797,7 +5806,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn("d2 Include the refund column", current)
         self.assertIn("why: Show refunds", current)
         self.assertIn("by: coordinator", current)
-        self.assertIn("UTC", current)
+        self.assertNotIn("UTC", current)
         self.assertIn(f"d1 {text} · replaced by d2", replaced)
         all_decisions = self.hansa("decisions", "--all")
         self.assertIn("why: the principal asked", all_decisions)
@@ -5808,6 +5817,83 @@ class DeskTest(unittest.TestCase):
             self.hansa("decide", "Change again", "--why", "A reason", "--replaces", "d1")
         self.assertIn("d2", str(e.exception))
         self.assertEqual(goals.entries(self.desk), before)
+
+    def test_goal_show_says_a_check_has_not_run_yet_and_none_only_for_a_lane_without_one(self):
+        self.hansa("goal", "add", "Export")
+        tid = self.desk.new_task("Build the export", goal="g1", lane="a")
+        for state in ("queued", "running"):
+            with self.subTest(state=state):
+                self.desk.update(tid, state=state)
+                self.assertIn("check: not run yet", self.hansa("goal", "show", "g1"))
+                self.assertEqual(json.loads(self.hansa("goal", "show", "g1", "--json"))["chains"][0]["check"],
+                                 "not run yet")
+        self.desk.update(tid, state="done")
+        self.assertIn("check: none", self.hansa("goal", "show", "g1"))
+        self.hansa("lane", "set", "a", "check", "python3 tests.py")
+        self.assertNotIn("check: none", self.hansa("goal", "show", "g1"))
+        self.assertIn("check: not run", self.hansa("goal", "show", "g1"))
+        self.desk.update(tid, check={"ok": True})
+        self.assertIn("check: passed", self.hansa("goal", "show", "g1"))
+
+    def test_goal_show_times_are_local_in_the_form_status_uses(self):
+        self.hansa("goal", "add", "Export")
+        self.hansa("decide", "Choice", "--why", "Reason", "--goal", "g1")
+        from hansa import goals
+        created = goals.records(self.desk)[0]["g1"]["created"]
+        try:  # a zone away from UTC, so that UTC would not pass for local time
+            with unittest.mock.patch.dict(os.environ, {"TZ": "Asia/Tokyo"}):
+                time.tzset()
+                shown = self.hansa("goal", "show", "g1")
+                local = time.strftime("%Y-%m-%d %H:%M", time.localtime(created))
+        finally:
+            time.tzset()
+        self.assertIn("created: " + local, shown)
+        self.assertIn("· " + local, shown)
+        self.assertNotIn("UTC", shown)
+
+    def test_goal_show_lists_newest_first_and_counts_old_settled_tasks_with_all_listing_them(self):
+        self.hansa("goal", "add", "Export")
+        tids = [self.desk.new_task(f"Part {n}", goal="g1", lane="a") for n in range(25)]
+        for tid in tids[:3]:
+            self.desk.update(tid, state="merged")
+        self.desk.update(tids[3], state="cancelled", closed="closed: closed with hansa close")
+        self.desk.update(tids[4], state="failed")  # old but not merged or closed: still listed
+        shown = self.hansa("goal", "show", "g1")
+        self.assertLess(shown.index(tids[-1] + " "), shown.index(tids[-2] + " "))
+        for tid in tids[:4]:
+            self.assertNotRegex(shown, rf"(?m)^{tid} ")
+        self.assertRegex(shown, rf"(?m)^{tids[4]} failed")
+        folded = [line for line in shown.splitlines() if "--all" in line]
+        self.assertEqual(len(folded), 1)
+        self.assertIn("4 ", folded[0])
+        self.assertIn("goal show g1 --all", folded[0])
+        everything = self.hansa("goal", "show", "g1", "--all")
+        for tid in tids:
+            self.assertRegex(everything, rf"(?m)^{tid} ")
+        self.assertNotIn("goal show g1 --all", everything)
+        self.assertLess(everything.index(tids[1] + " "), everything.index(tids[0] + " "))
+
+    def test_decide_says_the_goal_it_is_tied_to_and_a_replacement_keeps_its_goal(self):
+        from hansa import goals
+        self.hansa("goal", "add", "Export reports")
+        self.hansa("goal", "add", "Invoices")
+        alone = self.hansa("decide", "Standalone choice", "--why", "No goal needed")
+        self.assertEqual(alone.split()[0], "d1")
+        self.assertIn("Standalone choice", alone)
+        self.assertIn("coordinator", alone)
+        self.assertIn("no goal", alone)
+        self.hansa("decide", "Old rule", "--why", "Old request", "--goal", "g1", "--by", "principal")
+        self.hansa("goal", "done", "g1", "shipped")
+        kept = self.hansa("decide", "New rule", "--why", "New request", "--replaces", "d2")
+        self.assertEqual(kept.split()[0], "d3")
+        self.assertIn("g1", kept)
+        self.assertEqual(goals.records(self.desk)[1]["d3"]["goal"], "g1")
+        self.assertIn("d3 New rule", self.hansa("goal", "show", "g1"))
+        moved = self.hansa("decide", "Newer rule", "--why", "Moved", "--replaces", "d3", "--goal", "g2")
+        self.assertIn("g2", moved)
+        self.assertEqual(goals.records(self.desk)[1]["d4"]["goal"], "g2")
+        self.hansa("decide", "Free rule", "--why", "x", "--replaces", "d1")
+        self.assertEqual(goals.records(self.desk)[1]["d5"]["goal"], "")
 
     def test_goal_decisions_filter_text_reason_case_and_current_newest_first(self):
         self.hansa("goal", "add", "Export")
@@ -5912,7 +5998,7 @@ class DeskTest(unittest.TestCase):
     def test_goal_retry_keeps_ended_goal_and_shows_latest_round_only(self):
         for action in ("done", "drop"):
             with self.subTest(action=action):
-                gid = self.hansa("goal", "add", "Export").strip()
+                gid = self.hansa("goal", "add", "Export").split()[0]
                 tid = self.hansa("add", "Build the export", "--lane", "a", "--goal", gid).split()[0]
                 self.desk.update(tid, state="done")
                 self.hansa("goal", action, gid, "Plans settled")
@@ -5927,7 +6013,7 @@ class DeskTest(unittest.TestCase):
         d = Dispatcher(self.desk)
         for action in ("done", "drop"):
             with self.subTest(action=action):
-                gid = self.hansa("goal", "add", "Export").strip()
+                gid = self.hansa("goal", "add", "Export").split()[0]
                 tid = self.hansa("add", "Add hello.txt", "--lane", "a", "--goal", gid).split()[0]
                 self.assertEqual(self.settle(d, tid)["state"], "done")
                 self.hansa("goal", action, gid, "Plans settled")
@@ -6027,8 +6113,8 @@ class DeskTest(unittest.TestCase):
             self.assertNotIn(secret, str(e.exception))
             self.assertEqual(goals.entries(self.desk), original)
         self.assertEqual(self.page_save(lambda s: s.update(release_forbidden=["refund"])), {"ok": True, "problems": []})
-        self.assertEqual(self.hansa("goal", "add", "refund"), "g2\n")
-        self.assertEqual(self.hansa("decide", "refund", "--why", "refund"), "d1\n")
+        self.assertEqual(self.hansa("goal", "add", "refund").split()[0], "g2")
+        self.assertEqual(self.hansa("decide", "refund", "--why", "refund").split()[0], "d1")
 
     def test_goal_empty_text_refused_without_entries(self):
         from hansa import goals
@@ -6060,7 +6146,7 @@ class DeskTest(unittest.TestCase):
             for p in processes:
                 p.wait(timeout=60)
         self.assertEqual([p.returncode for p in processes], [0, 0], outputs)
-        self.assertEqual({out for out, err in outputs}, {"d1\n", "d2\n"})
+        self.assertEqual({out.split()[0] for out, err in outputs}, {"d1", "d2"})
         self.assertEqual({d["text"] for d in goals.records(self.desk)[1].values()}, {"Include orders", "Include refunds"})
 
     def test_goal_records_survive_server_restart_and_fresh_commands(self):
@@ -6082,8 +6168,8 @@ class DeskTest(unittest.TestCase):
         self.assertEqual(result.stdout, expected)
         for p, original in files.items():
             self.assertEqual(p.read_bytes(), original)
-        self.assertEqual(self.hansa("goal", "add", "Next"), "g2\n")
-        self.assertEqual(self.hansa("decide", "Next choice", "--why", "Next request"), "d3\n")
+        self.assertEqual(self.hansa("goal", "add", "Next").split()[0], "g2")
+        self.assertEqual(self.hansa("decide", "Next choice", "--why", "Next request").split()[0], "d3")
 
     def test_goal_empty_desk_keeps_existing_commands_and_documents_help(self):
         self.assertEqual(self.hansa("goal", "list"), "\n")

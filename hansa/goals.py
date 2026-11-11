@@ -70,8 +70,9 @@ def end(desk: Desk, gid: str, state: str, outcome: str) -> None:
         _append(desk, event="goal_ended", id=gid, state=state, outcome=outcome)
 
 
-def decide(desk: Desk, text: str, why: str, *, gid: str = "", by: str = "coordinator",
+def decide(desk: Desk, text: str, why: str, *, gid: str | None = None, by: str = "coordinator",
            task: str = "", replaces: str = "") -> str:
+    """gid None: a replacement keeps the goal of the decision it replaces (also an ended one); "" is no goal."""
     with desk.lock():
         _text(desk, text, "the decision")
         _text(desk, why, "the decision's reason")
@@ -86,6 +87,9 @@ def decide(desk: Desk, text: str, why: str, *, gid: str = "", by: str = "coordin
                 raise SystemExit(f"hansa: no decision {desk.redact(replaces)}; nothing was recorded")
             if old.get("replaced_by"):
                 raise SystemExit(f"hansa: {replaces} was already replaced by {old['replaced_by']}; nothing was recorded")
+            if gid is None:
+                gid = old.get("goal") or ""
+        gid = gid or ""
         did = f"d{len(decisions) + 1}"
         _append(desk, event="decision_added", id=did, text=text, why=why, goal=gid, by=by,
                 task=task, replaces=replaces)
@@ -138,7 +142,23 @@ def summary_text(g: dict) -> str:
 
 
 def _when(ts: float) -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(ts))
+    """Local time, in the form hansa status uses."""
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+def added_text(g: dict) -> str:
+    """What goal add recorded; the id stays the first word for scripts."""
+    return f"{g['id']} recorded: {one_line(g['title'])}\n  why: {one_line(g['why']) if g.get('why') else '(none)'}"
+
+
+def decided_text(desk: Desk, d: dict) -> str:
+    """What decide recorded; the id stays the first word for scripts."""
+    goal_ = records(desk)[0].get(d["goal"]) if d.get("goal") else None
+    tied = (f"tied to goal {d['goal']} {one_line(goal_['title'])}"
+            + (f" [{goal_['state']}]" if goal_["state"] != "open" else "") if goal_ else "tied to no goal")
+    return (f"{d['id']} recorded: {one_line(d['text'])}\n  by: {d['by']} · {tied}"
+            + (f" · task: {d['task']}" if d.get("task") else "")
+            + (f" · replaces {d['replaces']}" if d.get("replaces") else ""))
 
 
 def decision_text(d: dict) -> str:
@@ -197,8 +217,16 @@ def task_releases(m: dict, context: dict) -> list:
 def task_evidence(desk: Desk, m: dict, context: dict) -> dict:
     from .run import rounds_of, standing_verification
     check = m.get("check") or {}
-    checked = ("could not run" if check.get("could_not_run") else "passed" if check.get("ok") else
-               "failed" if check else "none")
+    if check:
+        checked = "could not run" if check.get("could_not_run") else "passed" if check.get("ok") else "failed"
+    elif m["state"] in ("queued", "running"):
+        checked = "not run yet"
+    else:
+        if "lanes" not in context:
+            context["lanes"] = desk.settings().get("lanes") or {}
+        lane = context["lanes"].get(m.get("lane")) or {}
+        # "none" says the lane has no check; a lane with one whose check never ran on this task says so.
+        checked = "not run" if lane.get("check") and m.get("kind") != "verify" else "none"
     v = standing_verification(desk, m)
     verdict = ("running" if v and v["state"] in ("queued", "running") else
                (v.get("verdict") or "none") if v else "none")
@@ -227,6 +255,7 @@ def task_evidence(desk: Desk, m: dict, context: dict) -> dict:
     boundary = max((i + 1 for i, r in enumerate(rounds[:-1]) if r["state"] == "merged"), default=0)
     count = 1 if m.get("restored_parent") else len(rounds) - boundary
     return {"id": m["id"], "title": m["title"], "state": m["state"], "lane": m.get("lane"),
+            "closed": bool(m.get("closed")),
             "rounds": count, "check": checked, "verification": verdict,
             "verification_task": v["id"] if v else None, "merge": merge, "merge_commit": m.get("merge_commit"),
             "merge_checked": merge_checked, "despite_check": bool(marks.get("despite_check")),
@@ -258,7 +287,14 @@ def page_list(desk: Desk) -> list:
             for g in summaries(desk, tasks, all_=True, evidence=True, context=context)]
 
 
-def show_text(desk: Desk, gid: str) -> str:
+SHOWN_TASKS = 20
+
+
+def _settled(m: dict) -> bool:
+    return m["state"] in ("merged", "cancelled") or bool(m.get("closed"))
+
+
+def show_text(desk: Desk, gid: str, *, all_: bool = False) -> str:
     g = show(desk, gid)
     decisions = g["decisions"]
     out = [f"{gid} {g['title']} [{g['state']}]", f"created: {_when(g['created'])}",
@@ -270,8 +306,12 @@ def show_text(desk: Desk, gid: str) -> str:
     out += ["replaced decisions:"]
     out += [f"{d['id']} {one_line(d['text'])} · replaced by {d['replaced_by']}"
             for d in decisions if d.get("replaced_by")]
-    out += ["tasks (latest in each retry chain):"]
-    for m in g["chains"]:
+    out += ["tasks (latest in each retry chain, newest first):"]
+    chains = list(reversed(g["chains"]))
+    folded = [] if all_ else [m for m in chains[SHOWN_TASKS:] if _settled(m)]
+    for m in chains:
+        if any(m is f for f in folded):
+            continue
         rounds = m["rounds"]
         out += [f"{m['id']} {m['state']} · {rounds} round{'s' if rounds != 1 else ''} · {one_line(m['title'])}",
                 f"  check: {m['check']}", f"  verification: {m['verification']}"
@@ -279,8 +319,11 @@ def show_text(desk: Desk, gid: str) -> str:
         out += [f"  release #{r['id']}: {r['target']} · {r['state']}" for r in m["releases"]] or ["  releases: none"]
         if m["missing"] is not None:
             out += ["  missing: " + ("; ".join(m["missing"]) or "nothing")]
+    if folded:
+        out += [f"{len(folded)} older merged or closed task{'s' if len(folded) != 1 else ''} not listed "
+                f"(hansa goal show {gid} --all lists them)"]
     out += [f"{v['id']} {v['state']} · 1 round · {one_line(v['title'])} · verification of {v['parent']}"
-            for v in g["verifications"]]
+            for v in reversed(g["verifications"])]
     c = g["cost"]
     out += [f"cost: {c['tokens']:,} tokens · ${c['usd']:.6f} worth"
             + (f" · {c['unpriced_tokens']:,} tokens unpriced" if c["unpriced_tokens"] else ""),
