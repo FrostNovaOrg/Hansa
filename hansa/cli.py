@@ -863,8 +863,10 @@ def cmd_merge(a):
         releasing = release.running_on(desk, repo)  # nor while a release runs there: it sends out what it saw
         if releasing or any(x["state"] == "merging" and x["id"] != a.id and merge_target(s, x.get("lane")) == at
                             for x in desk.tasks()):
-            despite = bool((chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked)
-            m = desk.update(a.id, state="merging", merge_check_result=None, **sess, merge_check={
+            despite = bool((chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
+                           or (m.get("merge_check_result") or {}).get("ok") is False)
+            m = desk.update(a.id, state="merging",
+                            merge_check_result=m.get("merge_check_result") if a.despite_check else None, **sess, merge_check={
                 "phase": "queued", "queued": now(), "moves": 0, "plain": True,
                 **({"despite": True, "despite_check": despite} if a.despite_check else {})})
             ahead = views.merge_check_waits_for(desk, m)
@@ -897,14 +899,22 @@ def cmd_merge(a):
                 git("merge", "--abort", cwd=repo)
             except RuntimeError:
                 pass
-            raise SystemExit(desk.redact(conflict_advice(a.id, base, places, str(e)[:300])))
+            advice = desk.redact(conflict_advice(a.id, base, files, places, str(e)))
+            result = {"ok": False, "direct": True, "onto": tip, "at": now(), "files": files,
+                      "note": f"conflicts with {base} as it is now" if files
+                      else desk.redact(f"merging it into {base} failed ({str(e)[:200]})"),
+                      "conflict" if files else "merge_error": advice}
+            desk.update(a.id, merge_check_result=result)
+            desk.event("merge_failed", ts=result["at"], task=a.id, **result)
+            raise SystemExit(advice)
         note = unverified_note(desk, m)  # before its verification is closed
         said = message_fallback(lane, m["lane"], "merge_message")
         m = desk.update(a.id, state="merged", merged=now(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
                         merge_repo=release.repo_key(repo), merge_base=base,
                         unverified=note or None, merge_message_note=said or None)
         close_verification(desk, m, f"closed: {a.id} was merged")
-    despite = (chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
+    despite = ((chk and not chk["ok"]) or (v and v["verdict"] == "does not hold") or unchecked
+               or (a.despite_check and (m.get("merge_check_result") or {}).get("ok") is False))
     desk.event("task_merged", ts=m["merged"], task=a.id, into=base, **({"despite_check": True} if despite else {}),
                **({"merge_not_checked": True} if unchecked else {}))
     print(f"{a.id} merged into {base} at {repo}" + (f" (without checking it together with what {base} gained "
