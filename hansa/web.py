@@ -222,7 +222,10 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 raise error
             self.close_connection = True  # a POST's body may be unread
             path = urllib.parse.urlparse(self.path).path
-            problem = f"hansa serve could not answer {path}: {type(error).__name__}: {error}"[:500]
+            problem = f"hansa serve could not answer {path}"
+            if self._authed():
+                problem += f": {type(error).__name__}: {error}"
+            problem = problem[:500]
             return self._send(500, {"ok": False, "error": problem, "problems": [problem]})
 
         def do_GET(self):

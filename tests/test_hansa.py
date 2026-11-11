@@ -43132,12 +43132,15 @@ else if (ask === "task-steps")'''))
                 self.assertIn("所示数据时间" if zh else "Data as of", gone["notice"]["text"])
                 self.assertNotIn("重新连接" if zh else "Reconnecting", gone["notice"]["text"])
                 self.assertEqual(gone["notice"]["buttons"], ["重试" if zh else "Retry"])
-                # each press says it in the page's language: nothing went, and how to start the server again
+                # Writes say nothing went, and how to start the server again; To-dos only reads.
                 self.assertEqual(out["released"]["tried"], "/api/release/answer")
                 for said in (out["released"]["header"]["text"], out["saved"]):
                     self.assertIn(not_sent, said)
                     self.assertIn("hansa up", said)
                 self.assertIn("hansa up", out["todos"])
+                self.assertIn(unreached, out["todos"])
+                self.assertNotIn(not_sent, out["todos"])
+                self.assertIn("重试" if zh else "Retry", out["todos"])
                 for said in (out["released"]["header"]["text"], out["saved"], out["todos"], gone["notice"]["text"]):
                     self.assertNotIn("Failed to fetch", said)
                 self.assertNotIn("修正后可重新保存" if zh else "Correct the values", out["saved"])
@@ -43160,6 +43163,27 @@ else if (ask === "task-steps")'''))
                 for words in ("Reconnecting", "重新连接", "No data received", "尚未收到数据"):
                     self.assertNotIn(words, out["notice"]["text"] + out["status"])
                 self.assertEqual(out["after"], out["gets"])  # five minutes and a return to the tab ask nothing more
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_recent_events_task_added_only_names_a_present_lane_in_both_languages(self):
+        self.hansa_out("add", "An unassigned task")
+        self.hansa_out("add", "An assigned task", "--lane", "a")
+        events = self.events("task_added")
+        self.assertFalse(events[0]["lane"])
+        self.assertEqual(events[1]["lane"], "a")
+        events.append({**events[0], "lane": None})
+        for language in ("en", "zh"):
+            [page] = self.page_header("status-picture", self.picture_status(), language, events=events)
+            self.assertEqual(len(page["events"]), len(events))
+            for event, row in zip(events, page["events"]):
+                with self.subTest(language=language, lane=event["lane"]):
+                    self.assertIn("任务已添加" if language == "zh" else "Task added", row["text"])
+                    self.assertEqual(row["links"], [event["task"]])
+                    if event["lane"]:
+                        self.assertIn("工作线 a" if language == "zh" else "on lane a", row["text"])
+                    else:
+                        self.assertNotIn("工作线" if language == "zh" else "lane", row["text"])
+                        self.assertNotIn("—", row["text"])
 
     EVERYDAY_EVENTS = [
         ("task_added", {"task": "t0008", "lane": "a"}, ("lane a", "工作线 a")),
@@ -43226,6 +43250,29 @@ else if (ask === "task-steps")'''))
         self.hansa_out("close", "t0001")
         [e] = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines()) if e["event"] == "task_cancel"]
         self.assertEqual((e["task"], e.get("closed"), e.get("ended")), ("t0001", True, True))
+
+    def test_web_shell_failure_only_discloses_error_details_with_the_bearer_token(self):
+        from hansa import web
+        token = self.desk.web_token()
+        missing = self.tmp / "private-page.html"
+        with unittest.mock.patch.object(web, "UI", missing):
+            for path, auth, allowed in (("/", {}, False),
+                                        ("/", {"Authorization": "Bearer wrong"}, False),
+                                        ("/?t=" + token, {}, False),
+                                        ("/", {"Cookie": "hansa_t=" + token}, False),
+                                        ("/", {"Authorization": "Bearer " + token}, True)):
+                with self.subTest(path=path, auth=auth):
+                    code, body, headers = self.web_request(path, headers=auth)
+                    self.assertEqual(code, 500)
+                    self.assertFalse(body["ok"])
+                    self.assertEqual(body["problems"], [body["error"]])
+                    self.assertEqual(headers["Cache-Control"], "no-store")
+                    self.assertEqual(headers["Connection"], "close")
+                    for detail in (str(missing), "FileNotFoundError", "No such file"):
+                        if allowed:
+                            self.assertIn(detail, body["error"])
+                        else:
+                            self.assertNotIn(detail, json.dumps(body))
 
     def test_an_endpoint_that_fails_on_a_record_answers_an_error_rather_than_dropping_the_connection(self):
         auth = {"Authorization": "Bearer " + self.desk.web_token()}

@@ -364,15 +364,19 @@ laptop woke up), the header no longer says the server runs: it says the page
 cannot reach `hansa serve` and that `hansa up` starts it. Status keeps the last
 data with a notice saying the same, the time of the data, and a Retry button;
 polls back off up to a minute, and the next poll or Retry that gets an answer
-clears the notice. A press in that state (Release, Save settings, a to-do's
-button) says, in the page's language, that the page cannot reach `hansa serve`,
-that nothing was sent, and that `hansa up` starts it again, rather than the
-browser's "Failed to fetch".
+clears the notice. A write in that state (Release, Save settings) says, in the
+page's language, that the page cannot reach `hansa serve`, that nothing was sent,
+and that `hansa up` starts it again, rather than the browser's "Failed to fetch".
+The To-dos tab only reads: it shows the shorter message that the page cannot
+reach `hansa serve` and that `hansa up` starts it again, with Retry.
 A page opened without its token, or with a wrong one, shows only "Forbidden: open
 the address printed by hansa web" in its language and stops polling.
 When fetching `/api/status` fails, both parts show
 an error in place of their previous figures. An events fetch failure appears in
 Recent events and leaves the status picture visible.
+An internal server failure returns HTTP 500; its error details are included only
+when the request carries the bearer token, including a failure to read the public
+page's file at `/`.
 At widths up to 640 px the strip's stages and lane steps take two rows; labels
 wrap between words, the principal box follows below the stages, and tracks fit
 the page without horizontal scrolling.
@@ -527,7 +531,8 @@ carry `task`:
 Other kinds are folded into one line, “N other records”, after the sentences;
 opened, it shows them with their raw event name and `key=value` text, and stays
 open across refreshes. A missing check
-result reads as unknown; a check that could not run says so.
+result reads as unknown; a check that could not run says so. `task_added` says
+“Task added” (or “任务已添加”) when no lane is recorded; with a lane it names it.
 `release_waits` names the lane and target and says the release needs the principal's
 answer again because its target left the releases-without-asking list or no longer
 matches what that list recorded.
