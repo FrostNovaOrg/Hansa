@@ -165,7 +165,7 @@ section.push-addresses { overflow-wrap:anywhere; }
 .page-head h1 { margin:0 0 8px; font-size:28px; line-height:1.3; font-weight:650; letter-spacing:-.7px; }
 .page-head p { margin:0; color:var(--muted); font-size:13px; max-width:68ch; }
 .page-head > .status-pill { margin-top:4px; flex:none; }
-.status-pill { display:inline-flex; align-items:center; gap:6px; width:fit-content; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--muted); font-size:11px; line-height:1.5; }
+.status-pill { display:inline-flex; align-items:center; gap:6px; width:fit-content; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--muted); font-size:11px; line-height:1.5; overflow-wrap:normal; }
 .status-pill.ok { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
 .status-pill.warn { color:var(--warn); background:var(--warn-bg); border-color:transparent; }
 .status-pill.bad { color:var(--bad); background:var(--bad-bg); border-color:transparent; }
@@ -190,6 +190,10 @@ section.push-addresses { overflow-wrap:anywhere; }
 .runtime-actions input { min-width:180px; flex:1; }
 .runtime-actions button { min-height:40px; }
 .dashboard-panel table { font-size:12px; }
+/* Status tables scroll as a unit; long values wrap without taking their neighbours' space. */
+#tab-status table { min-width:680px; }
+#tab-status td { min-width:6em; max-width:28em; }
+#tab-status td button { white-space:nowrap; overflow-wrap:normal; }
 .dashboard-panel th { padding-top:0; }
 .dashboard-panel td { padding-top:12px; padding-bottom:12px; }
 .dashboard-panel .mono { font-size:11px; }
@@ -219,6 +223,10 @@ td .task-detail { min-width:200px; }
 .principal-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:6px 0; }
 .principal-actions > input { flex:1 1 180px; min-width:0; }
 .principal-actions > button { max-width:100%; white-space:normal; }
+.release-card > .principal-actions { flex-direction:column; align-items:flex-start; }
+.release-refusal { display:flex; flex-wrap:nowrap; align-items:center; gap:8px; width:100%; max-width:28em; }
+.release-refusal > input { flex:1; min-width:0; }
+.release-refusal > button { flex:none; white-space:nowrap; }
 .principal-details { margin-top:8px; }
 .principal-details > summary { cursor:pointer; color:var(--link); }
 .principal-details pre { margin:7px 0; }
@@ -280,10 +288,11 @@ td .task-detail { min-width:200px; }
 .work-chart-tooltip { display:none; position:absolute; z-index:2; bottom:60px; left:0; width:max-content; max-width:100%; box-sizing:border-box; padding:8px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; font-size:12px; }
 .work-chart-track:hover .work-chart-tooltip, .work-chart-track:focus .work-chart-tooltip { display:block; }
 @media (max-width:860px) {
-  header { grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:12px 18px; }
-  #tabs { grid-column:1 / -1; grid-row:2; flex-wrap:wrap; }
-  #state { grid-column:1 / -1; grid-row:3; font-size:11px; }
-  #language { grid-column:2; grid-row:1; }
+  header { grid-template-columns:auto minmax(0,1fr) auto; gap:6px 10px; padding:12px 18px; }
+  #title { max-width:160px; }
+  #tabs { grid-column:2; grid-row:1; flex-wrap:nowrap; overscroll-behavior-x:contain; }
+  #state { grid-column:1 / -1; grid-row:2; font-size:11px; }
+  #language { grid-column:3; grid-row:1; }
   main { padding:24px 18px; }
   .settings-layout { grid-template-columns:minmax(0,1fr); gap:20px; }
   .settings-nav { flex-direction:row; overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:thin; scrollbar-color:var(--control-line) transparent; top:calc(var(--header-height) + 6px); z-index:3; box-shadow:var(--shadow); border-radius:10px; }
@@ -298,18 +307,31 @@ td .task-detail { min-width:200px; }
 }
 @media (max-width:640px) { main { padding:16px 12px; } .grid, .facts { grid-template-columns:minmax(0, 1fr); } th, td { padding:7px 6px; } }
 @media (max-width:640px) {
-  header { padding:10px 12px; gap:10px; }
+  header { padding:8px 12px; }
   #title { font-size:14px; } .brand-mark { width:25px; height:25px; }
+  #title .brand-label { display:none; }
   #tabs button { padding:6px 9px; }
   #tabs .icon { display:none; }
-  .settings-head { gap:10px; } .settings-head h1 { font-size:25px; }
-  .settings-head p { font-size:12px; }
+  .settings-head { display:block; position:relative; margin-bottom:8px; }
+  .settings-head .eyebrow { display:none; }
+  .settings-head h1 { font-size:25px; margin-bottom:0; }
+  .settings-head p { display:none; }
+  .settings-head .draft-badge { position:absolute; top:0; right:0; max-width:60%; }
   .draft-badge { padding:5px 8px; font-size:11px; }
-  .settings-group > section { padding:16px; }
-  .settings-group .lane { padding:14px; }
+  .settings-layout { gap:8px; }
+  .settings-group .group-head { gap:8px; margin-bottom:4px; }
+  .settings-group .group-symbol { width:30px; height:30px; }
+  .settings-group .group-head h2 { font-size:17px; }
+  .settings-group .group-head p { font-size:12px; }
+  .settings-group > section { padding:12px; }
+  .settings-group section > h2 { margin-bottom:10px; }
+  .settings-group .lane { padding:12px; }
+  .settings-group .card-head { gap:6px; margin-bottom:6px; }
+  .settings-group .card-actions button { font-size:12px; padding:6px 8px; min-height:32px; }
   .form-fields, .settings-group .facts { grid-template-columns:minmax(0,1fr); }
-  .settings-footer { gap:9px; padding:12px; bottom:8px; }
-  .settings-footer .save-state { flex-basis:100%; }
+  .settings-footer { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px 8px; padding:8px; bottom:8px; }
+  .settings-footer .save-state { grid-column:1 / -1; font-size:11px; }
+  .settings-footer button { min-width:0; min-height:34px; padding:6px; font-size:12px; }
   .page-head { flex-direction:column; gap:12px; margin-bottom:20px; }
   .page-head h1 { font-size:25px; }
   .page-head p { font-size:12px; }
@@ -606,6 +628,7 @@ const T = ZH ? {
   releaseGone:"现在没有哪条工作线有这个发布目标：取消勾选再保存，就从清单上去掉", releaseGoneWas:"当时的命令：", releaseGoneUnknown:"（保存时没记下它当时的命令）",
   releaseNoAbout:cmd => ["还没有说明：协调员可以用 ", cmd, " 加上"], releaseLast:(at, st) => `上次发布：${at}，${st}`, releaseNever:"还没发布过",
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
+  releaseStopSummary:"叫停可能留下部分更新的服务。点开查看详情。",
   releaseStopNote:"发布完成后，叫停会停止仍在运行的监测，发布仍记为完成；监测记录由谁停止及原因，重启服务器也不会再次启动。叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。发布中途停止可能使服务处于部分更新状态：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
   releasesWithoutAsking:"每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、监测命令（--watch）、它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效：手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
   releaseForbidden:"不许发出去的字眼（每行一个词、短语或 re:Python 正则表达式，不分大小写；每项最多 200 字符，正则必须能编译且不能匹配空字符串；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
@@ -763,6 +786,7 @@ const T = ZH ? {
   releaseGone:"no lane has this release target now: untick it and Save to take it off the list", releaseGoneWas:"its command then: ", releaseGoneUnknown:"(its command then was not recorded)",
   releaseNoAbout:cmd => ["No description yet: the coordinator can add one with ", cmd], releaseLast:(at, st) => `Last release: ${at}, ${st}`, releaseNever:"Never released",
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
+  releaseStopSummary:"Stop may leave the server partly updated. Tap for details.",
   releaseStopNote:"After a release is done, Stop ends its running watch, keeping the release done; the watch records who stopped it and why and stays stopped after a server restart. Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
   releasesWithoutAsking:"Each target is ticked on its own. A tick stops counting once the lane's repository or base branch, the target's command or an outside file it names, its watch command (--watch), the target it must follow or the way it runs (fixed) changes: a release asked for by hand then waits for your yes, and one that runs by itself after merges waits until you tick it again.",
   releaseForbidden:"Words, phrases or re:Python patterns no release may send out (one per line, any case; at most 200 characters per entry; patterns must compile and must not match the empty string; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
@@ -1565,7 +1589,10 @@ const statusDrafts = new Map();
 const principalOpen = new Set();
 function keepPrincipalDetails(st) {
   const live = new Set(st.asks.map(a => `ask:${a.id}`));
-  for (const r of st.releases || []) if (r.state === "waiting") live.add(`release:${r.id}`);
+  for (const r of st.releases || []) {
+    live.add(`release-stop:${r.id}`);
+    if (r.state === "waiting") live.add(`release:${r.id}`);
+  }
   const item = key => key.slice(0, key.lastIndexOf(":"));
   for (const fold of document.querySelectorAll("#tab-status details")) {
     const key = fold.getAttribute("data-principal-fold");
@@ -1751,7 +1778,7 @@ function releaseBlock(r) {
   return h("div", {class:"lane release-card", "data-principal-request":true},
     h("div", {class:"request-body"}, h("strong", {}, "#" + r.id), h("span", {}, `${T.lane} ${r.lane}${r.target ? ` · ${T.releaseTarget} ${r.target}` : ""}`)),
     h("div", {class:"principal-actions"}, h("button", {class:"primary", "data-status-focus":`release:${r.id}:yes`, onclick: () => answer(true)}, T.releaseYes),
-      reason, h("button", {"data-status-focus":`release:${r.id}:no`, onclick: () => answer(false)}, T.releaseNo)),
+      h("div", {class:"release-refusal"}, reason, h("button", {"data-status-focus":`release:${r.id}:no`, onclick: () => answer(false)}, T.releaseNo))),
     h("div", {class:"muted"}, T.releaseCommand), h("pre", {class:"mono"}, r.command), releaseWatch(r),
     h("div", {class:"row"}, `${r.base} @ `, h("code", {}, (r.commit || "").slice(0, 10)), h("span", {class:"muted"}, when(r.asked))),
     r.note ? h("div", {}, `${T.releaseNote}: ${r.note}`) : null,
@@ -1790,9 +1817,12 @@ function releaseStop(r) {
   const watchOpen = ["waiting", "starting", "running"].includes(r.watch_run?.state);
   if (watchOpen ? r.watch_run.stop_asked : (!["approved", "starting", "running"].includes(r.state) || r.stop_asked)) return null;
   const reason = statusInput(`stop:${r.id}`, {placeholder:T.releaseStopReason});
-  return h("div", {class:"row", style:"margin-top:4px"}, reason,
-    h("button", {title:T.releaseStopNote, "data-status-focus":`release:${r.id}:stop`, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
-      .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop));
+  const key = `release-stop:${r.id}:note`;
+  return h("div", {}, h("div", {class:"row", style:"margin-top:4px"}, reason,
+    h("button", {"data-status-focus":`release:${r.id}:stop`, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
+      .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop)),
+    h("details", {class:"principal-details", "data-principal-fold":key, open:principalOpen.has(key)},
+      h("summary", {}, T.releaseStopSummary), h("p", {}, T.releaseStopNote)));
 }
 function patternLimitReason(x) {
   if (!ZH) return x.reason;
