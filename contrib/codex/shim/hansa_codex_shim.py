@@ -17,6 +17,7 @@ import errno
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import struct
@@ -33,6 +34,7 @@ PLACEHOLDER = "http://codex.invalid"  # the Codex provider's base URL (a `compat
 CODEX_HOSTS = ("chatgpt.com", "auth.openai.com", "api.openai.com")
 DEFAULT_MODEL = "gpt-6.1-sol"
 DEFAULT_EFFORT = "high"
+EFFORT_VALUES = ("low", "medium", "high", "xhigh", "max")  # the values hansa passes with --effort
 DEFAULT_MAX_TURNS = 300  # hansa always gives --max-turns; its own default
 SETTINGS = ("HANSA_CODEX_BIN", "HANSA_CODEX_HOME", "HANSA_CODEX_MODEL", "HANSA_CODEX_EFFORT", "HANSA_CODEX_LOGS",
             "HANSA_CODEX_SRT", "HANSA_REAL_CLAUDE", "HANSA_CODEX_CA_FILE", "HANSA_CODEX_WEB_SEARCH",
@@ -80,7 +82,7 @@ DROP_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", 
              "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CODEX_HOME", "CODEX_CA_CERTIFICATE", NO_WATCHDOG, PAUSE_AFTER_START,
              STATUS_TIMEOUT_SETTING, *SETTINGS)
 COUNTED_ITEMS = ("command_execution", "file_change")  # what counts against --max-turns
-STOP_GRACE = 3  # seconds between SIGTERM and SIGKILL; hansa waits 5 before its own SIGKILL
+STOP_GRACE = 3  # seconds between SIGTERM and SIGKILL; hansa waits 10 on a stop, 5 on a sweep
 POLL = 0.2  # seconds between looks at Codex's log, while it writes nothing new
 WATCHDOG = "--hansa-codex-watchdog"
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
@@ -120,26 +122,45 @@ INNER = ('hansa_codex_f=$1; hansa_codex_h=$2; hansa_codex_c=$3; shift 3; '
 
 # ---- settings and the call -------------------------------------------------------------------------------
 
-def settings_text() -> str:
-    """codex.env, else OLD_ENV when there is no codex.env; '' when neither can be read."""
+class Settings(dict):
+    """The settings and the file read, kept for startup diagnostics without adding a setting key."""
+
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+
+
+def settings_text() -> tuple:
+    """(file, text): codex.env, else OLD_ENV when there is no codex.env; '' when neither can be read."""
     for f in (CODEX_ENV, OLD_ENV):
         try:
-            return f.read_text(encoding="utf-8")
+            return f, f.read_text(encoding="utf-8")
         except FileNotFoundError:
             continue
         except OSError:
-            break
-    return ""
+            return f, ""
+    return CODEX_ENV, ""
 
 
 def settings(env) -> dict:
-    """The adapter's settings: from the environment, else from codex.env (KEY=VALUE lines) beside bin/. Empty in
-    the environment is unset, except for EMPTY_MEANS_NONE, where empty means none."""
-    out = {}
-    for line in settings_text().splitlines():
-        k, eq, v = line.strip().partition("=")
-        if eq and k.strip() in SETTINGS:
-            out[k.strip()] = os.path.expanduser(v.strip().strip("'\""))
+    """The adapter's settings: from the environment, else from codex.env ([export] KEY=VALUE lines) beside bin/.
+    Empty in the environment is unset, except for EMPTY_MEANS_NONE, where empty means none. Unknown adapter keys
+    and values still holding an example's default note raise ValueError, naming the file."""
+    source, text = settings_text()
+    out = Settings(source)
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        k, eq, v = re.sub(r"^export\s+", "", line).partition("=")
+        k = k.strip()
+        if eq and k.startswith("HANSA_CODEX_") and k not in SETTINGS:
+            raise ValueError(f"{source}: unknown setting {k}; known keys: {', '.join(SETTINGS)}")
+        if eq and k in SETTINGS:
+            v = v.strip().strip("'\"")
+            if re.search(r"\s+\(default:.*\)$", v):
+                raise ValueError(f"{source}: {k} value {v!r} still holds the example's note; remove the note")
+            out[k] = os.path.expanduser(v)
     out.update({k: env[k] for k in SETTINGS if env.get(k) or (k in EMPTY_MEANS_NONE and k in env)})
     return out
 
@@ -596,9 +617,10 @@ def watchdog(shim: int, top: int) -> None:
 
 # Codex 0.162.1's own messages (several with ’, U+2019, where ' is read too), each matched in the whole text
 # A provider limit: hansa rests the provider (until the reset a usage limit gives)
-LIMIT_TEXT = re.compile(r"You[’']ve hit your usage limit|Your workspace is out of credits|You hit your spend cap|"
-                        r"Quota exceeded\. Check your plan and billing details\.|"
-                        r"To use Codex with your ChatGPT plan, upgrade to Plus", re.I)
+CREDIT_TEXT = re.compile(r"Your workspace is out of credits|"
+                         r"To use Codex with your ChatGPT plan, upgrade to Plus", re.I)
+LIMIT_TEXT = re.compile(r"You[’']ve hit your usage limit|You hit your spend cap|"
+                        r"Quota exceeded\. Check your plan and billing details\.", re.I)
 # Overloaded, try later: as Claude's overloaded (529)
 OVERLOADED_TEXT = re.compile(r"Selected model is at capacity|We[’']re currently experiencing high demand", re.I)
 # The provider refused the request: not a dropped connection, though it starts as one does
@@ -670,7 +692,14 @@ def one_line(text: str, n: int = 400) -> str:
     return whole if len(whole) <= n else whole[:n - 1] + "…"
 
 
-def classify(text: str) -> dict:
+def login_failure(said: str, home: str, codex: str) -> dict:
+    """The adapter owns the login remedy; hansa keeps login_hint when resting the provider."""
+    login = (f"CODEX_HOME={shlex.quote(home)} " if home else "") + f"{shlex.quote(codex)} login"
+    hint = f"sign in again with `{login}`"
+    return {"result": f"Not logged in (Codex: {said}); {hint}", "login_hint": hint}
+
+
+def classify(text: str, home: str = "", codex: str = "codex") -> dict:
     """Codex's failure as hansa reads Claude Code's: the fields of an error answer ("result", maybe
     "api_error_status" or "stop_reason"), worded so hansa's unusable_reason and network_reason class it as they
     would Claude's. Classed on the whole text; only what is shown is cut."""
@@ -679,12 +708,14 @@ def classify(text: str) -> dict:
     if REFUSAL_TEXT.search(whole):
         return {"result": f"Codex: the provider refused the request (content_filter): {said}",
                 "stop_reason": "content_filter"}
+    if CREDIT_TEXT.search(whole):
+        return {"result": f"API Error: 402 credit balance too low (Codex: {said})", "api_error_status": 402}
     if LIMIT_TEXT.search(whole) or QUOTA_WORDS.search(whole):
         reset = reset_at(whole)
         return {"result": f"API Error: 429 usage limit reached (Codex: {said})"
                           + (f" · resets_at: {reset}" if reset else ""), "api_error_status": 429}
     if LOGIN_FAILED_TEXT.search(whole):
-        return {"result": f"Not logged in · Please run /login (Codex: the login failed; sign in again: {said})"}
+        return login_failure(said, home, codex)
     if NO_MODEL_TEXT.search(whole):
         return {"result": f"API Error: 404 the model is not available (Codex: {said})", "api_error_status": 404}
     if OVERLOADED_TEXT.search(whole):
@@ -695,7 +726,7 @@ def classify(text: str) -> dict:
         return {"result": f"hansa-codex-shim: Codex refused its configuration (a -c key or --disable feature this "
                           f"codex does not know): {said}"}
     if LOGIN_WORDS.search(whole) and not re.search(r"\b40[13]\b", whole):
-        return {"result": f"Not logged in · Please run /login (Codex: {said})"}
+        return login_failure(said, home, codex)
     if AUTH_WORDS.search(whole):
         status = 403 if re.search(r"\b403\b|forbidden", whole, re.I) else 401
         return {"result": f"API Error: {status} authentication_error (Codex: {said})", "api_error_status": status}
@@ -846,7 +877,10 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
         return emit(answer("error_during_execution", f"hansa-codex-shim: {why}", sid, model=model))
     for what, v in (("HANSA_CODEX_BIN", codex), ("HANSA_CODEX_HOME", home), ("srt (HANSA_CODEX_SRT)", srt)):
         if not v:
-            return failed(f"{what} is not set")
+            return failed(f"{what} is not set (settings file: {conf.source})")
+    if effort not in EFFORT_VALUES:
+        what = "--effort" if a.get("--effort") else "HANSA_CODEX_EFFORT"
+        return failed(f"{what} ({effort}) is not one of {', '.join(EFFORT_VALUES)}")
     web = web_options(conf)
     if isinstance(web, str):
         return failed(web)
@@ -906,18 +940,74 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
                *codex_argv(codex, wt, model, effort, a.get("--append-system-prompt") or "", last, *web,
                           zsh_prefix=zsh_prefix, no_repo=check)]
 
+    # Codex's stdout is the log file itself, never a pipe: a write to a regular file does not fail with EAGAIN,
+    # whoever sets O_NONBLOCK on it (codex's print panics on that when a pipe is full). The shim follows the file.
+    jsonl, err = open(logs / f"{name}.jsonl", "wb"), open(logs / f"{name}.err", "wb")
+    follow = open(logs / f"{name}.jsonl", "rb", buffering=0)
+    seen, said, errors, failure, usage, thread, done, over = set(), "", [], None, None, "", False, False
+    progress = Progress(env.get("CLAUDE_CONFIG_DIR", "") if not check else "", sid)
+    retries, warnings = [], []
+    partial = b""
+
+    def read_events(ended, stopping=False):
+        nonlocal partial, said, failure, usage, thread, done, over
+        if follow.closed:
+            return False
+        chunk = follow.read()
+        lines = (partial + chunk).split(b"\n")
+        partial = lines.pop()  # what follows the last newline: a line not yet complete
+        if ended and partial:
+            lines.append(partial)  # a last line without its newline, parsed if it is complete JSON
+            partial = b""
+        for line in lines:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            t, item = ev.get("type"), ev.get("item") if isinstance(ev.get("item"), dict) else {}
+            if t == "thread.started":
+                thread = str(ev.get("thread_id") or "")
+                (logs / f"{name}.thread").write_text(thread + "\n", encoding="utf-8")
+            elif t in ("item.started", "item.completed") and item.get("type") in COUNTED_ITEMS:
+                seen.add(item.get("id") or f"#{len(seen)}")
+                if len(seen) > max_turns:
+                    over = True
+            elif (t == "item.completed" and item.get("type") == "agent_message"
+                  and isinstance(item.get("text"), str) and item["text"]):
+                said = item["text"]
+            elif t == "item.completed" and item.get("type") == "error" and item.get("message"):
+                warnings.append(str(item["message"]))  # a model warning, not a failure
+            elif t == "turn.completed":
+                done = True
+                if isinstance(ev.get("usage"), dict):
+                    usage = usage_of(ev["usage"])
+            elif t == "turn.failed":
+                failure = str((ev.get("error") or {}).get("message") or ev.get("error") or "")
+            elif t == "error":
+                m = str(ev.get("message") or "")
+                (retries if RETRY.match(m) else errors).append(m)
+            if not stopping:
+                progress.event(len(seen), said)
+                if over:
+                    break
+        return bool(chunk)
+
     def on_signal(sig, _frame):  # hansa's ceiling, or a cancel: srt, codex and their commands go too
+        for s in STOP_SIGNALS:
+            signal.signal(s, signal.SIG_IGN)  # another stop must not restart the three-second grace
         if Run.proc is not None:
             stop_tree(Run.proc.pid, Run.proc, seen=Run.seen)
+        read_events(ended=True, stopping=True)  # include events written just before or during the stop
+        if seen or said or usage:
+            extra = {"codex_thread_id": thread} if thread else {}
+            emit(answer("error_during_execution", said, sid, len(seen), model, usage, **extra))
         shutil.rmtree(mine, ignore_errors=True)
         os._exit(128 + sig)
     for s in STOP_SIGNALS:
         signal.signal(s, on_signal)
 
-    # Codex's stdout is the log file itself, never a pipe: a write to a regular file does not fail with EAGAIN,
-    # whoever sets O_NONBLOCK on it (codex's print panics on that when a pipe is full). The shim follows the file.
-    jsonl, err = open(logs / f"{name}.jsonl", "wb"), open(logs / f"{name}.err", "wb")
-    follow = open(logs / f"{name}.jsonl", "rb", buffering=0)
     # A signal held back until Run.proc is set and the watchdog runs, then handled once: srt is never left behind.
     # The children start with the mask as it was.
     was = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
@@ -946,57 +1036,23 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
     finally:
         unmasked()
     sys.stderr.write(f"hansa-codex-shim: Codex's output is kept in {logs}/{name}.jsonl and .err\n")
-    seen, said, errors, failure, usage, thread, done, over = set(), "", [], None, None, "", False, False
-    progress = Progress(env.get("CLAUDE_CONFIG_DIR", "") if not check else "", sid)
-    retries, warnings = [], []
-    looked, partial, ended = 0.0, b"", False
+    looked, ended = 0.0, False
     # Complete lines as they arrive; a partial last one is kept until its newline does
     while not (ended or over):
         if time.time() - looked > 2:
             looked = time.time()
             Run.seen = descendants(proc.pid, dict(Run.seen))
         ended = proc.poll() is not None  # before the read: what srt's codex wrote is then all in the file
-        chunk = follow.read()
-        if not chunk and not ended:
+        # The handler drains this same reader. Defer it until the offset, partial line and counts agree.
+        was_reading = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+        try:
+            changed = read_events(ended)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, was_reading)
+        if over:
+            stop_tree(proc.pid, proc, seen=Run.seen)
+        if not changed and not ended:
             time.sleep(POLL)
-            continue
-        lines = (partial + chunk).split(b"\n")
-        partial = lines.pop()  # what follows the last newline: a line not yet complete
-        if ended and partial:
-            lines.append(partial)  # a last line without its newline, parsed if it is complete JSON
-        for line in lines:
-            try:
-                ev = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(ev, dict):
-                continue
-            t, item = ev.get("type"), ev.get("item") if isinstance(ev.get("item"), dict) else {}
-            if t == "thread.started":
-                thread = str(ev.get("thread_id") or "")
-                (logs / f"{name}.thread").write_text(thread + "\n", encoding="utf-8")
-            elif t in ("item.started", "item.completed") and item.get("type") in COUNTED_ITEMS:
-                seen.add(item.get("id") or f"#{len(seen)}")
-                if len(seen) > max_turns:
-                    over = True
-            elif (t == "item.completed" and item.get("type") == "agent_message"
-                  and isinstance(item.get("text"), str) and item["text"]):
-                said = item["text"]
-            elif t == "item.completed" and item.get("type") == "error" and item.get("message"):
-                warnings.append(str(item["message"]))  # a warning (Model metadata for `x` not found), not a failure
-            elif t == "turn.completed":
-                done = True
-                if isinstance(ev.get("usage"), dict):
-                    usage = usage_of(ev["usage"])
-            elif t == "turn.failed":
-                failure = str((ev.get("error") or {}).get("message") or ev.get("error") or "")
-            elif t == "error":
-                m = str(ev.get("message") or "")
-                (retries if RETRY.match(m) else errors).append(m)
-            progress.event(len(seen), said)
-            if over:
-                stop_tree(proc.pid, proc, seen=Run.seen)
-                break
     follow.close()
     code = proc.wait()
     stop_tree(proc.pid, None, grace=0, seen=Run.seen)  # what codex left running
@@ -1035,7 +1091,7 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
     if not text and retries:
         text = RETRY.match(retries[-1]).group(1)
     text = text or f"codex ended (exit {code}) without finishing its turn"
-    said = classify(text)
+    classified = classify(text, home, codex)
     if REFRESH_USED_TEXT.search(text):  # another run's refresh at the same instant, or a login that is gone
         try:
             limit = float(env.get(STATUS_TIMEOUT_SETTING) or STATUS_TIMEOUT)
@@ -1044,13 +1100,13 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
         good, how = login_status(codex, home, env, limit)
         sys.stderr.write(f"hansa-codex-shim: the refresh token was already used; codex login status: {how}\n")
         if good:
-            said = {"result": f"API Error: Connection dropped (Codex: another run on the same Codex home refreshed "
+            classified = {"result": f"API Error: Connection dropped (Codex: another run on the same Codex home refreshed "
                               f"the login at the same moment, and `codex login status` says the login is still "
                               f"good; run the task again: {one_line(text)})"}
         else:
-            said["result"] += f" (codex login status: {how})"
-    return emit(answer("error_during_execution", said.pop("result") + warned.replace("\n\n", " · "), sid,
-                       len(seen), model, usage, **said, **extra))
+            classified["result"] += f" (codex login status: {how})"
+    return emit(answer("error_during_execution", classified.pop("result") + warned.replace("\n\n", " · "), sid,
+                       len(seen), model, usage, **classified, **extra))
 
 
 def given_env() -> dict:
@@ -1072,8 +1128,17 @@ def main(argv: list) -> int:
         watchdog(int(argv[1]), int(argv[2]))
         return 0
     env = given_env()
-    conf = settings(env)
     kind = call_kind(argv, env)
+    try:
+        conf = settings(env)
+    except ValueError as e:
+        why = f"hansa-codex-shim: {e}"
+        if kind == "pass":
+            raise SystemExit(why)
+        a = parse(argv)
+        return emit(answer("error_during_execution", why,
+                           a.get("--session-id") or a.get("--resume") or str(uuid.uuid4()),
+                           model=a.get("--model") or env.get("HANSA_CODEX_MODEL") or DEFAULT_MODEL))
     if kind == "pass":
         pass_through(argv, env, conf)
     if kind == "resume":

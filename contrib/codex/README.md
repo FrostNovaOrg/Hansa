@@ -51,7 +51,7 @@ boundary, and some of its write denies are globs (below). On Linux srt drops eve
 | `HANSA_CODEX_BIN` | the codex program | (required) |
 | `HANSA_CODEX_HOME` | its `CODEX_HOME`, holding the adapter's login | (required) |
 | `HANSA_CODEX_MODEL` | `-m` when hansa passes no `--model`; the provider's model, which hansa passes, comes first | `gpt-6.1-sol` |
-| `HANSA_CODEX_EFFORT` | `model_reasoning_effort`; hansa's `--effort` overrides it; either is passed as it is | `high` |
+| `HANSA_CODEX_EFFORT` | `model_reasoning_effort`; hansa's `--effort` overrides it; accepts `low`, `medium`, `high`, `xhigh`, `max` ([startup checks](../../docs/tasks.md#effort)) | `high` |
 | `HANSA_CODEX_LOGS` | where each run's `<session-id>.jsonl`, `.err`, `.thread` and `.srt.json` are kept | `logs/` here |
 | `HANSA_CODEX_SRT` | srt | `srt` on the worker's PATH |
 | `HANSA_REAL_CLAUDE` | the real claude | the first `claude` on PATH that is not the adapter, else `~/.local/bin/claude` |
@@ -99,7 +99,12 @@ The task goes in on stdin, as hansa gives it. Why each part:
 stops codex and answers `error_max_turns`. **The time limit.** srt runs in a session of its own. On SIGTERM, SIGINT
 or SIGHUP (hansa's ceiling, or a cancel) the adapter sends SIGTERM to srt's group and to every process found below
 srt by parent (so commands codex put in groups of their own go too), and SIGKILL three seconds later, within
-hansa's five-second grace. If the adapter is killed outright, a watchdog in a session of its own does the same.
+hansa's ten-second stop grace and five-second sweep grace. The adapter then drains Codex's events and writes a
+JSON answer on stdout with the last message, turns and latest `turn.completed` usage, keeping exit 128 + signal.
+hansa reads that answer from
+`run.json` in `finish`: `show` keeps the message and turns, and `cost` counts the tokens. The task still fails at
+the time ceiling, or stays cancelled on request. Before any message, counted item or usage, there is no answer.
+If the adapter is killed outright, a watchdog in a session of its own does the same cleanup.
 A run killed by a signal the adapter did not send (the out-of-memory killer, say) gets no answer and exits
 128 + n, as a killed claude does, so hansa runs it again.
 
@@ -138,12 +143,13 @@ What it cannot close:
 - **Codex and the commands it runs share one sandbox**, so a run's own commands can read the Codex login and
   write the rest of the home: Codex refreshes its token into `auth.json` during a run. Claude workers cannot read
   it (setup, step 3).
-- A task stopped at a ceiling has only Codex's last message.
+- A task stopped at a ceiling or cancelled has only Codex's last message as its report.
 - **None of hansa's tool rules** (`--allowedTools`, `--disallowedTools`, Read denials) and no browser
   (`--mcp-config` is ignored): srt's file and network rules are the boundary. `permission_denials` is always empty.
 - **hansa shows these runs' cost as 0 because it has no price for them**, until the principal adds the model to the
   price table. The tokens are still counted, from `turn.completed`, and the provider's own charges are not known to
-  hansa. A failed run's usage is unknown and shown as zero.
+  hansa. At a requested stop the latest usage is kept; tokens not yet reported in `turn.completed` are unknown
+  and cannot be counted. With no usage event, usage is shown as zero.
 - The watchdog looks every half second; a process that leaves and loses its parent between two looks can escape.
   Codex's unlimited reconnect is kept: it waits for the network in place, and hansa's time ceiling still holds.
 
@@ -154,17 +160,20 @@ codex's stderr, and classed on the whole text, so that hansa's own readings take
 
 | Codex says | hansa reads | hansa does |
 |---|---|---|
-| a usage limit, out of credits, spend cap, quota, 429 | quota, with Codex's reset time | requeues; the provider rests until the reset |
+| a usage limit, spend cap, quota, 429 | quota, with Codex's reset time when given | requeues; the provider rests until the reset, or for its configured rest when no time is given |
+| workspace out of credits, or the plan requires an upgrade to use Codex | credit | requeues without using a try; the provider rests until the principal confirms a top-up on the page or saves a key |
 | model at capacity, high demand | overloaded (529) | tries once more |
 | `content_filter` | refused | the lane's next provider |
 | a dropped stream, idle timeout | connection dropped | tries once more on the same provider |
 | refused, reset or timed-out connection; `workspace routing discovery failed`; a 5xx | connection error, server error | tries once more |
-| a token that cannot be refreshed, 401, not logged in | login | rests the provider until someone signs in |
+| a token that cannot be refreshed, 401, not logged in | login | rests the provider for 24 hours; follow the adapter's `codex login` command, then `hansa ping NAME` |
 | 403 | key | rests the provider |
 | 404 (no such model), a refused configuration, anything else | neither | the task fails, saying why |
 
 Codex's reset time (`try again at 3:05 PM`, or with a date) is read by the adapter and passed on as `resets_at`,
 which hansa reads. A model warning is said in the result and `codex_warnings`; it never fails a run alone.
+The shim supplies the login remedy in `login_hint`, using its configured Codex home and executable, both shell quoted; hansa
+keeps that hint in the rest reason and adds `hansa ping NAME`. The placeholder key cannot renew a Codex login.
 
 ## The provider check
 
