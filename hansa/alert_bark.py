@@ -141,7 +141,8 @@ class Bark:
                     or not re.fullmatch(r"[A-Za-z0-9_-]+", key)):
                 raise ValueError
         except (ValueError, IndexError, UnicodeError):
-            raise ValueError("Bark needs an HTTPS server address followed by its device key") from None
+            from .alert_phone import AddressProblem
+            raise AddressProblem("Bark needs an HTTPS server address followed by its device key") from None
         return "https://" + parsed.netloc.lower() + "/" + key
 
     def secrets(self, address):
