@@ -1578,6 +1578,12 @@ def cmd_changelog(a):
 
 def cmd_release(a):
     desk = Desk.find(a.desk)
+    if a.fixed is not None:
+        # --fixed is a target's option, not a request's: say where it goes, with the words given.
+        target = a.note[0] if a.note and NAME.match(a.note[0]) else "NAME"
+        raise SystemExit(f"hansa: --fixed is set on the target, not on the release: hansa lane target "
+                         f"{a.lane or 'L'} {target} '<command>'"
+                         + (" --fixed none" if a.fixed == "none" else " --fixed"))
     if a.show is not None:
         if a.lane or a.note or a.direct is not None:
             raise SystemExit("hansa: --show takes only a release's number. Nothing was changed")
@@ -1598,15 +1604,21 @@ def cmd_release(a):
     if os.environ.get("HANSA_TASK"):  # a worker or verification: releases are the coordinator's
         raise SystemExit("hansa: only the coordinator asks for a release; a worker or verification "
                          "cannot. Say in your report that it may be ready to go out")
-    if answer_name(a.lane) and a.note and a.note[0].lstrip("#").isdigit():  # always an answer, never a request
+    if answer_name(a.lane):
         taken = [n for n in desk.settings()["lanes"] if answer_name(n)]
-        if taken:
-            raise SystemExit(f"hansa: hansa release {a.lane} ID CODE is the principal's answer, but this desk has a "
-                             f"lane named {', '.join(taken)}: that lane must be removed first (hansa lane remove), "
-                             "then pass the code again. Nothing was recorded")
-        a.lane = a.lane.strip().lower()
-        _answer_by_code(desk, a)
-        return
+        if a.note and a.note[0].lstrip("#").isdigit():  # always an answer, never a request
+            if taken:
+                raise SystemExit(f"hansa: hansa release {a.lane} ID CODE is the principal's answer, but this desk has "
+                                 f"a lane named {', '.join(taken)}: that lane must be removed first (hansa lane "
+                                 "remove), then pass the code again. Nothing was recorded")
+            a.lane = a.lane.strip().lower()
+            _answer_by_code(desk, a)
+            return
+        if not taken:  # no lane has that name: the word was meant as the start of an answer
+            word = a.lane.strip().lower()
+            raise SystemExit(f"hansa: the id after {word} is the release's number: hansa release {word} ID CODE, "
+                             "with the code the principal said. Nothing was checked or counted. "
+                             + see_more("release-flow"))
     note, target = list(a.note), None
     targets = lane_targets(desk.settings()["lanes"].get(a.lane))
     # On a one-target lane, a mistyped target must not become a note and release the only target.
@@ -3827,6 +3839,8 @@ def main(argv=None):
     p.add_argument("--direct", metavar="WHY", help="record why direct base commits go out; required when the "
                    "principal's release_direct setting is hold, then waits for their yes even for a ticked target; "
                    "refused when there are no direct commits")
+    # --fixed belongs to a target, not to a request: taken here only to say so, in cmd_release.
+    p.add_argument("--fixed", nargs="?", const="yes", metavar="none", help=argparse.SUPPRESS)
     p.add_argument("lane", nargs="?")
     p.add_argument("note", nargs="*")
     p = add("notify", cmd_notify, "list the sessions hansa posts to; on / off: start or stop posting to the Claude "

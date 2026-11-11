@@ -19,7 +19,8 @@ hansa serve runs an approved
 release in the lane's repository, as the desk's account, outside the sandbox, with hansa's own environment (not
 the lane's env) and the target's time limit (else the lane's timeout_min), and only while the base branch and the
 command line are still what the principal saw, and the target it must follow sent out that commit: otherwise the
-request is void, says why, and the coordinator asks again. Its output is kept,
+request is void, says why, and says how to ask again (setting the lane or target again first when it was
+removed). Its output is kept,
 keys removed, in .hansa/releases/<id>.log. One release runs at a time per repository. A release runs in the
 lane's repository and holds it for as long as it runs: none starts while a merge check runs there, nor a merge
 while it runs. A target set --fixed (`hansa lane target L NAME --fixed`) runs instead in a detached checkout of
@@ -1230,6 +1231,23 @@ def code_live(r: dict) -> bool:
             and time.time() - (c.get("made") or 0) < CODE_LIFE and (c.get("wrong") or 0) < CODE_TRIES)
 
 
+def _after_void(s: dict, r: dict) -> str:
+    """After a release went void as its code was answered: 'ask again' when a new request can be asked as it is;
+    otherwise the lane or target it needs must be set again first, and this says how."""
+    ln = s["lanes"].get(r.get("lane"))
+    if not ln:
+        repo = r.get("repo")
+        return (f"lane {r.get('lane')} must be added again first: hansa lane add {r.get('lane')} --repo "
+                f"{shlex.quote(str(repo)) if repo else '<path>'}")
+    target = r.get("target") or ""
+    if target and lane_targets(ln).get(target) is None:
+        command = r.get("command")
+        return (f"the target must be set again first: hansa lane target {r.get('lane')} {target} "
+                f"{shlex.quote(command) if command else '<command>'}"
+                + (" --fixed" if r.get("fixed") else ""))
+    return "ask again"
+
+
 def answer_by_code(desk: Desk, rid, yes: bool, code: str, reason: str = "", by: str = "coordinator") -> dict:
     """The principal's answer given in the conversation with the one-time code of their alert, passed on by the
     coordinator: checked against this release's code only. A right code answers it (recorded as given through the
@@ -1265,7 +1283,7 @@ def answer_by_code(desk: Desk, rid, yes: bool, code: str, reason: str = "", by: 
         if why:  # no longer what the principal was alerted of
             void(desk, rid, why, ("waiting",), why_zh)
             return {"ok": False, "void": why, "problems": [f"release #{rid} is void: {why}; its code has lapsed. "
-                                                           "Nothing was run; ask again"]}
+                                                           f"Nothing was run; {_after_void(s, r)}"]}
         if not hmac.compare_digest(c["hash"], _code_hash(desk, rid, plain_code(code))):
             wrong = (c.get("wrong") or 0) + 1
             gone = wrong >= CODE_TRIES
