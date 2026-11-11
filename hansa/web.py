@@ -5,6 +5,8 @@ It only reads and writes the desk's files and never calls a model. It listens on
 The page keeps the address's token in sessionStorage for its origin and tab,
 and sends it explicitly in Authorization. Changes also need X-Hansa: 1.
 The HTML shell is public; every API request requires the bearer token.
+A request from outside this machine (from_outside: a proxy's) changes settings and keys only while the
+principal's switch, settings_from_outside, is on.
 """
 from __future__ import annotations
 
@@ -89,6 +91,29 @@ def _events(desk: Desk, n: int = 60, kind: str = "") -> list:
             if len(out) >= n:
                 break
     return out
+
+
+# A Host the browser sends for this machine's own address, the SSH tunnel's: any port, any letter case
+LOOPBACK_HOST = re.compile(r"(127\.0\.0\.1|localhost|\[::1\])(:[0-9]{1,5})?", re.IGNORECASE)
+# Headers a proxy adds; and every X-Forwarded-* header
+PROXY_HEADERS = ("forwarded", "x-real-ip", "via")
+SETTINGS_LOCAL_ONLY = ("settings and keys change only from this machine's own address (127.0.0.1 or localhost, "
+                       "through the SSH tunnel), and this request came from outside it (through a proxy, say); "
+                       "to allow it, turn on \"Allow changing settings from outside this machine\" in Settings, "
+                       "Lanes, General, on the page opened at this machine's own address")
+
+
+def from_outside(headers) -> bool:
+    """Whether a request to the page came from outside this machine: it is local only with one Host, a loopback
+    name, and none of the headers a proxy adds. Whatever cannot be read is from outside."""
+    try:
+        names = [str(k).lower() for k in headers.keys()]
+        hosts = [v for k, v in headers.items() if str(k).lower() == "host"]
+        if any(n in PROXY_HEADERS or n.startswith("x-forwarded-") for n in names):
+            return True
+        return not (len(hosts) == 1 and isinstance(hosts[0], str) and LOOPBACK_HOST.fullmatch(hosts[0].strip()))
+    except Exception:
+        return True
 
 
 # The coordinator sets these (hansa lane, hansa concurrency, hansa disk-floor, hansa memory-floor).
@@ -182,6 +207,10 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
         def _authed(self) -> bool:
             return hmac.compare_digest(self.headers.get("Authorization", "").encode(),
                                        ("Bearer " + token).encode())
+
+        def _settings_refused(self) -> bool:
+            """A change of settings or keys from outside this machine, while the principal's switch is off."""
+            return from_outside(self.headers) and desk.settings().get("settings_from_outside") is not True
 
         def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", *, conditional=False):
             self.answering = True
@@ -296,7 +325,9 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     **{k: q.get(k, [""])[0] for k in ("state", "lane", "words")}))
             if url.path == "/api/settings":
                 # with the free space of the desk's volume, shown beside the floor (hansa/disk.py)
-                return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0]})
+                # and whether this request came from outside this machine, where the page cannot save them
+                return self._send(200, {**public_settings(desk), "disk_free": disk.desk_free(desk)[0],
+                                        "from_outside": from_outside(self.headers)})
             if url.path == "/api/cost/calendar":
                 return self._send(200, cost.calendar(desk))
             if url.path == "/api/cost":
@@ -340,6 +371,9 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if not isinstance(body, dict):
                     return self._bad_request("invalid_type", "body", "body must be a JSON object")
                 path = urllib.parse.urlparse(self.path).path
+                if path in ("/api/settings", "/api/key") and self._settings_refused():
+                    return self._send(200, {"ok": False, "code": "settings_local_only", "problems": [SETTINGS_LOCAL_ONLY],
+                                            "problem_details": [{"code": "settings_local_only", "values": {}}]})
                 if path == "/api/settings":
                     return self._send(200, _save_settings(desk, body))
                 if path == "/api/key":

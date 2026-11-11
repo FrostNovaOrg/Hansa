@@ -89,7 +89,8 @@ PROJECT_INTRO = ("<!-- This project's own rules for the coordinator: how it buil
 PROJECT_LONG = 8 * 1024
 # Settings only the principal saves, on the page: no command of the coordinator's changes them
 PRINCIPAL_ONLY = ("releases_without_asking", "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow",
-                  "release_direct", "alert", "alert_language", "alert_push", "coordinator_compact", "coordinator_alert", "desk_name")
+                  "release_direct", "alert", "alert_language", "alert_push", "coordinator_compact", "coordinator_alert", "desk_name",
+                  "settings_from_outside")
 # The entries of workers_may_not_read the coordinator added (hansa hide), each with who and when: {entry: {by, at}}.
 # An entry without one is the principal's, saved on the page. The coordinator only adds; the principal removes
 HIDDEN_BY = "workers_may_not_read_added"
@@ -264,6 +265,10 @@ def default_settings() -> dict:
     return {
         "version": 1,
         "desk_name": "",  # the principal's display name, on the page; blank uses the last two folders
+        # Whether a request to the page from outside this machine (a Host that is no loopback name, or a proxy's
+        # headers: web.from_outside) may save settings and keys. The principal's, on the page; off: only this
+        # machine's own address (the SSH tunnel) changes them
+        "settings_from_outside": False,
         "concurrency": 1,
         # GB of free space under which hansa serve starts nothing new (hansa/disk.py); 0: off. The coordinator's
         # (hansa disk-floor), as concurrency is
@@ -668,7 +673,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     known = {"version", "concurrency", "disk_floor", "memory_floor", "cool_minutes", "coordinator", "providers", "lanes", "prices",
              "workers_may_not_read", HIDDEN_BY, "releases_without_asking",
              "release_forbidden", "release_forbidden_except", "release_mailboxes", "release_mailbox_allow", "release_direct", "alert", "coordinator_compact",
-             "coordinator_alert", "alert_language", "alert_push", "bench", "desk_name"}
+             "coordinator_alert", "alert_language", "alert_push", "bench", "desk_name", "settings_from_outside"}
     p += [f"unknown setting: {k}" for k in s if k not in known]
     name_problem = desk_name_problem(s.get("desk_name", ""))
     if name_problem:
@@ -703,6 +708,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
         p.append(rule("release_direct must be record or hold", "release_direct", "direct"))
     if not isinstance(s.get("release_mailboxes", False), bool):
         p.append(rule(f"{mailbox_key} must be true or false", "release_mailboxes", "boolean"))
+    if not isinstance(s.get("settings_from_outside", False), bool):
+        p.append(rule("settings_from_outside must be true or false", "settings_from_outside", "boolean"))
     mailbox_allow = s.get("release_mailbox_allow", [])
     if not isinstance(mailbox_allow, list) or len(mailbox_allow) > MAX_MAILBOX_ALLOW:
         p.append(SettingsProblem(f"release_mailbox_allow must be a list of at most {MAX_MAILBOX_ALLOW} entries, one per line",
@@ -2850,6 +2857,7 @@ class Desk:
                 new.setdefault("alert_language", old["alert_language"])
                 new.setdefault("alert_push", old["alert_push"])
                 new.setdefault("desk_name", old["desk_name"])
+                new.setdefault("settings_from_outside", old["settings_from_outside"])
                 if by == "page":
                     new["bench"] = old["bench"]
                 mailbox_key = mailbox_settings(new)
