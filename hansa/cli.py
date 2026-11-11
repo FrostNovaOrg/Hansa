@@ -2031,6 +2031,10 @@ def cmd_coordinator(a):
         plan = json.loads(r.stdout)
     else:
         plan = coordinator_desk(desk, account.uid(), talk)
+    said = plan.get("card_said") if isinstance(plan.get("card_said"), list) else []
+    for line in said:  # once: the copy is removed, or left for hansa status to name while it is there
+        if isinstance(line, str) and line.isprintable():  # the account's to write when root starts it
+            print(line, file=sys.stderr)  # each starts with hansa's name
     from .run import PROVIDER_VARS, claude_bin, no_read_rules
     # the plan may be the account's to write, and it goes on root's command line and into root's environment
     model, effort = plan.get("model"), plan.get("effort") or ""
@@ -2253,7 +2257,7 @@ def coordinator_desk(desk: Desk, by: int, talk: bool = True) -> dict:
     s = desk.settings()
     co = s["coordinator"]
     p = s["providers"][co["provider"]]
-    bring_card(desk, starting=True)
+    card_said = bring_card(desk, starting=True)
     for f in sorted(HELPERS.glob("*.md")):
         _bring(desk, f.read_text(encoding="utf-8"), desk.root / ".claude" / "agents" / f.name, "helper_refreshed")
     mine = desk.root / ".claude" / "settings.json"  # hansa keeps its rules current there; the rest is left as it is
@@ -2277,7 +2281,8 @@ def coordinator_desk(desk: Desk, by: int, talk: bool = True) -> dict:
             "effort": co.get("effort") or "", "env": provider_env(desk, co["provider"], p, run=False),
             "no_read": kept, "no_read_refused": unkept,
             "compact": {"working_at": compact_settings(s)["working_at"]}, "started": started,
-            "language": s.get("alert_language")}  # the status line's, until hansa serve's summary gives it
+            "language": s.get("alert_language"),  # the status line's, until hansa serve's summary gives it
+            "card_said": card_said}  # what became of the copy of the card hansa notify on wrote (up.refresh_copy)
 
 
 def _record_roots_mod(theirs: str, desk: Desk, rec: dict) -> str:
@@ -2315,11 +2320,11 @@ def cmd_coordinator_desk(a):
         print(json.dumps({"mod_unrecorded": f"{type(e).__name__}: {e}"}))
 
 
-def bring_card(desk: Desk, starting: bool = False) -> None:
+def bring_card(desk: Desk, starting: bool = False) -> list:
     """The desk's card brought up to hansa's, and the copy hansa notify on wrote for a session outside the desk
-    with it (up.refresh_copy; starting: hansa coordinator's start)."""
+    with it (up.refresh_copy; starting: hansa coordinator's start). What the start says of that copy: lines."""
     _bring(desk, CARD.read_text(encoding="utf-8"), desk.root / "CLAUDE.md", "card_refreshed")
-    up.refresh_copy(desk, starting=starting)
+    return up.refresh_copy(desk, starting=starting)
 
 
 def _bring(desk: Desk, new: str, dst: Path, event: str, keep_as: str = "") -> None:

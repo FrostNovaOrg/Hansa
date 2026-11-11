@@ -3857,11 +3857,13 @@ class CoordinatorUpTest(unittest.TestCase):
         self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")  # every notify on writes it again
         self.assertEqual(copy.read_text(), mine)
         self.assertNotIn("an older card", mine)
-        copy.write_text(mine.split("\n\n", 1)[0] + "\n\nan older copy\n")
-        cli.coordinator_desk(desk, os.getuid())  # hansa coordinator's start refreshes the card, and so the copy
-        self.assertEqual((desk.root / "CLAUDE.md").read_text(), cli.CARD.read_text())
-        self.assertEqual(copy.read_text(), mine)
         self.assertIn("## Never", copy.read_text())
+        # hansa coordinator's start refreshes the card; the copy, as hansa wrote it, it removes (see
+        # test_hansa_coordinator_removes_the_copy_it_no_longer_keeps_up_to_date)
+        plan = cli.coordinator_desk(desk, os.getuid())
+        self.assertEqual((desk.root / "CLAUDE.md").read_text(), cli.CARD.read_text())
+        self.assertFalse(copy.exists())
+        self.assertIn(str(copy), " ".join(plan["card_said"]))
         # a copy in a folder that holds the desk would reach the session hansa coordinator starts there: removed
         inner = self.tmp / "inner"
         inner.mkdir()
@@ -3870,6 +3872,56 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertTrue(self.copy_of(inner).is_file())
         cli.coordinator_desk(desk, os.getuid())
         self.assertFalse(self.copy_of(inner).exists())
+
+    def coordinator_start_said(self, desk):
+        """What hansa coordinator says before it would start Claude Code (no claude in this test)."""
+        err = io.StringIO()
+        with unittest.mock.patch("hansa.run.claude_bin", side_effect=RuntimeError("no claude in this test")), \
+                contextlib.redirect_stderr(err), self.assertRaisesRegex(SystemExit, "no claude in this test"):
+            main(["--desk", str(desk.root), "coordinator"])
+        return err.getvalue()
+
+    def test_hansa_coordinator_removes_the_copy_it_no_longer_keeps_up_to_date(self):
+        """A session recorded with notify on beside the desk, then started by hansa coordinator: its copy goes."""
+        project = self.tmp / "project"
+        project.mkdir()
+        self.desk = desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        copy = self.copy_of(project)
+        (copy.parent / "mine.md").write_text("my own rules\n")  # nothing else in that folder is hansa's
+        said = self.coordinator_start_said(desk)
+        self.assertFalse(copy.exists())
+        self.assertEqual((copy.parent / "mine.md").read_text(), "my own rules\n")
+        [line] = [x for x in said.splitlines() if str(copy) in x]
+        self.assertIn("removed its copy of the card", line)
+        # once: the next start has nothing to say of it
+        self.assertNotIn("copy of the card", self.coordinator_start_said(desk))
+        self.assertNotIn("copy of the card", self.status_line())
+
+    def test_hansa_coordinator_leaves_an_edited_copy_and_status_names_it(self):
+        project = self.tmp / "project"
+        project.mkdir()
+        self.desk = desk = cli.init_desk(self.tmp / "desk", "", "a", "")
+        self.notify_on(["claude"], str(project), HANSA_ROLE="coordinator")
+        copy = self.copy_of(project)
+        edited = copy.read_text() + "my own note\n"
+        copy.write_text(edited)
+        said = self.coordinator_start_said(desk)
+        self.assertEqual(copy.read_text(), edited)  # neither removed nor overwritten
+        [line] = [x for x in said.splitlines() if str(copy) in x]
+        self.assertIn("no longer kept up to date", line)
+        self.assertIn("edited", line)
+        # the session hansa coordinator started is recorded; hansa status goes on naming the copy while it is there
+        write_json(desk.state_dir / "coordinator-start.json",
+                   {"kind": "coordinator", "words": [], "folder": str(desk.root), "session": self.SESS})
+        for _ in range(2):
+            self.assertIn(str(copy), self.status_line())
+            self.assertIn("no longer kept up to date", self.status_line())
+        self.serve_until_web(desk)
+        cli.coordinator_desk(desk, os.getuid())
+        self.assertEqual(copy.read_text(), edited)
+        copy.unlink()
+        self.assertNotIn("no longer kept up to date", self.status_line())
 
     def serve_until_web(self, desk):
         """hansa serve's start up to its web server, which this test does not start; its lock let go after."""
