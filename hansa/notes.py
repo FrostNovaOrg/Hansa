@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import fcntl
 import hashlib
 import os
 import re
+import shlex
 import stat
 import time
 import uuid
@@ -72,22 +74,48 @@ def _page_file(desk: Desk, folder: int, name: str) -> dict:
             "headings": [(i, level, desk.redact(title)) for i, level, title in heads]}
 
 
-def page_list(desk: Desk, archived: bool = False) -> list:
-    """The page's shallow, read-only view of notes, using the CLI's heading parser."""
-    out = []
-    for archive in (False, True) if archived else (False,):
+def _page_walk(desk: Desk, archived: bool, folder: int | None = None, prefix: str = "", depth: int = 0):
+    """(opened folder, file name, path under notes/) of each note the page may read, in subfolders too: folders
+    are opened without following a link, and a link, a dot name or notes/archive/ (unless ARCHIVED) is passed over
+    without opening it."""
+    if folder is None:
+        with _page_folder(desk) as top:
+            yield from _page_walk(desk, archived, top)
+        return
+    for name in sorted(n for n in os.listdir(folder) if not n.startswith(".")):
+        path = prefix + name
         try:
-            with _page_folder(desk, archive) as folder:
-                for name in sorted(n for n in os.listdir(folder) if not n.startswith(".")):
-                    try:
-                        item = _page_file(desk, folder, name)
-                    except (OSError, ValueError):
-                        continue
-                    item.pop("text")
-                    path = (ARCHIVE + "/" if archive else "") + name
-                    out.append({"name": desk.redact(path), "id": _page_id(path), **item})
+            entry = os.stat(name, dir_fd=folder, follow_symlinks=False)
         except OSError:
             continue
+        if stat.S_ISDIR(entry.st_mode):
+            if (path == ARCHIVE and not archived) or depth >= 32:
+                continue
+            try:
+                sub = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
+            except OSError:
+                continue
+            try:
+                yield from _page_walk(desk, archived, sub, path + "/", depth + 1)
+            finally:
+                os.close(sub)
+        elif stat.S_ISREG(entry.st_mode):
+            yield folder, name, path
+
+
+def page_list(desk: Desk, archived: bool = False) -> list:
+    """The page's read-only view of notes, subfolders included, using the CLI's heading parser."""
+    out = []
+    try:
+        for folder, name, path in _page_walk(desk, archived):
+            try:
+                item = _page_file(desk, folder, name)
+            except (OSError, ValueError):
+                continue
+            item.pop("text")
+            out.append({"name": desk.redact(path), "id": _page_id(path), **item})
+    except OSError:
+        pass
     return sorted(out, key=lambda item: (-item["modified"], item["name"]))
 
 
@@ -97,15 +125,12 @@ def _page_id(name: str) -> str:
 
 def page_note(desk: Desk, name: str, identity: str = "") -> dict:
     if identity:
-        for archive in (False, True):
-            try:
-                with _page_folder(desk, archive) as folder:
-                    for filename in os.listdir(folder):
-                        path = (ARCHIVE + "/" if archive else "") + filename
-                        if _page_id(path) == identity:
-                            return _page_file(desk, folder, filename)
-            except OSError:
-                continue
+        try:
+            for folder, filename, path in _page_walk(desk, True):
+                if _page_id(path) == identity:
+                    return _page_file(desk, folder, filename)
+        except OSError:
+            pass
         raise ValueError("no such note")
     parts = name.split("/")
     if (len(parts) not in (1, 2) or len(parts) == 2 and parts[0] != ARCHIVE
@@ -177,7 +202,7 @@ def _file_text(desk: Desk, p: Path, with_headings: bool) -> str:
     lines = _lines(p)
     out = f"{_rel(desk, p)}  {_size(p.stat().st_size)}, {len(lines)} lines"
     if not with_headings:
-        return out + f" (headings not listed; hansa notes {_rel(desk, p)[6:]} lists them)"
+        return out + f" (headings not listed; hansa notes {shlex.quote(_rel(desk, p)[6:])} lists them)"
     return "\n".join([out] + [f"  {i + 1:>5} {'#' * lvl} {text}" for i, lvl, text in headings(lines)])
 
 
@@ -205,16 +230,30 @@ def list_text(desk: Desk, name: str = "") -> str:
     return "\n".join(out) if out else f"{_rel(desk, top) if name else 'notes/'} holds no files"
 
 
-def _match(heads: list, want: str) -> list:
-    """The headings WANT names: their text, whole or the start of it; WANT starting with #s ("## Round 1") names
-    only headings of that level."""
+def _match(heads: list, want: str) -> tuple:
+    """(the headings whose text is WANT whole, those whose text only starts with it); WANT starting with #s
+    ("## Round 1") names only headings of that level. Only a whole match is ever moved: run twice, a start would
+    take the next heading that starts so ("Round 10" after "Round 1")."""
     want = want.strip()
     level = len(want) - len(want.lstrip("#"))
     want = want.lstrip("#").strip()
     if level:
         heads = [h for h in heads if h[1] == level]
     whole = [h for h in heads if h[2] == want]
-    return whole or [h for h in heads if want and h[2].startswith(want)]
+    return whole, [h for h in heads if want and h[2] != want and h[2].startswith(want)]
+
+
+@contextlib.contextmanager
+def _notes_lock(desk: Desk):
+    """One hansa notes archive at a time on a desk: a second one waits until the first has written both files, so
+    no section is read by both and none is lost or doubled."""
+    desk.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(desk.state_dir / "notes.lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _write(p: Path, data: bytes, mode: int | None) -> None:
@@ -235,7 +274,12 @@ def _write(p: Path, data: bytes, mode: int | None) -> None:
 def archive(desk: Desk, name: str, heading: str, to: str = "") -> str:
     """Move the section of notes/NAME that starts at the heading matching HEADING, up to the next heading of the
     same or a higher level, onto the end of notes/TO (default notes/archive/NAME). Refuses, changing nothing, when
-    HEADING matches no heading or several."""
+    HEADING matches no heading whole, or several."""
+    with _notes_lock(desk):
+        return _archive(desk, name, heading, to)
+
+
+def _archive(desk: Desk, name: str, heading: str, to: str) -> str:
     src = inside(desk, name)
     if not src.is_file():
         raise SystemExit(f"hansa: there is no file {_rel(desk, src)}" + ("" if src.exists() else
@@ -252,14 +296,19 @@ def archive(desk: Desk, name: str, heading: str, to: str = "") -> str:
                          f"nothing was changed")
     lines = _lines(src, strict=True)
     heads = headings(lines)
-    found = _match(heads, heading)
+    found, starts = _match(heads, heading)
     listed = lambda hs: "\n".join(f"  {i + 1:>5} {'#' * lvl} {t}" for i, lvl, t in hs)  # noqa: E731
+    if not found and starts:
+        raise SystemExit(f"hansa: no heading in {_rel(desk, src)} matches {heading!r} whole (its whole text; with #s "
+                         f"in front, only a heading of that level); nothing was changed. Give the whole text of the one "
+                         f"to move; the headings that start so are:\n{listed(starts)}")
     if not found:
-        raise SystemExit(f"hansa: no heading in {_rel(desk, src)} matches {heading!r} (its text, whole or the start of "
-                         f"it; with #s in front, only a heading of that level); nothing was changed. Its headings:\n{listed(heads) or '  (none)'}")
+        raise SystemExit(f"hansa: no heading in {_rel(desk, src)} matches {heading!r} (its whole text; with #s in "
+                         f"front, only a heading of that level); nothing was changed. Its headings:\n"
+                         f"{listed(heads) or '  (none)'}")
     if len(found) > 1:
-        raise SystemExit(f"hansa: {len(found)} headings in {_rel(desk, src)} match {heading!r}; give more of the one "
-                         f"to move, or #s in front for its level. Nothing was changed. They are:\n{listed(found)}")
+        raise SystemExit(f"hansa: {len(found)} headings in {_rel(desk, src)} match {heading!r} whole; give #s in front "
+                         f"for the level of the one to move. Nothing was changed. They are:\n{listed(found)}")
     start, level, text = found[0]
     end = next((i for i, lvl, _ in heads if i > start and lvl <= level), len(lines))
     section = lines[start:end]

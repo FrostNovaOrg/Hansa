@@ -8189,11 +8189,66 @@ def save():'''))
         self.assertIn("\n## Round 12\n", dst.read_text())
         self.assertTrue(dst.read_text().startswith("## Round 1\n"))
         self.assertTrue(dst.read_text().endswith("last\n"))
-        # a prefix that matches one heading; --to another file, made with its folder
-        self.assertEqual(self.hansa_notes("archive", "plan.md", "Round", "--to", "done/r2.md")[0], 0)
+        # --to another file, made with its folder
+        self.assertEqual(self.hansa_notes("archive", "plan.md", "Round 2", "--to", "done/r2.md")[0], 0)
         self.assertTrue((self.desk.notes_dir / "done" / "r2.md").read_text().startswith("## Round 2\n"))
         self.assertEqual(src.read_text(), "# Plan\nintro\n\n")
         self.assertFalse(list(self.desk.notes_dir.rglob("*.hansa-tmp")))
+
+    def test_hansa_notes_archive_moves_only_a_whole_heading_so_a_second_run_moves_nothing(self):
+        src, dst = self.desk.notes_dir / "plan.md", self.desk.notes_dir / "archive" / "plan.md"
+        src.write_text("# Plan\n## Round 1\na\n## Round 10\nb\n")
+        self.assertEqual(self.hansa_notes("archive", "plan.md", "Round 1")[0], 0)
+        before = self.notes_state()
+        code, _, err = self.hansa_notes("archive", "plan.md", "Round 1")  # run again: Round 10 only starts so
+        self.assertEqual(code, 1)
+        self.assertIn("matches 'Round 1' whole", err)
+        self.assertIn("othing was changed", err)
+        self.assertRegex(err, r"2 ## Round 10$")  # the heading that starts so, listed
+        self.assertEqual(self.notes_state(), before)
+        self.assertEqual(src.read_text(), "# Plan\n## Round 10\nb\n")
+        self.assertNotIn("Round 10", dst.read_text())
+
+    def test_hansa_notes_quotes_a_path_with_a_space_in_its_hint(self):
+        (self.desk.notes_dir / "archive").mkdir()
+        (self.desk.notes_dir / "archive" / "my notes.md").write_text("# Old\n")
+        out = self.hansa_notes()[1]
+        hint = out.split("headings not listed; hansa notes ", 1)[1].split(" lists them", 1)[0]
+        self.assertEqual(shlex.split(hint), ["archive/my notes.md"])  # runs as copied: one argument
+        self.assertIn("1 # Old", self.hansa_notes(*shlex.split(hint))[1])
+
+    def test_hansa_notes_archives_at_the_same_moment_lose_and_double_nothing(self):
+        import multiprocessing
+        src = self.desk.notes_dir / "r.md"
+        src.write_text("# R\n## A\na\n## B\nb\n## C\nc\n")
+        ctx = multiprocessing.get_context("fork")
+        start = ctx.Event()
+        def run(heading):
+            start.wait(60)
+            try:
+                main(["--desk", str(self.desk.root), "notes", "archive", "r.md", heading])
+            except SystemExit as e:
+                os._exit(e.code if isinstance(e.code, int) else 1)
+            os._exit(0)
+        from hansa import notes
+        real = notes._write
+        def wide(p, data, mode):  # widen the window between reading and the two writes
+            real(p, data, mode)
+            time.sleep(0.2)
+        with unittest.mock.patch.object(notes, "_write", wide):
+            procs = [ctx.Process(target=run, args=(h,)) for h in ("A", "B")]
+            for p in procs:
+                p.start()
+            start.set()
+            for p in procs:
+                p.join(120)
+        self.assertEqual([p.exitcode for p in procs], [0, 0])
+        archived = (self.desk.notes_dir / "archive" / "r.md").read_text()
+        rest = src.read_text()
+        for h in ("## A\n", "## B\n"):
+            self.assertEqual(archived.count(h) + rest.count(h), 1, (h, archived, rest))
+            self.assertIn(h, archived)
+        self.assertEqual(rest, "# R\n## C\nc\n")
 
     def test_hansa_notes_archive_writes_the_other_file_first(self):
         from hansa import notes
@@ -8236,7 +8291,7 @@ def save():'''))
         (self.desk.notes_dir / "out.md").symlink_to(self.tmp / "elsewhere.md")
         before = self.notes_state()
         for args, says in ((["plan.md", "Round 3"], "no heading in notes/plan.md matches 'Round 3'"),
-                           (["plan.md", "Round"], "3 headings in notes/plan.md match 'Round'"),
+                           (["plan.md", "Round"], "no heading in notes/plan.md matches 'Round' whole"),
                            (["twice.md", "Todo"], "2 headings in notes/twice.md match 'Todo'"),
                            (["plan.md", "in code"], "no heading"),
                            (["../settings.json", "Plan"], "../settings.json is refused"),
@@ -8259,7 +8314,7 @@ def save():'''))
         self.assertFalse((self.tmp / "x.md").exists())
         self.assertEqual(list(outside.iterdir()), [])
         err = self.hansa_notes("archive", "plan.md", "Round")[2]
-        self.assertRegex(err, r"12 ## Round 2\n +15 ## Round 12$")  # the headings it matched, to pick from
+        self.assertRegex(err, r"4 ## Round 1\n +12 ## Round 2\n +15 ## Round 12$")  # those that start so, to pick from
         err = self.hansa_notes("archive", "plan.md", "Nothing")[2]
         self.assertIn("4 ## Round 1", err)  # all the file's headings
 
@@ -35331,8 +35386,20 @@ def save():'''))
         (root / "other" / "hidden.md").write_text("# Hidden\n")
         os.utime(root / "older.md", (10, 10))
         os.utime(root / "中文.md", (20, 20))
+        (root / "notes-sub").mkdir()
+        (root / "notes-sub" / "deep").mkdir()
+        (root / "notes-sub" / "deep" / "deep.md").write_text("# Deep\n")
+        (root / "archive" / "sub").mkdir()
+        (root / "archive" / "sub" / "old.md").write_text("# Old\n")
+        for p in ((root / "other" / "hidden.md"), root / "notes-sub" / "deep" / "deep.md",
+                  root / "archive" / "sub" / "old.md"):
+            os.utime(p, (5, 5))
         files = notes.page_list(self.desk)
-        self.assertEqual([f["name"] for f in files], ["中文.md", "older.md"])
+        self.assertEqual([f["name"] for f in files], ["中文.md", "older.md", "notes-sub/deep/deep.md",
+                                                      "other/hidden.md"])
+        deep = next(f for f in files if f["name"] == "notes-sub/deep/deep.md")
+        self.assertEqual(notes.page_note(self.desk, "", deep["id"])["text"], "# Deep\n")
+        self.assertIn("notes/notes-sub/deep/deep.md", notes.list_text(self.desk))
         self.assertEqual(files[0]["size"], len(text.encode()))
         self.assertEqual(files[0]["modified"], 20)
         self.assertEqual(files[0]["headings"], notes.headings(text.splitlines(keepends=True)))
@@ -35340,7 +35407,8 @@ def save():'''))
         self.assertEqual(notes.page_note(self.desk, "中文.md")["text"], text)
         self.assertEqual(notes.page_note(self.desk, "", files[0]["id"])["text"], text)
         self.assertEqual({f["name"] for f in notes.page_list(self.desk, True)},
-                         {"中文.md", "older.md", "archive/done.md"})
+                         {"中文.md", "older.md", "archive/done.md", "archive/sub/old.md", "other/hidden.md",
+                          "notes-sub/deep/deep.md"})
         self.assertEqual(notes.page_note(self.desk, "archive/done.md")["text"], "# Done\n")
 
     def test_web_notes_links_and_special_files_are_never_opened(self):

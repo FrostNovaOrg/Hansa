@@ -738,10 +738,11 @@ accessible name and tooltip in the page's language.
 
 ### Notes on the web page
 
-Notes shows files directly in the desk's `notes/`, most recently modified first,
+Notes shows the files in the desk's `notes/` and its subfolders (`sub/deep.md`,
+named with their folder), most recently modified first,
 with their size, modification time and the Markdown headings that `hansa notes`
-lists (headings inside fenced code are ignored). Show archived also includes files
-directly in `notes/archive/`. A missing or empty folder shows No notes. Choosing
+lists (headings inside fenced code are ignored). Show archived also includes the files
+in `notes/archive/` and its subfolders. A missing or empty folder shows No notes. Choosing
 a file shows its text as plain text, including Chinese; Markdown and HTML are
 never rendered. The preview contains at most the first 1 MB (1,048,576 bytes),
 with a truncation notice and any incomplete final UTF-8 character omitted.
@@ -752,10 +753,11 @@ does from reports. Browsing never changes the notes.
 `GET /api/notes` lists these files; `archived=1` includes the archive. Each record
 has `name`, an opaque `id`, `size` in bytes, `modified` in Unix seconds, `binary`,
 `truncated` and `headings` (zero-based line, level, text). `GET /api/note?id=ID`
-returns the metadata and preview `text`; `name=FILE` also accepts a filename or
-`archive/FILE`. Both requests require the usual bearer page key. Invalid paths
-and unavailable files return HTTP 404. Other subfolders, absolute paths and `..`
-are refused before opening anything. Reads open directories and files without
+returns the metadata and preview `text` of any listed file, in a subfolder too;
+`name=FILE` also accepts a filename directly in `notes/` or `archive/FILE`. Both
+requests require the usual bearer page key. Invalid paths and unavailable files
+return HTTP 404. With `name=`, other subfolders, absolute paths and `..` are
+refused before opening anything; folders that are links are passed over unopened. Reads open directories and files without
 following symbolic links and check the opened file is regular with exactly one
 hard link. These checks prevent note browsing from exposing files elsewhere;
 keep them while the page reads notes from the filesystem. Headings and UTF-8
@@ -1718,7 +1720,11 @@ the current work and open items only. It moves finished rounds to another file
 there that it does not reread, without asking the principal and without typing
 them out again, with `hansa notes archive FILE HEADING` (to `notes/archive/FILE`
 unless `--to` names another); `hansa notes` lists the files with their sizes and
-headings. It does not `mv`, `cp` or `sed` them: a shell command there asks.
+headings. HEADING must be a heading's whole text: when none matches whole, nothing
+moves and the headings that start so are listed, so running it twice never takes
+`Round 10` after `Round 1`. One archive runs at a time on a desk: a second waits
+until the first has written both files, and a crash between the two writes leaves
+the section in both files, never in neither. It does not `mv`, `cp` or `sed` them: a shell command there asks.
 
 ### Compaction
 

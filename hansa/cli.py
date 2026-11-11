@@ -4112,11 +4112,11 @@ def main(argv=None):
         "hansa notes [PATH]: the files under the desk's notes/ (or under notes/PATH), each with its size, its number "
         "of lines and its headings with their line numbers; under notes/archive/ only size and lines, unless PATH "
         "names it. hansa notes archive FILE HEADING [--to OTHER]: move the section of notes/FILE that starts at the "
-        "heading matching HEADING (its text, whole, or the start of it when that matches only one heading; HEADING "
-        "starting with #s, such as \"## Round 1\", matches only headings of that level) and runs up to the next heading of the same or a higher level, subsections with it, onto the end "
+        "heading matching HEADING (its whole text: when none matches whole, nothing moves and the headings that start "
+        "so are listed; HEADING starting with #s, such as \"## Round 1\", matches only headings of that level) and runs up to the next heading of the same or a higher level, subsections with it, onto the end "
         "of notes/OTHER (default: notes/archive/FILE, made when missing), under a line saying when it was moved. "
         "Both files must be inside notes/. When HEADING matches no heading or several, nothing is changed and the "
-        "headings are listed. The other file is written first and the notes file replaced whole after it, so a "
+        "headings are listed. One archive runs at a time on a desk; a second waits for it. The other file is written first and the notes file replaced whole after it, so a "
         "crash between the two leaves the section in both files, never in neither")
     p.add_argument("words", nargs="*", metavar="PATH | archive FILE HEADING")
     p.add_argument("--to", metavar="OTHER", help="with archive: the file under notes/ the section goes to "
