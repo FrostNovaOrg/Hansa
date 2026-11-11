@@ -215,7 +215,7 @@ a web page for the principal (the person directing the work), and task workers. 
 
 - `hansa web` prints the page key after `#t=` so the address keeps it out of server and proxy logs; older `?t=` links still work.
 - The page sends its origin's cookies for sign-in proxies; answers that are not from `hansa serve` show a notice with **Reload**.
-- Settings and provider keys can be changed from outside this machine only after the principal enables **Allow changing settings from outside this machine** in **Settings → Lanes → General** from the machine's own address. Until then the page shows a notice and disables **Save settings** and key fields; reading, releases, pause and provider checks remain available.
+- Settings and provider keys can be changed from outside this machine only after the principal enables **Allow changing settings from outside this machine** in **Settings → Lanes → General** from the machine's own address. Until then the page shows a notice and disables settings saves, key fields, alert and push tests, push address recognition, provider checks and top-up confirmations; only reading, answering or stopping releases, and pausing or resuming dispatch remain available.
 - [The desk guide](docs/desk.md#opening-the-page-from-outside-the-machine) explains sign-in proxy precautions and how either the browser or proxy supplies the page key.
 - English and Chinese views show the pipeline, active lanes, waiting decisions and searchable tasks.
   Task details show each step, reports, checks and verification. Notes and known gaps are readable.

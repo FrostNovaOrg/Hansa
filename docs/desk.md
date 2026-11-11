@@ -157,7 +157,7 @@ One lock: whoever passes the proxy's sign-in is in. The key also sits in its con
 When the proxy's sign-in ends and it answers instead, the page says “This answer did not come from hansa serve.” and offers **Reload** to sign in again.
 Afterwards the same tab keeps its key in session storage (the first way) or needs none (the second); without session storage, reopen the address with `#t=KEY`.
 
-From outside, settings and keys cannot be changed unless **Allow changing settings from outside this machine** (`settings_from_outside`, off by default) is on in **Settings → Lanes → General**; turn it on from the machine's own address through the SSH tunnel.
+From outside, while **Allow changing settings from outside this machine** (`settings_from_outside`, off by default) is off, the page may only read, answer or stop releases, and pause or resume dispatch. Saving settings and keys, testing alerts or pushes, recognizing push addresses, checking providers (Ping) and confirming top-ups require the switch; turn it on in **Settings → Lanes → General** from the machine's own address through the SSH tunnel.
 A request counts as from outside if its `Host` is not a loopback name (`127.0.0.1`, `localhost`, `[::1]`) or it carries `Forwarded`, `X-Forwarded-*`, `X-Real-IP` or `Via`.
 A proxy that hides both its outside host name and these headers would not be recognised as outside: do not set one up that way.
 
@@ -829,13 +829,17 @@ or tmux server.
 
 Below it, **Allow changing settings from outside this machine**
 (`settings_from_outside`, off by default) decides whether a request that reaches
-`hansa serve` from outside this machine may save settings and provider keys. A
+`hansa serve` from outside this machine may save settings and provider keys,
+test alerts or pushes, recognize push addresses, check providers (Ping) and confirm top-ups. A
 request counts as from outside unless its `Host` is `127.0.0.1`, `localhost` or
 `[::1]` (any port or letter case) and it has no proxy header (`Forwarded`,
 `X-Forwarded-*`, `X-Real-IP`, `Via`). While the switch is off, such a request
-can still read the page and answer releases, but saving settings or a key gets
-`ok: false` with code `settings_local_only`. A page opened that way shows the
-settings with a notice, and Save settings and the key fields are disabled. Only
+may only read, answer or stop releases, and pause or resume dispatch. Other POST
+requests get HTTP 200 with `ok: false`: code `settings_local_only` for settings
+and keys, `outside_local_only` for the others, before any action runs. An allowlist
+keeps new POST paths closed from outside until explicitly opened; keep this rule
+while the switch limits outside actions. The page shows a notice and disables
+the corresponding controls, including Ping and top-ups on Status. Only
 the principal's save on the page changes the switch, and settings history
 records it.
 
