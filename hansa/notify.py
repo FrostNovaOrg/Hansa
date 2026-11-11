@@ -202,10 +202,15 @@ def task_line(desk: Desk, m: dict) -> str:
         head += f" · kept {count} {'note' if count == 1 else 'notes'} (hansa gaps)"
     chk = m.get("check") or {}
     if st == "done" and m.get("kind") != "verify":
+        from .views import check_interruption, merge_failure_reason
+        mr = m.get("merge_check_result") or {}
         head += (" (no changes)" if not m.get("commits") else
+                 f" (check did not finish: {chk['note']})" if check_interruption(chk) == "timeout" else
                  " (its check could not run: the machine's problem, not the task's)" if chk.get("could_not_run") else
                  " (check passed)" if chk.get("ok") else
                  f" (check FAILED{': ' + chk['note'] if chk.get('note') else ''})" if chk else "")
+        if mr and not mr.get("ok"):
+            head += f" · last merge stopped: {merge_failure_reason(mr).splitlines()[0]}"
         if m.get("verify_after_error"):
             head += f" · verification could not be queued: {m['verify_after_error']}"
     elif st in ("failed", "cancelled") and m.get("error") and m.get("error") != st:
@@ -298,10 +303,16 @@ def _item(desk: Desk, e: dict, me=None):
             return None
         if kind == "merge_check_ended":
             key = ("merge", tid)
-            from .views import waited_text
+            from .views import check_interruption, merge_failure_reason, waited_text
+            result = {**(m.get("merge_check_result") or {}), **e}
+            why, reason = check_interruption(result), merge_failure_reason(result).splitlines()[0]
+            what = ("merge could not be made" if why in ("checkout", "forbidden", "conflict", "merge") else
+                    "merge check did not run" if why == "setup" else
+                    "merge check did not finish" if why == "timeout" else
+                    "merge check ended; nothing was merged")
             said = (f"{tid}'s merge: {waited_text(e)}" if e.get("waited") else
-                    f"{tid}'s merge check ended; nothing was merged: {e.get('note') or 'the check failed'}"
-                    + (f" (it ran: {desk.redact(e['command'])})" if e.get("command") else ""))
+                    f"{tid}'s {what}: {reason}"
+                    + (f" (it ran: {desk.redact(e['command'])})" if e.get("command") and why != "setup" else ""))
             line = f"{said}: {m.get('title', '')} · next: {_next_step(desk, tid)}"
         elif kind == "task_merged":
             how = ("in its turn behind a merge check, without a check of its own" if e.get("waited") else
