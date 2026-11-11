@@ -23824,7 +23824,9 @@ def save():'''))
         self.assertIn("queue a follow-up task (new id) that continues from this task's last commit with your note; "
                       "this task becomes replaced unless it is merged", retry)
         for words in ("a second retry of it is refused", "A merged task stays merged",
-                      "cancelled before it started gives the earlier task back"):
+                      "cancelled before it started gives the earlier task back",
+                      "Providers that refused an earlier round are skipped without using a follow-up try",
+                      "including with --fresh", "unless the destination lane has only one provider"):
             self.assertIn(words, retry)
         self.assertNotIn("attempt", retry)
         self.assertIn("a verification by another model", " ".join(self.hansa("help", "verify").split()))
@@ -28267,6 +28269,134 @@ def save():'''))
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt again"))
         self.assertEqual(m["state"], "failed", m)
         self.assertIn("no other provider", m["error"])
+
+    def refusal_parent(self, providers=("mimo", "claude")):
+        """A real run refused by mimo, then finished on claude when the lane has it."""
+        s = self.desk.settings()
+        for name in ("mimo", "spare"):
+            s["providers"][name] = {"kind": "compatible", "model": "fixture-model", "effort": "",
+                                    "base_url": "https://example.invalid"}
+            self.desk.write_key(name, "sk-test-" + name)
+        s["lanes"]["a"].update(providers=list(providers), env={"FAKE_REFUSE_ON_COMPAT": "1"})
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.hansa("add", "Add hello.txt", "--lane", "a").split()[0]
+        parent = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual([(a["provider"], a["kind"]) for a in parent["attempts"]], [("mimo", "refused")])
+        return parent
+
+    def assert_refusal_follow_up(self, tid, provider="claude", state="done", refusals=()):
+        from hansa import run
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["provider"]), (state, provider), m)
+        self.assertEqual([(a["provider"], a["kind"]) for a in m["attempts"]], list(refusals))
+        self.assertEqual(run.tries_used(m["attempts"]), len(refusals))
+        self.assertEqual([e["provider"] for e in self.events("task_started") if e["task"] == tid], [provider])
+        return m
+
+    def test_retry_skips_parent_refusal_without_a_run_or_try(self):
+        parent = self.refusal_parent()
+        tid = self.hansa("retry", parent["id"], "Carry on").split()[0]
+        self.assertEqual(self.desk.meta(tid)["attempts"], [])
+        self.assertIn("ready for lane a on claude", self.hansa("show", tid))
+        self.assert_refusal_follow_up(tid)
+        self.assertEqual(self.desk.meta(parent["id"])["attempts"], parent["attempts"])
+
+    def test_retry_chain_inherits_all_refusals_and_stops_when_none_remain(self):
+        parent = self.refusal_parent()
+        s = self.desk.settings()
+        s["lanes"]["a"]["providers"] = ["mimo", "spare"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        second = self.hansa("retry", parent["id"], "Carry on").split()[0]
+        self.assert_refusal_follow_up(second, "spare", "failed", (("spare", "refused"),))
+        third = self.hansa("retry", second, "Carry on again").split()[0]
+        self.assertIn("lane a has no provider ready", self.hansa("show", third))
+        with unittest.mock.patch("hansa.run.start") as start:
+            Dispatcher(self.desk).tick()
+        start.assert_not_called()
+        s["lanes"]["a"]["providers"] = ["mimo", "spare", "claude"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        shown = self.hansa("show", third)
+        self.assertIn(f"mimo (refused {parent['id']})", shown)
+        self.assertIn(f"spare (refused {second})", shown)
+        self.assert_refusal_follow_up(third)
+        fourth = self.hansa("retry", third, "One more round").split()[0]
+        self.assert_refusal_follow_up(fourth)
+
+    def test_retry_inherits_refusals_from_rounds_created_before_inheritance(self):
+        parent = self.refusal_parent()
+        legacy = self.desk.new_task("Earlier follow-up", lane="a", parent=parent["id"], state="failed",
+                                    attempts=[{"provider": "claude", "kind": "limit", "error": "usage limit"}])
+        tid = self.hansa("retry", legacy, "Carry on").split()[0]
+        self.assert_refusal_follow_up(tid)  # limits are not inherited, the ancestor's refusal is
+
+    def test_retry_lane_with_only_ancestor_refuser_still_runs(self):
+        parent = self.refusal_parent()
+        self.hansa("lane", "add", "b", "--like", "a")
+        self.hansa("lane", "set", "b", "providers", "mimo")
+        tid = self.hansa("retry", parent["id"], "Carry on", "--lane", "b").split()[0]
+        self.assertIn("ready for lane b on mimo", self.hansa("show", tid))
+        self.assertNotIn("providers left out:", self.hansa("show", tid))
+        self.assert_refusal_follow_up(tid, "mimo", "failed", (("mimo", "refused"),))
+        self.assertNotIn("providers left out:", self.hansa("show", tid))
+        next_tid = self.hansa("retry", tid, "Carry on again", "--lane", "a").split()[0]
+        self.assert_refusal_follow_up(next_tid)
+
+    def test_retry_only_refuser_without_lane_still_runs_and_offers_lane_hint(self):
+        parent = self.refusal_parent(("mimo",))
+        shown = self.hansa("show", parent["id"])
+        [hint] = [line for line in shown.splitlines() if line.startswith("next:")]
+        self.assertIn(f'hansa retry {parent["id"]} "what to change" (or --fresh to start over)', hint)
+        self.assertIn(f'hansa retry {parent["id"]} "..." --lane L', hint)
+        tid = self.hansa("retry", parent["id"], "Carry on").split()[0]
+        self.assert_refusal_follow_up(tid, "mimo", "failed", (("mimo", "refused"),))
+        self.assertNotIn("providers left out:", self.hansa("show", tid))
+
+    def test_retry_fresh_inherits_refusals(self):
+        parent = self.refusal_parent()
+        tid = self.hansa("retry", parent["id"], "--fresh", "Start over").split()[0]
+        self.assertNotIn("start_from", self.desk.meta(tid))
+        self.assert_refusal_follow_up(tid)
+
+    def test_add_does_not_inherit_another_tasks_refusal(self):
+        self.refusal_parent()
+        tid = self.hansa("add", "Add hello.txt again", "--lane", "a").split()[0]
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["provider"]), ("done", "claude"), m)
+        self.assertEqual([(a["provider"], a["kind"]) for a in m["attempts"]], [("mimo", "refused")])
+        self.assertEqual([e["provider"] for e in self.events("task_started") if e["task"] == tid], ["mimo", "claude"])
+        self.assertNotIn("providers left out:", self.hansa("show", tid))
+
+    def test_show_names_the_inherited_refusal_in_one_line(self):
+        parent = self.refusal_parent()
+        tid = self.hansa("retry", parent["id"], "Carry on").split()[0]
+        for done in (False, True):
+            with self.subTest(done=done):
+                if done:
+                    self.assert_refusal_follow_up(tid)
+                shown = self.hansa("show", tid)
+                lines = [line for line in shown.splitlines() if line.startswith("providers left out:")]
+                self.assertEqual(len(lines), 1)
+                self.assertIn(f"mimo (refused {parent['id']})", lines[0])
+                self.assertIn("no follow-up try used", lines[0])
+                self.assertNotIn("earlier try on mimo:", shown)
+
+    def test_retry_refusals_follow_the_current_lane_provider_list(self):
+        parent = self.refusal_parent()
+        tid = self.hansa("retry", parent["id"], "Carry on").split()[0]
+        self.hansa("lane", "set", "a", "providers", "mimo")
+        self.assert_refusal_follow_up(tid, "mimo", "failed", (("mimo", "refused"),))
+        next_tid = self.hansa("retry", tid, "Carry on again").split()[0]
+        self.hansa("lane", "set", "a", "providers", "mimo", "claude")
+        self.assert_refusal_follow_up(next_tid)
+
+    def test_retry_keeps_inherited_refusals_when_an_earlier_round_is_gone(self):
+        parent = self.refusal_parent()
+        tid = self.hansa("retry", parent["id"], "Carry on").split()[0]
+        self.desk.update(tid, state="failed")
+        shutil.rmtree(self.desk.tasks_dir / parent["id"])
+        next_tid = self.hansa("retry", tid, "Carry on again").split()[0]
+        self.assertIn(f"mimo (refused {parent['id']})", self.hansa("show", next_tid))
+        self.assert_refusal_follow_up(next_tid)
 
     def test_no_commits_means_no_check_and_the_task_can_be_closed(self):
         s = self.desk.settings()
