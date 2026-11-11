@@ -51,7 +51,7 @@ boundary, and some of its write denies are globs (below). On Linux srt drops eve
 | `HANSA_CODEX_BIN` | the codex program | (required) |
 | `HANSA_CODEX_HOME` | its `CODEX_HOME`, holding the adapter's login | (required) |
 | `HANSA_CODEX_MODEL` | `-m` when hansa passes no `--model`; the provider's model, which hansa passes, comes first | `gpt-6.1-sol` |
-| `HANSA_CODEX_EFFORT` | `model_reasoning_effort`; hansa's `--effort` overrides it; either is passed as it is | `high` |
+| `HANSA_CODEX_EFFORT` | `model_reasoning_effort`; hansa's `--effort` overrides it; accepts `low`, `medium`, `high`, `xhigh`, `max` ([startup checks](../../docs/tasks.md#effort)) | `high` |
 | `HANSA_CODEX_LOGS` | where each run's `<session-id>.jsonl`, `.err`, `.thread` and `.srt.json` are kept | `logs/` here |
 | `HANSA_CODEX_SRT` | srt | `srt` on the worker's PATH |
 | `HANSA_REAL_CLAUDE` | the real claude | the first `claude` on PATH that is not the adapter, else `~/.local/bin/claude` |
