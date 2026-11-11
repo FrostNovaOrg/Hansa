@@ -250,6 +250,10 @@ still uses a try, and saving a new key brings that provider back.
 After `hansa lane set L providers ...`, queued tasks, including those waiting for a resting provider,
 use the new order: first ready provider excluding prior refusals; otherwise they wait. A
 dropped-connection retry keeps its provider if still listed. Running work keeps its provider.
+`lane set` and `lane add --providers` accept comma-separated names with spaces around them
+(quote `"claude, spare"` in the shell). Each provider must appear only once, to avoid repeating a
+fallback entry; a duplicate is refused by name before anything changes. Existing saved lists with
+duplicates still load and run.
 `hansa retry` uses its destination lane's current order. Verification on L uses L's current order;
 on a verify lane, that lane's order. Neither inherits the parent's provider; readiness decides which runs.
 
@@ -582,6 +586,11 @@ verification's report, with its verdict. Earlier notes are not carried, so
 what still holds of them is said again in the new note. Each round's note is
 kept on its own beside its task, as `note.md` in the task's folder (keys
 removed, as from what else hansa writes there).
+
+The follow-up keeps the earlier task's model unless `--model M` overrides it. As with
+`hansa add --model M`, it is recorded on the new task and applies only when a Claude subscription
+provider runs it; other providers use their own model. Both commands print the same note about
+that limit. `--effort E` overrides the inherited effort separately.
 
 A done, failed, closed or cancelled task becomes replaced, so it can be sent back once; a second `hansa retry` of it is
 refused and names the follow-up to send back instead. A merged task stays merged: each
