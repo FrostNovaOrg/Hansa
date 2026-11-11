@@ -24,6 +24,9 @@ a web page for the principal (the person directing the work), and task workers. 
 - Cancelling a follow-up before it starts restores the task it replaced, including its verification.
 - Retrying a follow-up the machine kept from starting preserves the earlier work, report and standing verification report.
 - Closed and cancelled tasks can be replaced only once; another retry points to their follow-up.
+- `hansa close ID` also puts away failed tasks and verifications, keeping why they failed in `hansa show`.
+  Status lists only failures not closed, shows how many more there are and gives `failed_count` in JSON;
+  goals no longer count closed failed work as failed.
 - Once a prerequisite is merged, later follow-ups do not hold tasks queued with `--after`.
 - Follow-ups of merged work count as new work in goals; the merged task keeps its releases and evidence.
 - Request verification by another worker, optionally on another lane or model. `add --verify`
@@ -40,6 +43,24 @@ a web page for the principal (the person directing the work), and task workers. 
   When API errors keep ending turns, hansa reposts unhandled work and alerts after 30 minutes by default,
   or at once for errors only the principal can fix; after an alert, a normal turn sends a recovery notice.
   Server startup writes missing events for saved task ends even after a long stop, without writing any twice.
+- Posts to the coordinator include tasks cancelled or closed elsewhere and survive titles with bytes that are not UTF-8.
+  Long posts keep the newest ten lines whole and summarize each earlier result.
+  After a session's `/restart`, `hansa notify on` from that session restores posting and delivers what was missed.
+- Missing Claude Code, an unusable `HANSA_CLAUDE`, a missing repository folder or git failing to prepare a worktree
+  holds tasks in the queue without using a try. Status gives the reason; tasks start by themselves once it is fixed.
+  For a task that failed to start, `hansa show` says what to fix before retrying and omits empty model details.
+- `hansa add --lane` refuses an unknown lane and names the desk's lanes. Queuing says why work cannot start now,
+  including a pause or a disk or memory floor; with the server stopped, it gives the command to start it.
+- Status, show and the page name a task's wait for a concurrency slot, with the occupied and allowed counts.
+  While a lane's setup runs, status and show name it and its elapsed minutes instead of saying the model has not replied.
+- `hansa wait` returns at once with no work to watch, a stopped server, or only queued tasks held by a pause
+  or a disk or memory floor; it keeps waiting for running and merging work under those holds.
+  A session that starts hearing hansa while the server is down gets that notice once, with the start command.
+- A lane whose repository folder moved or was renamed gives the recovery commands in order: cancel or close its tasks,
+  remove the lane, add it at the new folder and queue the tasks again. Lane removal moves an unreachable worktree aside
+  within the desk (`--discard` deletes it); adding a lane sets aside a worktree left from another or unreachable repository
+  so work starts fresh, saying when the other repository still needs `git worktree prune`. Set the re-added lane's check
+  and other settings again; it starts with defaults.
 - `hansa goal` and `hansa decide` record the principal's goals and reasons for product choices.
   Tasks tie to goals.
   `hansa goal show` lists each goal's checks, verdicts, merges, releases and what is missing.
@@ -47,6 +68,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The sandbox
 
+- On Linux, leftover processes are stopped and listed by `hansa show` even when the kernel cut a process name
+  inside a multi-byte character, which previously left the process running and logged a decoding error.
 - Folders hansa makes for desks, new projects and the coordinator's mod are private whatever the umask.
   For an existing folder others can write in, hansa gives the `chmod go-w` fix.
 - Worker commands run in an operating-system sandbox with lane-specific network hosts and write
@@ -76,6 +99,13 @@ a web page for the principal (the person directing the work), and task workers. 
   `hansa show`, `hansa diff` and `hansa git` show them correctly.
 - A task's check runs after its worker. A merge check tests the combined tree when the base has
   changes absent from the task, or a separate command is needed, with its own limit or check lane.
+- A merge check waiting for a concurrency slot says so in status, show, the page and the merge reply,
+  including when it uses the task's own lane.
+- When git cannot commit a worker's work, the task fails with git's words and keeps the work under
+  `refs/hansa/kept/ID`; `hansa show` gives the error and the command to read the work.
+- `hansa show` names the stash holding worktree leftovers found before a task starts, the last task that ran there
+  and commands to read the changes and new files.
+- A verification whose scratch changes cannot be kept says so in `hansa show`, with git's words; its verdict stands.
 - Merges queue per repository and base. Compatible merges can share a check; a failed batch
   is checked again individually in its original order.
 - Lane copies omit release targets; merge lanes refuse target settings and releases and show how to remove old targets.
@@ -101,6 +131,13 @@ a web page for the principal (the person directing the work), and task workers. 
 
 - Named targets have commands, time limits and optional dependencies on another target releasing
   the same commit. Requests show outgoing changes and direct commits, which can require approval.
+- Release requests and lists show at most ten direct commits, their count and a command to see the full range.
+  The instruction to wait for the principal follows the head; void, replaced and stopped requests take one line each.
+  Outside-path warnings appear in lists and `--show` only while a request waits for approval.
+- `hansa explain lane L` gives each target short lines for its command, approval and last successful release,
+  with the latest request separately. `hansa lane target L` shows every target's approval tick;
+  both commands and a release request say when a tick lapsed and why.
+- A release command's local `git push` destination is described as where it sends, without advice to move it into the repository.
 - `hansa release` refuses an unknown target word even on a lane with only one target;
   name the target before a one-word note, or give a quoted note with spaces.
 - A repeated release request names the waiting request it replaces and says its code no longer works.
@@ -115,10 +152,35 @@ a web page for the principal (the person directing the work), and task workers. 
   targets let merges continue. Releases can be stopped; results return to the coordinator.
 - After a push, a target's `--watch` command follows CI without holding other work and posts whether it passed.
   The [CI watch example](docs/releases.md#watching-ci-after-a-push) keeps waiting through network errors until the run ends.
+- `hansa release --show ID` shows a request and all retained release and watch output, keys removed, including output
+  so far while running. Failed release lists and posts point to it for more; the whole log stays the principal's.
+- `hansa release --stop ID` and Stop on the page also end a running watch, keeping the release done and recording
+  who stopped the watch and why. A stopped watch stays stopped after a server restart and its log is trimmed like others;
+  a stop after the command ended keeps its result. Release stops name the coordinator, the principal or a terminal command in words.
+- A malformed one-time code uses none of the principal's wrong-code tries, for either `hansa release yes` or `no`.
 - Watch commands warn about forbidden words when saved and refuse releases containing them.
 - The principal sets the alert command. Alerts are grouped and rate-limited; closed to-dos are omitted
   and failures shown. Low disk space holds new work until space recovers, with a floor scaled to
   the volume. See [releases and alerts](docs/releases.md).
+- Long alert batches keep every alert's start, urgent ones first. Release alerts put the request, code and what to do
+  before the target's description; requests that no longer wait are left out, while their results still go out.
+- A successful alert-command run clears an earlier failure warning. A waiting release whose code-bearing alert failed
+  says the code may not have arrived and points to the page; status also says to use the page when no waiting release has a live code.
+- `hansa status` says how many alerts the hourly limit holds and until when, leaving out answered requests
+  and excluding test alerts from the held count.
+- Recovery from low disk space, a lane's sandbox failure or a stuck server sends an all-clear with the trouble's
+  start and end times. A sandbox failure alerts again after a passing try cleared the earlier hold, even for the same reason.
+- Alerts about no session hearing hansa count only work that still waits and no longer fire for a server starting again.
+- A coordinator that handles a post and then stops on a permission dialog still alerts after the waiting time.
+- Work waiting for review still alerts after a session or server restart, from whichever session watches it.
+  A queued or running verification suspends that wait; the review status line appears only while the coordinator is idle.
+- Alerts and status describe a failed request the principal typed as that request failing at its time, with advice to type it again.
+  Login, billing and other errors only the principal can fix give that remedy first.
+- After reposting work, an API-error alert waits for the turn it started to finish, or for the time allowed for it to start.
+- Problem alerts give a next step the principal can take, including how to restore a session or ask for review;
+  every coordinator API error has advice. Chinese alerts use Chinese throughout, quoting task titles and programs' own words
+  and naming the provider or lanes concerned. `hansa explain` and the page also list alerts for failed turns and provider credit.
+- Status shows the configured minutes for each coordinator alert, or that it is off.
 - Alerts use English or Chinese, carry attention levels and keep the release's description.
   Push addresses and the alert command send independently.
   Save up to ten private push addresses on the page; paste an address to recognize its service, or choose it.
@@ -132,13 +194,19 @@ a web page for the principal (the person directing the work), and task workers. 
   An unreadable entry does not stop the others from sending.
   Deleted Discord webhooks are named as such in `hansa status` and on the page.
   `hansa help push-services` explains setup.
+- Discord and Slack mentions remain text and ping no users or channels; Slack alerts use plain text.
 - Bark entries can encrypt alerts with the key set in the app and on the page, using AES-128, -192 or -256 in CBC mode.
   Bark's server and Apple see ciphertext; entries without a key send as before. The page and status mark encrypted entries,
   and test pushes explain key mismatches. English and Chinese guides cover setup and privacy.
+- A Bark encryption key made invalid by a file edit sends nothing and carries no release code; the page and status
+  say to set it again. Bark encryption examples may include links to other sites. Other services' tokens and signing
+  secrets still work when their files contain extra blank lines.
 - Encrypted Bark entries receive the same one-time release code as the alert command; other push entries ask for approval on the page.
   Code delivery status counts every eligible channel, and saved results omit service responses for pushes carrying codes.
   If making a code fails, the whole alert batch still goes out, asking for an answer on the page.
 - `hansa changelog` collects workers' release notes, missing notes and direct commits.
+- With no earlier release or remote-tracking history, `hansa changelog` leaves out history from before hansa managed
+  the repository, using the same cutoff as release requests.
 
 ### The web page
 
@@ -155,6 +223,19 @@ a web page for the principal (the person directing the work), and task workers. 
 - Settings group providers, coordinator, lanes, read restrictions, releases, alerts and prices.
   Lanes are read-only; dispatch controls are in Settings. Drafts survive tab changes and failed saves;
   concurrent settings changes are shown before another save.
+- Push addresses show the recognized service while typing. Bare Bark keys need at least eight characters;
+  Bark and ntfy refuse each other's official addresses and name the service to choose.
+- Saving a duplicate push address names the entry that already has it. Older duplicates leave unrelated settings saves
+  working, and status names the entries sharing an address.
+- Before saving an ntfy topic, the page warns that hansa hides it wherever it appears
+  and recommends a topic that is hard to guess.
+- Push-service refusals show the service's code and what to check. Malformed addresses get a specific reason;
+  save refusals on the Chinese page are in Chinese.
+- Replacing a push address clears its old delivery result.
+- Clear a saved extra secret while keeping the push address. Clearing a Bark encryption key first warns that later
+  pushes will be unencrypted and carry no release codes; a blank replacement field still keeps the saved secret.
+- “Send a test alert” reports every configured channel, and a failure in any channel makes the test fail.
+- Emptying a coordinator-alert minutes box restores the default; saving says which default applies.
 - `hansa explain history` and Settings show who changed each setting, when and old → new; filter by lane or provider. Keys stay hidden.
 - The page is compressed and cached by the browser when unchanged.
   Polls stay small and back off on connection loss.
@@ -172,11 +253,16 @@ a web page for the principal (the person directing the work), and task workers. 
 - Connection failures hold the provider until a check answers, then resume tasks from safe saved
   commits. Repeated counted failures stop the task; a system-killed worker can restart once.
 - `hansa ping` uses the server's recorded Claude program, including an adapter; checks use no tools.
+- A `HANSA_CLAUDE` naming a missing or unrunnable file gives hansa's own one-line error in `hansa coordinator`,
+  a failed `hansa ping` and provider Check, and a failed Claude Code row in `hansa doctor`, with the remedy.
+  No other `claude` runs in its place; details are in the task guide.
 
 ### The terminal menu and `hansa doctor`
 
 - `hansa init` and `hansa lane add` create a repository with an empty first commit for a new or empty project.
   A folder already holding files is refused, with the commands to commit them.
+- `hansa init --repo` describes the lane it made and warns when it has no check, with the command to set one,
+  as `hansa lane add` does.
 - `hansa init` refuses a desk folder that already holds files and gives a command using a separate folder.
   It also refuses lane names that `hansa lane add` refuses. A desk inside a git repository is kept out of its commits,
   both at init and when adding that repository as a lane.
@@ -185,6 +271,20 @@ a web page for the principal (the person directing the work), and task workers. 
   `hansa up --all` starts all listed desks, restoring recorded server and coordinator starts.
 - Outside a desk without a terminal, `hansa up` starts nothing and lists the account's desks with
   `hansa --desk DIR up` and `hansa up --all`. Stopped-server notices to sessions outside the desk give the `--desk` form.
+- `--desk` or `HANSA_DESK` naming a missing folder or one that is not a desk is refused before anything is written,
+  pointing to `hansa init DIR` instead of treating it as an empty desk or printing a traceback.
+- A second interactive `hansa coordinator` is refused with the running session's pid, name and tmux attach command
+  when available. Runs with `-p`, help or version leave the interactive session's saved start alone.
+- A failed `hansa serve` bind gives one line with host, port and the system's reason and keeps the last successful
+  start for `hansa up`. Simultaneous `hansa up` calls wait for the first start, then report the server running.
+- `hansa up` starts a coordinator on a desk that never had one, including with tasks added from a shell.
+  It resumes the coordinator's own conversation by session id, or starts a new one when none remains, and says which;
+  older records still continue the folder's latest conversation until its id is recorded.
+- When the coordinator fails to start, `hansa up` reports its last output and the command to run by hand;
+  a failed resume also gives the command for a new conversation. Only starts ending within their first minute
+  leave the pane's last screen on disk.
+- `hansa desks` shows no page address for a desk never started, points to `hansa init` for an empty list
+  and gives `hansa desks --forget PATH` for a desk whose folder is gone.
 - Serving without an explicit port finds a free one and remembers it.
   Hansa starts no second server when it cannot inspect the one holding the desk.
   A symbolic link to `bin/hansa` on PATH works. [Getting started](docs/getting-started.md) covers local and SSH use.
