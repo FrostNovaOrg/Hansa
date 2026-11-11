@@ -7868,6 +7868,33 @@ def save():'''))
         code, _, _ = self.init_says("init", str(folders))  # with no repository: beside the folder
         self.assertIn(shlex.join(["hansa", "init", str(self.tmp.resolve() / "folders-desk")]), str(code))
 
+    def test_init_says_in_a_line_why_it_cannot_make_the_desk_and_leaves_nothing_half_made(self):
+        a_file = self.tmp / "plain-file"
+        a_file.write_text("")
+        code, _, _ = self.init_says("init", str(a_file / "sub"))
+        self.assertIsInstance(code, str)  # a line from hansa, not a traceback
+        self.assertIn(f"{a_file.resolve()} is a file, not a folder", code)
+        self.assertIn("no desk was made", code)
+        self.assertEqual(a_file.read_text(), "")
+        empty = self.tmp / "empty-for-init"
+        empty.mkdir()
+        real_write = cli.write_text
+
+        def refused(path, *args, **kwargs):  # a folder this account may not write in, part way through
+            if Path(path).name == "CLAUDE.md":
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_write(path, *args, **kwargs)
+
+        for root in (empty, self.tmp / "new-parent" / "desk"):
+            with self.subTest(root=root.name), unittest.mock.patch.object(cli, "write_text", refused):
+                code, _, _ = self.init_says("init", str(root))
+                self.assertIsInstance(code, str)
+                self.assertIn("may not write in", code)
+                self.assertIn(str(root.resolve()), code)
+                self.assertIn("no desk was made", code)
+        self.assertEqual(os.listdir(empty), [])  # what it made in the empty folder is gone
+        self.assertFalse((self.tmp / "new-parent").exists())  # and the folders it made
+
     def test_init_takes_a_missing_an_empty_or_a_finder_only_folder(self):
         empty, finder = self.tmp / "empty", self.tmp / "finder"
         empty.mkdir()
@@ -14889,6 +14916,17 @@ def save():'''))
         self.assertIn("nothing was run", str(e.exception.code))
         self.assertFalse(run.try_file(self.desk, "a").exists())
 
+    def test_lane_try_without_a_server_names_the_command_that_starts_it(self):
+        from hansa import run
+        self.hansa("lane", "set", "a", "check", "echo checked")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            main(["--desk", str(self.desk.root), "lane", "try", "a"])
+        said = str(e.exception.code)
+        self.assertIn("hansa serve is not running", said)
+        self.assertIn("nothing was run", said)
+        self.assertRegex(said, r"Start it with hansa( --desk \S+)? up")
+        self.assertFalse(run.try_file(self.desk, "a").exists())
+
     def test_lane_try_holds_the_lane_and_says_could_not_run_when_srt_cannot_start(self):
         from hansa import run
         ran = self.tmp / "check-ran"
@@ -15734,6 +15772,7 @@ def save():'''))
                            env=env, timeout=20)
         address = r.stdout.splitlines()[0]
         self.assertTrue(address.startswith(f"Open http://127.0.0.1:{port}/#t="), address)
+        self.assertNotIn("not running", r.stdout)
         with urllib.request.urlopen(address.partition(" ")[2], timeout=10) as page:  # the page of this desk
             self.assertEqual(page.status, 200)
         r = subprocess.run([bin_, "--desk", str(self.desk.root), "web", "--port", "9999"], input="",
@@ -15774,6 +15813,8 @@ def save():'''))
                             "web"], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("/#t=", r.stdout)  # the key after #, which a browser sends to no server
+        self.assertIn("hansa serve is not running, so the page will not open", r.stdout)  # no server here
+        self.assertRegex(r.stdout, r"start it with hansa( --desk \S+)? up")
         self.assertNotIn("?t=", r.stdout)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
@@ -18483,6 +18524,20 @@ def save():'''))
         self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(until)), event["text"])
         self.assertIn("the reset time its error gave, and a minute", event["text"])
         self.assertIn(f"waiting: {tid}", event["text"])
+        self.assertNotIn("still running", event["text"])
+
+    def test_provider_rest_post_says_tasks_still_running_on_it_may_join(self):
+        from hansa import run
+        tid = self.desk.new_task("Waiting task", lane="a")
+        busy = self.desk.new_task("Still running", lane="missing")
+        self.desk.change(busy, lambda m: {"state": "running", "provider": "claude"})
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "out of quota (HTTP 429)")
+        run.provider_rest_news(self.desk, self.desk.settings(), "claude")
+        [event] = self.events("provider_rested")  # still one post
+        self.assertIn(f"waiting: {tid}", event["text"])
+        self.assertTrue(event["text"].endswith(" · tasks still running on claude may join them: hansa status"),
+                        event["text"])
+        self.assertEqual(event["tasks"], [tid])
 
     def test_provider_rest_ignores_tasks_waiting_for_other_reasons(self):
         from hansa import run
@@ -20129,6 +20184,8 @@ def save():'''))
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             main(["wait", "--help"])
         self.assertIn("nothing to wait for", " ".join(out.getvalue().split()))
+        ids = re.search(r"tasks to watch \(default: ([^)]*)\)", " ".join(out.getvalue().split())).group(1)
+        self.assertIn("merging", ids)  # the code waits for merging tasks too
 
     def test_wait_ignores_request_answers_until_a_running_task_ends(self):
         held = cli.hold_server_lock(self.desk)
@@ -24693,6 +24750,20 @@ def save():'''))
         self.assertEqual(len(self.events("provider_checked")), 1)
         self.assertNotIn("last ping:", self.hansa("status"))
         self.assertIn("last ping:", self.hansa("explain", "provider", "claude"))
+
+    def test_explain_provider_gives_the_last_ping_in_words_and_local_time(self):
+        at = time.time() - 3600
+        self.desk.set_provider_state("claude", check={"ok": True, "detail": "fake-model", "at": at, "seconds": 2.5})
+        line = next(ln for ln in self.hansa("explain", "provider", "claude").splitlines() if "last ping:" in ln)
+        self.assertIn("answered", line)
+        self.assertIn(time.strftime("%Y-%m-%d %H:%M", time.localtime(at)), line)
+        self.assertIn("fake-model", line)
+        self.assertIn("2.5s", line)
+        self.assertNotIn("{", line)
+        self.desk.set_provider_state("claude", check={"ok": False, "detail": "no answer in 60s", "at": at, "seconds": 60})
+        line = next(ln for ln in self.hansa("explain", "provider", "claude").splitlines() if "last ping:" in ln)
+        self.assertIn("did not answer", line)
+        self.assertIn("no answer in 60s", line)
 
     @staticmethod
     def sandbox_of(argv):

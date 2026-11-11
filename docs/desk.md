@@ -166,6 +166,8 @@ A proxy that hides both its outside host name and these headers would not be rec
 For opening the page and setting providers, models and prices, follow
 [Getting started](getting-started.md#open-the-principals-page); for a remote
 desk, use its [SSH tunnel instructions](getting-started.md#work-over-ssh).
+When hansa serve is not running, `hansa web` says so under the address, with the command that
+starts it (`hansa up`): the page opens only while the server runs.
 `hansa web` prints the token after `#` (`/#t=...`): a browser sends what
 follows `#` to no server, so no proxy or server on the way records it. An
 older address with `?t=` still works; if an address has both, the token after
@@ -1594,7 +1596,10 @@ posted when queued tasks have no provider ready in their eligible lanes. Hansa
 posts after the run's final task state or the provider check is saved, so a task
 returned to the queue is included along with tasks waiting in other lanes. The
 line names the provider, reason, rest end time and up to five waiting task IDs,
-then the count of any more. It goes to the desk's coordinator sessions, with
+then the count of any more. A task still running on that provider when the
+post is made returns to the queue later and no second post names it, so the
+line then ends `· tasks still running on NAME may join them: hansa status`.
+It goes to the desk's coordinator sessions, with
 the provider as its subject; it does not alert the principal. Moving on to a
 ready provider stays quiet. The same reason stays quiet until a worker run on
 that provider finishes instead of returning to wait; this survives a server

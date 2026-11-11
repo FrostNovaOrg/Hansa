@@ -537,6 +537,20 @@ def project_text(pf: dict) -> str:
                if pf["long"] else ""))
 
 
+def ping_text(check) -> str:
+    """A provider's last ping (hansa ping, the page's Ping) in a line: whether it answered, when in local time,
+    what it said and how long it took."""
+    if not isinstance(check, dict):
+        return "never"
+    at = check.get("at")
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(at)) if isinstance(at, (int, float)) else "at an unknown time"
+    secs = check.get("seconds")
+    took = f", in {secs:g}s" if isinstance(secs, (int, float)) and not isinstance(secs, bool) else ""
+    detail = str(check.get("detail") or "").strip()
+    return (("answered" if check.get("ok") else "did not answer") + f" {when}" + (f": {detail}" if detail else "")
+            + took)
+
+
 def web_address(desk: Desk) -> tuple:
     """The address and port this desk's hansa serve last served the page on (the defaults before it ever ran)."""
     try:
@@ -2105,7 +2119,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             + ("" if p["kind"] == "subscription" else f" · key: {'present' if desk.has_key(name) else 'missing'}"),
             f"  now: {provider_problem(desk, s, name) or 'ready'}",
             *([f"  {quota_probe_text(st, s)}"] if quota_probe_text(st, s) else []),
-            f"  last ping: {st.get('check') or 'never'}"])
+            f"  last ping: {ping_text(st.get('check'))}"])
     if what == "task":
         return show_text(desk, name)
     if what == "server":
