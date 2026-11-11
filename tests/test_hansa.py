@@ -18196,6 +18196,296 @@ def save():'''))
         self.assertEqual((m["state"], m["error"], m["attempts"]), ("failed", "error: I could not do it", []), m)
         self.assertEqual(count.read_text(), "1")
 
+    def quota_probe_rest(self, *, desk=None, kind="quota", text="usage limit resets in 6 hours", age=None):
+        from hansa import run
+        desk = desk or self.desk
+        s = desk.settings()
+        age = 60 * s["cool_minutes"] + 5 if age is None else age
+        with unittest.mock.patch.object(run.time, "time", return_value=time.time() - age):
+            return run.rest_provider(desk, s, "claude", kind, "usage limit" if kind == "quota" else kind, text)
+
+    def join_provider_probes(self, d):
+        for thread in d.probes.values():
+            thread.join(timeout=120)
+            self.assertFalse(thread.is_alive(), "provider check did not end")
+
+    def test_quota_probe_interval_restart_and_early_recovery(self):
+        from hansa import run
+        other = self.shared_rest_desks()
+        s = self.desk.settings()
+        s["cool_minutes"] = 9
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        until = self.quota_probe_rest(age=0)
+        d = Dispatcher(self.desk)
+        before = self.desk.provider_state()["claude"]["cool_since"]
+        actual, calls = subprocess.run, []
+
+        def answer(argv, **kwargs):
+            if kwargs.get("input") != "Reply with the single word OK.":
+                return actual(argv, **kwargs)
+            calls.append(self.desk.provider_state()["claude"]["quota_probe_at"])
+            self.assertEqual(kwargs["env"]["CLAUDE_CODE_MAX_RETRIES"], "0")
+            self.assertEqual(argv[argv.index("--max-turns") + 1], "1")
+            self.assertEqual(argv[argv.index("--tools") + 1], "")
+            self.assertEqual(kwargs["timeout"], 90)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            return actual(argv, **kwargs)
+
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            for offset, expected in ((539, 0), (540, 1), (1079, 1), (1080, 2)):
+                with unittest.mock.patch.object(run.time, "time", return_value=before + offset):
+                    d = Dispatcher(Desk(self.desk.root))  # no interval reset on restarting serve
+                    d.probe_providers(s)
+                    self.join_provider_probes(d)
+                    self.assertEqual(len(calls), expected)
+                if expected == 1:
+                    self.assertEqual(self.desk.provider_state()["claude"]["cool_until"], until)
+        self.assertEqual(calls, [before + 540, before + 1080])
+        for desk in (self.desk, other):
+            self.assertFalse(provider_problem(desk, desk.settings(), "claude"))
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.assertFalse(self.events("provider_credit"))
+
+    def test_quota_probe_only_for_work_waiting_on_that_provider(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["providers"]["spare"] = {**s["providers"]["claude"], "config_dir": str(self.tmp / "spare")}
+        s["lanes"]["b"] = {**s["lanes"]["a"], "providers": ["spare"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.quota_probe_rest()
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            d.probe_providers(s)  # empty queue
+            tid = self.desk.new_task("Work elsewhere", lane="b")
+            d.probe_providers(s)
+            self.desk.update(tid, lane="a", attempts=[{"provider": "claude", "kind": "refused"}])
+            d.probe_providers(s)
+            self.desk.update(tid, attempts=[])
+            s["lanes"]["a"]["providers"].append("spare")
+            self.assertEqual(self.desk.save_settings(s), [])
+            d.probe_providers(s)  # a ready alternative
+            check.assert_not_called()
+            self.desk.update(tid, attempts=[{"provider": "claude", "kind": "network"}])
+            d.probe_providers(s)  # a dropped run waits for its original provider
+            self.join_provider_probes(d)
+            check.assert_called_once_with(self.desk, "claude", quota_probe=True)
+
+    def test_quota_probe_skips_short_and_fixed_rests(self):
+        from hansa import run
+        self.desk.new_task("Wait", lane="a")
+        s = self.desk.settings()
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            for text, age, words in (("usage limit resets in 45 minutes", 1800, "within the next check interval"),
+                                     ("usage limit", 0, "no reset time was recorded")):
+                with self.subTest(text=text):
+                    self.quota_probe_rest(text=text, age=age)
+                    d = Dispatcher(self.desk)
+                    d.probe_providers(s)
+                    check.assert_not_called()
+                    self.assertIn(words, self.hansa("explain", "provider", "claude"))
+                    self.assertIn(words, self.hansa("status"))
+            self.quota_probe_rest()
+            d.probe_providers(s)
+            self.join_provider_probes(d)
+            check.assert_called_once()
+
+    def test_quota_probe_never_checks_other_kinds_of_rest(self):
+        from hansa import run
+        self.desk.new_task("Wait", lane="a")
+        s = self.desk.settings()
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            for kind in ("key", "login", "unknown", "credit"):
+                with self.subTest(kind=kind):
+                    self.quota_probe_rest(kind=kind)
+                    self.desk.set_provider_state("claude", unreachable_since=time.time() - 3600)
+                    d = Dispatcher(self.desk)
+                    d.probe_providers(s)
+                    check.assert_not_called()
+                    for output in (self.hansa("status"), self.hansa("explain", "provider", "claude")):
+                        self.assertIn("not a usage-limit rest", output)
+
+    def test_quota_probe_failure_preserves_the_rest_for_every_error(self):
+        from hansa import rests, run
+        other = self.shared_rest_desks()
+        self.desk.new_task("Wait", lane="a")
+        for result, stderr in (({"is_error": True, "api_error_status": 429,
+                                "result": "usage limit resets in 20 hours"}, ""),
+                               ({"is_error": True, "api_error_status": 402, "result": "credit balance too low"}, ""),
+                               ({"is_error": True, "api_error_status": 401, "result": "Invalid API key"}, ""),
+                               ({"is_error": True, "result": "Not logged in · Please run /login"}, ""),
+                               ({}, "Connection dropped"), ({}, "not json")):
+            with self.subTest(result=result, stderr=stderr):
+                self.quota_probe_rest()
+                self.desk.set_provider_state("claude", quota_probe_at=0)
+                before = self.desk.provider_state()["claude"]
+                shared = rests.rests_file().read_bytes()
+                d = Dispatcher(self.desk)
+                with unittest.mock.patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        [], 1, json.dumps(result), stderr)) as request:
+                    d.probe_providers(self.desk.settings())
+                    self.join_provider_probes(d)
+                request.assert_called_once()
+                after = self.desk.provider_state()["claude"]
+                self.assertFalse(after["check"]["ok"])
+                for key in set(before) | set(after):
+                    if key not in ("check", "quota_probe_at"):
+                        self.assertEqual(after.get(key), before.get(key), key)
+                self.assertEqual(rests.rests_file().read_bytes(), shared)
+                self.assertEqual(other.provider_state()["claude"]["cool_until"], before["cool_until"])
+        self.assertFalse(self.events("provider_credit"))
+
+    def test_quota_probe_repeated_limit_disables_only_that_rest(self):
+        from hansa import run
+        self.net_lane("limit", 2, FAKE_LIMIT_TEXT="usage limit resets in 6 hours")
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        d = Dispatcher(self.desk)
+        for number in (1, 2):
+            end = time.monotonic() + 120
+            while time.monotonic() < end and len(self.desk.meta(tid).get("attempts", [])) < number:
+                d.tick()
+                time.sleep(0.02)
+            m = self.desk.meta(tid)
+            self.assertEqual(len(m.get("attempts", [])), number)
+            self.assertEqual(m["state"], "queued")
+            self.assertEqual(run.tries_used(m["attempts"]), 0)
+            if number == 1:
+                self.desk.set_provider_state("claude", cool_since=time.time() - 1805)
+                d.probe_providers(self.desk.settings())
+                self.join_provider_probes(d)
+                self.assertFalse(provider_problem(self.desk, self.desk.settings(), "claude"))
+            else:
+                with unittest.mock.patch.object(run.time, "time", return_value=time.time() + 1805):
+                    d.probe_providers(self.desk.settings())
+                    self.join_provider_probes(d)
+        self.assertEqual(len(self.events("provider_checked")), 1)
+        until = self.desk.provider_state()["claude"]["cool_until"]
+        fresh = Dispatcher(Desk(self.desk.root))
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            fresh.probe_providers(self.desk.settings())
+            check.assert_not_called()
+        for output in (self.hansa("status"), self.hansa("explain", "provider", "claude")):
+            self.assertIn("hit the usage limit again after a successful automatic check", output)
+        self.assertEqual(self.desk.provider_state()["claude"]["cool_until"], until)
+        self.assertIn("claude: ok", self.hansa("ping", "claude"))
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.assertEqual(run.LIMIT_RETURNS, 5)
+
+    def test_quota_probe_pause_disk_and_memory_floors(self):
+        from hansa import run
+        self.desk.new_task("Wait", lane="a")
+        self.quota_probe_rest()
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            self.desk.pause("hold")
+            Dispatcher(self.desk).tick()
+            self.desk.resume()
+            self.free = 0
+            Dispatcher(self.desk).tick()
+            self.free = 500 * 10 ** 9
+            self.memory_reading(available=0)
+            Dispatcher(self.desk).tick()
+            check.assert_not_called()
+            self.memory_reading()
+            d = Dispatcher(self.desk)
+            d.tick()
+            self.join_provider_probes(d)
+            check.assert_called_once_with(self.desk, "claude", quota_probe=True)
+
+    def test_quota_probe_single_flight_does_not_hold_dispatch(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["providers"]["other"] = {**s["providers"]["claude"], "config_dir": str(self.tmp / "other")}
+        s["lanes"]["b"] = {**s["lanes"]["a"], "providers": ["other"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.new_task("Wait", lane="a")
+        other = self.desk.new_task("Add hello.txt", lane="b")
+        self.quota_probe_rest()
+        started, release = threading.Event(), threading.Event()
+        actual, calls = subprocess.run, []
+
+        def answer(argv, **kwargs):
+            if kwargs.get("input") != "Reply with the single word OK.":
+                return actual(argv, **kwargs)
+            calls.append(argv)
+            started.set()
+            self.assertTrue(release.wait(120), "other lane did not finish while check waited")
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            try:
+                d.tick()
+                self.assertTrue(started.wait(30), "serve did not start its provider check")
+                self.desk.set_provider_state("claude", quota_probe_at=0)  # even another due interval cannot overlap
+                self.assertEqual(self.settle(d, other)["state"], "done")
+                self.assertEqual(len(calls), 1)
+            finally:
+                release.set()
+                self.join_provider_probes(d)
+        self.assertIn("no answer in 90s", self.desk.provider_state()["claude"]["check"]["detail"])
+
+    def test_quota_probe_shared_rest_and_repeated_limit(self):
+        from hansa import run
+        other = self.shared_rest_desks()
+        self.desk.new_task("Wait", lane="a")
+        self.quota_probe_rest(desk=other)
+        d = Dispatcher(self.desk)
+        d.probe_providers(self.desk.settings())
+        self.join_provider_probes(d)
+        self.assertEqual(len(self.events("provider_checked")), 1)
+        self.assertFalse(provider_problem(other, other.settings(), "claude"))
+        self.quota_probe_rest(desk=other, age=0)
+        other.set_provider_state("claude", cool_since=time.time() - 1805)
+        self.assertTrue(other.provider_state()["claude"]["quota_probe_blocked"])
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            d.probe_providers(self.desk.settings())
+            check.assert_not_called()
+        self.assertIn("hit the usage limit again", self.hansa("status"))
+
+    def test_quota_probe_status_and_explain_name_the_interval(self):
+        s = self.desk.settings()
+        s["cool_minutes"] = 9
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.quota_probe_rest()
+        for output in (self.hansa("status"), self.hansa("explain", "provider", "claude")):
+            self.assertIn("automatically every 9 minutes while work waits", output)
+            self.assertIn("reset time its error gave", output)
+
+    def test_quota_probe_successful_work_consumes_the_repeated_limit_guard(self):
+        from hansa import run
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        self.quota_probe_rest()
+        d = Dispatcher(self.desk)
+        d.probe_providers(self.desk.settings())
+        self.join_provider_probes(d)
+        self.assertEqual(len(self.events("provider_checked")), 1)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.quota_probe_rest(age=0)
+        self.assertFalse(self.desk.provider_state()["claude"]["quota_probe_blocked"])
+        self.desk.new_task("Next task", lane="a")
+        # Wait the interval by advancing the clock only for the scheduler, preserving rest identity.
+        with unittest.mock.patch.object(run.time, "time", return_value=time.time() + 1805):
+            d = Dispatcher(self.desk)
+            d.probe_providers(self.desk.settings())
+            self.join_provider_probes(d)
+        self.assertEqual(len(self.events("provider_checked")), 2)
+
+    def test_quota_probe_stops_at_exactly_one_interval_left_and_expires_normally(self):
+        from hansa import run
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        until = self.quota_probe_rest()
+        with unittest.mock.patch.object(run.time, "time", return_value=until - 1800), \
+                unittest.mock.patch.object(run, "check_provider") as check:
+            Dispatcher(self.desk).probe_providers(self.desk.settings())
+            check.assert_not_called()
+            self.assertIn("within the next check interval", self.hansa("status"))
+        self.desk.set_provider_state("claude", cool_until=time.time() - 1, quota_probe_blocked=True)
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.quota_probe_rest(age=0)
+        self.assertFalse(self.desk.provider_state()["claude"]["quota_probe_blocked"])
+
     def test_a_limit_s_reset_time_is_read_in_each_form(self):
         from datetime import datetime, timedelta, timezone
         from zoneinfo import ZoneInfo
@@ -18458,7 +18748,8 @@ def save():'''))
             self.assertRegex(entry["source"], r"^[0-9a-f]{64}$")
             self.assertRegex(entry["provider"], r"^[0-9a-f]{64}$")
             self.assertEqual(entry["model"], rests.fingerprint("opus"))
-            self.assertEqual(set(entry), {"source", "provider", "model", "cool_since", "cool_until"})
+            self.assertEqual(set(entry), {"source", "provider", "model", "cool_since", "cool_until",
+                                          "cool_reset", "quota_probe_blocked"})
         s = other.settings()
         s["providers"]["claude"]["base_url"] = "https://different.example.invalid"
         self.assertEqual(other.save_settings(s), [])
@@ -18641,7 +18932,8 @@ def save():'''))
         with unittest.mock.patch.object(rests, "write_json", side_effect=PermissionError("unwritable")):
             run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "local limit")
         self.assertIn("local limit", provider_problem(self.desk, self.desk.settings(), "claude"))
-        for malformed in (None, [], {"credit_since": "bad"}, {"cool_until": float("inf")}):
+        for malformed in (None, [], {"credit_since": "bad"}, {"cool_until": float("inf")},
+                          {"quota_probe_ok": "bad"}, {"cool_reset": float("inf")}):
             write_json(path, {rests.login(other, "claude", other.settings()["providers"]["claude"]): malformed})
             self.assertIn("local rest", provider_problem(other, other.settings(), "claude"))
 

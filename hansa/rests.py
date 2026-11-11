@@ -52,7 +52,7 @@ def record(desk, name, *, checked=False, **fields):
                 checked_rest = fingerprint([key, entry.get("cool_since", 0)])
                 if entry.get("model") not in (None, fingerprint(p["model"])):
                     return checked_rest
-                entry.update(cool_until=0, cool_cleared=time.time())
+                entry.update(cool_until=0, cool_cleared=time.time(), quota_probe_ok=fields.get("quota_probe_ok", 0))
             else:
                 entry.update(fields, source=fingerprint(str(desk.root)))
                 if "cool_since" in fields:
@@ -74,13 +74,15 @@ def include(desk, states):
             entry = entries.get(key)
             if not isinstance(entry, dict):
                 continue
-            credit, until, cleared, since, cool_cleared = (entry.get(k, 0) for k in
-                ("credit_since", "cool_until", "credit_cleared", "cool_since", "cool_cleared"))
+            credit, until, cleared, since, cool_cleared, reset, probe_ok = (entry.get(k, 0) for k in
+                ("credit_since", "cool_until", "credit_cleared", "cool_since", "cool_cleared", "cool_reset", "quota_probe_ok"))
             if not all(isinstance(x, (int, float)) and 0 <= x < float("inf")
-                       for x in (credit, until, cleared, since, cool_cleared)):
+                       for x in (credit, until, cleared, since, cool_cleared, reset, probe_ok)):
                 continue
             credit = credit if credit > cleared else 0
             st = states.setdefault(name, {})
+            if entry.get("model") in (None, fingerprint(p["model"])) and probe_ok:
+                st["quota_probe_ok"] = max(st.get("quota_probe_ok", 0), probe_ok)
             if st.get("credit_since") and st["credit_since"] <= cleared:
                 st["credit_since"] = 0
             # Keep this distinction while usage limits can belong to one configured model: a check
@@ -98,7 +100,9 @@ def include(desk, states):
             if credit or until > time.time():
                 if not st.get("credit_since") and (credit or until > st.get("cool_until", 0)):
                     st.update(credit_since=credit, cool_until=until, shared_rest=True,
-                              reason="another desk found the usage limit", rest_how="shared", rest_minutes=None)
+                              reason="another desk found the usage limit", rest_how="shared", rest_minutes=None,
+                              cool_since=since, cool_reset=reset,
+                              quota_probe_blocked=entry.get("quota_probe_blocked", False))
         except (OSError, ValueError):
             continue
     return states

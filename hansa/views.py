@@ -16,7 +16,7 @@ from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shar
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError)
 from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
-                  credit_text, provider_problem, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
+                  credit_text, provider_problem, providers_waited_for, quota_probe_text, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_detail, waiting_looks, write_list)
 
 STATES = {
@@ -1018,6 +1018,7 @@ def status(desk: Desk) -> dict:
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
                        "rest_minutes": s.get("cool_minutes", 30),
                        "credit_since": pst.get(n, {}).get("credit_since", 0),
+                       "automatic_check": quota_probe_text(pst.get(n, {}), s),
                        "problem": provider_status_problem(desk, s, n, queued), "check": pst.get(n, {}).get("check")}
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
@@ -1197,7 +1198,8 @@ def status_text(st: dict) -> str:
     rests = [rest_words(p) for p in st["providers"]]
     wr = max(map(len, rests), default=0)
     for p, rest in zip(st["providers"], rests):
-        out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {rest:<{wr}}  {p['problem'] or 'ready'}")
+        out.append(f"  {p['name']:<{wn}}  {p['kind']:<12}  {p['model']:<{wm}}  {rest:<{wr}}  {p['problem'] or 'ready'}"
+                   + (f"; {p['automatic_check']}" if p.get("automatic_check") else ""))
     shown_releases = [r for r in st.get("releases") or [] if r["state"] in release.OPEN
                       or any(h.get("kind") == "pattern_limit" for h in r.get("hits") or [])]
     if shown_releases or st.get("after_merge_waiting"):
@@ -1227,14 +1229,7 @@ def provider_status_problem(desk: Desk, s: dict, name: str, queued: list) -> str
     problem = provider_problem(desk, s, name)
     if not (desk.provider_state().get(name) or {}).get("unreachable_since"):
         return problem
-    waiting = 0
-    for m in queued:
-        lanes = [m["lane"]] if m.get("lane") else s["lanes"]
-        providers = {p for ln in lanes if ln in s["lanes"] and not work_lane_problem(s, ln,
-                     verifying=m.get("kind") == "verify" and bool(m.get("lane")))
-                     for p in task_providers(s, ln, m) if p not in refused_by(m)}
-        if name in providers and not any(not provider_problem(desk, s, p) for p in providers):
-            waiting += 1
+    waiting = providers_waited_for(desk, s, queued).get(name, 0)
     return problem + f"; {waiting} {'task waits' if waiting == 1 else 'tasks wait'} for it"
 
 
@@ -2092,6 +2087,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"  {'login' if p['kind'] == 'subscription' else 'endpoint'}: {where}"
             + ("" if p["kind"] == "subscription" else f" · key: {'present' if desk.has_key(name) else 'missing'}"),
             f"  now: {provider_problem(desk, s, name) or 'ready'}",
+            *([f"  {quota_probe_text(st, s)}"] if quota_probe_text(st, s) else []),
             f"  last ping: {st.get('check') or 'never'}"])
     if what == "task":
         return show_text(desk, name)
