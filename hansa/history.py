@@ -100,6 +100,8 @@ def record(desk, old: dict, new: dict, by: str = "", command: str = ""):
             if (any(p.lower() in SECRET_FIELDS for p in parts) or _private(before, keys)
                     or _private(after, keys)):
                 entry["redacted"] = True
+                if parts[-1].lower() in SECRET_FIELDS and (isinstance(after, str) or after is MISSING):
+                    entry["secret_action"] = "cleared" if after is MISSING or after == "" else "set"
             else:
                 for side, value in (("old", before), ("new", after)):
                     if value is MISSING:
@@ -152,7 +154,8 @@ def read(desk, kind: str = "", name: str = "", last: int | None = None) -> dict:
         for field in ("by", "command", "path"):
             if field in entry:
                 entry[field] = _clean(entry[field], keys)
-        entry["change"] = ("changed (values withheld)" if entry.get("redacted")
+        action = entry.get("secret_action")
+        entry["change"] = ((action if action in ("set", "cleared") else "changed") + " (values withheld)" if entry.get("redacted")
                            else f"{_value(entry, 'old')} → {_value(entry, 'new')}")
     return {"recording_since": since, "entries": entries}
 

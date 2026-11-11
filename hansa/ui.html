@@ -797,6 +797,11 @@ Object.assign(T, ZH ? {
   readOnly:"只读", learnMore:"查看完整说明", advanced:"其余各项（只读）", connection:"连接信息",
   keySeparate:"密钥单独保存，不随“保存设置”提交。", keyPending:"有密钥尚未保存，请在模型服务商中单独保存。", keySaved:"密钥已保存。", keyCleared:"密钥已清除。",
   invalidName:"名称只能包含小写字母、数字和连字符，且不能重复。", invalidModel:"模型名称不能为空或重复。",
+  providerUsedByCoordinator:name => `不能移除 ${name}：协调员正在使用它。请先为协调员选择另一家服务商。`,
+  providerUsedByLanes:(name, lanes) => `不能移除 ${name}：工作线 ${lanes} 正在使用它。工作线由协调员更换服务商，请先让协调员将这些工作线移到另一家服务商。`,
+  defaultMinutes:n => `留空使用默认值 ${n} 分钟。`, defaultTokens:n => `留空使用默认值 ${n} token。`,
+  compactIdleWarning:"警告：空闲压缩阈值大于或等于工作压缩阈值，空闲时不会触发压缩。",
+  historyKeySet:"已设置（密钥不显示）", historyKeyCleared:"已清除（密钥不显示）",
   providerName:"服务商名称", priceName:"模型名称", baseModel:"模型（空＝用服务商的）",
   cooldown:"额度用完后休息（分钟）", contextTitle:"上下文压缩", compactHint:"范围 100,000–1,000,000 token。详细生效方式见说明。",
   protectedPaths:"不可读取的路径", protectedHint:"每行一个绝对路径。常见登录信息、密钥与浏览器数据已内置保护。",
@@ -873,6 +878,11 @@ Object.assign(T, ZH ? {
   readOnly:"Read only", learnMore:"Full explanation", advanced:"Other fields (read only)", connection:"Connection",
   keySeparate:"Keys are saved separately from Save settings.", keyPending:"Some keys are unsaved. Save them separately under Providers.", keySaved:"Key saved.", keyCleared:"Key cleared.",
   invalidName:"Use a unique name with lowercase letters, digits and hyphens.", invalidModel:"Enter a unique, non-empty model name.",
+  providerUsedByCoordinator:name => `Cannot remove ${name}: the coordinator uses it. Choose another provider for the coordinator first.`,
+  providerUsedByLanes:(name, lanes) => `Cannot remove ${name}: lanes ${lanes} use it. The coordinator moves lanes to another provider; ask the coordinator to do that first.`,
+  defaultMinutes:n => `Blank uses the default, ${n} minutes.`, defaultTokens:n => `Blank uses the default, ${n} tokens.`,
+  compactIdleWarning:"Warning: the idle compaction threshold is at or above the working threshold, so compaction will not happen when idle.",
+  historyKeySet:"set (values withheld)", historyKeyCleared:"cleared (values withheld)",
   providerName:"Provider name", priceName:"Model name", baseModel:"Model (blank = the provider's)",
   cooldown:"Rest after a usage limit (minutes)", contextTitle:"Context management", compactHint:"100,000–1,000,000 tokens. See the explanation for when each applies.",
   protectedPaths:"Paths workers must not read", protectedHint:"One absolute path per line. Common logins, keys and browser data are already protected.",
@@ -1834,7 +1844,7 @@ let PUSH_NEW = emptyPush();
 const pushDraft = entry => PUSH_DRAFTS[entry.id] ||= {service:entry.service, on:entry.on, name:entry.name || "", address:"", secret:"", remove:false, clearSecret:false};
 function pushChanges() {
   const changes = [];
-  const hasSecret = draft => draft.service === "bark" ? draft.secret.length > 0 : !!draft.secret.trim();
+  const hasSecret = draft => !!draft.secret.trim();
   for (const entry of PUSH_ENTRIES) {
     const d = pushDraft(entry), edit = {id:entry.id};
     if (d.remove) { changes.push({...edit, remove:true}); continue; }
@@ -1889,6 +1899,7 @@ const pushProblem = problem => {
 // Drafts live only in this page's memory. In particular, keys never enter browser storage or settings JSON.
 let settingsBaseline = null, settingsLoading = null, settingsSaving = false, settingsGroup = "providers", settingsEpoch = 0;
 let settingsMessage = "", settingsProblems = [], KEY_DRAFTS = {}, newProviderName = "", newPriceName = "";
+let settingsDefaults = {};
 let settingsRebase = "", keyProblemProvider = "";
 let settingsPending = "save", settingsFailure = "", fieldRecords = [];
 let settingsForm, settingsSaveButton, settingsDiscardButton, settingsBadge, settingsSaveState;
@@ -1920,6 +1931,7 @@ function settingsSavedMessage(settings) {
   const before = JSON.parse(settingsBaseline || "{}");
   const changed = key => settingText(settings[key]) !== settingText(before[key]);
   const compactChanged = key => settingText(settings.coordinator_compact?.[key]) !== settingText(before.coordinator_compact?.[key]);
+  const compact = {...settingsDefaults.coordinator_compact, ...settings.coordinator_compact};
   return [T.saved,
     changed("prices") ? T.savedPrices : null,
     changed("providers") ? T.savedProviders : null,
@@ -1928,7 +1940,8 @@ function settingsSavedMessage(settings) {
     changed("coordinator") || compactChanged("working_at") ? T.savedCoordinator : null,
     compactChanged("idle_at") ? T.savedIdle : null,
     GROUP_KEYS.releases.some(changed) ? T.savedReleases : null,
-    (GROUP_KEYS.alerts.some(changed) || pushDraftDirty()) ? T.savedAlerts : null].filter(Boolean).join(" ");
+    (GROUP_KEYS.alerts.some(changed) || pushDraftDirty()) ? T.savedAlerts : null,
+    compact.idle_at >= compact.working_at ? T.compactIdleWarning : null].filter(Boolean).join(" ");
 }
 function groupDirty(key) {
   if (!S || settingsBaseline === null) return false;
@@ -2026,6 +2039,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   // A clean page may refresh on return, but a reply must never replace edits begun while it was in flight.
   if (background && (epoch !== settingsEpoch || settingsSaving || settingsDirty() || JSON.stringify(S) !== before || newProviderName || newPriceName)) return;
   S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
+  settingsDefaults = r.settings_defaults || {};
   CREDIT_RESTS = r.provider_credit || {};
   RELEASE_UNMATCHED = r.release_unmatched || []; RELEASE_LAST = r.release_last || {}; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
@@ -2047,6 +2061,11 @@ async function loadSettings(problems, keepKeys = false, background = false) {
 }
 async function saveSettings() {
   if (settingsSaving || !S) return;
+  const pendingNames = ["provider", "price"].filter(kind => (kind === "provider" ? newProviderName : newPriceName) !== "");
+  const nameProblems = pendingNames.map(settingsNameProblem).filter(Boolean);
+  if (nameProblems.length) { settingsFailure = "save"; renderSettings(nameProblems); return; }
+  for (const kind of pendingNames) addSettingsName(kind);
+  if (pendingNames.length) renderSettings([]);
   settingsEpoch++;
   settingsPending = "save"; settingsSaving = true; settingsMessage = ""; settingsRebase = ""; settingsFailure = ""; keyProblemProvider = ""; refreshSettingsState();
   let saved = false;
@@ -2279,7 +2298,12 @@ function laneFields(l) {
 }
 function bind(obj, key, kind) {
   const set = el => {
-    if (kind === "number") { if (el.value === "") delete obj[key]; else obj[key] = Number(el.value); }
+    if (kind === "number") {
+      if (el.value === "") {
+        if (obj === S && key === "cool_minutes") obj[key] = settingsDefaults.cool_minutes;
+        else delete obj[key];
+      } else obj[key] = Number(el.value);
+    }
     else if (kind === "bool") obj[key] = el.checked;
     else obj[key] = el.value;
     refreshSettingsState();
@@ -2290,6 +2314,12 @@ function bind(obj, key, kind) {
   return input;
 }
 function pick(obj, key, options, labels) {
+  // Keep an unknown value visible so the browser cannot silently show another choice.
+  const value = obj[key] || "";
+  if (!options.includes(value)) {
+    options = [value, ...options];
+    if (labels) labels = [value || T.effortDefault, ...labels];
+  }
   const select = h("select", {onchange: e => { obj[key] = e.target.value; refreshSettingsState(); }},
     options.map((o, i) => h("option", {value:o, selected: (obj[key] || "") === o}, labels ? labels[i] : (o || T.effortDefault))));
   select._settingMeta = controlMeta(obj, key);
@@ -2322,10 +2352,10 @@ function alertSection() {
     h("div", {class:"row"}, test, said)),
     pushSection(),
     section(T.alertTiming, fields(
-      field(T.noSessionShort, bind(S.coordinator_alert, "no_session_min", "number")),
-      field(T.windowShort, bind(S.coordinator_alert, "window_min", "number")),
-      field(T.reviewShort, bind(S.coordinator_alert, "review_min", "number")),
-      field(T.turnShort, bind(S.coordinator_alert, "turn_min", "number"))), help(T.alertCoordinatorNote))];
+      field(T.noSessionShort, bind(S.coordinator_alert, "no_session_min", "number"), T.defaultMinutes(settingsDefaults.coordinator_alert?.no_session_min)),
+      field(T.windowShort, bind(S.coordinator_alert, "window_min", "number"), T.defaultMinutes(settingsDefaults.coordinator_alert?.window_min)),
+      field(T.reviewShort, bind(S.coordinator_alert, "review_min", "number"), T.defaultMinutes(settingsDefaults.coordinator_alert?.review_min)),
+      field(T.turnShort, bind(S.coordinator_alert, "turn_min", "number"), T.defaultMinutes(settingsDefaults.coordinator_alert?.turn_min))), help(T.alertCoordinatorNote))];
 }
 // A minutes box of the coordinator alert left empty takes its default: the save says which (hansa/web.py)
 const MINUTES_LABELS = {no_session_min:"noSessionShort", window_min:"windowShort", review_min:"reviewShort", turn_min:"turnShort"};
@@ -2367,7 +2397,8 @@ function pushSection() {
       }
     };
     const input = (key, label, hint = "", type = "text") => {
-      const el = h("input", {type, value:draft[key], autocomplete:"off", "aria-label":label, "data-push-field":key,
+      const barkSecret = key === "secret" && draft.service === "bark";
+      const el = h("input", {type, value:barkSecret ? draft[key].replace(/[\r\n]/g, " ") : draft[key], autocomplete:"off", "aria-label":label, "data-push-field":key,
         onpaste:e => {
           if (key !== "secret" || draft.service !== "bark") return;
           // Password inputs strip line breaks. Preserve the copied script in
@@ -2375,7 +2406,8 @@ function pushSection() {
           e.preventDefault(); draft[key] = e.clipboardData.getData("text"); draft.clearSecret = false;
           e.target.value = draft[key].replace(/[\r\n]/g, " "); refreshSettingsState();
         },
-        oninput:async e => { draft[key] = e.target.value; if (key === "secret") draft.clearSecret = false; refreshSettingsState();
+        oninput:async e => { draft[key] = barkSecret ? editedBarkSecret(draft[key], e.target.value) : e.target.value;
+          if (key === "secret") draft.clearSecret = false; refreshSettingsState();
           if (key === "address") await updatePreview(); }});
       return field(label, type === "password" ? passwordControl(el) : el, hint, "", true);
     };
@@ -2467,6 +2499,38 @@ function releaseTicks() {
             h("div", {class:"mono release-tick-command", title:was}, was)] : T.releaseGoneUnknown))));
   }));
 }
+// A masked single-line input displays script line breaks as spaces. Retain the
+// original lines outside the edit, so typing after a paste still parses the script.
+function editedBarkSecret(before, value) {
+  const displayed = before.replace(/[\r\n]/g, " ");
+  let start = 0, end = 0;
+  while (start < displayed.length && start < value.length && displayed[start] === value[start]) start++;
+  while (end < displayed.length - start && end < value.length - start
+      && displayed[displayed.length - 1 - end] === value[value.length - 1 - end]) end++;
+  return before.slice(0, start) + value.slice(start, value.length - end) + before.slice(before.length - end);
+}
+function settingsNameProblem(kind) {
+  const name = (kind === "provider" ? newProviderName : newPriceName).trim();
+  return kind === "provider" ? (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name) || S.providers[name] ? T.invalidName : "")
+    : (!name || S.prices[name] ? T.invalidModel : "");
+}
+function addSettingsName(kind) {
+  const problem = settingsNameProblem(kind);
+  if (problem) return problem;
+  if (kind === "provider") {
+    S.providers[newProviderName.trim()] = {kind:"compatible", model:"", effort:"", base_url:""}; newProviderName = "";
+  } else {
+    S.prices[newPriceName.trim()] = {in:0, out:0}; newPriceName = "";
+  }
+  return "";
+}
+function removeProvider(name) {
+  const lanes = Object.entries(S.lanes).filter(([, lane]) => (lane.providers || []).includes(name)).map(([name]) => name);
+  const problems = [S.coordinator.provider === name ? T.providerUsedByCoordinator(name) : "",
+    lanes.length ? T.providerUsedByLanes(name, lanes.join(", ")) : ""].filter(Boolean);
+  if (problems.length) return renderSettings(problems);
+  delete S.providers[name]; delete KEY_DRAFTS[name]; renderSettings([]);
+}
 function renderSettings(problems = settingsProblems) {
   settingsProblems = (problems || []).map(pushProblem);
   exceptionRefreshers = []; fieldRecords = [];
@@ -2485,7 +2549,7 @@ function renderSettings(problems = settingsProblems) {
         return h("div", {class:"lane"},
           h("div", {class:"card-head"}, h("strong", {}, name), h("span", {class:"tag"}, p.kind === "compatible" ? T.compatible : T.subscription),
             h("div", {class:"card-actions"}, checkButton(name, null),
-              h("button", {class:"danger", onclick:() => { delete S.providers[name]; delete KEY_DRAFTS[name]; renderSettings(); }}, T.remove))),
+              h("button", {class:"danger", onclick:() => removeProvider(name)}, T.remove))),
           CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, CREDIT_RESTS[name]),
             h("button", {onclick:() => topUpProvider(name)}, T.toppedUp)) : null,
           fields(field(T.kind, kindSel), field(T.model, bind(p, "model")), field(T.effort, pick(p, "effort", EFFORTS)),
@@ -2500,18 +2564,16 @@ function renderSettings(problems = settingsProblems) {
               : [field(T.loginDir, bind(p, "config_dir"), "", "", true)])));
       }),
       h("div", {class:"row add-row"}, newProv, h("button", {onclick:() => {
-        const n = newProviderName.trim();
-        if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(n) || S.providers[n]) return renderSettings([T.invalidName]);
-        S.providers[n] = {kind:"compatible", model:"", effort:"", base_url:""}; newProviderName = ""; renderSettings([]);
+        const problem = addSettingsName("provider"); renderSettings(problem ? [problem] : []);
       }}, T.addProvider))),
-      section(T.cooldown, fields(field(T.cooldown, bind(S, "cool_minutes", "number"))))],
+      section(T.cooldown, fields(field(T.cooldown, bind(S, "cool_minutes", "number"), T.defaultMinutes(settingsDefaults.cool_minutes))))],
     coordinator: [
       section(T.compactTitle, fields(
         field(T.provider, pick(S.coordinator, "provider", Object.keys(S.providers), Object.keys(S.providers))),
         field(T.baseModel, bind(S.coordinator, "model")), field(T.effort, pick(S.coordinator, "effort", EFFORTS)))),
       section(T.contextTitle, fields(
-        field(T.compactIdle, bind(S.coordinator_compact, "idle_at", "number")),
-        field(T.compactWorking, bind(S.coordinator_compact, "working_at", "number"))),
+        field(T.compactIdle, bind(S.coordinator_compact, "idle_at", "number"), T.defaultTokens(settingsDefaults.coordinator_compact?.idle_at)),
+        field(T.compactWorking, bind(S.coordinator_compact, "working_at", "number"), T.defaultTokens(settingsDefaults.coordinator_compact?.working_at))),
         h("p", {class:"field-note"}, T.compactHint), help(T.compactNote))],
     lanes: [
       dispatchSection(),
@@ -2553,7 +2615,7 @@ function renderSettings(problems = settingsProblems) {
         field(T.exceptionsTitle, forbiddenExceptions(), "", T.releaseForbiddenExcept, true),
         field(T.mailboxTitle, (() => { const input = bind(S, "release_mailboxes", "bool"); input.setAttribute("id", "release-mailboxes"); return input; })(), T.mailboxChecks, T.releaseMailboxes, true),
         field(T.mailboxAllowTitle, h("textarea", {id:"release-mailbox-allow", placeholder:"maintainer@example.com\n@project.example", oninput:e => {
-          S.release_mailbox_allow = e.target.value.split("\n").filter(x => x.trim()); refreshSettingsState();
+          S.release_mailbox_allow = e.target.value.split("\n").map(x => x.trim()).filter(Boolean); refreshSettingsState();
         }}, (S.release_mailbox_allow || []).join("\n")), T.mailboxHint, T.releaseMailboxAllow, true)))],
     alerts: alertSection(),
     prices: [section(T.prices, h("p", {class:"field-note"}, T.pricesNote),
@@ -2562,9 +2624,7 @@ function renderSettings(problems = settingsProblems) {
           const input = bind(p, k, "number"); input.setAttribute("aria-label", `${m} · ${label}`); return input;
         }), h("button", {onclick:() => { delete S.prices[m]; renderSettings(); }}, T.remove)])),
       h("div", {class:"row add-row"}, newPrice, h("button", {onclick:() => {
-        const n = newPriceName.trim();
-        if (!n || S.prices[n]) return renderSettings([T.invalidModel]);
-        S.prices[n] = {in:0, out:0}; newPriceName = ""; renderSettings([]);
+        const problem = addSettingsName("price"); renderSettings(problem ? [problem] : []);
       }}, T.addPrice)))]
   };
   settingsPanels = {}; settingsNavButtons = {};
@@ -2634,7 +2694,8 @@ function loadHistory() {
   historyFlight = api(path).then(data => {
     if (path !== historyPath()) return;
     historyBody.replaceChildren(data.entries.length ? table([T.historyAt, T.historyBy, T.historyPath, T.changes], data.entries.map(e => [
-      when(e.ts), e.by + (e.command ? ` (${e.command})` : ""), e.path, e.change
+      when(e.ts), e.by + (e.command ? ` (${e.command})` : ""), e.path,
+      e.secret_action === "set" ? T.historyKeySet : e.secret_action === "cleared" ? T.historyKeyCleared : e.change
     ])) : h("p", {}, T.historyEmpty));
     historyMore.hidden = data.entries.length < historyLast;
   }).catch(() => {

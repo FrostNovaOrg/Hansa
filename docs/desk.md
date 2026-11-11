@@ -670,7 +670,9 @@ The read-only **Changes** section starts folded. Opening it shows the newest 50
 settings changes: time, actor or command, setting path, and old → new values.
 **Show 50 more** extends the list; filter by a lane or provider name, including a
 removed one. Withheld values stay withheld, and long values retain their recorded
-truncation markers. History loads only when opened and refreshes at most once a
+truncation markers. New key records distinguish setting from clearing a key,
+without recording its value; older records still say only that it changed.
+History loads only when opened and refreshes at most once a
 minute while visible and open, separately from Status. `GET /api/history` uses
 the page token, gzip and ETags, with `last` (default 50) and optional `kind`
 (`lane` or `provider`) plus `name`; invalid filters or limits return HTTP 400.
@@ -681,6 +683,16 @@ may not read, Releases, Alerts and Prices. Select a group in the directory; full
 explanations and other read-only lane fields expand in place. Network, write and
 allowed-command rules remain visible, as do the warnings needed before saving.
 Providers includes the rest minutes that apply to every provider.
+Remove refuses a provider used by the coordinator or any lane. Choose another
+provider for the coordinator first; for lanes, ask the coordinator to move the
+named lanes to another provider before removing it. Selects show the draft's
+value even if it no longer matches a known choice.
+Blank rest minutes use 30; blank coordinator-alert minutes and compaction
+thresholds also use their defaults, shown beside each field. A price's input and
+output rates have no default and must be filled in. Mailbox allow-list lines
+are trimmed at both ends; whitespace inside an entry is still refused.
+Saving an idle compaction threshold at or above the working threshold succeeds
+with a warning that compaction will not happen when idle.
 Lanes starts with Dispatch control, above the read-only concurrency and disk floor.
 It shows whether dispatch is on or paused, including the pause reason. Pause sends
 the optional reason immediately; Resume also takes effect immediately. These
@@ -730,6 +742,9 @@ choose AES-128, AES-192 or AES-256 with mode CBC in Bark, and paste the same
 16, 24 or 32 character ASCII key (or its copied example) into the entry's
 optional encryption key field. Saved encrypted entries are marked on the page,
 in status and in explain; the server and Apple receive ciphertext.
+Leaving that field blank or entering only whitespace keeps the saved key.
+Typing after pasting an encryption example preserves its lines in the draft,
+although the masked field displays them on one line.
 See [push-address setup](releases.md#push-addresses-and-services) for the page's
 controls, and the [service guide](push-services.md), including
 [Bark](push-services.md#bark), for what to paste.
@@ -813,7 +828,10 @@ draft value is kept for settings changed by both. Typed
 keys remain. Nothing is saved until the principal presses Save again. A failed reload keeps
 the draft too. Unsaved markers compare values regardless of object key order;
 a blank optional field counts as unset. Names typed for a new provider or price
-also count as drafts, even before Add. If a save succeeds but its reload fails,
+also count as drafts, even before Add. Save settings adds those names just as
+Add does. A name Add would refuse keeps its text and shows the same reason on
+Save; any later save refusal keeps the added entry available to edit (a new
+provider still needs its model). If a save succeeds but its reload fails,
 the page says that the save succeeded.
 
 Keys are saved separately with each provider's Save key button. An unsaved key

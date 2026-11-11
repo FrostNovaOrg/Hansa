@@ -3378,7 +3378,10 @@ def public_settings(desk: Desk) -> dict:
         problems.append(problem)
     for entry in alert_push.entries(s):
         entry["name"] = desk.redact(entry.get("name", ""))
-    return {"settings": s, "alert_push": alert_push.public(desk), "alert_push_services": alert_services.public(), "alert_language_saved": "alert_language" in desk._saved_settings(),
+    return {"settings": s, "settings_defaults": {"cool_minutes": default_settings()["cool_minutes"],
+                                               "coordinator_compact": dict(COMPACT_DEFAULTS),
+                                               "coordinator_alert": dict(COORDINATOR_ALERT)},
+            "alert_push": alert_push.public(desk), "alert_push_services": alert_services.public(), "alert_language_saved": "alert_language" in desk._saved_settings(),
             "keys": keys, "problems": problems, "rev": rev,
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},

@@ -345,10 +345,12 @@ def apply(desk, writes, removes):
     from .history import record
     failed = []
     for id, value, extra in writes:
+        before = _read(desk, id, extra)
         if not extra and value != _read(desk, id):
             _last_file(desk, id).unlink(missing_ok=True)
         _write_secret(desk, id, value, extra)
-        record(desk, {}, {"alert_push": {id: {"secret": "changed"}}}, "page")
+        record(desk, {"alert_push": {id: {"secret": before}}},
+               {"alert_push": {id: {"secret": value}}}, "page")
     if writes:
         for secret in set(keys(desk).values()):
             failed.extend(desk.scrub(secret, "push"))
