@@ -69,7 +69,8 @@ refused when it is set, since a command is stored and shown as written: have
 it read the key from where the tool keeps it (its own login or config). A target that must follow another is asked only for
 a commit the other one already sent out, and looked at again before it
 starts. Otherwise the page shows it, with its target, with Release and
-Refuse; a target the principal ticks as released without asking (each one
+Refuse. Release takes one tap; the optional refusal reason and Refuse sit
+together on a separate row. A target the principal ticks as released without asking (each one
 on its own) needs no answer while the lane's repository and base branch, the
 target's command and watch command, the target it must follow (its `--after`, or none) and
 whether it is `--fixed` are what they were when the list was saved, and while the desk is not paused: a
@@ -274,6 +275,11 @@ exit 1
 ```
 
 ### Stopping a release
+
+Beside Stop, the page shows a short warning that stopping may leave the server
+partly updated. Tap or click that warning to read the full explanation, including
+TERM, KILL after 30 seconds, and stopping a running watch. It stays open across
+status refreshes while you read, in either page language.
 
 A release can be stopped: the coordinator with `hansa release --stop ID
 [reason]`, the principal with Stop on the page. One that has not started yet
@@ -714,7 +720,7 @@ within 20 seconds of each other go out in one run to every channel that is set u
 one batch at a time, and at most 20 runs an hour: beyond that, alerts are held and go out together in one
 run when the hour frees a run, with a line saying how many were held back
 (the page's test button is not held and is excluded from that count).
-`hansa status` shows how many alerts are currently held and when the hourly limit
+`hansa status`, and the page's status line as a warning, show how many alerts are currently held and when the hourly limit
 frees a run, leaving out answered requests. A run that fails or times out is recorded
 (event `alert_failed` with `channel: "command"`) and `hansa status` shows the last failure with its exit
 code and last lines (none for an alert that held a release's one-time code:

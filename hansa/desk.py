@@ -596,7 +596,7 @@ def forbidden_pattern(entry: str) -> tuple:
             return None, SettingsProblem("the pattern matches the empty string", "empty")
     except Exception as e:
         # Python versions differ in the errors raised for invalid SRE code.
-        return None, f"the pattern does not compile: {e}"
+        return None, SettingsProblem(f"the pattern does not compile: {e}", "compile", error=str(e))
     return pattern, ""
 
 
@@ -731,8 +731,10 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                 continue
             _, why = forbidden_pattern(entry)
             if why:
+                detail = getattr(why, "detail", {})
                 p.append(SettingsProblem(f"release_forbidden entry {i}: {why}", "forbidden_pattern",
-                                         entry=i, reason=getattr(why, "detail", {}).get("code", "unknown"), max=200))
+                                         entry=i, reason=detail.get("code", "unknown"), max=200,
+                                         **detail.get("values", {})))
     exceptions = s.get("release_forbidden_except", [])
     if not forbidden_exceptions_ok(exceptions):
         empty = [x for x in (exceptions if isinstance(exceptions, list) else [])

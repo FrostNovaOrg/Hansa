@@ -686,7 +686,7 @@ def command_hits_text(desk: Desk, lane: str, hits: list) -> str:
 
 def hits_text(hits: list, zh: bool = False) -> str:
     out = []
-    for limit, heading in ((False, "查到的禁发字眼" if zh else "Words found that must not go out"),
+    for limit, heading in ((False, "查到的禁词" if zh else "Words found that must not go out"),
                            (True, "这一行无法检查" if zh else "The line could not be checked")):
         group = [h for h in hits if (h.get("kind") == "pattern_limit") == limit]
         if group:

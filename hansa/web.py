@@ -184,6 +184,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                                        ("Bearer " + token).encode())
 
         def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", *, conditional=False):
+            self.answering = True
             data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
             # Weak validators cover either content coding. Only the public shell may be stored;
             # poll validators and their data live in page memory, with auth checked before _send.
@@ -215,11 +216,25 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
         def _bad_request(self, code: str, field: str, problem: str):
             return self._send(400, {"ok": False, "code": code, "field": field, "problems": [problem]})
 
+        def _failed(self, error):
+            """An answer the page can show, for a failure of the server's own (a record it cannot read, say),
+            where the request would otherwise end with its connection dropped and the page say only that it
+            could not fetch. Not once an answer has begun: then the connection goes."""
+            if getattr(self, "answering", False):
+                raise error
+            self.close_connection = True  # a POST's body may be unread
+            path = urllib.parse.urlparse(self.path).path
+            problem = f"hansa serve could not answer {path}: {type(error).__name__}: {error}"[:500]
+            return self._send(500, {"ok": False, "error": problem, "problems": [problem]})
+
         def do_GET(self):
+            self.answering = False  # one handler answers each request of a kept-alive connection in turn
             try:
                 return self._get()
             except SettingsError as e:
                 return self._settings_unavailable(e)
+            except Exception as e:
+                return self._failed(e)
 
         def _settings_unavailable(self, error):
             return self._send(503, {"ok": False, "code": "settings_unavailable", "problems": [str(error)]})
@@ -306,6 +321,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             return self._send(404, {"error": "not found"})
 
         def do_POST(self):
+            self.answering = False
             if not self._authed() or self.headers.get("X-Hansa") != "1":
                 self.close_connection = True  # the unread body cannot become the next HTTP/1.1 request
                 return self._send(403, {"error": "forbidden"})
@@ -358,6 +374,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 return self._send(400, {"ok": False, "saved": True, "problems": [str(e)]})
             except (KeyError, ValueError, TypeError) as e:
                 return self._send(400, {"ok": False, "problems": [str(e)]})
+            except Exception as e:
+                return self._failed(e)
 
     httpd = http.server.ThreadingHTTPServer((host, port), Page)
     threading.Thread(target=httpd.serve_forever, daemon=True, name="hansa-web").start()

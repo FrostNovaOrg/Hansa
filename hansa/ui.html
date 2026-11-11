@@ -165,7 +165,7 @@ section.push-addresses { overflow-wrap:anywhere; }
 .page-head h1 { margin:0 0 8px; font-size:28px; line-height:1.3; font-weight:650; letter-spacing:-.7px; }
 .page-head p { margin:0; color:var(--muted); font-size:13px; max-width:68ch; }
 .page-head > .status-pill { margin-top:4px; flex:none; }
-.status-pill { display:inline-flex; align-items:center; gap:6px; width:fit-content; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--muted); font-size:11px; line-height:1.5; }
+.status-pill { display:inline-flex; align-items:center; gap:6px; width:fit-content; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--muted); font-size:11px; line-height:1.5; overflow-wrap:normal; }
 .status-pill.ok { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
 .status-pill.warn { color:var(--warn); background:var(--warn-bg); border-color:transparent; }
 .status-pill.bad { color:var(--bad); background:var(--bad-bg); border-color:transparent; }
@@ -190,6 +190,10 @@ section.push-addresses { overflow-wrap:anywhere; }
 .runtime-actions input { min-width:180px; flex:1; }
 .runtime-actions button { min-height:40px; }
 .dashboard-panel table { font-size:12px; }
+/* Status tables scroll as a unit; long values wrap without taking their neighbours' space. */
+#tab-status table { min-width:680px; }
+#tab-status td { min-width:6em; max-width:28em; }
+#tab-status td button { white-space:nowrap; overflow-wrap:normal; }
 .dashboard-panel th { padding-top:0; }
 .dashboard-panel td { padding-top:12px; padding-bottom:12px; }
 .dashboard-panel .mono { font-size:11px; }
@@ -219,6 +223,10 @@ td .task-detail { min-width:200px; }
 .principal-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:6px 0; }
 .principal-actions > input { flex:1 1 180px; min-width:0; }
 .principal-actions > button { max-width:100%; white-space:normal; }
+.release-card > .principal-actions { flex-direction:column; align-items:flex-start; }
+.release-refusal { display:flex; flex-wrap:nowrap; align-items:center; gap:8px; width:100%; max-width:28em; }
+.release-refusal > input { flex:1; min-width:0; }
+.release-refusal > button { flex:none; white-space:nowrap; }
 .principal-details { margin-top:8px; }
 .principal-details > summary { cursor:pointer; color:var(--link); }
 .principal-details pre { margin:7px 0; }
@@ -228,6 +236,7 @@ td .task-detail { min-width:200px; }
 .event-list { max-height:400px; overflow:auto; }
 .event-row { display:grid; grid-template-columns:160px minmax(0,1fr); gap:5px 16px; padding:12px 0; border-top:1px solid var(--line); }
 .event-row:first-child { border-top:0; padding-top:0; }
+.event-other > summary { padding:12px 0; border-top:1px solid var(--line); cursor:pointer; color:var(--muted); font-size:12px; }
 .event-time { color:var(--muted); font-size:11px; }
 .event-name { font-size:12px; font-weight:550; }
 .event-data { grid-column:2; color:var(--muted); }
@@ -280,10 +289,11 @@ td .task-detail { min-width:200px; }
 .work-chart-tooltip { display:none; position:absolute; z-index:2; bottom:60px; left:0; width:max-content; max-width:100%; box-sizing:border-box; padding:8px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; font-size:12px; }
 .work-chart-track:hover .work-chart-tooltip, .work-chart-track:focus .work-chart-tooltip { display:block; }
 @media (max-width:860px) {
-  header { grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:12px 18px; }
-  #tabs { grid-column:1 / -1; grid-row:2; flex-wrap:wrap; }
-  #state { grid-column:1 / -1; grid-row:3; font-size:11px; }
-  #language { grid-column:2; grid-row:1; }
+  header { grid-template-columns:auto minmax(0,1fr) auto; gap:6px 10px; padding:12px 18px; }
+  #title { max-width:160px; }
+  #tabs { grid-column:2; grid-row:1; flex-wrap:nowrap; overscroll-behavior-x:contain; }
+  #state { grid-column:1 / -1; grid-row:2; font-size:11px; }
+  #language { grid-column:3; grid-row:1; }
   main { padding:24px 18px; }
   .settings-layout { grid-template-columns:minmax(0,1fr); gap:20px; }
   .settings-nav { flex-direction:row; overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:thin; scrollbar-color:var(--control-line) transparent; top:calc(var(--header-height) + 6px); z-index:3; box-shadow:var(--shadow); border-radius:10px; }
@@ -298,18 +308,31 @@ td .task-detail { min-width:200px; }
 }
 @media (max-width:640px) { main { padding:16px 12px; } .grid, .facts { grid-template-columns:minmax(0, 1fr); } th, td { padding:7px 6px; } }
 @media (max-width:640px) {
-  header { padding:10px 12px; gap:10px; }
+  header { padding:8px 12px; }
   #title { font-size:14px; } .brand-mark { width:25px; height:25px; }
+  #title .brand-label { display:none; }
   #tabs button { padding:6px 9px; }
   #tabs .icon { display:none; }
-  .settings-head { gap:10px; } .settings-head h1 { font-size:25px; }
-  .settings-head p { font-size:12px; }
+  .settings-head { display:block; position:relative; margin-bottom:8px; }
+  .settings-head .eyebrow { display:none; }
+  .settings-head h1 { font-size:25px; margin-bottom:0; }
+  .settings-head p { display:none; }
+  .settings-head .draft-badge { position:absolute; top:0; right:0; max-width:60%; }
   .draft-badge { padding:5px 8px; font-size:11px; }
-  .settings-group > section { padding:16px; }
-  .settings-group .lane { padding:14px; }
+  .settings-layout { gap:8px; }
+  .settings-group .group-head { gap:8px; margin-bottom:4px; }
+  .settings-group .group-symbol { width:30px; height:30px; }
+  .settings-group .group-head h2 { font-size:17px; }
+  .settings-group .group-head p { font-size:12px; }
+  .settings-group > section { padding:12px; }
+  .settings-group section > h2 { margin-bottom:10px; }
+  .settings-group .lane { padding:12px; }
+  .settings-group .card-head { gap:6px; margin-bottom:6px; }
+  .settings-group .card-actions button { font-size:12px; padding:6px 8px; min-height:32px; }
   .form-fields, .settings-group .facts { grid-template-columns:minmax(0,1fr); }
-  .settings-footer { gap:9px; padding:12px; bottom:8px; }
-  .settings-footer .save-state { flex-basis:100%; }
+  .settings-footer { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px 8px; padding:8px; bottom:8px; }
+  .settings-footer .save-state { grid-column:1 / -1; font-size:11px; }
+  .settings-footer button { min-width:0; min-height:34px; padding:6px; font-size:12px; }
   .page-head { flex-direction:column; gap:12px; margin-bottom:20px; }
   .page-head h1 { font-size:25px; }
   .page-head p { font-size:12px; }
@@ -454,7 +477,7 @@ const T = ZH ? {
   taskStates:{queued:"排队中", running:"运行中", done:"做完待审", merging:"合并中", merged:"已合并", failed:"失败", cancelled:"已取消", replaced:"已被接替"},
   anyState:"所有状态", anyLane:"所有工作线", applyFilters:"筛选", tasksLoading:"正在加载任务…", tasksEmpty:"没有符合条件的任务。",
   tasksLoadFailed:"任务加载失败，请重试。", newerPage:"上一页", olderPage:"下一页", taskPage:(p, n, total) => `第 ${p} / ${n} 页 · 共 ${total} 件任务`,
-  desk:"工作台", version:"hansa 版本", summaryNow:"现在",
+  desk:"工作台", version:"Hansa 版本", summaryNow:"现在",
   dispatchLimit:n => `正在派发任务，同时最多 ${n} 件`, installed:"安装于",
   dispatchOn:"正在派发任务", paused:"已暂停", pause:"暂停派发任务", resume:"恢复派发任务", pauseReason:"暂停原因（可不填）",
   serverUp:"后台在运行", serverDown:"后台没在运行：新任务不会开始",
@@ -496,20 +519,20 @@ const T = ZH ? {
   providers:"模型服务商", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
   effortDefault:"默认", endpoint:"接口地址", loginDir:"登录目录（空＝默认）", key:"密钥", keySet:"已填", keyMissing:"未填",
   saveKey:"保存密钥", clearKey:"清除密钥", keyHint:"在这里输入密钥", check:"Ping", checking:"Ping 中…",
-  keyUse:"保存在本机；网页不回显已保存的内容。运行 hansa 的系统账号及工作智能体或适配器可读取密钥。请求会把密钥发给上方的服务商接口地址。",
+  keyUse:"保存在本机；网页不回显已保存的内容。运行 Hansa 的系统账号及工作智能体或适配器可读取密钥。请求会把密钥发给上方的服务商接口地址。",
   keyTransport:"HTTP 会以未加密方式传送密钥。远程接口请使用 HTTPS；HTTP 仅适用于可信的本机适配器。",
   rest:"歇", toppedUp:"已充值", topUpsToConfirm:"等你确认充值",
   ready:"可用", notChecked:"尚未检查", checkFailed:"上次 Ping 未通过", lastCheck:"上次 Ping", addProvider:"加一家服务商", newName:"名字（小写字母、数字、-）", remove:"删除",
   general:"总体", deskName:"工作台名称",
   deskNameHint:"最多 40 个字符，任何语言均可；只用一行，不含控制字符、Unicode 格式字符或已保存的密钥。保存时去掉两端空格；留空或只填空格使用路径的最后两级文件夹。只有负责人在此保存才会更改，并记入设置历史。名称用于提醒、推送标题和分组、网页、status、工作台列表和菜单；列表和菜单同时显示文件夹，以区分同名工作台。",
   concurrency:"同时最多做几件", compactIdle:"空闲时压缩于（token）", compactWorking:"工作中压缩于（token）",
-  compactNote:"一轮以回答结束、会话空闲后，若上下文达到第一个数，协调员的 mod 在空闲一分钟后压缩它，这时整个上下文还在提示缓存里。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第二个数时压缩（hansa coordinator 用 --autocompact 传给它）。两个数都在 100,000 到 1,000,000 token 之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或第一个数不小于第二个数），那个压缩就不会发生：Claude Code 自己先压缩了。第二个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。第一个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第二个数从会话下次启动起生效。协调员不能改它们。Claude Code（2.1.299 或更新的版本）还会自己压缩一个有 200,000 token 或更多、空闲了约 54 分钟的对话；这一项 hansa 既不设置也不读取。mod 需要 Claude Code 2.1.306 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
-  modStarted:t => `协调员会话 ${t} 启动：`, modOn:"hansa 加载了协调员的 mod", modOff:why => `hansa 没有加载协调员的 mod，因为：${why}`,
-  modUnknown:"hansa 是否加载了协调员的 mod：不知道", modOptions:"命令行里的 --autocompact 选项：", notKnown:"不知道",
+  compactNote:"一轮以回答结束、会话空闲后，若上下文达到第一个数，协调员的 mod 在空闲一分钟后压缩它，这时整个上下文还在提示缓存里。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第二个数时压缩（hansa coordinator 用 --autocompact 传给它）。两个数都在 100,000 到 1,000,000 token 之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或第一个数不小于第二个数），那个压缩就不会发生：Claude Code 自己先压缩了。第二个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。第一个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第二个数从会话下次启动起生效。协调员不能改它们。Claude Code（2.1.299 或更新的版本）还会自己压缩一个有 200,000 token 或更多、空闲了约 54 分钟的对话；这一项 Hansa 既不设置也不读取。mod 需要 Claude Code 2.1.306 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
+  modStarted:t => `协调员会话 ${t} 启动：`, modOn:"Hansa 加载了协调员的 mod", modOff:why => `Hansa 没有加载协调员的 mod，因为：${why}`,
+  modUnknown:"Hansa 是否加载了协调员的 mod：不知道", modOptions:"命令行里的 --autocompact 选项：", notKnown:"不知道",
   modOutside:"记录的会话在 hansa coordinator 之外启动；其中没有协调员的 mod 和每日清空，但由 hansa up 启动时会有 Hansa 的状态行",
   clearUnknown:"每日清空：不知道", clearNone:"没有每日清空，因为协调员启动时没带 --clear-daily",
-  clearNoMod:(w, why) => `没有每日清空 ${w}，因为 hansa 没有加载协调员的 mod（${why}）`,
-  clearRoot:w => `每日清空 ${w}：上次清空不知道（root 在这个工作台上的会话，hansa 不记录它的清空）`,
+  clearNoMod:(w, why) => `没有每日清空 ${w}，因为 Hansa 没有加载协调员的 mod（${why}）`,
+  clearRoot:w => `每日清空 ${w}：上次清空不知道（root 在这个工作台上的会话，Hansa 不记录它的清空）`,
   clearLastUnknown:w => `每日清空 ${w}：上次清空不知道`, clearLast:(w, t) => `每日清空 ${w}：上次清空在 ${t}`,
   clearNever:(w, t) => `每日清空 ${w}：自 ${t} 启动以来没有清空过`, clearMissed:n => `；此后已有 ${n} 个时段过去而没有清空`,
   repo:"代码仓路径", base:"基础分支", maxTurns:"每件任务最多轮数（仅用于防止任务失控，应设得高一些：达到上限说明任务太大、没说清或卡住了）", timeout:"每件任务最长分钟数（同上，仅用于防止任务失控）",
@@ -529,11 +552,11 @@ const T = ZH ? {
   diskFloorNote:"任一卷（工作台、各工作线的仓库和工作区、临时文件夹）剩余空间低于它时，后台不再启动新任务，已启动的任务会继续运行到结束；每个卷都多出 1 GB 后自动恢复。小于下限四倍的卷（如 tmpfs 的 /tmp）以其大小的四分之一为下限，余量随之缩小（不超过该下限的四分之一）。由协调员用 hansa disk-floor 设定，这里只能看。",
   diskLow:"磁盘空间不足，不开始新的事",
   laneCommands:"工作线最近改过的命令、网络和可写文件夹（最新在前，最多 20 条）",
-  laneCommandsNote:"装依赖的命令和检查由 hansa 自己跑，在 srt 里，用这条工作线的沙箱（跟工作智能体一样的网络和可写范围）。网络和可写文件夹的改动，会放宽这条工作线的工作智能体（连同装依赖和检查）能做的事。",
+  laneCommandsNote:"装依赖的命令和检查由 Hansa 自己跑，在 srt 里，用这条工作线的沙箱（跟工作智能体一样的网络和可写范围）。网络和可写文件夹的改动，会放宽这条工作线的工作智能体（连同装依赖和检查）能做的事。",
   f_setup:"装依赖", f_check:"检查", field:"哪一项", change:"原来 -> 现在", at:"时间",
   prices:"价目（美元／每百万 token）", in:"输入", out:"输出", cacheRead:"读缓存", cacheWrite:"写缓存", cacheWrite1h:"写缓存（1 小时）",
   addPrice:"加一个模型", pricesNote:"缓存价留空时：读缓存按输入价的 0.1 倍，5 分钟写缓存按 1.25 倍。claude- 模型的 1 小时写缓存按输入价的 2 倍；其他模型沿用已填的写缓存价，否则按输入价的 2 倍。第三方模型请填全。",
-  workersMayNotRead:"工作智能体不能读的文件夹和文件（每行一个完整路径；比如这台机器自己放密钥的文件夹。工作智能体、核验者、准备命令和检查的沙箱都读不到；每个工作智能体、核验者以及 hansa coordinator 启动的会话的 Read 工具也被拒绝，用 hansa notify on 记下的会话不在此列。登录信息、密钥、浏览器数据等常见位置 hansa 已内置，不用再列。名字里或链接指向的地方含 ()[]{}*?\\ 的路径写不成规则：只要列表里有这样一条，hansa 就不启动任何工作智能体、核验者或协调员，直到这里改掉它）",
+  workersMayNotRead:"工作智能体不能读的文件夹和文件（每行一个完整路径；比如这台机器自己放密钥的文件夹。工作智能体、核验者、准备命令和检查的沙箱都读不到；每个工作智能体、核验者以及 hansa coordinator 启动的会话的 Read 工具也被拒绝，用 hansa notify on 记下的会话不在此列。登录信息、密钥、浏览器数据等常见位置 Hansa 已内置，不用再列。名字里或链接指向的地方含 ()[]{}*?\\ 的路径写不成规则：只要列表里有这样一条，Hansa 就不启动任何工作智能体、核验者或协调员，直到这里改掉它）",
   workersMayNotReadAdded:"其中这些是协调员用 hansa hide 加的（它只能加，删只能由你在这里删）", addedByCoordinator:"协调员添加于",
   workersMayNotReadSkipped:"列表里这些现在没有生效：它们会挡住某条工作线的仓库、工作树或 PATH 上的文件夹，因此每次运行都会跳过，运行时仍可访问这个文件夹；在你和协调员商定前会一直如此（请改掉或删掉）",
   noReadStop:"什么都不启动：工作智能体不能读的列表里有一条用不上",
@@ -549,11 +572,11 @@ const T = ZH ? {
   last24h:"最近 24 小时", finished:"做完", merged:"已合并", tokens:"token", listValue:"按价目折算",
   total:"合计", unpriced:"这些模型还没有价目：", setPrice:"去“设置”的价目表里填。",
   costNote:"美元按你在设置里填的价目表折算（价目表里没有的 Claude 模型按官方标价）。订阅是按月付费的，这是这些 token 值多少钱，用来比较、找浪费，不是账单。一件任务重新排队时，每次尝试的 token 都算在里面。",
-  coordinatorUncounted:"这里没有算协调员和它的助手的用量：协调员以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，hansa 读不到。",
-  coordinatorUncountedWhy:{untied:"这里没有算协调员和它的助手的用量：协调员的会话在工作台之外的 {where} 启动。在该会话中运行一次 hansa 命令后，hansa 才能识别并统计它；目前还没有。",
-    login:"这里没有算协调员和它的助手的用量：协调员的会话用的是 {where} 里的 Claude 登录，不是工作智能体的，hansa 只读工作智能体的登录。",
+  coordinatorUncounted:"这里没有算协调员和它的助手的用量：协调员以 {user} 身份运行，Claude Code 把它的会话记录设成只有 {user} 能读，Hansa 读不到。",
+  coordinatorUncountedWhy:{untied:"这里没有算协调员和它的助手的用量：协调员的会话在工作台之外的 {where} 启动。在该会话中运行一次 Hansa 命令后，Hansa 才能识别并统计它；目前还没有。",
+    login:"这里没有算协调员和它的助手的用量：协调员的会话用的是 {where} 里的 Claude 登录，不是工作智能体的，Hansa 只读工作智能体的登录。",
     missing:"这里没有算协调员和它的助手的用量：在 {where} 里找不到它的会话记录。",
-    unreadable:"这里没有算协调员和它的助手的用量：hansa 读不了它的会话记录 {where}。"},
+    unreadable:"这里没有算协调员和它的助手的用量：Hansa 读不了它的会话记录 {where}。"},
   runs:"运行次数（每次尝试都算）", turns:"轮数",
   export:"导出表格", byday:"按天", byseat:"按席位", bylane:"按工作线", bymodel:"按模型", bytask:"按任务", byprovider:"按服务商",
   seat_coordinator:"协调员", seat_helper:"协调员的助手", seat_worker:"工作智能体", seat_verify:"核验任务", helper_reviewer:"复核助手", helper_scout:"调研助手", helper_operator:"操作助手",
@@ -581,7 +604,23 @@ const T = ZH ? {
     lane_try_queued:e => `工作线 ${e.lane} 试跑已排队`, lane_try_started:e => `工作线 ${e.lane} 试跑开始`,
     lane_tried:(e, result) => `工作线 ${e.lane} 试跑${result(e)}`, lane_try_withdrawn:e => `工作线 ${e.lane} 试跑已撤回`,
     sandbox_held:e => `工作线 ${e.lane} 沙箱暂缓：${e.why || "—"}`, sandbox_ready:e => `工作线 ${e.lane} 沙箱已恢复`,
-    provider_credit:e => `服务商 ${e.provider} 余额不足，等负责人确认充值`, server_stopped:() => "后台已停止，新任务暂停启动"
+    provider_credit:e => `服务商 ${e.provider} 余额不足，等负责人确认充值`, server_stopped:() => "后台已停止，新任务暂停启动",
+    task_added:e => `任务已添加：工作线 ${e.lane || "—"}`,
+    task_cancel:e => e.closed ? "任务已关闭，未合并" : "任务已取消",
+    task_not_started:e => `任务没能开始：${e.error || "—"}`,
+    task_after_held:e => `任务暂缓：它要跟在 ${e.latest || e.after || "—"} 之后，而那个任务没合并就结束了`,
+    start_held:e => `任务在工作线 ${e.lane || "—"} 上暂缓：${e.why || "—"}`,
+    paused:(e, result, state, by) => `派发已暂停${by(e.by)}：${e.reason || "—"}`,
+    resumed:(e, result, state, by) => `派发已恢复${by(e.by)}`,
+    ask:(e, result, state, by) => `待办 #${e.id} 已提出${by(e.by)}`,
+    ask_closed:e => `待办 #${e.id} 已由协调员关闭：${e.reason || "—"}`,
+    key_set:(e, result, state, by) => `${e.provider || "—"} 的密钥已设置${by(e.by)}`,
+    key_removed:(e, result, state, by) => `${e.provider || "—"} 的密钥已清除${by(e.by)}`,
+    settings_saved:(e, result, state, by) => `设置已保存${by(e.by)}：${(Array.isArray(e.changed) ? e.changed : []).join("、") || "—"}`,
+    provider_checked:e => `服务商 ${e.provider || "—"} 已检查：${e.ok ? "可用" : "失败"}${e.detail ? `（${e.detail}）` : ""}`,
+    srt_tried:e => `后台启动时试了沙箱（srt）：${e.ran ? "能运行" : !e.found ? "没找到" : "没能运行"}${!e.ran && e.said ? `：${e.said}` : ""}`,
+    disk_low:e => `磁盘空间不足：${(Array.isArray(e.volumes) ? e.volumes : []).join("；") || "—"}`,
+    disk_ok:() => "磁盘空间已回到下限以上"
   },
   tokensNoPrice:"token 没价目", keyInChange:"改动中包含密钥，不能合并", markersInChange:"改动里留着冲突标记，不能合并",
   mcBatch:(members, owner) => `与 ${members.join(", ")} 一起检查；运行 ${owner} 的合并检查`,
@@ -591,7 +630,7 @@ const T = ZH ? {
   mcQueuedSoon:"合并检查在排队：几秒内开始", mcQueuedNoServer:"合并检查在排队：后台没在运行，开始不了",
   mcAgain:"（又一次：检查期间基础分支变了）",
   checkMinutes:(c, n) => `检查已跑 ${c} 分钟（一共 ${n} 分钟）`,
-  releases:"发布", releaseWaiting:"等你点头才会发布", releaseRecent:"最近的发布", releaseCommand:"命令（hansa 用这台机器的账户在沙箱外运行，能用账户的登录和网络）",
+  releases:"发布", releaseWaiting:"等你点头才会发布", releaseRecent:"最近的发布", releaseCommand:"命令（Hansa 用这台机器的账户在沙箱外运行，能用账户的登录和网络）",
   releaseNote:"说明", releaseCommits:(n, since, remotes) => since ? `自上次发布 #${since} 以来的 ${n} 个提交` : remotes ? `至少一个远程缺少的 ${n} 个提交（${Object.entries(remotes).map(([remote, count]) => `${count} 个不在远程 ${remote} 上`).join("，")}；此目标还没发布过）` : `不在任何远程跟踪分支上的 ${n} 个提交（这条工作线还没发布过）`,
   releaseChecked:(n, shown) => `已检查全部 ${n} 个待发布提交是否含有禁词` + (shown < n ? `（这里只列出前 ${shown} 个）` : ""),
   releaseUnmatched:"清单上这些工作线已和保存清单时不一样，它们的发布要等你点头（直接保存会保留旧的记录：用下面的按钮，或取消勾选再勾上，然后保存，才会按当前设置重新纳入）：",
@@ -606,6 +645,7 @@ const T = ZH ? {
   releaseGone:"现在没有哪条工作线有这个发布目标：取消勾选再保存，就从清单上去掉", releaseGoneWas:"当时的命令：", releaseGoneUnknown:"（保存时没记下它当时的命令）",
   releaseNoAbout:cmd => ["还没有说明：协调员可以用 ", cmd, " 加上"], releaseLast:(at, st) => `上次发布：${at}，${st}`, releaseNever:"还没发布过",
   releaseStop:"叫停", releaseStopReason:"叫停原因（可不填）",
+  releaseStopSummary:"叫停可能留下部分更新的服务。点开查看详情。",
   releaseStopNote:"发布完成后，叫停会停止仍在运行的监测，发布仍记为完成；监测记录由谁停止及原因，重启后台也不会再次启动。叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。发布中途停止可能使服务处于部分更新状态：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
   releasesWithoutAsking:"每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、监测命令（--watch）、它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效：手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
   releaseForbidden:"禁词（每行一个词、短语或 re:Python 正则表达式，不分大小写；每项最多 200 字符，正则必须能编译且不能匹配空字符串；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
@@ -616,13 +656,13 @@ const T = ZH ? {
   releaseMailboxes:"新增行中的邮箱必须使用保留示例域名或列入允许名单（合并和发布时检查；默认关闭）",
   releaseMailboxAllow:"邮箱允许名单（每行一项，忽略大小写）：完整邮箱地址允许该地址；@域名允许该域名及其子域名",
   f_release:"发布命令",
-  alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调员叫停了发布、协调员向你提了请求、服务商余额不足、hansa serve 很久没跑完一轮、hansa 发给协调员会话的消息到不了它、协调员的轮次接连因 API 错误结束）由 hansa 运行，以这台机器的账号在沙箱外、在工作台 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，级别在 HANSA_ALERT_LEVEL，正文（按保存的提醒语言，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；20 秒内产生的提醒合并处理，只运行一次提醒命令（空＝不运行提醒命令）。协调员不能设置它，也不发提醒",
+  alertCmd:"提醒命令：有事等你时（发布等你点头、发布结束、协调员叫停了发布、协调员向你提了请求、服务商余额不足、hansa serve 很久没跑完一轮、Hansa 发给协调员会话的消息到不了它、协调员的轮次接连因 API 错误结束）由 Hansa 运行，以这台机器的账号在沙箱外、在工作台 secrets/alert-runs 下它自己的临时文件夹里运行（结束后删除）；提醒的种类在 HANSA_ALERT_KIND，级别在 HANSA_ALERT_LEVEL，正文（按保存的提醒语言，去掉密钥，约 1000 字以内）在标准输入；30 秒内要结束；20 秒内产生的提醒合并处理，只运行一次提醒命令（空＝不运行提醒命令）。协调员不能设置它，也不发提醒",
   alertSavedAt:t => `在网页上保存于 ${t}`, alertTest:"发一条测试提醒", alertTesting:"发送中…", alertTestOk:"测试提醒已发出", alertTestBad:"测试提醒失败：",
   alertKeep:"提醒命令不要把提醒的文字留在协调员能读到的地方（文件、日志或聊天记录）：其中的一次性码能批准发布。",
   alertOutside:"这个文件在工作台的 secrets/ 外，协调员可以修改它，一次性发布码会经过它；请把它放在 secrets/ 下。",
-  alertCoordinatorNote:"种类 coordinator：hansa 发给协调员会话的消息到不了它时提醒你：没有会话接收 hansa 消息，要发的消息等了这么久（hansa serve 提醒一次，有会话再次接收后才会再提醒）；会话停在权限对话框或问题上，发给它的消息未得到处理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，hansa 不再发给它）；会话的轮次接连因 API 错误结束这么久（每段一次；只有你能解决的错误，如额度或账号问题，立即提醒；正常结束一轮后再提醒“恢复工作”）。设为 0 时这种情况不提醒，但 hansa 仍会把未处理的消息重发给会话（等待可能消除的错误在 2、10、30 分钟重发）。0 到 1440 的整数分钟，0＝不提醒这一种；没有可用的提醒渠道时一种也不提醒。协调员不能改",
+  alertCoordinatorNote:"种类 coordinator：Hansa 发给协调员会话的消息到不了它时提醒你：没有会话接收 Hansa 消息，要发的消息等了这么久（hansa serve 提醒一次，有会话再次接收后才会再提醒）；会话停在权限对话框或问题上，发给它的消息未得到处理（每段等待一次）；发给它的任务等审这么久而会话空闲（每个任务一次，Hansa 不再发给它）；会话的轮次接连因 API 错误结束这么久（每段一次；只有你能解决的错误，如额度或账号问题，立即提醒；正常结束一轮后再提醒“恢复工作”）。设为 0 时这种情况不提醒，但 Hansa 仍会把未处理的消息重发给会话（等待可能消除的错误在 2、10、30 分钟重发）。0 到 1440 的整数分钟，0＝不提醒这一种；没有可用的提醒渠道时一种也不提醒。协调员不能改",
   laneTargets:"发布目标：基础分支发出去的各种方式，每个发布目标有自己的命令、时限（分钟）和必须先发布的发布目标（after）；发布在仓库里运行时占着仓库，那里的合并要等它；fixed 发布目标会在该提交的独立副本中运行，不占用仓库",
-  laneMergeCheck:"合并检查所用的命令：合并前由 hansa 在把这件任务并上基础分支后跑，代替检查；每件改了东西的任务合并前都跑，任务做完后不跑（空＝合并检查运行工作线检查）", mergeTimeout:"合并检查最长分钟数（空＝同每件任务最长分钟数）", f_merge_check:"合并检查"
+  laneMergeCheck:"合并检查所用的命令：合并前由 Hansa 在把这件任务并上基础分支后跑，代替检查；每件改了东西的任务合并前都跑，任务做完后不跑（空＝合并检查运行工作线检查）", mergeTimeout:"合并检查最长分钟数（空＝同每件任务最长分钟数）", f_merge_check:"合并检查"
 } : {
   status:"Status", settings:"Settings", cost:"Work and cost",
   tasks:"All tasks", tasksIntro:"Find every desk task, newest queued first.",
@@ -738,7 +778,24 @@ const T = ZH ? {
     lane_try_queued:e => `Lane ${e.lane} try queued`, lane_try_started:e => `Lane ${e.lane} try started`,
     lane_tried:(e, result) => `Lane ${e.lane} try ${result(e)}`, lane_try_withdrawn:e => `Lane ${e.lane} try withdrawn`,
     sandbox_held:e => `Sandbox held on lane ${e.lane}: ${e.why || "—"}`, sandbox_ready:e => `Sandbox ready on lane ${e.lane}`,
-    provider_credit:e => `Provider ${e.provider} rests until the principal confirms it is topped up`, server_stopped:() => "Server stopped; new tasks will not start"
+    provider_credit:e => `Provider ${e.provider} rests until the principal confirms it is topped up`, server_stopped:() => "Server stopped; new tasks will not start",
+    // The everyday records (see the Recent events fold in renderStatus for the rest)
+    task_added:e => `Task added on lane ${e.lane || "—"}`,
+    task_cancel:e => e.closed ? "Task closed without merging" : "Task cancelled",
+    task_not_started:e => `Task could not start: ${e.error || "—"}`,
+    task_after_held:e => `Task held: the task it follows, ${e.latest || e.after || "—"}, ended without merging`,
+    start_held:e => `Task held on lane ${e.lane || "—"}: ${e.why || "—"}`,
+    paused:(e, result, state, by) => `Dispatch paused${by(e.by)}: ${e.reason || "—"}`,
+    resumed:(e, result, state, by) => `Dispatch resumed${by(e.by)}`,
+    ask:(e, result, state, by) => `To-do #${e.id} asked${by(e.by)}`,
+    ask_closed:e => `To-do #${e.id} closed by the coordinator: ${e.reason || "—"}`,
+    key_set:(e, result, state, by) => `Key of ${e.provider || "—"} set${by(e.by)}`,
+    key_removed:(e, result, state, by) => `Key of ${e.provider || "—"} cleared${by(e.by)}`,
+    settings_saved:(e, result, state, by) => `Settings saved${by(e.by)}: ${(Array.isArray(e.changed) ? e.changed : []).join(", ") || "—"}`,
+    provider_checked:e => `Provider ${e.provider || "—"} checked: ${e.ok ? "ready" : "failed"}${e.detail ? ` (${e.detail})` : ""}`,
+    srt_tried:e => `Sandbox (srt) tried as the server started: ${e.ran ? "it runs" : !e.found ? "not found" : "it did not run"}${!e.ran && e.said ? `: ${e.said}` : ""}`,
+    disk_low:e => `Disk space low: ${(Array.isArray(e.volumes) ? e.volumes : []).join("; ") || "—"}`,
+    disk_ok:() => "Disk space back above the floor"
   },
   tokensNoPrice:"tokens without a price", keyInChange:"holds a key: cannot be merged", markersInChange:"holds conflict markers: cannot be merged",
   mcBatch:(members, owner) => `Checked with ${members.join(", ")}; ${owner}’s check runs`,
@@ -763,6 +820,7 @@ const T = ZH ? {
   releaseGone:"no lane has this release target now: untick it and Save to take it off the list", releaseGoneWas:"its command then: ", releaseGoneUnknown:"(its command then was not recorded)",
   releaseNoAbout:cmd => ["No description yet: the coordinator can add one with ", cmd], releaseLast:(at, st) => `Last release: ${at}, ${st}`, releaseNever:"Never released",
   releaseStop:"Stop", releaseStopReason:"reason for stopping (optional)",
+  releaseStopSummary:"Stop may leave the server partly updated. Tap for details.",
   releaseStopNote:"After a release is done, Stop ends its running watch, keeping the release done; the watch records who stopped it and why and stays stopped after a server restart. Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
   releasesWithoutAsking:"Each target is ticked on its own. A tick stops counting once the lane's repository or base branch, the target's command or an outside file it names, its watch command (--watch), the target it must follow or the way it runs (fixed) changes: a release asked for by hand then waits for your yes, and one that runs by itself after merges waits until you tick it again.",
   releaseForbidden:"Words, phrases or re:Python patterns no release may send out (one per line, any case; at most 200 characters per entry; patterns must compile and must not match the empty string; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
@@ -782,7 +840,7 @@ const T = ZH ? {
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
 Object.assign(T, ZH ? {
-  protectedStop:"只要列表里有一条含 ()[]{}*?\\ 的路径，hansa 就不启动任何工作智能体、核验者或协调员，直到这里改掉它。",
+  protectedStop:"只要列表里有一条含 ()[]{}*?\\ 的路径，Hansa 就不启动任何工作智能体、核验者或协调员，直到这里改掉它。",
   alertBoundary:"提醒命令以这台机器的账号在沙箱外运行。",
   mailboxChecks:"合并和发布时都检查。", runtimeReadOnly:"并发数和磁盘下限由协调员设定，这里只能看。",
   settingsIntro:"按主题设置模型、运行方式和发布规则。切换页面时，未保存的修改会保留。",
@@ -851,7 +909,7 @@ Object.assign(T, ZH ? {
   pushRecognized:service => `识别为 ${service}。保存前请确认这是你要用的服务；单独的密钥可能属于其他服务。`,
   pushBareKeyProblem:"单独的 Bark 设备密钥至少需要 8 个字符；请粘贴 Bark 应用中的完整地址。",
   pushDuplicate:entry => `这个推送地址已保存在条目“${entry}”中。`,
-  pushNtfyTopicWarning:"hansa 会在这个主题词出现的任何地方隐藏它，包括提醒和工作台名称。未设置访问控制时，任何猜到主题的人都能读取提醒。建议使用难以猜到的主题。",
+  pushNtfyTopicWarning:"Hansa 会在这个主题词出现的任何地方隐藏它，包括提醒和工作台名称。未设置访问控制时，任何猜到主题的人都能读取提醒。建议使用难以猜到的主题。",
   pushChecking:"正在识别地址…", pushPreviewFailed:"无法识别地址，请检查连接后重新粘贴。",
   pushBadAddress:"这个推送服务不接受此地址，请查看服务的提示，重新粘贴完整地址。",
   pushForeign:service => `这个地址像是 ${service} 的地址，请选择 ${service} 作为推送服务。`,
@@ -968,6 +1026,25 @@ Object.assign(T, ZH ? {
   loadFailed:"Reload failed. The current settings are still here.", modifiedGroup:"This section has unsaved changes",
   jumpToField:"Go to this setting", retrySave:"Correct the values and save again.",
   needsAttention:"Settings need attention", keySaveFailed:"Key operation incomplete. Check the error details."
+});
+// The page's own words when the server does not answer (api): a browser's "Failed to fetch" says neither what
+// happened nor what to do, and in English only.
+Object.assign(T, ZH ? {
+  serveUnreachedRead:"页面连不上后台（hansa serve）。用 hansa up 重新启动它。",
+  serveUnreachedSent:"页面连不上后台（hansa serve）：什么也没有发出去。用 hansa up 重新启动它，再试一次。",
+  serverUnreached:"页面连不上后台（hansa serve）：用 hansa up 启动",
+  dataAsOf:t => t ? "所示数据时间：" + t : "尚未收到数据",
+  alertHeld:(n, until) => `${n} 条提醒因每小时上限暂缓，到 ${until} 一起发出`,
+  otherRecords:n => `其他 ${n} 条记录`,
+  eventBy:by => by ? `（${({page:"在本页", cli:"用命令", coordinator:"协调员", principal:"你"})[by] || by}）` : ""
+} : {
+  serveUnreachedRead:"This page cannot reach hansa serve. Start it again with hansa up.",
+  serveUnreachedSent:"This page cannot reach hansa serve: nothing was sent. Start it again with hansa up, then try again.",
+  serverUnreached:"cannot reach hansa serve: start it with hansa up",
+  dataAsOf:t => t ? "Data as of " + t : "No data received yet",
+  alertHeld:(n, until) => `${n} alert${n === 1 ? "" : "s"} held by the hourly limit until ${until}`,
+  otherRecords:n => `${n} other record${n === 1 ? "" : "s"}`,
+  eventBy:by => by ? " " + (({page:"on this page", cli:"from the command line", coordinator:"by the coordinator", principal:"by you"})[by] || "by " + by) : ""
 });
 Object.assign(T, ZH ? {
   statusIntro:"查看任务进展、工作线和需要你处理的事项。", costIntro:"按时间查看工作台的工作记录、token 用量及折算金额。",
@@ -1150,6 +1227,8 @@ const money = n => "US$" + n.toFixed(2);
 const when = ts => ts ? new Date(ts * 1000).toLocaleString(language) : "";
 // Poll data stays in this page's memory; no authenticated response enters the HTTP cache.
 const pollReplies = new Map();
+// A refused token stays refused: the page stops polling and says only how to open it (T.forbidden).
+let pageRefused = false;
 async function api(path, body) {
   const opt = {credentials:"omit", mode:"same-origin", cache:"no-store", headers:{Authorization:"Bearer " + pageToken}};
   const conditional = body === undefined && (path === "/api/status" || path === "/api/goals" || path.startsWith("/api/history?") || path === "/api/events" || path.startsWith("/api/events?"));
@@ -1160,8 +1239,15 @@ async function api(path, body) {
     Object.assign(opt.headers, {"Content-Type":"application/json", "X-Hansa":"1"});
     opt.body = JSON.stringify(body);
   }
-  const r = await fetch(path, opt);
-  if (r.status === 403) throw new Error(T.forbidden);
+  let r;
+  try { r = await fetch(path, opt); }
+  catch (e) {
+    // A browser rejects with a TypeError ("Failed to fetch", "Load failed") only when no answer came at all.
+    if (e?.name !== "TypeError") throw e;
+    const unreached = new Error(body === undefined ? T.serveUnreachedRead : T.serveUnreachedSent);
+    unreached.unreached = true; throw unreached;
+  }
+  if (r.status === 403) { pageRefused = true; throw new Error(T.forbidden); }
   if (r.status === 304 && previous) return previous.reply;
   const reply = await r.json();
   if (reply?.code === "settings_unavailable") throw new Error((reply.problems || []).join("; "));
@@ -1209,14 +1295,19 @@ function statusFrame() {
   statusTimer = setTimeout(statusFrame, 40);
 }
 function setStatusParts(parts) {
-  const ordered = [...parts.filter(p => p.tone !== "muted"), ...parts.filter(p => p.tone === "muted")];
-  if (!ordered.some(p => p.key === statusKey)) {
+  const warnings = parts.filter(p => p.tone !== "muted");
+  const ordered = [...warnings, ...parts.filter(p => p.tone === "muted")];
+  // While a warning holds, the line shows the warnings together and stays on them (a long one scrolls, then
+  // starts again); the routine facts, which rotate when nothing is wrong, stay in the list behind the toggle.
+  const rotated = warnings.length ? [{key:"warnings", text:warnings.map(p => p.text).join(" · "),
+    tone:warnings.some(p => p.tone === "bad") ? "bad" : "warn"}] : ordered;
+  if (!rotated.some(p => p.key === statusKey)) {
     const index = statusParts.findIndex(p => p.key === statusKey);
     const next = [...statusParts.slice(index + 1), ...statusParts.slice(0, index)]
-      .find(p => ordered.some(n => n.key === p.key));
-    statusKey = (next || ordered[0])?.key; statusStarted = performance.now();
+      .find(p => rotated.some(n => n.key === p.key));
+    statusKey = (next || rotated[0])?.key; statusStarted = performance.now();
   }
-  statusParts = ordered;
+  statusParts = rotated;
   $("#state").className = parts.some(p => p.tone === "bad") ? "bad" : parts.some(p => p.tone === "warn") ? "warn" : "muted";
   $("#state-list").replaceChildren(...ordered.map(p => h("li", {class:p.tone},
     p.tone !== "muted" ? icon("error") : null, p.text)));
@@ -1368,11 +1459,20 @@ function waitingText(m) {
   const render = r => Object.hasOwn(T.waitReasons, r.code) ? T.waitReasons[r.code](r.values, render, r.text) : r.text;
   return render({code:m.waiting_code, values:m.waiting_values, text:m.waiting});
 }
+// The records a principal meets in an ordinary day read as sentences; the rest wait, as they are, in one fold
+// that stays open or closed across polls.
+let eventsOtherOpen = false;
+function eventList(events) {
+  const told = e => Object.hasOwn(T.eventSentences, e.event), other = events.filter(e => !told(e));
+  return h("div", {class:"event-list"}, events.filter(told).map(eventRow), other.length
+    ? h("details", {class:"event-other", open:eventsOtherOpen, ontoggle:e => { eventsOtherOpen = e.target.open; }},
+      h("summary", {}, T.otherRecords(other.length)), other.map(eventRow)) : null);
+}
 function eventRow(e) {
   const sentence = Object.hasOwn(T.eventSentences, e.event) ? T.eventSentences[e.event] : null;
   return h("div", {class:"event-row"}, h("span", {class:"event-time"}, when(e.ts)),
     sentence ? h("div", {class:"event-name"}, e.task ? [taskLink(e.task), " · "] : null,
-      sentence(e, T.eventResult, state => T.eventStates[state] || state || "—"))
+      sentence(e, T.eventResult, state => T.eventStates[state] || state || "—", T.eventBy))
     : [h("span", {class:"event-name"}, e.event),
       h("div", {class:"event-data mono"}, Object.entries(e).filter(([k]) => k !== "ts" && k !== "event")
         .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" "))]);
@@ -1570,7 +1670,10 @@ const statusDrafts = new Map();
 const principalOpen = new Set();
 function keepPrincipalDetails(st) {
   const live = new Set(st.asks.map(a => `ask:${a.id}`));
-  for (const r of st.releases || []) if (r.state === "waiting") live.add(`release:${r.id}`);
+  for (const r of st.releases || []) {
+    live.add(`release-stop:${r.id}`);
+    if (r.state === "waiting") live.add(`release:${r.id}`);
+  }
   const item = key => key.slice(0, key.lastIndexOf(":"));
   for (const fold of document.querySelectorAll("#tab-status details")) {
     const key = fold.getAttribute("data-principal-fold");
@@ -1608,17 +1711,18 @@ function keepStatusFocus(root) {
     (root.contains(active) ? active : controls[index] || controls[0])?.focus({preventScroll:true});
   };
 }
-let statusFlight = null, statusPollTimer, statusFailures = 0, statusLastGood = 0;
+let statusFlight = null, statusPollTimer, statusFailures = 0, statusLastGood = 0, statusUnreached = false, statusFacts = [];
 function pollNotice(reconnecting) {
   const notice = $("#status-connection");
-  notice.hidden = !reconnecting;
-  notice.textContent = !reconnecting ? "" : ZH
-    ? `正在重新连接… ${statusLastGood ? "所示数据时间：" + when(statusLastGood) : "尚未收到数据"}`
-    : `Reconnecting… ${statusLastGood ? "Data as of " + when(statusLastGood) : "No data received yet"}`;
+  notice.hidden = !reconnecting || pageRefused;
+  if (notice.hidden) { notice.replaceChildren(); return; }
+  const asOf = T.dataAsOf(statusLastGood ? when(statusLastGood) : "");
+  notice.replaceChildren(statusUnreached ? `${T.serveUnreachedRead} ${asOf} ` : `${ZH ? "正在重新连接…" : "Reconnecting…"} ${asOf} `,
+    h("button", {type:"button", onclick:() => loadStatus(true).catch(err)}, T.retry));
 }
 function scheduleStatusPoll() {
   clearTimeout(statusPollTimer);
-  if (current === "status" && !document.hidden) {
+  if (current === "status" && !document.hidden && !pageRefused) {
     const delay = Math.min(60000, 5000 * 2 ** Math.min(4, Math.max(0, statusFailures - 1)));
     statusPollTimer = setTimeout(() => loadStatus().catch(err), delay);
   }
@@ -1637,13 +1741,17 @@ function loadStatus(force = false) {
 }
 async function renderStatus(force) {
   const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
+  statusUnreached = [status, events].some(x => x.status === "rejected" && x.reason?.unreached);
   if (status.status === "rejected") {
     const e = status.reason;
-    if (!statusShown) {
+    if (!statusShown || pageRefused) {
       pictureError(String(e.message || e));
       err(e); throw e;
     }
-    // Keep callers' error handlers from replacing the last header status too.
+    // Keep callers' error handlers from replacing the last header status too; but with no server to reach, the
+    // header no longer says that it runs.
+    if (statusUnreached) setStatusParts([{key:"server", text:T.serverUnreached, tone:"bad"},
+      ...statusFacts.filter(p => p.key !== "server")]);
     return false;
   }
   const st = status.value, ev = events.status === "fulfilled" ? events.value : [];
@@ -1659,11 +1767,13 @@ async function renderStatus(force) {
   part("server", st.server && st.server.state === "stuck" ? T.serverStuck(st.server.pid, Math.floor(st.server.quiet / 60))
     : st.server_up ? T.serverUp : T.serverDown, !st.server_up || (st.server && st.server.state === "stuck"));
   part("version", T.version + " " + st.build);
-  part("installed", T.installed + " " + (st.installed ? `${installed.getFullYear()}-${pad(installed.getMonth() + 1)}-${pad(installed.getDate())} ${clock(installed)}` : "?"));
+  const stamp = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(d)}`;
+  part("installed", T.installed + " " + (st.installed ? stamp(installed) : "?"));
   part("now", T.summaryNow + " " + clock(now));
   part("serveCode", st.serve_code ? T.serveCodeWarning + ": " + st.serve_code : "", true);
   part("srt", st.srt_missing, true);
   part("alert", st.alert_failed ? T.alertFailedWarning + ": " + st.alert_failed : "", true);
+  part("alertHeld", st.alert_held ? T.alertHeld(st.alert_held.count, stamp(new Date(st.alert_held.until * 1000))) : "", true);
   part("disk", st.disk && st.disk.low_text ? (ZH ? T.diskLow + "：" : "") + st.disk.low_text : "", true);
   for (const [i, x] of (st.disk && st.disk.unknown || []).entries()) part("disk:" + i, x, true);
   part("memory", st.memory && st.memory.low_text || "", true);
@@ -1673,7 +1783,7 @@ async function renderStatus(force) {
   for (const [i, x] of (st.unreached || []).entries()) part("unreached:" + i, T.unreachedWarning + ": " + x, true);
   part("mod", modLine(st.mod, st.mod_line), st.mod && st.mod.kind !== "notify" && st.mod.loaded !== true);
   part("clear", clearLine(st.mod, st.clear_line), st.mod && st.mod.clear && st.mod.clear.warn);
-  setStatusParts(parts);
+  setStatusParts(statusFacts = parts);
   keepStatusDrafts(st);
   // Check after the fetch: focus may have entered while the request was in flight.
   // Leave fields and their selection in place while editing; redraw lists for other controls.
@@ -1731,7 +1841,7 @@ async function renderStatus(force) {
       checkButton(p.name, () => loadStatus(true))])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
     dashboardPanel(T.events, "status", Math.min(ev.length, 20), events.status === "rejected"
       ? h("div", {class:"bad", role:"alert"}, String(events.reason.message || events.reason))
-      : ev.length ? h("div", {class:"event-list"}, ev.slice(0, 20).map(eventRow)) : emptyState(T.noEvents, T.noEventsNote, "status"))
+      : ev.length ? eventList(ev.slice(0, 20)) : emptyState(T.noEvents, T.noEventsNote, "status"))
   ]));
   statusShown = true;
   restoreFocus();
@@ -1756,7 +1866,7 @@ function releaseBlock(r) {
   return h("div", {class:"lane release-card", "data-principal-request":true},
     h("div", {class:"request-body"}, h("strong", {}, "#" + r.id), h("span", {}, `${T.lane} ${r.lane}${r.target ? ` · ${T.releaseTarget} ${r.target}` : ""}`)),
     h("div", {class:"principal-actions"}, h("button", {class:"primary", "data-status-focus":`release:${r.id}:yes`, onclick: () => answer(true)}, T.releaseYes),
-      reason, h("button", {"data-status-focus":`release:${r.id}:no`, onclick: () => answer(false)}, T.releaseNo)),
+      h("div", {class:"release-refusal"}, reason, h("button", {"data-status-focus":`release:${r.id}:no`, onclick: () => answer(false)}, T.releaseNo))),
     h("div", {class:"muted"}, T.releaseCommand), h("pre", {class:"mono"}, r.command), releaseWatch(r),
     h("div", {class:"row"}, `${r.base} @ `, h("code", {}, (r.commit || "").slice(0, 10)), h("span", {class:"muted"}, when(r.asked))),
     r.note ? h("div", {}, `${T.releaseNote}: ${r.note}`) : null,
@@ -1795,9 +1905,12 @@ function releaseStop(r) {
   const watchOpen = ["waiting", "starting", "running"].includes(r.watch_run?.state);
   if (watchOpen ? r.watch_run.stop_asked : (!["approved", "starting", "running"].includes(r.state) || r.stop_asked)) return null;
   const reason = statusInput(`stop:${r.id}`, {placeholder:T.releaseStopReason});
-  return h("div", {class:"row", style:"margin-top:4px"}, reason,
-    h("button", {title:T.releaseStopNote, "data-status-focus":`release:${r.id}:stop`, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
-      .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop));
+  const key = `release-stop:${r.id}:note`;
+  return h("div", {}, h("div", {class:"row", style:"margin-top:4px"}, reason,
+    h("button", {"data-status-focus":`release:${r.id}:stop`, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
+      .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop)),
+    h("details", {class:"principal-details", "data-principal-fold":key, open:principalOpen.has(key)},
+      h("summary", {}, T.releaseStopSummary), h("p", {}, T.releaseStopNote)));
 }
 function patternLimitReason(x) {
   if (!ZH) return x.reason;
@@ -1936,7 +2049,7 @@ function settingsReplyProblems(reply) {
       },
       lane_provider:() => T.validationLaneProvider(v.lane, v.provider),
       forbidden_pattern:() => T.validationPatternReasons[v.reason] && T.validationPattern(v.entry,
-        T.validationPatternReasons[v.reason].replaceAll("{max}", v.max)),
+        T.validationPatternReasons[v.reason].replace(/\{(\w+)\}/g, (_, key) => v[key])),
       whole_number:() => labels[v.field] && T.validationWhole(labels[v.field], v.min, v.max),
       gb_number:() => labels[v.field] && T.validationGB(labels[v.field], v.min, v.max),
       desk_name:() => T.validationDeskName(v.max),
@@ -1965,7 +2078,7 @@ Object.assign(T, ZH ? {
   validationLaneProvider:(lane, provider) => `${T.lanes} ${lane} · ${T.providers}：未找到 ${provider}。`,
   validationPattern:(entry, why) => `${T.forbiddenWords}，第 ${entry} 项：${why}。`,
   validationPatternReasons:{length:"正则表达式连同 re: 前缀最多 {max} 个字符", repeat:"重复两次或以上的部分不能包含分组、分支或其他重复，否则可能回溯过多",
-    reference:"不能使用反向引用，否则可能回溯过多", empty:"正则表达式不能匹配空字符串"},
+    reference:"不能使用反向引用，否则可能回溯过多", empty:"正则表达式不能匹配空字符串", compile:"正则表达式无法编译：{error}"},
   validationWhole:(label, min, max) => `${label}：必须是 ${min} 到 ${max} 的整数。`,
   validationGB:(label, min, max) => `${label}：必须是 ${min} 到 ${max} GB 的数值（0＝关闭）。`,
   validationDeskName:max => `${T.deskName}：最多 ${max} 个字符，只用一行，不能含控制字符或格式字符。`,
@@ -1991,7 +2104,7 @@ Object.assign(T, ZH ? {
   validationLaneProvider:(lane, provider) => `${T.lanes} ${lane} · ${T.providers}: unknown provider ${provider}.`,
   validationPattern:(entry, why) => `${T.forbiddenWords}, entry ${entry}: ${why}.`,
   validationPatternReasons:{length:"a pattern must be at most {max} characters, including re:", repeat:"a repeat of two or more must not contain a group, alternation or another repeat: it can backtrack badly",
-    reference:"backreferences are not allowed: they can backtrack badly", empty:"the pattern matches the empty string"},
+    reference:"backreferences are not allowed: they can backtrack badly", empty:"the pattern matches the empty string", compile:"the pattern does not compile: {error}"},
   validationWhole:(label, min, max) => `${label}: must be a whole number from ${min} to ${max}.`,
   validationGB:(label, min, max) => `${label}: must be a number of GB from ${min} (off) to ${max}.`,
   validationDeskName:max => `${T.deskName}: at most ${max} characters on one line, without control or format characters.`,
@@ -2216,7 +2329,7 @@ async function saveSettings() {
       renderSettings();
     } else { settingsFailure = "save"; renderSettings(settingsReplyProblems(r)); }
   } catch (e) {
-    settingsFailure = saved ? "savedReload" : settingsFailure === "stale" ? "stale" : "save";
+    settingsFailure = saved ? "savedReload" : settingsFailure === "stale" ? "stale" : e.unreached ? "unreached" : "save";
     renderSettings([String(e.message || e)]);
   }
   finally { settingsSaving = false; refreshSettingsState(); }
@@ -2758,7 +2871,7 @@ function renderSettings(problems = settingsProblems) {
     h("div", {class:"settings-head"}, h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T.settings), h("h1", {}, T.settings), h("p", {}, T.settingsIntro)), settingsBadge),
     settingsRebase ? h("div", {class:"notice", role:"status"}, settingsRebase) : null,
     settingsProblems.length ? h("section", {class:"settings-errors", role:"alert"}, h("h2", {}, icon("error"), settingsFailure === "savedReload" ? T.savedReloadFailed : T.problems),
-      ["stale", "savedReload"].includes(settingsFailure) ? null : h("p", {class:"field-note"}, T.retrySave),
+      ["stale", "savedReload", "unreached"].includes(settingsFailure) ? null : h("p", {class:"field-note"}, T.retrySave),
       h("ul", {}, settingsProblems.map(p => h("li", {class:"bad"}, problemTarget(p) ? h("button", {type:"button", onclick:() => focusProblem(p), title:T.jumpToField}, p) : p)))) : null,
     NO_READ_STOP ? section(T.noReadStop, h("p", {class:"bad"}, NO_READ_STOP)) : null,
     h("div", {class:"settings-layout"}, nav, h("div", {class:"settings-content"}, settingsForm,
@@ -2801,6 +2914,7 @@ function loadHistory() {
   if (!historyFold?.open || current !== "settings" || document.hidden) return;
   if (historyFlight) return historyFlight;
   const delay = historyDue - performance.now();
+  if (pageRefused) return;
   if (delay > 0) { historyTimer = setTimeout(loadHistory, delay); return; }
   const path = historyPath();
   historyFlight = api(path).then(data => {
@@ -2917,7 +3031,7 @@ function loadGoals() {
     if (changed) renderGoals(); else goalsNotice();
   }).catch(() => { goalsFailures++; goalsNotice(); }).finally(() => {
     goalsFlight = null;
-    if (current === "goals" && !document.hidden) {
+    if (current === "goals" && !document.hidden && !pageRefused) {
       const delay = Math.min(600000, 60000 * 2 ** Math.min(4, Math.max(0, goalsFailures - 1)));
       goalsPollTimer = setTimeout(loadGoals, delay);
     }
@@ -3337,6 +3451,7 @@ document.addEventListener("visibilitychange", () => {
   loadHistory();
   clearTimeout(statusPollTimer);
   clearTimeout(goalsPollTimer);
+  if (pageRefused) return;
   if (current === "status" && !document.hidden) loadStatus().catch(err);
   if (current === "goals" && !document.hidden) loadGoals();
 });
