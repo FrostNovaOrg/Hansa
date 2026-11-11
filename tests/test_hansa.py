@@ -16365,6 +16365,7 @@ def save():'''))
         self.assertEqual(m["provider"], "claude")
         self.assertEqual(m["attempts"][0]["provider"], "mimo")
         self.assertIn("resting until", provider_problem(self.desk, self.desk.settings(), "mimo"))
+        self.assertEqual(self.events("provider_rested"), [])
 
     def net_lane(self, what: str, times: int, **env) -> Path:
         from hansa import run
@@ -18196,6 +18197,227 @@ def save():'''))
         self.assertEqual((m["state"], m["error"], m["attempts"]), ("failed", "error: I could not do it", []), m)
         self.assertEqual(count.read_text(), "1")
 
+    def test_provider_rest_posts_once_when_returned_tasks_wait(self):
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "cat > /dev/null"}))["ok"])
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        p, sock = self.session()
+        with self.in_session(p, sock):
+            self.hansa_out("notify", "on")
+        for name, env, reason in (
+                ("limited", "FAKE_QUOTA_ON_COMPAT", "out of quota (HTTP 429)"),
+                ("rejected", "FAKE_BADKEY_ON_COMPAT", "key rejected (HTTP 401)"),
+                ("loggedout", "FAKE_NOLOGIN_ON_COMPAT", "not logged in (Please run /login)")):
+            with self.subTest(provider=name):
+                s = self.desk.settings()
+                s["providers"][name] = {"kind": "compatible", "model": "m", "effort": "",
+                                        "base_url": "https://example.invalid"}
+                s["lanes"]["a"].update(providers=[name], env={env: "1"})
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.desk.write_key(name, f"sk-rest-test-{name}")  # one login each: a login's rest is shared
+                tid = self.desk.new_task("Add hello.txt", lane="a")
+                d = Dispatcher(self.desk)
+
+                def returned():
+                    d.tick()
+                    return self.desk.meta(tid).get("attempts")
+
+                self.soon(returned, timeout=30)
+                self.assertEqual(self.desk.meta(tid)["state"], "queued")
+                events = [e for e in self.events("provider_rested") if e["provider"] == name]
+                self.assertEqual(len(events), 1)
+                [item] = notify.items_for(self.desk, events, {"session": None})
+                self.assertEqual(item["key"], ["provider", name])
+                self.assertIn(reason, item["line"])
+                until = self.desk.provider_state()[name]["cool_until"]
+                self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(until)), item["line"])
+                self.assertIn(f"waiting: {tid}", item["line"])
+                if name == "limited":
+                    self.assertIn("no reset time in its error, so its rest of 30 minutes", item["line"])
+                posted = self.soon(lambda: [x for x in self.posts(sock) if f"provider {name}:" in x], timeout=30)
+                self.assertEqual(len(posted), 1)
+                self.assertTrue(posted[0].startswith("[hansa] desk "))
+                self.assertIn("\n- " + item["line"], posted[0])
+                self.assertEqual(alert.queued(self.desk), [])
+                self.desk.change(tid, lambda m: {"state": "cancelled"})
+
+    def test_provider_rest_lists_returning_and_queued_tasks_after_finish(self):
+        from hansa import run
+        for lane, env in (("b", "FAKE_QUOTA_ON_COMPAT"), ("", "FAKE_QUOTA_ON_COMPAT"),
+                          ("a", "FAKE_QUOTA_ON_COMPAT"), ("b", "FAKE_BADKEY_ON_COMPAT"),
+                          ("b", "FAKE_NOLOGIN_ON_COMPAT")):
+            with self.subTest(queued_lane=lane, failure=env):
+                for m in self.desk.tasks():
+                    self.desk.change(m["id"], lambda m: {"state": "cancelled"})
+                self.desk.set_provider_state("limited", cool_until=0, rest_notice_reason="")
+                s = self.desk.settings()
+                s["providers"]["limited"] = {"kind": "compatible", "model": "m", "effort": "",
+                                               "base_url": "https://example.invalid"}
+                s["lanes"]["a"].update(providers=["limited"], env={env: "1"})
+                s["lanes"]["b"] = {**s["lanes"]["a"]}
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.desk.write_key("limited", "sk-rest-test")
+                before = len(self.events("provider_rested"))
+                first = self.desk.new_task("Add hello.txt", lane="a")
+                proc = run.start(self.desk, first, "a", "limited")
+                self.assertIsNotNone(proc)
+                second = self.desk.new_task("Waiting task", lane=lane)
+                finished = run.finish(self.desk, first, proc.wait(timeout=30))
+                self.assertEqual(finished["state"], "queued")
+                events = self.events("provider_rested")[before:]
+                self.assertEqual(len(events), 1)
+                [event] = events
+                self.assertEqual(event["tasks"], [first, second])
+                [item] = notify.items_for(self.desk, [event], {"session": None})
+                self.assertIn(f"waiting: {first}, {second}", item["line"])
+                for tid in (first, second):
+                    self.desk.change(tid, lambda m: {"state": "cancelled"})
+
+    def test_provider_rest_after_fallback_lists_only_task_without_a_ready_provider(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["providers"]["limited"] = {"kind": "compatible", "model": "m", "effort": "",
+                                       "base_url": "https://example.invalid"}
+        s["lanes"]["a"].update(providers=["limited", "claude"], env={"FAKE_QUOTA_ON_COMPAT": "1"})
+        s["lanes"]["b"] = {**s["lanes"]["a"], "providers": ["limited"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("limited", "sk-rest-test")
+        first = self.desk.new_task("Add hello.txt", lane="a")
+        proc = run.start(self.desk, first, "a", "limited")
+        self.assertIsNotNone(proc)
+        second = self.desk.new_task("Waiting task", lane="b")
+        posted_states = []
+        event = self.desk.event
+
+        def record(kind, **fields):
+            if kind == "provider_rested":
+                posted_states.append([self.desk.meta(t)["state"] for t in (first, second)])
+            return event(kind, **fields)
+
+        with unittest.mock.patch.object(self.desk, "event", record):
+            self.assertEqual(run.finish(self.desk, first, proc.wait(timeout=30))["state"], "queued")
+        [rest] = self.events("provider_rested")
+        self.assertEqual(rest["tasks"], [second])
+        self.assertEqual(posted_states, [["queued", "queued"]])
+        self.assertEqual(self.settle(Dispatcher(self.desk), first)["state"], "done")
+        self.assertEqual(self.desk.meta(second)["state"], "queued")
+        self.assertEqual(len(self.events("provider_rested")), 1)
+
+    def test_failed_ping_records_check_before_posting_waiting_tasks(self):
+        self.failed_check_posts_waiting_tasks(page=False)
+
+    def test_failed_page_check_records_check_before_posting_waiting_tasks(self):
+        why = unix_sockets_refused()
+        if why:
+            skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS)
+        self.failed_check_posts_waiting_tasks(page=True)
+
+    def failed_check_posts_waiting_tasks(self, *, page):
+        s = self.desk.settings()
+        s["providers"]["limited"] = {"kind": "compatible", "model": "tool-first-429", "effort": "",
+                                       "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["providers"] = ["limited"]
+        s["lanes"]["b"] = {**s["lanes"]["a"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("limited", "sk-rest-test")
+        tids = [self.desk.new_task("Waiting task", lane=lane) for lane in ("a", "b", "")]
+        if page:
+            self.assertFalse(self.page_post("/api/check", {"provider": "limited"})["ok"])
+        else:
+            self.assertIn("limited: NOT ok", self.hansa("ping", "limited"))
+        [rest] = self.events("provider_rested")
+        self.assertEqual(rest["tasks"], tids)
+        events, _ = notify.read_log(self.desk, 0)
+        checked = next(i for i, e in enumerate(events) if e["event"] == "provider_checked")
+        posted = next(i for i, e in enumerate(events) if e["event"] == "provider_rested")
+        self.assertLess(checked, posted)  # a completed check, then its notice using the saved rest and task states
+        self.assertFalse(self.desk.provider_state()["limited"]["check"]["ok"])
+        [item] = notify.items_for(self.desk, [rest], {"session": None})
+        self.assertEqual(item["key"], ["provider", "limited"])
+        self.assertIn("waiting: " + ", ".join(tids), item["line"])
+        self.assertEqual(alert.queued(self.desk), [])
+
+    def test_provider_rest_repeats_stay_quiet_until_a_run_finishes(self):
+        self.net_lane("quota", 2)
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        for attempt in (1, 2):
+            # A fresh dispatcher and Desk still read the previous announcement from disk.
+            d = Dispatcher(Desk(self.desk.root))
+
+            def returned():
+                d.tick()
+                return len(self.desk.meta(tid).get("attempts", [])) == attempt
+
+            self.soon(returned, timeout=30)
+            self.assertEqual(len(self.events("provider_rested")), 1)
+            self.desk.set_provider_state("claude", cool_until=0)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.net_lane("limit", 1)
+        again = self.desk.new_task("Add hello.txt", lane="a")
+
+        def returned_again():
+            d.tick()
+            return self.desk.meta(again).get("attempts")
+
+        self.soon(returned_again, timeout=30)
+        self.assertEqual(len(self.events("provider_rested")), 2)
+
+    def test_provider_rest_lists_five_tasks_then_the_count_and_keeps_latest_subject(self):
+        from hansa import run
+        tids = [self.desk.new_task("Waiting task", lane="a") for _ in range(7)]
+        unrelated = self.desk.new_task("Another lane", lane="missing")
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "out of quota (HTTP 429)")
+        run.provider_rest_news(self.desk, self.desk.settings(), "claude")
+        [event] = self.events("provider_rested")
+        self.assertEqual(event["tasks"], tids)
+        self.assertIn("waiting: " + ", ".join(tids[:5]) + " (+2 more)", event["text"])
+        for tid in [*tids[5:], unrelated]:
+            self.assertNotIn(tid, event["text"])
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "login", "not logged in (Please run /login)")
+        run.provider_rest_news(self.desk, self.desk.settings(), "claude")
+        events = self.events("provider_rested")
+        self.assertEqual(len(events), 2)
+        [item] = notify.items_for(self.desk, events, {"session": None})
+        self.assertEqual(item["key"], ["provider", "claude"])
+        self.assertIn("not logged in", item["line"])
+
+    def test_provider_rest_post_uses_reset_time(self):
+        from hansa import run
+        tid = self.desk.new_task("Waiting task", lane="a")
+        until = run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "out of quota (HTTP 429)",
+                                  "usage resets in 2 hours")
+        run.provider_rest_news(self.desk, self.desk.settings(), "claude")
+        [event] = self.events("provider_rested")
+        self.assertEqual(event["until"], until)
+        self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(until)), event["text"])
+        self.assertIn("the reset time its error gave, and a minute", event["text"])
+        self.assertIn(f"waiting: {tid}", event["text"])
+
+    def test_provider_rest_ignores_tasks_waiting_for_other_reasons(self):
+        from hansa import run
+        s = self.desk.settings()
+        # its own login: a login's usage rest is shared with every provider on it
+        s["providers"]["spare"] = {**s["providers"]["claude"], "config_dir": str(self.tmp / "spare")}
+        s["lanes"]["b"] = {**s["lanes"]["a"], "providers": ["spare"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.new_task("Can use lane b")
+        tid = self.desk.new_task("Paused work", lane="a")
+        self.desk.pause("hold work")
+        run.rest_provider(self.desk, s, "claude", "quota", "out of quota (HTTP 429)")
+        run.provider_rest_news(self.desk, s, "claude")
+        self.assertEqual(self.events("provider_rested"), [])
+        self.desk.resume()
+        self.desk.change(tid, lambda m: {"state": "running"})
+        run.rest_provider(self.desk, s, "claude", "quota", "out of quota (HTTP 429)")
+        run.provider_rest_news(self.desk, s, "claude")
+        self.assertEqual(self.events("provider_rested"), [])
+        self.desk.change(tid, lambda m: {"state": "queued"})
+        run.rest_provider(self.desk, s, "claude", "quota", "out of quota (HTTP 429)")
+        run.provider_rest_news(self.desk, s, "claude")
+        [event] = self.events("provider_rested")
+        self.assertEqual(event["tasks"], [tid])
+
     def quota_probe_rest(self, *, desk=None, kind="quota", text="usage limit resets in 6 hours", age=None):
         from hansa import run
         desk = desk or self.desk
@@ -18384,6 +18606,26 @@ def save():'''))
                 self.assertEqual(rests.rests_file().read_bytes(), shared)
                 self.assertEqual(other.provider_state()["claude"]["cool_until"], before["cool_until"])
         self.assertFalse(self.events("provider_credit"))
+
+    def test_quota_probe_failure_posts_no_provider_rest(self):
+        from hansa import run
+        tid = self.desk.new_task("Wait", lane="a")
+        for result in ({"is_error": True, "api_error_status": 429, "result": "usage limit resets in 20 hours"},
+                       {"is_error": True, "api_error_status": 401, "result": "Invalid API key"},
+                       {"is_error": True, "result": "Not logged in · Please run /login"}):
+            with self.subTest(result=result):
+                self.quota_probe_rest()  # a rest no post announced: no task waited when it began
+                self.desk.set_provider_state("claude", quota_probe_at=0, rest_notice_reason="")
+                d = Dispatcher(self.desk)
+                with unittest.mock.patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        [], 1, json.dumps(result), "")) as request:
+                    d.probe_providers(self.desk.settings())
+                    self.join_provider_probes(d)
+                request.assert_called_once()
+                self.assertFalse(self.desk.provider_state()["claude"]["check"]["ok"])
+                self.assertEqual(self.desk.meta(tid)["state"], "queued")
+                self.assertEqual(self.events("provider_rested"), [])
+        self.assertNotIn("rest_notice_reason", {k for k, v in self.desk.provider_state()["claude"].items() if v})
 
     def test_quota_probe_repeated_limit_disables_only_that_rest(self):
         from hansa import run
@@ -19271,6 +19513,7 @@ def save():'''))
         self.assertIn("saving a new key", provider_problem(self.desk, self.desk.settings(), "mimo"))
         self.desk.write_key("mimo", "sk-right")
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
+        self.assertEqual(self.events("provider_rested"), [])
 
     def test_not_logged_in_rests_provider_until_a_check_answers(self):
         from hansa import run
@@ -19297,6 +19540,7 @@ def save():'''))
         with unittest.mock.patch.object(run.subprocess, "run", answer):
             self.assertTrue(run.check_provider(self.desk, "mimo")["ok"])
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "mimo"), "")
+        self.assertEqual(self.events("provider_rested"), [])
 
     def test_runs_ride_out_a_short_network_drop_and_the_provider_check_answers_at_once(self):
         from hansa import cli, run
@@ -19470,6 +19714,62 @@ def save():'''))
             th.join(10)
         self.assertTrue(slept.is_set())
         self.assertEqual(sleeps, [])
+
+    def test_wait_queued_provider_reason_matches_status(self):
+        from hansa import run
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        tid = self.desk.new_task("Waiting for provider", lane="a")
+        for kind, reason in (("quota", "out of quota (HTTP 429)"), ("key", "key rejected (HTTP 401)"),
+                             ("login", "not logged in (Please run /login)"), ("credit", "balance too low")):
+            with self.subTest(kind=kind):
+                run.rest_provider(self.desk, self.desk.settings(), "claude", kind, reason)
+                status = views.status(self.desk)
+                why = next(m["waiting"] for m in status["queued"] if m["id"] == tid)
+                out = self.hansa_out("wait", tid, "--timeout", "0")
+                self.assertIn(f"{tid} queued: {why}\n", out)
+                self.assertIn("no task finished in 0 min", out)
+                self.assertIn(why, views.status_text(status))
+
+    def test_wait_provider_rest_does_not_end_wait(self):
+        from hansa import run
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        tid = self.desk.new_task("Wait through rest", lane="a")
+
+        def progress(_):
+            if len(sleeps) == 1:
+                run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "out of quota (HTTP 429)")
+            elif len(sleeps) == 2:
+                self.desk.change(tid, lambda m: {"state": "done"})
+            else:
+                self.fail("wait did not return after completion")
+
+        patcher, sleeps = self.patch_sleeps(progress)
+        with patcher:
+            out = self.hansa_out("wait", tid, "--timeout", "1")
+        self.assertEqual(len(sleeps), 2)
+        self.assertIn(f"{tid} done", out)
+
+    def test_wait_other_queued_running_and_merging_lines_are_unchanged(self):
+        held = cli.hold_server_lock(self.desk)
+        self.addCleanup(held.close)
+        self.round_at(0)
+        tid = self.desk.new_task("Waiting for lane", lane="a")
+        busy = self.desk.new_task("Holding the lane", lane="a")
+        self.desk.change(busy, lambda m: {"state": "running"})
+        for state in ("queued", "running", "merging"):
+            with self.subTest(state=state):
+                self.desk.change(tid, lambda m: {"state": state})
+                m = self.desk.meta(tid)
+                expected = (f"{tid} queued" if state == "queued" else
+                            f"{tid} running 0 min, so far: {views.progress_text(self.desk, m)}" if state == "running"
+                            else f"{tid} merging: {views.merge_check_text(self.desk, m)}")
+                out = self.hansa_out("wait", tid, "--timeout", "0")
+                self.assertIn(expected + "\n", out)
+                self.assertNotIn("no provider ready", out)
 
     def test_wait_returns_when_a_task_ends(self):
         held = cli.hold_server_lock(self.desk)
@@ -20298,6 +20598,7 @@ def save():'''))
         text = views.explain_text(self.desk, "notify")
         self.assertNotIn("answered or closed", text)
         self.assertIn("hansa notify on, run from it, moves posting there", text)
+        self.assertIn("a provider's timed rest leaving queued tasks without a ready provider", text)
 
     def test_a_title_that_is_not_utf8_is_posted_with_the_byte_replaced_and_posting_goes_on(self):
         a, sa = self.session()

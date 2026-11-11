@@ -241,7 +241,8 @@ hansa serve repairs recent saved task ends missing from the event log when it st
 long stop, so their usual end notices still reach you once. More: `hansa help inbox`.
 hansa posts to your session when something needs you: a task, verification, merge
 check or release ended or failed, the principal answered a release, the server stopped or got stuck, free space
-went under the floor. Each message is a `[hansa]` header with the desk, then a bullet line per event,
+went under the floor, or a provider's timed rest left tasks without a ready provider.
+Each message is a `[hansa]` header with the desk, then a bullet line per event,
 the latest per task or subject; a task's line carries `next:`, others when one applies. When a
 provider an open to-do names became ready, the to-do may be done: if so,
 close it with `hansa ask --close N "<outcome>"`. A session started with `hansa coordinator` is posted to

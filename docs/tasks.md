@@ -211,7 +211,8 @@ lane, or waits for one.
   that provider and has no ready alternative. This finds limits lifted early by the account's owner.
   It checks only usage rests with a recorded reset time and more than one interval left; fixed rests,
   credit, key and login rests are not checked. Pausing the desk or falling below its disk or memory
-  floor prevents checks. A failed automatic check records its answer but leaves the rest unchanged.
+  floor prevents checks. A failed automatic check records its answer but leaves the rest unchanged,
+  and posts nothing to the coordinator (a failed `hansa ping` or page check that begins a rest does).
   A good check ends the rest, including shared rests as below. If real work hits the limit again after
   that check, hansa stops automatic checks for the new rest: wait for its end, ping, or check on the
   page. This guard prevents a tiny successful request from repeatedly restarting work that cannot run;
@@ -745,6 +746,10 @@ at once with the reason only if every watched task is queued; running and mergin
 still waited on, even if queued tasks are watched alongside them. With no tasks to watch, or
 with `hansa serve` not running, it returns at once. For a stopped server, it gives the command
 to start that desk.
+
+When a still-queued task waits for a provider, its `ID queued` line includes the
+same waiting reason as status. Provider rests do not make wait return sooner;
+the timeout and the conditions above still apply.
 
 While the lane's setup runs, status and show name it and show its elapsed minutes instead of saying the
 model has not replied. Once setup completes, model progress is shown as above.
