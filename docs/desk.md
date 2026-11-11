@@ -536,7 +536,7 @@ Names, paths and quoted program output retain their original spelling.
 
 The API keeps its English fields and adds companion `{code, values, text}`
 messages (`FIELD_message`, `unreached_messages`, resource `low_message`,
-`provider_credit_messages`, and release `problem_messages`). The page chooses
+`provider_credit_messages`, `provider_model_messages`, and release `problem_messages`). The page chooses
 the wording; unknown codes retain `text`. Historical reasons are decoded only
 when they match a known complete form, so unfamiliar messages remain readable.
 Provider checks save the same detail message returned by `/api/check`, so their
@@ -564,7 +564,7 @@ carry `task`:
 - Lane tries: `lane_try_queued`, `lane_try_started`, `lane_tried`,
   `lane_try_withdrawn`.
 - Sandbox holds: `sandbox_held`, `sandbox_ready`.
-- Provider rests and the server: `provider_credit`, `server_stopped`.
+- Provider rests and the server: `provider_credit`, `provider_model`, `server_stopped`.
 - A day's other work: `task_added`, `task_cancel` (closed, when `hansa close`
   wrote it), `task_not_started`, `task_after_held`, `start_held`, `paused`,
   `resumed`, `ask`, `ask_closed`, `key_set`, `key_removed`, `settings_saved`

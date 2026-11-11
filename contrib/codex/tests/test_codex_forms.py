@@ -96,6 +96,17 @@ class ProviderLimits(unittest.TestCase):
 
 
 class OtherForms(unittest.TestCase):
+    def test_unknown_model_400_and_404_are_model_errors(self):
+        for status in (400, 404):
+            for text in ("model_not_found", "The model `example` does not exist", "Unknown model: example",
+                         "The model `example` is not supported", "model_not_available", "unknown_model",
+                         "example is not a valid model ID", "Model Not Exist"):
+                with self.subTest(status=status, text=text):
+                    kind, net, run = read(f"unexpected status {status}: {text}")
+                    self.assertEqual((kind, net, run["api_error_status"]), ("model", "", status))
+        kind, net, _ = read("unexpected status 400 Bad Request: unsupported parameter temperature")
+        self.assertEqual((kind, net), ("", ""))
+
     def test_overloaded_as_claude_overloaded(self):
         for text in ("Selected model is at capacity. Please try a different model.",
                      "We’re currently experiencing high demand, which may cause temporary errors."):
@@ -135,7 +146,7 @@ class OtherForms(unittest.TestCase):
 
     def test_model_not_available(self):
         kind, net, run = read("unexpected status 404 Not Found: {\"detail\":\"Model not found gpt-x\"}")
-        self.assertEqual((kind, net), ("", ""), "neither: the task fails, saying why")
+        self.assertEqual((kind, net), ("model", ""))
         self.assertEqual(run["api_error_status"], 404)
         self.assertIn("model is not available", run["result"])
 
@@ -187,7 +198,7 @@ class Runs(Scratch):
         run = self.failed_run("model_not_found.jsonl")
         self.assertEqual(run["api_error_status"], 404)
         self.assertIn("Model metadata for `gpt-6.1-sol` not found", run["result"])
-        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("", ""))
+        self.assertEqual(hansa_run.unusable_reason(run, self.err)[0], "model")
 
     def test_usage_with_cache_writes(self):
         run, code = self.run_worker("all_usage.jsonl")

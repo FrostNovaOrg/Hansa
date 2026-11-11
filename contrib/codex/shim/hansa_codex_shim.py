@@ -633,7 +633,10 @@ LOGIN_FAILED_TEXT = re.compile(r"Your access token could not be refreshed|unexpe
 # auth on disk is unchanged, manager.rs), and the login on disk may be fine; `codex login status` tells
 REFRESH_USED_TEXT = re.compile(r"refresh token was already used", re.I)
 LOGGED_IN_LINE = re.compile(r"Logged in\b")  # the first line of `codex login status` when it is
-NO_MODEL_TEXT = re.compile(r"unexpected status 404 Not Found", re.I)  # the model is not available
+NO_MODEL_TEXT = re.compile(r"unexpected status 404 Not Found|\bmodel[_ -]not[_ -](?:found|available|supported|exist)\b|"
+                           r"\b(?:unknown|unsupported|no such)[_ -]model\b|\bis not a valid model\b|"
+                           r"\bmodel\b.{0,120}?\b(?:does not exist|doesn't exist|may not exist|not found|not exist|"
+                           r"(?:is |is currently )?not (?:available|supported))\b", re.I)
 # --strict-config's refusal of a -c key, or --disable's of a feature name: on stderr only, before the start
 CONFIG_TEXT = re.compile(r"Error loading config\.toml|unknown configuration field|Unknown feature flag", re.I)
 # A retry, not the final error: "Reconnecting... 2/5 (M)", "Reconnecting... waiting for network (M)"
@@ -717,7 +720,8 @@ def classify(text: str, home: str = "", codex: str = "codex") -> dict:
     if LOGIN_FAILED_TEXT.search(whole):
         return login_failure(said, home, codex)
     if NO_MODEL_TEXT.search(whole):
-        return {"result": f"API Error: 404 the model is not available (Codex: {said})", "api_error_status": 404}
+        status = 400 if re.search(r"\b400\b", whole) else 404
+        return {"result": f"API Error: {status} the model is not available (Codex: {said})", "api_error_status": status}
     if OVERLOADED_TEXT.search(whole):
         return {"result": f"API Error: Repeated 529 Overloaded errors (Codex: {said})", "api_error_status": 529}
     if DROPPED_TEXT.search(whole):

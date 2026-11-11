@@ -162,7 +162,12 @@ class ProviderCheck(Scratch):
         self.set_model("gpt-6-astra")
         r = self.check("model_not_found.jsonl")
         self.assertFalse(r["ok"])
-        self.assertIn("model is not available", r["detail"])
+        self.assertIn("does not know model gpt-6-astra", r["detail"])
+        self.assertIn("Settings, Providers", r["detail"])
+        self.assertEqual(hansa_run.provider_problem(self.desk, self.desk.settings(), "codex"), r["detail"])
+        self.assertGreater(self.desk.provider_state()["codex"]["model_since"], 0)
+        self.assertTrue(self.check()["ok"])
+        self.assertEqual(hansa_run.provider_problem(self.desk, self.desk.settings(), "codex"), "")
         argv = self.assert_codex_ran()["argv"]
         self.assertEqual(argv[argv.index("-m") + 1], "gpt-6-astra")
 

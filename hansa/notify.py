@@ -342,6 +342,8 @@ def _item(desk: Desk, e: dict, me=None):
                 + start_held_text(e, short=True) + "; not failed · next: hansa status", None, True, None)
     if kind == "provider_credit":
         return ("credit", e.get("provider"), e.get("since")), e["text"], None, True, None
+    if kind == "provider_model":
+        return ("model", e.get("provider"), e.get("since")), e["text"], None, True, None
     if kind == "disk_low":
         return ("disk",), (f"free space is under the floor ({e.get('floor') or 0:g} GB): "
                            + "; ".join(e.get("volumes") or []) + f": hansa serve starts {disk.STARTS} until "

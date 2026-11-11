@@ -55,6 +55,7 @@ PATTERNS = [
     ("provider_overloaded", r"the provider was overloaded \((?P<said>.*)\)"),
     ("provider_server", r"the provider had a server error \((?P<said>.*)\)"),
     ("provider_network", r"the connection to the provider failed \((?P<said>.*)\)"),
+    ("provider_model", r"the provider does not know model (?P<model>.+); rests until a check answers or the principal changes its model or key on the page \(Settings, Providers\)"),
     ("attachment_missing", r"its attachment (?P<path>.+) is gone"),
     ("release_limit", r"stopped at (?P<whose>the lane's|target (?P<target>.+)'s) time limit \((?P<minutes>[\d.]+) min\)"),
 ]
@@ -105,6 +106,8 @@ def provider(text: str, state: dict, name: str) -> dict:
     values = {"provider": name, "reason": describe(state.get("reason", ""))}
     if state.get("credit_since"):
         return message("provider_credit", text, since=state["credit_since"], shared=bool(state.get("shared_rest")))
+    if state.get("model_since"):
+        return message("provider_model", text, model=state["model_unknown"])
     simple = describe(text)
     if simple["code"] != "unknown" or not text:
         return simple

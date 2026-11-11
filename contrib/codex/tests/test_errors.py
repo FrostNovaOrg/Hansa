@@ -192,6 +192,20 @@ class ProviderFailures(Scratch):
         return [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
                 if e.get("event") == "provider_credit"]
 
+    def test_unknown_model_codex_runs_rest_once_and_use_no_try(self):
+        for run in (self.failure("model_not_found.jsonl"),
+                    {"is_error": True, **shim.classify("unexpected status 400 Bad Request: model_not_found")}):
+            with self.subTest(run=run):
+                self.desk.write_key("adapter", "sk-placeholder-0001")
+                for _ in range(2):
+                    m = self.finish_failure(run)
+                    self.assertEqual((m["state"], hansa_run.tries_used(m["attempts"])), ("queued", 0))
+                self.assertIn(f"does not know model {shim.DEFAULT_MODEL}", self.problem())
+                self.assertFalse(self.desk.provider_state()["adapter"].get("cool_until"))
+        events = [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                  if e.get("event") == "provider_model"]
+        self.assertEqual(len(events), 2)  # one per rest, even when two tasks had already started
+
     def test_lost_codex_login_shows_its_home_and_working_remedy(self):
         for fixture in ("refresh_token_expired.jsonl", "unauthorized.jsonl"):
             with self.subTest(fixture=fixture):

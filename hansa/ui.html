@@ -516,6 +516,7 @@ const T = ZH ? {
     providers:(v, render) => `工作线 ${v.lane} 没有就绪的服务商（${v.providers.map(p => `${p.values.provider}：${render(p)}`).join("；")}）`,
     refused:() => "拒绝了这件任务", missing_provider:() => "设置中没有这家服务商", no_endpoint:() => "没有接口地址", no_key:() => "没有密钥",
     credit:v => `余额不足，自 ${when(v.since)} 起休息，等负责人在网页上确认充值`,
+    model:v => `服务商不认识模型 ${v.model}；休息到检查通过，或负责人在网页的“设置 → 服务商”中更改模型或密钥`,
     rest:(v, render, text) => `休息到 ${when(v.until)}（${v.why}）` + (v.how === "reset" ? "；按错误给的重置时间再加一分钟"
       : v.minutes ? `；错误没给重置时间，休息 ${v.minutes} 分钟` : "；修复登录或密钥后运行 hansa ping " + v.provider + (text ? `；${text}` : "")),
     unreachable:v => `自 ${when(v.since)} 起无法连接（${v.why}），定时重试`
@@ -616,6 +617,7 @@ const T = ZH ? {
     lane_try_queued:e => `工作线 ${e.lane} 试跑已排队`, lane_try_started:e => `工作线 ${e.lane} 试跑开始`,
     lane_tried:(e, result) => `工作线 ${e.lane} 试跑${result(e)}`, lane_try_withdrawn:e => `工作线 ${e.lane} 试跑已撤回`,
     sandbox_held:e => `工作线 ${e.lane} 沙箱暂缓：${e.why || "—"}`, sandbox_ready:e => `工作线 ${e.lane} 沙箱已恢复`,
+    provider_model:e => `服务商 ${e.provider} 不认识模型 ${e.model}；请在“设置 → 服务商”中更改模型`,
     provider_credit:e => `服务商 ${e.provider} 余额不足，等负责人确认充值`, server_stopped:() => "后台已停止，新任务暂停启动",
     task_added:e => e.lane ? `任务已添加：工作线 ${e.lane}` : "任务已添加",
     task_cancel:e => e.closed ? "任务已关闭，未合并" : "任务已取消",
@@ -705,6 +707,7 @@ const T = ZH ? {
     providers:(v, render) => `lane ${v.lane} has no provider ready (${v.providers.map(p => `${p.values.provider}: ${render(p)}`).join("; ")})`,
     refused:() => "refused this task", missing_provider:() => "not in settings", no_endpoint:() => "no endpoint address", no_key:() => "no key",
     credit:v => `credit balance too low since ${when(v.since)}; rests until the principal confirms a top-up on the page`,
+    model:v => `the provider does not know model ${v.model}; rests until a check answers or the principal changes its model or key on the page (Settings, Providers)`,
     rest:(v, render, text) => `resting until ${when(v.until)} (${v.why})` + (v.how === "reset" ? "; the reset time its error gave, and a minute"
       : v.minutes ? `; no reset time in its error, so its rest of ${v.minutes} minutes` : "; fix the login or key, then run hansa ping " + v.provider + (text ? `; ${text}` : "")),
     unreachable:v => `unreachable since ${when(v.since)} (${v.why}); checked periodically`
@@ -792,6 +795,7 @@ const T = ZH ? {
     lane_try_queued:e => `Lane ${e.lane} try queued`, lane_try_started:e => `Lane ${e.lane} try started`,
     lane_tried:(e, result) => `Lane ${e.lane} try ${result(e)}`, lane_try_withdrawn:e => `Lane ${e.lane} try withdrawn`,
     sandbox_held:e => `Sandbox held on lane ${e.lane}: ${e.why || "—"}`, sandbox_ready:e => `Sandbox ready on lane ${e.lane}`,
+    provider_model:e => `Provider ${e.provider} does not know model ${e.model}; change the model in Settings, Providers`,
     provider_credit:e => `Provider ${e.provider} rests until the principal confirms it is topped up`, server_stopped:() => "Server stopped; new tasks will not start",
     // The everyday records (see the Recent events fold in renderStatus for the rest)
     task_added:e => e.lane ? `Task added on lane ${e.lane}` : "Task added",
@@ -1532,6 +1536,7 @@ const serverMessagesZh = {
   provider_overloaded:v => `服务商过载（${v.said}）`, provider_server:v => `服务商出现服务器错误（${v.said}）`,
   provider_network:v => `连接服务商失败（${v.said}）`,
   provider_credit:v => `余额不足，自 ${when(v.since)} 起休息，等你在网页上确认充值${v.shared ? "；由另一个工作台发现" : ""}`,
+  provider_model:v => `服务商不认识模型 ${v.model}；休息到检查通过，或负责人在网页的“设置 → 服务商”中更改模型或密钥`,
   provider_rest:v => `休息到 ${when(v.until)}（${reasonText(v.reason)}）` + (v.how === "reset" ? "；按错误给的重置时间再加一分钟"
     : v.minutes ? `；错误没给重置时间，休息 ${v.minutes} 分钟` : ""),
   provider_save_key:v => `${reasonText(v.reason)}；保存新密钥可恢复，也可在密钥到位后运行 hansa ping ${v.provider}`,
@@ -1945,7 +1950,7 @@ async function renderStatus(force) {
       st.failed.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"bad"}, fieldText(m, "error"))]))) : null,
     dashboardPanel(T.providers, "providers", st.providers.length, st.providers.length ? table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
       p.name, p.kind === "subscription" ? T.subscription : T.compatible,
-      p.model + (p.effort ? " · " + p.effort : "") + (p.credit_since ? "" : ` · ${T.rest} ${p.rest_minutes} ${ZH ? "分钟" : "min"} (${T.providers})`),
+      p.model + (p.effort ? " · " + p.effort : "") + (p.credit_since || p.model_since ? "" : ` · ${T.rest} ${p.rest_minutes} ${ZH ? "分钟" : "min"} (${T.providers})`),
       p.problem ? statusPill(fieldText(p, "problem"), "warn", "error") : !p.check ? statusPill(T.notChecked, "muted", "pending")
         : p.check.ok ? statusPill(T.ready, "ok") : statusPill(T.checkFailed, "warn", "error"),
       p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${fieldText(p.check, "detail")} (${when(p.check.at)})`) : "",
@@ -2071,7 +2076,7 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, MODEL_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
 // Outside and locked: only reading, release answers/stops and pause/resume stay open.
 let SETTINGS_LOCKED = true, outsideRuleLoaded = false, outsideRuleFlight = null;
 function readOutsideRule(reply) {
@@ -2396,6 +2401,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
   settingsDefaults = r.settings_defaults || {};
   CREDIT_RESTS = r.provider_credit || {}; CREDIT_MESSAGES = r.provider_credit_messages || {};
+  MODEL_MESSAGES = r.provider_model_messages || {};
   RELEASE_UNMATCHED = r.release_unmatched || []; RELEASE_LAST = r.release_last || {}; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
   readOutsideRule(r);
@@ -2484,7 +2490,7 @@ async function saveProviderKey(name, clear = false) {
     const r = await api("/api/key", {provider:name, key:value});
     if (r.ok || r.saved === true) {
       KEYS[name] = !!value.trim(); delete KEY_DRAFTS[name];
-      if (value.trim()) delete CREDIT_RESTS[name];
+      if (value.trim()) { delete CREDIT_RESTS[name]; delete MODEL_MESSAGES[name]; }
     }
     if (r.ok === false) { settingsFailure = "key"; renderSettings(r.code === "settings_local_only" ? settingsReplyProblems(r) : (r.problems || [T.problems]).map(pushProblem)); }
     else {
@@ -2913,6 +2919,7 @@ function renderSettings(problems = settingsProblems) {
               h("button", {class:"danger", onclick:() => removeProvider(name)}, T.remove))),
           CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, messageText(CREDIT_MESSAGES[name], CREDIT_RESTS[name])),
             h("button", {disabled:SETTINGS_LOCKED, onclick:() => topUpProvider(name)}, T.toppedUp)) : null,
+          MODEL_MESSAGES[name] ? h("div", {class:"row warn"}, messageText(MODEL_MESSAGES[name])) : null,
           fields(field(T.kind, kindSel), field(T.model, bind(p, "model")), field(T.effort, pick(p, "effort", EFFORTS)),
             ...(p.kind === "compatible"
               ? [field(T.endpoint, bind(p, "base_url")), field(T.key,
