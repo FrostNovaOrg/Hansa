@@ -986,6 +986,7 @@ def status(desk: Desk) -> dict:
         "alert_push": alert_push.public(desk, s),
         "alert_push_problem": alert_push.migration_problem(desk),
         "alert_push_duplicates": alert_push.duplicate_names(desk, s),
+        "alert_minutes": alert.minutes_line(desk, s),  # the coordinator alert's minutes, while an alert can go out
         "bad_messages": bad_messages(s),  # message forms written by hand that hansa cannot use
         "merge_targets": [why for n, ln in sorted(s["lanes"].items()) if (why := merge_targets_problem(n, ln))],
         "shared_writes": shared_writes(desk.root, s),  # write-list folders another listed desk's lanes write too
@@ -1111,6 +1112,7 @@ def status_text(st: dict) -> str:
         if last and last["why"] == "bad_key":
             out[-1] += (" · this entry's encryption key is not valid; nothing was sent: set it again on the page "
                         "(Settings, Alerts)")
+    out += [st["alert_minutes"]] if st.get("alert_minutes") else []
     out += [st["disk"]["low_text"] + ". More: hansa help free-space"] if (st.get("disk") or {}).get("low_text") else []
     out += (st.get("disk") or {}).get("unknown") or []
     out += [st["memory"]["low_text"]] if (st.get("memory") or {}).get("low_text") else []

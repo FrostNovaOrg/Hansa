@@ -281,7 +281,8 @@ list, the write list or the network, each tried alone, or "the deny-write
 patterns keep what git needs open" or "the deny-write patterns do not
 keep" with the path; a sandbox that does not keep what it should runs no
 one); the principal's
-alert is told once for each lane and reason. Only what was refused is
+alert is told once for each lane and reason, and again, even for the same reason, after a passing try clears the
+hold. Only what was refused is
 held: a worker's or a verifier's refusal holds its workers and verifiers, and `hansa status` says
 which. Held tasks start by themselves once a probe passes: after a fix,
 restart `hansa serve`, which as it starts probes the sandbox of each held

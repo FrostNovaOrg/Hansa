@@ -866,23 +866,29 @@ def start_held_text(h: dict, short: bool = False, lane: str = "") -> str:
     return out + (f"; {repo_way_out(lane or h.get('lane') or 'L')}" if h.get("cause") == "repo" else "")
 
 
-def sandbox_held_text(h: dict, zh: bool = False, short: bool = False, lane: str = "") -> str:
+def sandbox_held_text(h: dict, zh: bool = False, short: bool = False, lane: str = "", principal: bool = False) -> str:
     """Why a lane's runs are held (an entry of sandbox_held), which of them, and what starts them again, in a
-    clause. zh: in Chinese for the alert, keeping the raw diagnostic in either language. short: the reason's first
-    line alone (hansa status), for one held for the machine or the lane (start_held_text), whose lane is `lane`."""
+    clause. zh: in Chinese, for the alert, with the diagnostic as it is, quoted. short: the reason's first
+    line alone (hansa status), for one held for the machine or the lane (start_held_text), whose lane is `lane`.
+    principal: for the principal's alert, which gives its own next step: no commands to run."""
     if h.get("cause"):
         return start_held_text(h, short, lane)
     why = str(h.get("why") or "?")
     if zh:
         kind = {"worker": "工作智能体", "verifier": "核验者", "check": "检查"}.get(h.get("kind"), "运行")
-        problem = "沙箱已启动，但未通过检查" if why.startswith("the sandbox starts, but ") else "沙箱无法启动"
-        return (f"其{kind}的{problem}：{why}；这会暂缓其工作智能体和核验者，"
-                "沙箱试跑通过后会自动恢复（修复后重启 hansa serve；hansa explain server）")
+        starts = why.startswith("the sandbox starts, but ")
+        problem = "沙箱已启动，但未通过检查" if starts else "沙箱无法启动"
+        said = why.removeprefix("the sandbox starts, but ") if starts else why.removeprefix(
+            "the sandbox could not start: ")
+        return (f"其{kind}的{problem}：「{said}」；这会暂缓其工作智能体和核验者，沙箱试跑通过后会自动恢复"
+                + ("（修复后 hansa serve 重新启动或设置改动时会再试）" if principal else
+                   "（修复后重启 hansa serve；hansa explain server）"))
     return (f"its {h.get('kind') or 'run'}'s "
             + (why.removeprefix("the ") if why.startswith("the sandbox starts, but ") else
                "sandbox could not start: " + why.removeprefix("the sandbox could not start: "))
-            + f"; this holds {SANDBOX_GROUPS['work']}, which start by themselves once a "
-              "try of the sandbox passes (after a fix, restart hansa serve; hansa explain server)")
+            + f"; this holds {SANDBOX_GROUPS['work']}, which start by themselves once a try of the sandbox passes "
+            + ("(after a fix, as hansa serve starts again or the settings change)" if principal else
+               "(after a fix, restart hansa serve; hansa explain server)"))
 
 
 def sandbox_clear(desk: Desk, lane_name: str, group: str) -> None:

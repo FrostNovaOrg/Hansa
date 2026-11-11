@@ -621,6 +621,7 @@ set` has nothing like it. `hansa serve` runs it when a release starts waiting
 for the principal's yes (also when a ticked target's tick no longer holds and
 its release goes back to waiting), when a release ends (done, failed, void or
 forbidden), when the coordinator stops a release, when a to-do for the principal is recorded (`hansa ask`), when a
+provider runs out of credit (once per rest), when a
 lane's runs cannot start because their sandbox cannot (once for each lane and reason until a passing sandbox try
 clears the hold), when free space goes under the
 floor and `hansa serve` starts nothing new (once each time: see [free space](desk.md#free-space)), when
@@ -635,6 +636,16 @@ finishes a round again. The line says when the trouble began and ended, with dat
 It keeps the same alert kind; sandbox recovery is per lane. The beginning is remembered across processes
 and server restarts. A healthy look without an earlier queued alert sends no recovery; recovery while
 channels are off clears the notice without saving it for later. The coordinator's `turn_ok` recovery stays as below.
+
+The principal reads alerts on a phone and need not use a terminal, so a problem alert ends with a next step they
+can take, after `next:` (in Chinese `下一步：`). For `hansa serve` finishing no round, and for a lane held because its
+sandbox cannot start, it says what the trouble means and to tell the coordinator, which can find the cause with
+`hansa explain server`; the sandbox alert adds that the held runs start by themselves once a try of the sandbox
+passes, after a fix, as `hansa serve` starts again or the settings change. A command the principal runs names
+where: `hansa up` in a terminal on the desk's machine. In Chinese alerts hansa's own words are Chinese, while a task's
+title and a program's own message stay as they are, quoted: `其工作智能体的沙箱无法启动：「srt: …」`. A release stopped
+with `hansa release --stop` names who stopped it: the coordinator (from a Claude Code session, or with
+`HANSA_ROLE=coordinator`) or a command in a terminal; a stop recorded by an older hansa says a hansa command.
 
 The command runs as the desk's account, outside the
 sandbox, in a temporary folder of its own under the desk's `secrets/alert-runs` (closed to the
@@ -736,10 +747,14 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   Only what still waits for the coordinator counts, said as it reads now: a task while it waits for review or has
   failed (not once it is merged, closed or cancelled, nor while a verification of it runs), and the server's stop
   only while `hansa serve` is not running, so a server that starts again after a stop does not alert of its own stop.
-  `hansa status` counts the same way.
+  `hansa status` counts the same way. Its next step: when the session ended, or none has heard yet, to run `hansa
+  up` in a terminal on the desk's machine, which starts the session again; when the session runs but does not hear, to
+  ask the coordinator in that session to run `hansa notify on`. In Chinese it says the oldest thing in Chinese: a task
+  by its ID, its title (quoted) and its state.
   A session that starts hearing still first gets what was missed, as before.
   The same minutes also cover a running session whose inbox refuses posts: its follower alerts once, saying that
-  the inbox refuses posts, and keeps the lines to try again. A successful post ends that stretch; a later stretch
+  the inbox refuses posts, and keeps the lines to try again; its next step is, if it lasts, to quit that session and
+  run `hansa up` in a terminal on the desk's machine. A successful post ends that stretch; a later stretch
   counts from its own first refusal. A failed startup summary also waits for a successful post before it counts
   as caught up. The refusal's wait and whether it was alerted survive a follower's restart on new code. Only
   refusals while lines wait count; a failed post an older hansa recorded starts none. While its follower tries
@@ -754,7 +769,8 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
 - **Posted work sits untouched** (120 minutes): a task hansa posted to the session has waited that long for review
   (done, not merged or closed), and the session is `idle` at a lookup after that. Once per task across the desk,
   however many followers watch it (a task that records no session goes to each); its next round may alert again.
-  hansa does not post it again. A task does not wait for review while a verification of it is queued or running,
+  hansa does not post it again; the alert's next step is to ask the coordinator in that session to review it. A task
+  does not wait for review while a verification of it is queued or running,
   whoever asked for it; its verdict's post starts the wait again. A follower started afresh (the session quit and
   opened again, a reboot, `hansa up`) takes the tasks that already wait for review and would be posted to its
   session, as waiting since they ended (or their verification did): the alert says `since it ended`.
@@ -778,10 +794,18 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
     after it fails too, or after 2 minutes when nothing waits. It says to log in again in that session.
   - `max_output_tokens`: one repost at once, ending `go on`; the alert if the next failure is that too.
 
-  The alert names the session, the error, since when and how many things posted to it wait unhandled. When only the
+  The alert ends with advice for the error, for each of them: for those only the principal can fix, and
+  `authentication_failed`, what to fix and where (`billing_error`: add credit or fix billing on the account's page
+  with its provider; `model_not_found`: choose another model with `/model` in that session; and so on); for the
+  others, that hansa tries again with its next post to the session.
+
+  The alert names the session, the error, since when and, when any do, how many things posted to it wait unhandled. When only the
   principal's own request failed in the stretch (no turn hansa started did), it says that instead, with no minutes:
   `the principal's own request ended with an API error (overloaded) at 16:00 and was not done · type it again in
-  that session`. 0 turns the `turn` and `turn_ok` alerts off; the reposts still go. While a stretch holds, `hansa
+  that session`. For an error only the principal can fix, and `authentication_failed`, typing again does nothing
+  until the cause is fixed, so the advice for it comes first: `… · its login failed: log in again in that session
+  (/login), then type it again in that session`. When things hansa posted meanwhile wait unhandled, it ends with how
+  many: `· 2 thing(s) hansa posted meanwhile wait unhandled`. 0 turns the `turn` and `turn_ok` alerts off; the reposts still go. While a stretch holds, `hansa
   status` shows one line for the session, such as `the coordinator's session pid 4242 (desk-b4): its turns end with
   an API error (overloaded) since 14:02 (12 min) · hansa posted again what waits 2 time(s) · the principal is not
   alerted yet`, or the principal's own request in the same words as its alert; none once a turn ends normally.
@@ -794,6 +818,10 @@ still waits for review (so that its status line shows only while the session is 
 idle round with nothing waiting, nor while no alert channel is set up, and what it has alerted stays alerted when it
 restarts on new code. `hansa status` shows a line while a case holds, such as
 `the coordinator's session pid 4242 (desk-b4) has waited on its window for 14 min`.
+While an alert channel is set up, it also shows the minutes of the four cases with the other alert settings:
+`Coordinator alerts after: no listening session 10 min · waiting for input 10 min · task waiting for review 120 min ·
+turns failing 30 min (set on the page, Settings, Alerts)`, `off` for 0. A minutes box emptied on the page takes the
+default; the save says so, and which (`Coordinator's turns failing (minutes): left empty, so the default, 30 minutes, applies.`).
 
 ### Push addresses and services
 

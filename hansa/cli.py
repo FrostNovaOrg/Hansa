@@ -1400,7 +1400,9 @@ def _stop_release(desk: Desk, a) -> None:
     if not rid.isdigit():
         raise SystemExit(f"hansa: --stop takes a release's number (hansa release lists them), not {a.stop!r}")
     reason = " ".join(([a.lane] if a.lane else []) + list(a.note))
-    out = release.stop_release(desk, int(rid), reason, by=os.environ.get("HANSA_ROLE", "cli"))
+    # who, as the principal's alert names them (release.STOPPED_BY): a Claude Code session on a desk is the coordinator's
+    by = os.environ.get("HANSA_ROLE") or ("coordinator" if session_vars() else "terminal")
+    out = release.stop_release(desk, int(rid), reason, by=by)
     if not out["ok"]:
         raise SystemExit("hansa: " + "; ".join(out["problems"]) + ". Nothing was changed")
     r = release.get(desk, int(rid)) or {}
