@@ -54,7 +54,7 @@ To remove hansa (desks stay where they are):
 rm -rf ~/.local/share/hansa ~/.local/bin/hansa
 ```
 
-After installing, run `hansa doctor`; an agent helping with installation runs it first.
+After installing, run `hansa doctor`; an installing agent runs it first.
 
 ```sh
 hansa doctor
@@ -63,7 +63,7 @@ hansa doctor
 It needs no desk and changes nothing: it checks tools and sandbox operation
 without reading credentials, discards login output and removes its temporary
 folder.
-The login row fails until the principal logs in as described below; endpoint-only
+The login row fails until the principal logs in (below); endpoint-only
 setups can ignore that row. Rerun after fixes.
 
 Rows give findings, requirements and fixes; notes do not fail. Exit codes: `0`
@@ -76,12 +76,12 @@ Commands time out after 15 seconds.
 
 For a subscription, run `claude auth login` as the desk account; a new desk's
 provider `claude` uses that login.
-Alternatively, set an Anthropic-compatible endpoint and key on the page below;
-this needs no subscription login. The principal alone handles credentials.
+Alternatively, set an Anthropic-compatible endpoint and key on the page below,
+which needs no subscription login. The principal alone handles credentials.
 
 ## Try the sample first
 
-Run `hansa example` to make a sample task to try on your own login; the command
+Run `hansa example` to make a sample task to try on your own login; it
 starts nothing and calls no model.
 
 ## Create and start the desk
@@ -114,14 +114,13 @@ coordinator; `hansa up` does not restart running processes.
 
 ## Open the principal's page
 
-In your terminal, go to the desk and run:
+From the desk, run:
 
 ```sh
 hansa web
 ```
 
 Open the address, including `#t=...`, and keep the terminal open.
-The token sits after `#`, so the browser sends it to no server.
 The token grants page access, including release approval.
 Start the server and `hansa web` from a plain shell: `hansa web` refuses
 to expose the token in Claude Code sessions.
@@ -130,8 +129,8 @@ In **Settings → Providers**, add endpoints, default models and effort; use
 **Save settings** and the separate **Save key** button. In **Coordinator**, select
 its provider and model before starting it, or restart it after saving.
 In **Prices**, set USD per million tokens. New settings apply to new runs;
-price changes recalculate past costs. `hansa ping` checks all
-providers with a tiny request; the page has a check button too.
+price changes recalculate past costs. `hansa ping`, or the page's check
+button, tests all providers with a tiny request.
 
 ## Finish the first task
 
@@ -145,15 +144,15 @@ Ask the coordinator:
 For an empty project, ask for a Python function and unittest.
 The coordinator sets the check, for example
 `hansa lane set a check "python3 -m unittest discover"`, and the download hosts
-with `hansa lane set a network HOST ...`. The default network list is empty;
+with `hansa lane set a network HOST ...`. The default list is empty;
 list each required host. See [network lists](sandbox.md#a-lanes-network-list).
 
-`hansa lane try a` runs the setup and check in the lane's sandbox. Confirm that
-it passes and that `hansa explain server` reports `hansa serve tried srt` and
+`hansa lane try a` runs the setup and check in the lane's sandbox. Confirm
+it passes and `hansa explain server` reports `hansa serve tried srt` and
 `it ran`. Workers need their own sandbox probe to pass too.
 Without srt, setup and check commands say **could not run** because of a machine
 setup problem; the task itself has not failed. If configured setup cannot run,
-workers do not start. Fix the tools on the server's PATH, restart the server, and
+workers do not start. Fix the tools on the server's PATH, restart it, and
 recheck before merging (`hansa merge ID --recheck`).
 
 Follow progress on Status. The coordinator reads `hansa show ID` and
@@ -188,8 +187,8 @@ If the actual port is **8766**, run this from your own computer:
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -L 127.0.0.1:8766:127.0.0.1:8766 my-server '"$HOME/.local/bin/hansa" --desk "$HOME/shop/desk" web'
 ```
 
-Replace each `8766` with the actual port. Open the printed URL locally and keep
-the tunnel open; closing it ends page access. Keep the server's default
+Replace each `8766` with the actual port. Open the printed URL locally; closing
+the tunnel ends page access. Keep the server's default
 `127.0.0.1` binding; open no other inbound ports.
 
 `ServerAliveInterval=30` checks every 30 seconds, `ServerAliveCountMax=3`
