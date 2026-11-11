@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import date, timedelta
 from pathlib import Path
 
 from . import account, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
@@ -1825,13 +1826,21 @@ def _since(text: str) -> float:
             continue
         if fmt != "%H:%M":
             return time.mktime(t)
-        now = time.localtime()
-        ts = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, t.tm_hour, t.tm_min, 0, 0, 0, -1))
-        return ts - 86400 if ts > time.time() else ts
+        now = time.time()
+        today = date(*time.localtime(now)[:3])
+        ts = time.mktime((today.year, today.month, today.day, t.tm_hour, t.tm_min, 0, 0, 0, -1))
+        if ts > now:
+            yesterday = today - timedelta(days=1)
+            ts = time.mktime((yesterday.year, yesterday.month, yesterday.day, t.tm_hour, t.tm_min, 0, 0, 0, -1))
+        return ts
     raise SystemExit("hansa: --since takes HH:MM (today's, or yesterday's when still ahead) or YYYY-MM-DD HH:MM")
 
 
 def cmd_cost(a):
+    if not 1 <= a.days <= cost.MAX_DAYS:
+        raise SystemExit(f"hansa: --days must be 1 or more, up to {cost.MAX_DAYS}")
+    if a.rows and not a.json:
+        raise SystemExit("hansa: --rows needs --json")
     if a.turns and a.by:
         raise SystemExit("hansa: --turns lists the coordinator's turns session by session, with totals by what "
                          "started them; it has no --by. For totals by day, seat, lane, task, goal, model or provider: "
@@ -4176,7 +4185,7 @@ def main(argv=None):
                      "usage is a row of its own, (coordinator): in every view the rows add up to the total. "
                      "--by goal counts each goal's tasks, follow-ups and verifications in the same --days or --since "
                      "window; tasks without a goal and coordinator/helper usage go under (no goal).")
-    p.add_argument("--days", type=int, default=7)
+    p.add_argument("--days", type=int, default=7, help=f"1 to {cost.MAX_DAYS} days (default: 7)")
     p.add_argument("--since", help="HH:MM (today's, or yesterday's when still ahead), or YYYY-MM-DD "
                    "HH:MM: count from then instead of --days")
     p.add_argument("--by", choices=["day", "seat", "lane", "task", "goal", "model", "provider"], help="the totals by "

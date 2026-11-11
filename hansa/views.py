@@ -2313,17 +2313,20 @@ def try_text(lane: str, t: dict) -> str:
 
 
 def cost_text(rep: dict, by: str = "day") -> str:
+    def dollars(usd):
+        return "<$0.01" if 0 < usd < .01 else f"${usd:.2f}"
+
     rows = rep["by"].get(by, {})
     window = rep.get("window") or f"last {rep['days']} day(s)"
     unpriced = sum(v["unpriced_tokens"] for v in rows.values())
     total = rep["total"]
-    worth = "no price" if unpriced and unpriced == total["tokens"] else f"worth ${total['usd']:.2f}"
+    worth = "no price" if unpriced and unpriced == total["tokens"] else f"worth {dollars(total['usd'])}"
     if unpriced and unpriced < total["tokens"]:
         worth += f" ({unpriced:,} tokens with no price)"
     out = [f"{window}, by {by}: {total['tokens']:,} tokens, {worth}"]
     for k, v in rows.items():
         all_unpriced = v["unpriced_tokens"] and v["unpriced_tokens"] == v["tokens"]
-        worth = "no price" if all_unpriced else f"${v['usd']:.2f}"
+        worth = "no price" if all_unpriced else dollars(v["usd"])
         extra = f" ({v['unpriced_tokens']:,} tokens with no price)" if v["unpriced_tokens"] and not all_unpriced else ""
         if by == "task" and v.get("runs"):  # every run of the task: its earlier tries too
             extra += f"  {v['runs']} run(s), {v.get('turns', 0):,} turn(s)"

@@ -712,6 +712,21 @@ are worth, not a bill. `hansa cost` gives them (`--days N` or `--since HH:MM`;
 `--by day`, `seat`, `lane`, `task`, `goal`, `model` or `provider`; `--json`, with
 `--rows` for every row). A task's turns and tokens are recorded when it ends.
 
+`--days` defaults to 7 and accepts 1 through 36500. The upper limit keeps
+calendar conversion and work charts bounded; it can be raised if longer windows
+are needed. `--since` overrides that window: `HH:MM` is today, or the same local
+clock time on the previous calendar day when still ahead, including across
+daylight saving changes. It also accepts `YYYY-MM-DD HH:MM` (or `T` between date
+and time). A start outside the current year includes its year in the heading.
+In JSON, `since` is the effective start as Unix seconds and `days` is `null`
+for an explicit `--since`; `window` is its readable label. These fields also
+describe `--turns`. `--rows` requires `--json`.
+
+In the cost totals and breakdowns, positive amounts below one cent print as
+`<$0.01`; `$0.00` means zero. The total sums the unrounded values and is rounded
+once for display, so adding independently rounded displayed rows can differ.
+JSON keeps the unrounded dollar values.
+
 When the table has no entry for a Claude model, workers use Claude Code's
 recorded list-price total for the run. This fallback follows the model even if
 its provider was renamed, removed or changed kind. A worker's run without a

@@ -53572,6 +53572,120 @@ else:
         self.assertNotIn("w", r.stdout.splitlines())  # another run's sandbox cannot read it
 
 
+class CostWindowTest(unittest.TestCase):
+    hansa = DeskTest.hansa
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        env = unittest.mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "conf"),
+                                                   "XDG_STATE_HOME": str(self.tmp / "state")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.desk = init_desk(self.tmp / "desk")
+
+    def test_days_must_be_positive(self):
+        for days in ("0", "-3"):
+            for flags in ((), ("--turns",)):
+                with self.subTest(days=days, flags=flags):
+                    with self.assertRaises(SystemExit) as error:
+                        self.hansa("cost", "--days", days, *flags)
+                    self.assertIn("--days", str(error.exception))
+                    self.assertIn("1 or more", str(error.exception))
+
+    def test_days_limit_is_reported_and_accepted(self):
+        for days in ("36501", "100000000"):
+            for flags in ((), ("--turns",)):
+                with self.subTest(days=days, flags=flags):
+                    with self.assertRaises(SystemExit) as error:
+                        self.hansa("cost", "--days", days, *flags)
+                    self.assertIn("--days", str(error.exception))
+                    self.assertIn("36500", str(error.exception))
+        for days in (1, 36500):
+            rep = json.loads(self.hansa("cost", "--days", str(days), "--json"))
+            self.assertEqual(rep["days"], days)
+            self.assertIn(f"last {days} day(s)", rep["window"])
+            self.assertTrue(rep["work_chart"]["buckets"])
+
+    def test_since_label_includes_other_year(self):
+        now = time.mktime(time.strptime("2026-11-12 12:00", "%Y-%m-%d %H:%M"))
+        with unittest.mock.patch("hansa.cost.time.time", return_value=now):
+            for flags in ((), ("--turns",)):
+                for year, label in ((2025, "2025-01-02 10:00"), (2026, "01-02 10:00")):
+                    with self.subTest(flags=flags, year=year):
+                        text = self.hansa("cost", "--since", f"{year}-01-02 10:00", *flags)
+                        self.assertIn("since " + label, text)
+
+    def test_since_yesterday_keeps_local_clock_across_dst(self):
+        if not hasattr(time, "tzset"):
+            self.skipTest("needs tzset for local daylight saving time")
+        try:
+            with unittest.mock.patch.dict(os.environ, {"TZ": "America/New_York"}):
+                time.tzset()
+                localtime = time.localtime
+                for today, yesterday in (("2026-03-08", "2026-03-07"), ("2026-11-01", "2026-10-31"),
+                                         ("2026-01-01", "2025-12-31")):
+                    now = time.mktime(time.strptime(today + " 12:00", "%Y-%m-%d %H:%M"))
+                    with self.subTest(today=today), unittest.mock.patch("hansa.cli.time.time", return_value=now), \
+                            unittest.mock.patch("hansa.cli.time.localtime", side_effect=lambda stamp=None:
+                                                localtime(now if stamp is None else stamp)):
+                        since = cli._since("23:59")
+                        self.assertEqual(time.strftime("%Y-%m-%d %H:%M", time.localtime(since)), yesterday + " 23:59")
+                        self.assertEqual(time.strftime("%Y-%m-%d %H:%M", time.localtime(cli._since("11:00"))),
+                                         today + " 11:00")
+        finally:
+            time.tzset()
+
+    def test_since_json_names_the_requested_start(self):
+        now = time.mktime(time.strptime("2026-11-12 12:00", "%Y-%m-%d %H:%M"))
+        expected = time.mktime(time.strptime("2026-11-11 23:59", "%Y-%m-%d %H:%M"))
+        with unittest.mock.patch("hansa.cost.time.time", return_value=now):
+            for flags in ((), ("--turns",)):
+                with self.subTest(flags=flags):
+                    rep = json.loads(self.hansa("cost", "--json", "--since", "23:59", *flags))
+                    self.assertIsNone(rep["days"])
+                    self.assertEqual(rep["since"], expected)
+                    self.assertIn("since 11-11 23:59", rep["window"])
+
+    def test_since_chart_covers_its_window_independently_of_default_days(self):
+        now = time.time()
+        for days in (10, 40):
+            with self.subTest(days=days), unittest.mock.patch("hansa.cost.time.time", return_value=now):
+                rep = cost.report(self.desk, since=now - days * 86400)
+                chart = rep["work_chart"]
+                self.assertEqual(chart["interval"], "day" if days == 10 else "week")
+                self.assertEqual(chart["buckets"][0]["start"], rep["since"])
+                self.assertEqual(chart["buckets"][-1]["end"], now)
+                self.assertTrue(all(b["end"] - b["start"] <= (1 if days == 10 else 8) * 86400
+                                    for b in chart["buckets"]))
+
+    def test_positive_subcent_rows_and_totals_keep_their_value(self):
+        tid = self.desk.new_task("Small amounts")
+        for amounts in ((.006, .003, .002), (.005, .005, .005), (.0000001,), (.0099996,), (.0150004,)):
+            with self.subTest(amounts=amounts):
+                self.desk.update(tid, finished=time.time(), provider="claude", usage={
+                    f"claude-tiny-{i}": {"in": 1, "claude_code_usd": amount} for i, amount in enumerate(amounts)})
+                rep = json.loads(self.hansa("cost", "--json", "--rows"))
+                self.assertAlmostEqual(rep["total"]["usd"], sum(amounts), places=12)
+                self.assertAlmostEqual(sum(r["usd"] for r in rep["by"]["model"].values()), sum(amounts), places=12)
+                text = self.hansa("cost", "--by", "model")
+                total = "<$0.01" if sum(amounts) < .01 else f"${sum(amounts):.2f}"
+                self.assertIn("worth " + total, text.splitlines()[0])
+                for i, amount in enumerate(amounts):
+                    row = next(line for line in text.splitlines() if line.lstrip().startswith(f"claude-tiny-{i}"))
+                    self.assertIn("<$0.01" if amount < .01 else f"${amount:.2f}", row)
+                self.assertNotIn("$0.00", text)
+
+    def test_rows_requires_json(self):
+        for flags in ((), ("--turns",)):
+            with self.subTest(flags=flags):
+                with self.assertRaises(SystemExit) as error:
+                    self.hansa("cost", "--rows", *flags)
+                self.assertIn("--rows", str(error.exception))
+                self.assertIn("--json", str(error.exception))
+        self.assertIn("rows", json.loads(self.hansa("cost", "--rows", "--json")))
+
+
 class WorkCalendarTest(unittest.TestCase):
     PAGE_HARNESS = DeskTest.PAGE_HARNESS
     web_request = DeskTest.web_request

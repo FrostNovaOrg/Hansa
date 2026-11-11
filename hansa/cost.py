@@ -32,6 +32,8 @@ from . import account, notify, release, session_value, up
 from .desk import Desk, event_record, read_json, write_json
 
 TOKEN_FIELDS = ("in", "out", "cache_read", "cache_write")
+# Bound the CLI's calendar conversion and chart size; revisit if longer windows are needed.
+MAX_DAYS = 36500
 # in .hansa/: the Claude Code sessions the coordinator's process ran, each noted at a hansa command run in it
 SESSIONS = "coordinator-sessions.json"
 SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{7,63}")
@@ -417,13 +419,22 @@ def _starts_turn(d: dict):
     return TURN_KINDS.get(origin.get("kind"), "other")
 
 
+def window(days: int | None, since: float | None, now: float) -> dict:
+    """The effective window, shared by totals and coordinator turns."""
+    if since is not None:
+        local = time.localtime(since)
+        fmt = "%m-%d %H:%M" if local.tm_year == time.localtime(now).tm_year else "%Y-%m-%d %H:%M"
+        return {"days": None, "since": since, "window": "since " + time.strftime(fmt, local)}
+    return {"days": days, "since": 0 if days is None else now - days * 86400,
+            "window": "since the desk began" if days is None else f"last {days} day(s)"}
+
+
 def turns(desk: Desk, days: int = 7, since: float | None = None) -> dict:
     """hansa cost --turns: the coordinator's sessions turn by turn, valued as hansa cost values them, so the
     total is the coordinator's row of hansa cost --by seat over the same window. Only times, counts, tool
     names and numbers: no message text."""
-    window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
-              else f"last {days} day(s)")
-    since = since if since is not None else time.time() - days * 86400
+    period = window(days, since, time.time())
+    since = period["since"]
     got = scan(desk, since)
     rows, helpers, unpriced, shares = got["turns"], got["helpers"], got["unpriced"], got["shares"]
     for t in rows:
@@ -443,7 +454,7 @@ def turns(desk: Desk, days: int = 7, since: float | None = None) -> dict:
         b["usd"] = round(b["usd"], 6)
         b["share"] = b["usd"] / total if total else 0.0
     worth = sum(shares.values())
-    return {"window": window, "turns": rows, "by_kind": dict(sorted(by.items(), key=lambda kv: -kv[1]["usd"])),
+    return {**period, "turns": rows, "by_kind": dict(sorted(by.items(), key=lambda kv: -kv[1]["usd"])),
             "total": {"turns": len(rows), "steps": sum(t["steps"] for t in rows), "usd": round(total, 6),
                       "seconds": sum(t["seconds"] for t in rows)},
             "token_shares": {k: (v / worth if worth else 0.0) for k, v in shares.items()},
@@ -458,8 +469,8 @@ def unassigned(r: dict) -> str:
 
 def work_buckets(tasks: list, since: float, now: float, days: int | None) -> dict:
     """Daily rolling windows, or calendar weeks in the desk's timezone (including partial weeks)."""
-    weekly = days is None or days > 30
     first = since if since else min([now, *(m[k] for m in tasks for k in ("finished", "merged") if m.get(k))])
+    weekly = (days is None and since == 0) or now - first > 30 * 86400
     starts = [first]
     if weekly:
         monday = date.fromisoformat(_day(first))
@@ -468,7 +479,8 @@ def work_buckets(tasks: list, since: float, now: float, days: int | None) -> dic
             starts.append(stamp)
             monday += timedelta(days=7)
     else:
-        starts.extend(first + n * 86400 for n in range(1, days) if first + n * 86400 < now)
+        while starts[-1] + 86400 < now:
+            starts.append(starts[-1] + 86400)
     return {"interval": "week" if weekly else "day", "buckets": [
         {"start": start, "end": end,
          "label": str(date.fromisoformat(_day(start)) - timedelta(days=time.localtime(start).tm_wday)) if weekly else _day(end),
@@ -569,28 +581,27 @@ def grouped(rows: list, key: str) -> dict:
             a["usd"] += r["usd"]
     if key == "goal" and not agg:
         agg["(no goal)"]  # an empty desk still has a zero row
-    return {k: {**v, "usd": round(v["usd"], 6)} for k, v in sorted(agg.items())}
+    return dict(sorted(agg.items()))
 
 
 def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict:
-    window = (f"since {time.strftime('%m-%d %H:%M', time.localtime(since))}" if since is not None
-              else "since the desk began" if days is None else f"last {days} day(s)")
     now = time.time()
-    since = since if since is not None else 0 if days is None else now - days * 86400
+    period = window(days, since, now)
+    since = period["since"]
     tasks = desk.tasks()
-    chart = work_buckets(tasks, since, now, days)
+    chart = work_buckets(tasks, since, now, period["days"])
     # the coordinator's records too since the desk began: one read of them, about 3 s for 500 MB of a weeks-long session
     got = scan(desk, since)
     rows = worker_rows(desk, since, tasks=tasks) + got["rows"]
     by = {key: grouped(rows, key) for key in ("day", "seat", "lane", "task", "goal", "model", "provider")}
-    total_usd = round(sum(r["usd"] for r in rows if r["usd"] is not None), 6)
+    total_usd = sum(r["usd"] for r in rows if r["usd"] is not None)
     work = {**work_history(tasks, release.releases(desk), since, chart),
             # the coordinator's turns with a step in the window, and the time each worked, first step to last
             "coordinator_turns": len(got["turns"]),
             "coordinator_hours": sum(t["last"] - t["first"] for t in got["turns"]) / 3600}
     # what the period's value, the total shown, comes to per task merged in it; no merge: no figure
     work["usd_per_merged"] = round(total_usd / work["merged"], 6) if work["merged"] else None
-    return {"days": days, "window": window, "rows": rows, "by": by, "work": work,
+    return {**period, "rows": rows, "by": by, "work": work,
             "work_chart": chart,
             "total": {"tokens": sum(sum(r[k] for k in TOKEN_FIELDS) for r in rows), "usd": total_usd,
                       "turns": sum(r.get("turns", 0) for r in rows), "runs": sum(r.get("runs", 0) for r in rows)},
