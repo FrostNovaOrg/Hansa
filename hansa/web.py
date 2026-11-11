@@ -319,8 +319,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 tid = q.get("id", [""])[0]
                 if not re.fullmatch(r"t\d+", tid) or not (desk.tasks_dir / tid / "meta.json").is_file():
                     return self._send(404, {"error": "no such task"})
-                return self._send(200, {"meta": read_json(desk.tasks_dir / tid / "meta.json"),
-                                        "text": views.show_text(desk, tid, full=True)})
+                return self._send(200, views.task_page(desk, tid))
             return self._send(404, {"error": "not found"})
 
         def do_POST(self):

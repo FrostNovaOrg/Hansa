@@ -1090,6 +1090,11 @@ def void(desk: Desk, rid, why: str, states=("waiting", "approved"), why_zh: str 
     return r
 
 
+def _answer_refused(code: str, text: str, **values) -> dict:
+    from .page_messages import message
+    return {"ok": False, "problems": [text], "problem_messages": [message(code, text, **values)]}
+
+
 def answer(desk: Desk, rid, yes: bool, reason: str = "", commit: str = "", command=None, by: str = "page") -> dict:
     """The principal's answer on the page, to the release as the page showed it (commit, command). A yes stands
     only while the base branch and the command line are still what the page showed: otherwise the release is
@@ -1097,11 +1102,12 @@ def answer(desk: Desk, rid, yes: bool, reason: str = "", commit: str = "", comma
     with desk.lock():
         r = get(desk, rid)
         if not r:
-            return {"ok": False, "problems": [f"there is no release #{rid}"]}
+            return _answer_refused("release_missing", f"there is no release #{rid}", id=rid)
         if r.get("state") != "waiting":
-            return {"ok": False, "problems": [f"release #{rid} is not waiting for an answer: it is {r.get('state')}"]}
+            return _answer_refused("release_answered", f"release #{rid} is not waiting for an answer: it is {r.get('state')}",
+                                   id=rid, state=r.get("state"))
         if commit != r.get("commit") or (command is not None and command != r.get("command")):
-            return {"ok": False, "problems": [f"release #{rid} is not what this page shows; reload the page"]}
+            return _answer_refused("release_changed", f"release #{rid} is not what this page shows; reload the page", id=rid)
         return _answered(desk, r, yes, reason, by)
 
 
@@ -1121,8 +1127,8 @@ def _answered(desk: Desk, r: dict, yes: bool, reason: str, by: str, channel: str
     why, why_zh = stale_both(desk, desk.settings(), r)
     if why:
         void(desk, rid, why, ("waiting",), why_zh)
-        return {"ok": False, "void": why, "problems": [f"release #{rid} is void: {why}. Nothing was run; the "
-                                                       "coordinator is told, and asks again"]}
+        return {**_answer_refused("release_void", f"release #{rid} is void: {why}. Nothing was run; the "
+                                 "coordinator is told, and asks again", id=rid, why_zh=why_zh), "void": why}
     change(desk, rid, lambda x: {"state": "approved", **said, **({"reason": reason} if reason else {})})
     desk.event("release_answered", id=rid, lane=r.get("lane"), target=r.get("target") or "", yes=True, **how)
     return {"ok": True}
@@ -2058,6 +2064,7 @@ def waits_text(desk: Desk, s: dict, r: dict, tasks=None, zh: bool = False) -> st
 
 def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> str:
     """A release's state in words (zh: in Chinese, for the page)."""
+    from .page_messages import release_problem_zh
     st = r.get("state")
     coded = r.get("channel") == "code"
     if st == "waiting":
@@ -2103,7 +2110,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
     if st == "failed":
         if zh:
             return (f"{when(r.get('ended'))} 失败" + (f"（退出码 {r['exit']}）" if r.get("exit") is not None else "")
-                    + (f"：{r['problem']}" if r.get("problem") else "") + late)
+                    + (f"：{release_problem_zh(r['problem'])}" if r.get("problem") else "") + late)
         return (f"FAILED {when(r.get('ended'))}" + (f" (exit {r['exit']})" if r.get("exit") is not None else "")
                 + (f": {r['problem']}" if r.get("problem") else "") + late)
     if st == "refused":
