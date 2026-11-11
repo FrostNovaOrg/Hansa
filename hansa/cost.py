@@ -9,10 +9,11 @@ Two sources, never counted twice:
   coordinator's sessions hansa noted from its commands (note_session) and of every other session in the folder
   those ran in, its working folder: what the coordinator costs is everything spent there (working_folders).
 
-Prices come from the principal's table. A Claude model with no entry, run on a
-subscription, falls back to Claude Code's own list-price figure; any other model
-with no price is listed, not guessed (Claude Code's figure for a model it does not
-know is a placeholder). A subscription is paid by the month, so the dollar figure
+Prices come from the principal's table. A Claude model with no entry falls back
+to Claude Code's recorded list-price figure, or its known list rates when only
+token counts are available, regardless of the provider's current settings. Any
+other model with no price is listed, not guessed (Claude Code's figure for a model
+it does not know is a placeholder). A subscription is paid by the month, so the dollar figure
 is what the tokens are worth, for comparing and spotting waste, not a bill.
 """
 from __future__ import annotations
@@ -30,6 +31,27 @@ from . import account, notify, release, session_value, up
 from .desk import Desk, event_record, read_json, write_json
 
 TOKEN_FIELDS = ("in", "out", "cache_read", "cache_write")
+# Claude Code list rates, USD per million tokens. Keep explicit model names: an
+# unfamiliar model must stay unpriced, rather than inherit a family's guessed rate.
+# Saved worker totals take precedence over these rates; the principal's table wins over both.
+CLAUDE_CODE_PRICES = {
+    "claude-opus-5-5": {"in": 5, "out": 25},
+    "claude-opus-5": {"in": 5, "out": 25},
+    "claude-opus-4-6": {"in": 5, "out": 25},
+    "claude-opus-4-5": {"in": 5, "out": 25},
+    "claude-opus-4-1": {"in": 15, "out": 75},
+    "claude-opus-4": {"in": 15, "out": 75},
+    "claude-sonnet-4-6": {"in": 3, "out": 15},
+    "claude-sonnet-4-5": {"in": 3, "out": 15},
+    "claude-sonnet-4": {"in": 3, "out": 15},
+    "claude-haiku-4-5": {"in": 1, "out": 5},
+    "claude-3-7-sonnet": {"in": 3, "out": 15},
+    "claude-3-5-sonnet": {"in": 3, "out": 15},
+    "claude-3-5-haiku": {"in": .8, "out": 4},
+    "claude-3-opus": {"in": 15, "out": 75},
+    "claude-3-sonnet": {"in": 3, "out": 15},
+    "claude-3-haiku": {"in": .25, "out": 1.25},
+}
 # in .hansa/: the Claude Code sessions the coordinator's process ran, each noted at a hansa command run in it
 SESSIONS = "coordinator-sessions.json"
 SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{7,63}")
@@ -66,6 +88,20 @@ def value(model: str, u: dict, prices: dict):
     return None if p is None else sum(p.values())
 
 
+def pricing(model: str, u: dict, prices: dict) -> tuple:
+    """(dollars, source, token parts) for workers and sessions alike. A saved
+    Claude Code total has no token breakdown; unknown models never use its placeholder."""
+    p = parts(model, u, prices)
+    if p is not None:
+        return sum(p.values()), "price table", p
+    if model.startswith("claude-") and u.get("claude_code_usd") is not None:
+        return u["claude_code_usd"], "Claude Code list price", None
+    p = parts(model, u, CLAUDE_CODE_PRICES)
+    if p is not None:
+        return sum(p.values()), "Claude Code list price", p
+    return None, "no price", None
+
+
 def _day(ts: float) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
@@ -98,16 +134,12 @@ def worker_rows(desk: Desk, since: float, s: dict | None = None, tasks: list | N
             when = run["when"]
             if when < since:
                 continue
-            kind = s["providers"].get(run["provider"], {}).get("kind", "")
             for i, (model, u) in enumerate(run["usage"].items()):
-                usd = value(model, u, s["prices"])
-                source = "price table"
-                if usd is None and kind == "subscription" and u.get("claude_code_usd") is not None:
-                    usd, source = u["claude_code_usd"], "Claude Code list price"
+                usd, source, _ = pricing(model, u, s["prices"])
                 rows.append({"day": _day(when), "seat": seat, "lane": m.get("lane", ""), "task": m["id"],
                              "provider": run["provider"], "model": model, "goal": m.get("goal", ""),
                              **{k: u.get(k, 0) for k in TOKEN_FIELDS}, "usd": usd,
-                             "priced_by": source if usd is not None else "no price",
+                             "priced_by": source,
                              "turns": run["turns"] if i == 0 else 0, "runs": 1 if i == 0 else 0})
     return rows
 
@@ -261,7 +293,7 @@ def scan(desk: Desk, since: float) -> dict:
     """One read of the coordinator's and its helpers' records in the window: the rows hansa cost adds up, by day,
     seat, model and provider, and the coordinator's turns as hansa cost --turns lists them (see turns)."""
     prices = desk.settings()["prices"]
-    per = defaultdict(lambda: {**{k: 0 for k in TOKEN_FIELDS}, "usd": 0.0, "unpriced": False})
+    per = defaultdict(lambda: {**{k: 0 for k in TOKEN_FIELDS}, "usd": 0.0, "priced_by": "no price"})
     seen, tools_seen = set(), set()
     out, helpers, unpriced = [], defaultdict(lambda: {"steps": 0, "usd": 0.0}), set()
     shares = {k: 0.0 for k in TOKEN_FIELDS}
@@ -271,13 +303,13 @@ def scan(desk: Desk, since: float) -> dict:
             for d in records(f):
                 s_ = record_seat(d, seat)
                 got = step(d, seen, lo, hi)
-                usd = value(got[0], got[1], prices) if got else None  # each call valued alone
                 if got:
+                    usd, source, p_ = pricing(got[0], got[1], prices)  # each call valued alone
                     row = per[(_day(got[2]), s_, got[0], provider)]
                     for k in TOKEN_FIELDS:
                         row[k] += got[1][k]
                     row["usd"] += usd or 0
-                    row["unpriced"] |= usd is None
+                    row["priced_by"] = source
                     if usd is None:
                         unpriced.add(got[0])
                 if s_ != "coordinator":
@@ -294,7 +326,6 @@ def scan(desk: Desk, since: float) -> dict:
                     continue
                 if got:
                     model, u, ts = got
-                    p_ = parts(model, u, prices)
                     if cur["steps"] == 0:
                         cur["length"], cur["first"] = u["in"] + u["cache_read"] + u["cache_write"], ts
                     cur["steps"] += 1
@@ -313,10 +344,10 @@ def scan(desk: Desk, since: float) -> dict:
             continue
     rows = []
     for (day, seat, model, provider), u in sorted(per.items()):
-        usd = None if u["unpriced"] else u["usd"]
+        usd = None if u["priced_by"] == "no price" else u["usd"]
         rows.append({"day": day, "seat": seat, "lane": "", "task": "", "goal": "", "provider": provider,
                      "model": model, **{k: u[k] for k in TOKEN_FIELDS}, "usd": usd,
-                     "priced_by": "price table" if usd is not None else "no price"})
+                     "priced_by": u["priced_by"]})
     return {"rows": rows, "turns": sorted((t for t in out if t["steps"]), key=lambda t: t["start"]),
             "helpers": helpers, "unpriced": unpriced, "shares": shares}
 
@@ -589,4 +620,4 @@ def report(desk: Desk, days: int | None = 7, since: float | None = None) -> dict
             "unpriced_models": sorted({r["model"] for r in rows if r["usd"] is None}),
             **uncounted(desk),
             "coordinator_user": (read_json(desk.state_dir / "coordinator.json", {}) or {}).get("user", ""),
-            "note": "Dollars use the principal's price table (a Claude model without an entry uses Claude Code's list price). Subscriptions are paid by the month: this is what the tokens are worth, not a bill."}
+            "note": "Dollars use the principal's price table. Without an entry, Claude models use Claude Code's recorded list price or known list rates, regardless of the provider's current settings; models without either have no price. Subscriptions are paid by the month: this is what the tokens are worth, not a bill."}

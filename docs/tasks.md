@@ -628,6 +628,22 @@ are worth, not a bill. `hansa cost` gives them (`--days N` or `--since HH:MM`;
 `--by day`, `seat`, `lane`, `task`, `goal`, `model` or `provider`; `--json`, with
 `--rows` for every row). A task's turns and tokens are recorded when it ends.
 
+When the table has no entry for a Claude model, workers use Claude Code's
+recorded list-price total, or its known list rates when only tokens were saved.
+The coordinator and its helpers use the same known list rates for their session
+records. This fallback follows the model even if its provider was renamed,
+removed or changed kind. Unknown models without a recorded Claude list price
+or known rates stay unpriced; a third-party model's placeholder dollars are
+never used. The principal's table takes precedence, including a price of zero.
+
+`hansa status` shows the worth of the priced worker tokens in the last 24 hours
+and counts any tokens with no price yet, pointing to the principal's prices on
+the page. If none have a price, it shows no dollar value. `hansa cost` shows
+`no price` in place of dollars for a wholly unpriced row; a partly priced row
+shows its priced worth and how many of its total tokens have no price.
+The JSON fields stay the same: an unpriced usage row has `usd: null` and
+`priced_by: "no price"`.
+
 To say what one job cost, note the time `hansa status` shows when it starts,
 and run `hansa cost --since HH:MM --by seat` when it is done. Spend no turns on cost.
 

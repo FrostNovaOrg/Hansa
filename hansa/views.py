@@ -1067,6 +1067,8 @@ def status(desk: Desk) -> dict:
         "last_24h": {"finished": sum((m.get("finished") or 0) >= day for m in tasks),
                      "merged": sum(m["state"] == "merged" and (m.get("merged") or 0) >= day for m in tasks),
                      "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
+                     "worker_unpriced_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS)
+                                                   for r in rows if r["usd"] is None),
                      "worker_usd": round(sum(r["usd"] for r in rows if r["usd"] is not None), 2)},
     })
 
@@ -1218,8 +1220,12 @@ def status_text(st: dict) -> str:
         out.append("open asks to the principal:")
         out += [f"  #{a['id']}: {a['text'][:100]}" + (f" · {a['note']}" if a.get("note") else "") for a in st["asks"]]
     t = st["last_24h"]
+    unpriced = t.get("worker_unpriced_tokens", 0)
+    worth = f"worth ${t['worker_usd']:.2f}; " if not unpriced or unpriced < t["worker_tokens"] else ""
+    if unpriced:
+        worth += f"{unpriced:,} tokens have no price yet; the principal sets prices on the page; "
     out.append(f"last 24 h: {t['finished']} finished, {t['merged']} merged; workers used {t['worker_tokens']:,} tokens"
-               f" (worth ${t['worker_usd']:.2f}; hansa cost for everything)")
+               f" ({worth}hansa cost for everything)")
     return "\n".join(out)
 
 
@@ -2299,13 +2305,19 @@ def try_text(lane: str, t: dict) -> str:
 def cost_text(rep: dict, by: str = "day") -> str:
     rows = rep["by"].get(by, {})
     window = rep.get("window") or f"last {rep['days']} day(s)"
-    out = [f"{window}, by {by}: {rep['total']['tokens']:,} tokens, "
-           f"worth ${rep['total']['usd']:.2f}"]
+    unpriced = sum(v["unpriced_tokens"] for v in rows.values())
+    total = rep["total"]
+    worth = "no price" if unpriced and unpriced == total["tokens"] else f"worth ${total['usd']:.2f}"
+    if unpriced and unpriced < total["tokens"]:
+        worth += f" ({unpriced:,} tokens with no price)"
+    out = [f"{window}, by {by}: {total['tokens']:,} tokens, {worth}"]
     for k, v in rows.items():
-        extra = f" (+{v['unpriced_tokens']:,} tokens with no price)" if v["unpriced_tokens"] else ""
+        all_unpriced = v["unpriced_tokens"] and v["unpriced_tokens"] == v["tokens"]
+        worth = "no price" if all_unpriced else f"${v['usd']:.2f}"
+        extra = f" ({v['unpriced_tokens']:,} tokens with no price)" if v["unpriced_tokens"] and not all_unpriced else ""
         if by == "task" and v.get("runs"):  # every run of the task: its earlier tries too
             extra += f"  {v['runs']} run(s), {v.get('turns', 0):,} turn(s)"
-        out.append(f"  {k or '-':<22} {v['tokens']:>14,}  ${v['usd']:.2f}{extra}")
+        out.append(f"  {k or '-':<22} {v['tokens']:>14,}  {worth}{extra}")
     w = rep.get("work") or {}
     if w.get("coordinator_turns"):
         out.append(f"the coordinator: {w['coordinator_turns']:,} turn(s), {w['coordinator_hours']:.2f} hour(s) of work "
