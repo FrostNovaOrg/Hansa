@@ -457,6 +457,19 @@ new task file records, release file matching, conflict reports and the files giv
 worker. `hansa show` uses the recorded names; `hansa diff --stat` and `hansa git` show non-ASCII
 names as written. Names already saved by an older hansa are left as saved.
 
+`hansa diff ID [path ...] [--stat]` shows the recorded task's changes against its base.
+Paths are relative to the repository, without `..`. If the task's lane or worktree was removed,
+hansa says so and reads the recorded change from a remaining lane's repository when its task
+branch still holds that commit. Otherwise it names the branch and its recorded repository.
+
+For a follow-up, `hansa diff NEW --new` shows only what it added to the earlier task.
+With `retry --update`, changes brought in from the base are left out. A clean merge is skipped;
+an update with no merge is treated like a plain follow-up. For a conflicted merge, the output
+shows its resolution against git's recreated conflict markers, then changes committed after
+the merge. Path filters and `--stat` apply to both parts; their statistics are separate and the
+resolution counts removal of the markers. This uses git's `--remerge-diff` (git 2.36 or newer).
+If git cannot read the change, hansa gives its reason instead of a traceback.
+
 `hansa verify ID` chooses a verify lane listing the task's lane: free first, then fewest queued,
 then lanes' order; otherwise its own lane. `--lane L` overrides this.
 
