@@ -146,6 +146,11 @@ The HTML shell can load without a token; every API request must send
 `Authorization: Bearer <token>`, and POST also requires `X-Hansa: 1`.
 Query parameters and cookies do not authenticate API requests.
 
+On a phone, the main tabs stay in one row; swipe the row sideways to reach
+the other tabs. Status tables scroll sideways inside their own boxes, keeping
+buttons, task IDs and status words readable. Long paths, commands and addresses
+still wrap within their cells or cards.
+
 After upgrading, restart the desk's server and reopen the printed address:
 the token is renewed automatically when its format changes. A current token
 persists across server restarts. Closing a tab discards its session storage
@@ -688,7 +693,8 @@ buttons work separately from Save settings and preserve all unsaved settings.
 The dispatch state loads when Settings opens and after either action. A failed
 press shows its error and keeps the displayed state and reason box. The header
 still reports when the desk is paused.
-The save bar applies to all editable settings groups.
+The save bar applies to all editable settings groups. On narrow screens its
+status sits above two buttons; the compact heading and bar leave room for fields.
 In **Settings → Lanes → General**, **Desk name** (`desk_name` in
 `settings.json`) lets the principal name the desk in any language, for example
 `网店台子`. Saving strips surrounding spaces; only spaces saves an empty name.

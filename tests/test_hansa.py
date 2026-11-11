@@ -40252,6 +40252,27 @@ else if (ask === "principal-folds") (async () => {
   for (const key of [...opened, ...closed]) check(fold(key) && !fold(key).open, "departed item's fold state survived: " + key);
   console.log(JSON.stringify({ok:true}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "phone-stop-note") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const check = (ok, why) => { if (!ok) throw new Error(why); };
+  const note = () => descendants(ids["#tab-status"], "details").find(el => el.attrs["data-principal-fold"] === "release-stop:17:note");
+  await run("loadStatus()");
+  check(note() && !note().open, "Stop explanation must start folded");
+  check(note().kids[1].textContent === run("T.releaseStopNote"), "full Stop explanation is not text");
+  note().kids[0].click();
+  check(note().open, "tapping the Stop summary must reveal the explanation");
+  await run("loadStatus()");
+  check(note().open, "status refresh closed the Stop explanation while reading");
+  note().kids[0].click(); await run("loadStatus(true)");
+  check(!note().open, "closed Stop explanation reopened");
+  note().kids[0].click();
+  const releases = given["/api/status"].releases;
+  given["/api/status"].releases = []; await run("loadStatus()");
+  given["/api/status"].releases = releases; await run("loadStatus()");
+  check(!note().open, "departed release kept its old Stop explanation state");
+  check(apiPosts.length === 0, "reading the Stop explanation submitted an action");
+  console.log(JSON.stringify({touch:true, refresh:true, fullNote:true}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "stop-watch") (async () => {
   const run = code => vm.runInContext(code, ctx);
   const check = (ok, why) => { if (!ok) throw new Error(why); };
@@ -42832,10 +42853,10 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                         self.assertIn(prop, rule)
                 self.assertNotRegex(css, r"\.brand-caption\s*\{[^}]*display:none")
                 phone = css.split("@media (max-width:860px)")[1].split("@media (max-width:640px)")[0]
-                self.assertIn("grid-template-columns:minmax(0,1fr) auto", phone)
-                self.assertRegex(phone, r"#state\s*\{[^}]*grid-column:1 / -1;[^}]*grid-row:3;")
-                # Narrow pages wrap the tabs onto more rows, so none is cut off behind a sideways scroll.
-                self.assertRegex(phone, r"#tabs\s*\{[^}]*flex-wrap:wrap")
+                self.assertIn("grid-template-columns:auto minmax(0,1fr) auto", phone)
+                self.assertRegex(phone, r"#state\s*\{[^}]*grid-column:1 / -1;[^}]*grid-row:2;")
+                # Narrow pages keep one scrolling tab row above the status line.
+                self.assertRegex(phone, r"#tabs\s*\{[^}]*flex-wrap:nowrap")
                 self.assertNotIn("flex-wrap", re.search(r"#tabs\s*\{([^}]+)\}", css)[1])  # wide pages keep one row
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
@@ -43274,6 +43295,78 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 self.assertTrue(any(text in n["text"] for n in folds), text)
             self.assertIn("Changelog line 7", card["text"])
             self.assertFalse(any("Changelog line 7" in n["text"] for n in folds))
+
+    def test_phone_status_tables_keep_readable_columns_and_local_scrolling(self):
+        for page in self.principal_layout_page():
+            tables = [n for n in self.page_nodes(page["root"]) if n["tag"] == "table"]
+            self.assertTrue(tables)
+            for table in tables:
+                self.assertTrue(any(n["className"] == "scroll" and table in n["kids"]
+                                    for n in self.page_nodes(page["root"])))
+            css = page["css"]
+            self.assertRegex(css, r"\.scroll\s*\{[^}]*overflow-x:auto;[^}]*max-width:100%")
+            self.assertRegex(css, r"#tab-status table\s*\{[^}]*min-width:680px")
+            self.assertRegex(css, r"#tab-status td\s*\{[^}]*min-width:6em;[^}]*max-width:28em")
+            self.assertRegex(css, r"#tab-status td button\s*\{[^}]*white-space:nowrap")
+            self.assertRegex(css, r"\.status-pill\s*\{[^}]*overflow-wrap:normal")
+            # Paths, commands and addresses can still wrap within a bounded cell or card.
+            self.assertRegex(css, r"body, td, label, code, \.mono\s*\{[^}]*overflow-wrap:anywhere")
+
+    def test_phone_header_scrolls_one_tab_row_and_settings_footer_fits_contents(self):
+        for page in self.principal_layout_page():
+            css = page["css"]
+            narrow = re.search(r"@media \(max-width:860px\)\s*\{(.*?)\n\}", css, re.S)[1]
+            self.assertRegex(narrow, r"#tabs\s*\{[^}]*grid-row:1;[^}]*flex-wrap:nowrap")
+            self.assertRegex(css, r"#tabs\s*\{[^}]*overflow-x:auto")
+            phone = re.search(r"@media \(max-width:640px\)\s*\{\s*header(.*?)\n\}", css, re.S)[1]
+            self.assertRegex(phone, r"\.settings-footer\s*\{[^}]*display:grid;[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)")
+            self.assertRegex(phone, r"\.settings-footer \.save-state\s*\{[^}]*grid-column:1 / -1")
+            # The 320x568 English browser case needed 20 px less space above the first field
+            # to clear the save bar. Keep these compact gaps until that layout is replaced.
+            for selector, gap in ((".settings-head", "margin-bottom:8px"),
+                                  (".settings-layout", "gap:8px"),
+                                  (".settings-group .group-head", "margin-bottom:4px"),
+                                  (".settings-group .card-head", "margin-bottom:6px")):
+                rule = re.search(re.escape(selector) + r"\s*\{([^}]+)\}", phone)
+                self.assertIsNotNone(rule)
+                self.assertIn(gap, rule[1])
+
+    def test_phone_release_refusal_keeps_its_reason_with_refuse(self):
+        for page in self.principal_layout_page(releases=[{}]):
+            [card] = self.assert_principal_layout(page, 1)
+            actions = card["kids"][1]
+            self.assertEqual([n["tag"] for n in actions["kids"]], ["button", "div"])
+            self.assertEqual(actions["kids"][0]["attrs"]["data-status-focus"], "release:17:yes")
+            refusal = actions["kids"][1]
+            self.assertEqual(refusal["className"], "release-refusal")
+            self.assertEqual([n["tag"] for n in refusal["kids"]], ["input", "button"])
+            self.assertEqual(refusal["kids"][1]["attrs"]["data-status-focus"], "release:17:no")
+            self.assertRegex(page["css"], r"\.release-refusal\s*\{[^}]*display:flex;[^}]*flex-wrap:nowrap")
+            self.assertRegex(page["css"], r"\.release-refusal > input\s*\{[^}]*min-width:0")
+
+    def test_phone_release_stop_note_is_visible_and_expandable_in_both_languages(self):
+        releases = [{"state": "approved", "what": "approved"},
+                    {"id": 18, "state": "done", "what": "done", "watch_run": {"state": "running"}}]
+        for language, page in zip(("en", "zh"), self.principal_layout_page(releases=releases)):
+            nodes = list(self.page_nodes(page["root"]))
+            for rid in (17, 18):
+                button = next(n for n in nodes if n["attrs"].get("data-status-focus") == f"release:{rid}:stop")
+                self.assertNotIn("title", button["attrs"], "the explanation must work without hover")
+                note = next(n for n in nodes if n["attrs"].get("data-principal-fold") == f"release-stop:{rid}:note")
+                self.assertEqual(note["tag"], "details")
+                self.assertNotIn("open", note["attrs"])
+                self.assertEqual(note["kids"][0]["tag"], "summary")
+                self.assertIn("Stop" if language == "en" else "叫停", note["kids"][0]["text"])
+                self.assertIn("TERM", note["kids"][1]["text"])
+                self.assertIn("KILL", note["kids"][1]["text"])
+                self.assertIn("30", note["kids"][1]["text"])
+                self.assertIn("half-switched" if language == "en" else "部分更新", note["kids"][1]["text"])
+
+    def test_phone_release_stop_note_stays_open_while_reading(self):
+        for release in ({"state": "approved", "what": "approved"},
+                        {"state": "done", "what": "done", "watch_run": {"state": "running"}}):
+            for result in self.principal_layout_page(releases=[release], scenario="phone-stop-note"):
+                self.assertEqual(result, {"touch": True, "refresh": True, "fullNote": True})
 
     def test_principal_release_and_two_requests_come_before_other_sections(self):
         asks = [{"id": 7, "text": "Review <b>x</b>\n" + "\n".join(f"Request detail {i}" for i in range(20)),
