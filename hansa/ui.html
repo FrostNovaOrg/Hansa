@@ -11,7 +11,7 @@
 body { margin:0; font:14px/1.6 system-ui,-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif; background:var(--bg); color:var(--fg); }
 /* Long commands and paths stay inside the page. */
 body, td, label, code, .mono { overflow-wrap:anywhere; }
-header { display:grid; grid-template-columns:minmax(90px,160px) minmax(0,max-content) minmax(100px,1fr) auto; gap:20px; align-items:center; padding:12px 24px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:5; }
+header { display:grid; grid-template-columns:minmax(90px,160px) minmax(0,max-content) minmax(100px,1fr) auto auto; gap:20px; align-items:center; padding:12px 24px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:5; }
 #title { display:flex; align-items:center; gap:9px; min-width:0; font-size:15px; letter-spacing:-.3px; white-space:nowrap; }
 .brand-mark { display:grid; place-items:center; flex:none; width:27px; height:27px; border-radius:8px; background:var(--fg); color:var(--card); font-size:15px; font-weight:700; }
 .brand-label { display:flex; flex-direction:column; min-width:0; line-height:1.3; }
@@ -24,7 +24,9 @@ nav button.on { background:var(--card); border-color:var(--line); color:var(--fg
 #state { display:flex; align-items:center; gap:7px; min-width:0; height:30px; font-size:12px; }
 #state-window { flex:1; min-width:0; overflow:hidden; white-space:nowrap; }
 #state-text { display:inline-block; white-space:nowrap; }
-#state-toggle, #language { flex:none; width:30px; min-height:30px; padding:4px; }
+#state-toggle, #language, #github { flex:none; width:30px; min-height:30px; padding:4px; }
+#github { display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--line); border-radius:7px; background:var(--card); color:var(--fg); }
+#github:hover { border-color:var(--control-line); background:var(--surface); }
 .header-menu { position:absolute; top:100%; right:12px; z-index:6; margin:6px 0 0; padding:10px; border:1px solid var(--line); border-radius:9px; background:var(--card); box-shadow:var(--shadow); max-width:calc(100% - 24px); max-height:70vh; overflow:auto; }
 #state-list { width:620px; list-style:none; }
 #state-list li { display:flex; align-items:baseline; gap:7px; padding:5px; white-space:normal; }
@@ -289,11 +291,12 @@ td .task-detail { min-width:200px; }
 .work-chart-tooltip { display:none; position:absolute; z-index:2; bottom:60px; left:0; width:max-content; max-width:100%; box-sizing:border-box; padding:8px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; font-size:12px; }
 .work-chart-track:hover .work-chart-tooltip, .work-chart-track:focus .work-chart-tooltip { display:block; }
 @media (max-width:860px) {
-  header { grid-template-columns:auto minmax(0,1fr) auto; gap:6px 10px; padding:12px 18px; }
+  header { grid-template-columns:auto minmax(0,1fr) auto auto; gap:6px 10px; padding:12px 18px; }
   #title { max-width:160px; }
   #tabs { grid-column:2; grid-row:1; flex-wrap:nowrap; overscroll-behavior-x:contain; }
   #state { grid-column:1 / -1; grid-row:2; font-size:11px; }
   #language { grid-column:3; grid-row:1; }
+  #github { grid-column:4; grid-row:1; }
   main { padding:24px 18px; }
   .settings-layout { grid-template-columns:minmax(0,1fr); gap:20px; }
   .settings-nav { flex-direction:row; overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:thin; scrollbar-color:var(--control-line) transparent; top:calc(var(--header-height) + 6px); z-index:3; box-shadow:var(--shadow); border-radius:10px; }
@@ -428,6 +431,9 @@ td .task-detail { min-width:200px; }
   <nav id="tabs"></nav>
   <span id="state" class="muted"><span id="state-window"><span id="state-text"></span></span><button id="state-toggle" type="button" aria-controls="state-list" aria-expanded="false"></button></span>
   <button id="language" type="button" aria-controls="language-menu" aria-expanded="false"></button>
+  <a id="github" href="https://github.com/FrostNovaOrg/Hansa" target="_blank" rel="noopener noreferrer">
+    <svg class="icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.86c.68 0 1.36.09 2 .26 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>
+  </a>
   <ul id="state-list" class="header-menu" hidden></ul>
   <div id="language-menu" class="header-menu" hidden></div>
 </header>
@@ -1012,7 +1018,7 @@ Object.assign(T, ZH ? {
   staleReloaded:(changed, both) => `设置已在别处修改，页面已重新加载。别处修改的项：${changed}。两边都修改的项（保留你的草稿值）：${both}。草稿和密钥输入仍保留；再次点保存才会保存。`,
   staleReloadFailed:"设置已在别处修改，重新加载失败。草稿和密钥输入仍保留，请再试一次。",
   savedReloadFailed:"设置已保存，但重新加载失败。当前内容仍保留，请重新加载。",
-  primaryNav:"工作台导航", showKey:"显示密钥", hideKey:"隐藏密钥", refresh:"重新加载",
+  primaryNav:"工作台导航", github:"Hansa 的 GitHub 仓库", showKey:"显示密钥", hideKey:"隐藏密钥", refresh:"重新加载",
   reloading:"正在重新加载…", keySaving:"正在保存密钥…", saveFailed:"保存失败，修改仍保留。",
   loadFailed:"重新加载失败，当前内容仍保留。", modifiedGroup:"此分组有未保存修改",
   jumpToField:"前往对应设置", retrySave:"修正后可重新保存。",
@@ -1021,7 +1027,7 @@ Object.assign(T, ZH ? {
   staleReloaded:(changed, both) => `Settings changed elsewhere and the page reloaded them. Changed elsewhere: ${changed}. Changed by both (your draft values kept): ${both}. Your draft and key inputs remain; press Save again to save.`,
   staleReloadFailed:"Settings changed elsewhere, but reloading failed. Your draft and key inputs remain; try again.",
   savedReloadFailed:"Settings saved, but reloading failed. The current contents remain; reload settings.",
-  primaryNav:"Desk navigation", showKey:"Show key", hideKey:"Hide key", refresh:"Reload settings",
+  primaryNav:"Desk navigation", github:"Hansa on GitHub", showKey:"Show key", hideKey:"Hide key", refresh:"Reload settings",
   reloading:"Reloading settings…", keySaving:"Saving key…", saveFailed:"Save failed. Your changes are still here.",
   loadFailed:"Reload failed. The current settings are still here.", modifiedGroup:"This section has unsaved changes",
   jumpToField:"Go to this setting", retrySave:"Correct the values and save again.",
@@ -3435,6 +3441,8 @@ for (const tab of TABS) {
 }
 headerMenuButton($("#state-toggle"), $("#state-list"), ZH ? "全部状态" : "All status details", "tasks");
 headerMenuButton($("#language"), $("#language-menu"), ZH ? "语言" : "Language", "globe");
+$("#github").setAttribute("aria-label", T.github);
+$("#github").setAttribute("title", T.github);
 $("#language-menu").append(...[ ["zh-CN", "中文"], ["en", "English"] ].map(([value, label]) =>
   h("button", {type:"button", lang:value, "aria-current":value === language ? "true" : null, onclick:() => {
     closeHeaderMenu(true); keepChoice("localStorage", "hansa.language", value); location.reload();

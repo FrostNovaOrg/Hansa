@@ -39165,6 +39165,9 @@ function openPage(search = "") {
 }
 let ctx = openPage(preferences.search);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
+const headerLinks = () => descendants(ids.header, "a").map(el => ({tag:el.tag, ...el.attrs,
+  parent:el.parentElement.tag, previous:el.parentElement.kids[el.parentElement.kids.indexOf(el) - 1]?.id,
+  icons:descendants(el, "svg").map(svg => ({...svg.attrs, paths:descendants(svg, "path").length}))}));
 const stateBeforeCost = document.querySelector("#state").textContent;
 if (ask === "history") (async () => {
   const run = code => vm.runInContext(code, ctx), flush = () => new Promise(resolve => setImmediate(resolve));
@@ -39319,7 +39322,7 @@ else if (ask === "token-refused") (async () => {
   await flush();
   console.log(JSON.stringify({header:ids["#state-text"].textContent, parts:descendants(ids["#state-list"], "li").map(el => el.textContent),
     notice:{hidden:ids["#status-connection"].hidden, text:ids["#status-connection"].textContent},
-    status:ids["#tab-status"].textContent, gets, after:apiGets.length}));
+    status:ids["#tab-status"].textContent, links:headerLinks(), gets, after:apiGets.length}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "events-fold") (async () => {
   // Recent events: the sentences, the fold of the other records, and the fold kept open across a poll
@@ -39348,7 +39351,7 @@ else if (ask === "header") (async () => {
     focus:document.activeElement?.id || document.activeElement?.dataset.tab || document.activeElement?.tag,
     caption:caption.textContent, hover:caption.attrs.title,
     brand:ids["#title"].kids[1].kids[0].textContent, labelClass:caption.parentElement.className,
-    buttons:["#state-toggle", "#language"].map(id => ({tag:ids[id].tag, ...ids[id].attrs})),
+    buttons:["#state-toggle", "#language"].map(id => ({tag:ids[id].tag, ...ids[id].attrs})), links:headerLinks(),
     reloads, localWrites:local.writes.slice(), gets:apiGets.filter(path => path === "/api/status").length});
   const snapshots = [snapshot()];
   for (const action of given.headerActions || []) {
@@ -42839,6 +42842,45 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
     def header_offset(self, snapshot):
         return float(re.search(r"translateX\(-([\d.]+)px\)", snapshot["transform"] or "translateX(-0px)")[1])
 
+    def assert_header_github_link(self, links, language):
+        self.assertEqual(len(links), 1)
+        [link] = links
+        self.assertEqual(link["tag"], "a")
+        self.assertEqual(link["parent"], "header")
+        self.assertEqual(link["previous"], "language")
+        self.assertEqual(link["href"], "https://github.com/FrostNovaOrg/Hansa")
+        self.assertEqual(link["target"], "_blank")
+        self.assertEqual(set(link["rel"].split()), {"noopener", "noreferrer"})
+        name = "Hansa 的 GitHub 仓库" if language == "zh" else "Hansa on GitHub"
+        self.assertEqual(link["aria-label"], name)
+        self.assertEqual(link["title"], name)
+        self.assertEqual(len(link["icons"]), 1)
+        [icon] = link["icons"]
+        self.assertEqual(icon["fill"], "currentColor")
+        self.assertEqual(icon["aria-hidden"], "true")
+        self.assertGreater(icon["paths"], 0)
+
+    def test_header_github_link_uses_fixed_repository_and_localized_name(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                [page] = self.interactive_header(language)["snapshots"]
+                self.assert_header_github_link(page["links"], language)
+
+    def test_page_external_references_allow_only_the_header_github_link(self):
+        from html.parser import HTMLParser
+        from hansa import web
+
+        references = []
+
+        class References(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                for name, value in attrs:
+                    if name in ("src", "href") and value and urllib.parse.urlsplit(value).netloc:
+                        references.append((tag, name, value))
+
+        References().feed(web.UI.read_text(encoding="utf-8"))
+        self.assertEqual(references, [("a", "href", "https://github.com/FrostNovaOrg/Hansa")])
+
     def test_header_says_how_many_alerts_the_hourly_limit_holds_and_until_when_in_both_languages(self):
         until = 1793000000
         stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(until))
@@ -42927,6 +42969,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                 for words in ("Reconnecting", "重新连接", "No data received", "尚未收到数据"):
                     self.assertNotIn(words, out["notice"]["text"] + out["status"])
                 self.assertEqual(out["after"], out["gets"])  # five minutes and a return to the tab ask nothing more
+                self.assert_header_github_link(out["links"], language)
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_recent_events_task_added_only_names_a_present_lane_in_both_languages(self):
@@ -43240,8 +43283,10 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                         self.assertIn(prop, rule)
                 self.assertNotRegex(css, r"\.brand-caption\s*\{[^}]*display:none")
                 phone = css.split("@media (max-width:860px)")[1].split("@media (max-width:640px)")[0]
-                self.assertIn("grid-template-columns:auto minmax(0,1fr) auto", phone)
+                self.assertIn("grid-template-columns:auto minmax(0,1fr) auto auto;", phone)
                 self.assertRegex(phone, r"#state\s*\{[^}]*grid-column:1 / -1;[^}]*grid-row:2;")
+                self.assertRegex(phone, r"#github\s*\{[^}]*grid-column:4;[^}]*grid-row:1;")
+                self.assertNotRegex(css, r"#github\s*\{[^}]*(?:display:none|visibility:hidden)")
                 # Narrow pages keep one scrolling tab row above the status line.
                 self.assertRegex(phone, r"#tabs\s*\{[^}]*flex-wrap:nowrap")
                 self.assertNotIn("flex-wrap", re.search(r"#tabs\s*\{([^}]+)\}", css)[1])  # wide pages keep one row

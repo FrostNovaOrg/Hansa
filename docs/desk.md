@@ -664,7 +664,7 @@ always opens Status, where releases and to-dos wait for the principal.
 Unknown saved choices fall back to Status, Providers and 7 days.
 Scroll position and expanded Status details are not stored.
 
-The globe button at the end of the header opens a small menu offering `中文`
+The globe button near the end of the header opens a small menu offering `中文`
 and `English`, with the current language marked. Clicking elsewhere or pressing
 Escape closes it. Opening either header menu closes the other.
 Choosing writes `hansa.language` in `localStorage`
@@ -676,6 +676,9 @@ without a valid choice, a browser language starting with `zh` selects Chinese,
 and other languages select English. The HTML `lang` attribute matches the shown
 language. If storage is unavailable or throws, the page still works with its
 usual defaults for the choices it cannot read or keep.
+The GitHub icon beside the globe at the right end of the header opens
+[Hansa's repository](https://github.com/FrostNovaOrg/Hansa) in a new tab, with its
+accessible name and tooltip in the page's language.
 
 ### Notes on the web page
 
