@@ -18209,6 +18209,45 @@ def save():'''))
             thread.join(timeout=120)
             self.assertFalse(thread.is_alive(), "provider check did not end")
 
+    def test_unreachable_status_counts_work_after_a_merged_prerequisite(self):
+        parent = self.desk.new_task("Prerequisite", lane="a")
+        self.desk.update(parent, state="done")
+        self.desk.new_task("Dependent work", lane="a", after=[parent])
+        self.desk.set_provider_state("claude", unreachable_since=time.time(), unreachable_reason="offline")
+        self.assertIn("0 tasks wait for it", self.hansa("status"))
+        self.desk.update(parent, state="merged")
+        problem = next(p["problem"] for p in views.status(self.desk)["providers"] if p["name"] == "claude")
+        for output in (problem, self.hansa("status")):
+            with self.subTest(output=output):
+                self.assertIn("1 task waits for it", output)
+
+    def test_unreachable_probes_continue_while_paused_or_under_resource_floors(self):
+        from hansa import run
+        tid = self.desk.new_task("Wait", lane="a")
+        for hold in ("paused", "disk", "memory"):
+            with self.subTest(hold=hold):
+                self.desk.resume()
+                self.free = 500 * 10 ** 9
+                self.memory_reading()
+                if hold == "paused":
+                    self.desk.pause("hold")
+                elif hold == "disk":
+                    self.free = 0
+                else:
+                    self.memory_reading(available=0)
+                self.desk.set_provider_state("claude", unreachable_since=time.time() - 3600,
+                                             unreachable_reason="offline", probe_at=0)
+                d = Dispatcher(self.desk)
+                with unittest.mock.patch.object(run, "check_provider", wraps=run.check_provider) as check:
+                    d.tick()
+                    self.join_provider_probes(d)
+                    check.assert_called_once_with(self.desk, "claude")
+                    self.assertFalse(self.desk.provider_state()["claude"]["unreachable_since"])
+                    d.tick()
+                    self.join_provider_probes(d)
+                    self.assertEqual(check.call_count, 1)
+                self.assertEqual(self.desk.meta(tid)["state"], "queued")
+
     def test_quota_probe_interval_restart_and_early_recovery(self):
         from hansa import run
         other = self.shared_rest_desks()

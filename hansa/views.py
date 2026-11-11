@@ -1019,7 +1019,7 @@ def status(desk: Desk) -> dict:
                        "rest_minutes": s.get("cool_minutes", 30),
                        "credit_since": pst.get(n, {}).get("credit_since", 0),
                        "automatic_check": quota_probe_text(pst.get(n, {}), s),
-                       "problem": provider_status_problem(desk, s, n, queued), "check": pst.get(n, {}).get("check")}
+                       "problem": provider_status_problem(desk, s, n, tasks), "check": pst.get(n, {}).get("check")}
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
                      "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
@@ -1225,11 +1225,11 @@ def status_text(st: dict) -> str:
     return "\n".join(out)
 
 
-def provider_status_problem(desk: Desk, s: dict, name: str, queued: list) -> str:
+def provider_status_problem(desk: Desk, s: dict, name: str, tasks: list) -> str:
     problem = provider_problem(desk, s, name)
     if not (desk.provider_state().get(name) or {}).get("unreachable_since"):
         return problem
-    waiting = providers_waited_for(desk, s, queued).get(name, 0)
+    waiting = providers_waited_for(desk, s, tasks).get(name, 0)
     return problem + f"; {waiting} {'task waits' if waiting == 1 else 'tasks wait'} for it"
 
 

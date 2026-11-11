@@ -6697,11 +6697,9 @@ class Dispatcher:
             self.desk.ready_news()
         self.resting = resting
 
-    def probe_providers(self, s: dict) -> None:
+    def probe_providers(self, s: dict, *, quota_allowed: bool = True) -> None:
         """Check unreachable providers and long usage rests without holding up a round.
         The last start is kept with provider state so restarting serve does not shorten the interval."""
-        if self.desk.paused():
-            return
         waiting = None
         for name in s["providers"]:
             worker = self.probes.get(name)
@@ -6714,6 +6712,8 @@ class Dispatcher:
                 if st.get("credit_since"):
                     continue
                 if quota:
+                    if not quota_allowed or self.desk.paused():
+                        continue
                     if quota_probe_reason(st, s, at) or at - max(st.get("cool_since", at),
                             st.get("quota_probe_at", 0)) < 60 * s.get("cool_minutes", 30):
                         continue
@@ -6831,8 +6831,7 @@ class Dispatcher:
             memory_low = self.memory(s)
         low = bool(low or memory_low or desks_list_problem())  # an unreadable list of desks holds new runs too
         with serve_step():
-            if not low:
-                self.probe_providers(s)
+            self.probe_providers(s, quota_allowed=not low)
         with serve_step():
             desk._bench_off = True
             try:
