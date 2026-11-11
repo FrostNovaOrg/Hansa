@@ -77,7 +77,9 @@ refuses one that holds anything (files, folders, links, or what an interrupted
 init left) before anything is made, naming up to three of the entries and
 giving a `hansa init` command with the desk in a folder of its own beside the
 project (`~/shop-desk` for `~/shop`); so it never writes over a project's own
-`CLAUDE.md` or `.claude/settings.json`. A desk may lie inside a git
+`CLAUDE.md` or `.claude/settings.json`. When it cannot make a folder or write a
+file there (a file on the path, a folder this account may not write in), it says
+so in one line naming the path and removes what it had made. A desk may lie inside a git
 repository's work tree (the lane's or another), though a folder beside the
 project is the better place: `hansa init`, and `hansa lane add --repo R` for a
 desk inside R's work tree, write the desk's path into that repository's

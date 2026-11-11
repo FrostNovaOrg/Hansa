@@ -95,8 +95,6 @@ cd ~/shop/desk
 ```
 
 `hansa init` refuses a desk folder holding files and keeps one inside a repository out of its commits;
-when it cannot make the folders or write the files (a file on the path, a folder this account may not
-write in) it names the path in one line and removes what it had made;
 use plain names ([paths hansa refuses](sandbox.md#paths-hansa-refuses)).
 
 Init creates lane `a` on the checkout's current branch and lists the stopped

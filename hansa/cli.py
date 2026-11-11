@@ -191,15 +191,22 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str | None = No
         _settings_refused(validate(s, desk.root), "no desk was made")
         if new_repo:
             base = make_lane_repo(repo, new_repo, default_lane(repo, base), "no desk was made")
-    first_new = desk.root  # the topmost folder this makes, removed again when making the desk fails
-    while not os.path.lexists(first_new.parent) and first_new.parent != first_new:
-        first_new = first_new.parent
-    before = set(os.listdir(desk.root)) if desk.root.is_dir() else None
-    try:
-        _make_desk(desk, repo, lane, base, command)
-    except OSError as e:
-        _unmake_desk(desk.root, first_new, before)
-        raise SystemExit(f"hansa: cannot make the desk at {desk.root}: {_make_problem(e)}; no desk was made")
+    for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir, desk.secrets_dir):
+        mkdir_private(d)
+    s = default_settings()
+    if repo:
+        s["lanes"][lane] = default_lane(repo, base)
+        mkdir_private(desk.lanes_dir / lane)
+        write_text(desk.lanes_dir / lane / "brief.md", "")
+    with desk.lock():
+        write_json(desk.settings_path, s)
+        history.record(desk, {}, s, "coordinator", command)
+    write_text(desk.root / "CLAUDE.md", CARD.read_text(encoding="utf-8"))
+    if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; then only hansa notes archive writes it
+        write_text(desk.project_path, PROJECT_INTRO)
+    mkdir_private(desk.root / ".claude")
+    write_json(desk.root / ".claude" / "settings.json", {"permissions": permissions(desk)})
+    desk.event("desk_created", repo=repo, lane=lane if repo else "")
     return desk
 
 
@@ -232,23 +239,21 @@ def _unmake_desk(root: Path, first_new: Path, before) -> None:
         pass
 
 
-def _make_desk(desk: Desk, repo: str, lane: str, base, command: str) -> None:
-    for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir, desk.secrets_dir):
-        mkdir_private(d)
-    s = default_settings()
-    if repo:
-        s["lanes"][lane] = default_lane(repo, base)
-        mkdir_private(desk.lanes_dir / lane)
-        write_text(desk.lanes_dir / lane / "brief.md", "")
-    with desk.lock():
-        write_json(desk.settings_path, s)
-        history.record(desk, {}, s, "coordinator", command)
-    write_text(desk.root / "CLAUDE.md", CARD.read_text(encoding="utf-8"))
-    if not desk.project_path.exists() and not desk.project_path.is_symlink():  # made once; then only hansa notes archive writes it
-        write_text(desk.project_path, PROJECT_INTRO)
-    mkdir_private(desk.root / ".claude")
-    write_json(desk.root / ".claude" / "settings.json", {"permissions": permissions(desk)})
-    desk.event("desk_created", repo=repo, lane=lane if repo else "")
+def init_desk_or_say(root: Path, repo: str, lane: str, base) -> Desk:
+    """init_desk for hansa init: a folder or file it cannot make is one line naming the path, and what it made is removed."""
+    at = Desk(root).root
+    first_new = at  # the topmost folder this makes, removed again when making the desk fails
+    while not os.path.lexists(first_new.parent) and first_new.parent != first_new:
+        first_new = first_new.parent
+    try:
+        before = set(os.listdir(at)) if at.is_dir() else None
+    except OSError:
+        before = None  # init_desk itself says it cannot read the folder
+    try:
+        return init_desk(root, repo, lane, base)
+    except OSError as e:
+        _unmake_desk(at, first_new, before)
+        raise SystemExit(f"hansa: cannot make the desk at {at}: {_make_problem(e)}; no desk was made")
 
 
 def repo_path(path: str, nothing: str) -> str:
@@ -538,7 +543,7 @@ def cmd_init(a):
         raise SystemExit(answer_lane_refused(a.lane))
     if a.user:
         _init_for(a)
-    desk = init_desk(Path(a.dir), a.repo or "", a.lane, a.base)
+    desk = init_desk_or_say(Path(a.dir), a.repo or "", a.lane, a.base)
     print(f"desk ready at {desk.root}")
     s = desk.settings()
     ln = s["lanes"].get(a.lane)
