@@ -1313,7 +1313,7 @@ def _reset_time(text, at):
 
 def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "") -> float | None:
     """Rest an unusable provider. Credit has no end time; usage limits use their reset time and a minute
-    (at most REST_CAP), else cool_minutes. Record and announce a credit rest once, across task finishes."""
+    (at most REST_CAP), else cool_minutes. Announce credit rests, and timed rests that leave tasks waiting."""
     from .rests import record
     with desk.lock():
         if (desk.provider_state().get(name) or {}).get("credit_since"):
@@ -1330,6 +1330,7 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
         if kind != "quota":
             until = t + 60 * KEY_REST_MINUTES
             desk.set_provider_state(name, cool_until=until, reason=why, rest_how="", rest_minutes=None)
+            provider_rest_news(desk, s, name)
             return until
         try:
             reset = reset_time(text, t)
@@ -1344,7 +1345,42 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
             until = t + 60 * minutes
             desk.set_provider_state(name, cool_until=until, reason=why, rest_how="fixed", rest_minutes=minutes)
         record(desk, name, cool_until=until)
+        provider_rest_news(desk, s, name)
         return until
+
+
+def provider_rest_news(desk: Desk, s: dict, name: str) -> None:
+    """Tell the coordinator when a timed rest leaves tasks without a provider. Keep the reason on disk so
+    another rest after the fixed interval or a server restart stays quiet until a run finishes."""
+    with desk.lock():
+        st = desk.provider_state().get(name, {})
+        why = desk.redact(st.get("reason") or "")
+        if st.get("credit_since") or st.get("cool_until", 0) <= time.time() or not why \
+                or st.get("rest_notice_reason") == why:
+            return
+        tasks = desk.tasks()
+        queued = [m for m in tasks if m["state"] == "queued"]
+        if not queued:
+            return
+        looks = waiting_looks(desk, s, tasks)
+        busy = {occupied_lane(m) for m in tasks if lane_occupied(m)} | tried_lanes(desk)
+        waiting = []
+        for m in queued:
+            detail = waiting_detail(desk, s, m, busy, looks)
+            if detail["waiting_code"] == "lanes" and any(
+                    r["code"] == "providers" and any(p["values"]["provider"] == name and p["code"] == "rest"
+                                                     for p in r["values"]["providers"])
+                    for r in detail["waiting_values"]["reasons"]):
+                waiting.append(m["id"])
+        if not waiting:
+            return
+        until = st["cool_until"]
+        how = rest_text(st)
+        line = (f"provider {name}: resting until {time.strftime('%m-%d %H:%M', time.localtime(until))} ({why})"
+                + (f": {how}" if how else "") + " · waiting: " + ", ".join(waiting[:5])
+                + (f" (+{len(waiting) - 5} more)" if len(waiting) > 5 else ""))
+        desk.event("provider_rested", provider=name, reason=why, until=until, tasks=waiting, text=line)
+        desk.set_provider_state(name, rest_notice_reason=why)
 
 
 def credit_text(st: dict) -> str:
@@ -4691,6 +4727,12 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         return {"state": "running" if checking else final, "phase": "checking" if checking else "",
                 "error": desk.redact(message), "attempts": tries, "pid_start": "", **fields, **kept, **again}
     meta = desk.change(tid, decide)
+    if kind and kind != "credit":
+        # rest_provider runs before this task returns to the queue; include it now that its state is saved.
+        provider_rest_news(desk, desk.settings(), meta["provider"])
+    elif not kind and not net and meta["state"] != "queued" \
+            and (desk.provider_state().get(meta.get("provider")) or {}).get("rest_notice_reason"):
+        desk.set_provider_state(meta["provider"], rest_notice_reason="")
     if meta["state"] == "queued" and meta.get("sandbox_failed"):
         hold(desk, tid, meta.get("lane") or "", meta["error"], "",
              {"verify": "verifier"}.get(meta.get("kind"), "worker"))

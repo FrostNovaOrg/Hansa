@@ -664,6 +664,10 @@ still waited on, even if queued tasks are watched alongside them. With no tasks 
 with `hansa serve` not running, it returns at once. For a stopped server, it gives the command
 to start that desk.
 
+When a still-queued task waits for a provider, its `ID queued` line includes the
+same waiting reason as status. Provider rests do not make wait return sooner;
+the timeout and the conditions above still apply.
+
 While the lane's setup runs, status and show name it and show its elapsed minutes instead of saying the
 model has not replied. Once setup completes, model progress is shown as above.
 

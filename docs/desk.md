@@ -1589,6 +1589,16 @@ that it is back over it. A server busy for less than that is not news, and
 nothing the coordinator did itself and saw is posted to it.
 Time the machine sleeps does not count toward a server being busy or stuck.
 
+A provider starting a timed rest (usage limit, rejected key or lost login) is
+posted when queued tasks have no provider ready in their eligible lanes. The
+line names the provider, reason, rest end time and up to five waiting task IDs,
+then the count of any more. It goes to the desk's coordinator sessions, with
+the provider as its subject; it does not alert the principal. Moving on to a
+ready provider stays quiet. The same reason stays quiet until a worker run on
+that provider finishes instead of returning to wait; this survives a server
+restart and prevents a fresh post every fixed rest interval. Credit rests and
+provider-ready posts keep their own events and behavior.
+
 Each message is a `[hansa]` header line with the desk, then a bullet line per
 event, only the latest for each task or subject; a task's line carries `next:`,
 other lines only when one applies; events seconds apart come in one message, and past 10 lines the
