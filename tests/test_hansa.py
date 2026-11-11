@@ -333,7 +333,8 @@ if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a pro
                 "500": "API Error: 500 Internal server error", "plain": "I could not do it", "quota": "API Error: 429 rate_limit_error",
                 "test-timed-out": "Ran 40 tests\nERROR: test_upload (tests.test_api): the upload request timed out after 60s\nFAILED (errors=1)",
                 "log-overloaded": "The suite failed:\n2026-10-08 12:00:01 WARN queue overloaded, shedding requests\nerror: 2 tests failed",
-                "402": "payment required", "limit": os.environ.get("FAKE_LIMIT_TEXT", "")}[what]
+                "402": "payment required", "limit": os.environ.get("FAKE_LIMIT_TEXT", ""),
+                "model": os.environ.get("FAKE_MODEL_TEXT", "API Error: 400 model_not_found")}[what]
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
                           "api_error_status": 429 if what in ("quota", "limit") else status,
                           "result": text, "session_id": "s-net", "num_turns": 3,
@@ -18940,6 +18941,231 @@ def save():'''))
         st = self.desk.provider_state()["claude"]
         self.assertEqual(st["rest_how"], "fixed")
         self.assertAlmostEqual(st["cool_until"], t0 + 60 * 30, delta=30)
+
+    def model_run(self, *, compatible=True, model=None, text="API Error: 400 model_not_found", spare=False):
+        from hansa import run
+        self.net_lane("model", 1, FAKE_MODEL_TEXT=text)
+        s = self.desk.settings()
+        if compatible:
+            s["providers"]["claude"] = {"kind": "compatible", "model": "missing-model", "effort": "",
+                                         "base_url": "https://example.invalid"}
+            self.desk.write_key("claude", "sk-model-test", by="page")
+        if spare:
+            s["providers"]["spare"] = {"kind": "subscription", "model": "opus", "effort": ""}
+            s["lanes"]["a"]["providers"] = ["claude", "spare"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt", **({"model": model} if model else {}))
+        proc = run.start(self.desk, tid, "a", "claude")
+        self.assertEqual(proc.wait(timeout=30), 1)
+        return run.finish(self.desk, tid, 1)
+
+    def test_unknown_model_returns_without_a_try_and_uses_the_next_provider(self):
+        from hansa import run
+        m = self.model_run(spare=True)
+        self.assertEqual((m["state"], run.tries_used(m["attempts"])), ("queued", 0))
+        self.assertEqual(run.tries_used(m["attempts"] * (run.LIMIT_RETURNS + 2)), 0)
+        self.assertIn("missing-model", provider_problem(self.desk, self.desk.settings(), "claude"))
+        m = self.settle(Dispatcher(self.desk), m["id"])
+        self.assertEqual((m["state"], m["provider"], run.tries_used(m["attempts"])), ("done", "spare", 0))
+
+    def test_unknown_model_subscription_rests_but_a_task_model_fails(self):
+        from hansa import run
+        m = self.model_run(compatible=False)
+        self.assertEqual((m["state"], run.tries_used(m["attempts"])), ("queued", 0))
+        self.assertIn("model opus", provider_problem(self.desk, self.desk.settings(), "claude"))
+        self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        self.desk.update(m["id"], state="cancelled")
+        (self.tmp / "net-model-1").write_text("0")
+        m = self.model_run(compatible=False, model="missing-task-model")
+        self.assertEqual((m["state"], run.tries_used(m["attempts"])), ("failed", 0))
+        self.assertIn("does not know model missing-task-model", m["error"])
+        self.assertIn("--model", m["error"])
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+        self.assertEqual(len(self.events("provider_model")), 1)
+
+    def test_unknown_model_rest_has_no_deadline_and_failed_checks_do_not_end_it(self):
+        from hansa import run
+        m = self.model_run(text="API Error: 404 the model `missing-model` does not exist")
+        why = provider_problem(self.desk, self.desk.settings(), "claude")
+        self.assertFalse(self.desk.provider_state()["claude"].get("cool_until"))
+        with unittest.mock.patch.object(run.time, "time", return_value=time.time() + 40 * 86400):
+            self.assertEqual(provider_problem(Desk(self.desk.root), self.desk.settings(), "claude"), why)
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            Dispatcher(self.desk).probe_providers(self.desk.settings())
+            check.assert_not_called()
+        failed = subprocess.CompletedProcess([], 1, json.dumps({"is_error": True, "result": "API Error: 400 bad request"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", return_value=failed):
+            self.assertFalse(run.check_provider(self.desk, "claude")["ok"])
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "usage limit")
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), why)
+        self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+        self.assertEqual(self.settle(Dispatcher(self.desk), m["id"])["state"], "done")
+
+    def test_unknown_model_page_model_or_key_save_ends_only_its_rest(self):
+        from hansa import run
+        self.model_run()
+        self.assertTrue(self.page_save(lambda s: s.update(cool_minutes=17))["ok"])
+        self.assertIn("does not know model", provider_problem(self.desk, self.desk.settings(), "claude"))
+        self.assertTrue(self.page_save(lambda s: s["providers"]["claude"].update(model="sonnet"))["ok"])
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing")
+        self.desk.write_key("claude", "sk-corrected-model-key", by="page")
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+
+    def test_unknown_model_page_check_and_key_routes(self):
+        why = unix_sockets_refused()
+        if why:
+            skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS)
+        from hansa import run
+        answer = subprocess.CompletedProcess([], 1, json.dumps({"is_error": True,
+            "result": "API Error: 400 model_not_found"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", return_value=answer):
+            checked = self.page_post("/api/check", {"provider": "claude"})
+        self.assertEqual((checked["ok"], checked["detail"]), (False, run.model_text("opus")))
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), checked["detail"])
+        self.assertTrue(self.page_post("/api/key", {"provider": "claude", "key": "sk-page-model-key"})["ok"])
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+
+    def test_unknown_model_ping_and_page_check_start_the_same_rest(self):
+        from hansa import run
+        for status in (400, 404):
+            with self.subTest(status=status):
+                answer = subprocess.CompletedProcess([], 1, json.dumps({"is_error": True, "api_error_status": status,
+                    "result": f'API Error: {status} {{"error":{{"code":"model_not_found","message":"Unknown model"}}}}'}), "")
+                self.desk.write_key("claude", "sk-check-model", by="page")
+                with unittest.mock.patch.object(run.subprocess, "run", return_value=answer):
+                    out = self.hansa_out("ping", "claude")
+                why = run.model_text("opus")
+                self.assertIn(why, out)
+                self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), why)
+                for language, expected in (("en", why), ("zh", "服务商不认识模型 opus")):
+                    page = self.message_page(language=language, check=self.desk.provider_state()["claude"]["check"])
+                    self.assertIn(expected, page["check"])
+
+    def test_unknown_model_status_page_and_waiting_reason_in_both_languages(self):
+        from hansa import run
+        m = self.model_run()
+        why = run.model_text("missing-model")
+        self.assertEqual(views.rest_words(views.status(self.desk)["providers"][0]), "")
+        for shown in (self.hansa_out("status"), self.hansa_out("explain", "provider", "claude"),
+                      self.hansa_out("show", m["id"]), run.waiting_reason(self.desk, self.desk.settings(), m, set())):
+            self.assertIn(why, shown)
+        for language, expected, remedy in (("en", why, "Settings, Providers"),
+                                            ("zh", "服务商不认识模型 missing-model", "设置 → 服务商")):
+            page = self.message_page(language=language)
+            for field in ("providers", "status"):
+                self.assertIn(expected, page[field])
+                self.assertIn(remedy, page[field])
+
+    def test_unknown_model_posts_once_to_the_coordinator_without_a_principal_alert(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from hansa import alert, notify, run
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "cat > /dev/null"}))["ok"])
+        self.model_run()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda _: run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing"), range(2)))
+        [event] = self.events("provider_model")
+        [item] = notify.items_for(self.desk, [event], {"session": None})
+        self.assertIn("missing-model", str(item))
+        self.assertEqual(notify._item(self.desk, event)[1], event["text"])
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing")
+        self.assertEqual(len(notify.items_for(self.desk, self.events("provider_model"), {})), 2)
+
+    def test_unknown_model_rest_is_told_once_by_its_own_line_not_by_provider_rest_news(self):
+        from hansa import notify, run
+        m = self.model_run()  # the rest begins at a run's end, and the task waits for this provider
+        self.assertEqual(m["state"], "queued")
+        run.provider_rest_news(self.desk, self.desk.settings(), "claude")
+        self.assertEqual(len(self.events("provider_model")), 1)
+        self.assertEqual(self.events("provider_rested"), [])
+        self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        answer = subprocess.CompletedProcess([], 1, json.dumps({"is_error": True, "api_error_status": 400,
+            "result": "API Error: 400 model_not_found"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", return_value=answer):
+            self.assertIn("does not know model", self.hansa_out("ping", "claude"))  # the rest begins at a ping
+        run.provider_rest_news(self.desk, self.desk.settings(), "claude")
+        events = self.events("provider_model")
+        self.assertEqual(len(events), 2)
+        self.assertEqual(self.events("provider_rested"), [])
+        self.assertEqual([i["line"] for i in notify.items_for(self.desk, events[1:], {"session": None})],
+                         [events[1]["text"]])
+
+    def test_unknown_model_rest_gets_no_automatic_check_from_serve(self):
+        from hansa import run
+        m = self.model_run()
+        self.assertEqual(m["state"], "queued")
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            for state in ({}, {"unreachable_since": time.time() - 3600, "probe_at": 0},
+                          {"cool_until": time.time() + 6 * 3600, "cool_since": time.time() - 3600, "quota_probe_at": 0}):
+                with self.subTest(state=state):
+                    self.desk.set_provider_state("claude", **state)
+                    d.probe_providers(self.desk.settings())
+                    d.tick()
+                    self.join_provider_probes(d)
+                    check.assert_not_called()
+        self.assertIn("does not know model", provider_problem(self.desk, self.desk.settings(), "claude"))
+        self.assertEqual(self.desk.meta(m["id"])["state"], "queued")
+
+    def test_unknown_model_classification_leaves_other_400s_and_successes_alone(self):
+        from hansa import run
+        for status in (400, 404):
+            for text in ("model_not_found", "Unknown model: example", "model 'example' does not exist",
+                         "The model `example` is not supported", "The model is not available", "model: example not found",
+                         "model_not_available", "unknown_model", "example is not a valid model ID", "Model Not Exist",
+                         "There's an issue with the selected model (example). It may not exist or you may not have access to it"):
+                with self.subTest(status=status, text=text):
+                    self.assertEqual(run.unusable_reason({"is_error": True, "api_error_status": status,
+                                                          "result": f"API Error: {status} {text}"}, "")[0], "model")
+                    self.assertEqual(run.unusable_reason({"is_error": False, "result": text}, ""), ("", ""))
+        for text in ("invalid_request_error: max_tokens must be positive", "context_length_exceeded",
+                     "unsupported parameter: temperature", "not_found_error: route not found", "model does not support temperature"):
+            self.assertEqual(run.unusable_reason({"is_error": True, "api_error_status": 400, "result": text}, ""), ("", ""))
+        m = self.model_run(text="API Error: 400 invalid_request_error: unsupported parameter temperature")
+        self.assertEqual(m["state"], "failed")
+        self.assertIn("unsupported parameter", m["error"])
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+
+    def test_unknown_model_other_http_statuses_keep_their_classification(self):
+        from hansa import run
+        for status, kind in ((200, ""), (301, ""), (401, "key"), (403, "key"), (408, ""),
+                             (422, ""), (429, "quota"), (500, ""), (503, ""), (529, "")):
+            for prefix in ("API Error: ", "HTTP ", "unexpected status ", "status code: ", "Codex failed: ", ""):
+                text = f"{prefix}{status} model_not_found"
+                for structured in (False, True):
+                    with self.subTest(text=text, structured=structured):
+                        answer = {"is_error": True, "result": text}
+                        if structured:
+                            answer["api_error_status"] = status
+                        # Only the existing API Error wording classifies auth/quota without a field.
+                        expected = kind if structured or prefix == "API Error: " else ""
+                        self.assertEqual(run.unusable_reason(answer, "")[0], expected)
+        for status, text in ((503, "API Error: 503 The model is currently not available, please try again later"),
+                             (500, "500 model temporarily not available")):
+            with self.subTest(text=text):
+                answer = {"is_error": True, "api_error_status": status, "result": text}
+                self.assertEqual(run.unusable_reason(answer, ""), ("", ""))
+                self.assertIn(f"server error (HTTP {status})", run.network_reason(answer, ""))
+                self.assertEqual(run.unusable_reason({}, text), ("", ""))
+        for text in ("model_not_found", "Unknown model: example-500", "The model is not available"):
+            self.assertEqual(run.unusable_reason({"is_error": True, "result": text}, "")[0], "model")
+
+    def test_unknown_model_server_errors_remain_outages(self):
+        for status, text in ((503, "The model is currently not available, please try again later"),
+                             (500, "model temporarily not available")):
+            with self.subTest(status=status):
+                m = self.model_run(text=f"API Error: {status} {text}")
+                self.assertEqual((m["state"], m["attempts"][-1]["kind"]), ("queued", "network"))
+                st = self.desk.provider_state()["claude"]
+                self.assertTrue(st.get("unreachable_since"))
+                self.assertFalse(st.get("model_since"))
+                self.assertIn("server error", provider_problem(self.desk, self.desk.settings(), "claude"))
+                self.assertEqual(self.events("provider_model"), [])
+                self.desk.update(m["id"], state="cancelled")
+                (self.tmp / "net-model-1").write_text("0")
 
     def credit_run(self, text="credit balance is too low", status=None):
         count = self.net_lane("402" if status == 402 else "limit", 1, FAKE_LIMIT_TEXT=text)

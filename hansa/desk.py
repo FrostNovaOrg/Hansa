@@ -2945,6 +2945,12 @@ class Desk:
             saved = self._saved_settings()
             legacy = {"alert_bark": saved["alert_bark"]} if "alert_bark" in saved else {}
             write_json(self.settings_path, {**new, **legacy})
+            if by == "page":
+                states = self.provider_state()
+                for name, provider in new["providers"].items():
+                    if (states.get(name) or {}).get("model_since") and \
+                            provider.get("model") != (old["providers"].get(name) or {}).get("model"):
+                        self.set_provider_state(name, model_since=0, model_unknown="")
             from .history import record
             record(self, old, new, by, command)
             if changed:
@@ -3076,7 +3082,8 @@ class Desk:
             write_text(f, value.strip() + "\n", mode=0o600, follow_symlinks=False)
             record(self, {"providers": {provider: {"key": old}}},
                    {"providers": {provider: {"key": value.strip()}}}, by)
-            self.set_provider_state(provider, cool_until=0, credit_since=0, reason="", rest_how="", rest_minutes=None)
+            self.set_provider_state(provider, cool_until=0, credit_since=0, model_since=0, model_unknown="",
+                                    reason="", rest_how="", rest_minutes=None)
             failed = self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
         self.ready_news()
@@ -3390,7 +3397,7 @@ def release_last(desk: Desk) -> dict:
 
 def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
-    from .run import credit_text
+    from .run import credit_text, model_text
     from .page_messages import provider
     desk.settings()  # finish any legacy upgrade before obtaining the revision
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
@@ -3428,6 +3435,9 @@ def public_settings(desk: Desk) -> dict:
                                          if n in s["providers"] and st.get("credit_since")},
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
+            "provider_model_messages": {n: provider(model_text(st["model_unknown"]), st, n)
+                                        for n, st in desk.provider_state().items()
+                                        if n in s["providers"] and st.get("model_since") and not st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s), "release_last": release_last(desk),
             "alert_outside": outside.inspect((s.get("alert") if isinstance(s.get("alert"), dict) else {}).get("command") or "",

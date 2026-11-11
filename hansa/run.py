@@ -112,6 +112,14 @@ QUOTA_STATUS = {429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
 AUTH_STATUS = {401, 403}
 LOGIN = re.compile(r"Not logged in|Please run /login", re.I)  # Claude Code itself has no login for this provider
+# Keep this about the model, not HTTP 400/404 alone: other bad requests still fail normally.
+NO_MODEL = re.compile(r"\bmodel[_ -]not[_ -](?:found|available|supported|exist)\b|"
+                      r"\b(?:unknown|unsupported|no such)[_ -]model\b|\bis not a valid model\b|"
+                      r"\bmodel\b[^\n]{0,120}?\b(?:does not exist|doesn't exist|may not exist|not found|not exist|"
+                      r"(?:is |is currently )?not (?:available|supported))\b", re.I)
+# Model wording in a server error must keep the outage handling, not start an indefinite model rest.
+HTTP_STATUS = re.compile(r"(?:\b(?:API Error|Codex failed|status(?: code)?|HTTP)\s*:?\s*|^\s*)([1-5]\d\d)\b|"
+                         r"\b(5\d\d) (?:Internal|Bad Gateway|Service Unavailable|Gateway Time)", re.I | re.M)
 # A subscription's login that has run out: Claude Code says so with HTTP 401 and an authentication_error, which
 # is no key to save but a login to make again (unusable_reason gives it as "login" for a subscription provider)
 LOST_LOGIN = re.compile(r"OAuth token (?:has expired|has been revoked|is expired)", re.I)
@@ -1315,16 +1323,27 @@ def _reset_time(text, at):
     return found
 
 
-def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "") -> float | None:
-    """Rest an unusable provider. Credit has no end time; usage limits use their reset time and a minute
-    (at most REST_CAP), else cool_minutes. Announce credit here; callers announce timed rests with
-    provider_rest_news after saving the task's final state or the completed provider check."""
+def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "", *, model: str = "") -> float | None:
+    """Rest an unusable provider. Credit and unknown models have no end time and are announced once here;
+    usage limits use their reset time and a minute (at most REST_CAP), else cool_minutes, and callers announce
+    those timed rests with provider_rest_news after saving the task's final state or the completed provider check."""
     from .rests import record
     with desk.lock():
         st = desk.provider_state().get(name) or {}
         if st.get("credit_since"):
             return None  # neither another failure nor a coordinator's check can end a credit rest
         t = time.time()
+        if kind == "model":
+            if not st.get("model_since"):
+                model = model or s["providers"][name]["model"]
+                desk.set_provider_state(name, model_since=t, model_unknown=model, cool_until=0,
+                                        reason=model_text(model), rest_how="model", rest_minutes=None,
+                                        unreachable_since=0, unreachable_reason="")
+                desk.event("provider_model", provider=name, since=t, model=model,
+                           text=f"provider {name}: {model_text(model)}")
+            return None
+        if st.get("model_since") and kind != "credit":
+            return None  # another failing run cannot put a time limit on this rest
         if kind == "credit":
             desk.set_provider_state(name, credit_since=t, cool_until=0, reason=desk.redact(why),
                                     rest_how="credit", rest_minutes=None, unreachable_since=0, unreachable_reason="")
@@ -1365,7 +1384,8 @@ def provider_rest_news(desk: Desk, s: dict, name: str) -> None:
     with desk.lock():
         st = desk.provider_state().get(name, {})
         why = desk.redact(st.get("reason") or "")
-        if st.get("credit_since") or st.get("cool_until", 0) <= time.time() or not why \
+        # credit and unknown-model rests are told once by rest_provider (provider_credit, provider_model)
+        if st.get("credit_since") or st.get("model_since") or st.get("cool_until", 0) <= time.time() or not why \
                 or st.get("rest_notice_reason") == why:
             return
         tasks = desk.tasks()
@@ -1399,6 +1419,12 @@ def credit_text(st: dict) -> str:
     return ("rests until the principal says it is topped up on the page; credit balance too low since "
             + time.strftime('%m-%d %H:%M', time.localtime(since))
             + ("; another desk found it" if st.get("shared_rest") else "")) if since else ""
+
+
+def model_text(model: str) -> str:
+    """A model rest has no deadline; use the same remedy in checks and provider views."""
+    return (f"the provider does not know model {model}; rests until a check answers or the principal changes "
+            "its model or key on the page (Settings, Providers)")
 
 
 def rest_text(st: dict) -> str:
@@ -1450,8 +1476,8 @@ def providers_waited_for(desk: Desk, s: dict, tasks: list) -> dict:
 
 
 def tries_used(attempts: list) -> int:
-    """Earlier runs except free usage-limit returns, system kills, lost logins and drops during a known outage."""
-    return sum(1 for a in attempts if a.get("kind") not in ("killed", "credit", "login")
+    """Earlier runs except free usage-limit returns, unknown models, kills, lost logins and known outages."""
+    return sum(1 for a in attempts if a.get("kind") not in ("killed", "credit", "login", "model")
                and (a.get("kind") != "limit" or a.get("counted"))
                and (a.get("kind") != "network" or a.get("counted", True)))
 
@@ -1492,6 +1518,8 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
     st = desk.provider_state().get(name, {})
     if st.get("credit_since"):
         return credit_text(st)
+    if st.get("model_since"):
+        return model_text(st["model_unknown"])
     if p["kind"] == "compatible":
         if not p.get("base_url"):
             return "no endpoint address"
@@ -4429,7 +4457,7 @@ def refusal_reasons(home: Path, sid: str) -> dict:
 
 
 def unusable_reason(run: dict, err: str, subscription: bool = False):
-    """Why this provider cannot be used: ("credit" | "quota" | "key" | "login" | "refused" | "", words).
+    """Why this provider cannot be used: ("credit" | "quota" | "key" | "login" | "model" | "refused" | "", words).
     A subscription provider (subscription) whose login has run out answers 401 too: that is a login, not a key."""
     if run.get("stop_reason") in REFUSED_STOPS:
         return "refused", f"refused the request ({run['stop_reason']})"
@@ -4454,6 +4482,11 @@ def unusable_reason(run: dict, err: str, subscription: bool = False):
             # Keep an adapter's remedy in the rest reason; provider_problem adds this provider's ping command.
             return "login", f"not logged in; {run['login_hint']}"
         return "login", "not logged in (Please run /login)"
+    model_status = status
+    if model_status is None and (m := HTTP_STATUS.search(text)):
+        model_status = int(m.group(1) or m.group(2))
+    if model_status in (None, 400, 404) and NO_MODEL.search(text):
+        return "model", "the provider does not know the model"
     return "", ""
 
 
@@ -4700,6 +4733,21 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         state = "queued" if left and tries_used(attempts) < TRIES else "failed"
         error = f"{meta['provider']}: {why}; " + (
             "queued again for the lane's next provider" if state == "queued" else "no other provider in the lane to try")
+    elif kind == "model":
+        model = meta.get("model_asked") or (p or {}).get("model", "")
+        # Only subscription providers use the task's --model; compatible providers keep their own model.
+        requested = subscription and bool(meta.get("model"))
+        why = (f"the provider does not know model {model}; this task requested it with --model; "
+               "choose another model for the task") if requested else model_text(model)
+        attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "model"})
+        if requested:
+            state, error = "failed", f"{meta['provider']}: {why}"
+        else:
+            rest_provider(desk, desk.settings(), meta["provider"], kind, why, model=model)
+            state = "queued" if tries_used(attempts) < TRIES else "failed"
+            error = f"{meta['provider']}: {why}; " + (
+                "queued again without using a try; it starts when a provider of its lane is ready"
+                if state == "queued" else f"gave up after {TRIES} tries")
     elif kind in ("credit", "quota"):
         until = rest_provider(desk, desk.settings(), meta["provider"], kind, why, f"{run.get('result') or ''}\n{err}")
         counted = kind != "credit" and sum(a.get("kind") == "limit" for a in attempts) >= LIMIT_RETURNS
@@ -6743,7 +6791,8 @@ class Dispatcher:
         looked at too. Also once as the server starts, for rests that ran out while no server ran."""
         st = self.desk.provider_state()
         resting = {n for n in s["providers"] if (st.get(n) or {}).get("cool_until", 0) > time.time()
-                   or (st.get(n) or {}).get("credit_since") or (st.get(n) or {}).get("unreachable_since")}
+                   or (st.get(n) or {}).get("credit_since") or (st.get(n) or {}).get("model_since")
+                   or (st.get(n) or {}).get("unreachable_since")}
         if resting != self.resting:
             self.desk.ready_news()
         self.resting = resting
@@ -6760,7 +6809,7 @@ class Dispatcher:
                 st = self.desk.provider_state().get(name) or {}
                 at = time.time()
                 quota = st.get("cool_until", 0) > at
-                if st.get("credit_since"):
+                if st.get("credit_since") or st.get("model_since"):
                     continue
                 if quota:
                     if not quota_allowed or self.desk.paused():
@@ -7436,11 +7485,12 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
             st = lk["provider_state"].get(p, {})
             code = ({"refused this task": "refused", "not in settings": "missing_provider",
                      "no endpoint address": "no_endpoint", "no key": "no_key"}.get(problem)
-                    or ("credit" if st.get("credit_since") else "rest" if st.get("cool_until", 0) > time.time()
+                    or ("credit" if st.get("credit_since") else "model" if st.get("model_since")
+                        else "rest" if st.get("cool_until", 0) > time.time()
                         else "unreachable" if st.get("unreachable_since") else "unknown"))
             providers.append(reason(code, problem, provider=p, since=st.get("credit_since") or st.get("unreachable_since"),
                                     until=st.get("cool_until"), minutes=st.get("rest_minutes"),
-                                    how=st.get("rest_how"),
+                                    how=st.get("rest_how"), **({"model": st["model_unknown"]} if code == "model" else {}),
                                     why=(st.get("unreachable_reason") if code == "unreachable" else st.get("reason")) or ""))
         why.append(reason("providers", f"lane {ln} has no provider ready ({'; '.join(f'{p}: {x}' for p, x in probs.items())})",
                           lane=ln, providers=providers))
@@ -7498,7 +7548,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
             detail += ": answered, but stopped at the turn limit" if stopped else ""
         else:
             said =re.search(r'"message"\s*:\s*"([^"]{1,120})"', f"{run.get('result') or ''} {r.stderr}")
-            detail = (why or (run.get("result") or r.stderr or r.stdout or "no answer").strip()[:200]) + \
+            detail = model_text(p["model"]) if kind == "model" else \
+                (why or (run.get("result") or r.stderr or r.stdout or "no answer").strip()[:200]) + \
                 (f": {said.group(1)}" if said and why else "")
     except subprocess.TimeoutExpired:
         ok, detail = False, f"no answer in {timeout}s"
@@ -7521,11 +7572,12 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
             probe_ok = time.time() if quota_probe else 0
             checked_rest = record(desk, name, checked=True, quota_probe_ok=probe_ok)
             desk.set_provider_state(name, cool_until=0, quota_checked=checked_rest, reason="",
+                                    model_since=0, model_unknown="",
                                     unreachable_since=0, unreachable_reason="", quota_probe_ok=probe_ok,
                                     quota_probe_blocked=False)
         elif kind and not quota_probe:
             desk.set_provider_state(name, unreachable_since=0, unreachable_reason="")
-            rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}")
+            rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}", model=p["model"])
         desk.event("provider_checked", provider=name, ok=ok, detail=detail)
         if kind and not quota_probe:  # a failed automatic check changes nothing, so it tells nothing either
             provider_rest_news(desk, s, name)

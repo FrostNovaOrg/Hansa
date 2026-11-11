@@ -343,6 +343,8 @@ def _item(desk: Desk, e: dict, me=None):
                 + start_held_text(e, short=True) + "; not failed · next: hansa status", None, True, None)
     if kind == "provider_credit":
         return ("credit", e.get("provider"), e.get("since")), e["text"], None, True, None
+    if kind == "provider_model":
+        return ("model", e.get("provider"), e.get("since")), e["text"], None, True, None
     if kind == "provider_rested":
         return ("provider", e.get("provider")), e["text"], None, True, None
     if kind == "disk_low":

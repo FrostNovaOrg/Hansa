@@ -16,7 +16,7 @@ from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shar
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError)
 from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
-                  credit_text, provider_problem, providers_waited_for, quota_probe_text, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
+                  credit_text, model_text, provider_problem, providers_waited_for, quota_probe_text, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_detail, waiting_looks, write_list)
 
 STATES = {
@@ -1018,6 +1018,7 @@ def status(desk: Desk) -> dict:
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
                        "rest_minutes": s.get("cool_minutes", 30),
                        "credit_since": pst.get(n, {}).get("credit_since", 0),
+                       "model_since": pst.get(n, {}).get("model_since", 0),
                        "automatic_check": quota_probe_text(pst.get(n, {}), s),
                        "problem": provider_status_problem(desk, s, n, tasks), "check": pst.get(n, {}).get("check")}
                       for n, p in sorted(s["providers"].items())],
@@ -1241,7 +1242,7 @@ def provider_status_problem(desk: Desk, s: dict, name: str, tasks: list) -> str:
 
 def rest_words(p: dict) -> str:
     """A provider's rest after a usage limit whose error gives no reset time, for hansa status."""
-    if p.get("credit_since") or p.get("rest_minutes") is None:
+    if p.get("credit_since") or p.get("model_since") or p.get("rest_minutes") is None:
         return ""
     return f"rest {p['rest_minutes']} min" + " (desk)"
 
@@ -1250,9 +1251,11 @@ def limit_wait(desk: Desk, m: dict) -> str:
     """For hansa show: the line of a queued task whose last run ended on its provider's usage limit while that
     provider still rests; '' otherwise."""
     last = (m.get("attempts") or [{}])[-1]
-    if m.get("state") != "queued" or last.get("kind") not in ("limit", "credit"):
+    if m.get("state") != "queued" or last.get("kind") not in ("limit", "credit", "model"):
         return ""
     st = desk.provider_state().get(last["provider"]) or {}
+    if st.get("model_since") and not st.get("credit_since"):
+        return f"{last['provider']}: {model_text(st['model_unknown'])}; that return used no try"
     if st.get("credit_since"):
         return (f"{last['provider']}: {credit_text(st)}; it starts when a provider of its lane is ready. "
                 "That return used no try. More: hansa help provider-limits")
@@ -1577,7 +1580,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         if a.get("model") and (a["provider"], a["model"], a.get("effort", ""), a.get("effort_from")) != (
                 m.get("provider"), m.get("model_asked"), m.get("effort_used", ""), m.get("effort_from")):
             on = run_text(a, desk.settings()["providers"].get(a["provider"]))
-        out.append(f"earlier run on {on}: {a['error']} (credit; no try used)" if a.get("kind") == "credit" else
+        out.append(f"earlier run on {on}: {a['error']} ({a['kind']}; no try used)" if a.get("kind") in ("credit", "model") else
                    f"earlier try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
                    f"earlier run on {on}: {a['error']}; what it reported, if anything, is not kept"
                    if a.get("kind") == "killed" else  # it used no try

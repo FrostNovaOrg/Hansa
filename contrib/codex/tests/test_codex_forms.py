@@ -96,6 +96,43 @@ class ProviderLimits(unittest.TestCase):
 
 
 class OtherForms(unittest.TestCase):
+    def test_unknown_model_server_statuses_remain_server_errors(self):
+        for status, text in ((503, "API Error: 503 The model is currently not available, please try again later"),
+                             (500, "500 model temporarily not available"),
+                             (503, "unexpected status 503: model_not_found"),
+                             (500, "HTTP 500 model_not_found"),
+                             (503, "status code: 503 model_not_found")):
+            with self.subTest(text=text):
+                kind, net, run = read(text)
+                self.assertEqual((kind, run["api_error_status"]), ("", status))
+                self.assertIn(f"server error (HTTP {status})", net)
+
+    def test_unknown_model_other_statuses_and_no_status_keep_their_classification(self):
+        for status, expected in ((200, ""), (301, ""), (401, "login"), (403, "key"),
+                                 (408, ""), (422, ""), (429, "quota"), (529, "")):
+            with self.subTest(status=status):
+                kind, net, _ = read(f"unexpected status {status} Unauthorized: model_not_found" if status == 401
+                                    else f"unexpected status {status}: model_not_found")
+                self.assertEqual(kind, expected)
+                if status == 529:
+                    self.assertIn("overloaded", net)
+        for status in (200, 301, 408, 422):
+            with self.subTest(bare_status=status):
+                self.assertEqual(read(f"{status} model_not_found")[:2], ("", ""))
+        for text in ("model_not_found", "Unknown model: example-500", "The model is not available"):
+            self.assertEqual(read(text)[:2], ("model", ""))
+
+    def test_unknown_model_400_and_404_are_model_errors(self):
+        for status in (400, 404):
+            for text in ("model_not_found", "The model `example` does not exist", "Unknown model: example",
+                         "The model `example` is not supported", "model_not_available", "unknown_model",
+                         "example is not a valid model ID", "Model Not Exist"):
+                with self.subTest(status=status, text=text):
+                    kind, net, run = read(f"unexpected status {status}: {text}")
+                    self.assertEqual((kind, net, run["api_error_status"]), ("model", "", status))
+        kind, net, _ = read("unexpected status 400 Bad Request: unsupported parameter temperature")
+        self.assertEqual((kind, net), ("", ""))
+
     def test_overloaded_as_claude_overloaded(self):
         for text in ("Selected model is at capacity. Please try a different model.",
                      "We’re currently experiencing high demand, which may cause temporary errors."):
@@ -135,7 +172,7 @@ class OtherForms(unittest.TestCase):
 
     def test_model_not_available(self):
         kind, net, run = read("unexpected status 404 Not Found: {\"detail\":\"Model not found gpt-x\"}")
-        self.assertEqual((kind, net), ("", ""), "neither: the task fails, saying why")
+        self.assertEqual((kind, net), ("model", ""))
         self.assertEqual(run["api_error_status"], 404)
         self.assertIn("model is not available", run["result"])
 
@@ -187,7 +224,7 @@ class Runs(Scratch):
         run = self.failed_run("model_not_found.jsonl")
         self.assertEqual(run["api_error_status"], 404)
         self.assertIn("Model metadata for `gpt-6.1-sol` not found", run["result"])
-        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("", ""))
+        self.assertEqual(hansa_run.unusable_reason(run, self.err)[0], "model")
 
     def test_usage_with_cache_writes(self):
         run, code = self.run_worker("all_usage.jsonl")

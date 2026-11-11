@@ -633,7 +633,10 @@ LOGIN_FAILED_TEXT = re.compile(r"Your access token could not be refreshed|unexpe
 # auth on disk is unchanged, manager.rs), and the login on disk may be fine; `codex login status` tells
 REFRESH_USED_TEXT = re.compile(r"refresh token was already used", re.I)
 LOGGED_IN_LINE = re.compile(r"Logged in\b")  # the first line of `codex login status` when it is
-NO_MODEL_TEXT = re.compile(r"unexpected status 404 Not Found", re.I)  # the model is not available
+NO_MODEL_TEXT = re.compile(r"unexpected status 404 Not Found|\bmodel[_ -]not[_ -](?:found|available|supported|exist)\b|"
+                           r"\b(?:unknown|unsupported|no such)[_ -]model\b|\bis not a valid model\b|"
+                           r"\bmodel\b.{0,120}?\b(?:does not exist|doesn't exist|may not exist|not found|not exist|"
+                           r"(?:is |is currently )?not (?:available|supported))\b", re.I)
 # --strict-config's refusal of a -c key, or --disable's of a feature name: on stderr only, before the start
 CONFIG_TEXT = re.compile(r"Error loading config\.toml|unknown configuration field|Unknown feature flag", re.I)
 # A retry, not the final error: "Reconnecting... 2/5 (M)", "Reconnecting... waiting for network (M)"
@@ -644,8 +647,9 @@ LOGIN_WORDS = re.compile(r"not logged in|no (?:auth|credentials)|login required|
                          r"codex login|token data is not available", re.I)
 AUTH_WORDS = re.compile(r"\b40[13]\b|unauthori[sz]ed|forbidden|token[ _](?:expired|revoked)|"
                         r"refresh token|sign(?:ing)? in again|log(?:ging)? ?in again|invalid_grant", re.I)
-SERVER_STATUS = re.compile(r"(?:status:?|status code:?|HTTP)\s*(5\d\d)\b|\b(5\d\d) (?:Internal|Bad Gateway|"
-                           r"Service Unavailable|Gateway Time)", re.I)
+# Read the status before model wording: a temporary server failure must remain an outage.
+HTTP_STATUS = re.compile(r"(?:\b(?:API Error|status(?: code)?|HTTP)\s*:?\s*|^\s*)([1-5]\d\d)\b|"
+                         r"\b(5\d\d) (?:Internal|Bad Gateway|Service Unavailable|Gateway Time)", re.I | re.M)
 STREAM_WORDS = re.compile(r"stream (?:disconnected|closed|ended|error)|disconnected before completion|"
                           r"unexpected eof|idle timeout", re.I)
 CONNECT_WORDS = re.compile(r"error sending request|connection (?:reset|refused|closed|error|aborted)|"
@@ -716,8 +720,11 @@ def classify(text: str, home: str = "", codex: str = "codex") -> dict:
                           + (f" · resets_at: {reset}" if reset else ""), "api_error_status": 429}
     if LOGIN_FAILED_TEXT.search(whole):
         return login_failure(said, home, codex)
-    if NO_MODEL_TEXT.search(whole):
-        return {"result": f"API Error: 404 the model is not available (Codex: {said})", "api_error_status": 404}
+    m = HTTP_STATUS.search(whole)
+    status = int(m.group(1) or m.group(2)) if m else None
+    if status in (None, 400, 404) and NO_MODEL_TEXT.search(whole):
+        status = status or 404
+        return {"result": f"API Error: {status} the model is not available (Codex: {said})", "api_error_status": status}
     if OVERLOADED_TEXT.search(whole):
         return {"result": f"API Error: Repeated 529 Overloaded errors (Codex: {said})", "api_error_status": 529}
     if DROPPED_TEXT.search(whole):
@@ -730,8 +737,7 @@ def classify(text: str, home: str = "", codex: str = "codex") -> dict:
     if AUTH_WORDS.search(whole):
         status = 403 if re.search(r"\b403\b|forbidden", whole, re.I) else 401
         return {"result": f"API Error: {status} authentication_error (Codex: {said})", "api_error_status": status}
-    if m := SERVER_STATUS.search(whole):
-        status = int(m.group(1) or m.group(2))
+    if status is not None and 500 <= status <= 599:
         return {"result": f"API Error: {status} (Codex: {said})", "api_error_status": status}
     if STREAM_WORDS.search(whole):
         return {"result": f"API Error: Connection dropped (Codex: {said})"}
