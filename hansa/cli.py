@@ -7,6 +7,7 @@ import fcntl
 import getpass
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -3543,9 +3544,80 @@ def index_text(commands: list, lane_commands: list) -> str:
         topics_text()])
 
 
+LINK = re.compile(r"(?<!!)\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+\"[^\"]*\")?\s*\)")
+
+
+def anchor_of(heading: str) -> str:
+    """The anchor GitHub gives a docs heading: lowercased, punctuation dropped, its spaces as hyphens."""
+    return re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
+
+
+def topic_at(file: str, anchor: str) -> str:
+    """The topic a relative link to file#anchor lands on: the topic of that exact section, or of the file when a
+    topic is the whole file; "" when no topic prints it."""
+    for name, (topic_file, heading, _) in TOPICS.items():
+        if topic_file == file and (heading is None or anchor_of(heading) == anchor):
+            return name
+    return ""
+
+
+def docs_heading(file: str, anchor: str) -> str:
+    """A docs heading in its own words, for a link whose section is no topic; "" when the file cannot be read."""
+    try:
+        lines = (DOCS / file).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    fence = False
+    for x in lines:
+        if x.startswith("```"):
+            fence = not fence
+            continue
+        m = None if fence else re.match(r"(#+) (.*)", x)
+        if m and anchor_of(m.group(2)) == anchor:
+            return m.group(2).strip()
+    return ""
+
+
+def links_followed(text: str, file: str) -> str:
+    """A topic's text with its relative Markdown links, outside code blocks, made followable in a terminal: a
+    link to a section a topic prints becomes its words and `hansa help TOPIC`; a link to any other section or
+    file becomes its words and where to read it in hansa's repository. A link to a site is left as it is."""
+    fences, fence, start, offset = [], False, 0, 0
+    for line in text.splitlines(keepends=True):
+        if line.startswith("```"):
+            if fence:
+                fences.append((start, offset + len(line)))
+            else:
+                start = offset
+            fence = not fence
+        offset += len(line)
+    if fence:
+        fences.append((start, offset))
+
+    def followed(m):
+        if any(start <= m.start() < end for start, end in fences):  # a code block prints as it is
+            return m.group(0)
+        words, target = " ".join(m.group(1).split()), m.group(2)
+        if re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", target):  # a link to a site: as it is
+            return m.group(0)
+        path, _, anchor = target.partition("#")
+        to = posixpath.normpath(posixpath.join(posixpath.dirname(file), path)) if path else file
+        if to == ".." or to.startswith("../"):
+            at = re.sub(r"^(?:[.][.]/)+", "", to)
+            return f"{words} (the file {at} in hansa's repository)"
+        topic = topic_at(to, anchor)
+        if topic:
+            return f"{words} (hansa help {topic})"
+        heading = docs_heading(to, anchor) if anchor else ""
+        under = f', under "{heading}"' if heading else ""
+        return f"{words} (docs/{to}{under})"
+
+    return LINK.sub(followed, text)
+
+
 def topic_text(name: str) -> str:
     """hansa help TOPIC: its section of docs/, from its heading down to the next heading of the same or a higher
-    level, subsections with it; the whole file for a topic that names no heading."""
+    level, subsections with it; the whole file for a topic that names no heading; its relative links followed."""
     file, heading, _ = TOPICS[name]
     where = (f"the section \"{heading}\" of " if heading else "") + f"docs/{file}"
     try:
@@ -3554,7 +3626,7 @@ def topic_text(name: str) -> str:
         raise SystemExit(f"hansa: this install has no {DOCS / file}, so it cannot print {name}: read {where} in "
                          "hansa's repository")
     if heading is None:
-        return "\n".join(lines).strip()
+        return links_followed("\n".join(lines).strip(), file)
     out, level, fence = [], 0, False
     for x in lines:
         if x.startswith("```"):
@@ -3569,7 +3641,7 @@ def topic_text(name: str) -> str:
     if not out:
         raise SystemExit(f"hansa: {DOCS / file} has no heading \"{heading}\", so it cannot print {name}: read "
                          f"{where} in hansa's repository")
-    return "\n".join(out).strip()
+    return links_followed("\n".join(out).strip(), file)
 
 
 def cmd_help(a):

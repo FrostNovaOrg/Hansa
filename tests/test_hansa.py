@@ -24967,7 +24967,9 @@ def save():'''))
         rows = re.findall(r"^\| `([a-z]+)` \| (.+) \|$", shown, re.M)
         self.assertEqual([state for state, _ in rows], list(views.STATES))
         self.assertEqual({state: says.replace("`", "") for state, says in rows}, views.STATES)
-        self.assertIn(shown.strip(), (Path(__file__).resolve().parent.parent / "docs" / "tasks.md").read_text())
+        guide = (Path(__file__).resolve().parent.parent / "docs" / "tasks.md").read_text()
+        for state, says in rows:  # the rows are docs/tasks.md's own, which hansa help rewrites elsewhere
+            self.assertIn(f"| `{state}` | {says} |", guide)
         tid = self.desk.new_task("A task that waits for review")
         self.desk.update(tid, state="done")
         self.assertIn(views.STATES["done"], " ".join(self.hansa("show", tid).split()))
@@ -25042,8 +25044,14 @@ def save():'''))
         self.assertIn("### Sending a task back", merging)
         self.assertIn("says which round it is", " ".join(merging.split()))
         self.assertNotIn("## What work costs", merging)
-        self.assertEqual(cli.topic_text("push-services"),
-                         (top / "docs" / "push-services.md").read_text(encoding="utf-8").strip())
+        # a topic that is a whole file prints all of it, its relative links rewritten and its links to a site as
+        # they are
+        whole = (top / "docs" / "push-services.md").read_text(encoding="utf-8").strip()
+        printed = cli.topic_text("push-services")
+        self.assertEqual(len(printed.splitlines()), len(whole.splitlines()))
+        self.assertIn("(hansa help alerts)", printed)
+        self.assertIn("简体中文 (docs/zh-CN/push-services.md)", printed)
+        self.assertIn("[Bark](https://github.com/Finb/Bark)", printed)
         self.assertIn("`hansa help push-services`", self.hansa_out("help", "alerts"))
         # no topic can be taken for something else
         names = commands | lane_subs | targets | {"card", "topics"}
@@ -25073,6 +25081,50 @@ def save():'''))
                 text = f.read_text(encoding="utf-8")
                 self.assertEqual(re.findall(r"`hansa explain`[^.;]{0,60}?\b(?:address|host|port|web page)\b", text),
                                  [], f.name)
+
+    def test_a_topic_link_in_a_topics_help_names_the_topic_that_prints_it(self):
+        """hansa help TOPIC follows a relative link to a section that is a help topic: the link's words, then
+        hansa help that topic; docs/releases.md itself keeps its Markdown link."""
+        shown = cli.topic_text("release-flow")
+        self.assertIn("Forbidden words before a release (hansa help forbidden-words)", shown)
+        self.assertNotIn("](#forbidden-words-before-a-release)", shown)
+        # a link in the same file, and a link to a whole-file topic, are followed the same way
+        self.assertIn("A lane's write list and env (hansa help write-env)", cli.topic_text("workers-sandbox"))
+        self.assertIn("See the Bark guide (hansa help push-services)", cli.topic_text("alerts"))
+        self.assertIn("[Forbidden words before a\nrelease](#forbidden-words-before-a-release)",
+                      (Path(__file__).resolve().parent.parent / "docs" / "releases.md").read_text())
+
+    def test_a_link_to_a_docs_section_that_is_no_topic_gives_the_file_and_heading(self):
+        """hansa help TOPIC follows a relative link to a section or file that is no topic: the link's words, then
+        the docs file and, for a section, its heading. The docs' own files keep their Markdown links."""
+        shown = cli.topic_text("principles")
+        self.assertIn('limits (docs/concepts.md, under "Limits")', shown)
+        self.assertIn("the sandbox guide (docs/sandbox.md)", shown)
+        self.assertNotIn("](concepts.md#limits)", shown)
+        self.assertIn("](concepts.md#limits)", (Path(__file__).resolve().parent.parent / "docs" /
+                                                "principles.md").read_text())
+        # a section of the topic's own file, a file with no heading, and a file outside docs/
+        self.assertIn('status line (docs/desk.md, under "The status line")', cli.topic_text("inbox"))
+        self.assertIn("merge lane (docs/desk.md)", cli.topic_text("merge-check"))
+        self.assertIn("The optional Codex adapter (the file contrib/codex/README.md in hansa's repository)",
+                      cli.topic_text("effort"))
+
+    def test_a_link_to_a_site_in_a_topics_help_is_left_as_it_is(self):
+        self.assertIn("[Bark](https://github.com/Finb/Bark)", cli.topic_text("push-services"))
+        self.assertIn("[Install Lima](https://lima-vm.io/docs/installation/)", cli.topic_text("test-bench"))
+
+    def test_every_topics_help_leaves_no_relative_link_and_names_only_topics(self):
+        """Every topic's text, after its links are followed: no relative Markdown link remains, and every
+        hansa help it says names a topic (card and topics are hansa help's own pages)."""
+        from tests.test_docs import links as markdown_links  # the documentation tests' link parser
+        for name in cli.TOPICS:
+            shown = cli.topic_text(name)
+            for line, target in markdown_links(shown):
+                self.assertRegex(target, r"^[a-zA-Z][a-zA-Z0-9+.-]*:", f"{name}, line {line}: {target}")
+            for topic in re.findall(r"\(hansa help ([a-z][a-z0-9-]*)\)", shown):  # what this rewrite adds
+                self.assertIn(topic, cli.TOPICS, name)
+            for word in re.findall(r"hansa help ([a-z][a-z0-9-]*)", shown):
+                self.assertIn(word, set(cli.TOPICS) | {"card", "topics"}, name)
 
     def test_no_hansa_help_pointer_reaches_the_page_or_the_alerts(self):
         """The principal reads the page and the alerts, not the command line: hansa help is for the coordinator."""
