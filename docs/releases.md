@@ -799,7 +799,7 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   with its provider; `model_not_found`: choose another model with `/model` in that session; and so on); for the
   others, that hansa tries again with its next post to the session.
 
-  The alert names the session, the error, since when and how many things posted to it wait unhandled. When only the
+  The alert names the session, the error, since when and, when any do, how many things posted to it wait unhandled. When only the
   principal's own request failed in the stretch (no turn hansa started did), it says that instead, with no minutes:
   `the principal's own request ended with an API error (overloaded) at 16:00 and was not done · type it again in
   that session`. For an error only the principal can fix, and `authentication_failed`, typing again does nothing

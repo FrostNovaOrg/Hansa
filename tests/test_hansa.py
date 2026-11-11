@@ -49979,6 +49979,50 @@ else:
         for english in ("done", "no changes", "next"):
             self.assertNotIn(english, zh)
 
+    def test_chinese_no_session_alert_names_the_provider_and_lanes_the_english_names(self):
+        from hansa import alert
+        self.coordinator_desk("zh-names")
+        at = time.time() - 300
+        for what, line, said in (
+                ("ready kimi", "kimi is ready now: done? Still open: request #3 (Sign the form)",
+                 "服务商「kimi」已就绪，待办也许已完成"),
+                ("start claude a b", "lanes a, b cannot run: no claude to run; not failed", "工作线「a」、「b」无法开始任务"),
+                ("start repo c", "lane c cannot run: its repository folder is not there; not failed",
+                 "工作线「c」无法开始任务"),
+                ("credit deepseek 1762800000.5", "deepseek is out of credit since 11:00", "服务商「deepseek」余额不足"),
+                ("after-merge a pub", "lane a target pub after merges t0001: its check failed",
+                 "工作线「a」目标「pub」合并后的发布在等")):
+            with self.subTest(what=what):
+                items = [{"what": what, "at": at, "line": line}]
+                en = alert.unheard_text(self.desk, items, time.time())
+                zh = alert.unheard_text(self.desk, items, time.time(), zh=True)
+                self.assertIn(f"min: {line} · next:", en)
+                self.assertIn(f"分钟：{said} · 下一步：", zh)
+                for word in ("cannot run", "ready now", "out of credit", "next"):
+                    self.assertNotIn(word, zh)
+
+    def test_the_turns_alert_leaves_out_what_waits_when_nothing_does(self):
+        from hansa import alert
+        self.coordinator_desk("turn-none")
+        me = {"session": {"pid": 4242, "start": ""}, "name": "desk-4242"}
+        for count, en_said, zh_said in ((0, None, None), (2, "· 2 thing(s) hansa posted to it wait unhandled ·",
+                                                           "· hansa 发去的 2 件事尚未处理 ·")):
+            with self.subTest(count=count):
+                en, zh = alert.turn_text({"case": "turn", "error": "billing_error", "since": time.time() - 1860,
+                                          "count": count}, "pid 4242 (desk-4242)", "pid 4242 (desk-4242)", time.time())
+                self.assertIn("add credit or fix billing", en)
+                self.assertIn("充值", zh)
+                if count:
+                    self.assertIn(en_said, en)
+                    self.assertIn(zh_said, zh)
+                else:
+                    self.assertNotIn("thing(s)", en)
+                    self.assertNotIn("unhandled", en)
+                    self.assertNotIn("件事", zh)
+                    self.assertNotIn("0", en.split("min)")[-1])
+                    self.assertIn("(31 min) · the account has no credit", en)
+                    self.assertIn("（billing_error）结束 · 账号余额不足", zh)
+
     def test_who_stopped_a_release_is_said_in_words(self):
         from hansa import release
         self.release_listing_history()

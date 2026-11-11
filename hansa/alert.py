@@ -88,7 +88,7 @@ once the principal was alerted. By the error:
 The alert ends with the advice for its error (TURN_ADVICE: what to fix and where for those only the principal can
 cure, and authentication_failed; that hansa tries again for the rest). A turn the principal started is never posted
 again; it alerts after turn_min, with that advice first where only the principal can cure it, then to type the request
-again. The alert names the error, since when, and how many things posted to the session wait unhandled. turn_min 0 turns the `turn` and `turn_ok` alerts off;
+again. The alert names the error, since when, and, when any do, how many things posted to the session wait unhandled. turn_min 0 turns the `turn` and `turn_ok` alerts off;
 the reposts still go. hansa status shows a line while a stretch holds for a session hansa posts to: the error, since
 when, how many reposts went and whether the principal was alerted; none once a turn ended normally.
 
@@ -958,8 +958,24 @@ def _what_zh(desk: Desk, x: dict) -> str:
             return f"核验 {tid}「{title}」已结束"
         return f"任务 {tid}「{title}」" + TASK_STATE_ZH.get(m.get("state"), f"（{m.get('state')}）")
     if head in WHAT_ZH:
-        return WHAT_ZH[head] + (f" #{rest}" if head.startswith("release") and rest else "")
+        return _named_zh(head, rest.split(" ") if rest else [])
     return f"「{x.get('line') or ''}」" if not what else "一件事"
+
+
+def _named_zh(head: str, parts: list) -> str:
+    """What waits, not a task, in Chinese with the names its English line gives (quoted, as they are), taken from its
+    subject (notify._item's key after its first word, split at spaces): the provider ready or out of credit, the lanes
+    that cannot start (after the cause), the lane and target whose release waits after merges, the release's number."""
+    def q(p):
+        return f"「{p}」" if p and p != "None" else ""
+    if head in ("ready", "credit") and q(parts[0] if parts else ""):
+        return f"服务商{q(parts[0])}" + ("已就绪，待办也许已完成" if head == "ready" else "余额不足")
+    lanes = [q(p) for p in parts[1:] if q(p)]
+    if head == "start" and lanes:
+        return f"工作线{'、'.join(lanes)}无法开始任务"
+    if head == "after-merge" and q(parts[0] if parts else ""):
+        return f"工作线{q(parts[0])}" + (f"目标{q(parts[1])}" if len(parts) > 1 and q(parts[1]) else "") + "合并后的发布在等"
+    return WHAT_ZH[head] + (f" #{parts[0]}" if head.startswith("release") and parts and parts[0] else "")
 
 
 def session_minutes(desk: Desk) -> dict:
@@ -1102,8 +1118,8 @@ TURN_ADVICE = {
 
 
 def turn_text(req: dict, who: str, who_zh: str, t: float) -> tuple:
-    """The `turn` case's alert (notify.Turns), (English, Chinese): the error, since when, how many things wait, and
-    the advice for the error."""
+    """The `turn` case's alert (notify.Turns), (English, Chinese): the error, since when, how many things wait (left
+    out when none does), and the advice for the error."""
     since = req["since"] if _at(req.get("since")) else t
     count = req["count"] if isinstance(req.get("count"), int) and not isinstance(req.get("count"), bool) else 0
     error = str(req.get("error") or "unknown")[:40]
@@ -1114,9 +1130,10 @@ def turn_text(req: dict, who: str, who_zh: str, t: float) -> tuple:
                 f"协调员的会话 {who_zh}：{principal_turn_text(error, failed, zh=True, count=count)}")
     en, zh = TURN_ADVICE.get(error, _RETRY)
     text = (f"the coordinator's session {who} cannot work: its turns end with an API error ({error}) since {at} "
-            f"({_mins(t - since)} min) · {count} thing(s) hansa posted to it wait unhandled · {en}")
+            f"({_mins(t - since)} min) · " + (f"{count} thing(s) hansa posted to it wait unhandled · " if count else "")
+            + en)
     text_zh = (f"协调员的会话 {who_zh} 无法工作：自 {at} 起（{_mins(t - since)} 分钟）轮次一直以 API 错误（{error}）结束 · "
-               f"hansa 发去的 {count} 件事尚未处理 · {zh}")
+               + (f"hansa 发去的 {count} 件事尚未处理 · " if count else "") + zh)
     return text, text_zh
 
 
