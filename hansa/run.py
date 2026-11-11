@@ -7229,6 +7229,9 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
     lk = looks or waiting_looks(desk, s)
 
     def reason(code, text, **values):
+        from .page_messages import describe
+        if "why" in values:
+            values["why_message"] = describe(values["why"])
         return {"code": code, "values": values, "text": text}
 
     def result(code, text, **values):

@@ -8429,7 +8429,7 @@ def save():'''))
         for language in ("en", "zh"):
             with self.subTest(language=language):
                 shown = self.forbidden_exception_page("exception-dangling", settings, language)
-                self.assertIn(reason, shown["warning"])
+                self.assertIn(reason if language == "en" else "第 1 条豁免（未选工作线）", shown["warning"])
                 self.assertIn(reason, shown["refused"])
 
     def forbidden_exception_page(self, scenario, settings, language="en"):
@@ -8535,7 +8535,7 @@ def save():'''))
         for language in ("en", "zh"):
             with self.subTest(language=language):
                 shown = self.forbidden_exception_page("exception-dangling", settings, language)
-                self.assertIn(reason, shown["warning"])
+                self.assertIn(reason if language == "en" else "第 1 条豁免（工作线 a、b）", shown["warning"])
                 self.assertIn("private-orphan", shown["row"])
                 self.assertTrue(shown["unavailable"])
                 self.assertIn(reason, shown["refused"])
@@ -41454,6 +41454,249 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
   console.log(JSON.stringify({ticks, after: vm.runInContext("S.releases_without_asking", ctx)}));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 """
+
+    def message_page(self, status=None, settings=None, task=None, reply=None, language="zh", samples=()):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        from hansa.desk import public_settings
+        harness = self.tmp / "message-page.js"
+        harness.write_text(self.PAGE_HARNESS.replace('return {status:200, json:async () => ({ok:true})};',
+            'return {status:200, json:async () => (given[path] || {ok:true})};').replace('else if (ask === "task-steps")', r'''else if (ask === "message-cases") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  await run("loadStatus()");
+  const status = ids["#tab-status"].textContent, warnings = ids["#state-list"].textContent;
+  await run("loadSettings()");
+  run("settingsGroup = 'providers'; renderSettings()");
+  const providers = ids["#tab-settings"].textContent;
+  run("settingsGroup = 'releases'; renderSettings()");
+  const settings = ids["#tab-settings"].textContent;
+  let task = "", answer = "";
+  if (given["/api/task"]) {
+    const [button, box] = run('taskLink("t0042")');
+    ids["#tab-status"].append(button, box);
+    await button.click(); await new Promise(resolve => setImmediate(resolve)); task = box.textContent;
+  }
+  if (given["/api/release/answer"]) {
+    await run("loadStatus(true)");
+    const button = descendants(ids["#tab-status"], "button").find(b => b.attrs["data-status-focus"] === "release:1:yes");
+    await button.click(); answer = ids["#state-list"].textContent;
+  }
+  console.log(JSON.stringify({status, warnings, providers, settings, task, answer,
+    samples:(given.messageSamples || []).map(r => run("messageText(" + JSON.stringify(r) + ")"))}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "task-steps")'''))
+        data = {"/api/status": status or views.status(self.desk), "/api/events": [],
+                "/api/settings": settings or public_settings(self.desk), "/api/lane-commands": [], "messageSamples":samples}
+        if task:
+            data["/api/task"] = task
+        if reply:
+            data["/api/release/answer"] = reply
+        result = subprocess.run(["node", str(harness), str(Path(__file__).resolve().parent.parent / "hansa/ui.html"),
+                                 "message-cases", language], input=json.dumps(data), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_page_status_warning_messages(self):
+        from hansa import run, plugin, alert, memory, disk
+        samples = [
+            ("serve_code", "hansa serve runs old, but new was installed 2026-11-10 12:00: restart it", "重启"),
+            ("srt_missing", "srt MISSING (on the PATH of this command; hansa serve has not tried srt yet, and its PATH may differ): " + run.SRT_MISSING, "安装"),
+            ("alert_failed", "alert command FAILED 2026-11-10 12:00 (exit 4): program <&> · the principal's, on the page", "退出码 4"),
+            ("unreached", ["no session hears from hansa, so the coordinator's session cannot be reached: 7 thing(s) wait for it, the oldest for 9 min (task t0001)"], "7 件事"),
+            ("mod", {"started":"11-10 02:39", "loaded":False, "why":plugin.version_problem(""), "autocompact":"", "clear":{"window":""}}, "无法识别")]
+        for field, value, zh in samples:
+            with self.subTest(field=field):
+                source = {"serve_code":"hansa.views.serve_code", "srt_missing":"hansa.views.srt_problem",
+                          "alert_failed":"hansa.alert.failure_line", "unreached":"hansa.alert.coordinator_lines", "mod":"hansa.plugin.status"}[field]
+                with unittest.mock.patch(source, return_value=value):
+                    st = views.status(self.desk)
+                page = self.message_page(st)
+                self.assertIn(zh, page["warnings"])
+                raw = value[0] if isinstance(value, list) else value.get("why") if isinstance(value, dict) else value
+                self.assertNotIn(raw, page["warnings"])
+                self.assertIn(raw, views.status_text(st))
+        vol = {"mount":"/small <&>", "free":0.5 * disk.GB, "total":4 * disk.GB, "what":["the desk's folder", "lane a's repository", "lane a's worktree", "the runs' temporary folders", "hansa serve's TMPDIR", "lane commands' TMPDIR"]}
+        with unittest.mock.patch.object(disk, "held", return_value=[vol]), \
+                unittest.mock.patch.object(memory, "held", return_value=True), \
+                unittest.mock.patch.object(memory, "record", return_value={"available":disk.GB, "total":32 * disk.GB}):
+            st = views.status(self.desk)
+        page = self.message_page(st)
+        for text in ("可用内存", "磁盘空间", "/small <&>", "0.5 GB", "1 GB", "恢复", "正在运行", "工作线 a 的仓库", "工作线 a 的工作树", "工作台文件夹", "运行的临时文件夹", "hansa serve 的 TMPDIR", "工作线命令的 TMPDIR"):
+            self.assertIn(text, page["warnings"])
+        self.assertNotIn("DISK LOW", page["warnings"])
+        self.assertNotIn("MEMORY LOW", page["warnings"])
+        en = self.message_page(st, language="en")
+        self.assertIn(st["disk"]["low_text"], en["warnings"])
+        self.assertIn(st["memory"]["low_text"], en["warnings"])
+
+    def test_page_task_failure_and_hold_messages(self):
+        from hansa import run
+        tid = self.desk.new_task("Failure", lane="a")
+        cases = [("failed", "could not start: claude was not found; install Claude Code or set HANSA_CLAUDE", "安装 Claude Code"),
+                 ("queued", "the sandbox could not start: bwrap: permission denied <&>", "沙箱无法启动")]
+        for state, error, zh in cases:
+            with self.subTest(state=state):
+                self.desk.change(tid, lambda m: {"state":state, "error":error})
+                if state == "queued":
+                    run.hold(self.desk, tid, "a", error, "", "worker")
+                # The same payload the task endpoint serves, without needing a port.
+                task = views.task_page(self.desk, tid) if hasattr(views, "task_page") else {
+                    "meta":self.desk.meta(tid), "text":views.show_text(self.desk, tid, full=True)}
+                page = self.message_page(views.status(self.desk), task=task)
+                self.assertIn(zh, page["status"])
+                self.assertIn(zh, page["task"])
+                self.assertNotIn(error, page["task"])
+                self.assertIn(error, views.show_text(self.desk, tid, full=True))
+                if state == "queued":
+                    self.assertIn("bwrap: permission denied <&>", page["task"])
+
+    def test_page_provider_problem_check_and_credit_messages(self):
+        from hansa import run
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "out of quota (HTTP 429)")
+        self.desk.set_provider_state("claude", check={"ok":False, "detail":"no answer in 25s", "at":1700000000})
+        with self.subTest(rest=True):
+            page = self.message_page()
+            for word in ("休息到", "30 分钟", "25 秒", "用量"):
+                self.assertIn(word, page["status"])
+            self.assertNotIn("resting until", page["status"])
+            self.assertNotIn("no answer in", page["status"])
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "credit", "credit balance too low")
+        self.assertIn("余额不足", self.message_page()["providers"])
+        self.assertNotIn("rests until", self.message_page()["providers"])
+
+    def test_page_release_answer_and_failure_messages(self):
+        from hansa import release
+        self.with_release("true")
+        self.commit_in_repo("release.txt", "ready\n")
+        self.hansa("release", "a")
+        reply = release.answer(self.desk, 1, True, commit="stale")
+        self.assertFalse(reply["ok"])
+        with self.subTest(answer=True):
+            page = self.message_page(reply=reply)
+            self.assertIn("重新加载", page["answer"])
+            self.assertNotIn("reload the page", page["answer"])
+        cases = [("it could not start: [Errno 2] /example/tool <&>", "无法启动"),
+                 ("it was interrupted before it could end (no exit code)", "中断"),
+                 ("stopped at the lane's time limit (30 min)", "30 分钟"),
+                 ("stopped at target preview's time limit (12 min)", "preview 的运行时限（12 分钟）")]
+        for problem, zh in cases:
+            with self.subTest(problem=problem):
+                release.change(self.desk, 1, lambda r: {"state":"failed", "problem":problem, "ended":time.time()})
+                r = release.get(self.desk, 1)
+                self.assertIn(zh, release.state_text(self.desk, r, zh=True))
+                self.assertIn(problem, release.state_text(self.desk, r))
+                self.assertIn(zh, self.message_page()["status"])
+
+    def test_page_exception_warning_is_chinese_only(self):
+        from hansa.desk import public_settings
+        settings = public_settings(self.desk)
+        settings["settings"].update(release_forbidden=["kept"], release_forbidden_except=[{"entry":"gone", "lanes":["a"]}])
+        page = self.message_page(settings=settings)
+        self.assertIn("第 1", page["settings"])
+        self.assertNotIn("names no entry", page["settings"])
+        self.assertIn("names no entry", self.message_page(settings=settings, language="en")["settings"])
+
+    def test_page_message_variants_and_original_values(self):
+        from hansa import page_messages as pm, plugin, run
+        samples = [
+            (plugin.version_problem("2.1.1"), "请升级"),
+            ("its copy would be in a folder another account could change: /example/mod <&>", "/example/mod <&>"),
+            (plugin.failed({}, "copying the mod into /example/mod <&>", OSError("read only"))["why"], "复制"),
+            (plugin.failed({}, "making the mod's folder /example/mod <&>", OSError("read only"))["why"], "创建"),
+            (plugin.failed({}, "finding the folder for the mod's copy (the home folder)", KeyError("home"))["why"], "主目录"),
+            (plugin.failed({}, "asking Claude Code its version (claude --version)", OSError("bad executable"))["why"], "读取版本"),
+            ("hansa serve started 2026-11-10 12:00, before new was installed 2026-11-11 12:00: restart it", "重启"),
+            ("srt CANNOT RUN (as hansa serve saw it, 11-10 12:00): it is at /example/srt <&>, but a sandboxed `true` failed: bwrap: denied. Setups and checks do not run until this is fixed (hansa explain server)", "bwrap: denied"),
+            ("alert command FAILED 2026-11-10 12:00 (timed out after 30 s) · the principal's, on the page", "30 秒后超时"),
+            ("alert command FAILED 2026-11-10 12:00 (exit 4): its output was not kept, as the alert held a one-time code · the principal's, on the page", "一次性码"),
+            ("the coordinator's session demo cannot be reached: its inbox /example/inbox is gone (no such file) for 9 min, as after a restart of the session in place (Claude Code's /restart gives it a new inbox); hansa keeps the lines · next: hansa notify on, from that session", "收件箱 /example/inbox"),
+            ("the coordinator's session demo cannot be reached: its inbox refuses posts for 9 min; hansa keeps the lines and tries again", "拒收 9 分钟"),
+            ("the coordinator's session demo has waited on its window for 9 min (a permission dialog or a question), with what hansa posted to it unanswered", "权限对话框"),
+            ("waiting for review while the coordinator's session demo is idle: t0001 for 9 min, t0002 for 3 min", "t0002 已等 3 分钟"),
+            ("not in settings", "设置中没有"), ("no endpoint address", "没有接口地址"), ("no key", "没有密钥"),
+            ("credit balance too low", "余额不足"), ("no answer", "没有收到答复"),
+            ("not logged in (Please run /login)", "尚未登录"),
+            ("cancelled", "已取消"), ("cancelled before it started", "开始前"),
+            ("out of quota (HTTP 429): service <&>", "用量已达上限"),
+            ("key rejected (HTTP 401): service <&>", "密钥被拒绝"),
+            ("opus: answered, but stopped at the turn limit", "opus：已答复"),
+            ("the provider was overloaded (HTTP 529)", "服务商过载"),
+            ("the provider had a server error (HTTP 502)", "服务器错误"),
+            ("the connection to the provider failed (ECONNRESET)", "连接服务商失败"),
+            ("could not start: its attachment /example/note <&> is gone", "/example/note <&>"),
+            ("could not start: the lane's setup could not run: bwrap: denied", "准备命令无法运行"),
+            ("its repository folder /example/repo <&> is gone (moved or removed)", "仓库文件夹"),
+            ("git cannot prepare its worktree /example/tree <&>: fatal: not a repository", "工作树"),
+            ("the lane's setup command failed (exit 4), so the worker never started; hansa show t0001 has the setup's last lines", "退出码 4"),
+            (f"stopped at the ceiling of 30 minutes: {run.CEILING}", "30 分钟"),
+            (f"stopped at the ceiling of 12 turns: {run.CEILING}", "12 轮"),
+            ("error: no output (exit 1)", "没有输出"),
+            ("error: model said <&>", "程序报告"),
+            ("hansa serve stopped as it started the release, so whether its command ran is not known: read its output (hansa release), and ask again if it has to go out", "hansa up"),
+        ]
+        records = [pm.describe(raw) for raw, zh in samples]
+        for language in ("zh", "en"):
+            shown = self.message_page(samples=records, language=language)["samples"]
+            for (raw, zh), record, text in zip(samples, records, shown):
+                with self.subTest(raw=raw, language=language):
+                    self.assertNotEqual(record["code"], "unknown")
+                    self.assertIn(zh, text) if language == "zh" else self.assertEqual(raw, text)
+                    self.assertNotIn("undefined", text)
+
+    def test_page_provider_remedies_and_release_refusals(self):
+        from hansa import run, page_messages as pm, release, alert
+        records, wanted = [], []
+        for kind, reason, zh in (("key", "key rejected (HTTP 401)", "保存新密钥"),
+                                 ("login", "not logged in (Please run /login)", "登录"),
+                                 ("quota", "out of quota (HTTP 429)", "重置时间")):
+            run.rest_provider(self.desk, self.desk.settings(), "claude", kind, reason,
+                              "resets at 2099-01-01T00:00:00Z" if kind == "quota" else "")
+            if kind == "quota":
+                self.desk.set_provider_state("claude", rest_how="reset")
+            st = views.status(self.desk)
+            records.append(st["providers"][0]["problem_message"]); wanted.append(zh)
+        self.desk.set_provider_state("claude", cool_until=0, unreachable_since=1700000000,
+                                     unreachable_reason="the connection to the provider failed (ECONNRESET)",
+                                     check={"at":1700000001, "ok":False, "detail":"no answer in 25s"})
+        records.append(views.status(self.desk)["providers"][0]["problem_message"]); wanted.append("25 秒")
+        self.with_release("true")
+        self.commit_in_repo("release.txt", "release\n")
+        self.hansa("release", "a")
+        r = release.get(self.desk, 1)
+        for reply in (release.answer(self.desk, 999, True),
+                      release.answer(self.desk, 1, True, commit="old")):
+            records.extend(reply["problem_messages"]); wanted.append("重新加载")
+        release.change(self.desk, 1, lambda r: {"state":"failed"})
+        records.extend(release.answer(self.desk, 1, True)["problem_messages"]); wanted.append("重新加载")
+        release.change(self.desk, 1, lambda r: {"state":"waiting"})
+        self.commit_in_repo("later.txt", "changed\n")
+        records.extend(release.answer(self.desk, 1, True, commit=r["commit"])["problem_messages"]); wanted.append("作废")
+        for principal, told, on in ((False,1700000001,True),(False,0,True),(False,0,False),(True,0,True)):
+            raw = alert.turn_line({"since":1700000000, "at":1700000000, "error":"authentication_failed",
+                                  "reposts":2, "principal":principal, "told":told}, "demo", 1700000600, on)
+            records.append(pm.describe(raw)); wanted.append("API 错误")
+        for language in ("zh", "en"):
+            for record, zh, text in zip(records, wanted, self.message_page(samples=records, language=language)["samples"]):
+                with self.subTest(code=record["code"], raw=record["text"], language=language):
+                    self.assertIn(zh, text) if language == "zh" else self.assertEqual(record["text"], text)
+
+    def test_page_task_reason_does_not_translate_user_text(self):
+        raw = "could not start: claude was not found; install Claude Code or set HANSA_CLAUDE"
+        tid = self.desk.new_task("Keep this literal:\nerror: " + raw, lane="a")
+        self.desk.change(tid, lambda m: {"state":"failed", "error":raw + "\nprogram <&>",
+                                      "attempts":[{"provider":"claude", "at":time.time(), "error":"no answer in 25s", "kind":"credit"}]})
+        page = self.message_page(task=views.task_page(self.desk, tid))
+        self.assertIn("error: " + raw, page["task"])
+        self.assertIn("原因：", page["task"])
+        self.assertIn("program <&>", page["task"])
+        self.assertIn("先前由 claude 运行", page["task"])
+        self.assertIn("25 秒", page["task"])
+
+    def test_page_unknown_message_keeps_english(self):
+        st = views.status(self.desk)
+        st.update(serve_code="future server warning <&>", serve_code_message={"code":"future", "values":{}, "text":"future server warning <&>"})
+        for language in ("en", "zh"):
+            self.assertIn("future server warning <&>", self.message_page(st, language=language)["warnings"])
 
     def picture_status(self):
         st = views.status(self.desk)

@@ -3351,6 +3351,7 @@ def release_last(desk: Desk) -> dict:
 def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
     from .run import credit_text
+    from .page_messages import provider
     desk.settings()  # finish any legacy upgrade before obtaining the revision
     rev = desk.settings_rev()  # read first: if the file changes meanwhile, a save is refused, never lost
     s = copy.deepcopy(desk.settings())
@@ -3383,6 +3384,8 @@ def public_settings(desk: Desk) -> dict:
                                                "coordinator_alert": dict(COORDINATOR_ALERT)},
             "alert_push": alert_push.public(desk), "alert_push_services": alert_services.public(), "alert_language_saved": "alert_language" in desk._saved_settings(),
             "keys": keys, "problems": problems, "rev": rev,
+            "provider_credit_messages": {n: provider(credit_text(st), st, n) for n, st in desk.provider_state().items()
+                                         if n in s["providers"] and st.get("credit_since")},
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),

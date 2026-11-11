@@ -495,14 +495,15 @@ const T = ZH ? {
         : `等待 ${name} 合并到 ${v.base}`;
     }).join("；"),
     after_lane:v => `工作线 ${v.lane} 不在依赖任务的仓库和基准分支 ${v.base}（${v.repo}）上`,
-    disk:v => `磁盘空间低于下限，暂停新任务：${v.volumes.map(x => `${x.mount} 可用 ${x.free}，下限 ${x.floor}，恢复需 ${x.again}`).join("；")}`,
+    disk:v => `磁盘空间低于下限，暂停新任务：${v.volumes.map(x => `${x.mount}${x.places?.length ? "（" + x.places.map(p => messageText(p)).join("、") + "）" : ""} 可用 ${x.free}，下限 ${x.floor}，恢复需 ${x.again}${x.total ? "，总容量 " + x.total : ""}`).join("；")}`,
     memory:v => `可用内存 ${v.available} 低于下限 ${v.floor}，暂停新任务，等待恢复到 ${v.again}`,
     ready:v => `工作线 ${v.lane} 和服务商 ${v.provider} 已就绪；` + (v.server === "gone" ? "服务未运行，请运行 hansa up"
       : v.server === "stuck" ? `服务正忙或卡住，已有 ${Math.floor((v.seconds || 0) / 60)} 分钟没跑完一轮` : "服务下次查看时开始（几秒内）"),
     lanes:(v, render) => v.reasons.map(render).join("；"),
     missing_lane:v => `设置中没有工作线 ${v.lane}`, merge_lane:v => `工作线 ${v.lane} 是合并检查工作线，不接任务`,
     verify_lane:v => `工作线 ${v.lane} 是核验工作线，只接核验`, busy:v => `工作线 ${v.lane} 正忙`,
-    sandbox:v => `工作线 ${v.lane} 因沙箱暂缓：${v.why}；沙箱试跑通过后会自动恢复（修复后重启 hansa serve）`,
+    start:v => `工作线 ${v.lane} 暂缓：${messageText(v.why_message, v.why)}`,
+    sandbox:v => `工作线 ${v.lane} 因沙箱暂缓：${messageText(v.why_message, v.why)}；沙箱试跑通过后会自动恢复（修复后重启 hansa serve）`,
     providers:(v, render) => `工作线 ${v.lane} 没有就绪的服务商（${v.providers.map(p => `${p.values.provider}：${render(p)}`).join("；")}）`,
     refused:() => "拒绝了这件任务", missing_provider:() => "设置中没有这家服务商", no_endpoint:() => "没有接口地址", no_key:() => "没有密钥",
     credit:v => `余额不足，自 ${when(v.since)} 起休息，等负责人在网页上确认充值`,
@@ -1381,7 +1382,7 @@ function taskSteps(m, v, ancestry) {
     const failed = m.state === "failed" && !completed;
     const cancelled = m.state === "cancelled" && !completed;
     runs.push({provider:m.provider, ran_from:m.started, ended:m.finished,
-      error:failed ? m.error || T.taskFailed : cancelled ? m.error || T.taskCancelled : "", cancelled,
+      error:failed ? fieldText(m, "error") || T.taskFailed : cancelled ? fieldText(m, "error") || T.taskCancelled : "", cancelled,
       running:m.state === "running" && m.phase !== "checking" && !m.finished});
   }
   runs.sort((a, b) => (a.ran_from || a.ended || a.at || 0) - (b.ran_from || b.ended || b.at || 0));
@@ -1391,7 +1392,7 @@ function taskSteps(m, v, ancestry) {
     firstStart ? T.taskCompleted : T.notKnown, "", m.state === "queued")];
   runs.forEach((r, i) => steps.push(taskStep("run", T.taskRun(i + 1), r.ran_from,
     [r.provider || T.notKnown, elapsed(r.ran_from, r.ended || r.at || (r.running ? Date.now() / 1000 : null))].join(" · "),
-    [r.error || r.why || (r.cancelled ? T.taskCancelled : r.ended ? T.taskCompleted : T.notKnown),
+    [fieldText(r, "error") || fieldText(r, "why") || (r.cancelled ? T.taskCancelled : r.ended ? T.taskCompleted : T.notKnown),
       r.kind || "", r.exit != null ? T.taskExit(r.exit) : ""].filter(Boolean).join(" · "),
     r.running ? "" : r.error || r.why || r.cancelled ? "bad" : "", r.running)));
   const checking = m.state === "running" && m.phase === "checking";
@@ -1430,7 +1431,7 @@ function taskLink(id, ancestry = []) {
   const load = async () => {
     const r = await api("/api/task?id=" + encodeURIComponent(id));
     const m = r.meta;
-    const text = h("pre", {}, r.text);
+    const text = h("pre", {}, r.text_parts ? r.text_parts.map(part => typeof part === "string" ? part : messageText(part)).join("\n") : r.text);
     box.replaceChildren(text);
     if (!m) return;
     let v = null;
@@ -1449,6 +1450,78 @@ function taskLink(id, ancestry = []) {
   }}, id);
   return [btn, box];
 }
+// English is the server's unchanged sentence. Unknown codes (including nested ones)
+// keep that sentence too, so an older page remains useful after a server upgrade.
+const serverMessagesZh = {
+  mod_copy:v => `复制 mod 到 ${v.path} 失败，程序报告：“${v.said}”；请修复后重启协调员`,
+  mod_mkdir:v => `创建 mod 文件夹 ${v.path} 失败，程序报告：“${v.said}”；请修复后重启协调员`,
+  mod_home:v => `找不到 mod 副本所用的主目录，程序报告：“${v.said}”；请修复后重启协调员`,
+  mod_version:v => `读取版本（claude --version）失败，程序报告：“${v.said}”；请检查 Claude Code 安装后重启协调员`,
+  repository_missing:v => `仓库文件夹 ${v.path} 已被移动或删除；请恢复文件夹或修正工作线设置`,
+  worktree_failed:v => `git 无法准备工作树 ${v.path}，程序报告：“${v.said}”；请修复后重试`,
+  setup_failed:v => `工作线的准备命令失败（退出码 ${v.exit}），工作智能体尚未启动；hansa show ${v.task} 可查看准备命令的输出`,
+  task_ceiling:v => `达到上限（${v.count} ${v.unit === "minutes" ? "分钟" : "轮"}）；任务可能过大、描述不清或工作智能体卡住，请检查任务后重试`,
+  program_error:v => reasonText(v.reason), no_output:v => `没有输出（退出码 ${v.exit}）`,
+  task_wait:v => `等待：${waitingText(v.waiting)}`,
+  task_prior:v => `先前由 ${v.provider} 运行：${reasonText(v.reason)}` + (v.kind === "credit" ? "（余额不足，不计尝试次数）"
+    : v.kind === "limit" ? `（达到用量上限，${v.counted ? "计入" : "不计"}尝试次数）` : v.kind === "killed" ? "；未保留报告" : ""),
+  release_lost:() => "hansa serve 在发布启动时停止，无法确认命令是否运行；请运行 hansa up，查看输出（hansa release），需要时重新请求并答复",
+  place_desk:() => "工作台文件夹", place_temporary:() => "运行的临时文件夹", place_serve_tmp:() => "hansa serve 的 TMPDIR", place_lane_tmp:() => "工作线命令的 TMPDIR",
+  place_lane:v => `工作线 ${v.lane} 的${v.kind === "repository" ? "仓库" : "工作树"}`,
+  claude_missing:() => "找不到 claude；请安装 Claude Code 或设置 HANSA_CLAUDE",
+  mod_version_unknown:() => "无法识别 claude --version 返回的 Claude Code 版本；请检查 Claude Code 安装",
+  mod_old:v => `Claude Code ${v.version} 早于 ${v.needs}；请升级 Claude Code 并重启协调员会话`,
+  mod_folder:v => `mod 副本所在的文件夹可被其他账号修改：${v.path}；请修复文件夹权限后重启协调员`,
+  serve_code:v => `hansa serve 正在运行 ${v.runs}，当前安装的是 ${v.build}（${v.installed || "安装时间未知"}）；请重启 hansa serve`,
+  serve_started:v => `hansa serve 于 ${v.started} 启动，早于 ${v.build} 的安装（${v.installed}）；请重启 hansa serve`,
+  srt_missing:v => `找不到 srt，工作线的准备和检查命令无法运行；请在服务使用的 PATH 上安装 Node ${v.node} 或更新版本，并运行 ${v.install}，然后重启 hansa serve（hansa explain server）`,
+  srt_failed:v => `hansa serve${v.when ? " 在" + v.when.replace(/^, /, "") : ""} 无法运行 srt：${v.path}；沙箱中的 true 失败，程序报告：“${v.said}”。准备和检查暂停，请修复后重启 hansa serve（hansa explain server）`,
+  alert_failed:v => `提醒命令在 ${v.at} 失败（${v.timeout ? `${v.number} 秒后超时` : `退出码 ${v.number}`}）${v.withheld ? "；提醒含有一次性码，因此未保留输出" : v.said ? `，程序报告：“${v.said}”` : ""}；请在设置中检查并测试提醒命令`,
+  coordinator_absent:v => `没有会话接收 hansa 的消息；${v.count} 件事在等协调员，最早的已等 ${v.minutes} 分钟；请在协调员会话中运行 hansa notify on`,
+  coordinator_inbox_gone:v => `协调员会话 ${v.who} 的收件箱 ${v.path} 已消失 ${v.minutes} 分钟（/restart 会换收件箱）；消息已保留，请在那个会话中运行 hansa notify on`,
+  coordinator_inbox:v => `协调员会话 ${v.who} 的收件箱已拒收 ${v.minutes} 分钟；hansa 保留消息并重试`,
+  coordinator_window:v => `协调员会话 ${v.who} 已等待窗口操作 ${v.minutes} 分钟；请处理权限对话框或问题，发去的消息尚未答复`,
+  coordinator_turn:v => `协调员会话 ${v.who} 自 ${v.at} 起（${v.minutes} 分钟）轮次以 API 错误（${v.error}）结束；hansa 已重发未处理的消息 ${v.reposts} 次；${turnAlertText(v)}`,
+  coordinator_principal:v => `协调员会话 ${v.who}：${v.principal_zh}；${turnAlertText(v)}`,
+  coordinator_review:v => `协调员会话 ${v.who} 空闲，但任务仍在等审核：${v.tasks.map(t => `${t.task} 已等 ${t.minutes} 分钟`).join("；")}`,
+  disk_low:v => `磁盘空间不足：${v.volumes.map(x => `${x.mount}${x.places?.length ? "（" + x.places.map(p => messageText(p)).join("、") + "）" : ""} 可用 ${x.free}，下限 ${x.floor}，恢复需 ${x.again}${x.total ? "，总容量 " + x.total : ""}`).join("；")}；请释放空间，所有卷达到恢复线后才开始新任务、核验、试跑、合并及合并检查、发布；正在运行的继续（hansa explain server）`,
+  memory_low:v => `可用内存不足：${v.available}，下限 ${v.floor}；恢复到 ${v.again} 后才开始新任务、核验、试跑、合并及合并检查、发布；正在运行的继续（hansa explain server）`,
+  task_error:v => `原因：${messageText(v.reason)}`,
+  task_start:v => `无法开始：${reasonText(v.reason)}`,
+  setup_start:v => `工作线的准备命令无法运行：${reasonText(v.reason)}；请检查运行环境（hansa explain server）`,
+  sandbox_start:v => `沙箱无法启动，程序报告：“${messageText(v.reason)}”；请修复后重启 hansa serve`,
+  attachment_missing:v => `附件 ${v.path} 已不存在`,
+  cancelled:() => "已取消", cancelled_before_start:() => "开始前已取消",
+  missing_provider:() => "设置中没有这家服务商", no_endpoint:() => "没有接口地址", no_key:() => "没有密钥",
+  credit_low:() => "余额不足", no_answer:() => "没有收到答复", not_logged_in:() => "尚未登录；请运行 /login",
+  provider_quota:v => `用量已达上限（${v.said}）${v.detail ? `；程序报告：“${v.detail}”` : ""}`,
+  provider_key:v => `密钥被拒绝（${v.said}）${v.detail ? `；程序报告：“${v.detail}”` : ""}`,
+  provider_timeout:v => `${v.seconds} 秒内没有收到答复`,
+  provider_turn_limit:v => `${v.models}：已答复，但达到轮次上限`,
+  provider_overloaded:v => `服务商过载（${v.said}）`, provider_server:v => `服务商出现服务器错误（${v.said}）`,
+  provider_network:v => `连接服务商失败（${v.said}）`,
+  provider_credit:v => `余额不足，自 ${when(v.since)} 起休息，等你在网页上确认充值${v.shared ? "；由另一个工作台发现" : ""}`,
+  provider_rest:v => `休息到 ${when(v.until)}（${reasonText(v.reason)}）` + (v.how === "reset" ? "；按错误给的重置时间再加一分钟"
+    : v.minutes ? `；错误没给重置时间，休息 ${v.minutes} 分钟` : ""),
+  provider_save_key:v => `${reasonText(v.reason)}；保存新密钥可恢复，也可在密钥到位后运行 hansa ping ${v.provider}`,
+  provider_login:v => `${reasonText(v.reason)}；请用 ${v.login}${v.account ? ` 以账号 ${v.account} 登录（从 root 运行：${v.root}）` : " 登录"}，然后运行 hansa ping ${v.provider}`,
+  provider_unreachable:v => `自 ${when(v.since)} 起无法连接（${reasonText(v.reason)}），定时重试`
+    + (v.check.at >= v.since ? `；最近检查 ${when(v.check.at)}：${fieldText(v.check, "detail")}` : "")
+    + (v.waiting == null ? "" : `；${v.waiting} 件任务在等它`),
+  release_missing:v => `发布 #${v.id} 已不存在；请重新加载页面`,
+  release_answered:v => `发布 #${v.id} 已不在等待答复；请重新加载页面查看当前状态`,
+  release_changed:v => `发布 #${v.id} 已与页面显示的不同；请重新加载页面，核对后再答复`,
+  release_void:v => `发布 #${v.id} 已作废：${v.why_zh}；什么都没运行。协调员已获通知，请等它重新请求后再答复`
+};
+function messageText(record, text = record?.text || "") {
+  return ZH && record?.text === text && Object.hasOwn(serverMessagesZh, record.code)
+    ? serverMessagesZh[record.code](record.values) : text;
+}
+const turnAlertText = v => v.told_at ? `已在 ${v.told_at} 提醒负责人` : v.alerts_off ? "轮次提醒已关闭（没有提醒渠道，或 turn_min 为 0）" : "尚未提醒负责人";
+const fieldText = (record, key) => messageText(record?.[key + "_message"], record?.[key] || "");
+const reasonText = r => r?.code === "unknown" && r.text ? `程序报告：“${r.text}”` : messageText(r);
+const replyProblems = r => (r.problems || []).map((text, i) => messageText(r.problem_messages?.[i], text)).join("; ");
+
 // Codes are supplied by the server; unrecognised reasons keep its English sentence.
 function waitingText(m) {
   const render = r => Object.hasOwn(T.waitReasons, r.code) ? T.waitReasons[r.code](r.values, render, r.text) : r.text;
@@ -1478,7 +1551,7 @@ function modLine(m, line) {
   if (!m) return "";
   if (!ZH) return line;
   if (m.kind === "notify") return T.modOutside;
-  return T.modStarted(m.started) + (m.loaded === null ? T.modUnknown : m.loaded ? T.modOn : T.modOff(m.why || T.notKnown))
+  return T.modStarted(m.started) + (m.loaded === null ? T.modUnknown : m.loaded ? T.modOn : T.modOff(fieldText(m, "why") || T.notKnown))
     + "；" + T.modOptions + (m.autocompact === null ? T.notKnown : m.autocompact || T.none);
 }
 // Its daily clear: the window hansa handed over at the start, and the clears hansa's hook recorded (hansa/plugin.py)
@@ -1487,7 +1560,7 @@ function clearLine(m, line) {
   if (!ZH) return line;
   const c = m.clear, w = c.window;
   return (w === null || (w && m.loaded === null) ? T.clearUnknown : !w ? T.clearNone
-    : !m.loaded ? T.clearNoMod(w, m.why || T.notKnown) : c.root ? T.clearRoot(w) : !c.known ? T.clearLastUnknown(w)
+    : !m.loaded ? T.clearNoMod(w, fieldText(m, "why") || T.notKnown) : c.root ? T.clearRoot(w) : !c.known ? T.clearLastUnknown(w)
     : (c.last ? T.clearLast(w, c.last) : T.clearNever(w, m.started)) + (c.warn ? T.clearMissed(c.missed) : ""));
 }
 // The review links identify verifiers without adding fields to /api/status.
@@ -1570,7 +1643,7 @@ function laneTracks(st) {
         m ? h("span", {class:"lane-note", title:note}, T.lastNote + " " + (note || "—")) : null,
         h("span", {}, T.laneQueued(queued.length))) : null,
       !m && queued.length ? h("div", {class:"muted"}, waitingText(queued[0])) : null,
-      held.map(held => h("div", {class:"warn lane-held"}, T.laneHeld + ": " + held.why))));
+      held.map(held => h("div", {class:"warn lane-held"}, T.laneHeld + ": " + fieldText(held, "why")))));
   });
   return h("section", {id:"status-lanes", class:"dashboard-panel"},
     h("div", {class:"section-head"}, h("h2", {}, icon("lanes"), T.laneTracks), h("span", {class:"count-badge"}, st.lanes.length)),
@@ -1765,17 +1838,17 @@ async function renderStatus(force) {
   const stamp = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(d)}`;
   part("installed", T.installed + " " + (st.installed ? stamp(installed) : "?"));
   part("now", T.summaryNow + " " + clock(now));
-  part("serveCode", st.serve_code ? T.serveCodeWarning + ": " + st.serve_code : "", true);
-  part("srt", st.srt_missing, true);
-  part("alert", st.alert_failed ? T.alertFailedWarning + ": " + st.alert_failed : "", true);
+  part("serveCode", st.serve_code ? T.serveCodeWarning + ": " + fieldText(st, "serve_code") : "", true);
+  part("srt", fieldText(st, "srt_missing"), true);
+  part("alert", st.alert_failed ? T.alertFailedWarning + ": " + fieldText(st, "alert_failed") : "", true);
   part("alertHeld", st.alert_held ? T.alertHeld(st.alert_held.count, stamp(new Date(st.alert_held.until * 1000))) : "", true);
-  part("disk", st.disk && st.disk.low_text ? (ZH ? T.diskLow + "：" : "") + st.disk.low_text : "", true);
+  part("disk", st.disk && st.disk.low_text ? messageText(st.disk.low_message, st.disk.low_text) : "", true);
   for (const [i, x] of (st.disk && st.disk.unknown || []).entries()) part("disk:" + i, x, true);
-  part("memory", st.memory && st.memory.low_text || "", true);
+  part("memory", st.memory ? messageText(st.memory.low_message, st.memory.low_text || "") : "", true);
   for (const [i, x] of (st.memory && st.memory.unknown || []).entries()) part("memory:" + i, x, true);
   part("noRead", st.no_read_stop ? T.noReadStop + ": " + st.no_read_stop : "", true);
   for (const [i, x] of (st.no_read_left_out || []).entries()) part("leftOut:" + i, T.workersMayNotReadSkipped + ": " + x, true);
-  for (const [i, x] of (st.unreached || []).entries()) part("unreached:" + i, T.unreachedWarning + ": " + x, true);
+  for (const [i, x] of (st.unreached || []).entries()) part("unreached:" + i, T.unreachedWarning + ": " + messageText(st.unreached_messages?.[i], x), true);
   part("mod", modLine(st.mod, st.mod_line), st.mod && st.mod.kind !== "notify" && st.mod.loaded !== true);
   part("clear", clearLine(st.mod, st.clear_line), st.mod && st.mod.clear && st.mod.clear.warn);
   setStatusParts(statusFacts = parts);
@@ -1826,13 +1899,13 @@ async function renderStatus(force) {
              m.verify.verdict === "holds, with notes" ? [" · ", taskLink(m.verify.task)] : null],
         m.denied ? h("span", {class:"warn"}, m.denied) : "0"]))) : emptyState(T.review, T.none, "security")),
     st.failed.length ? dashboardPanel(T.failed, "error", st.failed.length, table([T.task, T.lane, T.titleCol, T.error],
-      st.failed.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"bad"}, m.error)]))) : null,
+      st.failed.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"bad"}, fieldText(m, "error"))]))) : null,
     dashboardPanel(T.providers, "providers", st.providers.length, st.providers.length ? table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
       p.name, p.kind === "subscription" ? T.subscription : T.compatible,
-      p.model + (p.effort ? " · " + p.effort : "") + (p.credit_since ? "" : ` · ${T.rest} ${p.rest_minutes} min (${T.providers})`),
-      p.problem ? statusPill(p.problem, "warn", "error") : !p.check ? statusPill(T.notChecked, "muted", "pending")
+      p.model + (p.effort ? " · " + p.effort : "") + (p.credit_since ? "" : ` · ${T.rest} ${p.rest_minutes} ${ZH ? "分钟" : "min"} (${T.providers})`),
+      p.problem ? statusPill(fieldText(p, "problem"), "warn", "error") : !p.check ? statusPill(T.notChecked, "muted", "pending")
         : p.check.ok ? statusPill(T.ready, "ok") : statusPill(T.checkFailed, "warn", "error"),
-      p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${p.check.detail} (${when(p.check.at)})`) : "",
+      p.check ? h("span", {class: p.check.ok ? "ok" : "bad"}, `${p.check.ok ? "OK" : "✗"} ${fieldText(p.check, "detail")} (${when(p.check.at)})`) : "",
       checkButton(p.name, () => loadStatus(true))])) : emptyState(T.noProviders, T.noProvidersNote, "providers")),
     dashboardPanel(T.events, "status", Math.min(ev.length, 20), events.status === "rejected"
       ? h("div", {class:"bad", role:"alert"}, String(events.reason.message || events.reason))
@@ -1856,7 +1929,7 @@ function asksSection(st) {
 function releaseBlock(r) {
   const reason = statusInput(`release:${r.id}`, {placeholder:T.releaseReason});
   const answer = yes => api("/api/release/answer", {id:r.id, yes, reason:reason.value, commit:r.commit, command:r.command})
-    .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err);
+    .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error(replyProblems(x))); })).catch(err);
   const named = new Set(r.named || []);
   return h("div", {class:"lane release-card", "data-principal-request":true},
     h("div", {class:"request-body"}, h("strong", {}, "#" + r.id), h("span", {}, `${T.lane} ${r.lane}${r.target ? ` · ${T.releaseTarget} ${r.target}` : ""}`)),
@@ -1903,7 +1976,7 @@ function releaseStop(r) {
   const key = `release-stop:${r.id}:note`;
   return h("div", {}, h("div", {class:"row", style:"margin-top:4px"}, reason,
     h("button", {"data-status-focus":`release:${r.id}:stop`, onclick: () => api("/api/release/stop", {id:r.id, reason:reason.value})
-      .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error((x.problems || []).join("; "))); })).catch(err)}, T.releaseStop)),
+      .then(x => loadStatus(true).then(() => { if (x.ok === false) err(new Error(replyProblems(x))); })).catch(err)}, T.releaseStop)),
     h("details", {class:"principal-details", "data-principal-fold":key, open:principalOpen.has(key)},
       h("summary", {}, T.releaseStopSummary), h("p", {}, T.releaseStopNote)));
 }
@@ -1943,13 +2016,13 @@ function checkButton(name, after) {
     let r = null;
     try { r = await api("/api/check", {provider:name}); } catch (e) { err(e); }
     if (after) return after(r);
-    b.disabled = false; b.textContent = r ? `${T.check}: ${r.ok ? "OK" : "✗"} ${r.detail}` : T.check;
+    b.disabled = false; b.textContent = r ? `${T.check}: ${r.ok ? "OK" : "✗"} ${fieldText(r, "detail")}` : T.check;
     b.className = r && r.ok ? "ok" : "bad"; }}, T.check);
   return b;
 }
 
 /* ---------- settings ---------- */
-let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
 // Public, masked entries and service instructions come from the settings reply. Private drafts stay in memory.
 let PUSH_ENTRIES = [], PUSH_SERVICES = [], PUSH_DRAFTS = {};
 const emptyPush = () => ({service:"recognize", address:"", secret:"", name:""});
@@ -2153,7 +2226,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   if (background && (epoch !== settingsEpoch || settingsSaving || settingsDirty() || JSON.stringify(S) !== before || newProviderName || newPriceName)) return;
   S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
   settingsDefaults = r.settings_defaults || {};
-  CREDIT_RESTS = r.provider_credit || {};
+  CREDIT_RESTS = r.provider_credit || {}; CREDIT_MESSAGES = r.provider_credit_messages || {};
   RELEASE_UNMATCHED = r.release_unmatched || []; RELEASE_LAST = r.release_last || {}; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
   // Rebase only fields the principal edited, so an unrelated key save or stale-tab reload keeps newer metadata.
@@ -2370,8 +2443,8 @@ function forbiddenExceptions() {
     editor.replaceChildren(...rows.map((row, i) => {
       const warnings = h("div", {});
       const update = () => warnings.replaceChildren(...shown([
-        row.entry && !entries.includes(row.entry) ? h("p", {class:"warn"}, `${T.forbiddenEntryUnmatched}. ` +
-          `release_forbidden_except: exception ${i + 1} (${row.lanes.length ? "lanes " + row.lanes.join(", ") : "no lanes"}) names no entry in release_forbidden`) : null,
+        row.entry && !entries.includes(row.entry) ? h("p", {class:"warn"}, ZH ? `第 ${i + 1} 条豁免（${row.lanes.length ? "工作线 " + row.lanes.join("、") : "未选工作线"}）：${T.forbiddenEntryUnmatched}`
+          : `${T.forbiddenEntryUnmatched}. release_forbidden_except: exception ${i + 1} (${row.lanes.length ? "lanes " + row.lanes.join(", ") : "no lanes"}) names no entry in release_forbidden`) : null,
         row.lanes.filter(lane => !S.lanes[lane]).map(lane => h("p", {class:"warn"}, `${lane}: ${T.forbiddenLaneUnmatched}`))]));
       update();
       const choices = ["", ...new Set(entries)];
@@ -2663,7 +2736,7 @@ function renderSettings(problems = settingsProblems) {
           h("div", {class:"card-head"}, h("strong", {}, name), h("span", {class:"tag"}, p.kind === "compatible" ? T.compatible : T.subscription),
             h("div", {class:"card-actions"}, checkButton(name, null),
               h("button", {class:"danger", onclick:() => removeProvider(name)}, T.remove))),
-          CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, CREDIT_RESTS[name]),
+          CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, messageText(CREDIT_MESSAGES[name], CREDIT_RESTS[name])),
             h("button", {onclick:() => topUpProvider(name)}, T.toppedUp)) : null,
           fields(field(T.kind, kindSel), field(T.model, bind(p, "model")), field(T.effort, pick(p, "effort", EFFORTS)),
             ...(p.kind === "compatible"

@@ -949,7 +949,8 @@ def status(desk: Desk) -> dict:
     no_read = no_read_parts_shown(s, desk.root)
     queued = [m for m in tasks if m["state"] == "queued"]
     looks = waiting_looks(desk, s, tasks, server) if queued else None  # once for all of them
-    return {
+    from . import page_messages
+    return page_messages.status(desk, s, {
         "desk": str(desk.root),
         "desk_name": alert.desk_name(desk),
         "build": build(),
@@ -1067,7 +1068,7 @@ def status(desk: Desk) -> dict:
                      "merged": sum(m["state"] == "merged" and (m.get("merged") or 0) >= day for m in tasks),
                      "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
                      "worker_usd": round(sum(r["usd"] for r in rows if r["usd"] is not None), 2)},
-    }
+    })
 
 
 def todo_list(desk: Desk, page: int = 1, state: str = "") -> dict:
@@ -1464,9 +1465,20 @@ def run_text(m: dict, provider: dict | None) -> str:
     return f"{m['provider']}" + (f" ({said})" if said else "")  # none yet: a task that never started
 
 
-def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
+def task_page(desk: Desk, tid: str) -> dict:
+    from . import page_messages
+    meta = page_messages.annotate(desk.meta(tid))
+    for key in ("attempts", "earlier_runs"):
+        meta[key] = [page_messages.annotate(r) for r in meta.get(key, [])]
+    messages = {}
+    text = show_text(desk, tid, full=True, page_messages=messages)
+    return {"meta": meta, "text": text, "text_parts": messages["parts"]}
+
+
+def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_messages=None) -> str:
     """hansa show. full: the whole text and report. heard: whether the session it is for hears from hansa
     (default: the session this command runs in)."""
+    from .page_messages import describe, message
     m = as_closed_now(desk.meta(tid))
     m["markers"] = markers_of(desk, m)
     d = desk.tasks_dir / tid
@@ -1510,6 +1522,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
         out.append(f"verification could not be queued: {m['verify_after_error']}")
     out += [x for x in (rounds_line(desk, m), "" if verifying else rethink_text(desk, m)) if x]
     if m.get("error"):
+        if page_messages is not None:
+            page_messages[str(len(out))] = message("task_error", f"error: {m['error']}", reason=describe(m["error"]))
         out.append(f"error: {m['error']}")
     if m.get("failed_error") is not None and m["state"] == "cancelled":  # closed after it failed (hansa close)
         out.append(f"it had failed before it was closed: {m['failed_error'] or 'no error was recorded'}")
@@ -1562,6 +1576,9 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
                    if a.get("kind") == "killed" else  # it used no try
                    f"earlier run on {on}: {a['error']} (its usage limit; "
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
+        if page_messages is not None:
+            page_messages[str(len(out) - 1)] = message("task_prior", out[-1], provider=on, reason=describe(a["error"]),
+                                                     kind=a.get("kind"), counted=bool(a.get("counted")))
         if a.get("kind") == "credit" and (m["state"] != "queued" or a != m["attempts"][-1]):
             if resting := credit_text(desk.provider_state().get(a["provider"]) or {}):
                 out.append(f"  {a['provider']}: {resting}")
@@ -1583,6 +1600,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
     if limit_wait(desk, m):
         out.append(limit_wait(desk, m))
     if m["state"] == "queued":
+        if page_messages is not None:
+            page_messages[str(len(out))] = message("task_wait", "waits: " + waiting["waiting"], waiting=waiting)
         out.append("waits: " + waiting["waiting"])
         names = {p for ln in ([m["lane"]] if m.get("lane") else s["lanes"]) if ln in s["lanes"]
                  for p in task_providers(s, ln, m)}
@@ -1770,6 +1789,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None) -> str:
             nxt = {}
     if m["state"] in nxt:
         out.append("next: " + nxt[m["state"]])
+    if page_messages is not None:
+        page_messages["parts"] = [page_messages.get(str(i), line) for i, line in enumerate(out)]
     return "\n".join(out)
 
 

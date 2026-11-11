@@ -314,8 +314,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 tid = q.get("id", [""])[0]
                 if not re.fullmatch(r"t\d+", tid) or not (desk.tasks_dir / tid / "meta.json").is_file():
                     return self._send(404, {"error": "no such task"})
-                return self._send(200, {"meta": read_json(desk.tasks_dir / tid / "meta.json"),
-                                        "text": views.show_text(desk, tid, full=True)})
+                return self._send(200, views.task_page(desk, tid))
             return self._send(404, {"error": "not found"})
 
         def do_POST(self):
@@ -350,7 +349,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                     desk.resume(by="page")
                     return self._send(200, {"ok": True})
                 if path == "/api/check":
-                    return self._send(200, check_provider(desk, body["provider"]))
+                    from .page_messages import annotate
+                    return self._send(200, annotate(check_provider(desk, body["provider"]), ("detail",)))
                 if path == "/api/release/answer":  # the principal's yes or no, to the release as the page showed it
                     return self._send(200, release.answer(desk, int(body["id"]), body.get("yes") is True,
                                                           str(body.get("reason") or ""), str(body.get("commit") or ""),

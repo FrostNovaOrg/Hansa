@@ -482,8 +482,21 @@ as the server sent them.
 Login and rejected-key rests also keep the server's recovery sentence in both
 page languages, including the login command or how saving a new key restores it.
 
-The status line also warns about `serve_code`, `alert_failed` and every line of
-`unreached`, with short translated labels and the server's original text.
+Status warnings (coordinator reachability and mod startup, server code, srt,
+alert commands, low memory and low disk), task failure and hold reasons, and
+provider problems and check details use the page's language. Settings also
+translates credit rests and uses Chinese minutes. Release answer refusals say
+when to reload and answer again; failed releases explain recovery in Chinese.
+Names, paths and quoted program output retain their original spelling.
+
+The API keeps its English fields and adds companion `{code, values, text}`
+messages (`FIELD_message`, `unreached_messages`, resource `low_message`,
+`provider_credit_messages`, and release `problem_messages`). The page chooses
+the wording; unknown codes retain `text`. Historical reasons are decoded only
+when they match a known complete form, so unfamiliar messages remain readable.
+Task details carry `text_parts` for generated reason lines; user text and reports
+stay untouched. Terminal `hansa status` and `hansa show` remain English.
+Settings save errors and push-address refusals keep their existing handling.
 
 Recent events keeps the newest 20, with their times. The page reads the log from
 the end in 64 KiB blocks, reading each byte at most once per request even when an
