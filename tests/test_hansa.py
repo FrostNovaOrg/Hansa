@@ -28928,6 +28928,32 @@ def save():'''))
                     self.assertEqual(self.desk.meta(other)[field], expected)
                 self.desk.update(tid, state="failed")
 
+    def test_retry_model_overrides_parent_and_prints_add_note(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        s = self.desk.settings()
+        s["providers"]["spare"] = {"kind": "compatible", "model": "provider-model", "effort": "",
+                                    "base_url": "https://example.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("spare", "sk-test-01")
+        for provider, lane in (("claude", "a"), ("spare", "b")):
+            with self.subTest(provider=provider, lane=lane):
+                self.hansa("lane", "set", lane, "providers", provider)
+                added = self.hansa("add", "Add hello.txt", "--lane", lane, "--model", "sonnet")
+                reference = self.desk.tasks()[-1]["id"]
+                self.hansa("cancel", reference)
+                parent = self.desk.new_task("Add hello.txt", lane="a", model="earlier-model")
+                self.desk.update(parent, state="failed")
+                said = self.hansa("retry", parent, "Add the file", "--lane", lane, "--model", "sonnet")
+                tid = self.desk.tasks()[-1]["id"]
+                self.assertIn(f"{tid} queued as a follow-up to {parent}", said)
+                note = next(line for line in added.splitlines() if line.startswith("note: --model"))
+                self.assertIn(note, said.splitlines())
+                self.assertEqual(self.desk.meta(tid)["model"], self.desk.meta(reference)["model"])
+                m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(m["state"], "done", m)
+                self.assertEqual(m["model_asked"], "sonnet" if provider == "claude" else "provider-model")
+                self.assertEqual(self.desk.meta(parent)["model"], "earlier-model")
+
     def assert_retry_lane_refused_unchanged(self, tid, args, words):
         records = {p: p.read_bytes() for p in self.desk.tasks_dir.glob("*/meta.json")}
         events = self.desk.events_path.read_bytes()
@@ -34901,6 +34927,45 @@ def save():'''))
         self.assertIn("lane a: unknown provider nosuch", str(e.exception.code))
         self.assertEqual(self.desk.settings_path.read_text(), before)
         self.assertEqual(len(self.events("settings_saved")), saved)
+
+    def test_lane_provider_duplicates_are_refused_without_changes(self):
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        for values in (("claude,claude",), ("claude, claude",), ("claude", "claude")):
+            for args in (("lane", "set", "a", "providers", *values),
+                         ("lane", "add", "b", "--like", "a", "--providers", ",".join(values))):
+                with self.subTest(args=args):
+                    with self.assertRaises(SystemExit) as caught:
+                        self.hansa(*args)
+                    self.assertIn("provider claude", str(caught.exception))
+                    self.assertIn("listed twice", str(caught.exception))
+                    self.assertIn("Nothing was changed", str(caught.exception))
+                    self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+                    self.assertFalse((self.desk.lanes_dir / "b").exists())
+
+    def test_lane_provider_commas_accept_surrounding_spaces(self):
+        s = self.desk.settings()
+        s["providers"]["spare"] = dict(s["providers"]["claude"])
+        self.assertEqual(self.desk.save_settings(s), [])
+        for value in ("claude, spare", " claude , spare ", "claude,spare"):
+            with self.subTest(value=value):
+                self.hansa("lane", "set", "a", "providers", "spare")
+                said = self.hansa("lane", "set", "a", "providers", value)
+                self.assertIn('providers: ["spare"] -> ["claude", "spare"]', said)
+                self.assertEqual(self.desk.settings()["lanes"]["a"]["providers"], ["claude", "spare"])
+        self.hansa("lane", "add", "b", "--like", "a", "--providers", "claude, spare")
+        self.assertEqual(self.desk.settings()["lanes"]["b"]["providers"], ["claude", "spare"])
+        with self.assertRaises(SystemExit) as caught:
+            self.hansa("lane", "set", "a", "providers", "claude, none")
+        self.assertIn("none means an empty providers", str(caught.exception))
+
+    def test_saved_duplicate_providers_still_load_and_run(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["providers"] = ["claude", "claude"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["providers"], ["claude", "claude"])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt", lane="a"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertIn("hello.txt", m["files"])
 
     def test_a_lanes_network_list(self):
         self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "network"))  # [] -> []: no change
