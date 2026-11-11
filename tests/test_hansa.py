@@ -17779,7 +17779,8 @@ def save():'''))
                 self.assertIn(f"HTTP {status}", desk.provider_state()["claude"]["unreachable_reason"])
 
         def row7():
-            for kind, status in (("quota", 429), ("key", 401), ("login", None), ("killed", None), ("report", None)):
+            for kind, status in (("quota", 429), ("key", 401), ("login", None), ("lost", 401), ("killed", None),
+                                 ("report", None)):
                 desk, repo, root = setup(f"7-{kind}")
                 tid = desk.new_task("Add hello.txt")
                 if kind == "killed":
@@ -17793,7 +17794,10 @@ def save():'''))
                     rc = proc.wait(timeout=20)
                     if kind != "report":
                         result = {"is_error": True, "api_error_status": status,
-                                  "result": "Not logged in · Please run /login" if kind == "login" else "API Error"}
+                                  "result": "Not logged in · Please run /login" if kind == "login" else
+                                  'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":'
+                                  '"OAuth token has expired. Please obtain a new token or refresh your existing '
+                                  'token."}} · Please run /login' if kind == "lost" else "API Error"}
                         write_json(desk.state_dir / "runs" / tid / "run.json", result)
                     with unittest.mock.patch.object(run, "report_after_notices", return_value=("Finished work", [])
                                                     if kind == "report" else None):
@@ -17801,15 +17805,24 @@ def save():'''))
                     self.assertEqual(m["state"], "failed" if kind == "report" else "queued")
                     if kind == "quota":
                         self.assertEqual((m["attempts"][0]["kind"], run.tries_used(m["attempts"])), ("limit", 0))
-                    elif kind in ("key", "login"):
+                    elif kind == "key":
                         self.assertEqual(run.tries_used(m["attempts"]), 1)
-                        self.assertIn("key rejected" if kind == "key" else "not logged in",
-                                      provider_problem(desk, desk.settings(), "claude"))
+                        self.assertIn("key rejected", provider_problem(desk, desk.settings(), "claude"))
+                    elif kind in ("login", "lost"):  # a lost login is not the task's doing: no try used
+                        self.assertEqual((m["attempts"][0]["kind"], run.tries_used(m["attempts"])), ("login", 0))
+                        self.assertIn("without using a try", m["error"])
+                        prob = provider_problem(desk, desk.settings(), "claude")
+                        self.assertTrue(prob.startswith("not logged in (Please run /login); log in with `"), prob)
+                        self.assertIn("CLAUDE_CONFIG_DIR=", prob)  # this desk's provider has its own config_dir
+                        self.assertNotIn("saving a new key", prob)
+                        self.assertIn("hansa ping claude", prob)
+                        rest = desk.provider_state()["claude"]["cool_until"] - time.time()
+                        self.assertAlmostEqual(rest, 60 * run.KEY_REST_MINUTES, delta=120)
                     elif kind == "report":
                         self.assertEqual(m["attempts"], [])
                         self.assertEqual((desk.tasks_dir / tid / "result.md").read_text(), "Finished work\n")
                 self.assertFalse((desk.provider_state().get("claude") or {}).get("unreachable_since"))
-                if kind in ("quota", "key", "login"):
+                if kind in ("quota", "key", "login", "lost"):
                     # Another already-running task's drop must not shorten this usage/key/login rest.
                     until = desk.provider_state()["claude"]["cool_until"]
                     desk.set_provider_state("claude", unreachable_since=time.time() - 600,
@@ -18803,6 +18816,7 @@ def save():'''))
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
         self.assertEqual((m["state"], m["provider"]), ("done", "claude"), m)
         self.assertEqual(m["attempts"][0]["error"], "not logged in (Please run /login)")
+        self.assertEqual((m["attempts"][0]["kind"], run.tries_used(m["attempts"])), ("login", 0))
         prob = provider_problem(self.desk, self.desk.settings(), "mimo")
         self.assertIn("not logged in (Please run /login)", prob)
         self.assertIn("hansa ping mimo", prob)
@@ -18922,6 +18936,32 @@ def save():'''))
         self.assertIn("log in with `CLAUDE_CONFIG_DIR='/Users/me/claude two' claude`", prob)
         self.assertEqual(run.unusable_reason({"is_error": True, "result": "Invalid API key · Please run /login"}, "")[0],
                          "key")
+
+    def test_an_expired_subscription_login_is_a_lost_login_and_a_check_ends_its_rest(self):
+        from hansa import run
+        expired = {"is_error": True, "api_error_status": 401, "result": (
+            'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has '
+            'expired. Please obtain a new token or refresh your existing token."}} · Please run /login')}
+        self.assertEqual(run.unusable_reason(expired, "", subscription=True), ("login", "not logged in (Please run /login)"))
+        self.assertEqual(run.unusable_reason(expired, ""), ("key", "key rejected (HTTP 401)"))  # a compatible's 401
+        self.assertEqual(run.unusable_reason({**expired, "result": "API Error: 401 Invalid API key"}, "",
+                                             subscription=True)[0], "key")  # no lost login said: as before
+
+        def answer(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, json.dumps({"type": "result", "subtype": "success", **expired}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            r = run.check_provider(self.desk, "claude")
+        self.assertEqual((r["ok"], r["detail"].split(":")[0]), (False, "not logged in (Please run /login)"))
+        prob = provider_problem(self.desk, self.desk.settings(), "claude")
+        self.assertTrue(prob.startswith("not logged in (Please run /login)"), prob)  # with the check's own message
+        self.assertIn("; log in with `claude`, then `hansa ping claude` brings it back", prob)
+        self.assertNotIn("saving a new key", prob)
+
+        def logged_in(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "result", "result": "OK"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", logged_in):
+            self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
 
     def test_a_config_dir_must_be_a_full_path(self):
         want = "provider claude: config_dir must be a full path starting with /"
