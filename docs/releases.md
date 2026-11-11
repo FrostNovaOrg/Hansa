@@ -120,7 +120,9 @@ the code in it approves a release. No lane may be named `yes` or `no`, as
 those words begin the answer. hansa serve runs the
 command only then, and only while the base branch and the command are still
 what the principal saw (else the request is void and the coordinator asks
-again): in the lane's repository at that commit, as the desk's account,
+again; when the lane or its target was removed, the message says to set it
+again first, with the command, before asking again): in the lane's
+repository at that commit, as the desk's account,
 outside the sandbox (it needs the account's logins and network), with
 hansa's own environment (not the lane's env), the target's time limit as its
 limit, its output kept without keys in `.hansa/releases/` (the daily trim keeps

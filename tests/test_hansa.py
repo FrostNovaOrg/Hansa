@@ -51666,6 +51666,79 @@ else:
         card = " ".join((Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text().split())
         self.assertIn("The code is one word (dashes allowed, no spaces)", card)
 
+    def test_release_fixed_is_a_target_option_not_a_request_option(self):
+        from hansa import release
+        self.with_targets(prod="true")
+        said = self.refused("release", "a", "prod", "--fixed")
+        self.assertIn("--fixed is set on the target", said)
+        self.assertIn("hansa lane target a prod '<command>' --fixed", said)
+        self.assertEqual(len(said.splitlines()), 1, said)
+        self.assertEqual(release.releases(self.desk), [])
+        # --fixed none asks for the other direction, and says so
+        self.assertIn("hansa lane target a prod '<command>' --fixed none",
+                      self.refused("release", "a", "prod", "--fixed", "none"))
+
+    def test_release_yes_or_no_with_a_word_that_is_not_a_number_names_the_answer_form(self):
+        from hansa import release
+        self.with_release("true")
+        for word in ("yes", "no"):
+            with self.subTest(word=word):
+                said = self.refused("release", word, "x1", "ABCDEF")
+                self.assertIn(f"hansa release {word} ID CODE", said)
+                self.assertIn("release's number", said)
+                self.assertNotIn(f"there is no lane {word}", said)
+        self.assertEqual(release.releases(self.desk), [])
+
+    def test_a_void_release_code_names_a_removed_target_to_set_again(self):
+        from hansa import alert, release
+        self.alert_fake()
+        self.with_targets(prod="touch pushed.txt")
+        self.hansa("release", "a", "prod")
+        alert.send_due(self.desk, gather=0)
+        code = self.sent_code(1)
+        self.hansa("lane", "target", "a", "prod", "none")
+        refused = self.code_answer("yes", "1", code)[1]
+        self.assertIn("has no release target prod any more", refused)
+        self.assertIn("the target must be set again first", refused)
+        self.assertIn("hansa lane target a prod 'touch pushed.txt'", refused)
+        self.assertNotIn("ask again", refused)
+        self.assertEqual(release.get(self.desk, 1)["state"], "void")
+
+    def test_a_void_release_code_names_a_removed_fixed_target_with_fixed(self):
+        from hansa import release
+        self.hansa("lane", "target", "a", "prod", "true", "--fixed")
+        self.hansa("release", "a", "prod")
+        code = release.new_code(self.desk, 1)
+        self.hansa("lane", "target", "a", "prod", "none")
+        refused = self.code_answer("no", "1", code)[1]
+        self.assertIn("the target must be set again first", refused)
+        self.assertIn("hansa lane target a prod true --fixed", refused)
+        self.assertNotIn("ask again", refused)
+
+    def test_a_void_release_code_names_a_removed_lane_to_add_again(self):
+        from hansa import release
+        self.with_release("true")
+        self.hansa("release", "a")
+        code = release.new_code(self.desk, 1)
+        self.hansa("lane", "remove", "a")
+        refused = self.code_answer("yes", "1", code)[1]
+        self.assertIn("lane a must be added again first", refused)
+        self.assertIn("hansa lane add a --repo", refused)
+        self.assertNotIn("ask again", refused)
+
+    def test_a_void_release_code_still_says_ask_again_when_a_new_request_works(self):
+        from hansa import alert, release
+        self.alert_fake()
+        self.with_release("true")
+        self.hansa("release", "a")
+        alert.send_due(self.desk, gather=0)
+        code = self.sent_code(1)
+        self.commit_in_repo("b.txt", "b\n")
+        refused = self.code_answer("yes", "1", code)[1]
+        self.assertIn("main moved since it was asked", refused)
+        self.assertIn("ask again", refused)
+        self.assertEqual(release.get(self.desk, 1)["state"], "void")
+
     def test_a_timed_out_alert_names_its_real_time_limit(self):
         from hansa import alert
         self.assertEqual(self.page_save(lambda s: s.update(alert={"command": "sleep 5"})), {"ok": True, "problems": []})
