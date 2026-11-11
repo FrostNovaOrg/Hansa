@@ -839,8 +839,9 @@ requests get HTTP 200 with `ok: false`: code `settings_local_only` for settings
 and keys, `outside_local_only` for the others, before any action runs. An allowlist
 keeps new POST paths closed from outside until explicitly opened; keep this rule
 while the switch limits outside actions. The page shows a notice and disables
-the corresponding controls, including Ping and top-ups on Status. Only
-the principal's save on the page changes the switch, and settings history
+the corresponding controls, including Ping and top-ups on Status. Those two
+stay disabled until the rule is read; a slow settings reply does not hold up Status.
+Only the principal's save on the page changes the switch, and settings history
 records it.
 
 In Alerts, beside the alert command, **Alert language** (`alert_language`) selects

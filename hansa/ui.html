@@ -1844,10 +1844,13 @@ function loadStatus(force = false) {
 }
 async function renderStatus(force) {
   // Status offers Ping and top-ups before Settings is opened. Read the existing settings reply for the rule,
-  // without loading or replacing the settings form's drafts.
-  const [status, events, rule] = await Promise.allSettled([api("/api/status"), api("/api/events"),
-    outsideRuleLoaded ? null : api("/api/settings")]);
-  if (!outsideRuleLoaded && rule.status === "fulfilled" && rule.value) readOutsideRule(rule.value);
+  // without holding up reading or replacing the settings form's drafts. Until it arrives, both stay disabled.
+  if (!outsideRuleLoaded && !outsideRuleFlight) {
+    outsideRuleFlight = api("/api/settings").then(reply => {
+      if (!outsideRuleLoaded) readOutsideRule(reply);
+    }).catch(() => {}).finally(() => { outsideRuleFlight = null; });
+  }
+  const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
   statusUnreached = [status, events].some(x => x.status === "rejected" && x.reason?.unreached);
   statusForeign = [status, events].find(x => x.status === "rejected" && x.reason?.notFromServe)?.reason.message || null;
   if (status.status === "rejected") {
@@ -1908,7 +1911,7 @@ async function renderStatus(force) {
     creditProviders(st).length ? dashboardPanel(T.topUpsToConfirm, "providers", creditProviders(st).length,
       creditProviders(st).map(p => h("div", {class:"request-card", "data-principal-provider":p.name},
         h("div", {class:"request-body"}, h("strong", {}, p.name), T.waitReasons.credit({since:p.credit_since})),
-        h("div", {class:"principal-actions"}, h("button", {disabled:SETTINGS_LOCKED, "data-status-focus":`top-up:${p.name}`,
+        h("div", {class:"principal-actions"}, h("button", {disabled:SETTINGS_LOCKED, "data-outside-action":"", "data-status-focus":`top-up:${p.name}`,
           onclick:() => topUpProvider(p.name)}, T.toppedUp))))) : null) : null;
   statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));
   $("#tab-status").replaceChildren(...shown([
@@ -2052,7 +2055,7 @@ function releasesSection(rel, scheduled = []) {
         releaseStop(r))]))] : null);
 }
 function checkButton(name, after) {
-  const b = h("button", {disabled:SETTINGS_LOCKED, "data-status-focus":`provider:${name}:ping`, onclick: async () => {
+  const b = h("button", {disabled:SETTINGS_LOCKED, "data-outside-action":"", "data-status-focus":`provider:${name}:ping`, onclick: async () => {
     if (SETTINGS_LOCKED) return;
     b.disabled = true; b.textContent = T.checking;
     let r = null;
@@ -2070,10 +2073,16 @@ function checkButton(name, after) {
 /* ---------- settings ---------- */
 let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
 // Outside and locked: only reading, release answers/stops and pause/resume stay open.
-let SETTINGS_LOCKED = true, outsideRuleLoaded = false;
+let SETTINGS_LOCKED = true, outsideRuleLoaded = false, outsideRuleFlight = null;
 function readOutsideRule(reply) {
+  const wasLocked = SETTINGS_LOCKED;
   SETTINGS_LOCKED = reply.from_outside === true && reply.settings.settings_from_outside !== true;
   outsideRuleLoaded = true;
+  if (wasLocked !== SETTINGS_LOCKED) {
+    for (const button of document.querySelectorAll("#tab-status button")) {
+      if (button.getAttribute("data-outside-action") !== null) button.disabled = SETTINGS_LOCKED;
+    }
+  }
 }
 const outsideRefusal = reply => reply?.code === "outside_local_only" ? T.outsideLocked : "";
 // Public, masked entries and service instructions come from the settings reply. Private drafts stay in memory.

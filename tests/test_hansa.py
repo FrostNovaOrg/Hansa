@@ -33602,6 +33602,32 @@ def save():'''))
                 self.assertTrue(output["lastGood"])
                 self.assertEqual(output["delays"], [5000, 10000, 20000, 40000, 60000, 60000])
 
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_status_stays_readable_while_the_outside_rule_is_pending(self):
+        from hansa import web
+        self.desk.set_provider_state("claude", credit_since=time.time() - 60)
+        harness = self.tmp / "outside-rule-pending.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            for outside, switch in ((False, False), (True, False), (True, True)):
+                with self.subTest(language=language, outside=outside, switch=switch):
+                    settings = public_settings(self.desk)
+                    settings["from_outside"] = outside
+                    settings["settings"]["settings_from_outside"] = switch
+                    replies = {"/api/status": views.status(self.desk), "/api/events": [],
+                               "/api/settings": settings}
+                    result = subprocess.run(["node", str(harness), str(web.UI), "outside-rule-pending", language],
+                                            input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(result.stdout, result.stderr or "Status waited for the outside rule")
+                    page = json.loads(result.stdout)
+                    self.assertEqual(page["before"], [True, True])  # Ping and top-up
+                    self.assertEqual(page["after"], [outside and not switch] * 2)
+                    self.assertTrue(page["resumeEnabled"])
+                    self.assertTrue(page["sameControls"])
+                    self.assertEqual(page["settingsGets"], 1)
+                    self.assertEqual(page["posts"], [{"path": "/api/pause", "body": {"reason": "While settings load"}}])
+
     def goals_page(self, rows, scenario="goals", language="en"):
         from hansa import web
         if not shutil.which("node"):
@@ -39533,6 +39559,8 @@ function openPage(search = "", hash = "") {
   vm.runInContext(script, context);
   return context;
 }
+let finishOutsideRule;
+if (ask === "outside-rule-pending") settingsGetGate = new Promise(resolve => { finishOutsideRule = resolve; });
 let ctx = openPage(preferences.search, preferences.hash);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 const headerLinks = () => descendants(ids.header, "a").map(el => ({tag:el.tag, ...el.attrs,
@@ -40647,6 +40675,26 @@ else if (ask.startsWith("settings-dispatch-")) (async () => {
   await run("show('status')"); await run("show('settings')"); keepDraft();
   check(root.textContent.includes("Paused elsewhere"), "returning to dirty Settings did not refresh dispatch state");
   console.log(JSON.stringify({initial, failed, posts:apiPosts, draft:true, reopened:snapshot()}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "outside-rule-pending") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  await run("loadStatus()");
+  await run("loadStatus()");  // A pending settings read must not multiply with each status refresh.
+  const root = ids["#tab-status"], buttons = () => descendants(root, "button");
+  const controls = buttons().filter(b => [run("T.check"), run("T.toppedUp")].includes(b.textContent));
+  const before = controls.map(b => b.disabled);
+  await run("loadDispatch()");
+  const dispatch = run("dispatchPanel");
+  descendants(dispatch, "input")[0].value = "While settings load";
+  await descendants(dispatch, "button").find(b => b.textContent === run("T.pause")).click();
+  const resumeEnabled = descendants(dispatch, "button").some(b => b.textContent === run("T.resume") && !b.disabled);
+  // Keep the very same controls while the rule arrives, including any focus or draft beside them.
+  const currentControls = buttons().filter(b => [run("T.check"), run("T.toppedUp")].includes(b.textContent));
+  finishOutsideRule();
+  await new Promise(resolve => setImmediate(resolve));
+  const sameControls = currentControls.every(b => root.contains(b));
+  console.log(JSON.stringify({before, after:currentControls.map(b => b.disabled), resumeEnabled, sameControls,
+    settingsGets:settingsGetCount, posts:apiPosts}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "outside-actions") (async () => {
   const run = code => vm.runInContext(code, ctx);
@@ -42343,7 +42391,7 @@ else if (ask === "task-steps")'''))
             handler.do_GET()
             self.assertEqual(replies.pop()[0], 403)
             view.assert_not_called()
-            handler.headers = {"Authorization": "Bearer " + self.desk.web_token()}
+            handler.headers = {"Authorization": "Bearer " + self.desk.web_token(), "Host": "127.0.0.1:8765"}
             handler.do_GET()
             self.assertEqual(replies.pop(), (200, {"lanes": []}))
             view.assert_called_once_with(self.desk)
@@ -47844,7 +47892,7 @@ else:
         for path in ("/api/alert/bark/key", "/api/alert/bark-test"):
             page.path = path
             data = b"{}"
-            page.headers = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1",
+            page.headers = {"Authorization": "Bearer " + self.desk.web_token(), "Host": "127.0.0.1:8765", "X-Hansa": "1",
                             "Content-Length": str(len(data))}
             page.rfile, page._send = io.BytesIO(data), unittest.mock.Mock()
             page.do_POST()
@@ -50838,7 +50886,8 @@ else:
         data = json.dumps(body).encode()
         ours, theirs = socket.socketpair()
         with ours, theirs:
-            ours.sendall(f"POST {path} HTTP/1.0\r\nAuthorization: Bearer {self.desk.web_token()}\r\nX-Hansa: 1\r\n"
+            ours.sendall(f"POST {path} HTTP/1.0\r\nHost: 127.0.0.1:8765\r\n"
+                         f"Authorization: Bearer {self.desk.web_token()}\r\nX-Hansa: 1\r\n"
                          f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
             made["handler"](theirs, ("127.0.0.1", 0), None)
             theirs.shutdown(socket.SHUT_WR)
