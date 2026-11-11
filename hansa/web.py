@@ -238,6 +238,9 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if getattr(self, "close_connection", False):
                 self.send_header("Connection", "close")
             self.send_header("Referrer-Policy", "no-referrer")
+            # On every answer of hansa serve's own: the page tells them by it from what a proxy in front answers
+            # (a sign-in page, a redirect, a 401 or 403); a proxy may replace Server.
+            self.send_header("X-Hansa-Serve", "1")
             self.end_headers()
             if code != 304:
                 self.wfile.write(data)

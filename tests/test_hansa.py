@@ -15643,7 +15643,7 @@ def save():'''))
         r = subprocess.run([bin_, "--desk", str(self.desk.root), "web"], input="", capture_output=True, text=True,
                            env=env, timeout=20)
         address = r.stdout.splitlines()[0]
-        self.assertTrue(address.startswith(f"Open http://127.0.0.1:{port}/?t="), address)
+        self.assertTrue(address.startswith(f"Open http://127.0.0.1:{port}/#t="), address)
         with urllib.request.urlopen(address.partition(" ")[2], timeout=10) as page:  # the page of this desk
             self.assertEqual(page.status, 200)
         r = subprocess.run([bin_, "--desk", str(self.desk.root), "web", "--port", "9999"], input="",
@@ -15670,7 +15670,7 @@ def save():'''))
                               "web"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         self.addCleanup(lambda: p.poll() is None and p.kill())
         self.addCleanup(p.stdout.close)
-        self.assertIn("/?t=", p.stdout.readline().decode())
+        self.assertIn("/#t=", p.stdout.readline().decode())
         p.stdin.close()  # what sshd does when the connection closes
         try:
             code = p.wait(timeout=5)
@@ -15683,7 +15683,8 @@ def save():'''))
         r = subprocess.run([str(Path(__file__).resolve().parent.parent / "bin" / "hansa"), "--desk", str(self.desk.root),
                             "web"], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("/?t=", r.stdout)
+        self.assertIn("/#t=", r.stdout)  # the key after #, which a browser sends to no server
+        self.assertNotIn("?t=", r.stdout)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             main(["web", "--help"])
@@ -15821,6 +15822,7 @@ def save():'''))
             self.assertNotEqual(r.returncode, 0)
             self.assertNotIn(token, r.stdout + r.stderr)
             self.assertNotIn("?t=", r.stdout + r.stderr)
+            self.assertNotIn("#t=", r.stdout + r.stderr)
             self.assertIn("inside a Claude Code session", r.stderr)
             self.assertIn("ssh -L 8765:127.0.0.1:8765 HOST ", r.stderr)
             self.assertIn(f"--desk {self.desk.root} web", r.stderr)
@@ -22303,7 +22305,7 @@ def save():'''))
         self.assertEqual(plugin.summary_path(self.desk), path)
         text = path.read_text()
         for secret in ("493817", "sk-provider-key-123456", "fixture-push-key-7788", "api.day.app",
-                       self.desk.web_token(), "?t=", "Title", "Ask text"):
+                       self.desk.web_token(), "?t=", "#t=", "Title", "Ask text"):
             self.assertNotIn(secret, text)
         self.assertEqual(json.loads(text)["page"], "http://127.0.0.1:8790/")
 
@@ -33949,6 +33951,16 @@ def save():'''))
                                          headers={**headers, "X-Hansa": "1"})[:2], (200, {"ok": True}))
         self.assertTrue(self.desk.paused())
 
+    def test_every_answer_of_hansa_serve_carries_its_own_header(self):
+        # The page tells hansa serve's answers from a proxy's by this header (a proxy may replace Server).
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        for method, path, headers in (("GET", "/", {}), ("GET", "/api/status", {}), ("GET", "/api/status", auth),
+                                      ("GET", "/missing", auth), ("POST", "/api/pause", {"X-Hansa": "1"}),
+                                      ("POST", "/api/pause", {**auth, "X-Hansa": "1"}), ("POST", "/api/pause", auth)):
+            with self.subTest(method=method, path=path, headers=headers):
+                code, _, sent = self.web_request(path, method=method, headers=headers, data=b"{}" if method == "POST" else b"")
+                self.assertEqual(sent.get("X-Hansa-Serve"), "1", code)
+
     def test_web_page_has_no_ambient_credentials(self):
         token = self.desk.web_token()
         for path in ("/?t=" + token, "/"):
@@ -34004,11 +34016,35 @@ def save():'''))
                 self.assertTrue(output["requests"])
                 for request in output["requests"]:
                     self.assertEqual(request["headers"]["Authorization"], "Bearer " + token)
-                    self.assertEqual(request["credentials"], "omit")
+                    # The page's own origin's cookies travel (a sign-in proxy's session); hansa serve takes none as a key.
+                    self.assertEqual(request["credentials"], "same-origin")
+                    self.assertEqual(request["redirect"], "manual")
                     self.assertEqual(request["mode"], "same-origin")
                     self.assertNotIn(token, request["path"])
                 self.assertEqual(output["requests"][-1]["headers"]["X-Hansa"], "1")
                 self.assertNotIn("hansa.token", output["snapshots"][-1]["local"])
+
+    def test_web_page_takes_its_key_from_the_fragment_before_the_query(self):
+        for hash, search, kept in (("#t=fragment-token", "", "fragment-token"),
+                                   ("#t=fragment-token", "?t=query-token", "fragment-token"),
+                                   ("#other=1&t=fragment-token", "?t=query-token", "fragment-token"),
+                                   ("#t=a%2Db", "", "a-b")):
+            with self.subTest(hash=hash, search=search):
+                output = self.page_preferences(hash=hash, search=search, session={"hansa.tab": "cost"},
+                                               actions=[{"reload": True}, {"api": "/api/pause", "body": {}}])
+                self.assertEqual(output["snapshots"][0]["tab"], "status")
+                for snapshot in output["snapshots"]:
+                    self.assertEqual(snapshot["session"]["hansa.token"], kept)
+                # the key leaves the address before the page asks for desk data
+                self.assertEqual(output["historyReplacements"], [[None, "", "/"]])
+                self.assertTrue(output["requests"])
+                for request in output["requests"]:
+                    self.assertEqual(request["headers"]["Authorization"], "Bearer " + kept)
+                    self.assertNotIn(kept, request["path"])
+        output = self.page_preferences(hash="#section", session={"hansa.tab": "cost", "hansa.token": "kept"})
+        self.assertEqual(output["snapshots"][0]["tab"], "cost")
+        self.assertEqual(output["historyReplacements"], [])
+        self.assertEqual(output["requests"][0]["headers"]["Authorization"], "Bearer kept")
 
     def test_web_page_keeps_bootstrap_in_memory_when_storage_is_unavailable(self):
         for mode in ("missing", "access", "read", "write"):
@@ -39215,11 +39251,26 @@ let pollErrorStatus = 0;
 let serverGone = false, refuseToken = ask === "token-refused";  // refused from the page's first request
 const pollResponses = [];
 let confirmReply = true, dispatchPostError = null, dispatchPostReply = null;
+// foreignAnswer: what something in front of hansa serve answers instead of it (a sign-in proxy): its kind
+let foreignAnswer = null;
+const foreignReply = kind => {
+  const unparsed = async () => { throw new SyntaxError(kind === "html" ? `Unexpected token '<', "<!DOCTYPE "... is not valid JSON` : "Unexpected end of JSON input"); };
+  if (kind === "redirect") return {type:"opaqueredirect", status:0, ok:false, headers:{get:() => null}, json:unparsed};
+  return {type:"basic", status:kind === "html" ? 200 : Number(kind), headers:{get:name => name.toLowerCase() === "content-type" ? "text/html" : null}, json:unparsed};
+};
+// Every answer of hansa serve carries its own header; the stand-ins below answer as hansa serve.
 const fetch = async (path, options) => {
-  apiRequests.push({path, headers:{...options?.headers}, credentials:options?.credentials, mode:options?.mode, cache:options?.cache});
+  const r = await serveAnswer(path, options);
+  if (r.foreign) return r;
+  const own = r.headers;
+  return {...r, headers:{get:name => name.toLowerCase() === "x-hansa-serve" ? "1" : own?.get(name) ?? null}};
+};
+const serveAnswer = async (path, options) => {
+  apiRequests.push({path, headers:{...options?.headers}, credentials:options?.credentials, mode:options?.mode, cache:options?.cache, redirect:options?.redirect});
   if (options && options.method === "POST") apiPosts.push({path, body:JSON.parse(options.body)});
   else apiGets.push(path);
   if (serverGone) throw new TypeError("Failed to fetch");
+  if (foreignAnswer) return {...foreignReply(foreignAnswer), foreign:true};
   if (refuseToken) return {status:403, json:async () => { throw new Error("a 403 says Open the address, as text"); }};
   if (options && options.method === "POST" && path === "/api/settings") {
     posted = JSON.parse(options.body); settingsPostCount++;
@@ -39309,7 +39360,7 @@ async function advance(milliseconds) {
   }
   timerNow = end;
 }
-function openPage(search = "") {
+function openPage(search = "", hash = "") {
   for (const key of Object.keys(ids)) delete ids[key];
   timers.clear(); timerNow = 0;
   document.documentElement = new El("html"); document.activeElement = null; document.title = "Hansa";
@@ -39325,7 +39376,7 @@ function openPage(search = "") {
   for (const key of Object.keys(windowEvents)) delete windowEvents[key];
   for (const tab of ["status", "goals", "tasks", "todos", "gaps", "notes", "settings", "cost"]) document.querySelector("#tab-" + tab).hidden = tab !== "status";
   const context = vm.createContext({document, fetch, navigator: {language: process.argv[4] || "en"},
-  location: {search, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
+  location: {search, hash, reload() { reloads++; }}, history: {replaceState(...args) { historyReplacements.push(args); }},
   URLSearchParams, performance:{now:() => timerNow},
   setTimeout:later, clearTimeout:id => timers.delete(id),
   setInterval(f, delay) { (windowEvents.interval ||= []).push(f); return later(f, delay, true); },
@@ -39361,7 +39412,7 @@ function openPage(search = "") {
   vm.runInContext(script, context);
   return context;
 }
-let ctx = openPage(preferences.search);
+let ctx = openPage(preferences.search, preferences.hash);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 const headerLinks = () => descendants(ids.header, "a").map(el => ({tag:el.tag, ...el.attrs,
   parent:el.parentElement.tag, previous:el.parentElement.kids[el.parentElement.kids.indexOf(el) - 1]?.id,
@@ -39510,6 +39561,30 @@ else if (ask === "server-gone") (async () => {
   await descendants(ids["#status-connection"], "button")[0].click(); await flush();
   const back = {header:header(), notice:notice()};
   console.log(JSON.stringify({up, gone, released, saved:errors.join(""), todos, again, back}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "foreign-answer") (async () => {
+  // Something in front of hansa serve answers instead of it (a sign-in proxy whose sign-in ended), then hansa serve again.
+  const run = code => vm.runInContext(code, ctx), flush = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
+  const notice = () => ({hidden:ids["#status-connection"].hidden, text:ids["#status-connection"].textContent,
+    buttons:descendants(ids["#status-connection"], "button").map(el => el.textContent)});
+  const delay = () => [...timers.values()].find(t => t.delay >= 5000)?.at - timerNow;
+  if (given.dirty) {
+    await run('show("settings")'); await flush();
+    run("S.cool_minutes = (S.cool_minutes || 0) + 7"); run("refreshSettingsState()");
+    if (!run("settingsDirty()")) throw new Error("settings did not become dirty");
+  }
+  await run('show("status")'); await flush();
+  foreignAnswer = given.foreign;
+  const delays = [];
+  for (let i = 0; i < 4; i++) { await advance(delay()); await flush(); delays.push(delay()); }
+  const away = {notice:notice(), header:ids["#state-text"].textContent, tone:ids["#state-text"].className,
+    status:ids["#tab-status"].textContent, reloads};
+  const reload = descendants(ids["#status-connection"], "button")[0];
+  if (reload) await reload.click();
+  const pressed = reloads;
+  foreignAnswer = null;
+  await advance(delay()); await flush();
+  console.log(JSON.stringify({away, delays, pressed, back:{notice:notice(), header:ids["#state-text"].textContent}}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "token-refused") (async () => {
   const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
@@ -39750,7 +39825,7 @@ else if (ask === "preferences") (async () => {
       if (!(event.prevented && action.cancelReload)) ctx = openPage();
     }
     if (action.newTab) { session = storage(); ctx = openPage(); }
-    else if (action.reload) ctx = openPage(action.search || "");
+    else if (action.reload) ctx = openPage(action.search || "", action.hash || "");
     await flush(); snapshots.push(snapshot());
   }
   console.log(JSON.stringify({snapshots, reloads, historyReplacements, unloadWarnings, sessionWrites:session.writes, localWrites:local.writes,
@@ -43369,7 +43444,7 @@ else if (ask === "task-steps")'''))
                 [page] = self.interactive_header(language, alert_held=None)["snapshots"]
                 self.assertEqual(page["dot"], "muted")
 
-    def stopped_server_page(self, scenario, language):
+    def stopped_server_page(self, scenario, language, **given):
         if not shutil.which("node"):
             self.skipTest("needs node to run the page's script")
         st = self.picture_status()
@@ -43381,7 +43456,7 @@ else if (ask === "task-steps")'''))
         harness = self.tmp / "stopped-server-page.js"
         harness.write_text(self.PAGE_HARNESS)
         replies = {"/api/status": st, "/api/events": [], "/api/settings": public_settings(self.desk),
-                   "/api/todos": {"page": 1, "pages": 1, "total": 0, "rows": []}}
+                   "/api/todos": {"page": 1, "pages": 1, "total": 0, "rows": []}, **given}
         result = subprocess.run(["node", str(harness), str(web.UI), scenario, language], input=json.dumps(replies),
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -43442,6 +43517,35 @@ else if (ask === "task-steps")'''))
                     self.assertNotIn(words, out["notice"]["text"] + out["status"])
                 self.assertEqual(out["after"], out["gets"])  # five minutes and a return to the tab ask nothing more
                 self.assert_header_github_link(out["links"], language)
+
+    def test_an_answer_not_from_hansa_serve_says_so_offers_reload_and_clears_in_both_languages(self):
+        # A redirect (opaque, as redirect:"manual" gives it), a sign-in page with 200, a 401, a 403 without
+        # hansa serve's header: what a sign-in proxy in front of the page answers once its sign-in has ended.
+        for kind in ("redirect", "html", "401", "403"):
+            for language in ("en", "zh"):
+                for dirty in ((False, True) if kind == "html" else (False,)):
+                    with self.subTest(kind=kind, language=language, dirty=dirty):
+                        zh = language == "zh"
+                        out = self.stopped_server_page("foreign-answer", language, foreign=kind, dirty=dirty)
+                        away = out["away"]
+                        said = "不是后台（hansa serve）发来的" if zh else "did not come from hansa serve"
+                        sign_in = "登录" if zh else "sign-in"
+                        self.assertFalse(away["notice"]["hidden"])
+                        for text in (away["notice"]["text"], away["header"]):
+                            self.assertIn(said, text)
+                            self.assertIn(sign_in, text)
+                            for wrong in ("JSON", "Unexpected", "hansa up", "Forbidden", "没有权限", "cannot reach", "连不上"):
+                                self.assertNotIn(wrong, text)
+                        self.assertEqual(away["tone"], "bad")
+                        self.assertEqual(away["notice"]["buttons"], ["重新加载" if zh else "Reload"])
+                        lost = "重新加载会丢掉未保存的设置修改" if zh else "reloading loses your unsaved settings changes"
+                        (self.assertIn if dirty else self.assertNotIn)(lost, away["notice"]["text"])
+                        # never reloads by itself; polls go on, backing off as for an unreached server
+                        self.assertEqual(away["reloads"], 0)
+                        self.assertEqual(out["delays"], [5000, 10000, 20000, 40000])
+                        self.assertEqual(out["pressed"], 1)  # the button reloads the page
+                        self.assertTrue(out["back"]["notice"]["hidden"])
+                        self.assertNotIn(said, out["back"]["header"])
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
     def test_recent_events_task_added_only_names_a_present_lane_in_both_languages(self):
@@ -44137,7 +44241,7 @@ else if (ask === "task-steps")'''))
                 self.assertEqual(page["posts"], [{"path": "/api/provider/top-up", "body": {"provider": "claude"}}])
                 [request] = page["requests"]
                 self.assertEqual(request["headers"], {"Authorization": "Bearer ", "Content-Type": "application/json", "X-Hansa": "1"})
-                self.assertEqual((request["credentials"], request["mode"]), ("omit", "same-origin"))
+                self.assertEqual((request["credentials"], request["mode"]), ("same-origin", "same-origin"))
                 self.assertTrue(page["final"]["title"].startswith("(2) "))
                 self.assertEqual(page["final"]["pipeline"], "2")
                 before, after = (p["root"]["kids"][0] for p in (page["before"], page["final"]))

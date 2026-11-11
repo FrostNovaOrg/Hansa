@@ -461,11 +461,14 @@ function keepChoice(storage, key, value) {
   try { globalThis[storage].setItem(key, String(value)); } catch (_) {}
 }
 // sessionStorage belongs to this origin and tab; an unavailable store still permits this load.
+// hansa web prints the key after # (#t=), which a browser sends to no server; ?t= is an older address's form.
+// With both, the fragment's key is used.
+const tokenFragment = new URLSearchParams((location.hash || "").replace(/^#/, ""));
 const tokenQuery = new URLSearchParams(location.search);
-const tokenAddress = tokenQuery.has("t");
+const tokenAddress = tokenFragment.has("t") || tokenQuery.has("t");
 let pageToken = "";
 if (tokenAddress) {
-  pageToken = tokenQuery.get("t");
+  pageToken = tokenFragment.has("t") ? tokenFragment.get("t") : tokenQuery.get("t");
   keepChoice("sessionStorage", "hansa.token", pageToken);
   history.replaceState(null, "", "/");
 } else {
@@ -1044,6 +1047,8 @@ Object.assign(T, ZH ? {
   serveUnreachedRead:"页面连不上后台（hansa serve）。用 hansa up 重新启动它。",
   serveUnreachedSent:"页面连不上后台（hansa serve）：什么也没有发出去。用 hansa up 重新启动它，再试一次。",
   serverUnreached:"页面连不上后台（hansa serve）：用 hansa up 启动",
+  notFromServe:"这个回答不是后台（hansa serve）发来的。如果这个页面前面有登录服务，它的登录可能已经过期：重新加载页面，让它重新登录。",
+  notFromServeUnsaved:"注意：重新加载会丢掉未保存的设置修改。", reloadPage:"重新加载",
   dataAsOf:t => t ? "所示数据时间：" + t : "尚未收到数据",
   alertHeld:(n, until) => `${n} 条提醒因每小时上限暂缓，到 ${until} 一起发出`,
   otherRecords:n => `其他 ${n} 条记录`,
@@ -1052,6 +1057,8 @@ Object.assign(T, ZH ? {
   serveUnreachedRead:"This page cannot reach hansa serve. Start it again with hansa up.",
   serveUnreachedSent:"This page cannot reach hansa serve: nothing was sent. Start it again with hansa up, then try again.",
   serverUnreached:"cannot reach hansa serve: start it with hansa up",
+  notFromServe:"This answer did not come from hansa serve. If a sign-in service stands in front of this page, its sign-in may have ended: reload the page so that it can sign you in again.",
+  notFromServeUnsaved:"Note: reloading loses your unsaved settings changes.", reloadPage:"Reload",
   dataAsOf:t => t ? "Data as of " + t : "No data received yet",
   alertHeld:(n, until) => `${n} alert${n === 1 ? "" : "s"} held by the hourly limit until ${until}`,
   otherRecords:n => `${n} other record${n === 1 ? "" : "s"}`,
@@ -1240,8 +1247,16 @@ const when = ts => ts ? new Date(ts * 1000).toLocaleString(language) : "";
 const pollReplies = new Map();
 // A refused token stays refused: the page stops polling and says only how to open it (T.forbidden).
 let pageRefused = false;
+// An answer without hansa serve's own header came from something in front of it (a sign-in proxy's redirect,
+// sign-in page, 401 or 403): the page says so and offers a reload, and polls go on as for an unreached server.
+function notFromServe() {
+  const e = new Error(T.notFromServe + (settingsDirty() ? " " + T.notFromServeUnsaved : ""));
+  e.notFromServe = true; return e;
+}
 async function api(path, body) {
-  const opt = {credentials:"omit", mode:"same-origin", cache:"no-store", headers:{Authorization:"Bearer " + pageToken}};
+  // The origin's own cookies travel: a sign-in proxy keeps its session in one. hansa serve takes no cookie as a key.
+  // A redirect stays visible (an opaque redirect) instead of being followed.
+  const opt = {credentials:"same-origin", mode:"same-origin", redirect:"manual", cache:"no-store", headers:{Authorization:"Bearer " + pageToken}};
   const conditional = body === undefined && (path === "/api/status" || path === "/api/goals" || path.startsWith("/api/history?") || path === "/api/events" || path.startsWith("/api/events?"));
   const previous = conditional ? pollReplies.get(path) : null;
   if (previous) opt.headers["If-None-Match"] = previous.etag;
@@ -1258,6 +1273,7 @@ async function api(path, body) {
     const unreached = new Error(body === undefined ? T.serveUnreachedRead : T.serveUnreachedSent);
     unreached.unreached = true; throw unreached;
   }
+  if (r.type === "opaqueredirect" || !r.headers?.get("X-Hansa-Serve")) throw notFromServe();
   if (r.status === 403) { pageRefused = true; throw new Error(T.forbidden); }
   if (r.status === 304 && previous) return previous.reply;
   const reply = await r.json();
@@ -1795,12 +1811,16 @@ function keepStatusFocus(root) {
   };
 }
 let statusFlight = null, statusPollTimer, statusFailures = 0, statusLastGood = 0, statusUnreached = false, statusFacts = [];
+let statusForeign = null;  // the message of an answer that did not come from hansa serve, while the last one was one
 function pollNotice(reconnecting) {
   const notice = $("#status-connection");
   notice.hidden = !reconnecting || pageRefused;
   if (notice.hidden) { notice.replaceChildren(); return; }
   const asOf = T.dataAsOf(statusLastGood ? when(statusLastGood) : "");
-  notice.replaceChildren(statusUnreached ? `${T.serveUnreachedRead} ${asOf} ` : `${ZH ? "正在重新连接…" : "Reconnecting…"} ${asOf} `,
+  // Reload only when pressed: the service in front can then sign the user in again.
+  if (statusForeign) notice.replaceChildren(`${statusForeign} ${asOf} `,
+    h("button", {type:"button", onclick:() => location.reload()}, T.reloadPage));
+  else notice.replaceChildren(statusUnreached ? `${T.serveUnreachedRead} ${asOf} ` : `${ZH ? "正在重新连接…" : "Reconnecting…"} ${asOf} `,
     h("button", {type:"button", onclick:() => loadStatus(true).catch(err)}, T.retry));
 }
 function scheduleStatusPoll() {
@@ -1825,6 +1845,7 @@ function loadStatus(force = false) {
 async function renderStatus(force) {
   const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
   statusUnreached = [status, events].some(x => x.status === "rejected" && x.reason?.unreached);
+  statusForeign = [status, events].find(x => x.status === "rejected" && x.reason?.notFromServe)?.reason.message || null;
   if (status.status === "rejected") {
     const e = status.reason;
     if (!statusShown || pageRefused) {
@@ -1833,7 +1854,7 @@ async function renderStatus(force) {
     }
     // Keep callers' error handlers from replacing the last header status too; but with no server to reach, the
     // header no longer says that it runs.
-    if (statusUnreached) setStatusParts([{key:"server", text:T.serverUnreached, tone:"bad"},
+    if (statusForeign || statusUnreached) setStatusParts([{key:"server", text:statusForeign || T.serverUnreached, tone:"bad"},
       ...statusFacts.filter(p => p.key !== "server")]);
     return false;
   }
@@ -3025,7 +3046,7 @@ function loadHistory() {
 
 /* ---------- goals ---------- */
 let goalsRows = null, goalsAll = false, goalSelected = "", goalsFlight = null, goalsPollTimer;
-let goalsFailures = 0, goalsLastGood = 0;
+let goalsFailures = 0, goalsLastGood = 0, goalsForeign = null;
 const goalFolds = new Map();
 function goalCost(c) {
   return `${T.totalTokens}: ${fmt(c.tokens)} · ${T.estimatedCost}: ${money(c.usd)}`
@@ -3105,9 +3126,9 @@ function goalsNotice() {
   if (loading) loading.hidden = !!goalsFailures;
   notice.hidden = !goalsFailures;
   notice.replaceChildren(...shown(goalsFailures ? [
-    goalsRows === null ? T.goalsFailed : T.goalsReconnecting,
+    goalsForeign || (goalsRows === null ? T.goalsFailed : T.goalsReconnecting),
     goalsLastGood ? " " + T.goalsAsOf + when(goalsLastGood) : null, " ",
-    h("button", {onclick:loadGoals}, T.retry)] : []));
+    goalsForeign ? h("button", {onclick:() => location.reload()}, T.reloadPage) : h("button", {onclick:loadGoals}, T.retry)] : []));
 }
 function loadGoals() {
   if (goalsFlight) return goalsFlight;
@@ -3116,9 +3137,9 @@ function loadGoals() {
   goalsFlight = api("/api/goals").then(rows => {
     if (!Array.isArray(rows)) throw new Error("Invalid goals response");
     const changed = rows !== goalsRows;
-    goalsRows = rows; goalsFailures = 0; goalsLastGood = Date.now() / 1000;
+    goalsRows = rows; goalsFailures = 0; goalsLastGood = Date.now() / 1000; goalsForeign = null;
     if (changed) renderGoals(); else goalsNotice();
-  }).catch(() => { goalsFailures++; goalsNotice(); }).finally(() => {
+  }).catch(e => { goalsFailures++; goalsForeign = e?.notFromServe ? e.message : null; goalsNotice(); }).finally(() => {
     goalsFlight = null;
     if (current === "goals" && !document.hidden && !pageRefused) {
       const delay = Math.min(600000, 60000 * 2 ** Math.min(4, Math.max(0, goalsFailures - 1)));
