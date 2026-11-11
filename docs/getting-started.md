@@ -191,6 +191,8 @@ Replace each `8766` with the actual port. Open the printed URL locally; closing
 the tunnel ends page access. Keep the server's default
 `127.0.0.1` binding; open no other inbound ports.
 
+For a sign-in proxy, read [Opening the page from outside the machine](desk.md#opening-the-page-from-outside-the-machine).
+
 `ServerAliveInterval=30` checks every 30 seconds, `ServerAliveCountMax=3`
 disconnects after three unanswered checks, and `ExitOnForwardFailure=yes` exits
 if forwarding fails. Install `autossh` to reopen dropped tunnels automatically:
