@@ -428,18 +428,28 @@ def _merge_result_lines(m: dict, log: str = "") -> list:
     r = m.get("merge_check_result")
     if not r:
         return []
+    past = m.get("state") == "merged" and not r.get("ok")
+    label = "previous merge check" if past else "merge check"
+    advice = (r.get("conflict") or r.get("merge_error") or "").removeprefix("hansa: ")
+    outcome = (("merged later" if advice or r.get("waited") else "merged despite this failed check")
+               + f" at {notify.when(m.get('merged'))}" if past else "nothing was merged")
+    if past:
+        advice = advice.replace("nothing was merged", outcome, 1)
+    if r.get("direct"):
+        return [f"{'previous merge' if past else 'merge'}: last attempt at {notify.when(r.get('at'))}; {advice}"]
     if r.get("waited"):  # it needed no check: it waited its turn behind other merges, and no check ran
-        return ["merge: " + (f"{WAITED}: " + r["conflict"].removeprefix("hansa: ") if r.get("conflict")
+        return [f"{'previous merge' if past else 'merge'}: " + (f"{WAITED}: " + advice if advice
                              else waited_text(r))]
-    if r.get("conflict"):
-        return ["merge check: nothing was merged; " + r["conflict"].removeprefix("hansa: ")]
+    if advice:
+        return [f"{label}: " + advice]
     where = f"hansa merged it onto the base at {r.get('onto', '')[:10]}"
     if r.get("lane") and r["lane"] != m.get("lane"):
         where += f" in lane {r['lane']}'s worktree"
     if r.get("ok"):
-        return [f"merge check: passed in {r.get('seconds', 0)} s ({where}): {r.get('command', '')}"]
+        return [f"merge check: passed in {r.get('seconds', 0)} s ({where})"
+                + ("" if r.get("steps") else f": {r.get('command', '')}")]
     if r.get("could_not_run"):
-        return [f"merge check: {r['note']}; nothing was merged", "  " + machine_hint(r)]
+        return [f"{label}: {r['note']}; {outcome}", "  " + machine_hint(r)]
     how = f"FAILED ({r['note']})" if r.get("note") else f"FAILED (exit {r.get('exit')})"
     hint = machine_hint(r)
     if r.get("steps"):  # a --recheck's steps: named as the per-step lines below name them (merge_result_lines)
@@ -450,10 +460,10 @@ def _merge_result_lines(m: dict, log: str = "") -> list:
             f"; the {' and the '.join(s['what'] for s in not_run)} did not run or was interrupted" if not_run else "")
         if failed and not r.get("note"):
             how = f"{failed[0]['what']} FAILED (exit {failed[0]['exit']})"
-        return ([f"merge check ({where}{did}): {how} in {r.get('seconds', 0)} s; nothing was merged"]
+        return ([f"{label} ({where}{did}): {how} in {r.get('seconds', 0)} s; {outcome}"]
                 + failed_check_lines(log, r.get("tail", []), m["id"], "--merge-check-log") + (["  " + hint] if hint else []))
-    return ([f"merge check ({where} and ran the lane's {'merge check' if r.get('own') else 'check'} there): {how}"
-             + (f" in {r['seconds']} s: {r['command']}" if r.get("command") else "") + "; nothing was merged"]
+    return ([f"{label} ({where} and ran the lane's {'merge check' if r.get('own') else 'check'} there): {how}"
+             + (f" in {r['seconds']} s: {r['command']}" if r.get("command") else "") + f"; {outcome}"]
             + failed_check_lines(log, r.get("tail", []), m["id"], "--merge-check-log") + (["  " + hint] if hint else []))
 
 
@@ -1772,7 +1782,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
     if verification_due(m):
         nxt["done"] = "wait for hansa serve to queue the requested verification"
     mr = m.get("merge_check_result") or {}
-    if mr.get("waited") and m["state"] == "done":
+    if (mr.get("waited") or mr.get("direct") or mr.get("merge_error")) and m["state"] == "done":
         nxt["done"] = (f"hansa retry {tid} --update \"<how to settle the conflict>\" · hansa retry {tid} --fresh "
                        f"\"<the same change on the current base>\"" if mr.get("conflict") else
                        f"once what stopped it is fixed (the principal fixes a checkout; tell them with hansa ask): "

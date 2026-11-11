@@ -544,7 +544,8 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   ID` saying why nothing was merged (the check's last lines, or a conflict). If
   the base moves again while it is checked alone, it is checked once more on the new
   tip; after a second move it stops and says so. `--despite-check` merges at
-  once without it (recorded).
+  once without it (recorded). After an override of a failed merge check,
+  `hansa show ID` dates the merge and shows the failed check as history.
 - **One at a time, or a batch.** Merges into one repository and base branch keep
   the order they were asked. A check starting with others queued behind it takes
   the next ones too, up to its check lane's `merge_batch` (default 4, including
@@ -565,7 +566,8 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   its extra check is followed by individual checks in merge order.
   `hansa status`, `hansa show` and the page name the members and whose check runs;
   each member's show points to that check's output and keeps its companions after
-  merging. Events record the members at check start and on each merge.
+  merging. Events record the members at check start and on each merge;
+  `merge_checked` keeps the members and any recheck steps with their exits.
   Merges also wait while a release runs in that repository. A plain merge waits
   its turn and goes in without a check if the base has still not moved, or with
   a check as above if it has.
@@ -595,7 +597,8 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   the results of its own repeated check. A passed task check needs only the merge
   check, as before.
   Use it once the machine problem is fixed. `hansa show` and the event log keep
-  the commands and each exit; the event log also records who asked.
+  the commands and each exit; the event log also records who asked. A passing
+  recheck has a short header, followed by the result of each step.
   With `--despite-check`, the checks are skipped and the override recorded.
 - **`merge_check` and `merge_timeout_min`.** A lane's merge check runs its check
   unless the lane has a command of its own for it: `hansa lane set L
@@ -617,12 +620,20 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   worker, and prints how each ended; `hansa lane try L --merge-check --log`
   prints each step's whole output of the last merge-check try, keys removed.
 - **Conflicts.** A conflict lists each conflicting file and the lines where the
-  two sides meet. Settle it with `hansa retry ID --update "<how to settle
+  two sides meet, with the base and task named alike in the legend and markers.
+  Even a direct merge with no check saves its failure in the task's
+  `merge_check_result` and a `merge_failed` event. `hansa show ID` keeps when
+  that attempt failed, the files and the conflict advice.
+  Settle it with `hansa retry ID --update "<how to settle
   it>"`: the follow-up continues from the task's branch with the current base
   merged in; where that conflicts, the worker finds the conflict markers in the
   files it is told about and settles them by editing, and hansa's commit
   completes the merge. Redo the whole change with `--fresh` only when the old
   work is no use.
+  When Git refuses a merge without leaving conflicted files, hansa keeps Git's
+  error and says nothing was merged. A file in the way belongs to the checkout's
+  owner: the owner moves or commits it, then runs `hansa merge ID` again.
+  This does not call for a worker to retry with `--update`.
 
 ### Sending a task back
 

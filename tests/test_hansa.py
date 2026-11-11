@@ -13055,6 +13055,9 @@ def save():'''))
         self.assertEqual((m["state"], m["merge_check_result"]["files"], m["merge_check_result"]["lane"]), ("done", ["hello.txt"], "m"))
         self.assertEqual((self.git_out("rev-parse", "main"), len(self.srt_calls())), (tip, calls))
         self.assertFalse(Path(self.git_out("rev-parse", "--git-path", "MERGE_HEAD", cwd=self.desk.worktrees_dir / "m")).exists())
+        shown = self.hansa("show", tid)
+        self.assertIn(f"{tid} conflicts with main", shown)
+        self.assertEqual(shown.count("nothing was merged"), 1)
 
     def test_merge_lane_cancel_queued_and_running_keeps_the_task_lanes_new_work(self):
         from hansa import run
@@ -13939,6 +13942,10 @@ def save():'''))
                     self.assertIn(unit, said)
                     self.assertNotIn("merge check again", said)
                     shown = self.hansa("show", tid)
+                    [header] = [line for line in shown.splitlines() if line.startswith("merge check:")]
+                    self.assertIn("passed in", header)
+                    for command in (unit, package, "&&"):
+                        self.assertNotIn(command, header)
                     for command in (unit, package):
                         self.assertIn(command, shown)
                     self.assertEqual([(s["command"], s["exit"], s["ok"]) for s in m["merge_check_result"]["steps"]],
@@ -14002,6 +14009,44 @@ def save():'''))
         self.assertEqual(self.desk.meta(tid)["state"], "merged")
         self.assertEqual(len(self.srt_calls()), calls)
         self.assertTrue(self.events("task_merged")[-1]["despite_check"])
+
+    def test_merge_despite_a_failed_merge_check_shows_the_override_as_history(self):
+        from hansa import release, run
+        for waited in (False, True):
+            with self.subTest(waited=waited):
+                d, tid = self.merge_check_lane(check="true", merge_check="echo packaging-failed; exit 1")
+                self.hansa("merge", tid)
+                failed = self.settle_merge(d, tid)["merge_check_result"]
+                self.assertFalse(failed["ok"])
+                holding = {"id": 1, "lane": "a"} if waited else None
+                with unittest.mock.patch.object(release, "running_on", return_value=holding):
+                    self.hansa("merge", tid, "--despite-check")
+                if waited:
+                    self.assertEqual(self.desk.meta(tid)["state"], "merging")
+                    run.plain_merge(self.desk, tid, self.desk.settings()["lanes"]["a"])
+                merged = self.desk.meta(tid)
+                self.assertEqual(merged["state"], "merged")
+                self.assertEqual(merged["merge_check_result"], failed)
+                shown = self.hansa("show", tid)
+                for words in ("merged despite", "failed check", notify.when(merged["merged"]),
+                              "previous merge check", "FAILED (exit 1)", "packaging-failed"):
+                    self.assertIn(words, shown)
+                self.assertNotIn("nothing was merged", shown)
+                self.assertTrue(self.events("task_merged")[-1]["despite_check"])
+
+    def test_recheck_batch_event_keeps_the_steps_and_members(self):
+        d, first, second = self.two_lanes(check="true")
+        self.merge_lane_for_checks("echo merge-ok")
+        for tid in (first, second):
+            self.hansa("merge", tid, "--recheck")
+        merged = self.settle_merge(d, first)
+        self.assertEqual(merged["state"], "merged")
+        self.assertEqual(self.desk.meta(second)["state"], "merged")
+        [checked] = self.events("merge_checked")
+        self.assertEqual(checked["members"], [first, second])
+        self.assertEqual(checked["steps"], merged["merge_check_result"]["steps"])
+        self.assertEqual([(s["what"], s["command"], s["exit"], s["ok"]) for s in checked["steps"]],
+                         [("merge check", "echo merge-ok", 0, True)])
 
     def test_recheck_failed_task_keeps_its_results_when_merges_wait_together(self):
         self.hansa("lane", "add", "b", "--like", "a")
@@ -15268,6 +15313,11 @@ def save():'''))
         self.assertIn("hello.txt, lines 1-5:", said)
         self.assertIn(f"hello from {t1}", said)
         self.assertIn(f"hello from {t2}", said)
+        [legend] = [line for line in said.splitlines() if "Where the two sides meet" in line]
+        markers = re.findall(r"^\s+\d+  ((?:<<<<<<<|>>>>>>>) .+)$", said, re.M)
+        self.assertEqual(markers, ["<<<<<<< main", f">>>>>>> {t2}"])
+        for marker in markers:
+            self.assertIn(marker, legend)
         self.assertLess(said.index(f"hansa retry {t2} --update"), said.index(f"hansa retry {t2} --fresh"))
         self.assertEqual(self.git_out("status", "--porcelain"), "")  # the merge was aborted after it was read
         for cmd in re.findall(r"hansa (retry [^;()]*?\"<[^>]*>\")", said):  # the advice is commands that parse
@@ -15275,6 +15325,118 @@ def save():'''))
             with unittest.mock.patch("hansa.cli.cmd_retry") as retry:
                 main(["--desk", str(self.desk.root), *shlex.split(cmd)])
             self.assertTrue(retry.call_args[0][0].note)
+
+    def test_direct_merge_conflict_is_recorded_and_shown(self):
+        _, first, second = self.two_lanes(names=("hello.txt", "hello.txt"))
+        self.hansa("merge", first)
+        tip = self.git_out("rev-parse", "main")
+        said = self.refused("merge", second)
+        # Reopen the desk as another session would: the printed advice must survive the command.
+        saved = Desk(self.desk.root).meta(second)
+        self.assertEqual(saved["state"], "done")
+        result = saved["merge_check_result"]
+        self.assertEqual((result["ok"], result["files"], result["onto"]), (False, ["hello.txt"], tip))
+        self.assertEqual(result["conflict"], said)
+        [event] = self.events("merge_failed")
+        self.assertEqual((event["task"], event["files"], event["ts"]), (second, ["hello.txt"], result["at"]))
+        shown = self.hansa("show", second)
+        for words in (f"{second} conflicts with main", "hello.txt", notify.when(result["at"]),
+                      f"next: hansa retry {second} --update \"<how to settle the conflict>\""):
+            self.assertIn(words, shown)
+        self.assertNotIn("merge check:", shown)
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        self.assertEqual(self.git_out("status", "--porcelain"), "")
+
+    def test_untracked_file_blocking_a_merge_is_the_owners_to_fix(self):
+        from hansa import run
+        for waited in (False, True):
+            with self.subTest(waited=waited):
+                name = f"owner-{waited}.txt"
+                tid = self.done_with(env={"FAKE_HELLO": name})
+                tip = self.git_out("rev-parse", "main")
+                path = self.repo / name
+                path.write_text("the owner's file\n")
+                if waited:
+                    self.desk.update(tid, state="merging", merge_check={"phase": "queued", "plain": True})
+                    run.plain_merge(self.desk, tid, self.desk.settings()["lanes"]["a"])
+                    said = self.hansa("show", tid)
+                else:
+                    said = self.refused("merge", tid)
+                for text in (said, self.hansa("show", tid)):
+                    for words in ("untracked", "overwritten", name, "nothing was merged", "owner", "moves or commits",
+                                  f"hansa merge {tid}"):
+                        self.assertIn(words, text)
+                    self.assertNotIn("conflicts with", text)
+                    self.assertNotIn("--update", text)
+                self.assertEqual(path.read_text(), "the owner's file\n")
+                self.assertEqual(self.git_out("rev-parse", "main"), tip)
+                self.assertEqual(self.desk.meta(tid)["state"], "done")
+                path.rename(self.repo / ("moved-" + name))
+                self.assertIn("merged into main", self.hansa("merge", tid))
+                shown = self.hansa("show", tid)
+                self.assertIn("previous merge:", shown)
+                self.assertIn("merged later at", shown)
+                self.assertNotIn("failed check", shown)
+                self.assertNotIn("nothing was merged", shown)
+
+    def test_merge_git_errors_without_conflicted_files_are_not_conflicts(self):
+        from hansa import run
+        for mode in ("direct", "waited", "checked"):
+            with self.subTest(mode=mode):
+                tid = self.done_with(env={"FAKE_HELLO": f"{mode}.txt"})
+                tip = self.git_out("rev-parse", "main")
+                error = "git merge failed: fatal: could not write the index"
+                original = run.wgit if mode == "checked" else cli.git if mode == "direct" else run.git
+
+                def refuse_merge(*args, **kwargs):
+                    command = args[2:] if mode == "checked" else args
+                    if command and command[0] == "merge" and "--abort" not in command:
+                        raise RuntimeError(error)
+                    return original(*args, **kwargs)
+
+                if mode == "direct":
+                    with unittest.mock.patch.object(cli, "git", side_effect=refuse_merge):
+                        said = self.refused("merge", tid)
+                else:
+                    mc = {"phase": "queued", **({"plain": True} if mode == "waited" else {})}
+                    self.desk.update(tid, state="merging", merge_check=mc)
+                    with unittest.mock.patch.object(run, "wgit" if mode == "checked" else "git", side_effect=refuse_merge):
+                        if mode == "checked":
+                            run.start_merge_check(self.desk, tid, "a", self.desk.settings()["lanes"]["a"])
+                        else:
+                            run.plain_merge(self.desk, tid, self.desk.settings()["lanes"]["a"])
+                    said = self.hansa("show", tid)
+                for text in (said, self.hansa("show", tid)):
+                    for words in ("could not write the index", "nothing was merged", f"hansa merge {tid}"):
+                        self.assertIn(words, text)
+                    self.assertNotIn("conflicts with", text)
+                    self.assertNotIn("--update", text)
+                result = self.desk.meta(tid)["merge_check_result"]
+                self.assertEqual(result["files"], [])
+                self.assertNotIn("conflict", result)
+                self.assertEqual(self.git_out("rev-parse", "main"), tip)
+
+    def test_merge_check_file_obstruction_keeps_gits_error_and_owner_advice(self):
+        from hansa import run
+        tid = self.done_with()
+        tip = self.git_out("rev-parse", "main")
+        ready = run.ready_worktree
+
+        def obstruct(desk, repo, wt, task, start):
+            ready(desk, repo, wt, task, start)
+            run.wgit(desk, wt, "checkout", "-q", "--detach", start)
+            (wt / "hello.txt").write_text("the owner's file\n")
+
+        self.desk.update(tid, state="merging", merge_check={"phase": "queued"})
+        with unittest.mock.patch.object(run, "ready_worktree", side_effect=obstruct):
+            run.start_merge_check(self.desk, tid, "a", self.desk.settings()["lanes"]["a"])
+        shown = self.hansa("show", tid)
+        for words in ("hello.txt", "untracked", "overwritten", "owner", "moves or commits", f"hansa merge {tid}"):
+            self.assertIn(words, shown)
+        self.assertNotIn("--update", shown)
+        self.assertNotIn("conflicts with", shown)
+        self.assertEqual(self.git_out("rev-parse", "main"), tip)
+        self.assertEqual((self.desk.worktrees_dir / "a" / "hello.txt").read_text(), "the owner's file\n")
 
     def test_a_conflict_past_the_first_megabyte_lists_its_file_and_lines(self):
         from hansa import run

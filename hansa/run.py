@@ -4040,9 +4040,16 @@ def conflict_places(cwd: Path, files: list, most_files: int = 10, most_lines: in
     return "\n".join(out)
 
 
-def conflict_advice(tid: str, base: str, places: str, error: str = "") -> str:
-    """What the coordinator is told when a task's merge conflicts with the base."""
-    where = (f" Where the two sides meet (<<<<<<< {base} as it is now, >>>>>>> {tid}):\n{places}\n" if places
+def conflict_advice(tid: str, base: str, files: list, places: str, error: str = "") -> str:
+    """A failed merge: only unmerged files call for a worker to settle a conflict."""
+    if not files:
+        return (f"hansa: merging {tid} into {base} failed; nothing was merged.\n{error}\n"
+                "Next: the owner fixes the Git error above (moves or commits any files in the way), "
+                f"then hansa merge {tid} again. More: hansa help merge-check")
+    # Git labels these HEAD and a commit id. Use the same base/task names in the legend and the excerpts.
+    for marker, name in (("<<<<<<<", base), (">>>>>>>", tid)):
+        places = re.sub(rf"(?m)^(\s*\d+  {marker}).*$", lambda m: f"{m[1]} {name}", places)
+    where = (f" Where the two sides meet (<<<<<<< {base}, the base as it is now; >>>>>>> {tid}, the task):\n{places}\n" if places
              else f" ({error})\n" if error else "\n")
     return (f"hansa: {tid} conflicts with {base}; nothing was merged.{where}"
             f"Next: hansa retry {tid} --update \"<how to settle the conflict>\" (a worker continues from {tid}'s "
@@ -5458,11 +5465,13 @@ def plain_merge(desk: Desk, tid: str, lane: dict) -> str | None:
             end_merge_check(desk, tid, {"ok": False, "onto": tip, "at": now(), "files": files,
                                         "note": f"conflicts with {name} as it is now" if files
                                         else desk.redact(f"merging it into {name} failed ({str(e)[:200]})"),
-                                        "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
+                                        "conflict" if files else "merge_error":
+                                            desk.redact(conflict_advice(tid, name, files, places, str(e)))})
             return None
         m = desk.update(tid, state="merged", merged=now(), merge_commit=git("rev-parse", "HEAD", cwd=repo),
                         merge_repo=str(Path(repo).resolve()), merge_base=name,
-                        merge_check=None, merge_check_result=None, unverified=unverified_note(desk, m) or None,
+                        merge_check=None, merge_check_result=m.get("merge_check_result") if mc.get("despite") else None,
+                        unverified=unverified_note(desk, m) or None,
                         merge_message_note=message_fallback(lane, m["lane"], "merge_message") or None)
         close_verification(desk, m, f"closed: {tid} was merged")
     desk.event("task_merged", ts=m["merged"], task=tid, into=name, waited=True, onto=tip,
@@ -5515,8 +5524,10 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
             if merge_in_progress(desk, wt):
                 wgit(desk, wt, "merge", "--abort")
             end_merge_check(desk, tid, {"ok": False, "onto": tip, "at": now(), "files": files,
-                                        "note": f"conflicts with {name} as it is now",
-                                        "conflict": desk.redact(conflict_advice(tid, name, places, str(e)[:300]))})
+                                        "note": f"conflicts with {name} as it is now" if files
+                                        else desk.redact(f"merging it into {name} failed ({str(e)[:200]})"),
+                                        "conflict" if files else "merge_error":
+                                            desk.redact(conflict_advice(tid, name, files, places, str(e)))})
             return None
         commit = wgit(desk, wt, "rev-parse", "HEAD")
         said = message_fallback(task_lane, m["lane"], "merge_message")  # the message this merge commit was given
@@ -5664,6 +5675,7 @@ def finish_merge_check(desk: Desk, tid: str) -> dict | None:
                       checked_commit=mc.get("commit"))
         desk.event("merge_checked", task=tid, ok=result["ok"], exit=code, note=note, command=result["command"],
                    members=mc["members"],
+                   **({"steps": result["steps"]} if result.get("steps") else {}),
                    **({"recheck": True, "by": mc.get("by", "")} if mc.get("recheck") else {}))
         if result["ok"]:
             try:
