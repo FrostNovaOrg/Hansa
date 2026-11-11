@@ -47696,7 +47696,7 @@ else:
             self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
             text = self.alerted(out)[-1]["text"]
             self.assertIn(" · Original description · ", text)
-            self.assertTrue(text.startswith("[Hansa] 工作台 " if language == "zh" else "[hansa] desk "))
+            self.assertTrue(text.startswith("[hansa] " + ("工作台 " if language == "zh" else "desk ")))
             self.assertLess(text.index("一次性码" if language == "zh" else "code "), text.index("Original description"))
             self.assertNotIn("Changed description", text)
             release.void(self.desk, rid, "finished")
@@ -53610,6 +53610,7 @@ class PageLanguageTest(unittest.TestCase):
             self.assertIn(word, shown["texts"])
 
     def test_chinese_python_copy_uses_the_pages_names(self):
+        from hansa import alert, release
         # These modules supply release/page summaries and the principal's alerts.
         # Read literals (including f-string parts), without treating English copy or commands as prose.
         for name in ("release.py", "alert.py", "run.py", "desk.py", "alert_push.py"):
@@ -53623,9 +53624,21 @@ class PageLanguageTest(unittest.TestCase):
                 with self.subTest(file=name, line=node.lineno, text=text):
                     # These refer to the provider, rather than hansa serve.
                     own_terms = re.sub(r"服务商|云服务凭据|服务繁忙|服务自身出了错", "", text)
+                    if name == "release.py":  # The release's command updates the principal's server.
+                        own_terms = own_terms.replace("服务器可能停在半路", "")
                     self.assertNotIn("服务", own_terms)
-                    self.assertNotRegex(text, r"(?<![\w./])hansa\b(?![./-]| [a-z])")
+                    # The command's stable tag is not product prose.
+                    prose = text.removeprefix("[hansa] 工作台") if name in ("alert.py", "alert_push.py") else text
+                    self.assertNotRegex(prose, r"(?<![\w./])hansa\b(?![./-]| [a-z])")
                     self.assertNotRegex(text, r"\bHansa [a-z]")
+        summary = release.state_text(self.desk, {"state": "stopped", "ran": True}, zh=True)
+        self.assertIn("服务器可能停在半路", summary)
+        settings = self.desk.settings()
+        settings["alert_language"] = "zh"
+        self.assertEqual(self.desk.save_settings(settings, by="page"), [])
+        items = [{"kind": "test", "text": "测试提醒"}]
+        self.assertTrue(alert.text_of(self.desk, items).startswith("[hansa] 工作台 "))
+        self.assertEqual(alert_push._text(self.desk, items, 0)[1], "测试提醒")
 
     def test_release_summary_uses_the_pages_forbidden_words_name(self):
         from hansa import release
@@ -53675,7 +53688,7 @@ class DeskNameSettingTest(unittest.TestCase):
     def assert_displays(self, name):
         from hansa import alert, example
         self.assertEqual(alert.desk_name(self.desk), name)
-        self.assertTrue(alert.text_of(self.desk, [{"text": "a request"}]).startswith(f"[Hansa] 工作台 {name}:"))
+        self.assertTrue(alert.text_of(self.desk, [{"text": "a request"}]).startswith(f"[hansa] 工作台 {name}:"))
         [entry] = self.desk.settings()["alert_push"]
         self.http.reset_mock()
         self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")

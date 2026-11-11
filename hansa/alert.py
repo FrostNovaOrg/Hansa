@@ -462,7 +462,7 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
     codes = [x for x in items if x.get("code")]
     zh = chinese(desk)
     name = desk_name(desk)
-    head = f"[Hansa] 工作台 {name}" if zh else f"[hansa] desk {name}"
+    head = f"[hansa] 工作台 {name}" if zh else f"[hansa] desk {name}"
     held_text = ((f"（每小时最多 {MOST_RUNS} 次，{held} 条提醒因此暂缓）" if zh else
                   f" ({held} held back by the limit of {MOST_RUNS} runs an hour)") if held else "")
     if len(lines) == 1:  # a code stays early: what was held back is said after it

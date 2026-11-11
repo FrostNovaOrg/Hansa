@@ -535,7 +535,7 @@ def _text(desk: Desk, items: list[dict], held: int, *, with_codes=False) -> tupl
     # Reuse the command's language, grouping and character cap. Only encrypted
     # Bark receives its code-bearing wording; every other entry uses safe text.
     title = desk.redact(alert.desk_name(desk))
-    header = f"[Hansa] 工作台 {title}" if lang == "zh" else f"[hansa] desk {title}"
+    header = f"[hansa] {'工作台' if lang == 'zh' else 'desk'} {title}"
     body = alert.text_of(desk, items if with_codes else safe, held).removeprefix(header).removeprefix(": ").lstrip()
     return title, body
 

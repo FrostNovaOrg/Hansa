@@ -2097,7 +2097,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
         ran = r.get("ran", bool(r.get("started")))  # one stopped as its fixed checkout was made never ran
         if zh:
             return (f"{_who(r, zh)}在 {when(r.get('ended'))} 叫停了" + (f"：{r['stop_reason']}" if r.get("stop_reason") else "")
-                    + ("（命令已运行，留下了到那时的输出；后台可能停在半路）" if ran else "；什么都没运行"))
+                    + ("（命令已运行，留下了到那时的输出；服务器可能停在半路）" if ran else "；什么都没运行"))
         return (f"stopped by {_who(r)} {when(r.get('ended'))}" + (f": {r['stop_reason']}" if r.get("stop_reason") else "")
                 + ("; its command had run (its output so far is kept; the server may be half-switched)" if ran
                    else "; nothing was run"))
