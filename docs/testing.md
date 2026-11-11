@@ -145,3 +145,14 @@ Check that they do not alter the fixture's state.
 Some patches must reach another thread: the `test_6.py` stderr fixture intercepts
 its drain thread's select/read/join operations. Keep that interception scoped to
 the fixture and wait for the drain thread before restoring the targets.
+
+## The account's state in tests
+
+hansa keeps what desks on one account share under `XDG_STATE_HOME` (else
+`~/.local/state`): the list of desks and `provider-rests.json`, the rests shared
+between desks on one login. A test that makes a desk sets `XDG_STATE_HOME` to a
+folder of its own, as the Codex adapter's `Scratch` (`contrib/codex/tests/codexkit.py`)
+does for all its tests. Their providers share one placeholder login, so without it a
+credit rest one test records in the account's file is shared into the next test's
+desk, whose usage limit then starts no rest of its own. The file is missed only where
+a sandbox keeps tests from writing the real one, as hansa's worker sandbox on a Mac does.

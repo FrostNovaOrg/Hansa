@@ -2,7 +2,6 @@
 would Claude Code's: the provider rests for a usage limit (until its reset) or a login, a dropped connection is
 tried once more."""
 import json
-import os
 import shlex
 import subprocess
 import time
@@ -158,9 +157,6 @@ class ProviderFailures(Scratch):
 
     def setUp(self):
         super().setUp()
-        env = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state")})
-        env.start()
-        self.addCleanup(env.stop)
         self.desk = init_desk(self.root / "desk", str(self.root / "repo"), "a")
         s = self.desk.settings()
         s["providers"]["adapter"] = {"kind": "compatible", "model": shim.DEFAULT_MODEL, "base_url": shim.PLACEHOLDER}
