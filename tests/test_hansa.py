@@ -32544,6 +32544,21 @@ def save():'''))
         row = cost.worker_rows(self.desk, 0)[0]
         self.assertEqual((row["usd"], row["priced_by"]), (0, "price table"))
 
+    def test_cost_worker_claude_without_recorded_figure_has_no_price(self):
+        tid = self.desk.new_task("Worker without a recorded cost")
+        self.desk.update(tid, finished=time.time(), provider="claude", usage={
+            "claude-opus-5": {"in": 5000, "cache_read": 10000, "cache_write": 5000}})
+        s = self.desk.settings()
+        s["prices"] = {}
+        self.assertEqual(self.desk.save_settings(s), [])
+        rep = json.loads(self.hansa("cost", "--json", "--rows"))
+        row = rep["rows"][0]
+        self.assertEqual((row["usd"], row["priced_by"]), (None, "no price"))
+        self.assertEqual(rep["unpriced_models"], ["claude-opus-5"])
+        shown = self.hansa("cost", "--by", "model")
+        row = next(line for line in shown.splitlines() if line.lstrip().startswith("claude-opus-5"))
+        self.assertEqual(row.split(), ["claude-opus-5", "20,000", "no", "price"])
+
     def test_cost_worker_claude_fallback_survives_provider_rename_or_removal(self):
         tid = self.desk.new_task("Price earlier runs")
         self.desk.update(tid, finished=time.time(), provider="old", usage={
@@ -32567,10 +32582,10 @@ def save():'''))
                                  (.38, "Claude Code list price"))
                 self.assertEqual((rows["claude-haiku-4-5-20251001"]["usd"],
                                   rows["claude-haiku-4-5-20251001"]["priced_by"]),
-                                 (.005, "Claude Code list price"))
+                                 (None, "no price"))
                 self.assertEqual((rows["mimo-x"]["usd"], rows["mimo-x"]["priced_by"]), (None, "no price"))
 
-    def test_cost_coordinator_claude_fallback_prices_rows_turns_helpers_and_cache(self):
+    def test_cost_coordinator_claude_without_table_entry_has_no_price(self):
         conf = self.tmp / "conf"
         proj = conf / "projects" / cost.slug(self.desk.root)
         proj.mkdir(parents=True)
@@ -32592,16 +32607,22 @@ def save():'''))
         rep = json.loads(self.hansa("cost", "--json", "--rows"))
         self.assertEqual({r["seat"] for r in rep["rows"]}, {"coordinator", "helper"})
         for row in rep["rows"]:
-            self.assertEqual((row["usd"], row["priced_by"]), (56.75, "Claude Code list price"))
-        self.assertEqual(rep["total"]["usd"], 113.5)
-        self.assertEqual(rep["unpriced_models"], [])
-        self.assertIn("recorded list price or known list rates", rep["note"])
+            self.assertEqual((row["usd"], row["priced_by"]), (None, "no price"))
+        self.assertEqual(rep["total"]["tokens"], 12000000)
+        self.assertEqual(rep["unpriced_models"], ["claude-opus-5-20261001"])
+        shown = self.hansa("cost", "--by", "model")
+        row = next(line for line in shown.splitlines() if line.lstrip().startswith("claude-opus-5"))
+        self.assertEqual(row.split(), ["claude-opus-5-20261001", "12,000,000", "no", "price"])
+        self.assertIn("no price yet for: claude-opus-5-20261001", shown)
+        self.assertIn("the principal sets prices on the page", shown)
+        self.assertIn("figure Claude Code recorded for a worker's run", rep["note"])
         self.assertIn("regardless of the provider's current settings", rep["note"])
-        self.assertIn("models without either have no price", rep["note"])
+        self.assertIn("The coordinator's own usage and its helpers need an entry in the table", rep["note"])
         turns = cost.turns(self.desk)
-        self.assertEqual(turns["total"]["usd"], 56.75)
-        self.assertEqual(turns["helpers"]["helper"]["usd"], 56.75)
-        self.assertAlmostEqual(turns["token_shares"]["cache_write"], 26.25 / 56.75)
+        self.assertEqual(turns["total"]["usd"], 0)
+        self.assertEqual(turns["helpers"]["helper"]["usd"], 0)
+        self.assertEqual(turns["unpriced_models"], ["claude-opus-5-20261001"])
+        self.assertTrue(all(share == 0 for share in turns["token_shares"].values()))
         # The principal's prices still win, including free tokens.
         s["prices"]["claude-opus-5"] = {"in": 0, "out": 0}
         self.assertEqual(self.desk.save_settings(s), [])
@@ -32617,11 +32638,9 @@ def save():'''))
             for model in ("mimo-x", "claude-unknown", "claude-sonnet-4-6")))
         rep = json.loads(self.hansa("cost", "--json", "--rows"))
         rows = {r["model"]: r for r in rep["rows"]}
-        for model in ("mimo-x", "claude-unknown"):
+        for model in ("mimo-x", "claude-unknown", "claude-sonnet-4-6"):
             self.assertEqual((rows[model]["usd"], rows[model]["priced_by"]), (None, "no price"))
-        self.assertEqual((rows["claude-sonnet-4-6"]["usd"], rows["claude-sonnet-4-6"]["priced_by"]),
-                         (.015, "Claude Code list price"))
-        self.assertEqual(rep["unpriced_models"], ["claude-unknown", "mimo-x"])
+        self.assertEqual(rep["unpriced_models"], ["claude-sonnet-4-6", "claude-unknown", "mimo-x"])
 
     def test_status_unpriced_tokens_have_no_dollar_value(self):
         tid = self.desk.new_task("Unpriced work")
