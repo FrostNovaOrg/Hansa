@@ -33425,12 +33425,8 @@ def save():'''))
                     self.assertEqual(self.web_request(path, headers={**auth, **headers})[0], 200, path)
                 for path, data, target in (
                         ("/api/pause", {}, None), ("/api/resume", {}, None),
-                        ("/api/provider/top-up", {"provider": "mimo"}, "_top_up_provider"),
-                        ("/api/check", {"provider": "mimo"}, "check_provider"),
                         ("/api/release/answer", {"id": 1, "yes": True}, "release.answer"),
-                        ("/api/release/stop", {"id": 1}, "release.stop_release"),
-                        ("/api/alert/test", {}, "alert.test"),
-                        ("/api/alert/push-test", {"id": "x"}, "_push_test")):
+                        ("/api/release/stop", {"id": 1}, "release.stop_release")):
                     patch = unittest.mock.patch("hansa.web." + target, return_value={"ok": True}) if target \
                         else contextlib.nullcontext()
                     with patch as called:
@@ -33438,10 +33434,79 @@ def save():'''))
                     self.assertEqual((code, body.get("ok")), (200, True), path)
                     if target:
                         called.assert_called_once()
+                    elif path == "/api/pause":
+                        self.assertTrue(self.desk.paused())
+                    else:
+                        self.assertFalse(self.desk.paused())
+
+    OUTSIDE_CLOSED_POSTS = (
+        ("/api/alert/test", {}, "hansa.web.alert.test"),
+        ("/api/alert/push-test", {"id": "fixture"}, "hansa.alert_push.test"),
+        ("/api/alert/push-preview", {"address": "https://api.day.app/fixture"}, "hansa.alert_services.preview"),
+        ("/api/check", {"provider": "claude"}, "hansa.web.check_provider"),
+        ("/api/provider/top-up", {"provider": "claude"}, "hansa.web._top_up_provider"))
+
+    def assert_outside_action_refused(self, path, data, target):
+        from hansa import rests, web
+        # Both the desk's credit rest and the shared rest must survive a refused top-up.
+        self.desk.set_provider_state("claude", credit_since=123, cool_until=time.time() + 3600,
+                                     reason="credit", rest_how="credit")
+        rests.record(self.desk, "claude", credit_since=123)
+        before = (self.desk.provider_state(), rests.rests_file().read_bytes(), self.desk.events_path.read_bytes())
+        for headers in self.outside_cases():
+            with self.subTest(headers=headers), unittest.mock.patch(
+                    target, wraps=web._top_up_provider if path == "/api/provider/top-up" else None) as called:
+                if path != "/api/provider/top-up":
+                    called.return_value = {"ok": True}
+                code, reply, _ = self.settings_post(path, data, headers)
+                self.assertEqual(code, 200)
+                self.assertIs(reply["ok"], False)
+                self.assertEqual(reply["code"], "outside_local_only")
+                self.assertEqual(reply["problem_details"], [{"code": "outside_local_only", "values": {}}])
+                self.assertIn(path, reply["problems"][0])
+                self.assertIn("Allow changing settings from outside this machine", reply["problems"][0])
+                called.assert_not_called()
+                self.assertEqual((self.desk.provider_state(), rests.rests_file().read_bytes(),
+                                  self.desk.events_path.read_bytes()), before)
+
+    def test_outside_locked_refuses_alert_test_without_running(self):
+        self.assert_outside_action_refused(*self.OUTSIDE_CLOSED_POSTS[0])
+
+    def test_outside_locked_refuses_push_test_without_sending(self):
+        self.assert_outside_action_refused(*self.OUTSIDE_CLOSED_POSTS[1])
+
+    def test_outside_locked_refuses_push_preview_without_parsing(self):
+        self.assert_outside_action_refused(*self.OUTSIDE_CLOSED_POSTS[2])
+
+    def test_outside_locked_refuses_check_without_provider_call(self):
+        self.assert_outside_action_refused(*self.OUTSIDE_CLOSED_POSTS[3])
+
+    def test_outside_locked_refuses_top_up_without_clearing_rest_or_event(self):
+        # Exercise the real top-up helper too: it must not clear either rest or append an event.
+        self.assert_outside_action_refused(*self.OUTSIDE_CLOSED_POSTS[4])
+
+    def test_outside_locked_refuses_a_post_not_on_the_open_list(self):
+        code, reply, _ = self.settings_post("/api/future-action", {}, {"Host": "desk.example"})
+        self.assertEqual((code, reply.get("ok"), reply.get("code")), (200, False, "outside_local_only"))
+        self.assertEqual(self.settings_post("/api/future-action", {}, {})[0], 404)
+
+    def test_local_and_switch_on_keep_the_five_actions_open(self):
+        for switch, cases in ((False, [{"Host": h} for h in self.LOCAL_HOSTS]), (True, self.outside_cases())):
+            self.assertTrue(save_from_page(self.desk, {"settings": {
+                **self.desk.settings(), "settings_from_outside": switch}})["ok"])
+            for headers in cases:
+                for path, data, target in self.OUTSIDE_CLOSED_POSTS:
+                    with self.subTest(headers=headers, path=path), \
+                            unittest.mock.patch(target, return_value="sent" if target == "hansa.alert_push.test"
+                                                else {"ok": True}) as called:
+                        code, reply, _ = self.settings_post(path, data, headers)
+                        self.assertEqual((code, reply.get("ok")), (200, True))
+                        called.assert_called_once()
 
     def test_settings_requests_without_the_key_are_refused_before_the_rule(self):
         for headers in [{}, *self.outside_cases()]:
-            for path in ("/api/settings", "/api/key"):
+            for path in ("/api/settings", "/api/key", *(p for p, _, _ in self.OUTSIDE_CLOSED_POSTS),
+                         "/api/pause", "/api/resume", "/api/release/answer", "/api/release/stop", "/api/future-action"):
                 with self.subTest(headers=headers, path=path):
                     before = self.settings_and_keys()
                     code, body, _ = self.web_request(path, method="POST", headers={"X-Hansa": "1", **headers},
@@ -33536,6 +33601,32 @@ def save():'''))
                 self.assertTrue(output["ok"])
                 self.assertTrue(output["lastGood"])
                 self.assertEqual(output["delays"], [5000, 10000, 20000, 40000, 60000, 60000])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_status_stays_readable_while_the_outside_rule_is_pending(self):
+        from hansa import web
+        self.desk.set_provider_state("claude", credit_since=time.time() - 60)
+        harness = self.tmp / "outside-rule-pending.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            for outside, switch in ((False, False), (True, False), (True, True)):
+                with self.subTest(language=language, outside=outside, switch=switch):
+                    settings = public_settings(self.desk)
+                    settings["from_outside"] = outside
+                    settings["settings"]["settings_from_outside"] = switch
+                    replies = {"/api/status": views.status(self.desk), "/api/events": [],
+                               "/api/settings": settings}
+                    result = subprocess.run(["node", str(harness), str(web.UI), "outside-rule-pending", language],
+                                            input=json.dumps(replies), capture_output=True, text=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(result.stdout, result.stderr or "Status waited for the outside rule")
+                    page = json.loads(result.stdout)
+                    self.assertEqual(page["before"], [True, True])  # Ping and top-up
+                    self.assertEqual(page["after"], [outside and not switch] * 2)
+                    self.assertTrue(page["resumeEnabled"])
+                    self.assertTrue(page["sameControls"])
+                    self.assertEqual(page["settingsGets"], 1)
+                    self.assertEqual(page["posts"], [{"path": "/api/pause", "body": {"reason": "While settings load"}}])
 
     def goals_page(self, rows, scenario="goals", language="en"):
         from hansa import web
@@ -39468,6 +39559,8 @@ function openPage(search = "", hash = "") {
   vm.runInContext(script, context);
   return context;
 }
+let finishOutsideRule;
+if (ask === "outside-rule-pending") settingsGetGate = new Promise(resolve => { finishOutsideRule = resolve; });
 let ctx = openPage(preferences.search, preferences.hash);
 const walk = (el, f) => { if (el instanceof El) { f(el); el.kids.forEach(k => walk(k, f)); } };
 const headerLinks = () => descendants(ids.header, "a").map(el => ({tag:el.tag, ...el.attrs,
@@ -40583,6 +40676,66 @@ else if (ask.startsWith("settings-dispatch-")) (async () => {
   check(root.textContent.includes("Paused elsewhere"), "returning to dirty Settings did not refresh dispatch state");
   console.log(JSON.stringify({initial, failed, posts:apiPosts, draft:true, reopened:snapshot()}));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "outside-rule-pending") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  await run("loadStatus()");
+  await run("loadStatus()");  // A pending settings read must not multiply with each status refresh.
+  const root = ids["#tab-status"], buttons = () => descendants(root, "button");
+  const controls = buttons().filter(b => [run("T.check"), run("T.toppedUp")].includes(b.textContent));
+  const before = controls.map(b => b.disabled);
+  await run("loadDispatch()");
+  const dispatch = run("dispatchPanel");
+  descendants(dispatch, "input")[0].value = "While settings load";
+  await descendants(dispatch, "button").find(b => b.textContent === run("T.pause")).click();
+  const resumeEnabled = descendants(dispatch, "button").some(b => b.textContent === run("T.resume") && !b.disabled);
+  // Keep the very same controls while the rule arrives, including any focus or draft beside them.
+  const currentControls = buttons().filter(b => [run("T.check"), run("T.toppedUp")].includes(b.textContent));
+  finishOutsideRule();
+  await new Promise(resolve => setImmediate(resolve));
+  const sameControls = currentControls.every(b => root.contains(b));
+  console.log(JSON.stringify({before, after:currentControls.map(b => b.disabled), resumeEnabled, sameControls,
+    settingsGets:settingsGetCount, posts:apiPosts}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "outside-actions") (async () => {
+  const run = code => vm.runInContext(code, ctx);
+  const find = (root, pred) => { let result; walk(root, el => { if (!result && pred(el)) result = el; }); return result; };
+  const button = (root, label) => find(root, el => el.tag === "button" && el.textContent === run("T." + label));
+  const state = root => Object.fromEntries(["check", "toppedUp", "alertTest", "pushTest"].map(label =>
+    [label, button(root, label)?.disabled]));
+  const messages = [];
+  const exercise = async (root, labels) => {
+    for (const label of labels) {
+      const control = button(root, label);
+      if (!control) throw new Error("missing " + label);
+      await control.on.click();
+      messages.push({label, text:root.textContent + ids["#state-list"].textContent, button:control.textContent,
+        className:control.className});
+    }
+  };
+  // Status first, without loading the settings form.
+  await run("loadStatus()");
+  const status = state(ids["#tab-status"]), settingsBeforeStatus = run("S");
+  await exercise(ids["#tab-status"], ["check", "toppedUp"]);
+  await run("loadSettings()");
+  const root = ids["#tab-settings"], settings = state(root);
+  const previewControls = [];
+  walk(root, el => { if (["address", "service"].includes(el.attrs["data-push-field"]))
+    previewControls.push({field:el.attrs["data-push-field"], disabled:el.disabled}); });
+  // Direct handler calls also check the lock; a disabled DOM control cannot normally be clicked.
+  await exercise(root, ["check", "toppedUp", "alertTest", "pushTest"]);
+  for (const fresh of [false, true]) {
+    const card = find(root, el => fresh ? "data-push-add" in el.attrs : "data-push-id" in el.attrs);
+    const address = find(card, el => el.attrs["data-push-field"] === "address");
+    address.value = "https://api.day.app/fixture-preview";
+    await address.on.input({target:address});
+    messages.push({label:"preview", text:card.textContent});
+    const service = find(card, el => el.attrs["data-push-field"] === "service");
+    service.value = "bark"; service.on.change({target:service});
+  }
+  console.log(JSON.stringify({status, settings, settingsBeforeStatus, previewControls, messages, posts:apiPosts,
+    locked:run("T.outsideLocked"), alertBad:run("T.alertTestBad"), pushBad:run("T.pushTestBad"),
+    check:run("T.check"), notices:ids["#tab-settings"].textContent}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "principal-credit" || ask === "status-sections") (async () => {
   const run = code => vm.runInContext(code, ctx);
   const tree = el => ({tag:el.tag, attrs:el.attrs, className:el.className,
@@ -41034,8 +41187,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         nameLabel:field(root, "name")?.attrs["aria-label"],
         last:find(el => "data-push-last" in el.attrs, root)?.textContent});
       return {text:block().textContent, entries:cards().map(describe), add:add ? describe(add) : null,
-        alertsIndex:ids["#tab-settings"].textContent.indexOf(run("T.alertCommandTitle")) <
-          ids["#tab-settings"].textContent.indexOf(run("T.pushTitle")),
+        alertsIndex:descendants(ids["#tab-settings"], "h2").findIndex(el => el.textContent === run("T.alertCommandTitle")) <
+          descendants(ids["#tab-settings"], "h2").findIndex(el => el.textContent === run("T.pushTitle")),
         saveState:run("settingsSaveState.textContent"), badge:run("settingsBadge.textContent"),
         turnLabel:turnLabel()?.textContent, turnMin:turnInput()?.value};
     };
@@ -42238,7 +42391,7 @@ else if (ask === "task-steps")'''))
             handler.do_GET()
             self.assertEqual(replies.pop()[0], 403)
             view.assert_not_called()
-            handler.headers = {"Authorization": "Bearer " + self.desk.web_token()}
+            handler.headers = {"Authorization": "Bearer " + self.desk.web_token(), "Host": "127.0.0.1:8765"}
             handler.do_GET()
             self.assertEqual(replies.pop(), (200, {"lanes": []}))
             view.assert_called_once_with(self.desk)
@@ -44578,6 +44731,7 @@ else if (ask === "task-steps")'''))
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
         replies = {"/api/status": status, "/api/events": [], "/api/task": {"text": "Task detail from API"},
+                   "/api/settings": public_settings(self.desk),
                    "/api/check": {"ok": True, "detail": "example ping"}}
         for language in ("en", "zh"):
             with self.subTest(language=language):
@@ -47738,7 +47892,7 @@ else:
         for path in ("/api/alert/bark/key", "/api/alert/bark-test"):
             page.path = path
             data = b"{}"
-            page.headers = {"Authorization": "Bearer " + self.desk.web_token(), "X-Hansa": "1",
+            page.headers = {"Authorization": "Bearer " + self.desk.web_token(), "Host": "127.0.0.1:8765", "X-Hansa": "1",
                             "Content-Length": str(len(data))}
             page.rfile, page._send = io.BytesIO(data), unittest.mock.Mock()
             page.do_POST()
@@ -50732,7 +50886,8 @@ else:
         data = json.dumps(body).encode()
         ours, theirs = socket.socketpair()
         with ours, theirs:
-            ours.sendall(f"POST {path} HTTP/1.0\r\nAuthorization: Bearer {self.desk.web_token()}\r\nX-Hansa: 1\r\n"
+            ours.sendall(f"POST {path} HTTP/1.0\r\nHost: 127.0.0.1:8765\r\n"
+                         f"Authorization: Bearer {self.desk.web_token()}\r\nX-Hansa: 1\r\n"
                          f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
             made["handler"](theirs, ("127.0.0.1", 0), None)
             theirs.shutdown(socket.SHUT_WR)
@@ -53729,6 +53884,68 @@ class PageLanguageTest(unittest.TestCase):
     setUp = AlertPushPageTest.setUp
     page = AlertPushPageTest.page
     PAGE_HARNESS = AlertPushPageTest.PAGE_HARNESS
+
+    def outside_actions_page(self, language, outside=True, switch=False, refusal=False):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        from hansa import web
+        if not self.desk.settings()["alert_push"]:
+            alert_push.change(self.desk, [{"address": "https://api.day.app/outside-page-fixture"}], by="page")
+        self.desk.set_provider_state("claude", credit_since=time.time() - 60)
+        settings = public_settings(self.desk)
+        settings.update(from_outside=outside)
+        settings["settings"]["settings_from_outside"] = switch
+        given = {"/api/settings": settings, "/api/status": views.status(self.desk), "/api/events": []}
+        for path in ("/api/alert/test", "/api/alert/push-test", "/api/alert/push-preview", "/api/check",
+                     "/api/provider/top-up"):
+            given[path] = {"ok": False, "code": "outside_local_only",
+                           "problems": [web.OUTSIDE_LOCAL_ONLY.format(path=path)]} if refusal else {"ok": True}
+        harness = self.tmp / "outside-actions.js"
+        harness.write_text(self.PAGE_HARNESS)
+        result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"),
+                                 "outside-actions", "zh-CN" if language == "zh" else "en"],
+                                input=json.dumps(given), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_outside_locked_page_disables_all_five_actions_in_both_languages(self):
+        for lang in ("en", "zh"):
+            with self.subTest(lang=lang):
+                page = self.outside_actions_page(lang)
+                self.assertIsNone(page["settingsBeforeStatus"])
+                self.assertEqual(page["status"], {"check": True, "toppedUp": True})
+                self.assertEqual(page["settings"], dict.fromkeys(("check", "toppedUp", "alertTest", "pushTest"), True))
+                self.assertEqual(len(page["previewControls"]), 4)  # saved entry and add-address form
+                self.assertTrue(all(c["disabled"] for c in page["previewControls"]))
+                self.assertEqual(page["posts"], [])
+
+    def test_local_and_switch_on_page_keep_action_controls_enabled(self):
+        for lang in ("en", "zh"):
+            for outside, switch in ((False, False), (True, True)):
+                with self.subTest(lang=lang, outside=outside, switch=switch):
+                    # Stale refusals keep the fixture's credit rest visible for both top-up controls.
+                    page = self.outside_actions_page(lang, outside, switch, refusal=True)
+                    self.assertEqual(page["status"], {"check": False, "toppedUp": False})
+                    self.assertTrue(all(v is False for v in page["settings"].values()))
+                    self.assertTrue(all(not c["disabled"] for c in page["previewControls"]))
+
+    def test_outside_action_refusals_read_in_the_pages_language_without_failed_tests(self):
+        for lang in ("en", "zh"):
+            with self.subTest(lang=lang):
+                page = self.outside_actions_page(lang, switch=True, refusal=True)
+                self.assertEqual({p["path"] for p in page["posts"]}, {
+                    "/api/check", "/api/provider/top-up", "/api/alert/test", "/api/alert/push-test", "/api/alert/push-preview"})
+                for message in page["messages"]:
+                    self.assertIn(page["locked"], message["text"], message["label"])
+                    self.assertNotIn(page["alertBad"], message["text"])
+                    self.assertNotIn(page["pushBad"], message["text"])
+                    self.assertNotIn("POST /api/", message["text"])
+                    if message["label"] == "check":
+                        self.assertEqual(message["button"], page["check"])
+                        self.assertNotEqual(message["className"], "bad")
+                for word in (("only read", "Ping", "top-ups", "Allow changing settings from outside this machine")
+                             if lang == "en" else ("只能查看", "Ping", "已充值", "允许从本机以外更改设置")):
+                    self.assertIn(word, page["locked"])
 
     def test_validation_codes_name_the_pages_fields_and_keep_terminal_words(self):
         from hansa.desk import validate

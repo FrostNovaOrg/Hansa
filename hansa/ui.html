@@ -535,8 +535,8 @@ const T = ZH ? {
   ready:"可用", notChecked:"尚未检查", checkFailed:"上次 Ping 未通过", lastCheck:"上次 Ping", addProvider:"加一家服务商", newName:"名字（小写字母、数字、-）", remove:"删除",
   general:"总体", deskName:"工作台名称",
   outsideTitle:"允许从本机以外更改设置",
-  outsideNote:"默认关闭。开启后，经由代理或从其他地址打开本页的请求也能保存设置和服务商密钥，和本机自己的地址（SSH 隧道）一样。查看、答复或停止发布、暂停和 Ping 无论开关如何都能从外部进行。",
-  outsideLocked:"本页是从本机以外打开的（例如经由代理）：这里能查看设置，但设置和密钥只能从本机自己的地址（SSH 隧道）更改。如需在这里更改，请在本机地址打开的页面中开启 设置 → 工作线 → 总体 里的“允许从本机以外更改设置”。",
+  outsideNote:"默认关闭。关闭时，从本机以外（例如经由代理）只能查看、答复或停止发布、暂停或恢复派发任务。开启后，还能保存设置和服务商密钥、测试提醒、发送测试推送、识别推送地址、Ping 和确认已充值，和本机自己的地址（SSH 隧道）一样。",
+  outsideLocked:"本页是从本机以外打开的（例如经由代理）：这里只能查看、答复或停止发布、暂停或恢复派发任务。保存设置和密钥、测试提醒、发送测试推送、识别推送地址、Ping 和确认已充值均已禁用。如需使用，请在本机自己的地址（SSH 隧道）打开的页面中开启 设置 → 工作线 → 总体 里的“允许从本机以外更改设置”。",
   deskNameHint:"最多 40 个字符，任何语言均可；只用一行，不含控制字符、Unicode 格式字符或已保存的密钥。保存时去掉两端空格；留空或只填空格使用路径的最后两级文件夹。只有负责人在此保存才会更改，并记入设置历史。名称用于提醒、推送标题和分组、网页、status、工作台列表和菜单；列表和菜单同时显示文件夹，以区分同名工作台。",
   concurrency:"同时最多做几件", compactIdle:"空闲时压缩于（token）", compactWorking:"工作中压缩于（token）",
   compactNote:"一轮以回答结束、会话空闲后，若上下文达到第一个数，协调员的 mod 在空闲一分钟后压缩它，这时整个上下文还在提示缓存里。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第二个数时压缩（hansa coordinator 用 --autocompact 传给它）。两个数都在 100,000 到 1,000,000 token 之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或第一个数不小于第二个数），那个压缩就不会发生：Claude Code 自己先压缩了。第二个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。第一个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第二个数从会话下次启动起生效。协调员不能改它们。Claude Code（2.1.299 或更新的版本）还会自己压缩一个有 200,000 token 或更多、空闲了约 54 分钟的对话；这一项 Hansa 既不设置也不读取。mod 需要 Claude Code 2.1.306 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
@@ -724,8 +724,8 @@ const T = ZH ? {
   ready:"ready", notChecked:"not checked yet", checkFailed:"last ping failed", lastCheck:"last ping", addProvider:"Add provider", newName:"name (a-z, 0-9, -)", remove:"Remove",
   general:"General", deskName:"Desk name",
   outsideTitle:"Allow changing settings from outside this machine",
-  outsideNote:"Off by default. On: a page opened through a proxy or from another address may save settings and provider keys, as this machine's own address (the SSH tunnel) does. Reading, answering or stopping releases, pausing and Ping work from outside either way.",
-  outsideLocked:"This page was opened from outside this machine (through a proxy, say): it shows the settings, but settings and keys change only from this machine's own address (the SSH tunnel). To change them from here, turn on “Allow changing settings from outside this machine” in Settings → Lanes → General on the page opened at this machine's own address.",
+  outsideNote:"Off by default. Off: from outside this machine (through a proxy, say), you may only read, answer or stop releases, and pause or resume dispatch. On: you may also save settings and provider keys, test alerts, send test pushes, recognize push addresses, Ping and confirm top-ups, as at this machine's own address (the SSH tunnel).",
+  outsideLocked:"This page was opened from outside this machine (through a proxy, say): here you may only read, answer or stop releases, and pause or resume dispatch. Saving settings and keys, testing alerts, sending test pushes, recognizing push addresses, Ping and confirming top-ups are disabled. To use them here, turn on “Allow changing settings from outside this machine” in Settings → Lanes → General on the page opened at this machine's own address (the SSH tunnel).",
   deskNameHint:"Up to 40 characters in any language, on one line, without control or Unicode format characters or saved keys. Saving trims surrounding spaces. Leave blank or use only spaces for the last two folders of the path. Only the principal can save it here; settings history records the change. Used in alerts, push titles and groups, the page, status, desk lists and the menu. Lists and the menu also show the folder to distinguish desks with the same name.",
   concurrency:"Tasks at once", compactIdle:"Compact when idle at (tokens)", compactWorking:"Compact while working at (tokens)",
   compactNote:"Once a turn has ended with an answer and the session is idle, the coordinator's mod compacts it after a minute if its context is at or above the first figure, while the whole context is still in the prompt cache. A new turn cancels the wait. While it works nothing interrupts it: Claude Code's own auto-compact compacts it at the second (hansa coordinator gives it with --autocompact). Both figures take 100,000 to 1,000,000 tokens. The defaults suit a model with a 1M-token window. A figure at or near the model's window, or a first figure at or above the second, never comes: Claude Code compacts on its own first. A second figure above the model's window is taken as that window: Claude Code compacts at the model's own limit, as with no figure. A change to the first applies from the session's next decision (when a turn ends, or a wait ends); a change to the second from the session's next start. The coordinator cannot change them. Claude Code (2.1.299 or later) also compacts by itself a conversation of 200,000 tokens or more left idle about 54 minutes; hansa neither sets nor reads that. The mod needs Claude Code 2.1.306 or later; the status line at the top says whether the session was started with it, and why not.",
@@ -1843,6 +1843,13 @@ function loadStatus(force = false) {
   return statusFlight;
 }
 async function renderStatus(force) {
+  // Status offers Ping and top-ups before Settings is opened. Read the existing settings reply for the rule,
+  // without holding up reading or replacing the settings form's drafts. Until it arrives, both stay disabled.
+  if (!outsideRuleLoaded && !outsideRuleFlight) {
+    outsideRuleFlight = api("/api/settings").then(reply => {
+      if (!outsideRuleLoaded) readOutsideRule(reply);
+    }).catch(() => {}).finally(() => { outsideRuleFlight = null; });
+  }
   const [status, events] = await Promise.allSettled([api("/api/status"), api("/api/events")]);
   statusUnreached = [status, events].some(x => x.status === "rejected" && x.reason?.unreached);
   statusForeign = [status, events].find(x => x.status === "rejected" && x.reason?.notFromServe)?.reason.message || null;
@@ -1904,7 +1911,7 @@ async function renderStatus(force) {
     creditProviders(st).length ? dashboardPanel(T.topUpsToConfirm, "providers", creditProviders(st).length,
       creditProviders(st).map(p => h("div", {class:"request-card", "data-principal-provider":p.name},
         h("div", {class:"request-body"}, h("strong", {}, p.name), T.waitReasons.credit({since:p.credit_since})),
-        h("div", {class:"principal-actions"}, h("button", {"data-status-focus":`top-up:${p.name}`,
+        h("div", {class:"principal-actions"}, h("button", {disabled:SETTINGS_LOCKED, "data-outside-action":"", "data-status-focus":`top-up:${p.name}`,
           onclick:() => topUpProvider(p.name)}, T.toppedUp))))) : null) : null;
   statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));
   $("#tab-status").replaceChildren(...shown([
@@ -2048,19 +2055,36 @@ function releasesSection(rel, scheduled = []) {
         releaseStop(r))]))] : null);
 }
 function checkButton(name, after) {
-  const b = h("button", {"data-status-focus":`provider:${name}:ping`, onclick: async () => { b.disabled = true; b.textContent = T.checking;
+  const b = h("button", {disabled:SETTINGS_LOCKED, "data-outside-action":"", "data-status-focus":`provider:${name}:ping`, onclick: async () => {
+    if (SETTINGS_LOCKED) return;
+    b.disabled = true; b.textContent = T.checking;
     let r = null;
     try { r = await api("/api/check", {provider:name}); } catch (e) { err(e); }
+    if (outsideRefusal(r)) {
+      b.disabled = SETTINGS_LOCKED; b.textContent = T.check; b.className = "";
+      err(new Error(outsideRefusal(r))); return;
+    }
     if (after) return after(r);
-    b.disabled = false; b.textContent = r ? `${T.check}: ${r.ok ? "OK" : "✗"} ${fieldText(r, "detail")}` : T.check;
+    b.disabled = SETTINGS_LOCKED; b.textContent = r ? `${T.check}: ${r.ok ? "OK" : "✗"} ${fieldText(r, "detail")}` : T.check;
     b.className = r && r.ok ? "ok" : "bad"; }}, T.check);
   return b;
 }
 
 /* ---------- settings ---------- */
 let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
-// Opened from outside this machine (a proxy) while the principal's switch is off: settings and keys only shown
-let SETTINGS_LOCKED = false;
+// Outside and locked: only reading, release answers/stops and pause/resume stay open.
+let SETTINGS_LOCKED = true, outsideRuleLoaded = false, outsideRuleFlight = null;
+function readOutsideRule(reply) {
+  const wasLocked = SETTINGS_LOCKED;
+  SETTINGS_LOCKED = reply.from_outside === true && reply.settings.settings_from_outside !== true;
+  outsideRuleLoaded = true;
+  if (wasLocked !== SETTINGS_LOCKED) {
+    for (const button of document.querySelectorAll("#tab-status button")) {
+      if (button.getAttribute("data-outside-action") !== null) button.disabled = SETTINGS_LOCKED;
+    }
+  }
+}
+const outsideRefusal = reply => reply?.code === "outside_local_only" ? T.outsideLocked : "";
 // Public, masked entries and service instructions come from the settings reply. Private drafts stay in memory.
 let PUSH_ENTRIES = [], PUSH_SERVICES = [], PUSH_DRAFTS = {};
 const emptyPush = () => ({service:"recognize", address:"", secret:"", name:""});
@@ -2374,7 +2398,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   CREDIT_RESTS = r.provider_credit || {}; CREDIT_MESSAGES = r.provider_credit_messages || {};
   RELEASE_UNMATCHED = r.release_unmatched || []; RELEASE_LAST = r.release_last || {}; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
-  SETTINGS_LOCKED = r.from_outside === true && r.settings.settings_from_outside !== true;
+  readOutsideRule(r);
   // Rebase only fields the principal edited, so an unrelated key save or stale-tab reload keeps newer metadata.
   const pushEdits = keepKeys ? pushChanges().filter(edit => edit.id) : [];
   PUSH_ENTRIES = r.alert_push || []; PUSH_SERVICES = r.alert_push_services || []; PUSH_DRAFTS = {};
@@ -2471,12 +2495,12 @@ async function saveProviderKey(name, clear = false) {
   finally { settingsSaving = false; refreshSettingsState(); }
 }
 async function topUpProvider(name) {
-  if (settingsSaving) return;
+  if (settingsSaving || SETTINGS_LOCKED) return;
   settingsSaving = true; refreshSettingsState();
   try {
     const r = await api("/api/provider/top-up", {provider:name});
     if (r.ok) { delete CREDIT_RESTS[name]; await loadStatus(true); }
-    else err(new Error((r.problems || []).join("; ")));
+    else err(new Error(outsideRefusal(r) || (r.problems || []).join("; ")));
     if (S) renderSettings();
   } catch (e) { err(e); }
   finally { settingsSaving = false; refreshSettingsState(); }
@@ -2663,17 +2687,19 @@ function pick(obj, key, options, labels) {
 function alertSection() {
   S.alert = S.alert || {command:""};
   const said = h("span", {});
-  const test = h("button", {onclick: async () => { test.disabled = true; said.textContent = T.alertTesting; said.className = "muted";
+  const test = h("button", {disabled:SETTINGS_LOCKED, onclick: async () => {
+    if (SETTINGS_LOCKED) return;
+    test.disabled = true; said.textContent = T.alertTesting; said.className = "muted";
     try { const r = await api("/api/alert/test", {});
-      said.textContent = r.channels?.length ? r.channels.map(channel => {
+      said.textContent = outsideRefusal(r) || (r.channels?.length ? r.channels.map(channel => {
         const label = channel.channel === "command" ? T.alertCommandTitle
           : (channel.name || PUSH_SERVICES.find(s => s.id === channel.service)?.name[ZH ? "zh" : "en"] || channel.service);
         const result = channel.channel === "push" ? pushResultText(channel.why, channel, channel.code)
           : channel.ok ? T.pushSent : commandTestFailure(channel);
         return `${label}: ${result}`;
-      }).join("; ") : r.ok ? T.alertTestOk : T.alertTestBad + ((r.problems || []).join("; ") || commandTestFailure(r));
+      }).join("; ") : r.ok ? T.alertTestOk : T.alertTestBad + ((r.problems || []).join("; ") || commandTestFailure(r)));
       said.className = r.ok ? "ok" : "bad"; } catch (e) { err(e); }
-    test.disabled = false; }}, T.alertTest);
+    test.disabled = SETTINGS_LOCKED; }}, T.alertTest);
   S.coordinator_alert = S.coordinator_alert || {};
   return [section(T.alertCommandTitle,
     fields(field(T.alertCommandTitle, bind(S.alert, "command"), T.alertCommandHint, T.alertCmd, true),
@@ -2714,16 +2740,16 @@ function pushSection() {
     let previewVersion = 0;
     const updatePreview = async () => {
       const version = ++previewVersion, address = draft.address.trim(), selected = draft.service;
-      preview.textContent = address ? T.pushChecking : "";
-      if (!address) return;
+      preview.textContent = address && !SETTINGS_LOCKED ? T.pushChecking : "";
+      if (!address || SETTINGS_LOCKED) return;
       try {
         const result = await api("/api/alert/push-preview", {address, service:selected});
         // A slow reply must not describe a different paste or service choice.
         if (version !== previewVersion || draft.address.trim() !== address || draft.service !== selected) return;
         preview.className = result.ok ? "field-note" : "bad";
-        preview.textContent = result.ok ? T.pushRecognized(serviceName(result.service))
+        preview.textContent = outsideRefusal(result) || (result.ok ? T.pushRecognized(serviceName(result.service))
           + (result.warnings?.includes("ntfy_topic_hidden") ? " " + T.pushNtfyTopicWarning : "")
-          : (result.problems || []).map(pushProblem).join(" · ");
+          : (result.problems || []).map(pushProblem).join(" · "));
         if (result.warnings?.length) preview.className = "warn";
       } catch (e) {
         if (version === previewVersion) { preview.className = "bad"; preview.textContent = T.pushPreviewFailed; }
@@ -2731,7 +2757,8 @@ function pushSection() {
     };
     const input = (key, label, hint = "", type = "text") => {
       const barkSecret = key === "secret" && draft.service === "bark";
-      const el = h("input", {type, value:barkSecret ? draft[key].replace(/[\r\n]/g, " ") : draft[key], autocomplete:"off", "aria-label":label, "data-push-field":key,
+      const el = h("input", {type, disabled:key === "address" && SETTINGS_LOCKED,
+        value:barkSecret ? draft[key].replace(/[\r\n]/g, " ") : draft[key], autocomplete:"off", "aria-label":label, "data-push-field":key,
         onpaste:e => {
           if (key !== "secret" || draft.service !== "bark") return;
           // Password inputs strip line breaks. Preserve the copied script in
@@ -2744,7 +2771,7 @@ function pushSection() {
           if (key === "address") await updatePreview(); }});
       return field(label, type === "password" ? passwordControl(el) : el, hint, "", true);
     };
-    const select = h("select", {value:draft.service, "data-push-field":"service", onchange:e => {
+    const select = h("select", {disabled:SETTINGS_LOCKED, value:draft.service, "data-push-field":"service", onchange:e => {
       draft.service = e.target.value; draft.secret = ""; draft.clearSecret = false; renderSettings();
     }}, (fresh ? [{id:"recognize", name:{en:T.pushRecognize, zh:T.pushRecognize}}] : []).concat(PUSH_SERVICES)
       .map(s => h("option", {value:s.id, selected:draft.service === s.id}, word(s.name))));
@@ -2766,15 +2793,16 @@ function pushSection() {
     const lastLine = () => entry.last ? T.pushLast(whyText(entry.last.why, entry, entry.last.code), when(entry.last.at)) : T.pushLastNone;
     const last = h("p", {class:"field-note", "data-push-last":""}, lastLine());
     const said = h("span", {"aria-live":"polite"});
-    const test = h("button", {type:"button", "data-push-test":"", onclick:async () => {
+    const test = h("button", {disabled:SETTINGS_LOCKED, type:"button", "data-push-test":"", onclick:async () => {
+      if (SETTINGS_LOCKED) return;
       test.disabled = true; said.textContent = T.pushTesting;
       try {
         const r = await api("/api/alert/push-test", {id:entry.id});
-        said.textContent = r.ok ? T.pushSent : T.pushTestBad + whyText(r.why, entry, r.last?.code);
+        said.textContent = outsideRefusal(r) || (r.ok ? T.pushSent : T.pushTestBad + whyText(r.why, entry, r.last?.code));
         said.className = r.ok ? "ok" : "bad";
         if (r.last) { entry.last = r.last; last.textContent = lastLine(); }
       } catch (e) { said.textContent = T.pushUnknown; said.className = "bad"; }
-      test.disabled = false;
+      test.disabled = SETTINGS_LOCKED;
     }}, T.pushTest);
     const on = h("input", {type:"checkbox", checked:draft.on, role:"switch", "data-push-field":"on",
       onchange:e => { draft.on = e.target.checked; refreshSettingsState(); }});
@@ -2884,7 +2912,7 @@ function renderSettings(problems = settingsProblems) {
             h("div", {class:"card-actions"}, checkButton(name, null),
               h("button", {class:"danger", onclick:() => removeProvider(name)}, T.remove))),
           CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, messageText(CREDIT_MESSAGES[name], CREDIT_RESTS[name])),
-            h("button", {onclick:() => topUpProvider(name)}, T.toppedUp)) : null,
+            h("button", {disabled:SETTINGS_LOCKED, onclick:() => topUpProvider(name)}, T.toppedUp)) : null,
           fields(field(T.kind, kindSel), field(T.model, bind(p, "model")), field(T.effort, pick(p, "effort", EFFORTS)),
             ...(p.kind === "compatible"
               ? [field(T.endpoint, bind(p, "base_url")), field(T.key,

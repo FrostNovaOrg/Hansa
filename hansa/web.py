@@ -5,8 +5,8 @@ It only reads and writes the desk's files and never calls a model. It listens on
 The page keeps the address's token in sessionStorage for its origin and tab,
 and sends it explicitly in Authorization. Changes also need X-Hansa: 1.
 The HTML shell is public; every API request requires the bearer token.
-A request from outside this machine (from_outside: a proxy's) changes settings and keys only while the
-principal's switch, settings_from_outside, is on.
+A request from outside this machine (from_outside: a proxy's) may only read, answer or stop releases,
+and pause or resume while the principal's switch, settings_from_outside, is off.
 """
 from __future__ import annotations
 
@@ -101,6 +101,11 @@ SETTINGS_LOCAL_ONLY = ("settings and keys change only from this machine's own ad
                        "through the SSH tunnel), and this request came from outside it (through a proxy, say); "
                        "to allow it, turn on \"Allow changing settings from outside this machine\" in Settings, "
                        "Lanes, General, on the page opened at this machine's own address")
+# Keep this list while outside requests need the principal's switch: new POST actions stay closed by default.
+OUTSIDE_OPEN_POSTS = ("/api/pause", "/api/resume", "/api/release/answer", "/api/release/stop")
+OUTSIDE_LOCAL_ONLY = ('POST {path} was refused from outside this machine; to allow it, turn on '
+                      '"Allow changing settings from outside this machine" in Settings, Lanes, General, '
+                      "on the page opened at this machine's own address (through the SSH tunnel)")
 
 
 def from_outside(headers) -> bool:
@@ -209,7 +214,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                                        ("Bearer " + token).encode())
 
         def _settings_refused(self) -> bool:
-            """A change of settings or keys from outside this machine, while the principal's switch is off."""
+            """A request from outside this machine, while the principal's switch is off."""
             return from_outside(self.headers) and desk.settings().get("settings_from_outside") is not True
 
         def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", *, conditional=False):
@@ -374,9 +379,12 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if not isinstance(body, dict):
                     return self._bad_request("invalid_type", "body", "body must be a JSON object")
                 path = urllib.parse.urlparse(self.path).path
-                if path in ("/api/settings", "/api/key") and self._settings_refused():
-                    return self._send(200, {"ok": False, "code": "settings_local_only", "problems": [SETTINGS_LOCAL_ONLY],
-                                            "problem_details": [{"code": "settings_local_only", "values": {}}]})
+                if path not in OUTSIDE_OPEN_POSTS and self._settings_refused():
+                    settings = path in ("/api/settings", "/api/key")
+                    code = "settings_local_only" if settings else "outside_local_only"
+                    problem = SETTINGS_LOCAL_ONLY if settings else OUTSIDE_LOCAL_ONLY.format(path=path)
+                    return self._send(200, {"ok": False, "code": code, "problems": [problem],
+                                            "problem_details": [{"code": code, "values": {}}]})
                 if path == "/api/settings":
                     return self._send(200, _save_settings(desk, body))
                 if path == "/api/key":
