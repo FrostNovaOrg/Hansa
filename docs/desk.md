@@ -1452,7 +1452,9 @@ Time the machine sleeps does not count toward a server being busy or stuck.
 Each message is a `[hansa]` header line with the desk, then a bullet line per
 event, only the latest for each task or subject; a task's line carries `next:`,
 other lines only when one applies; events seconds apart come in one message, and past 10 lines the
-rest are counted (`hansa status` has them). A follower does the posting: a small
+newest 10 are shown whole, the older ones before them on one line, each as its subject and what happened
+(`- 4 earlier: t0001 done; t0002 failed; ...`). A byte in a line that is not UTF-8 (a title given as
+`$'caf\xe9'`) is posted as U+FFFD. A follower does the posting: a small
 background process per session and desk, which reads the event log from where it
 left off and ends when the session's process does; one that starts after
 another ended first posts what was missed meanwhile, as it is now. A `hansa
@@ -1470,10 +1472,17 @@ A startup summary also waits until posted before it counts as caught up. If the 
 the next follower's catch-up includes what was not posted. While it tries, the follower stays live: `hansa notify`
 and `hansa status` still show the session as heard.
 
+A session restarted in place (Claude Code's `/restart`, as after an update) keeps its process but gets a new
+inbox, and the old one is gone. The follower cannot learn the new one: it keeps the lines, and `hansa status`
+says the inbox is gone (no such file) and to run `hansa notify on` from that session. Run from the session,
+`hansa notify on` stops the follower that posts to the old inbox and starts one for the new, which first posts
+what the old one could not.
+
 Which session hears what: a task or request goes to the session that made it
 (`hansa add`, `retry`, `verify`, `merge` and `ask` record it) while
 that session has a follower; otherwise to every session hansa posts to, as do
-desk-wide events. A cancel or close is not posted to the session whose command
+desk-wide events. A queued task cancelled or a finished task closed (`hansa cancel`,
+`hansa close`) is posted like a task that ended, but not to the session whose command
 made it. A session started with `hansa coordinator` is posted to by itself;
 any other session runs `hansa notify on` once (`hansa notify off` stops it).
 `hansa notify` lists the sessions hansa posts to, and `hansa explain notify`
