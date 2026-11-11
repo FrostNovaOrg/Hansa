@@ -2125,7 +2125,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
             mailbox = mailbox_refusal(ordinary)
             parts.append((f"邮箱未使用保留的示例域名，也不在允许名单中（{len(ordinary)} 处）" if zh else
                           mailbox.splitlines()[0]) if mailbox else
-                         (f"要发出去的内容里有你不许发出去的字眼（{len(ordinary)} 处）" if zh else
+                         (f"要发出去的内容里有禁词（{len(ordinary)} 处）" if zh else
                           f"what goes out holds words the principal keeps from going out ({len(ordinary)} place(s))"))
         if limits:
             parts.append(f"{limits} 行无法用正则检查" if zh else

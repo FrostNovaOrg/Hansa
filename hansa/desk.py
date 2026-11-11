@@ -508,33 +508,41 @@ def mailbox_settings(s: dict) -> str:
     return key
 
 
+class SettingsProblem(str):
+    """Keep the terminal sentence, with a code and values for the page to word itself."""
+    def __new__(cls, text, code, **values):
+        problem = super().__new__(cls, text)
+        problem.detail = {"code": code, "values": values}
+        return problem
+
+
 def mailbox_allow_problem(entry) -> str:
     """Why an allowlist entry is not a full address or @domain; empty when it is valid."""
     if not isinstance(entry, str):
-        return "must be a full address or @domain"
+        return SettingsProblem("must be a full address or @domain", "address")
     if not entry:
-        return "an empty entry is not allowed"
+        return SettingsProblem("an empty entry is not allowed", "empty")
     if len(entry) > 254:
-        return "must be at most 254 characters"
+        return SettingsProblem("must be at most 254 characters", "length")
     if any(c.isspace() for c in entry):
-        return "spaces or other whitespace are not allowed"
+        return SettingsProblem("spaces or other whitespace are not allowed", "whitespace")
     if any(c in entry for c in "*?[]"):
-        return "pattern characters (*?[]) are not allowed"
+        return SettingsProblem("pattern characters (*?[]) are not allowed", "pattern")
     if entry == "@":
-        return "@ alone needs a domain"
+        return SettingsProblem("@ alone needs a domain", "domain")
     if entry.count("@") != 1:
-        return "must contain exactly one @, in a full address or @domain"
+        return SettingsProblem("must contain exactly one @, in a full address or @domain", "at")
     if any(not label for label in entry.split("@", 1)[1].split(".")):
-        return "the domain must not contain an empty label"
+        return SettingsProblem("the domain must not contain an empty label", "empty_label")
     label = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
     domain = rf"{label}(?:\.{label})*"
     if not re.fullmatch(rf"(?:[A-Za-z0-9._%+-]+)?@{domain}", entry):
-        return "must be a full address or @domain"
+        return SettingsProblem("must be a full address or @domain", "address")
     domain = entry.rsplit("@", 1)[1]
     if "." not in domain:
-        return "the domain must contain a dot"
+        return SettingsProblem("the domain must contain a dot", "dot")
     if not re.fullmatch(r"[A-Za-z]{2,}", domain.rsplit(".", 1)[-1]):
-        return "the domain's last label must be at least two letters"
+        return SettingsProblem("the domain's last label must be at least two letters", "last_label")
     return ""
 
 
@@ -544,7 +552,7 @@ def forbidden_pattern(entry: str) -> tuple:
     Scans use refused patterns as literals so settings saved before patterns existed keep working.
     """
     if len(entry) > 200:
-        return None, "a pattern must be at most 200 characters, including re:"
+        return None, SettingsProblem("a pattern must be at most 200 characters, including re:", "length")
     try:
         from re import _parser as parser
     except ImportError:  # Python before 3.11
@@ -563,8 +571,8 @@ def forbidden_pattern(entry: str) -> tuple:
             elif name in ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"):
                 body = walk(arg[2])
                 if arg[1] >= 2 and body & {"SUBPATTERN", "BRANCH", "MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}:
-                    raise ValueError("a repeat of two or more must not contain a group, alternation or another "
-                                     "repeat: it can backtrack badly")
+                    raise ValueError(SettingsProblem("a repeat of two or more must not contain a group, alternation or another "
+                                                     "repeat: it can backtrack badly", "repeat"))
                 kinds.update(body)
             elif name in ("ASSERT", "ASSERT_NOT"):
                 kinds.update(walk(arg[1]))
@@ -574,7 +582,7 @@ def forbidden_pattern(entry: str) -> tuple:
                 kinds.update(walk(arg[1]))
                 kinds.update(walk(arg[2] or []))
             elif name == "GROUPREF":
-                raise ValueError("backreferences are not allowed: they can backtrack badly")
+                raise ValueError(SettingsProblem("backreferences are not allowed: they can backtrack badly", "reference"))
         return kinds
 
     try:
@@ -582,10 +590,10 @@ def forbidden_pattern(entry: str) -> tuple:
         try:
             walk(parsed)
         except ValueError as e:
-            return None, str(e)
+            return None, e.args[0]
         pattern = re.compile(entry[3:], re.IGNORECASE)
         if pattern.search("") is not None:
-            return None, "the pattern matches the empty string"
+            return None, SettingsProblem("the pattern matches the empty string", "empty")
     except Exception as e:
         # Python versions differ in the errors raised for invalid SRE code.
         return None, f"the pattern does not compile: {e}"
@@ -637,7 +645,8 @@ def desk_name_problem(name) -> str:
     """The same character limits for page saves and names read for public headings."""
     if (not isinstance(name, str) or len(name) > 40 or _has_control(name)
             or any(unicodedata.category(c) == "Cf" for c in name)):
-        return "desk_name must be at most 40 characters on one line, without control or format characters"
+        return SettingsProblem("desk_name must be at most 40 characters on one line, without control or format characters",
+                               "desk_name", max=40)
     return ""
 
 
@@ -647,6 +656,9 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     rules a lane's allowed commands hold are not its problems (allow_problems shows them there as warnings).
     before: saved settings, to name the existing merge lane when refusing a second one.
     mailbox_key: the spelling before normalization, for a bad boolean's error."""
+    def rule(text, field, reason, **values):
+        return SettingsProblem(text, "field_rule", field=field, reason=reason, **values)
+
     p = []
     if not isinstance(s, dict):
         return ["settings must be an object"]
@@ -678,120 +690,135 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                  "it and when")
     kept = s.get("workers_may_not_read", [])
     if not isinstance(kept, list) or len(kept) > MAX_DENY or not all(isinstance(x, str) for x in kept):
-        p.append(DENY_LIST_WHY)
+        p.append(rule(DENY_LIST_WHY, "workers_may_not_read", "paths", max=MAX_DENY))
         kept = []
     kept = deny_split(kept, root)[0]  # whatever the lanes: a lane's repository gives way to the list, below
     listed = s.get("releases_without_asking", [])
     if not isinstance(listed, list) or len(listed) > 100 or not all(_listed_ok(x) for x in listed):
-        p.append("the releases without asking must be a list of lanes and their release targets, each a lane name "
-                 "and a target name (lowercase letters, digits and '-'; none for the lane's unnamed target)")
+        p.append(rule("the releases without asking must be a list of lanes and their release targets, each a lane name "
+                      "and a target name (lowercase letters, digits and '-'; none for the lane's unnamed target)",
+                      "releases_without_asking", "targets"))
     words = s.get("release_forbidden", [])
     if s.get("release_direct", "record") not in ("record", "hold"):
-        p.append("release_direct must be record or hold")
+        p.append(rule("release_direct must be record or hold", "release_direct", "direct"))
     if not isinstance(s.get("release_mailboxes", False), bool):
-        p.append(f"{mailbox_key} must be true or false")
+        p.append(rule(f"{mailbox_key} must be true or false", "release_mailboxes", "boolean"))
     mailbox_allow = s.get("release_mailbox_allow", [])
     if not isinstance(mailbox_allow, list) or len(mailbox_allow) > MAX_MAILBOX_ALLOW:
-        p.append(f"release_mailbox_allow must be a list of at most {MAX_MAILBOX_ALLOW} entries, one per line")
+        p.append(SettingsProblem(f"release_mailbox_allow must be a list of at most {MAX_MAILBOX_ALLOW} entries, one per line",
+                                 "mailbox_list", max=MAX_MAILBOX_ALLOW))
     else:
         seen = {}
         for i, entry in enumerate(mailbox_allow, 1):
             why = mailbox_allow_problem(entry)
             if why:
-                p.append(f"release_mailbox_allow entry {i}: {why}")
+                p.append(SettingsProblem(f"release_mailbox_allow entry {i}: {why}", "mailbox_entry",
+                                         entry=i, reason=why.detail["code"], max=254))
             else:
                 folded = entry.casefold()
                 if folded in seen:
-                    p.append(f"release_mailbox_allow entry {i} repeats entry {seen[folded]}")
+                    p.append(SettingsProblem(f"release_mailbox_allow entry {i} repeats entry {seen[folded]}",
+                                             "mailbox_duplicate", entry=i, previous=seen[folded]))
                 else:
                     seen[folded] = i
     if not isinstance(words, list) or len(words) > MAX_WORDS or not all(
             isinstance(x, str) and x.strip() and len(x) <= 200 and not _has_control(x) for x in words):
-        p.append(f"the words no release may send out must be a list of up to {MAX_WORDS} words or phrases, one per "
-                 "line, each up to 200 characters")
+        p.append(rule(f"the words no release may send out must be a list of up to {MAX_WORDS} words or phrases, one per "
+                      "line, each up to 200 characters", "release_forbidden", "words", max=MAX_WORDS, length=200))
     if isinstance(words, list):
         for i, entry in enumerate(words, 1):
             if not isinstance(entry, str) or not entry.startswith("re:"):
                 continue
             _, why = forbidden_pattern(entry)
             if why:
-                p.append(f"release_forbidden entry {i}: {why}")
+                p.append(SettingsProblem(f"release_forbidden entry {i}: {why}", "forbidden_pattern",
+                                         entry=i, reason=getattr(why, "detail", {}).get("code", "unknown"), max=200))
     exceptions = s.get("release_forbidden_except", [])
     if not forbidden_exceptions_ok(exceptions):
         empty = [x for x in (exceptions if isinstance(exceptions, list) else [])
                  if isinstance(x, dict) and isinstance(x.get("entry"), str) and not x["entry"].strip()
                  and isinstance(x.get("lanes"), list) and all(isinstance(lane, str) for lane in x["lanes"])]
         if empty:
-            p.extend(f"release_forbidden_except: the exception for lanes {', '.join(x['lanes'])} has no entry"
+            p.extend(rule(f"release_forbidden_except: the exception for lanes {', '.join(x['lanes'])} has no entry",
+                          "release_forbidden_except", "exception_empty", lanes=x["lanes"])
                      for x in empty)
         else:
-            p.append("release_forbidden_except must be a list of entries as written in release_forbidden and their "
-                     "lanes (a list of lane names)")
+            p.append(rule("release_forbidden_except must be a list of entries as written in release_forbidden and their "
+                          "lanes (a list of lane names)", "release_forbidden_except", "exceptions"))
     elif isinstance(words, list):
         # lane_words compares the original spellings, before the scan compiles re: patterns.
         # Keep spaces and the prefix intact; neither a regex match nor casefolding identifies an entry.
-        p.extend(f"release_forbidden_except: exception {i} "
-                 f"({('lanes ' + ', '.join(x['lanes'])) if x['lanes'] else 'no lanes'}) "
-                 "names no entry in release_forbidden"
+        p.extend(rule(f"release_forbidden_except: exception {i} "
+                      f"({('lanes ' + ', '.join(x['lanes'])) if x['lanes'] else 'no lanes'}) "
+                      "names no entry in release_forbidden", "release_forbidden_except", "exception_missing",
+                      entry=i, lanes=x["lanes"])
                  for i, x in enumerate(exceptions, 1) if x["entry"] not in words)
     al = s.get("alert", {"command": ""})
     from .alert_push import problems as push_problems
     p.extend(push_problems(s.get("alert_push", [])))
     if s.get("alert_language", "en") not in ("en", "zh"):
-        p.append('alert_language must be "en" or "zh"')
+        p.append(rule('alert_language must be "en" or "zh"', "alert_language", "language"))
     if (not isinstance(al, dict) or set(al) - {"command", "by", "at"} or not isinstance(al.get("command", ""), str)
             or len(al.get("command", "")) > 1000 or _has_control(al.get("command", ""))):
-        p.append("the alert command must be one shell command line (up to 1000 characters)")
+        p.append(rule("the alert command must be one shell command line (up to 1000 characters)",
+                      "alert", "command", max=1000))
     cc = s.get("coordinator_compact", {})
     if not isinstance(cc, dict) or set(cc) - set(COMPACT_DEFAULTS) or not all(
             _is_int(v, *COMPACT_MOST[k]) for k, v in cc.items()):
-        p.append("coordinator_compact: compact when idle at and compact while working at must be whole numbers of "
-                 "tokens from 100,000 to 1,000,000")
+        p.append(SettingsProblem("coordinator_compact: compact when idle at and compact while working at must be whole numbers of "
+                                 "tokens from 100,000 to 1,000,000", "compact", min=100000, max=1000000))
     ca = s.get("coordinator_alert", {})
     if not isinstance(ca, dict) or set(ca) - set(COORDINATOR_ALERT):
-        p.append("coordinator_alert must hold " + ", ".join(COORDINATOR_ALERT) + ", each a whole number of minutes")
+        p.append(rule("coordinator_alert must hold " + ", ".join(COORDINATOR_ALERT) + ", each a whole number of minutes",
+                      "coordinator_alert", "minutes"))
     else:
-        p += [f"coordinator_alert: {COORDINATOR_ALERT_WHAT[k]} ({k}) must be a whole number from 0 (off) to "
-              f"{COORDINATOR_ALERT_MOST}, not {json.dumps(v)}" for k, v in ca.items()
+        p += [SettingsProblem(f"coordinator_alert: {COORDINATOR_ALERT_WHAT[k]} ({k}) must be a whole number from 0 (off) to "
+                              f"{COORDINATOR_ALERT_MOST}, not {json.dumps(v)}", "whole_number",
+                              field=k, min=0, max=COORDINATOR_ALERT_MOST) for k, v in ca.items()
               if not _is_int(v, 0, COORDINATOR_ALERT_MOST)]
     if not _is_int(s.get("concurrency"), 1, 8):
-        p.append("concurrency must be a whole number from 1 to 8")
+        p.append(SettingsProblem("concurrency must be a whole number from 1 to 8", "whole_number",
+                                 field="concurrency", min=1, max=8))
     for key, default in (("disk_floor", 10), ("memory_floor", 2)):
         fl = s.get(key, default)
         if not isinstance(fl, (int, float)) or isinstance(fl, bool) or not 0 <= fl <= 100000 or fl != fl:
-            p.append(f"{key} must be a number of GB from 0 (off) to 100000")
+            p.append(SettingsProblem(f"{key} must be a number of GB from 0 (off) to 100000", "gb_number",
+                                     field=key, min=0, max=100000))
     if not _is_int(s.get("cool_minutes"), 1, 1440):
-        p.append("cool_minutes must be a whole number from 1 to 1440")
+        p.append(SettingsProblem("cool_minutes must be a whole number from 1 to 1440", "whole_number",
+                                 field="cool_minutes", min=1, max=1440))
 
     provs = s.get("providers")
     if not isinstance(provs, dict) or not provs:
-        p.append("at least one provider is needed")
+        p.append(rule("at least one provider is needed", "providers", "provider_required"))
         provs = {}
     for name, pv in provs.items():
         at = f"provider {name}"
         if not NAME.match(name):
-            p.append(f"{at}: use lowercase letters, digits and '-'")
+            p.append(rule(f"{at}: use lowercase letters, digits and '-'", "provider_name", "name", provider=name))
         if not isinstance(pv, dict):
-            p.append(f"{at}: must be an object")
+            p.append(rule(f"{at}: must be an object", "providers", "object", provider=name))
             continue
         if {"key", "api_key", "token"} & set(pv):
-            p.append(f"{at}: keys are not kept in settings; use the key box on the page")
+            p.append(rule(f"{at}: keys are not kept in settings; use the key box on the page", "providers", "key", provider=name))
         extra = set(pv) - {"kind", "model", "effort", "config_dir", "base_url", "note", "key", "api_key",
                            "token"}
         if extra:
-            p.append(f"{at}: unknown field(s): {', '.join(sorted(extra))}")
+            p.append(rule(f"{at}: unknown field(s): {', '.join(sorted(extra))}", "providers", "unknown_fields",
+                          provider=name, fields=sorted(extra)))
         if pv.get("kind") not in PROVIDER_KINDS:
-            p.append(f"{at}: kind must be 'subscription' or 'compatible'")
+            p.append(rule(f"{at}: kind must be 'subscription' or 'compatible'", "kind", "kind", provider=name))
         if not isinstance(pv.get("model"), str) or not pv.get("model", "").strip():
-            p.append(f"{at}: model is required")
+            p.append(rule(f"{at}: model is required", "model", "required", provider=name))
         if pv.get("effort", "") not in EFFORTS:
-            p.append(f"{at}: effort must be one of {', '.join(e or '(blank)' for e in EFFORTS)}")
+            p.append(rule(f"{at}: effort must be one of {', '.join(e or '(blank)' for e in EFFORTS)}", "effort", "effort",
+                          provider=name, choices=[e for e in EFFORTS if e]))
         url = pv.get("base_url", "")
         if pv.get("kind") == "compatible" and url and not str(url).startswith(("https://", "http://")):
-            p.append(f"{at}: the endpoint address must start with https://")
+            p.append(rule(f"{at}: the endpoint address must start with https://", "base_url", "https", provider=name))
         cdir = pv.get("config_dir", "")
         if cdir and not str(cdir).startswith("/"):  # nothing expands ~ for a worker
-            p.append(f"{at}: config_dir must be a full path starting with /")
+            p.append(rule(f"{at}: config_dir must be a full path starting with /", "config_dir", "path", provider=name))
 
     lanes = s.get("lanes")
     if not isinstance(lanes, dict):
@@ -853,7 +880,8 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
         if not isinstance(order, list) or not order:
             p.append(f"{at}: list at least one provider")
         else:
-            p += [f"{at}: unknown provider {x}" for x in order if x not in provs]
+            p += [SettingsProblem(f"{at}: unknown provider {x}", "lane_provider", lane=name, provider=x)
+                  for x in order if x not in provs]
         allow = ln.get("allow", [])
         if not isinstance(allow, list):
             p.append(f"{at}: allow must be a list of rules such as Bash(pnpm test:*)")
@@ -897,26 +925,28 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
 
     co = s.get("coordinator")
     if not isinstance(co, dict):
-        p.append("coordinator must be an object")
+        p.append(rule("coordinator must be an object", "coordinator", "object"))
     else:
         if co.get("provider") not in provs:
-            p.append("coordinator: unknown provider")
+            p.append(rule("coordinator: unknown provider", "provider", "provider", scope="coordinator"))
         if co.get("effort", "") not in EFFORTS:
-            p.append("coordinator: effort is not a known level")
+            p.append(rule("coordinator: effort is not a known level", "effort", "effort", scope="coordinator",
+                          choices=[e for e in EFFORTS if e]))
 
     prices = s.get("prices")
     if not isinstance(prices, dict):
-        p.append("prices must be an object")
+        p.append(rule("prices must be an object", "prices", "object"))
     else:
         for model, pr in prices.items():
             if not isinstance(pr, dict) or "in" not in pr or "out" not in pr:
-                p.append(f"price {model}: needs at least in and out")
+                p.append(SettingsProblem(f"price {model}: needs at least in and out", "price_required", model=model))
                 continue
             for k, v in pr.items():
                 if k not in PRICE_FIELDS:
                     p.append(f"price {model}: unknown field {k}")
                 elif not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0 or not _finite_number(v):
-                    p.append(f"price {model}: {k} must be a finite number, 0 or more; use a smaller price if too large")
+                    p.append(SettingsProblem(f"price {model}: {k} must be a finite number, 0 or more; use a smaller price if too large",
+                                             "price_number", model=model, field=k, min=0))
     return p
 
 

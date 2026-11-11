@@ -8380,7 +8380,8 @@ def save():'''))
         reason = "release_forbidden_except: exception 2 (lanes a, b) names no entry in release_forbidden"
         before = self.desk.settings_path.read_bytes()
         self.assertEqual(save_from_page(self.desk, {"settings": settings}),
-                         {"ok": False, "problems": [reason]})
+                         {"ok": False, "problems": [reason], "problem_details": [{"code": "field_rule", "values": {
+                             "field": "release_forbidden_except", "reason": "exception_missing", "entry": 2, "lanes": ["a", "b"]}}]})
         self.assertEqual(self.desk.settings_path.read_bytes(), before)
         # A legacy desk loads unchanged, but every writer refuses its dangling exception.
         write_json(self.desk.settings_path, settings)
@@ -8400,7 +8401,9 @@ def save():'''))
         self.assertEqual(save_from_page(self.desk, {"settings": {**settings, "release_forbidden": []}}),
                          {"ok": False, "problems": [
                              "release_forbidden_except: exception 1 (lanes a) names no entry in release_forbidden",
-                             reason]})
+                             reason], "problem_details": [{"code": "field_rule", "values": {
+                                 "field": "release_forbidden_except", "reason": "exception_missing", "entry": i, "lanes": lanes}}
+                                 for i, lanes in ((1, ["a"]), (2, ["a", "b"]))]})
 
     def test_forbidden_exception_identity_is_the_scans_exact_entry(self):
         from hansa import release
@@ -8423,7 +8426,8 @@ def save():'''))
                     "release_forbidden_except": [{"entry": "private-orphan", "lanes": []}]}
         reason = "release_forbidden_except: exception 1 (no lanes) names no entry in release_forbidden"
         self.assertEqual(save_from_page(self.desk, {"settings": settings}),
-                         {"ok": False, "problems": [reason]})
+                         {"ok": False, "problems": [reason], "problem_details": [{"code": "field_rule", "values": {
+                             "field": "release_forbidden_except", "reason": "exception_missing", "entry": 1, "lanes": []}}]})
         write_json(self.desk.settings_path, settings)
         self.assertEqual(self.desk.save_settings(settings), [reason])
         for language in ("en", "zh"):
@@ -8540,7 +8544,8 @@ def save():'''))
                 self.assertTrue(shown["unavailable"])
                 self.assertIn(reason, shown["refused"])
                 self.assertEqual(save_from_page(self.desk, shown["firstPost"]),
-                                 {"ok": False, "problems": [reason]})
+                                 {"ok": False, "problems": [reason], "problem_details": [{"code": "field_rule", "values": {
+                                     "field": "release_forbidden_except", "reason": "exception_missing", "entry": 1, "lanes": ["a", "b"]}}]})
                 self.assertEqual(shown["posted"]["settings"]["release_forbidden_except"], [])
                 self.assertTrue(save_from_page(self.desk, shown["posted"])["ok"])
 
@@ -9403,7 +9408,7 @@ def save():'''))
             ordinary = len(hits) - limits
             parts = []
             if ordinary:
-                parts.append(f"要发出去的内容里有你不许发出去的字眼（{ordinary} 处）" if zh else
+                parts.append(f"要发出去的内容里有禁词（{ordinary} 处）" if zh else
                              f"what goes out holds words the principal keeps from going out ({ordinary} place(s))")
             if limits:
                 parts.append(f"{limits} 行无法用正则检查" if zh else
@@ -9423,7 +9428,7 @@ def save():'''))
                 coordinator = c.refused("release", "a")
 
             def grouped(text, zh=False, code="line", where="unchecked.txt", page=False):
-                ordinary = "查到的禁发字眼:" if zh else "Words found that must not go out:"
+                ordinary = ("查到的禁词:" if page else "查到的禁发字眼:") if zh else "Words found that must not go out:"
                 limit = "这一行无法检查:" if zh else "The line could not be checked:"
                 c.assertEqual(text.count(ordinary), 1)
                 c.assertEqual(text.count(limit), 1)
@@ -9494,7 +9499,7 @@ def save():'''))
                         if len(selected) == 2:
                             grouped(text, zh, code, page=True)
                         else:
-                            c.assertNotIn(("查到的禁发字眼:" if zh else "Words found that must not go out:") if selected == hits[1:] else
+                            c.assertNotIn(("查到的禁词:" if zh else "Words found that must not go out:") if selected == hits[1:] else
                                           ("这一行无法检查:" if zh else "The line could not be checked:"), text)
 
         def pattern_limit_alert(c):
@@ -32996,7 +33001,7 @@ def save():'''))
                  f"merge check queued: waits for {t2}'s merge check on lane b",
                  f"merge check queued: waits for lane b, busy with {t2}"),
                 ("zh", "做完待审", "合并检查已跑了 0 分钟",
-                 f"合并检查在排队：同一个仓库和基础分支一次只跑一个合并检查，先等工作线 b 上 {t2} 的合并检查",
+                 f"合并检查在排队：等工作线 b 上 {t2} 的合并检查",
                  f"合并检查在排队：等工作线 b 空出来（现在在做 {t2}）")):
             for waiting_for_check, expected in ((True, ahead), (False, busy)):
                 with self.subTest(language=language, waiting_for_check=waiting_for_check):
@@ -42169,7 +42174,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         add("lanes", "lane a is busy", "工作线 a 正忙", busy={"a"})
         add("lanes", "sandbox probe <&>", "沙箱暂缓", lk={"held": {"a": {"work": {"why": "sandbox probe <&>", "kind": "worker"}}}})
         for server, en, zh in (("up", "within seconds", "几秒内"), ("busy", "within seconds", "几秒内"),
-                               ("gone", "not running", "服务未运行"), ("stuck", "6 min", "6 分钟")):
+                               ("gone", "not running", "后台未运行"), ("stuck", "6 min", "6 分钟")):
             values = add("ready", en, zh, lk={"server": {"state": server, "quiet": 360}, "not_looking": "busy" if server in ("gone", "stuck") else ""})
             self.assertEqual((values["lane"], values["provider"], values["seconds"]), ("a", "claude", 360))
         at = 1700000000
@@ -42242,7 +42247,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
                   unreached=["no listening session <&>", "review waits <&>"])
         for language, [page] in self.picture_pages(st):
             with self.subTest(language=language):
-                labels = ("Server code", "Alert failed", "Coordinator unreached") if language == "en" else ("服务代码", "提醒失败", "协调员未收到")
+                labels = ("Server code", "Alert failed", "Coordinator unreached") if language == "en" else ("后台代码", "提醒失败", "协调员未收到")
                 for label, raw in ((labels[0], st["serve_code"]), (labels[1], st["alert_failed"]),
                                    *((labels[2], raw) for raw in st["unreached"])):
                     self.assertIn(label + ": " + raw, page["warnings"])
@@ -42270,7 +42275,7 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
             ("lane_tried", {"lane": "a", "ok": True}, "passed", "通过"),
             ("sandbox_held", {"lane": "a", "why": "probe <&>"}, "Sandbox held", "沙箱暂缓"),
             ("provider_credit", {"provider": "claude"}, "topped up", "充值"),
-            ("server_stopped", {}, "Server stopped", "服务已停止"),
+            ("server_stopped", {}, "Server stopped", "后台已停止"),
             ("unknown_future", {"nested": {"x": 1}, "note": "raw <&>"}, "note=raw <&>", "note=raw <&>"),
         ]
         events = [{"ts": 1700000000 + i, "event": kind, **fields,
@@ -46882,7 +46887,7 @@ else:
                 ("release_ended", "release_void", {"state": "void", "void": "changed", "void_zh": "已改动"},
                  "void: changed; nothing was run", "作废：已改动；什么都没运行", "active"),
                 ("release_ended", "release_forbidden", {"state": "forbidden", "hits": [{"kind": "word"}]},
-                 "what goes out holds words", "要发出去的内容里有你不许发出去的字眼", "active"),
+                 "what goes out holds words", "要发出去的内容里有禁词", "active"),
                 ("release_ended", "release_forbidden", {"state": "forbidden", "hits": [{"kind": "pattern_limit"}]},
                  "1 line(s) could not be checked", "1 行无法用正则检查", "active"),
                 ("release_ended", "release_forbidden", {"state": "forbidden", "hits": [{"kind": "mailbox", "commit": "abc",
@@ -52659,6 +52664,204 @@ class AlertPushPageTest(unittest.TestCase):
                 self.assertTrue(result and result.get("ok"), result)
                 self.assertIn(f"a to-do {bad!r}", out.read_text())
                 self.http.assert_not_called()
+
+
+class PageLanguageTest(unittest.TestCase):
+    setUp = AlertPushPageTest.setUp
+    page = AlertPushPageTest.page
+    PAGE_HARNESS = AlertPushPageTest.PAGE_HARNESS
+
+    def test_validation_codes_name_the_pages_fields_and_keep_terminal_words(self):
+        from hansa.desk import validate
+        cases = (
+            ({"cool_minutes": None}, "whole_number", ("Rest after a usage limit (minutes)", "1", "1440"),
+             ("额度用完后休息（分钟）", "1", "1440")),
+            ({"desk_name": "x" * 41}, "desk_name", ("Desk name", "40", "one line"),
+             ("工作台名称", "40", "一行")),
+            ({"prices": {"claude-opus-5": {}}}, "price_required", ("claude-opus-5", "Input", "Output"),
+             ("claude-opus-5", "输入", "输出")),
+            ({"release_mailbox_allow": ["bad address"]}, "mailbox_entry", ("Mailbox allowlist", "1", "whitespace"),
+             ("邮箱允许名单", "1", "空白")),
+        )
+        for change, code, english, chinese in cases:
+            settings = {**self.desk.settings(), **change}
+            terminal = validate(settings, self.desk.root)
+            reply = save_from_page(self.desk, {"settings": settings})
+            with self.subTest(change=change):
+                self.assertFalse(reply["ok"])
+                self.assertEqual(reply["problems"], terminal)
+                self.assertEqual(reply["problem_details"][0]["code"], code)
+                self.assertIsInstance(reply["problem_details"][0]["values"], dict)
+                for lang, words in (("en", english), ("zh", chinese)):
+                    shown = self.page([{"turn_min": "45"}, {"reply": reply, "save": True}], lang)
+                    message = " ".join(shown["problems"])
+                    for word in words:
+                        self.assertIn(word, message)
+                    self.assertNotIn(terminal[0], message)
+
+    def test_unknown_validation_code_and_old_server_keep_english_fallback(self):
+        for details in (None, [{"code": "future_check", "values": {"limit": 7}}]):
+            reply = {"ok": False, "problems": ["future server explanation"]}
+            if details is not None:
+                reply["problem_details"] = details
+            for lang in ("en", "zh"):
+                shown = self.page([{"turn_min": "45"}, {"reply": reply, "save": True}], lang)
+                self.assertEqual(shown["problems"], reply["problems"])
+
+    def test_localized_validation_still_marks_and_reaches_the_field(self):
+        harness = self.PAGE_HARNESS.replace('settingsPosts:settingsPostCount, problems:run("settingsProblems"),', '''
+      invalid:run('fieldRecords.filter(r => r.control.getAttribute("aria-invalid") === "true").map(r => ({group:r.group, text:r.error.textContent}))'),
+      target:run('problemTarget(settingsProblems[0])?.group'),
+      settingsPosts:settingsPostCount, problems:run("settingsProblems"),''')
+        self.assertNotEqual(harness, self.PAGE_HARNESS)
+        reply = save_from_page(self.desk, {"settings": {**self.desk.settings(), "cool_minutes": 0}})
+        with unittest.mock.patch.object(self, "PAGE_HARNESS", harness):
+            for lang in ("en", "zh"):
+                shown = self.page([{"turn_min": "45"}, {"reply": reply, "save": True}], lang)
+                self.assertEqual(shown["target"], "providers")
+                self.assertEqual(shown["invalid"], [{"group": "providers", "text": shown["problems"][0]}])
+
+    def test_other_editable_validation_errors_use_labels_in_both_languages(self):
+        cases = (
+            ({"coordinator_compact": {"idle_at": 1}}, "空闲时压缩于", "Compact when idle"),
+            ({"coordinator_alert": {"turn_min": -1}}, "协调员轮次接连出错", "Coordinator's turns failing"),
+            ({"prices": {"model": {"in": -1, "out": 2}}}, "输入", "Input"),
+            ({"release_mailbox_allow": ["x@demo.example", "X@DEMO.EXAMPLE"]}, "邮箱允许名单", "Mailbox allowlist"),
+            ({"release_mailbox_allow": ["x@demo.example"] * 501}, "邮箱允许名单", "Mailbox allowlist"),
+            ({"alert": {"command": "x" * 1001}}, "提醒命令", "Alert command"),
+            ({"release_forbidden": ["x" * 201]}, "禁词", "Forbidden words"),
+            ({"providers": {"claude": {"kind": "subscription", "model": ""}}}, "模型", "Model"),
+            ({"coordinator": {"provider": "missing"}}, "协调员", "Coordinator"),
+            ({"coordinator": {"provider": "claude", "effort": "bad"}}, "思考强度", "Effort"),
+        )
+        for change, chinese, english in cases:
+            with self.subTest(change=change):
+                reply = save_from_page(self.desk, {"settings": {**self.desk.settings(), **change}})
+                self.assertFalse(reply["ok"])
+                self.assertNotEqual(reply["problem_details"][0]["code"], "unknown")
+                for lang, label in (("zh", chinese), ("en", english)):
+                    shown = self.page([{"turn_min": "45"}, {"reply": reply, "save": True}], lang)
+                    message = " ".join(shown["problems"])
+                    self.assertIn(label, message)
+                    self.assertNotIn(reply["problems"][0], message)
+
+    def test_each_mailbox_entry_reason_has_a_localized_code(self):
+        for value, reason in ((12, "address"), ("", "empty"), ("x" * 255, "length"), ("x y@demo.example", "whitespace"),
+                              ("*@demo.example", "pattern"), ("@", "domain"), ("x", "at"),
+                              ("x@.example", "empty_label"), ("x@@demo.example", "at"),
+                              ("!@demo.example", "address"), ("x@localhost", "dot"), ("x@demo.x", "last_label")):
+            with self.subTest(reason=reason, value=value):
+                reply = save_from_page(self.desk, {"settings": {**self.desk.settings(), "release_mailbox_allow": [value]}})
+                self.assertEqual(reply["problem_details"][0]["values"]["reason"], reason)
+                for lang in ("en", "zh"):
+                    shown = self.page([{"turn_min": "45"}, {"reply": reply, "save": True}], lang)
+                    self.assertNotIn(reply["problems"][0], " ".join(shown["problems"]))
+
+    def test_pattern_validation_names_the_forbidden_words_field(self):
+        for pattern in ("re:(a+)+", r"re:(a)\1", "re:a*", "re:" + "x" * 201):
+            with self.subTest(pattern=pattern):
+                reply = save_from_page(self.desk, {"settings": {**self.desk.settings(), "release_forbidden": [pattern]}})
+                self.assertFalse(reply["ok"])
+                for lang, label in (("en", "Forbidden words"), ("zh", "禁词")):
+                    shown = self.page([{"turn_min": "45"}, {"reply": reply, "save": True}], lang)
+                    self.assertTrue(all(label in p and "release_forbidden" not in p for p in shown["problems"]), shown["problems"])
+
+    def test_paste_refusals_are_whole_chinese_lines(self):
+        cases = (
+            ("paste the service's complete bot address", "请粘贴该服务的完整机器人地址。"),
+            ("paste the Bark device key", "请粘贴 Bark 设备密钥。"),
+            ("paste the Gotify server address or its /message?token=… address",
+             "请粘贴 Gotify 服务器地址，或它的 /message?token=… 地址。"),
+            ("paste the sendMessage address with its token and chat_id",
+             "请粘贴包含令牌和 chat_id 的 sendMessage 地址。"),
+        )
+        for reason, expected in cases:
+            with self.subTest(reason=reason):
+                shown = self.page([{"turn_min": "45"}, {"reply": {"ok": False, "problems": [reason]}, "save": True}], "zh")
+                self.assertEqual(shown["problems"], [expected])
+
+    def test_other_push_refusals_are_chinese(self):
+        for reason, words in (
+            ("Bark needs an HTTPS server address followed by its device key", ("Bark", "HTTPS", "设备密钥")),
+            ("unknown push service", ("未知", "推送服务")),
+            ("no such push address", ("推送地址", "不存在")),
+            ("Server酱 needs an SCT… or sctp<uid>t… SendKey", ("Server酱", "需要", "SCT", "sctp<uid>t", "SendKey")),
+            ("the Server酱 address must match the SendKey's server", ("Server酱", "地址", "必须", "SendKey", "服务器")),
+        ):
+            with self.subTest(reason=reason):
+                shown = self.page([{"turn_min": "45"}, {"reply": {"ok": False, "problems": [reason]}, "save": True}], "zh")
+                message = " ".join(shown["problems"])
+                self.assertNotIn(reason, message)
+                for word in words:
+                    self.assertIn(word, message)
+
+    def test_bark_shape_reason_reaches_preview_and_save(self):
+        address = "http://api.day.app/key"
+        reason = "Bark needs an HTTPS server address followed by its device key"
+        for service in ("bark", "recognize"):
+            for reply in (alert_services.preview(address, service), save_from_page(self.desk, {
+                    "settings": self.desk.settings(), "alert_push_changes": [{"service": service, "address": address}]})):
+                with self.subTest(service=service, reply=reply):
+                    self.assertEqual(reply["problems"], [reason])
+                    for lang, words in (("en", ("HTTPS server", "device key")), ("zh", ("HTTPS", "服务器", "设备密钥"))):
+                        shown = self.page([{"turn_min": "45"}, {"reply": reply, "save": True}], lang)
+                        for word in words:
+                            self.assertIn(word, " ".join(shown["problems"]))
+        self.assertEqual(self.desk.settings()["alert_push"], [])
+
+    def copy_page(self, language):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        harness = self.tmp / "copy-page.js"
+        harness.write_text(self.PAGE_HARNESS.replace('  if (ask === "push") {', '''
+  if (ask === "copy") {
+    const run = code => vm.runInContext(code, ctx);
+    await run('show("cost")');
+    console.log(JSON.stringify({ahead:run('T.mcQueuedAhead({id:"t123", lane:"b"})'), soon:run("T.mcQueuedSoon"),
+      outside:run("T.modOutside"), cost:ids["#tab-cost"].textContent,
+      texts:run(`Object.values(T).filter(v => typeof v === "string").concat([
+        T.releaseChecked(2, 1), T.waitReasons.after_lane({lane:"a", base:"main", repo:"repo"}),
+        T.waitReasons.after({dependencies:[{task:"t1", latest:"t1", held:true, state:"elsewhere"}]}),
+        ...["gone", "stuck", "up"].map(server => T.waitReasons.ready({lane:"a", provider:"demo", server, seconds:360})),
+        T.eventSentences.server_stopped({})]).join(" | ")`)})); return;
+  }
+  if (ask === "push") {'''))
+        report = {"total": {"tokens": 0, "usd": 0}, "by": {}, "rows": [], "unpriced_models": [],
+                  "coordinator_user": "", "coordinator_uncounted": "runs as another user"}
+        result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"), "copy", language],
+            input=json.dumps({"/api/settings": public_settings(self.desk), "/api/cost": report}),
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_chinese_copy_matches_the_english_statement(self):
+        shown = self.copy_page("zh")
+        self.assertIn("t123", shown["ahead"])
+        self.assertIn("工作线 b", shown["ahead"])
+        for key, extra in (("ahead", "一次只跑"), ("soon", "工作线空着")):
+            with self.subTest(key=key):
+                self.assertNotIn(extra, shown[key])
+        with self.subTest(key="modOutside"):
+            for word in ("hansa up", "状态行"):
+                self.assertIn(word, shown["outside"])
+        with self.subTest(key="coordinatorUncounted"):
+            self.assertIn("另一用户", shown["cost"])
+            self.assertNotIn("以  身份", shown["cost"])
+
+    def test_chinese_uses_one_name_for_each_thing(self):
+        shown = self.copy_page("zh")
+        for old in ("基准分支", "框架", "禁发字眼", "不许发出去的字眼", "禁止发布的字眼", "禁止发布的内容",
+                    "服务未运行", "服务正忙", "服务下次", "服务已停止", "服务代码", "重启服务器", "字眼"):
+            with self.subTest(old=old):
+                self.assertFalse(old in shown["texts"], old)
+        for word in ("基础分支", "后台", "Hansa", "禁词"):
+            self.assertIn(word, shown["texts"])
+
+    def test_release_summary_uses_the_pages_forbidden_words_name(self):
+        from hansa import release
+        summary = release.state_text(self.desk, {"state": "forbidden", "hits": [{"word": "private"}]}, zh=True)
+        self.assertIn("禁词", summary)
+        self.assertNotIn("不许发出去的字眼", summary)
 
 
 class DeskNameSettingTest(unittest.TestCase):
