@@ -19080,7 +19080,10 @@ def save():'''))
         self.assertEqual((r["ok"], r["detail"].split(":")[0]), (False, "not logged in (Please run /login)"))
         prob = provider_problem(self.desk, self.desk.settings(), "claude")
         self.assertTrue(prob.startswith("not logged in (Please run /login)"), prob)  # with the check's own message
-        self.assertIn("; log in with `claude`, then `hansa ping claude` brings it back", prob)
+        # on a Linux server run by another account the line also names that account between the two
+        self.assertIn("; log in with `claude`", prob)
+        self.assertTrue(prob.endswith(", then `hansa ping claude` brings it back"), prob)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", prob)
         self.assertNotIn("saving a new key", prob)
 
         def logged_in(argv, **kwargs):
