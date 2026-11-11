@@ -55,6 +55,7 @@ COPY = os.path.join(".claude", "rules", "hansa-card.md")
 COPY_MARK = "<!-- hansa: copy of the coordinator's card for the desk at "  # its header's first line, then the desk
 COPIES = "card-copies.json"  # in .hansa/: the copies hansa wrote, so notify off finds them after the record changes
 COPY_ENABLED = "card-copy.json"  # in .hansa/: the desk's choice, independent of the session's start record
+COPIES_WRITTEN = "card-copies-written.json"  # in .hansa/: each copy's path and the sha256 of what hansa last wrote
 
 
 def card_copy_enabled(desk: Desk) -> bool:
@@ -1118,11 +1119,13 @@ def known_copies(desk: Desk) -> list:
     return [x for x in listed if isinstance(x, str)] if isinstance(listed, list) else []
 
 
-def remove_copies(desk: Desk, keep: str = "") -> list:
+def remove_copies(desk: Desk, keep: str = "", only: str = "") -> list:
     """Remove the copies of the card hansa wrote for this desk (a file with its header that git does not track), all
-    but keep: their paths."""
+    but keep, or only the one at only: their paths."""
     gone = []
     for p in dict.fromkeys(known_copies(desk)):
+        if only and p != only:
+            continue
         if p != keep and copy_owner(p) == str(desk.root) and not tracked(git_top(Path(p).parent), p):
             try:
                 os.unlink(p)
@@ -1150,7 +1153,44 @@ def write_copy(desk: Desk, c: dict) -> dict:
     except OSError as e:
         return {**c, "state": "missing", "why": f"{path} could not be written ({e.strerror or e})"}
     remember_copies(desk, [*known_copies(desk), str(path)])
+    written = read_json(desk.state_dir / COPIES_WRITTEN, {})
+    try:
+        write_json(desk.state_dir / COPIES_WRITTEN, {**(written if isinstance(written, dict) else {}),
+                                                     str(path): hashlib.sha256(new.encode("utf-8")).hexdigest()})
+    except OSError:
+        pass
     return {**c, "state": "copy", "git": exclude_copy(top, path) if top else ""}
+
+
+def copy_as_written(desk: Desk, path) -> bool:
+    """Whether the copy at path still holds what hansa wrote there: its last write, as recorded, or the copy hansa
+    would write now (a copy written before hansa recorded its writes)."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return False
+    written = read_json(desk.state_dir / COPIES_WRITTEN, {})
+    if isinstance(written, dict) and written.get(str(path)) == hashlib.sha256(data).hexdigest():
+        return True
+    try:
+        return data.decode("utf-8") == copy_text(desk, Path(path))
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def stale_copies(desk: Desk) -> list:
+    """The copies of the card hansa wrote for this desk that are still there but no longer kept up to date: all of
+    them but the one the session recorded with hansa notify on reads (card_check's 'copy')."""
+    c = card_check(desk, read_coordinator(desk))
+    keep = c.get("copy") if c.get("state") == "copy" else ""
+    return [p for p in dict.fromkeys(known_copies(desk)) if p != keep and copy_owner(p) == str(desk.root)]
+
+
+def stale_text(path: str, why: str = "") -> str:
+    """What hansa coordinator's start and hansa status say of a copy stale_copies lists."""
+    return (f"hansa's copy of the card at {path} is no longer kept up to date"
+            f"{f' ({why})' if why else ''}: hansa leaves it there, and every Claude Code session started in its "
+            "folder still reads it; remove it by hand.")
 
 
 def place_card(desk: Desk, rec: dict) -> dict:
@@ -1162,16 +1202,25 @@ def place_card(desk: Desk, rec: dict) -> dict:
     return {**c, "removed": remove_copies(desk, c.get("copy", "") if c.get("state") == "copy" else "")}
 
 
-def refresh_copy(desk: Desk, starting: bool = False) -> None:
-    """After hansa writes the desk's card: its copy rewritten to match. At hansa coordinator's start (starting), a
-    copy in the desk's folder or above it is removed instead: the session it starts in the desk would read both."""
+def refresh_copy(desk: Desk, starting: bool = False) -> list:
+    """After hansa writes the desk's card: its copy rewritten to match. At hansa coordinator's start (starting), the
+    copy is removed instead: the session it starts in the desk reads the card there, and from then on nothing keeps
+    the copy up to date. One outside the desk only while it is as hansa wrote it; an edited one is left where it is.
+    What the start says of it: lines."""
     c = card_check(desk, read_coordinator(desk))
     if c.get("state") != "copy":
-        return
-    if starting and c["inside"]:
-        remove_copies(desk)
-    else:
+        return []
+    if not starting:
         write_copy(desk, c)
+        return []
+    if c["inside"]:  # the session in the desk would read both
+        remove_copies(desk)
+        return []
+    if not copy_as_written(desk, c["copy"]):
+        return [stale_text(c["copy"], "it was edited after hansa wrote it, and the session hansa coordinator starts "
+                                      "reads the desk's card")]
+    return [f"hansa removed its copy of the card, {p}: the session hansa coordinator starts reads the desk's card, "
+            "and sessions started in that folder no longer read it." for p in remove_copies(desk, only=c["copy"])]
 
 
 def card_lines(desk: Desk, rec: dict, c: dict = None) -> list:
@@ -1220,7 +1269,12 @@ def card_lines(desk: Desk, rec: dict, c: dict = None) -> list:
 
 
 def card_note(desk: Desk) -> str:
-    """For hansa status's hansa posts to line: the same state as card_lines, short."""
+    """For hansa status's hansa posts to line: the same state as card_lines, short; and any copy of the card hansa
+    no longer keeps up to date that is still there."""
+    return " · ".join([x for x in (_card_note(desk),) if x] + [stale_text(p) for p in stale_copies(desk)])
+
+
+def _card_note(desk: Desk) -> str:
     c = card_check(desk, read_coordinator(desk))
     if not c:
         return ""

@@ -1268,8 +1268,16 @@ stands. hansa rewrites the copy at every `hansa notify on` and wherever it
 writes the desk's card: at `hansa init`, at each `hansa serve` start (which
 brings the desk's card up to hansa's, as `hansa coordinator` does, so a desk
 whose coordinator only runs `hansa notify on` gets an upgraded hansa's card and
-copy too) and at `hansa coordinator`'s start, which instead removes a copy in a
-folder that holds the desk: the session it starts there would read both.
+copy too). `hansa coordinator`'s start instead takes the copy away, as the
+session it starts reads the card in the desk and nothing keeps the copy up to
+date after it: a copy in a folder that holds the desk it removes (that session
+would read both); one in a folder outside the desk it removes when it is still
+as hansa last wrote it (hansa records a checksum of each write in
+`.hansa/card-copies-written.json`), and says once, before Claude Code starts,
+that it removed it and where. An edited copy it neither removes nor rewrites:
+it says where the copy is and that it is no longer kept up to date, and
+`hansa status` goes on saying so on its `hansa posts to` line while the copy is
+there. Nothing else in that folder is touched.
 `hansa notify on --no-card` records the session but removes hansa's copy and
 keeps the copy off for this desk, including later plain `notify on` and starts
 of `hansa serve` or `hansa coordinator`. `hansa notify on --card` turns it back
