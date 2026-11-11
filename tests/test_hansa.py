@@ -24533,7 +24533,8 @@ def save():'''))
             with self.assertRaises(SystemExit) as e:
                 main(["--desk", str(self.desk.root), "lane", "add", "b", "--repo", str(self.repo)])
             self.assertIn("git refuses", str(e.exception.code))
-            self.assertIn(f"chown -R {account.name_of(os.getuid())} {self.repo.resolve()}", str(e.exception.code))
+            self.assertIn(shlex.join(["chown", "-R", account.name_of(os.getuid()), str(self.repo.resolve())]),
+                          str(e.exception.code))
             told = account.git_refusal(f"fatal: detected dubious ownership in repository at '{self.repo}'", self.repo)
             self.assertIn("chown -R", told)  # a task git refuses fails with this, not git's text
         self.assertNotIn("b", self.desk.settings()["lanes"])
@@ -54589,6 +54590,77 @@ class LaneEnvTest(unittest.TestCase):
                           and k not in own], [])
         self.assertEqual({k: os.environ[k] for k in own}, own)
         self.assertTrue(os.environ["TMPDIR"])  # the run's own, kept
+
+
+class GitMessagesTest(unittest.TestCase):
+    LOCALE = {"LANG": "zh_CN.UTF-8", "LC_ALL": "zh_CN.UTF-8", "LC_MESSAGES": "zh_CN.UTF-8",
+              "LANGUAGE": "zh_CN:en"}
+
+    def test_git_refusal_and_stats_ignore_the_callers_locale(self):
+        from hansa import run
+        repo = Path("/tmp/my repo")
+
+        def git(argv, **kw):
+            english = kw["env"].get("LC_ALL") == "C"
+            if "--shortstat" in argv:
+                return subprocess.CompletedProcess(argv, 0,
+                    "1 file changed, 2 insertions(+), 1 deletion(-)" if english else "1 个文件被修改，插入 2 行，删除 1 行", "")
+            error = (f"fatal: detected dubious ownership in repository at '{repo}'\n" if english else
+                     f"致命错误：在仓库 '{repo}' 检测到可疑的所有权\n")
+            return subprocess.CompletedProcess(argv, 128, "", error)
+
+        with unittest.mock.patch.dict(os.environ, self.LOCALE), \
+                unittest.mock.patch.object(run.subprocess, "run", side_effect=git), \
+                unittest.mock.patch.object(account, "owner", return_value=4242), \
+                unittest.mock.patch.object(account, "uid", return_value=4243):
+            for supplied in (None, dict(self.LOCALE)):
+                with self.subTest(env=supplied):
+                    with self.assertRaises(RuntimeError) as refused:
+                        run.git("status", cwd=repo, env=supplied)
+                    self.assertIn("git refuses", str(refused.exception))
+                    self.assertIn("chown -R", str(refused.exception))
+                    self.assertEqual(cost.recorded_lines(run.git("diff", "--shortstat", cwd=repo, env=supplied)),
+                                     (2, 1))
+                    if supplied is not None:
+                        self.assertEqual(supplied, self.LOCALE)
+            self.assertEqual({k: os.environ[k] for k in self.LOCALE}, self.LOCALE)
+
+    def test_chown_advice_quotes_every_argument_and_keeps_apostrophes(self):
+        cwd = "/tmp/current repo"
+        with unittest.mock.patch.object(account, "uid", return_value=4243), \
+                unittest.mock.patch.object(account, "name_of", return_value="desk user"):
+            for repo in ("/tmp/my repo", "/tmp/it's my repo; $(false)"):
+                diagnostic = f"fatal: detected dubious ownership in repository at '{repo}'\n\nMore advice\n"
+                for source in ("foreign_repo", "reported path", "cwd", "fallback"):
+                    with self.subTest(repo=repo, source=source):
+                        def owner(path):
+                            if source == "fallback" or (source == "cwd" and path != cwd):
+                                raise FileNotFoundError(path)
+                            return 4242
+                        with unittest.mock.patch.object(account, "owner", side_effect=owner):
+                            told = (account.foreign_repo(repo) if source == "foreign_repo" else
+                                    account.git_refusal(diagnostic, cwd))
+                        self.assertIn("git refuses", told)
+                        command = "chown -R" + told.split("chown -R", 1)[1]
+                        self.assertEqual(shlex.split(command),
+                                         ["chown", "-R", "desk user", cwd if source == "cwd" else repo])
+            self.assertEqual(account.git_refusal("fatal: not a git repository", cwd), "")
+
+    def test_conflict_marker_messages_ignore_the_callers_locale(self):
+        from hansa import run
+
+        def git(argv, **kw):
+            if "--check" in argv:
+                message = ("leftover conflict marker" if kw.get("env", os.environ).get("LC_ALL") == "C" else
+                           "残留的冲突标记")
+                return subprocess.CompletedProcess(argv, 2,
+                    "".join(f"notes.md:{n}: {message}\n" for n in (1, 3, 5)), "")
+            return subprocess.CompletedProcess(argv, 0, b"<<<<<<< ours\none\n=======\ntwo\n>>>>>>> theirs\n", b"")
+
+        with unittest.mock.patch.dict(os.environ, self.LOCALE), \
+                unittest.mock.patch.object(run.subprocess, "run", side_effect=git):
+            self.assertEqual(run.markers_in_change("/tmp/repo", "base", "head"), {"notes.md": [1, 3, 5]})
+            self.assertEqual({k: os.environ[k] for k in self.LOCALE}, self.LOCALE)
 
 
 class GitEnvTest(unittest.TestCase):
