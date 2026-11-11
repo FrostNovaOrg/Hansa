@@ -18197,7 +18197,6 @@ def save():'''))
 
     def test_an_automatic_follow_up_rerun_checks_only_the_interrupted_runs_commits(self):
         key = "sk-test-earlier-task-0987"
-        self.desk.write_key("mimo", key)
         for what, text in (("key", key), ("markers", "<<<<<<< ours\nfirst\n=======\nsecond\n>>>>>>> theirs")):
             with self.subTest(what):
                 s = self.desk.settings()
@@ -18211,6 +18210,8 @@ def save():'''))
                 if count.exists():
                     count.unlink()  # each follow-up loses its connection on its first run
                 self.hansa("retry", parent, "carry on")
+                if what == "key":
+                    self.desk.write_key("mimo", key)  # learned after retry; merge guards must still catch it
                 tid = self.desk.meta(parent)["replaced_by"]
                 m = self.settle(d, tid)
                 self.assertEqual((m["state"], count.read_text()), ("done", "2"), m)
