@@ -249,13 +249,15 @@ use none of the follow-up's tries. `hansa show` names the providers left out and
 in one line. This avoids spending every follow-up on the same content filter; it is unnecessary if
 providers no longer refuse individual requests.
 
-If the destination lane has only one provider, hansa tries it again as usual, whether the lane was
-inherited or explicitly chosen with `hansa retry ID "..." --lane L`. A failed refusal's `next:` line offers
-that command alongside the usual retry, to choose a lane on the same repository and base. A provider that refuses the
-follow-up itself is still excluded for the rest of that round. New tasks (`hansa add`) keep their
-usual provider order and do not inherit another task's refusals.
-If several providers are listed and all refused earlier rounds, the follow-up waits for a provider
-that has not refused it, or a change of lane.
+If every provider in the destination lane refused earlier rounds, hansa ignores the inherited refusals
+and tries the providers in the lane's order. This includes a lane with only one provider, whether the
+lane was inherited or explicitly chosen with `hansa retry ID "..." --lane L`, and prevents a follow-up
+from waiting forever when the inherited refusals exclude its whole lane. No provider is listed as left
+out in `hansa show` in that case. A provider that refuses the follow-up itself is still excluded for the
+rest of that round; if they all refuse it, the task fails with "no other provider in the lane to try".
+A failed refusal's `next:` line offers the lane command alongside the usual retry, to choose a lane on
+the same repository and base. New tasks (`hansa add`) keep their usual provider order and do not inherit
+another task's refusals.
 
 Verification on L uses L's current order;
 on a verify lane, that lane's order. Neither inherits the parent's provider; readiness decides which runs.

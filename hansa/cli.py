@@ -3694,7 +3694,8 @@ def main(argv=None):
                      "back as it was. Its own lane must still be on the desk and, when recorded, on the "
                      "repository where it ran; otherwise give the work again with hansa add --lane L. "
                      "Providers that refused an earlier round are skipped without using a follow-up try, "
-                     "including with --fresh, unless the destination lane has only one provider; "
+                     "including with --fresh, unless every provider in the destination lane refused earlier rounds; "
+                     "then they are tried in the lane's order. This round's own refusals still stand; "
                      "choose another lane with --lane L when needed.")
     p.add_argument("--lane", metavar="L", help="queue the follow-up on this work lane on the same repository "
                    "and base branch as the task's own lane, for example when that lane is busy; the task's "

@@ -23826,7 +23826,8 @@ def save():'''))
         for words in ("a second retry of it is refused", "A merged task stays merged",
                       "cancelled before it started gives the earlier task back",
                       "Providers that refused an earlier round are skipped without using a follow-up try",
-                      "including with --fresh", "unless the destination lane has only one provider"):
+                      "including with --fresh", "unless every provider in the destination lane refused earlier rounds",
+                      "then they are tried in the lane's order", "This round's own refusals still stand"):
             self.assertIn(words, retry)
         self.assertNotIn("attempt", retry)
         self.assertIn("a verification by another model", " ".join(self.hansa("help", "verify").split()))
@@ -28301,26 +28302,48 @@ def save():'''))
         self.assert_refusal_follow_up(tid)
         self.assertEqual(self.desk.meta(parent["id"])["attempts"], parent["attempts"])
 
-    def test_retry_chain_inherits_all_refusals_and_stops_when_none_remain(self):
+    def test_retry_chain_inherits_all_refusals(self):
         parent = self.refusal_parent()
         s = self.desk.settings()
         s["lanes"]["a"]["providers"] = ["mimo", "spare"]
         self.assertEqual(self.desk.save_settings(s), [])
         second = self.hansa("retry", parent["id"], "Carry on").split()[0]
         self.assert_refusal_follow_up(second, "spare", "failed", (("spare", "refused"),))
-        third = self.hansa("retry", second, "Carry on again").split()[0]
-        self.assertIn("lane a has no provider ready", self.hansa("show", third))
-        with unittest.mock.patch("hansa.run.start") as start:
-            Dispatcher(self.desk).tick()
-        start.assert_not_called()
         s["lanes"]["a"]["providers"] = ["mimo", "spare", "claude"]
         self.assertEqual(self.desk.save_settings(s), [])
+        third = self.hansa("retry", second, "Carry on again").split()[0]
         shown = self.hansa("show", third)
         self.assertIn(f"mimo (refused {parent['id']})", shown)
         self.assertIn(f"spare (refused {second})", shown)
         self.assert_refusal_follow_up(third)
         fourth = self.hansa("retry", third, "One more round").split()[0]
         self.assert_refusal_follow_up(fourth)
+
+    def test_retry_all_lane_providers_refused_earlier_rounds_tries_them_in_order(self):
+        from hansa import run
+        parent = self.refusal_parent()
+        self.hansa("lane", "set", "a", "providers", "mimo", "spare")
+        second = self.hansa("retry", parent["id"], "Carry on").split()[0]
+        self.assert_refusal_follow_up(second, "spare", "failed", (("spare", "refused"),))
+        tid = self.hansa("retry", second, "Carry on again").split()[0]
+        self.assertEqual(self.desk.meta(tid)["inherited_refusals"], {"mimo": parent["id"], "spare": second})
+        self.assertEqual(self.desk.meta(tid)["attempts"], [])
+        shown = self.hansa("show", tid)
+        self.assertIn("ready for lane a on mimo", shown)
+        self.assertNotIn("providers left out:", shown)
+        [queued] = views.status(self.desk)["queued"]
+        self.assertIn("ready for lane a on mimo", queued["waiting"])
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["provider"]), ("failed", "spare"), m)
+        self.assertEqual([e["provider"] for e in self.events("task_started") if e["task"] == tid], ["mimo", "spare"])
+        self.assertEqual([(a["provider"], a["kind"]) for a in m["attempts"]],
+                         [("mimo", "refused"), ("spare", "refused")])
+        self.assertEqual(run.tries_used(m["attempts"]), 2)
+        self.assertIn("no other provider in the lane to try", m["error"])
+        shown = self.hansa("show", tid)
+        self.assertNotIn("providers left out:", shown)
+        [hint] = [line for line in shown.splitlines() if line.startswith("next:")]
+        self.assertIn(f'hansa retry {tid} "..." --lane L', hint)
 
     def test_retry_inherits_refusals_from_rounds_created_before_inheritance(self):
         parent = self.refusal_parent()

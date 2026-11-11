@@ -1394,12 +1394,12 @@ def unreachable_text(st: dict) -> str:
 
 
 def refused_by(m: dict, order: list | None = None) -> set:
-    """Skip this round's refusals and its ancestors'. A lane's only provider may be tried again despite an
-    ancestor's refusal; this round's own refusals still stand. Inheritance prevents spending each follow-up
-    on the same content filter, and can go when providers no longer refuse individual requests."""
+    """Skip this round's refusals and its ancestors'. If every lane provider refused earlier rounds, try
+    them again; this round's own refusals still stand. Inheritance prevents spending each follow-up on
+    the same content filter, and can go when providers no longer refuse individual requests."""
     own = {a["provider"] for a in m.get("attempts", []) if a.get("kind") == "refused"}
     inherited = set(m.get("inherited_refusals", {}))
-    return own if order is not None and len(order) == 1 else own | inherited
+    return own if order is not None and inherited.issuperset(order) else own | inherited
 
 
 def provider_problem(desk: Desk, s: dict, name: str) -> str:
