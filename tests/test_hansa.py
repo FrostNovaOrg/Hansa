@@ -18196,6 +18196,335 @@ def save():'''))
         self.assertEqual((m["state"], m["error"], m["attempts"]), ("failed", "error: I could not do it", []), m)
         self.assertEqual(count.read_text(), "1")
 
+    def quota_probe_rest(self, *, desk=None, kind="quota", text="usage limit resets in 6 hours", age=None):
+        from hansa import run
+        desk = desk or self.desk
+        s = desk.settings()
+        age = 60 * s["cool_minutes"] + 5 if age is None else age
+        with unittest.mock.patch.object(run.time, "time", return_value=time.time() - age):
+            return run.rest_provider(desk, s, "claude", kind, "usage limit" if kind == "quota" else kind, text)
+
+    def join_provider_probes(self, d):
+        for thread in d.probes.values():
+            thread.join(timeout=120)
+            self.assertFalse(thread.is_alive(), "provider check did not end")
+
+    def test_unreachable_status_counts_work_after_a_merged_prerequisite(self):
+        parent = self.desk.new_task("Prerequisite", lane="a")
+        self.desk.update(parent, state="done")
+        self.desk.new_task("Dependent work", lane="a", after=[parent])
+        self.desk.set_provider_state("claude", unreachable_since=time.time(), unreachable_reason="offline")
+        self.assertIn("0 tasks wait for it", self.hansa("status"))
+        self.desk.update(parent, state="merged")
+        problem = next(p["problem"] for p in views.status(self.desk)["providers"] if p["name"] == "claude")
+        for output in (problem, self.hansa("status")):
+            with self.subTest(output=output):
+                self.assertIn("1 task waits for it", output)
+
+    def test_unreachable_probes_continue_while_paused_or_under_resource_floors(self):
+        from hansa import run
+        tid = self.desk.new_task("Wait", lane="a")
+        for hold in ("paused", "disk", "memory"):
+            with self.subTest(hold=hold):
+                self.desk.resume()
+                self.free = 500 * 10 ** 9
+                self.memory_reading()
+                if hold == "paused":
+                    self.desk.pause("hold")
+                elif hold == "disk":
+                    self.free = 0
+                else:
+                    self.memory_reading(available=0)
+                self.desk.set_provider_state("claude", unreachable_since=time.time() - 3600,
+                                             unreachable_reason="offline", probe_at=0)
+                d = Dispatcher(self.desk)
+                with unittest.mock.patch.object(run, "check_provider", wraps=run.check_provider) as check:
+                    d.tick()
+                    self.join_provider_probes(d)
+                    check.assert_called_once_with(self.desk, "claude")
+                    self.assertFalse(self.desk.provider_state()["claude"]["unreachable_since"])
+                    d.tick()
+                    self.join_provider_probes(d)
+                    self.assertEqual(check.call_count, 1)
+                self.assertEqual(self.desk.meta(tid)["state"], "queued")
+
+    def test_quota_probe_interval_restart_and_early_recovery(self):
+        from hansa import run
+        other = self.shared_rest_desks()
+        s = self.desk.settings()
+        s["cool_minutes"] = 9
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        until = self.quota_probe_rest(age=0)
+        d = Dispatcher(self.desk)
+        before = self.desk.provider_state()["claude"]["cool_since"]
+        actual, calls = subprocess.run, []
+
+        def answer(argv, **kwargs):
+            if kwargs.get("input") != "Reply with the single word OK.":
+                return actual(argv, **kwargs)
+            calls.append(self.desk.provider_state()["claude"]["quota_probe_at"])
+            self.assertEqual(kwargs["env"]["CLAUDE_CODE_MAX_RETRIES"], "0")
+            self.assertEqual(argv[argv.index("--max-turns") + 1], "1")
+            self.assertEqual(argv[argv.index("--tools") + 1], "")
+            self.assertEqual(kwargs["timeout"], 90)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            return actual(argv, **kwargs)
+
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            for offset, expected in ((539, 0), (540, 1), (1079, 1), (1080, 2)):
+                with unittest.mock.patch.object(run.time, "time", return_value=before + offset):
+                    d = Dispatcher(Desk(self.desk.root))  # no interval reset on restarting serve
+                    d.probe_providers(s)
+                    self.join_provider_probes(d)
+                    self.assertEqual(len(calls), expected)
+                if expected == 1:
+                    self.assertEqual(self.desk.provider_state()["claude"]["cool_until"], until)
+        self.assertEqual(calls, [before + 540, before + 1080])
+        for desk in (self.desk, other):
+            self.assertFalse(provider_problem(desk, desk.settings(), "claude"))
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.assertFalse(self.events("provider_credit"))
+
+    def test_quota_probe_only_for_work_waiting_on_that_provider(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["providers"]["spare"] = {**s["providers"]["claude"], "config_dir": str(self.tmp / "spare")}
+        s["lanes"]["b"] = {**s["lanes"]["a"], "providers": ["spare"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.quota_probe_rest()
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            d.probe_providers(s)  # empty queue
+            tid = self.desk.new_task("Work elsewhere", lane="b")
+            d.probe_providers(s)
+            self.desk.update(tid, lane="a", attempts=[{"provider": "claude", "kind": "refused"}])
+            d.probe_providers(s)
+            self.desk.update(tid, attempts=[])
+            s["lanes"]["a"]["providers"].append("spare")
+            self.assertEqual(self.desk.save_settings(s), [])
+            d.probe_providers(s)  # a ready alternative
+            check.assert_not_called()
+            self.desk.update(tid, attempts=[{"provider": "claude", "kind": "network"}])
+            d.probe_providers(s)  # a dropped run waits for its original provider
+            self.join_provider_probes(d)
+            check.assert_called_once_with(self.desk, "claude", quota_probe=True)
+
+    def test_quota_probe_skips_short_and_fixed_rests(self):
+        from hansa import run
+        self.desk.new_task("Wait", lane="a")
+        s = self.desk.settings()
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            for text, age, words in (("usage limit resets in 45 minutes", 1800, "within the next check interval"),
+                                     ("usage limit", 0, "no reset time was recorded")):
+                with self.subTest(text=text):
+                    self.quota_probe_rest(text=text, age=age)
+                    d = Dispatcher(self.desk)
+                    d.probe_providers(s)
+                    check.assert_not_called()
+                    self.assertIn(words, self.hansa("explain", "provider", "claude"))
+                    self.assertIn(words, self.hansa("status"))
+            self.quota_probe_rest()
+            d.probe_providers(s)
+            self.join_provider_probes(d)
+            check.assert_called_once()
+
+    def test_quota_probe_never_checks_other_kinds_of_rest(self):
+        from hansa import run
+        self.desk.new_task("Wait", lane="a")
+        s = self.desk.settings()
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            for kind in ("key", "login", "unknown", "credit"):
+                with self.subTest(kind=kind):
+                    self.quota_probe_rest(kind=kind)
+                    self.desk.set_provider_state("claude", unreachable_since=time.time() - 3600)
+                    d = Dispatcher(self.desk)
+                    d.probe_providers(s)
+                    check.assert_not_called()
+                    for output in (self.hansa("status"), self.hansa("explain", "provider", "claude")):
+                        self.assertIn("not a usage-limit rest", output)
+
+    def test_quota_probe_failure_preserves_the_rest_for_every_error(self):
+        from hansa import rests, run
+        other = self.shared_rest_desks()
+        self.desk.new_task("Wait", lane="a")
+        for result, stderr in (({"is_error": True, "api_error_status": 429,
+                                "result": "usage limit resets in 20 hours"}, ""),
+                               ({"is_error": True, "api_error_status": 402, "result": "credit balance too low"}, ""),
+                               ({"is_error": True, "api_error_status": 401, "result": "Invalid API key"}, ""),
+                               ({"is_error": True, "result": "Not logged in · Please run /login"}, ""),
+                               ({}, "Connection dropped"), ({}, "not json")):
+            with self.subTest(result=result, stderr=stderr):
+                self.quota_probe_rest()
+                self.desk.set_provider_state("claude", quota_probe_at=0)
+                before = self.desk.provider_state()["claude"]
+                shared = rests.rests_file().read_bytes()
+                d = Dispatcher(self.desk)
+                with unittest.mock.patch.object(run.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        [], 1, json.dumps(result), stderr)) as request:
+                    d.probe_providers(self.desk.settings())
+                    self.join_provider_probes(d)
+                request.assert_called_once()
+                after = self.desk.provider_state()["claude"]
+                self.assertFalse(after["check"]["ok"])
+                for key in set(before) | set(after):
+                    if key not in ("check", "quota_probe_at"):
+                        self.assertEqual(after.get(key), before.get(key), key)
+                self.assertEqual(rests.rests_file().read_bytes(), shared)
+                self.assertEqual(other.provider_state()["claude"]["cool_until"], before["cool_until"])
+        self.assertFalse(self.events("provider_credit"))
+
+    def test_quota_probe_repeated_limit_disables_only_that_rest(self):
+        from hansa import run
+        self.net_lane("limit", 2, FAKE_LIMIT_TEXT="usage limit resets in 6 hours")
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        d = Dispatcher(self.desk)
+        for number in (1, 2):
+            end = time.monotonic() + 120
+            while time.monotonic() < end and len(self.desk.meta(tid).get("attempts", [])) < number:
+                d.tick()
+                time.sleep(0.02)
+            m = self.desk.meta(tid)
+            self.assertEqual(len(m.get("attempts", [])), number)
+            self.assertEqual(m["state"], "queued")
+            self.assertEqual(run.tries_used(m["attempts"]), 0)
+            if number == 1:
+                self.desk.set_provider_state("claude", cool_since=time.time() - 1805)
+                d.probe_providers(self.desk.settings())
+                self.join_provider_probes(d)
+                self.assertFalse(provider_problem(self.desk, self.desk.settings(), "claude"))
+            else:
+                with unittest.mock.patch.object(run.time, "time", return_value=time.time() + 1805):
+                    d.probe_providers(self.desk.settings())
+                    self.join_provider_probes(d)
+        self.assertEqual(len(self.events("provider_checked")), 1)
+        until = self.desk.provider_state()["claude"]["cool_until"]
+        fresh = Dispatcher(Desk(self.desk.root))
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            fresh.probe_providers(self.desk.settings())
+            check.assert_not_called()
+        for output in (self.hansa("status"), self.hansa("explain", "provider", "claude")):
+            self.assertIn("hit the usage limit again after a successful automatic check", output)
+        self.assertEqual(self.desk.provider_state()["claude"]["cool_until"], until)
+        self.assertIn("claude: ok", self.hansa("ping", "claude"))
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.assertEqual(run.LIMIT_RETURNS, 5)
+
+    def test_quota_probe_pause_disk_and_memory_floors(self):
+        from hansa import run
+        self.desk.new_task("Wait", lane="a")
+        self.quota_probe_rest()
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            self.desk.pause("hold")
+            Dispatcher(self.desk).tick()
+            self.desk.resume()
+            self.free = 0
+            Dispatcher(self.desk).tick()
+            self.free = 500 * 10 ** 9
+            self.memory_reading(available=0)
+            Dispatcher(self.desk).tick()
+            check.assert_not_called()
+            self.memory_reading()
+            d = Dispatcher(self.desk)
+            d.tick()
+            self.join_provider_probes(d)
+            check.assert_called_once_with(self.desk, "claude", quota_probe=True)
+
+    def test_quota_probe_single_flight_does_not_hold_dispatch(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["providers"]["other"] = {**s["providers"]["claude"], "config_dir": str(self.tmp / "other")}
+        s["lanes"]["b"] = {**s["lanes"]["a"], "providers": ["other"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.new_task("Wait", lane="a")
+        other = self.desk.new_task("Add hello.txt", lane="b")
+        self.quota_probe_rest()
+        started, release = threading.Event(), threading.Event()
+        actual, calls = subprocess.run, []
+
+        def answer(argv, **kwargs):
+            if kwargs.get("input") != "Reply with the single word OK.":
+                return actual(argv, **kwargs)
+            calls.append(argv)
+            started.set()
+            self.assertTrue(release.wait(120), "other lane did not finish while check waited")
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            try:
+                d.tick()
+                self.assertTrue(started.wait(30), "serve did not start its provider check")
+                self.desk.set_provider_state("claude", quota_probe_at=0)  # even another due interval cannot overlap
+                self.assertEqual(self.settle(d, other)["state"], "done")
+                self.assertEqual(len(calls), 1)
+            finally:
+                release.set()
+                self.join_provider_probes(d)
+        self.assertIn("no answer in 90s", self.desk.provider_state()["claude"]["check"]["detail"])
+
+    def test_quota_probe_shared_rest_and_repeated_limit(self):
+        from hansa import run
+        other = self.shared_rest_desks()
+        self.desk.new_task("Wait", lane="a")
+        self.quota_probe_rest(desk=other)
+        d = Dispatcher(self.desk)
+        d.probe_providers(self.desk.settings())
+        self.join_provider_probes(d)
+        self.assertEqual(len(self.events("provider_checked")), 1)
+        self.assertFalse(provider_problem(other, other.settings(), "claude"))
+        self.quota_probe_rest(desk=other, age=0)
+        other.set_provider_state("claude", cool_since=time.time() - 1805)
+        self.assertTrue(other.provider_state()["claude"]["quota_probe_blocked"])
+        d = Dispatcher(self.desk)
+        with unittest.mock.patch.object(run, "check_provider") as check:
+            d.probe_providers(self.desk.settings())
+            check.assert_not_called()
+        self.assertIn("hit the usage limit again", self.hansa("status"))
+
+    def test_quota_probe_status_and_explain_name_the_interval(self):
+        s = self.desk.settings()
+        s["cool_minutes"] = 9
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.quota_probe_rest()
+        for output in (self.hansa("status"), self.hansa("explain", "provider", "claude")):
+            self.assertIn("automatically every 9 minutes while work waits", output)
+            self.assertIn("reset time its error gave", output)
+
+    def test_quota_probe_successful_work_consumes_the_repeated_limit_guard(self):
+        from hansa import run
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        self.quota_probe_rest()
+        d = Dispatcher(self.desk)
+        d.probe_providers(self.desk.settings())
+        self.join_provider_probes(d)
+        self.assertEqual(len(self.events("provider_checked")), 1)
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.quota_probe_rest(age=0)
+        self.assertFalse(self.desk.provider_state()["claude"]["quota_probe_blocked"])
+        self.desk.new_task("Next task", lane="a")
+        # Wait the interval by advancing the clock only for the scheduler, preserving rest identity.
+        with unittest.mock.patch.object(run.time, "time", return_value=time.time() + 1805):
+            d = Dispatcher(self.desk)
+            d.probe_providers(self.desk.settings())
+            self.join_provider_probes(d)
+        self.assertEqual(len(self.events("provider_checked")), 2)
+
+    def test_quota_probe_stops_at_exactly_one_interval_left_and_expires_normally(self):
+        from hansa import run
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        until = self.quota_probe_rest()
+        with unittest.mock.patch.object(run.time, "time", return_value=until - 1800), \
+                unittest.mock.patch.object(run, "check_provider") as check:
+            Dispatcher(self.desk).probe_providers(self.desk.settings())
+            check.assert_not_called()
+            self.assertIn("within the next check interval", self.hansa("status"))
+        self.desk.set_provider_state("claude", cool_until=time.time() - 1, quota_probe_blocked=True)
+        self.assertEqual(self.settle(Dispatcher(self.desk), tid)["state"], "done")
+        self.quota_probe_rest(age=0)
+        self.assertFalse(self.desk.provider_state()["claude"]["quota_probe_blocked"])
+
     def test_a_limit_s_reset_time_is_read_in_each_form(self):
         from datetime import datetime, timedelta, timezone
         from zoneinfo import ZoneInfo
@@ -18458,7 +18787,8 @@ def save():'''))
             self.assertRegex(entry["source"], r"^[0-9a-f]{64}$")
             self.assertRegex(entry["provider"], r"^[0-9a-f]{64}$")
             self.assertEqual(entry["model"], rests.fingerprint("opus"))
-            self.assertEqual(set(entry), {"source", "provider", "model", "cool_since", "cool_until"})
+            self.assertEqual(set(entry), {"source", "provider", "model", "cool_since", "cool_until",
+                                          "cool_reset", "quota_probe_blocked"})
         s = other.settings()
         s["providers"]["claude"]["base_url"] = "https://different.example.invalid"
         self.assertEqual(other.save_settings(s), [])
@@ -18641,7 +18971,8 @@ def save():'''))
         with unittest.mock.patch.object(rests, "write_json", side_effect=PermissionError("unwritable")):
             run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "local limit")
         self.assertIn("local limit", provider_problem(self.desk, self.desk.settings(), "claude"))
-        for malformed in (None, [], {"credit_since": "bad"}, {"cool_until": float("inf")}):
+        for malformed in (None, [], {"credit_since": "bad"}, {"cool_until": float("inf")},
+                          {"quota_probe_ok": "bad"}, {"cool_reset": float("inf")}):
             write_json(path, {rests.login(other, "claude", other.settings()["providers"]["claude"]): malformed})
             self.assertIn("local rest", provider_problem(other, other.settings(), "claude"))
 
@@ -19080,8 +19411,10 @@ def save():'''))
         self.assertEqual((r["ok"], r["detail"].split(":")[0]), (False, "not logged in (Please run /login)"))
         prob = provider_problem(self.desk, self.desk.settings(), "claude")
         self.assertTrue(prob.startswith("not logged in (Please run /login)"), prob)  # with the check's own message
+        # on a Linux server run by another account the line also names that account between the two
         self.assertIn("; log in with `claude`", prob)
-        self.assertIn(", then `hansa ping claude` brings it back", prob)  # Linux also names the account to log in as
+        self.assertTrue(prob.endswith(", then `hansa ping claude` brings it back"), prob)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", prob)
         self.assertNotIn("saving a new key", prob)
 
         def logged_in(argv, **kwargs):
@@ -28929,6 +29262,32 @@ def save():'''))
                     self.assertEqual(self.desk.meta(other)[field], expected)
                 self.desk.update(tid, state="failed")
 
+    def test_retry_model_overrides_parent_and_prints_add_note(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        s = self.desk.settings()
+        s["providers"]["spare"] = {"kind": "compatible", "model": "provider-model", "effort": "",
+                                    "base_url": "https://example.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("spare", "sk-test-01")
+        for provider, lane in (("claude", "a"), ("spare", "b")):
+            with self.subTest(provider=provider, lane=lane):
+                self.hansa("lane", "set", lane, "providers", provider)
+                added = self.hansa("add", "Add hello.txt", "--lane", lane, "--model", "sonnet")
+                reference = self.desk.tasks()[-1]["id"]
+                self.hansa("cancel", reference)
+                parent = self.desk.new_task("Add hello.txt", lane="a", model="earlier-model")
+                self.desk.update(parent, state="failed")
+                said = self.hansa("retry", parent, "Add the file", "--lane", lane, "--model", "sonnet")
+                tid = self.desk.tasks()[-1]["id"]
+                self.assertIn(f"{tid} queued as a follow-up to {parent}", said)
+                note = next(line for line in added.splitlines() if line.startswith("note: --model"))
+                self.assertIn(note, said.splitlines())
+                self.assertEqual(self.desk.meta(tid)["model"], self.desk.meta(reference)["model"])
+                m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(m["state"], "done", m)
+                self.assertEqual(m["model_asked"], "sonnet" if provider == "claude" else "provider-model")
+                self.assertEqual(self.desk.meta(parent)["model"], "earlier-model")
+
     def assert_retry_lane_refused_unchanged(self, tid, args, words):
         records = {p: p.read_bytes() for p in self.desk.tasks_dir.glob("*/meta.json")}
         events = self.desk.events_path.read_bytes()
@@ -32652,6 +33011,178 @@ def save():'''))
             with self.subTest(model=model, entry=entry):
                 self.assertEqual(cost.value(model, {"cache_write": 1000000}, {model: entry}), expected)
 
+    def test_cost_worker_claude_fallback_preserves_recorded_value_and_table_priority(self):
+        tid = self.desk.new_task("Price the worker")
+        self.desk.update(tid, finished=time.time(), provider="claude", usage={
+            "claude-opus-5": {"in": 5000, "claude_code_usd": .37},
+            "claude-new": {"in": 5000, "claude_code_usd": .38},
+            "mimo-x": {"in": 5000, "claude_code_usd": .99}})
+        s = self.desk.settings()
+        s["prices"] = {}
+        self.assertEqual(self.desk.save_settings(s), [])
+        rows = {r["model"]: r for r in cost.worker_rows(self.desk, 0)}
+        for model, expected in (("claude-opus-5", .37), ("claude-new", .38)):
+            self.assertEqual((rows[model]["usd"], rows[model]["priced_by"]),
+                             (expected, "Claude Code list price"))
+        self.assertEqual((rows["mimo-x"]["usd"], rows["mimo-x"]["priced_by"]), (None, "no price"))
+        s["prices"]["claude-opus-5"] = {"in": 0, "out": 0}
+        self.assertEqual(self.desk.save_settings(s), [])
+        row = cost.worker_rows(self.desk, 0)[0]
+        self.assertEqual((row["usd"], row["priced_by"]), (0, "price table"))
+
+    def test_cost_worker_claude_without_recorded_figure_has_no_price(self):
+        tid = self.desk.new_task("Worker without a recorded cost")
+        self.desk.update(tid, finished=time.time(), provider="claude", usage={
+            "claude-opus-5": {"in": 5000, "cache_read": 10000, "cache_write": 5000}})
+        s = self.desk.settings()
+        s["prices"] = {}
+        self.assertEqual(self.desk.save_settings(s), [])
+        rep = json.loads(self.hansa("cost", "--json", "--rows"))
+        row = rep["rows"][0]
+        self.assertEqual((row["usd"], row["priced_by"]), (None, "no price"))
+        self.assertEqual(rep["unpriced_models"], ["claude-opus-5"])
+        shown = self.hansa("cost", "--by", "model")
+        row = next(line for line in shown.splitlines() if line.lstrip().startswith("claude-opus-5"))
+        self.assertEqual(row.split(), ["claude-opus-5", "20,000", "no", "price"])
+
+    def test_cost_worker_claude_fallback_survives_provider_rename_or_removal(self):
+        tid = self.desk.new_task("Price earlier runs")
+        self.desk.update(tid, finished=time.time(), provider="old", usage={
+            "claude-opus-5": {"in": 5000, "claude_code_usd": .37},
+            "claude-haiku-4-5-20251001": {"in": 5000},
+            "mimo-x": {"in": 5000, "claude_code_usd": .99}},
+            attempts=[{"ended": time.time() - 60, "provider": "old",
+                       "usage": {"claude-new": {"in": 5000, "claude_code_usd": .38}}}])
+        for remaining in ("renamed", None, "old"):
+            with self.subTest(provider_now=remaining):
+                s = self.desk.settings()
+                s["prices"] = {}
+                if remaining:
+                    s["providers"][remaining] = {"kind": "compatible", "model": "mimo-x", "effort": "",
+                                                  "base_url": "https://example.invalid"}
+                self.assertEqual(self.desk.save_settings(s), [])
+                rows = {r["model"]: r for r in cost.worker_rows(self.desk, 0)}
+                self.assertEqual((rows["claude-opus-5"]["usd"], rows["claude-opus-5"]["priced_by"]),
+                                 (.37, "Claude Code list price"))
+                self.assertEqual((rows["claude-new"]["usd"], rows["claude-new"]["priced_by"]),
+                                 (.38, "Claude Code list price"))
+                self.assertEqual((rows["claude-haiku-4-5-20251001"]["usd"],
+                                  rows["claude-haiku-4-5-20251001"]["priced_by"]),
+                                 (None, "no price"))
+                self.assertEqual((rows["mimo-x"]["usd"], rows["mimo-x"]["priced_by"]), (None, "no price"))
+
+    def test_cost_coordinator_claude_without_table_entry_has_no_price(self):
+        conf = self.tmp / "conf"
+        proj = conf / "projects" / cost.slug(self.desk.root)
+        proj.mkdir(parents=True)
+        line = {"type": "assistant", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+                "message": {"id": "main", "model": "claude-opus-5-20261001", "usage": {
+                    "input_tokens": 1000000, "output_tokens": 1000000, "cache_read_input_tokens": 1000000,
+                    "cache_creation_input_tokens": 3000000,
+                    "cache_creation": {"ephemeral_5m_input_tokens": 1000000,
+                                       "ephemeral_1h_input_tokens": 2000000}}}}
+        (proj / "s.jsonl").write_text((json.dumps(line) + "\n") * 2)
+        helper = proj / "s" / "subagents"
+        helper.mkdir(parents=True)
+        (helper / "agent-1.jsonl").write_text(json.dumps({
+            **line, "message": {**line["message"], "id": "helper"}}) + "\n")
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(conf)
+        s["prices"] = {}
+        self.assertEqual(self.desk.save_settings(s), [])
+        rep = json.loads(self.hansa("cost", "--json", "--rows"))
+        self.assertEqual({r["seat"] for r in rep["rows"]}, {"coordinator", "helper"})
+        for row in rep["rows"]:
+            self.assertEqual((row["usd"], row["priced_by"]), (None, "no price"))
+        self.assertEqual(rep["total"]["tokens"], 12000000)
+        self.assertEqual(rep["unpriced_models"], ["claude-opus-5-20261001"])
+        shown = self.hansa("cost", "--by", "model")
+        row = next(line for line in shown.splitlines() if line.lstrip().startswith("claude-opus-5"))
+        self.assertEqual(row.split(), ["claude-opus-5-20261001", "12,000,000", "no", "price"])
+        self.assertIn("no price yet for: claude-opus-5-20261001", shown)
+        self.assertIn("the principal sets prices on the page", shown)
+        self.assertIn("figure Claude Code recorded for a worker's run", rep["note"])
+        self.assertIn("regardless of the provider's current settings", rep["note"])
+        self.assertIn("The coordinator's own usage and its helpers need an entry in the table", rep["note"])
+        turns = cost.turns(self.desk)
+        self.assertEqual(turns["total"]["usd"], 0)
+        self.assertEqual(turns["helpers"]["helper"]["usd"], 0)
+        self.assertEqual(turns["unpriced_models"], ["claude-opus-5-20261001"])
+        self.assertTrue(all(share == 0 for share in turns["token_shares"].values()))
+        # The principal's prices still win, including free tokens.
+        s["prices"]["claude-opus-5"] = {"in": 0, "out": 0}
+        self.assertEqual(self.desk.save_settings(s), [])
+        for row in cost.transcript_rows(self.desk, 0):
+            self.assertEqual((row["usd"], row["priced_by"]), (0, "price table"))
+
+    def test_cost_coordinator_unknown_models_keep_no_price_in_json(self):
+        proj = self.desk.state_dir / "claude-removed" / "projects" / cost.slug(self.desk.root)
+        proj.mkdir(parents=True)
+        (proj / "s.jsonl").write_text("".join(json.dumps({
+            "type": "assistant", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "message": {"id": model, "model": model, "usage": {"input_tokens": 5000}}}) + "\n"
+            for model in ("mimo-x", "claude-unknown", "claude-sonnet-4-6")))
+        rep = json.loads(self.hansa("cost", "--json", "--rows"))
+        rows = {r["model"]: r for r in rep["rows"]}
+        for model in ("mimo-x", "claude-unknown", "claude-sonnet-4-6"):
+            self.assertEqual((rows[model]["usd"], rows[model]["priced_by"]), (None, "no price"))
+        self.assertEqual(rep["unpriced_models"], ["claude-sonnet-4-6", "claude-unknown", "mimo-x"])
+
+    def test_status_unpriced_tokens_have_no_dollar_value(self):
+        tid = self.desk.new_task("Unpriced work")
+        self.desk.update(tid, state="done", finished=time.time(), provider="missing",
+                         usage={"mimo-x": {"in": 5000}})
+        line = self.hansa("status").splitlines()[-1]
+        self.assertIn("workers used 5,000 tokens", line)
+        self.assertIn("5,000 tokens have no price yet", line)
+        self.assertIn("the principal sets prices on the page", line)
+        self.assertNotIn("$", line)
+
+    def test_status_partly_priced_tokens_show_worth_and_missing_count(self):
+        tid = self.desk.new_task("Partly priced work")
+        self.desk.update(tid, state="done", finished=time.time(), provider="claude",
+                         usage={"claude-opus-5": {"in": 10000}, "mimo-x": {"in": 5000}})
+        line = self.hansa("status").splitlines()[-1]
+        self.assertIn("workers used 15,000 tokens", line)
+        self.assertIn("worth $0.05", line)
+        self.assertIn("5,000 tokens have no price yet", line)
+        self.assertIn("the principal sets prices on the page", line)
+
+    def test_cost_unpriced_model_prints_tokens_once_and_json_keeps_no_price(self):
+        tid = self.desk.new_task("Unpriced work")
+        self.desk.update(tid, finished=time.time(), provider="missing", usage={"mimo-x": {"in": 5000}})
+        text = self.hansa("cost", "--by", "model")
+        row = next(line for line in text.splitlines() if line.lstrip().startswith("mimo-x"))
+        self.assertEqual(row.split(), ["mimo-x", "5,000", "no", "price"])
+        self.assertNotIn("$0.00", text)
+        rep = json.loads(self.hansa("cost", "--json", "--rows"))
+        self.assertEqual((rep["rows"][0]["usd"], rep["rows"][0]["priced_by"]), (None, "no price"))
+
+    def test_cost_partly_priced_row_counts_missing_tokens_as_part_of_total(self):
+        tid = self.desk.new_task("Partly priced work")
+        self.desk.update(tid, finished=time.time(), provider="claude",
+                         usage={"claude-new": {"in": 10000, "claude_code_usd": .05}},
+                         earlier_runs=[{"ended": time.time() - 60, "provider": "removed",
+                                        "usage": {"claude-new": {"in": 5000}}}])
+        text = self.hansa("cost", "--by", "model")
+        row = next(line for line in text.splitlines() if line.lstrip().startswith("claude"))
+        self.assertIn("15,000", row)
+        self.assertIn("$0.05", row)
+        self.assertIn("5,000 tokens with no price", row)
+        self.assertNotIn("+5,000", row)
+
+    def test_cost_zero_priced_tokens_and_empty_status_keep_zero_dollars(self):
+        self.assertIn("worth $0.00", self.hansa("status").splitlines()[-1])
+        tid = self.desk.new_task("Free work")
+        self.desk.update(tid, finished=time.time(), provider="claude", usage={"free-model": {"in": 5000}})
+        s = self.desk.settings()
+        s["prices"]["free-model"] = {"in": 0, "out": 0}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertIn("worth $0.00", self.hansa("status").splitlines()[-1])
+        row = next(line for line in self.hansa("cost", "--by", "model").splitlines()
+                   if line.lstrip().startswith("free-model"))
+        self.assertEqual(row.split(), ["free-model", "5,000", "$0.00"])
+
     def test_cost_counts_workers_and_coordinator_once(self):
         tid = self.desk.new_task("Add hello.txt")
         self.settle(Dispatcher(self.desk), tid)
@@ -34730,6 +35261,45 @@ def save():'''))
         self.assertIn("lane a: unknown provider nosuch", str(e.exception.code))
         self.assertEqual(self.desk.settings_path.read_text(), before)
         self.assertEqual(len(self.events("settings_saved")), saved)
+
+    def test_lane_provider_duplicates_are_refused_without_changes(self):
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        for values in (("claude,claude",), ("claude, claude",), ("claude", "claude")):
+            for args in (("lane", "set", "a", "providers", *values),
+                         ("lane", "add", "b", "--like", "a", "--providers", ",".join(values))):
+                with self.subTest(args=args):
+                    with self.assertRaises(SystemExit) as caught:
+                        self.hansa(*args)
+                    self.assertIn("provider claude", str(caught.exception))
+                    self.assertIn("listed twice", str(caught.exception))
+                    self.assertIn("Nothing was changed", str(caught.exception))
+                    self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+                    self.assertFalse((self.desk.lanes_dir / "b").exists())
+
+    def test_lane_provider_commas_accept_surrounding_spaces(self):
+        s = self.desk.settings()
+        s["providers"]["spare"] = dict(s["providers"]["claude"])
+        self.assertEqual(self.desk.save_settings(s), [])
+        for value in ("claude, spare", " claude , spare ", "claude,spare"):
+            with self.subTest(value=value):
+                self.hansa("lane", "set", "a", "providers", "spare")
+                said = self.hansa("lane", "set", "a", "providers", value)
+                self.assertIn('providers: ["spare"] -> ["claude", "spare"]', said)
+                self.assertEqual(self.desk.settings()["lanes"]["a"]["providers"], ["claude", "spare"])
+        self.hansa("lane", "add", "b", "--like", "a", "--providers", "claude, spare")
+        self.assertEqual(self.desk.settings()["lanes"]["b"]["providers"], ["claude", "spare"])
+        with self.assertRaises(SystemExit) as caught:
+            self.hansa("lane", "set", "a", "providers", "claude, none")
+        self.assertIn("none means an empty providers", str(caught.exception))
+
+    def test_saved_duplicate_providers_still_load_and_run(self):
+        s = self.desk.settings()
+        s["lanes"]["a"]["providers"] = ["claude", "claude"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertEqual(self.desk.settings()["lanes"]["a"]["providers"], ["claude", "claude"])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt", lane="a"))
+        self.assertEqual(m["state"], "done", m)
+        self.assertIn("hello.txt", m["files"])
 
     def test_a_lanes_network_list(self):
         self.assertNotIn("Tell the principal", self.hansa("lane", "set", "a", "network"))  # [] -> []: no change

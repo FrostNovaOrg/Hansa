@@ -99,7 +99,12 @@ The task goes in on stdin, as hansa gives it. Why each part:
 stops codex and answers `error_max_turns`. **The time limit.** srt runs in a session of its own. On SIGTERM, SIGINT
 or SIGHUP (hansa's ceiling, or a cancel) the adapter sends SIGTERM to srt's group and to every process found below
 srt by parent (so commands codex put in groups of their own go too), and SIGKILL three seconds later, within
-hansa's five-second grace. If the adapter is killed outright, a watchdog in a session of its own does the same.
+hansa's ten-second stop grace and five-second sweep grace. The adapter then drains Codex's events and writes a
+JSON answer on stdout with the last message, turns and latest `turn.completed` usage, keeping exit 128 + signal.
+hansa reads that answer from
+`run.json` in `finish`: `show` keeps the message and turns, and `cost` counts the tokens. The task still fails at
+the time ceiling, or stays cancelled on request. Before any message, counted item or usage, there is no answer.
+If the adapter is killed outright, a watchdog in a session of its own does the same cleanup.
 A run killed by a signal the adapter did not send (the out-of-memory killer, say) gets no answer and exits
 128 + n, as a killed claude does, so hansa runs it again.
 
@@ -138,12 +143,13 @@ What it cannot close:
 - **Codex and the commands it runs share one sandbox**, so a run's own commands can read the Codex login and
   write the rest of the home: Codex refreshes its token into `auth.json` during a run. Claude workers cannot read
   it (setup, step 3).
-- A task stopped at a ceiling has only Codex's last message.
+- A task stopped at a ceiling or cancelled has only Codex's last message as its report.
 - **None of hansa's tool rules** (`--allowedTools`, `--disallowedTools`, Read denials) and no browser
   (`--mcp-config` is ignored): srt's file and network rules are the boundary. `permission_denials` is always empty.
 - **hansa shows these runs' cost as 0 because it has no price for them**, until the principal adds the model to the
   price table. The tokens are still counted, from `turn.completed`, and the provider's own charges are not known to
-  hansa. A failed run's usage is unknown and shown as zero.
+  hansa. At a requested stop the latest usage is kept; tokens not yet reported in `turn.completed` are unknown
+  and cannot be counted. With no usage event, usage is shown as zero.
 - The watchdog looks every half second; a process that leaves and loses its parent between two looks can escape.
   Codex's unlimited reconnect is kept: it waits for the network in place, and hansa's time ceiling still holds.
 

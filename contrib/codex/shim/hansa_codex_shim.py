@@ -81,7 +81,7 @@ DROP_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", 
              "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CODEX_HOME", "CODEX_CA_CERTIFICATE", NO_WATCHDOG, PAUSE_AFTER_START,
              STATUS_TIMEOUT_SETTING, *SETTINGS)
 COUNTED_ITEMS = ("command_execution", "file_change")  # what counts against --max-turns
-STOP_GRACE = 3  # seconds between SIGTERM and SIGKILL; hansa waits 5 before its own SIGKILL
+STOP_GRACE = 3  # seconds between SIGTERM and SIGKILL; hansa waits 10 on a stop, 5 on a sweep
 POLL = 0.2  # seconds between looks at Codex's log, while it writes nothing new
 WATCHDOG = "--hansa-codex-watchdog"
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
@@ -917,18 +917,74 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
                *codex_argv(codex, wt, model, effort, a.get("--append-system-prompt") or "", last, *web,
                           zsh_prefix=zsh_prefix, no_repo=check)]
 
+    # Codex's stdout is the log file itself, never a pipe: a write to a regular file does not fail with EAGAIN,
+    # whoever sets O_NONBLOCK on it (codex's print panics on that when a pipe is full). The shim follows the file.
+    jsonl, err = open(logs / f"{name}.jsonl", "wb"), open(logs / f"{name}.err", "wb")
+    follow = open(logs / f"{name}.jsonl", "rb", buffering=0)
+    seen, said, errors, failure, usage, thread, done, over = set(), "", [], None, None, "", False, False
+    progress = Progress(env.get("CLAUDE_CONFIG_DIR", "") if not check else "", sid)
+    retries, warnings = [], []
+    partial = b""
+
+    def read_events(ended, stopping=False):
+        nonlocal partial, said, failure, usage, thread, done, over
+        if follow.closed:
+            return False
+        chunk = follow.read()
+        lines = (partial + chunk).split(b"\n")
+        partial = lines.pop()  # what follows the last newline: a line not yet complete
+        if ended and partial:
+            lines.append(partial)  # a last line without its newline, parsed if it is complete JSON
+            partial = b""
+        for line in lines:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            t, item = ev.get("type"), ev.get("item") if isinstance(ev.get("item"), dict) else {}
+            if t == "thread.started":
+                thread = str(ev.get("thread_id") or "")
+                (logs / f"{name}.thread").write_text(thread + "\n", encoding="utf-8")
+            elif t in ("item.started", "item.completed") and item.get("type") in COUNTED_ITEMS:
+                seen.add(item.get("id") or f"#{len(seen)}")
+                if len(seen) > max_turns:
+                    over = True
+            elif (t == "item.completed" and item.get("type") == "agent_message"
+                  and isinstance(item.get("text"), str) and item["text"]):
+                said = item["text"]
+            elif t == "item.completed" and item.get("type") == "error" and item.get("message"):
+                warnings.append(str(item["message"]))  # a model warning, not a failure
+            elif t == "turn.completed":
+                done = True
+                if isinstance(ev.get("usage"), dict):
+                    usage = usage_of(ev["usage"])
+            elif t == "turn.failed":
+                failure = str((ev.get("error") or {}).get("message") or ev.get("error") or "")
+            elif t == "error":
+                m = str(ev.get("message") or "")
+                (retries if RETRY.match(m) else errors).append(m)
+            if not stopping:
+                progress.event(len(seen), said)
+                if over:
+                    break
+        return bool(chunk)
+
     def on_signal(sig, _frame):  # hansa's ceiling, or a cancel: srt, codex and their commands go too
+        for s in STOP_SIGNALS:
+            signal.signal(s, signal.SIG_IGN)  # another stop must not restart the three-second grace
         if Run.proc is not None:
             stop_tree(Run.proc.pid, Run.proc, seen=Run.seen)
+        read_events(ended=True, stopping=True)  # include events written just before or during the stop
+        if seen or said or usage:
+            extra = {"codex_thread_id": thread} if thread else {}
+            emit(answer("error_during_execution", said, sid, len(seen), model, usage, **extra))
         shutil.rmtree(mine, ignore_errors=True)
         os._exit(128 + sig)
     for s in STOP_SIGNALS:
         signal.signal(s, on_signal)
 
-    # Codex's stdout is the log file itself, never a pipe: a write to a regular file does not fail with EAGAIN,
-    # whoever sets O_NONBLOCK on it (codex's print panics on that when a pipe is full). The shim follows the file.
-    jsonl, err = open(logs / f"{name}.jsonl", "wb"), open(logs / f"{name}.err", "wb")
-    follow = open(logs / f"{name}.jsonl", "rb", buffering=0)
     # A signal held back until Run.proc is set and the watchdog runs, then handled once: srt is never left behind.
     # The children start with the mask as it was.
     was = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
@@ -957,57 +1013,23 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
     finally:
         unmasked()
     sys.stderr.write(f"hansa-codex-shim: Codex's output is kept in {logs}/{name}.jsonl and .err\n")
-    seen, said, errors, failure, usage, thread, done, over = set(), "", [], None, None, "", False, False
-    progress = Progress(env.get("CLAUDE_CONFIG_DIR", "") if not check else "", sid)
-    retries, warnings = [], []
-    looked, partial, ended = 0.0, b"", False
+    looked, ended = 0.0, False
     # Complete lines as they arrive; a partial last one is kept until its newline does
     while not (ended or over):
         if time.time() - looked > 2:
             looked = time.time()
             Run.seen = descendants(proc.pid, dict(Run.seen))
         ended = proc.poll() is not None  # before the read: what srt's codex wrote is then all in the file
-        chunk = follow.read()
-        if not chunk and not ended:
+        # The handler drains this same reader. Defer it until the offset, partial line and counts agree.
+        was_reading = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+        try:
+            changed = read_events(ended)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, was_reading)
+        if over:
+            stop_tree(proc.pid, proc, seen=Run.seen)
+        if not changed and not ended:
             time.sleep(POLL)
-            continue
-        lines = (partial + chunk).split(b"\n")
-        partial = lines.pop()  # what follows the last newline: a line not yet complete
-        if ended and partial:
-            lines.append(partial)  # a last line without its newline, parsed if it is complete JSON
-        for line in lines:
-            try:
-                ev = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(ev, dict):
-                continue
-            t, item = ev.get("type"), ev.get("item") if isinstance(ev.get("item"), dict) else {}
-            if t == "thread.started":
-                thread = str(ev.get("thread_id") or "")
-                (logs / f"{name}.thread").write_text(thread + "\n", encoding="utf-8")
-            elif t in ("item.started", "item.completed") and item.get("type") in COUNTED_ITEMS:
-                seen.add(item.get("id") or f"#{len(seen)}")
-                if len(seen) > max_turns:
-                    over = True
-            elif (t == "item.completed" and item.get("type") == "agent_message"
-                  and isinstance(item.get("text"), str) and item["text"]):
-                said = item["text"]
-            elif t == "item.completed" and item.get("type") == "error" and item.get("message"):
-                warnings.append(str(item["message"]))  # a warning (Model metadata for `x` not found), not a failure
-            elif t == "turn.completed":
-                done = True
-                if isinstance(ev.get("usage"), dict):
-                    usage = usage_of(ev["usage"])
-            elif t == "turn.failed":
-                failure = str((ev.get("error") or {}).get("message") or ev.get("error") or "")
-            elif t == "error":
-                m = str(ev.get("message") or "")
-                (retries if RETRY.match(m) else errors).append(m)
-            progress.event(len(seen), said)
-            if over:
-                stop_tree(proc.pid, proc, seen=Run.seen)
-                break
     follow.close()
     code = proc.wait()
     stop_tree(proc.pid, None, grace=0, seen=Run.seen)  # what codex left running
@@ -1046,7 +1068,7 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
     if not text and retries:
         text = RETRY.match(retries[-1]).group(1)
     text = text or f"codex ended (exit {code}) without finishing its turn"
-    said = classify(text, home, codex)
+    classified = classify(text, home, codex)
     if REFRESH_USED_TEXT.search(text):  # another run's refresh at the same instant, or a login that is gone
         try:
             limit = float(env.get(STATUS_TIMEOUT_SETTING) or STATUS_TIMEOUT)
@@ -1055,13 +1077,13 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
         good, how = login_status(codex, home, env, limit)
         sys.stderr.write(f"hansa-codex-shim: the refresh token was already used; codex login status: {how}\n")
         if good:
-            said = {"result": f"API Error: Connection dropped (Codex: another run on the same Codex home refreshed "
+            classified = {"result": f"API Error: Connection dropped (Codex: another run on the same Codex home refreshed "
                               f"the login at the same moment, and `codex login status` says the login is still "
                               f"good; run the task again: {one_line(text)})"}
         else:
-            said["result"] += f" (codex login status: {how})"
-    return emit(answer("error_during_execution", said.pop("result") + warned.replace("\n\n", " · "), sid,
-                       len(seen), model, usage, **said, **extra))
+            classified["result"] += f" (codex login status: {how})"
+    return emit(answer("error_during_execution", classified.pop("result") + warned.replace("\n\n", " · "), sid,
+                       len(seen), model, usage, **classified, **extra))
 
 
 def given_env() -> dict:
