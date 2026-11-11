@@ -233,6 +233,13 @@ The task moves to the lane's next provider without using a try; if all rest, it 
 Once per credit rest, hansa posts a line to the coordinator and runs the principal's alert command,
 if set. `status`, `show`, `explain provider P`, and the provider's page row say why and since when.
 
+A lost login is not the task's doing either. When a run says it is not logged in (`Please run /login`), or a
+subscription provider's run ends with HTTP 401 because its login ran out (`OAuth token has expired`), the
+provider rests for a day, until a `hansa ping` of it answers, and the task moves to the lane's next provider
+without using a try. A subscription provider's line says to log in with `claude` (with its `CLAUDE_CONFIG_DIR`
+when it has one) and then `hansa ping NAME`. A key a compatible provider's endpoint rejects (HTTP 401 or 403)
+still uses a try, and saving a new key brings that provider back.
+
 After `hansa lane set L providers ...`, queued tasks, including those waiting for a resting provider,
 use the new order: first ready provider excluding prior refusals; otherwise they wait. A
 dropped-connection retry keeps its provider if still listed. Running work keeps its provider.
