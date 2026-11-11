@@ -1341,12 +1341,12 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
             reset = None
         if reset is not None:
             until = min(max(reset, t) + 60, t + REST_CAP)
-            desk.set_provider_state(name, cool_until=until, reason=why, rest_how="reset", rest_minutes=None)
+            desk.set_provider_state(name, cool_until=until, cool_since=t, reason=why, rest_how="reset", rest_minutes=None)
         else:
             minutes = s.get("cool_minutes", 30)
             until = t + 60 * minutes
-            desk.set_provider_state(name, cool_until=until, reason=why, rest_how="fixed", rest_minutes=minutes)
-        record(desk, name, cool_until=until)
+            desk.set_provider_state(name, cool_until=until, cool_since=t, reason=why, rest_how="fixed", rest_minutes=minutes)
+        record(desk, name, cool_until=until, cool_since=t)
         return until
 
 
@@ -7396,7 +7396,10 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -
         result = annotate(result, ("detail",))
         desk.set_provider_state(name, check=result)
         if ok and not (desk.provider_state().get(name) or {}).get("credit_since"):
-            desk.set_provider_state(name, cool_until=0, reason="", unreachable_since=0, unreachable_reason="")
+            from .rests import record
+            checked_rest = record(desk, name, checked=True)
+            desk.set_provider_state(name, cool_until=0, quota_checked=checked_rest, reason="",
+                                    unreachable_since=0, unreachable_reason="")
         elif kind:
             desk.set_provider_state(name, unreachable_since=0, unreachable_reason="")
             rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}")

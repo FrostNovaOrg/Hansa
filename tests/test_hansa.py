@@ -18449,14 +18449,16 @@ def save():'''))
         self.assertIn("another desk", provider_problem(other, other.settings(), "claude"))
         text = rests.rests_file().read_text()
         self.assertEqual(rests.rests_file().parent, up.desks_file().parent)
-        for secret in ("sk-shared-rest-test", "https://shared.example.invalid", str(self.tmp)):
+        for secret in ("sk-shared-rest-test", "https://shared.example.invalid", str(self.tmp), "opus", "claude"):
             self.assertNotIn(secret, text)
         entries = json.loads(text)
         self.assertEqual(len(entries), 1)
         for key, entry in entries.items():
             self.assertRegex(key, r"^[0-9a-f]{64}$")
             self.assertRegex(entry["source"], r"^[0-9a-f]{64}$")
-            self.assertEqual(set(entry), {"source", "cool_until"})
+            self.assertRegex(entry["provider"], r"^[0-9a-f]{64}$")
+            self.assertEqual(entry["model"], rests.fingerprint("opus"))
+            self.assertEqual(set(entry), {"source", "provider", "model", "cool_since", "cool_until"})
         s = other.settings()
         s["providers"]["claude"]["base_url"] = "https://different.example.invalid"
         self.assertEqual(other.save_settings(s), [])
@@ -18496,6 +18498,130 @@ def save():'''))
                 self.assertIn("another desk", provider_problem(other, other.settings(), "claude"))
                 self.assertEqual(_top_up_provider(other, "claude"), {"ok": True})
                 self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+
+    def test_shared_usage_ping_on_source_clears_both_desks(self):
+        from hansa import run
+        other = self.shared_rest_desks()
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "usage limit")
+        self.assertIn("another desk", provider_problem(other, other.settings(), "claude"))
+        self.assertIn("claude: ok", self.hansa("ping", "claude"))
+        for desk in (self.desk, Desk(other.root)):
+            self.assertEqual(provider_problem(desk, desk.settings(), "claude"), "")
+
+    def test_shared_usage_ping_on_peer_clears_source_local_rest(self):
+        from hansa import run
+        for compatible in (False, True):
+            with self.subTest(compatible=compatible):
+                other = self.shared_rest_desks(compatible)
+                run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "usage limit")
+                run.rest_provider(other, other.settings(), "claude", "quota", "usage limit")
+                self.assertIn("claude: ok", self.hansa("ping", "claude"))
+                for desk in (self.desk, Desk(other.root)):
+                    self.assertEqual(provider_problem(desk, desk.settings(), "claude"), "")
+
+    def test_shared_usage_other_model_ping_stays_ready_until_new_limit(self):
+        from hansa import rests, run
+        other = self.shared_rest_desks()
+        s = self.desk.settings()
+        s["providers"]["claude"]["model"] = "sonnet"
+        self.assertEqual(self.desk.save_settings(s), [])
+        reset = f"usage limit reached|{int(time.time()) + 3600}"
+        until = run.rest_provider(other, other.settings(), "claude", "quota", "usage limit", reset)
+        before = rests.rests_file().read_bytes()
+        self.assertIn("claude: ok", self.hansa("ping", "claude"))
+        self.assertEqual(rests.rests_file().read_bytes(), before)
+        for _ in range(2):
+            fresh = Desk(self.desk.root)
+            self.assertEqual(provider_problem(fresh, fresh.settings(), "claude"), "")
+            self.assertEqual(other.provider_state()["claude"]["cool_until"], until)
+        # Even an identical reset deadline is a new limit, not the one this check answered.
+        self.assertEqual(run.rest_provider(other, other.settings(), "claude", "quota", "usage limit", reset), until)
+        for desk in (self.desk, other):
+            self.assertIn("resting", provider_problem(desk, desk.settings(), "claude"))
+
+    def test_shared_usage_page_check_clears_source_local_rest(self):
+        why = unix_sockets_refused()
+        if why:
+            skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS)
+        from hansa import run
+        other = self.shared_rest_desks()
+        run.rest_provider(other, other.settings(), "claude", "quota", "usage limit")
+        self.assertTrue(self.page_post("/api/check", {"provider": "claude"})["ok"])
+        for desk in (self.desk, other):
+            self.assertEqual(provider_problem(desk, desk.settings(), "claude"), "")
+
+    def test_shared_usage_failed_check_preserves_both_rests(self):
+        from hansa import rests, run
+        other = self.shared_rest_desks()
+        run.rest_provider(other, other.settings(), "claude", "quota", "usage limit")
+        before = rests.rests_file().read_bytes()
+        states = [d.provider_state()["claude"] for d in (self.desk, other)]
+        with unittest.mock.patch.object(run.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 90)):
+            self.assertFalse(run.check_provider(self.desk, "claude")["ok"])
+        self.assertEqual(rests.rests_file().read_bytes(), before)
+        for desk, state in zip((self.desk, other), states):
+            after = desk.provider_state()["claude"]
+            after.pop("check", None)
+            self.assertEqual(after, state)
+
+    def test_shared_usage_two_providers_on_one_desk(self):
+        from hansa import run
+        self.shared_rest_desks()
+        s = self.desk.settings()
+        s["providers"]["peer"] = dict(s["providers"]["claude"])
+        self.assertEqual(self.desk.save_settings(s), [])
+        for model in ("opus", "sonnet"):
+            with self.subTest(model=model):
+                s["providers"]["peer"]["model"] = model
+                self.assertEqual(self.desk.save_settings(s), [])
+                run.rest_provider(self.desk, s, "claude", "quota", "usage limit")
+                self.assertIn("resting", provider_problem(self.desk, s, "peer"))
+                self.assertTrue(run.check_provider(self.desk, "peer")["ok"])
+                self.assertEqual(provider_problem(self.desk, s, "peer"), "")
+                self.assertEqual(bool(provider_problem(self.desk, s, "claude")), model != "opus")
+
+    def test_shared_usage_legacy_record_without_model_clears_both_desks(self):
+        from hansa import rests, run
+        other = self.shared_rest_desks()
+        s = self.desk.settings()
+        s["providers"]["claude"]["model"] = "sonnet"
+        self.assertEqual(self.desk.save_settings(s), [])
+        until = time.time() + 3600
+        other.set_provider_state("claude", cool_until=until, reason="usage limit", rest_how="fixed")
+        key = rests.login(other, "claude", other.settings()["providers"]["claude"])
+        rests.rests_file().parent.mkdir(parents=True, exist_ok=True)
+        write_json(rests.rests_file(), {key: {"source": rests.fingerprint(str(other.root)), "cool_until": until}})
+        self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        for desk in (self.desk, Desk(other.root)):
+            self.assertEqual(provider_problem(desk, desk.settings(), "claude"), "")
+
+    def test_shared_usage_new_limit_after_clear_rests_every_desk_again(self):
+        from hansa import run
+        other = self.shared_rest_desks()
+        reset = f"usage limit reached|{int(time.time()) + 3600}"
+        until = run.rest_provider(other, other.settings(), "claude", "quota", "usage limit", reset)
+        self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        self.assertEqual(provider_problem(other, other.settings(), "claude"), "")
+        self.assertEqual(run.rest_provider(other, other.settings(), "claude", "quota", "usage limit", reset), until)
+        for desk in (self.desk, other):
+            self.assertEqual(desk.provider_state()["claude"]["cool_until"], until)
+            self.assertIn("resting", provider_problem(desk, desk.settings(), "claude"))
+
+    def test_shared_usage_clear_preserves_credit_key_and_login_rests(self):
+        from hansa import run
+        other = self.shared_rest_desks()
+        for kind in ("key", "login"):
+            with self.subTest(kind=kind):
+                run.rest_provider(other, other.settings(), "claude", "quota", "usage limit")
+                until = run.rest_provider(other, other.settings(), "claude", kind, "fix credentials")
+                self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+                self.assertEqual(other.provider_state()["claude"]["cool_until"], until)
+                self.assertTrue(run.check_provider(other, "claude")["ok"])
+                self.assertEqual(provider_problem(other, other.settings(), "claude"), "")
+        run.rest_provider(other, other.settings(), "claude", "credit", "credit too low")
+        self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+        for desk in (self.desk, other):
+            self.assertIn("topped up", provider_problem(desk, desk.settings(), "claude"))
 
     def test_shared_rest_unavailable_or_damaged_preserves_local_rests(self):
         from hansa import rests, run
