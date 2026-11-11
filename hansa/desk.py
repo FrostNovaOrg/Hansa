@@ -3239,7 +3239,7 @@ class Desk:
     def new_task(self, text: str, **opts) -> str:
         text = text.strip()
         if not text:
-            raise ValueError("the task text is empty")
+            raise SystemExit("hansa: the task text is empty; nothing was queued")
         with self.lock():  # a key saved meanwhile is either known here or scrubbed from the task after
             from . import after, goals
             after.validate(self, opts)
@@ -3267,7 +3267,8 @@ class Desk:
                 for name, data in attachments:
                     write_bytes(folder / name, data)
                 opts["attachments"] = [{"name": name, "size": len(data)} for name, data in attachments]
-            title = self.redact(opts.pop("title", "")) or text.splitlines()[0][:80]
+            title = self.redact(opts.pop("title", ""))
+            title = title if title.strip() else text.splitlines()[0][:80]
             meta = {"id": tid, "title": title, "state": "queued", "created": now(),
                     "lane": "", "effort": "", "model": "", "max_turns": 0, "attempts": []}
             meta.update({k: v for k, v in opts.items() if v not in (None, "")})

@@ -467,6 +467,8 @@ def _stdin_problem(args) -> str:
 
 
 def _text(args) -> str:
+    if getattr(args, "file", None) and (getattr(args, "text", None) or getattr(args, "note", None)):
+        raise SystemExit("hansa: give the text as words or with --file, not both; nothing was changed")
     if getattr(args, "file", None) == "-":  # on standard input: root hands a file's text to the desk's account so
         problem = _stdin_problem(args)
         if problem:
@@ -615,6 +617,14 @@ def cmd_add(a):
 
 
 def _add(desk: Desk, a, text: str) -> None:
+    if a.max_turns is not None and a.max_turns < 1:
+        raise SystemExit("hansa: --max-turns must be 1 or more; nothing was queued")
+    title = a.title or ""
+    if title and title.splitlines() != [title]:
+        raise SystemExit("hansa: --title must be on one line; nothing was queued")
+    a.title = title if title.strip() else ""
+    if len(a.title) > 200:
+        raise SystemExit("hansa: --title must be at most 200 characters; nothing was queued")
     s = desk.settings()
     if a.lane and a.lane not in s["lanes"]:
         raise SystemExit(f"hansa: there is no lane {a.lane}; lanes: {', '.join(sorted(s['lanes'])) or 'none'}; "
@@ -647,7 +657,9 @@ def _add(desk: Desk, a, text: str) -> None:
 
 def _model_note(lane: str | None) -> None:
     print("note: --model applies only when a Claude subscription provider runs the task; other providers use"
-          f" their own model. Which provider runs it follows the lane's order: hansa explain lane {lane or 'L'}")
+          " their own model. Which provider runs it follows the lane's order: "
+          + (f"hansa explain lane {lane}" if lane else
+             "hansa lane lists the lanes; hansa explain lane NAME shows one's order"))
 
 
 def cmd_status(a):
@@ -1076,8 +1088,6 @@ def _retry(desk: Desk, a) -> None:
         if held:
             raise SystemExit(f"hansa: {held}; nothing was queued. Start over from the base: hansa retry {a.id} "
                              f"--fresh \"...\"")
-    if a.file and a.note:
-        raise SystemExit("hansa: give the note as words or with --file, not both. Nothing was queued")
     note = (_text(a) if a.file else " ".join(a.note)).strip()
     text = (_follow_up_start(desk, m) + f"\nFollow-up to {a.id} ({m['state']})."
             + (f" What to change: {note}" if note else ""))
@@ -2540,7 +2550,7 @@ def cmd_lane(a):
             print("  ".join(f"{x:<{w}}" for x, w in zip(r, widths)) + "  " + r[3])
             if not Path(lanes[r[0]]["repo"]).is_dir():
                 print(f"  {r[0]}: {repo_gone_text(r[0], lanes[r[0]]['repo'])}")
-        print("no lanes yet: hansa lane add L --repo PATH" if not lanes else "more on one: hansa explain lane L")
+        print("no lanes yet: hansa lane add L --repo PATH" if not lanes else "more on one: hansa explain lane NAME")
         return
     if a.action == "try":
         return _lane_try(desk, a)
@@ -4122,7 +4132,7 @@ def main(argv=None):
     p.description = ("Add each full path to what workers may not read (the principal's list on the web page, Settings), "
                      "each judged as a page save adding it: any problem, even an old one, refuses it, with the page's "
                      "reason, and one already there, however it is spelled, is not added again. Each addition is "
-                     "recorded as the coordinator's, with when, and shown so on the page and in hansa explain lane L. "
+                     "recorded as the coordinator's, with when, and shown so on the page and in hansa explain lane NAME. "
                      "Runs that start from now on are kept from it, and Read is denied there to the session hansa "
                      "coordinator starts from its next start (not to one hansa notify on recorded); a run already going keeps the sandbox it started with. There is no command to "
                      "remove an entry: removing one gives workers something back, so only the principal removes "
