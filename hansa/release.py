@@ -1883,7 +1883,7 @@ def after_merge_rows(desk: Desk, s: dict, tasks: list) -> list:
             elif held:
                 en, zh = "held: direct commits need the principal's yes", "已暂缓：直接提交需要负责人同意"
             elif now() >= at:
-                en, zh = "starts when the server next looks", "服务器下次检查时开始"
+                en, zh = "starts when the server next looks", "后台下次检查时开始"
             else:
                 en = f"starts at {when(at)}, {delay} minute{'s' if delay != 1 else ''} after the last merge"
                 zh = f"于 {when(at)} 开始，即上次合并后 {delay} 分钟"
@@ -2097,7 +2097,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
         ran = r.get("ran", bool(r.get("started")))  # one stopped as its fixed checkout was made never ran
         if zh:
             return (f"{_who(r, zh)}在 {when(r.get('ended'))} 叫停了" + (f"：{r['stop_reason']}" if r.get("stop_reason") else "")
-                    + ("（命令已运行，留下了到那时的输出；服务器可能停在半路）" if ran else "；什么都没运行"))
+                    + ("（命令已运行，留下了到那时的输出；后台可能停在半路）" if ran else "；什么都没运行"))
         return (f"stopped by {_who(r)} {when(r.get('ended'))}" + (f": {r['stop_reason']}" if r.get("stop_reason") else "")
                 + ("; its command had run (its output so far is kept; the server may be half-switched)" if ran
                    else "; nothing was run"))
@@ -2145,7 +2145,7 @@ def state_text(desk: Desk, r: dict, s: dict | None = None, zh: bool = False) -> 
 # hansa release --stop records "coordinator" in a Claude Code session (or with HANSA_ROLE=coordinator), "terminal"
 # outside one; "cli" was recorded for both before.
 STOPPED_BY = {"page": ("the principal", "你"), "coordinator": ("the coordinator", "协调员"),
-              "terminal": ("a command in a terminal", "终端里的命令"), "cli": ("a hansa command", "一条 hansa 命令")}
+              "terminal": ("a command in a terminal", "终端里的命令"), "cli": ("a hansa command", "一条 Hansa 命令")}
 
 
 def _who(r: dict, zh: bool = False) -> str:

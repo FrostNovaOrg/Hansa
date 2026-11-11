@@ -1554,7 +1554,7 @@ def listed_mismatch(s: dict, entry, zh: bool = False, now_as: dict | None = None
             return f"工作线 {lane} 现在没有发布目标 {target or 'default'}"
         return f"lane {lane} has no release target {target or 'default'} now"
     if not isinstance(entry, dict):
-        return ("保存清单时 hansa 还没记下各工作线的仓库、基础分支和发布命令" if zh else
+        return ("保存清单时 Hansa 还没记下各工作线的仓库、基础分支和发布命令" if zh else
                 "the list was saved before hansa recorded each lane's repository, base branch and release command")
     if not entry.get("repo"):
         return f"保存清单时工作线 {lane} 还不在工作台上" if zh else f"lane {lane} was not on the desk when the list was saved"

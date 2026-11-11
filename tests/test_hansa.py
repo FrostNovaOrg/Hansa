@@ -37792,7 +37792,7 @@ def save():'''))
         page_rows(direct, reason=("held: direct commits need the principal's yes", "已暂缓：直接提交需要负责人同意"))
         self.assertTrue(self.page_save(lambda s: s.update(release_direct="record"))["ok"])
         with unittest.mock.patch.object(release, "now", return_value=at + 1500):
-            page_rows(direct, reason=("starts when the server next looks", "服务器下次检查时开始"))
+            page_rows(direct, reason=("starts when the server next looks", "后台下次检查时开始"))
         self.hansa("pause", "reviewing")
         page_rows(direct, at + 1500, paused=True)
         with unittest.mock.patch.object(release, "now", return_value=at + 1500):
@@ -47696,7 +47696,7 @@ else:
             self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
             text = self.alerted(out)[-1]["text"]
             self.assertIn(" · Original description · ", text)
-            self.assertTrue(text.startswith("[hansa] " + ("工作台 " if language == "zh" else "desk ")))
+            self.assertTrue(text.startswith("[Hansa] 工作台 " if language == "zh" else "[hansa] desk "))
             self.assertLess(text.index("一次性码" if language == "zh" else "code "), text.index("Original description"))
             self.assertNotIn("Changed description", text)
             release.void(self.desk, rid, "finished")
@@ -50688,7 +50688,7 @@ else:
                     ("invalid_request", "the session's context may have gone wrong: /compact or /clear in that "
                      "session may cure it", "在那个会话里 /compact 或 /clear 也许能解决"),
                     ("authentication_failed", "log in again in that session", "请在那个会话里重新登录"),
-                    ("overloaded", "hansa tries again with its next post to the session", "hansa 下次给那个会话发消息时会再试")):
+                    ("overloaded", "hansa tries again with its next post to the session", "Hansa 下次给那个会话发消息时会再试")):
                 with self.subTest(zh=zh, error=error):
                     write_json(alert.queue_file(self.desk), [])
                     self.assertEqual(alert.from_follower(self.desk, me, {"case": "turn", "error": error,
@@ -50698,7 +50698,7 @@ else:
                     self.assertEqual((x["kind"], x["level"]), ("coordinator", "urgent"))
                     if zh:
                         self.assertIn("协调员的会话 pid 4242 (desk-4242) 无法工作：自 ", x["text"])
-                        self.assertIn(f"（31 分钟）轮次一直以 API 错误（{error}）结束 · hansa 发去的 3 件事尚未处理",
+                        self.assertIn(f"（31 分钟）轮次一直以 API 错误（{error}）结束 · Hansa 发去的 3 件事尚未处理",
                                       x["text"])
                         self.assertIn(zh_said, x["text"])
                     else:
@@ -50912,7 +50912,7 @@ else:
                 self.assertIn(f"{advice}, then type it again in that session", en)
                 self.assertIn("2 thing(s) hansa posted meanwhile wait unhandled", en)
                 self.assertIn(f"{advice_zh}，然后在那个会话里再输入一次", zh)
-                self.assertIn("hansa 期间发去的 2 件事尚未处理", zh)
+                self.assertIn("Hansa 期间发去的 2 件事尚未处理", zh)
         for error in (*notify.TURN_WAIT, notify.TURN_LONG):
             with self.subTest(error=error):
                 en, zh = alert.turn_text({"error": error, "principal": True, "at": t, "since": t, "count": 0}, who, who,
@@ -50963,7 +50963,7 @@ else:
         self.coordinator_desk("turn-none")
         me = {"session": {"pid": 4242, "start": ""}, "name": "desk-4242"}
         for count, en_said, zh_said in ((0, None, None), (2, "· 2 thing(s) hansa posted to it wait unhandled ·",
-                                                           "· hansa 发去的 2 件事尚未处理 ·")):
+                                                           "· Hansa 发去的 2 件事尚未处理 ·")):
             with self.subTest(count=count):
                 en, zh = alert.turn_text({"case": "turn", "error": "billing_error", "since": time.time() - 1860,
                                           "count": count}, "pid 4242 (desk-4242)", "pid 4242 (desk-4242)", time.time())
@@ -53609,6 +53609,24 @@ class PageLanguageTest(unittest.TestCase):
         for word in ("基础分支", "后台", "Hansa", "禁词"):
             self.assertIn(word, shown["texts"])
 
+    def test_chinese_python_copy_uses_the_pages_names(self):
+        # These modules supply release/page summaries and the principal's alerts.
+        # Read literals (including f-string parts), without treating English copy or commands as prose.
+        for name in ("release.py", "alert.py", "run.py", "desk.py", "alert_push.py"):
+            path = Path(hansa.__file__).with_name(name)
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                text = node.value
+                if not re.search(r"[\u4e00-\u9fff]", text):
+                    continue
+                with self.subTest(file=name, line=node.lineno, text=text):
+                    # These refer to the provider, rather than hansa serve.
+                    own_terms = re.sub(r"服务商|云服务凭据|服务繁忙|服务自身出了错", "", text)
+                    self.assertNotIn("服务", own_terms)
+                    self.assertNotRegex(text, r"(?<![\w./])hansa\b(?![./-]| [a-z])")
+                    self.assertNotRegex(text, r"\bHansa [a-z]")
+
     def test_release_summary_uses_the_pages_forbidden_words_name(self):
         from hansa import release
         summary = release.state_text(self.desk, {"state": "forbidden", "hits": [{"word": "private"}]}, zh=True)
@@ -53657,12 +53675,13 @@ class DeskNameSettingTest(unittest.TestCase):
     def assert_displays(self, name):
         from hansa import alert, example
         self.assertEqual(alert.desk_name(self.desk), name)
-        self.assertTrue(alert.text_of(self.desk, [{"text": "a request"}]).startswith(f"[hansa] 工作台 {name}:"))
+        self.assertTrue(alert.text_of(self.desk, [{"text": "a request"}]).startswith(f"[Hansa] 工作台 {name}:"))
         [entry] = self.desk.settings()["alert_push"]
         self.http.reset_mock()
         self.assertEqual(alert_push.test(self.desk, entry["id"]), "sent")
         [request] = self.http.call_args.args[0]
         self.assertEqual((request["json"]["title"], request["json"]["group"]), (name, name))
+        self.assertEqual(request["json"]["body"], "来自 Hansa 的测试提醒")
         self.assertTrue(self.hansa("status").splitlines()[0].startswith(f"desk {name} ("))
         self.assertEqual(views.status(self.desk)["desk_name"], name)
         self.assertIn(f"desk {name} ({self.desk.root})", self.hansa("desks"))

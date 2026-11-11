@@ -506,11 +506,11 @@ def test(desk, id):
         return "no_address"
     if entry["service"] == "bark" and _secret(desk, entry):
         en = 'an encrypted test alert from hansa; "Decryption Failed" on the phone means the two keys differ'
-        zh = '来自 hansa 的加密测试提醒；手机显示“Decryption Failed”表示两边的密钥不同'
+        zh = '来自 Hansa 的加密测试提醒；手机显示“Decryption Failed”表示两边的密钥不同'
         return send(desk, entry, [{"kind": "test", "level": "active", "text": en,
                                   "translations": {"en": en, "zh": zh}}], testing=True)
     return send(desk, entry, [{"kind": "test", "level": "active", "text": "a test alert from hansa",
-                             "translations": {"en": "a test alert from hansa", "zh": "来自 hansa 的测试提醒"}}], testing=True)
+                             "translations": {"en": "a test alert from hansa", "zh": "来自 Hansa 的测试提醒"}}], testing=True)
 
 
 def urgent_marker(text, level, *, chinese=False):
@@ -535,7 +535,7 @@ def _text(desk: Desk, items: list[dict], held: int, *, with_codes=False) -> tupl
     # Reuse the command's language, grouping and character cap. Only encrypted
     # Bark receives its code-bearing wording; every other entry uses safe text.
     title = desk.redact(alert.desk_name(desk))
-    header = f"[hansa] {'工作台' if lang == 'zh' else 'desk'} {title}"
+    header = f"[Hansa] 工作台 {title}" if lang == "zh" else f"[hansa] desk {title}"
     body = alert.text_of(desk, items if with_codes else safe, held).removeprefix(header).removeprefix(": ").lstrip()
     return title, body
 

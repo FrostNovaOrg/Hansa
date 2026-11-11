@@ -462,7 +462,7 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
     codes = [x for x in items if x.get("code")]
     zh = chinese(desk)
     name = desk_name(desk)
-    head = f"[hansa] 工作台 {name}" if zh else f"[hansa] desk {name}"
+    head = f"[Hansa] 工作台 {name}" if zh else f"[hansa] desk {name}"
     held_text = ((f"（每小时最多 {MOST_RUNS} 次，{held} 条提醒因此暂缓）" if zh else
                   f" ({held} held back by the limit of {MOST_RUNS} runs an hour)") if held else "")
     if len(lines) == 1:  # a code stays early: what was held back is said after it
@@ -923,7 +923,7 @@ def unheard_text(desk: Desk, items: list, t: float, zh: bool = False) -> str:
         who = "这个工作台还没有会话接收过" if zh else "none has on this desk yet"
     if zh:
         step = "在那个会话里让协调员运行 hansa notify on" if runs else HANSA_UP[1]
-        return (f"协调员未收到：没有会话接收 hansa 的消息（{who}）· {len(items)} 件事在等协调员，"
+        return (f"协调员未收到：没有会话接收 Hansa 的消息（{who}）· {len(items)} 件事在等协调员，"
                 f"最早的已等 {_mins(t - items[0]['at'])} 分钟：{_what_zh(desk, items[0])} · 下一步：{step}")
     step = "ask the coordinator in that session to run hansa notify on" if runs else HANSA_UP[0]
     return (f"the coordinator's session cannot be reached: no session hears from hansa ({who}) · {len(items)} "
@@ -1026,7 +1026,7 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
         text = (f"the coordinator's session {who} cannot be reached: its inbox refuses posts for "
                 f"{_mins(t - since)} min · hansa keeps the lines and tries again · next: if it lasts, quit that session, "
                 f"then {HANSA_UP[0]}")
-        text_zh = (f"协调员未收到：会话 {who_zh} 的收件箱已拒收 {_mins(t - since)} 分钟 · hansa 保留消息并重试"
+        text_zh = (f"协调员未收到：会话 {who_zh} 的收件箱已拒收 {_mins(t - since)} 分钟 · Hansa 保留消息并重试"
                    f" · 下一步：如果一直这样，请退出那个会话，再{HANSA_UP[1]}")
     elif req.get("case") == "window":
         since = req["since"] if _at(req.get("since")) else t
@@ -1037,7 +1037,7 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
                 f"{time.strftime('%H:%M', time.localtime(posted))}, the oldest: {_short(req.get('oldest') or '')} · "
                 "answer it in that session")
         text_zh = (f"协调员的会话 {who_zh} 已在窗口上等了 {_mins(t - since)} 分钟（权限对话框或提问），"
-                   f"无法处理 hansa 发来的消息：从 {time.strftime('%H:%M', time.localtime(posted))} 起共 {count} 件，"
+                   f"无法处理 Hansa 发来的消息：从 {time.strftime('%H:%M', time.localtime(posted))} 起共 {count} 件，"
                    f"最早的是：{_short(req.get('oldest') or '')} · 请在那个会话里回答")
     elif req.get("case") == "review" and notify.TASK_ID.match(str(req.get("task") or "")):
         tid = req["task"]
@@ -1051,7 +1051,7 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
         text = (f"the coordinator's session {who} is idle while {tid} has waited for review for {_mins(t - posted)} "
                 f"min since {'it ended' if ended else 'hansa posted it there'}: {title} · next: ask the coordinator in "
                 f"that session to review {tid}")
-        text_zh = (f"协调员的会话 {who_zh} 空闲，但 {tid} 自{'结束' if ended else ' hansa 发到那里'}后已等了 "
+        text_zh = (f"协调员的会话 {who_zh} 空闲，但 {tid} 自{'结束' if ended else ' Hansa 发到那里'}后已等了 "
                    f"{_mins(t - posted)} 分钟待审：「{title}」 · 下一步：在那个会话里让协调员审阅 {tid}")
         with desk.lock():
             try:
@@ -1085,7 +1085,7 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
     return "queued" if add(desk, "coordinator", text, zh=text_zh) else ""
 
 
-_RETRY = ("hansa tries again with its next post to the session", "hansa 下次给那个会话发消息时会再试")
+_RETRY = ("hansa tries again with its next post to the session", "Hansa 下次给那个会话发消息时会再试")
 # What the principal may do, (English, Chinese), by the error (up.TURN_ERRORS) that keeps ending the coordinator's turns:
 # for those only the principal can cure (notify.TURN_PRINCIPAL, TURN_LOGIN), what to fix and where; for the rest, that
 # hansa tries again (the reposts, then whatever it posts next starts a turn).
@@ -1133,7 +1133,7 @@ def turn_text(req: dict, who: str, who_zh: str, t: float) -> tuple:
             f"({_mins(t - since)} min) · " + (f"{count} thing(s) hansa posted to it wait unhandled · " if count else "")
             + en)
     text_zh = (f"协调员的会话 {who_zh} 无法工作：自 {at} 起（{_mins(t - since)} 分钟）轮次一直以 API 错误（{error}）结束 · "
-               + (f"hansa 发去的 {count} 件事尚未处理 · " if count else "") + zh)
+               + (f"Hansa 发去的 {count} 件事尚未处理 · " if count else "") + zh)
     return text, text_zh
 
 
@@ -1147,7 +1147,7 @@ def principal_turn_text(error: str, at: str, zh: bool = False, count: int = 0) -
     if zh:
         again = f"{fix[1]}，然后在那个会话里再输入一次" if fix else "请在那个会话里再输入一次"
         return (f"负责人自己的请求在 {at} 因 API 错误（{error}）结束，没有完成 · {again}"
-                + (f" · hansa 期间发去的 {count} 件事尚未处理" if count else ""))
+                + (f" · Hansa 期间发去的 {count} 件事尚未处理" if count else ""))
     again = f"{fix[0]}, then type it again in that session" if fix else "type it again in that session"
     return (f"the principal's own request ended with an API error ({error}) at {at} and was not done · {again}"
             + (f" · {count} thing(s) hansa posted meanwhile wait unhandled" if count else ""))
