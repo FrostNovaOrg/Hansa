@@ -33951,6 +33951,25 @@ def save():'''))
                                          headers={**headers, "X-Hansa": "1"})[:2], (200, {"ok": True}))
         self.assertTrue(self.desk.paused())
 
+    def test_web_refuses_an_empty_bearer_before_a_second_authorization_header(self):
+        from hansa import web
+        token = self.desk.web_token()
+        with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
+                unittest.mock.patch.object(web.threading, "Thread"):
+            start_web(self.desk, "127.0.0.1", 0)
+        for method, path, body in (("GET", "/api/status", b""), ("POST", "/api/pause", b"{}")):
+            with self.subTest(method=method):
+                # Parse real HTTP headers: a dict would lose the duplicate and its order.
+                page = object.__new__(server.call_args.args[1])
+                page.rfile = io.BytesIO((f"{method} {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+                                        f"Authorization: Bearer \r\nAuthorization: Bearer {token}\r\n"
+                                        f"X-Hansa: 1\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body)
+                page.wfile = io.BytesIO()
+                page.handle_one_request()
+                self.assertEqual(page.headers.get_all("Authorization"), ["Bearer ", "Bearer " + token])
+                self.assertEqual(page.wfile.getvalue().split(b"\r\n", 1)[0].split()[1], b"403")
+                self.assertFalse(self.desk.paused())
+
     def test_every_answer_of_hansa_serve_carries_its_own_header(self):
         # The page tells hansa serve's answers from a proxy's by this header (a proxy may replace Server).
         auth = {"Authorization": "Bearer " + self.desk.web_token()}
@@ -34023,6 +34042,43 @@ def save():'''))
                     self.assertNotIn(token, request["path"])
                 self.assertEqual(output["requests"][-1]["headers"]["X-Hansa"], "1")
                 self.assertNotIn("hansa.token", output["snapshots"][-1]["local"])
+
+    def test_web_page_without_a_key_still_sends_empty_bearer_requests(self):
+        output = self.page_preferences(search="", hash="", session={},
+                                       actions=[{"reload": True}, {"tab": "settings"}, {"tab": "tasks"},
+                                                {"api": "/api/pause", "body": {}}])
+        paths = {r["path"].split("?", 1)[0] for r in output["requests"]}
+        self.assertTrue({"/api/status", "/api/events", "/api/settings", "/api/tasks", "/api/pause"} <= paths)
+        for request in output["requests"]:
+            self.assertEqual(request["headers"]["Authorization"], "Bearer ")
+        self.assertEqual(output["posts"], [{"path": "/api/pause", "body": {}}])
+        for request in output["requests"]:
+            if request["path"] == "/api/pause":
+                self.assertEqual(request["headers"]["X-Hansa"], "1")
+        for snapshot in output["snapshots"]:
+            self.assertEqual(snapshot["pageToken"], "")
+            self.assertNotIn("hansa.token", snapshot["session"])
+            self.assertNotIn("hansa.token", snapshot["local"])
+        self.assertEqual(output["historyReplacements"], [])
+
+    def test_web_page_with_a_proxy_supplied_key_shows_status_in_both_languages(self):
+        # The stand-in fetch answers as hansa serve does after a proxy replaces the empty Bearer header:
+        # successful JSON with X-Hansa-Serve: 1, while the browser never receives the key.
+        for language, heading, dispatch in (("en", "Status", "dispatch"), ("zh", "状态", "派发")):
+            with self.subTest(language=language):
+                output = self.page_preferences(language=language, search="", hash="", session={},
+                                               actions=[{"reload": True}])
+                self.assertTrue(output["requests"])
+                for snapshot in output["snapshots"]:
+                    self.assertEqual(snapshot["pageToken"], "")
+                    self.assertNotIn("hansa.token", snapshot["session"])
+                    self.assertEqual(snapshot["tab"], "status")
+                    self.assertEqual(snapshot["statusHeadings"], [heading])
+                    self.assertIn(dispatch, snapshot["state"])
+                    self.assertTrue(snapshot["notice"]["hidden"])
+                    self.assertEqual(snapshot["notice"]["text"], "")
+                    for forbidden in ("Forbidden", "没有权限"):
+                        self.assertNotIn(forbidden, snapshot["status"] + snapshot["state"])
 
     def test_web_page_takes_its_key_from_the_fragment_before_the_query(self):
         for hash, search, kept in (("#t=fragment-token", "", "fragment-token"),
@@ -39794,6 +39850,9 @@ else if (ask === "preferences") (async () => {
     const period = tab === "cost" ? descendants(ids["#cost-period"], "option").find(el => "selected" in el.attrs)?.value : null;
     return {tab, group, period, language:run('ZH ? "zh-CN" : "en"'), lang:document.documentElement.attrs.lang,
       title:document.title, caption:ids["#title"].kids.at(-1).kids.at(-1).textContent, state:ids["#state-list"].textContent,
+      pageToken:run("pageToken"), status:ids["#tab-status"].textContent,
+      statusHeadings:descendants(ids["#tab-status"], "h1").map(el => el.textContent),
+      notice:{hidden:ids["#status-connection"].hidden, text:ids["#status-connection"].textContent},
       cool:run("S && S.cool_minutes"), session:{...session.values}, local:{...local.values}};
   };
   await flush();
