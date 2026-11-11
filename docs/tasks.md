@@ -22,13 +22,13 @@ with the same counts, decisions, evidence and lifetime cost.
 
 | Command | What it records or shows |
 |---|---|
-| `hansa goal add "<title>" [--why "<what the principal asked, in their words>"]` | a new open goal; prints `g1`, `g2`, … |
+| `hansa goal add "<title>" [--why "<what the principal asked, in their words>"]` | a new open goal; prints its id (`g1`, `g2`, …) as the first word, then the title and reason it recorded |
 | `hansa goal list [--all] [--json]` | one line per open goal: id, title, task counts, merged chains missing evidence, released chains and open to-do count; `--all` includes done and dropped goals with their outcome |
-| `hansa goal show G [--json]` | the goal, current decisions newest first (reason, who, time, task), replaced decisions naming their replacement, latest task in each retry chain with state, rounds and evidence, total cost and rounds, and open to-dos |
+| `hansa goal show G [--all] [--json]` | the goal, current decisions newest first (reason, who, time, task), replaced decisions naming their replacement, latest task in each retry chain, newest first, with state, rounds and evidence, total cost and rounds, and open to-dos; merged or closed tasks older than the newest twenty are counted in one line, and `--all` lists them. Times are local, in the form `hansa status` uses |
 | `hansa cost --by goal [--days N \| --since "YYYY-MM-DD HH:MM"]` | tokens and worth per goal in the same window as `hansa cost`; tasks without a goal and coordinator/helper usage are under `(no goal)` |
 | `hansa goal done G "<outcome>"` | ends an open goal as done, keeping its outcome |
 | `hansa goal drop G "<why>"` | ends an open goal as dropped, keeping the reason |
-| `hansa decide "<decision>" --why "<reason>" [--goal G] [--by principal\|coordinator\|assumption] [--task T] [--replaces D]` | a decision; prints `d1`, `d2`, …; `--by` defaults to `coordinator`; `assumption` means still to be confirmed |
+| `hansa decide "<decision>" --why "<reason>" [--goal G] [--by principal\|coordinator\|assumption] [--task T] [--replaces D]` | a decision; prints its id (`d1`, `d2`, …) as the first word, then the decision, who took it and the goal it is tied to, or that it is tied to none; `--by` defaults to `coordinator`; `assumption` means still to be confirmed |
 | `hansa decisions [--goal G] [--grep TEXT] [--all]` | current decisions newest first; `--all` includes replaced ones; `--grep` matches decision or reason, ignoring case |
 | `hansa add "<task>" --goal G` | queues a task tied to the goal; `hansa retry` and `hansa verify`, including automatic verification, keep its goal |
 | `hansa ask "<what>" --goal G` | ties a new principal to-do to the goal; closing it removes it from the goal's open to-dos |
@@ -46,7 +46,9 @@ for the rest. With no goals it adds no goal lines. Ended goals remain readable w
 
 Under each chain, `goal show` adds the evidence recorded for its latest task:
 
-- `check:` passed, failed, could not run, or none, from the lane's check after that task.
+- `check:` passed, failed or could not run, from the lane's check after that task; `not run yet`
+  while the task is queued or running; `not run` when it ended without one on a lane that has a
+  check; `none` when its lane has no check.
 - `verification:` holds, holds with notes (printed as `holds, with notes`), does not hold,
   unsure, running (including queued), or none; it names the verification task when present.
 - `merge:` merged after its merge check, merged without one, merged despite a failed check
@@ -89,7 +91,8 @@ Retries and verifications, including automatic verification, keep their task's g
 the goal is done or dropped. `--task` requires an existing task.
 `--replaces D` requires a current decision; if it was already replaced,
 the refusal names its replacement. A decision is never edited or deleted: record a change of mind
-as a new decision with `--replaces D`. Pass `--goal G` on the new decision to keep it under that goal.
+as a new decision with `--replaces D`. The new decision keeps the goal of the one it replaces, also
+when that goal has ended; `--goal G` ties it to another open goal instead.
 These reference checks prevent recording new work under a missing or ended goal or overwriting a change
 of mind; they remain needed while these commands accept references.
 
