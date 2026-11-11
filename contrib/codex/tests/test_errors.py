@@ -1,10 +1,20 @@
 """Codex's failures, worded so that hansa's own unusable_reason, network_reason and reset_time class them as they
 would Claude Code's: the provider rests for a usage limit (until its reset) or a login, a dropped connection is
 tried once more."""
+import json
+import os
+import shlex
+import subprocess
 import time
 import unittest
+from unittest import mock
 
-from .codexkit import Scratch, hansa_run, shim
+from .codexkit import FAKES, FIXTURES, Scratch, hansa_run, shim
+
+from hansa.cli import init_desk
+from hansa.desk import Desk
+from hansa import views
+from hansa.web import _top_up_provider
 
 
 class ErrorMappings(Scratch):
@@ -30,14 +40,24 @@ class ErrorMappings(Scratch):
         self.assertEqual(hansa_run.unusable_reason(run, self.err)[0], "quota")
         self.assertIsNone(hansa_run.reset_time(f"{run['result']}\n{self.err}"))
 
+    def test_workspace_credits_and_plan_upgrade_are_credit_errors(self):
+        for fixture in ("out_of_credits.jsonl", "plan_upgrade.jsonl"):
+            with self.subTest(fixture=fixture):
+                run = self.failed_run(fixture)
+                self.assertEqual((run["api_error_status"], hansa_run.unusable_reason(run, self.err)),
+                                 (402, ("credit", "credit balance too low")))
+
     def test_401_is_a_failed_login(self):
         run = self.failed_run("unauthorized.jsonl")
-        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("login", "not logged in (Please run /login)"))
+        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("login", f"not logged in; {run['login_hint']}"))
+        self.assertIn(f"CODEX_HOME={shlex.quote(str(self.home))} {shlex.quote(str(FAKES / 'codex'))} login",
+                      run["login_hint"])
+        self.assertNotIn("/login", run["result"])
         self.assertEqual(hansa_run.network_reason(run, self.err), "")
 
     def test_not_logged_in(self):
         run = self.failed_run("not_logged_in.jsonl")
-        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("login", "not logged in (Please run /login)"))
+        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("login", f"not logged in; {run['login_hint']}"))
 
     def test_dropped_stream_is_a_dropped_connection(self):
         run = self.failed_run("dropped_stream.jsonl")
@@ -120,6 +140,106 @@ class Wordings(unittest.TestCase):
         kind, run = self.kind("model produced invalid tool call")
         self.assertEqual(kind, "")
         self.assertTrue(run["result"].startswith("Codex failed: "))
+
+    def test_an_adapter_hint_does_not_change_a_subscription_login(self):
+        run = {"is_error": True, "result": "Not logged in", "login_hint": "sign in with the adapter"}
+        self.assertEqual(hansa_run.unusable_reason(run, "", subscription=True),
+                         ("login", "not logged in (Please run /login)"))
+
+    def test_login_hint_quotes_the_configured_home_and_executable(self):
+        home, codex = "/tmp/adapter's home", "/tmp/codex tools/bin/codex"
+        run = shim.classify("Not logged in", home, codex)
+        command = run["login_hint"].split("`")[1]
+        self.assertEqual(shlex.split(command), [f"CODEX_HOME={home}", codex, "login"])
+
+
+class ProviderFailures(Scratch):
+    """Fixture failures through finish and the views, on any platform, without starting a Codex worker."""
+
+    def setUp(self):
+        super().setUp()
+        env = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.desk = init_desk(self.root / "desk", str(self.root / "repo"), "a")
+        s = self.desk.settings()
+        s["providers"]["adapter"] = {"kind": "compatible", "model": shim.DEFAULT_MODEL, "base_url": shim.PLACEHOLDER}
+        s["lanes"]["a"]["providers"] = ["adapter"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("adapter", "sk-placeholder-0001")
+        self.home = str(self.root / "codex home's login")
+
+    def failure(self, fixture):
+        events = [json.loads(line) for line in (FIXTURES / fixture).read_text().splitlines()]
+        text = next(e["error"]["message"] for e in events if e["type"] == "turn.failed")
+        return {"type": "result", "subtype": "error_during_execution", "is_error": True,
+                **shim.classify(text, self.home)}
+
+    def finish_failure(self, run):
+        tid = self.desk.new_task("Add hello.txt")
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.wt, text=True).strip()
+        self.desk.update(tid, state="running", lane="a", provider="adapter", worktree=str(self.wt),
+                         branch="task/t1", base=head)
+        logs = self.desk.state_dir / "runs" / tid
+        logs.mkdir(parents=True)
+        (logs / "run.json").write_text(json.dumps(run))
+        return hansa_run.finish(self.desk, tid, 1)
+
+    def problem(self):
+        return hansa_run.provider_problem(Desk(self.desk.root), self.desk.settings(), "adapter")
+
+    def credit_events(self):
+        return [e for e in map(json.loads, self.desk.events_path.read_text().splitlines())
+                if e.get("event") == "provider_credit"]
+
+    def test_lost_codex_login_shows_its_home_and_working_remedy(self):
+        for fixture in ("refresh_token_expired.jsonl", "unauthorized.jsonl"):
+            with self.subTest(fixture=fixture):
+                m = self.finish_failure(self.failure(fixture))
+                self.assertEqual((m["state"], m["attempts"][-1]["kind"], hansa_run.tries_used(m["attempts"])),
+                                 ("queued", "login", 0))
+                self.assertAlmostEqual(self.desk.provider_state()["adapter"]["cool_until"],
+                                       time.time() + 24 * 3600, delta=30)
+                problem = self.problem()
+                self.assertIn(f"sign in again with `CODEX_HOME={shlex.quote(self.home)} codex login`", problem)
+                self.assertIn("then `hansa ping adapter`", problem)
+                for shown in (problem, m["error"], views.explain_text(self.desk, "provider", "adapter")):
+                    self.assertNotIn("/login", shown)
+                    self.assertNotIn("saving a new key", shown)
+
+    def test_credit_and_plan_failures_wait_for_top_up_once_and_use_no_try(self):
+        for fixture in ("out_of_credits.jsonl", "plan_upgrade.jsonl"):
+            with self.subTest(fixture=fixture):
+                self.desk.write_key("adapter", "sk-placeholder-0001")
+                before = len(self.credit_events())
+                run = self.failure(fixture)
+                for _ in range(2):  # two tasks already running on the same provider
+                    m = self.finish_failure(run)
+                    self.assertEqual((m["state"], m["attempts"][0]["kind"], hansa_run.tries_used(m["attempts"])),
+                                     ("queued", "credit", 0))
+                    self.assertFalse(m["attempts"][0]["counted"])
+                st = self.desk.provider_state()["adapter"]
+                self.assertGreater(st["credit_since"], 0)
+                self.assertEqual((st["cool_until"], st["rest_how"]), (0, "credit"))
+                events = self.credit_events()
+                self.assertEqual(len(events), before + 1)
+                self.assertIn("topped up on the page", self.problem())
+                with mock.patch.object(hansa_run.time, "time", return_value=time.time() + 40 * 86400):
+                    self.assertIn("topped up on the page", self.problem())
+                with mock.patch.object(hansa_run.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        [], 0, json.dumps({"type": "result", "result": "OK"}), "")):
+                    self.assertTrue(hansa_run.check_provider(self.desk, "adapter", claude=str(FAKES / "claude"))["ok"])
+                self.assertIn("topped up on the page", self.problem())
+                self.desk.write_key("adapter", "sk-topped-up")
+                self.assertEqual(self.problem(), "")
+                self.finish_failure(run)
+                self.assertEqual(_top_up_provider(self.desk, "adapter"), {"ok": True})
+                self.assertEqual(self.problem(), "")
+
+    def test_raw_out_of_credits_precedes_a_429_and_reset(self):
+        run = {"is_error": True, "api_error_status": 429,
+               "result": "Your workspace is out of credits. Add credits; resets in 1 minute."}
+        self.assertEqual(hansa_run.unusable_reason(run, ""), ("credit", "credit balance too low"))
 
 
 if __name__ == "__main__":

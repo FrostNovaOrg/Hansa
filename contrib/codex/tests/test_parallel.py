@@ -95,7 +95,7 @@ class RefreshCollision(Scratch):
         return run
 
     def assert_failed_login(self, run, how):
-        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("login", "not logged in (Please run /login)"))
+        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("login", f"not logged in; {run['login_hint']}"))
         self.assertIn(f"codex login status: {how}", run["result"])
 
     def test_logged_in_is_a_dropped_connection(self):
@@ -137,7 +137,7 @@ class RefreshCollision(Scratch):
 
     def test_other_refresh_failures_ask_nothing(self):
         run = self.collided("in", fixture="refresh_token_expired.jsonl")
-        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("login", "not logged in (Please run /login)"))
+        self.assertEqual(hansa_run.unusable_reason(run, self.err), ("login", f"not logged in; {run['login_hint']}"))
         self.assertFalse(self.status_record.exists(), "no status command for another form")
         self.assertNotIn("codex login status", run["result"])
 

@@ -17,6 +17,7 @@ import errno
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import struct
@@ -596,9 +597,10 @@ def watchdog(shim: int, top: int) -> None:
 
 # Codex 0.162.1's own messages (several with ’, U+2019, where ' is read too), each matched in the whole text
 # A provider limit: hansa rests the provider (until the reset a usage limit gives)
-LIMIT_TEXT = re.compile(r"You[’']ve hit your usage limit|Your workspace is out of credits|You hit your spend cap|"
-                        r"Quota exceeded\. Check your plan and billing details\.|"
-                        r"To use Codex with your ChatGPT plan, upgrade to Plus", re.I)
+CREDIT_TEXT = re.compile(r"Your workspace is out of credits|"
+                         r"To use Codex with your ChatGPT plan, upgrade to Plus", re.I)
+LIMIT_TEXT = re.compile(r"You[’']ve hit your usage limit|You hit your spend cap|"
+                        r"Quota exceeded\. Check your plan and billing details\.", re.I)
 # Overloaded, try later: as Claude's overloaded (529)
 OVERLOADED_TEXT = re.compile(r"Selected model is at capacity|We[’']re currently experiencing high demand", re.I)
 # The provider refused the request: not a dropped connection, though it starts as one does
@@ -670,7 +672,14 @@ def one_line(text: str, n: int = 400) -> str:
     return whole if len(whole) <= n else whole[:n - 1] + "…"
 
 
-def classify(text: str) -> dict:
+def login_failure(said: str, home: str, codex: str) -> dict:
+    """The adapter owns the login remedy; hansa keeps login_hint when resting the provider."""
+    login = (f"CODEX_HOME={shlex.quote(home)} " if home else "") + f"{shlex.quote(codex)} login"
+    hint = f"sign in again with `{login}`"
+    return {"result": f"Not logged in (Codex: {said}); {hint}", "login_hint": hint}
+
+
+def classify(text: str, home: str = "", codex: str = "codex") -> dict:
     """Codex's failure as hansa reads Claude Code's: the fields of an error answer ("result", maybe
     "api_error_status" or "stop_reason"), worded so hansa's unusable_reason and network_reason class it as they
     would Claude's. Classed on the whole text; only what is shown is cut."""
@@ -679,12 +688,14 @@ def classify(text: str) -> dict:
     if REFUSAL_TEXT.search(whole):
         return {"result": f"Codex: the provider refused the request (content_filter): {said}",
                 "stop_reason": "content_filter"}
+    if CREDIT_TEXT.search(whole):
+        return {"result": f"API Error: 402 credit balance too low (Codex: {said})", "api_error_status": 402}
     if LIMIT_TEXT.search(whole) or QUOTA_WORDS.search(whole):
         reset = reset_at(whole)
         return {"result": f"API Error: 429 usage limit reached (Codex: {said})"
                           + (f" · resets_at: {reset}" if reset else ""), "api_error_status": 429}
     if LOGIN_FAILED_TEXT.search(whole):
-        return {"result": f"Not logged in · Please run /login (Codex: the login failed; sign in again: {said})"}
+        return login_failure(said, home, codex)
     if NO_MODEL_TEXT.search(whole):
         return {"result": f"API Error: 404 the model is not available (Codex: {said})", "api_error_status": 404}
     if OVERLOADED_TEXT.search(whole):
@@ -695,7 +706,7 @@ def classify(text: str) -> dict:
         return {"result": f"hansa-codex-shim: Codex refused its configuration (a -c key or --disable feature this "
                           f"codex does not know): {said}"}
     if LOGIN_WORDS.search(whole) and not re.search(r"\b40[13]\b", whole):
-        return {"result": f"Not logged in · Please run /login (Codex: {said})"}
+        return login_failure(said, home, codex)
     if AUTH_WORDS.search(whole):
         status = 403 if re.search(r"\b403\b|forbidden", whole, re.I) else 401
         return {"result": f"API Error: {status} authentication_error (Codex: {said})", "api_error_status": status}
@@ -1035,7 +1046,7 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
     if not text and retries:
         text = RETRY.match(retries[-1]).group(1)
     text = text or f"codex ended (exit {code}) without finishing its turn"
-    said = classify(text)
+    said = classify(text, home, codex)
     if REFRESH_USED_TEXT.search(text):  # another run's refresh at the same instant, or a login that is gone
         try:
             limit = float(env.get(STATUS_TIMEOUT_SETTING) or STATUS_TIMEOUT)

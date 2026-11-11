@@ -2,6 +2,7 @@
 Claude Code answers, so hansa's own check_provider judges it. Everything else still goes to the real claude."""
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -103,10 +104,35 @@ class ProviderCheck(Scratch):
         self.assert_codex_ran()
 
     def test_a_failed_login(self):
-        r = self.check("unauthorized.jsonl")
-        self.assertFalse(r["ok"])
-        self.assertIn("not logged in", r["detail"])
-        self.assert_codex_ran()
+        for fixture in ("unauthorized.jsonl", "refresh_token_expired.jsonl"):
+            with self.subTest(fixture=fixture):
+                r = self.check(fixture)
+                self.assertFalse(r["ok"])
+                self.assertIn("not logged in", r["detail"])
+                problem = hansa_run.provider_problem(self.desk, self.desk.settings(), "codex")
+                self.assertIn(f"CODEX_HOME={shlex.quote(str(self.home))} {shlex.quote(str(FAKES / 'codex'))} login",
+                              problem)
+                self.assertIn("then `hansa ping codex`", problem)
+                for shown in (problem, r["detail"]):
+                    self.assertNotIn("/login", shown)
+                    self.assertNotIn("saving a new key", shown)
+                self.assert_codex_ran()
+        self.assertTrue(self.check()["ok"])
+        self.assertEqual(hansa_run.provider_problem(self.desk, self.desk.settings(), "codex"), "")
+
+    def test_credit_or_plan_failure_stays_rested_after_a_passing_check(self):
+        for fixture in ("out_of_credits.jsonl", "plan_upgrade.jsonl"):
+            with self.subTest(fixture=fixture):
+                self.desk.write_key("codex", "sk-placeholder-0001")
+                r = self.check(fixture)
+                self.assertEqual((r["ok"], r["detail"]), (False, "credit balance too low"))
+                self.assert_codex_ran()
+                st = self.desk.provider_state()["codex"]
+                self.assertGreater(st["credit_since"], 0)
+                self.assertEqual(st["cool_until"], 0)
+                self.assertTrue(self.check()["ok"])
+                self.assertIn("topped up on the page",
+                              hansa_run.provider_problem(self.desk, self.desk.settings(), "codex"))
 
     def test_the_check_refuses_a_codex_home_with_instructions(self):
         self.home.mkdir()

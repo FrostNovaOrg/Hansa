@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 from .codexkit import Scratch, hansa_run, shim
 
 DROPPED = "the connection to the provider failed (Connection dropped)"
-LOGIN = ("login", "not logged in (Please run /login)")
 
 
 def read(text):
@@ -35,15 +34,20 @@ class ProviderLimits(unittest.TestCase):
                 "credits or try again later.",
                 "You’ve hit your usage limit. Try again later.",
                 "You've hit your usage limit. Try again later.",
-                "Your workspace is out of credits. Add credits to continue using Codex.",
                 "You hit your spend cap. Ask your workspace admin to raise it.",
-                "Quota exceeded. Check your plan and billing details.",
-                "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus."):
+                "Quota exceeded. Check your plan and billing details."):
             with self.subTest(text=text):
                 kind, net, run = read(text)
                 self.assertEqual((kind, net), ("quota", ""))
                 self.assertEqual(run["api_error_status"], 429)
                 self.assertIsNone(hansa_run.reset_time(run["result"]), "no time given: the provider's own rest")
+
+    def test_credits_and_plan_are_credit_rests_even_with_quota_words(self):
+        for text in ("Your workspace is out of credits. Add credits to continue using Codex.",
+                     "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus."):
+            with self.subTest(text=text):
+                kind, net, run = read(text + " Quota exceeded; try again in 1 hour.")
+                self.assertEqual((kind, net, run["api_error_status"]), ("credit", "", 402))
 
     def reset_read(self, text, want: datetime):
         kind, _, run = read(text)
@@ -124,7 +128,10 @@ class OtherForms(unittest.TestCase):
                 "Your access token could not be refreshed. Please log out and sign in again.",
                 "unexpected status 401 Unauthorized: Provided authentication token is expired."):
             with self.subTest(text=text):
-                self.assertEqual(read(text)[:2], (LOGIN[0], ""))
+                kind, net, run = read(text)
+                self.assertEqual((kind, net), ("login", ""))
+                self.assertIn("codex login", run["login_hint"])
+                self.assertNotIn("/login", run["result"])
 
     def test_model_not_available(self):
         kind, net, run = read("unexpected status 404 Not Found: {\"detail\":\"Model not found gpt-x\"}")

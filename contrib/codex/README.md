@@ -154,17 +154,20 @@ codex's stderr, and classed on the whole text, so that hansa's own readings take
 
 | Codex says | hansa reads | hansa does |
 |---|---|---|
-| a usage limit, out of credits, spend cap, quota, 429 | quota, with Codex's reset time | requeues; the provider rests until the reset |
+| a usage limit, spend cap, quota, 429 | quota, with Codex's reset time when given | requeues; the provider rests until the reset, or for its configured rest when no time is given |
+| workspace out of credits, or the plan requires an upgrade to use Codex | credit | requeues without using a try; the provider rests until the principal confirms a top-up on the page or saves a key |
 | model at capacity, high demand | overloaded (529) | tries once more |
 | `content_filter` | refused | the lane's next provider |
 | a dropped stream, idle timeout | connection dropped | tries once more on the same provider |
 | refused, reset or timed-out connection; `workspace routing discovery failed`; a 5xx | connection error, server error | tries once more |
-| a token that cannot be refreshed, 401, not logged in | login | rests the provider until someone signs in |
+| a token that cannot be refreshed, 401, not logged in | login | rests the provider for 24 hours; follow the adapter's `codex login` command, then `hansa ping NAME` |
 | 403 | key | rests the provider |
 | 404 (no such model), a refused configuration, anything else | neither | the task fails, saying why |
 
 Codex's reset time (`try again at 3:05 PM`, or with a date) is read by the adapter and passed on as `resets_at`,
 which hansa reads. A model warning is said in the result and `codex_warnings`; it never fails a run alone.
+The shim supplies the login remedy in `login_hint`, using its configured Codex home and executable, both shell quoted; hansa
+keeps that hint in the rest reason and adds `hansa ping NAME`. The placeholder key cannot renew a Codex login.
 
 ## The provider check
 
