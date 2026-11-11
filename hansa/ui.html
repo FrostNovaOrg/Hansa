@@ -605,7 +605,7 @@ const T = ZH ? {
     lane_tried:(e, result) => `工作线 ${e.lane} 试跑${result(e)}`, lane_try_withdrawn:e => `工作线 ${e.lane} 试跑已撤回`,
     sandbox_held:e => `工作线 ${e.lane} 沙箱暂缓：${e.why || "—"}`, sandbox_ready:e => `工作线 ${e.lane} 沙箱已恢复`,
     provider_credit:e => `服务商 ${e.provider} 余额不足，等负责人确认充值`, server_stopped:() => "服务已停止，新任务暂停启动",
-    task_added:e => `任务已添加：工作线 ${e.lane || "—"}`,
+    task_added:e => e.lane ? `任务已添加：工作线 ${e.lane}` : "任务已添加",
     task_cancel:e => e.closed ? "任务已关闭，未合并" : "任务已取消",
     task_not_started:e => `任务没能开始：${e.error || "—"}`,
     task_after_held:e => `任务暂缓：它要跟在 ${e.latest || e.after || "—"} 之后，而那个任务没合并就结束了`,
@@ -780,7 +780,7 @@ const T = ZH ? {
     sandbox_held:e => `Sandbox held on lane ${e.lane}: ${e.why || "—"}`, sandbox_ready:e => `Sandbox ready on lane ${e.lane}`,
     provider_credit:e => `Provider ${e.provider} rests until the principal confirms it is topped up`, server_stopped:() => "Server stopped; new tasks will not start",
     // The everyday records (see the Recent events fold in renderStatus for the rest)
-    task_added:e => `Task added on lane ${e.lane || "—"}`,
+    task_added:e => e.lane ? `Task added on lane ${e.lane}` : "Task added",
     task_cancel:e => e.closed ? "Task closed without merging" : "Task cancelled",
     task_not_started:e => `Task could not start: ${e.error || "—"}`,
     task_after_held:e => `Task held: the task it follows, ${e.latest || e.after || "—"}, ended without merging`,
