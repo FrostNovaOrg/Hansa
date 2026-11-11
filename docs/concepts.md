@@ -156,7 +156,9 @@ All settings writers record changes: the page, `hansa init`, `hansa example`,
 `hansa disk-floor`, and `hansa memory-floor`. This records changes made through
 hansa; edits made directly to files are not observed.
 
-Provider keys and tokens show only `changed (values withheld)`, with neither
+Provider keys and tokens show only `set (values withheld)` when saved or
+`cleared (values withheld)` when removed; older records still show
+`changed (values withheld)`, with neither
 value stored. If either value contains a key hansa knows, both are withheld.
 This check happens before shortening a value, including within lists and
 dictionaries. Other values are kept up to 2,048 characters of their JSON
