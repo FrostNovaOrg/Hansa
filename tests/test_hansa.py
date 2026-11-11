@@ -18229,6 +18229,102 @@ def save():'''))
                 self.assertEqual(alert.queued(self.desk), [])
                 self.desk.change(tid, lambda m: {"state": "cancelled"})
 
+    def test_provider_rest_lists_returning_and_queued_tasks_after_finish(self):
+        from hansa import run
+        for lane, env in (("b", "FAKE_QUOTA_ON_COMPAT"), ("", "FAKE_QUOTA_ON_COMPAT"),
+                          ("a", "FAKE_QUOTA_ON_COMPAT"), ("b", "FAKE_BADKEY_ON_COMPAT"),
+                          ("b", "FAKE_NOLOGIN_ON_COMPAT")):
+            with self.subTest(queued_lane=lane, failure=env):
+                for m in self.desk.tasks():
+                    self.desk.change(m["id"], lambda m: {"state": "cancelled"})
+                self.desk.set_provider_state("limited", cool_until=0, rest_notice_reason="")
+                s = self.desk.settings()
+                s["providers"]["limited"] = {"kind": "compatible", "model": "m", "effort": "",
+                                               "base_url": "https://example.invalid"}
+                s["lanes"]["a"].update(providers=["limited"], env={env: "1"})
+                s["lanes"]["b"] = {**s["lanes"]["a"]}
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.desk.write_key("limited", "sk-rest-test")
+                before = len(self.events("provider_rested"))
+                first = self.desk.new_task("Add hello.txt", lane="a")
+                proc = run.start(self.desk, first, "a", "limited")
+                self.assertIsNotNone(proc)
+                second = self.desk.new_task("Waiting task", lane=lane)
+                finished = run.finish(self.desk, first, proc.wait(timeout=30))
+                self.assertEqual(finished["state"], "queued")
+                events = self.events("provider_rested")[before:]
+                self.assertEqual(len(events), 1)
+                [event] = events
+                self.assertEqual(event["tasks"], [first, second])
+                [item] = notify.items_for(self.desk, [event], {"session": None})
+                self.assertIn(f"waiting: {first}, {second}", item["line"])
+                for tid in (first, second):
+                    self.desk.change(tid, lambda m: {"state": "cancelled"})
+
+    def test_provider_rest_after_fallback_lists_only_task_without_a_ready_provider(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["providers"]["limited"] = {"kind": "compatible", "model": "m", "effort": "",
+                                       "base_url": "https://example.invalid"}
+        s["lanes"]["a"].update(providers=["limited", "claude"], env={"FAKE_QUOTA_ON_COMPAT": "1"})
+        s["lanes"]["b"] = {**s["lanes"]["a"], "providers": ["limited"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("limited", "sk-rest-test")
+        first = self.desk.new_task("Add hello.txt", lane="a")
+        proc = run.start(self.desk, first, "a", "limited")
+        self.assertIsNotNone(proc)
+        second = self.desk.new_task("Waiting task", lane="b")
+        posted_states = []
+        event = self.desk.event
+
+        def record(kind, **fields):
+            if kind == "provider_rested":
+                posted_states.append([self.desk.meta(t)["state"] for t in (first, second)])
+            return event(kind, **fields)
+
+        with unittest.mock.patch.object(self.desk, "event", record):
+            self.assertEqual(run.finish(self.desk, first, proc.wait(timeout=30))["state"], "queued")
+        [rest] = self.events("provider_rested")
+        self.assertEqual(rest["tasks"], [second])
+        self.assertEqual(posted_states, [["queued", "queued"]])
+        self.assertEqual(self.settle(Dispatcher(self.desk), first)["state"], "done")
+        self.assertEqual(self.desk.meta(second)["state"], "queued")
+        self.assertEqual(len(self.events("provider_rested")), 1)
+
+    def test_failed_ping_records_check_before_posting_waiting_tasks(self):
+        self.failed_check_posts_waiting_tasks(page=False)
+
+    def test_failed_page_check_records_check_before_posting_waiting_tasks(self):
+        why = unix_sockets_refused()
+        if why:
+            skip_in_sandbox(self, why, *NEED_UNIX_SOCKETS)
+        self.failed_check_posts_waiting_tasks(page=True)
+
+    def failed_check_posts_waiting_tasks(self, *, page):
+        s = self.desk.settings()
+        s["providers"]["limited"] = {"kind": "compatible", "model": "tool-first-429", "effort": "",
+                                       "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["providers"] = ["limited"]
+        s["lanes"]["b"] = {**s["lanes"]["a"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("limited", "sk-rest-test")
+        tids = [self.desk.new_task("Waiting task", lane=lane) for lane in ("a", "b", "")]
+        if page:
+            self.assertFalse(self.page_post("/api/check", {"provider": "limited"})["ok"])
+        else:
+            self.assertIn("limited: NOT ok", self.hansa("ping", "limited"))
+        [rest] = self.events("provider_rested")
+        self.assertEqual(rest["tasks"], tids)
+        events, _ = notify.read_log(self.desk, 0)
+        checked = next(i for i, e in enumerate(events) if e["event"] == "provider_checked")
+        posted = next(i for i, e in enumerate(events) if e["event"] == "provider_rested")
+        self.assertLess(checked, posted)  # a completed check, then its notice using the saved rest and task states
+        self.assertFalse(self.desk.provider_state()["limited"]["check"]["ok"])
+        [item] = notify.items_for(self.desk, [rest], {"session": None})
+        self.assertEqual(item["key"], ["provider", "limited"])
+        self.assertIn("waiting: " + ", ".join(tids), item["line"])
+        self.assertEqual(alert.queued(self.desk), [])
+
     def test_provider_rest_repeats_stay_quiet_until_a_run_finishes(self):
         self.net_lane("quota", 2)
         tid = self.desk.new_task("Add hello.txt", lane="a")
@@ -18259,12 +18355,14 @@ def save():'''))
         tids = [self.desk.new_task("Waiting task", lane="a") for _ in range(7)]
         unrelated = self.desk.new_task("Another lane", lane="missing")
         run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "out of quota (HTTP 429)")
+        run.provider_rest_news(self.desk, self.desk.settings(), "claude")
         [event] = self.events("provider_rested")
         self.assertEqual(event["tasks"], tids)
         self.assertIn("waiting: " + ", ".join(tids[:5]) + " (+2 more)", event["text"])
         for tid in [*tids[5:], unrelated]:
             self.assertNotIn(tid, event["text"])
         run.rest_provider(self.desk, self.desk.settings(), "claude", "login", "not logged in (Please run /login)")
+        run.provider_rest_news(self.desk, self.desk.settings(), "claude")
         events = self.events("provider_rested")
         self.assertEqual(len(events), 2)
         [item] = notify.items_for(self.desk, events, {"session": None})
@@ -18276,6 +18374,7 @@ def save():'''))
         tid = self.desk.new_task("Waiting task", lane="a")
         until = run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "out of quota (HTTP 429)",
                                   "usage resets in 2 hours")
+        run.provider_rest_news(self.desk, self.desk.settings(), "claude")
         [event] = self.events("provider_rested")
         self.assertEqual(event["until"], until)
         self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(until)), event["text"])
@@ -18292,13 +18391,16 @@ def save():'''))
         tid = self.desk.new_task("Paused work", lane="a")
         self.desk.pause("hold work")
         run.rest_provider(self.desk, s, "claude", "quota", "out of quota (HTTP 429)")
+        run.provider_rest_news(self.desk, s, "claude")
         self.assertEqual(self.events("provider_rested"), [])
         self.desk.resume()
         self.desk.change(tid, lambda m: {"state": "running"})
         run.rest_provider(self.desk, s, "claude", "quota", "out of quota (HTTP 429)")
+        run.provider_rest_news(self.desk, s, "claude")
         self.assertEqual(self.events("provider_rested"), [])
         self.desk.change(tid, lambda m: {"state": "queued"})
         run.rest_provider(self.desk, s, "claude", "quota", "out of quota (HTTP 429)")
+        run.provider_rest_news(self.desk, s, "claude")
         [event] = self.events("provider_rested")
         self.assertEqual(event["tasks"], [tid])
 

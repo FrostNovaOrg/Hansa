@@ -1590,7 +1590,9 @@ nothing the coordinator did itself and saw is posted to it.
 Time the machine sleeps does not count toward a server being busy or stuck.
 
 A provider starting a timed rest (usage limit, rejected key or lost login) is
-posted when queued tasks have no provider ready in their eligible lanes. The
+posted when queued tasks have no provider ready in their eligible lanes. Hansa
+posts after the run's final task state or the provider check is saved, so a task
+returned to the queue is included along with tasks waiting in other lanes. The
 line names the provider, reason, rest end time and up to five waiting task IDs,
 then the count of any more. It goes to the desk's coordinator sessions, with
 the provider as its subject; it does not alert the principal. Moving on to a

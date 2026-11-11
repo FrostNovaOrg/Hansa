@@ -1313,7 +1313,8 @@ def _reset_time(text, at):
 
 def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "") -> float | None:
     """Rest an unusable provider. Credit has no end time; usage limits use their reset time and a minute
-    (at most REST_CAP), else cool_minutes. Announce credit rests, and timed rests that leave tasks waiting."""
+    (at most REST_CAP), else cool_minutes. Announce credit here; callers announce timed rests with
+    provider_rest_news after saving the task's final state or the completed provider check."""
     from .rests import record
     with desk.lock():
         if (desk.provider_state().get(name) or {}).get("credit_since"):
@@ -1330,7 +1331,6 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
         if kind != "quota":
             until = t + 60 * KEY_REST_MINUTES
             desk.set_provider_state(name, cool_until=until, reason=why, rest_how="", rest_minutes=None)
-            provider_rest_news(desk, s, name)
             return until
         try:
             reset = reset_time(text, t)
@@ -1345,7 +1345,6 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
             until = t + 60 * minutes
             desk.set_provider_state(name, cool_until=until, reason=why, rest_how="fixed", rest_minutes=minutes)
         record(desk, name, cool_until=until)
-        provider_rest_news(desk, s, name)
         return until
 
 
@@ -4728,7 +4727,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
                 "error": desk.redact(message), "attempts": tries, "pid_start": "", **fields, **kept, **again}
     meta = desk.change(tid, decide)
     if kind and kind != "credit":
-        # rest_provider runs before this task returns to the queue; include it now that its state is saved.
+        # Only announce after the returning task releases its lane, so all waiting tasks are included.
         provider_rest_news(desk, desk.settings(), meta["provider"])
     elif not kind and not net and meta["state"] != "queued" \
             and (desk.provider_state().get(meta.get("provider")) or {}).get("rest_notice_reason"):
@@ -7428,6 +7427,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "") -
         elif kind:
             desk.set_provider_state(name, unreachable_since=0, unreachable_reason="")
             rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}")
-    desk.event("provider_checked", provider=name, ok=ok, detail=detail)
+        desk.event("provider_checked", provider=name, ok=ok, detail=detail)
+        if kind:
+            provider_rest_news(desk, s, name)
     desk.ready_news()
     return result
