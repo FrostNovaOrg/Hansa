@@ -32651,6 +32651,178 @@ def save():'''))
             with self.subTest(model=model, entry=entry):
                 self.assertEqual(cost.value(model, {"cache_write": 1000000}, {model: entry}), expected)
 
+    def test_cost_worker_claude_fallback_preserves_recorded_value_and_table_priority(self):
+        tid = self.desk.new_task("Price the worker")
+        self.desk.update(tid, finished=time.time(), provider="claude", usage={
+            "claude-opus-5": {"in": 5000, "claude_code_usd": .37},
+            "claude-new": {"in": 5000, "claude_code_usd": .38},
+            "mimo-x": {"in": 5000, "claude_code_usd": .99}})
+        s = self.desk.settings()
+        s["prices"] = {}
+        self.assertEqual(self.desk.save_settings(s), [])
+        rows = {r["model"]: r for r in cost.worker_rows(self.desk, 0)}
+        for model, expected in (("claude-opus-5", .37), ("claude-new", .38)):
+            self.assertEqual((rows[model]["usd"], rows[model]["priced_by"]),
+                             (expected, "Claude Code list price"))
+        self.assertEqual((rows["mimo-x"]["usd"], rows["mimo-x"]["priced_by"]), (None, "no price"))
+        s["prices"]["claude-opus-5"] = {"in": 0, "out": 0}
+        self.assertEqual(self.desk.save_settings(s), [])
+        row = cost.worker_rows(self.desk, 0)[0]
+        self.assertEqual((row["usd"], row["priced_by"]), (0, "price table"))
+
+    def test_cost_worker_claude_without_recorded_figure_has_no_price(self):
+        tid = self.desk.new_task("Worker without a recorded cost")
+        self.desk.update(tid, finished=time.time(), provider="claude", usage={
+            "claude-opus-5": {"in": 5000, "cache_read": 10000, "cache_write": 5000}})
+        s = self.desk.settings()
+        s["prices"] = {}
+        self.assertEqual(self.desk.save_settings(s), [])
+        rep = json.loads(self.hansa("cost", "--json", "--rows"))
+        row = rep["rows"][0]
+        self.assertEqual((row["usd"], row["priced_by"]), (None, "no price"))
+        self.assertEqual(rep["unpriced_models"], ["claude-opus-5"])
+        shown = self.hansa("cost", "--by", "model")
+        row = next(line for line in shown.splitlines() if line.lstrip().startswith("claude-opus-5"))
+        self.assertEqual(row.split(), ["claude-opus-5", "20,000", "no", "price"])
+
+    def test_cost_worker_claude_fallback_survives_provider_rename_or_removal(self):
+        tid = self.desk.new_task("Price earlier runs")
+        self.desk.update(tid, finished=time.time(), provider="old", usage={
+            "claude-opus-5": {"in": 5000, "claude_code_usd": .37},
+            "claude-haiku-4-5-20251001": {"in": 5000},
+            "mimo-x": {"in": 5000, "claude_code_usd": .99}},
+            attempts=[{"ended": time.time() - 60, "provider": "old",
+                       "usage": {"claude-new": {"in": 5000, "claude_code_usd": .38}}}])
+        for remaining in ("renamed", None, "old"):
+            with self.subTest(provider_now=remaining):
+                s = self.desk.settings()
+                s["prices"] = {}
+                if remaining:
+                    s["providers"][remaining] = {"kind": "compatible", "model": "mimo-x", "effort": "",
+                                                  "base_url": "https://example.invalid"}
+                self.assertEqual(self.desk.save_settings(s), [])
+                rows = {r["model"]: r for r in cost.worker_rows(self.desk, 0)}
+                self.assertEqual((rows["claude-opus-5"]["usd"], rows["claude-opus-5"]["priced_by"]),
+                                 (.37, "Claude Code list price"))
+                self.assertEqual((rows["claude-new"]["usd"], rows["claude-new"]["priced_by"]),
+                                 (.38, "Claude Code list price"))
+                self.assertEqual((rows["claude-haiku-4-5-20251001"]["usd"],
+                                  rows["claude-haiku-4-5-20251001"]["priced_by"]),
+                                 (None, "no price"))
+                self.assertEqual((rows["mimo-x"]["usd"], rows["mimo-x"]["priced_by"]), (None, "no price"))
+
+    def test_cost_coordinator_claude_without_table_entry_has_no_price(self):
+        conf = self.tmp / "conf"
+        proj = conf / "projects" / cost.slug(self.desk.root)
+        proj.mkdir(parents=True)
+        line = {"type": "assistant", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+                "message": {"id": "main", "model": "claude-opus-5-20261001", "usage": {
+                    "input_tokens": 1000000, "output_tokens": 1000000, "cache_read_input_tokens": 1000000,
+                    "cache_creation_input_tokens": 3000000,
+                    "cache_creation": {"ephemeral_5m_input_tokens": 1000000,
+                                       "ephemeral_1h_input_tokens": 2000000}}}}
+        (proj / "s.jsonl").write_text((json.dumps(line) + "\n") * 2)
+        helper = proj / "s" / "subagents"
+        helper.mkdir(parents=True)
+        (helper / "agent-1.jsonl").write_text(json.dumps({
+            **line, "message": {**line["message"], "id": "helper"}}) + "\n")
+        s = self.desk.settings()
+        s["providers"]["claude"]["config_dir"] = str(conf)
+        s["prices"] = {}
+        self.assertEqual(self.desk.save_settings(s), [])
+        rep = json.loads(self.hansa("cost", "--json", "--rows"))
+        self.assertEqual({r["seat"] for r in rep["rows"]}, {"coordinator", "helper"})
+        for row in rep["rows"]:
+            self.assertEqual((row["usd"], row["priced_by"]), (None, "no price"))
+        self.assertEqual(rep["total"]["tokens"], 12000000)
+        self.assertEqual(rep["unpriced_models"], ["claude-opus-5-20261001"])
+        shown = self.hansa("cost", "--by", "model")
+        row = next(line for line in shown.splitlines() if line.lstrip().startswith("claude-opus-5"))
+        self.assertEqual(row.split(), ["claude-opus-5-20261001", "12,000,000", "no", "price"])
+        self.assertIn("no price yet for: claude-opus-5-20261001", shown)
+        self.assertIn("the principal sets prices on the page", shown)
+        self.assertIn("figure Claude Code recorded for a worker's run", rep["note"])
+        self.assertIn("regardless of the provider's current settings", rep["note"])
+        self.assertIn("The coordinator's own usage and its helpers need an entry in the table", rep["note"])
+        turns = cost.turns(self.desk)
+        self.assertEqual(turns["total"]["usd"], 0)
+        self.assertEqual(turns["helpers"]["helper"]["usd"], 0)
+        self.assertEqual(turns["unpriced_models"], ["claude-opus-5-20261001"])
+        self.assertTrue(all(share == 0 for share in turns["token_shares"].values()))
+        # The principal's prices still win, including free tokens.
+        s["prices"]["claude-opus-5"] = {"in": 0, "out": 0}
+        self.assertEqual(self.desk.save_settings(s), [])
+        for row in cost.transcript_rows(self.desk, 0):
+            self.assertEqual((row["usd"], row["priced_by"]), (0, "price table"))
+
+    def test_cost_coordinator_unknown_models_keep_no_price_in_json(self):
+        proj = self.desk.state_dir / "claude-removed" / "projects" / cost.slug(self.desk.root)
+        proj.mkdir(parents=True)
+        (proj / "s.jsonl").write_text("".join(json.dumps({
+            "type": "assistant", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "message": {"id": model, "model": model, "usage": {"input_tokens": 5000}}}) + "\n"
+            for model in ("mimo-x", "claude-unknown", "claude-sonnet-4-6")))
+        rep = json.loads(self.hansa("cost", "--json", "--rows"))
+        rows = {r["model"]: r for r in rep["rows"]}
+        for model in ("mimo-x", "claude-unknown", "claude-sonnet-4-6"):
+            self.assertEqual((rows[model]["usd"], rows[model]["priced_by"]), (None, "no price"))
+        self.assertEqual(rep["unpriced_models"], ["claude-sonnet-4-6", "claude-unknown", "mimo-x"])
+
+    def test_status_unpriced_tokens_have_no_dollar_value(self):
+        tid = self.desk.new_task("Unpriced work")
+        self.desk.update(tid, state="done", finished=time.time(), provider="missing",
+                         usage={"mimo-x": {"in": 5000}})
+        line = self.hansa("status").splitlines()[-1]
+        self.assertIn("workers used 5,000 tokens", line)
+        self.assertIn("5,000 tokens have no price yet", line)
+        self.assertIn("the principal sets prices on the page", line)
+        self.assertNotIn("$", line)
+
+    def test_status_partly_priced_tokens_show_worth_and_missing_count(self):
+        tid = self.desk.new_task("Partly priced work")
+        self.desk.update(tid, state="done", finished=time.time(), provider="claude",
+                         usage={"claude-opus-5": {"in": 10000}, "mimo-x": {"in": 5000}})
+        line = self.hansa("status").splitlines()[-1]
+        self.assertIn("workers used 15,000 tokens", line)
+        self.assertIn("worth $0.05", line)
+        self.assertIn("5,000 tokens have no price yet", line)
+        self.assertIn("the principal sets prices on the page", line)
+
+    def test_cost_unpriced_model_prints_tokens_once_and_json_keeps_no_price(self):
+        tid = self.desk.new_task("Unpriced work")
+        self.desk.update(tid, finished=time.time(), provider="missing", usage={"mimo-x": {"in": 5000}})
+        text = self.hansa("cost", "--by", "model")
+        row = next(line for line in text.splitlines() if line.lstrip().startswith("mimo-x"))
+        self.assertEqual(row.split(), ["mimo-x", "5,000", "no", "price"])
+        self.assertNotIn("$0.00", text)
+        rep = json.loads(self.hansa("cost", "--json", "--rows"))
+        self.assertEqual((rep["rows"][0]["usd"], rep["rows"][0]["priced_by"]), (None, "no price"))
+
+    def test_cost_partly_priced_row_counts_missing_tokens_as_part_of_total(self):
+        tid = self.desk.new_task("Partly priced work")
+        self.desk.update(tid, finished=time.time(), provider="claude",
+                         usage={"claude-new": {"in": 10000, "claude_code_usd": .05}},
+                         earlier_runs=[{"ended": time.time() - 60, "provider": "removed",
+                                        "usage": {"claude-new": {"in": 5000}}}])
+        text = self.hansa("cost", "--by", "model")
+        row = next(line for line in text.splitlines() if line.lstrip().startswith("claude"))
+        self.assertIn("15,000", row)
+        self.assertIn("$0.05", row)
+        self.assertIn("5,000 tokens with no price", row)
+        self.assertNotIn("+5,000", row)
+
+    def test_cost_zero_priced_tokens_and_empty_status_keep_zero_dollars(self):
+        self.assertIn("worth $0.00", self.hansa("status").splitlines()[-1])
+        tid = self.desk.new_task("Free work")
+        self.desk.update(tid, finished=time.time(), provider="claude", usage={"free-model": {"in": 5000}})
+        s = self.desk.settings()
+        s["prices"]["free-model"] = {"in": 0, "out": 0}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertIn("worth $0.00", self.hansa("status").splitlines()[-1])
+        row = next(line for line in self.hansa("cost", "--by", "model").splitlines()
+                   if line.lstrip().startswith("free-model"))
+        self.assertEqual(row.split(), ["free-model", "5,000", "$0.00"])
+
     def test_cost_counts_workers_and_coordinator_once(self):
         tid = self.desk.new_task("Add hello.txt")
         self.settle(Dispatcher(self.desk), tid)
