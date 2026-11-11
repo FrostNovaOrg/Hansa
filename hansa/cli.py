@@ -1099,6 +1099,13 @@ def _retry(desk: Desk, a) -> None:
             "parent": a.id, "title": f"{own_title(m['title'])} (retry of {a.id})",
             **_verify_request(desk, a, {**m, "lane": lane}),
             **notify.recorded(notify.session_here())}
+    inherited = {}
+    for r in rounds_of(desk, m):  # include old rounds and keep the sources even if those rounds are later gone
+        inherited.update(r.get("inherited_refusals", {}))
+        inherited.update({attempt["provider"]: r["id"] for attempt in r.get("attempts", [])
+                          if attempt.get("kind") == "refused"})
+    if inherited:
+        opts["inherited_refusals"] = inherited  # not attempts: these runs and tries belong to their own rounds
     if m.get("after"):
         opts.update(after=m["after"], after_target=m["after_target"])
     base = (own or {}).get("base") or "main"
@@ -1502,9 +1509,16 @@ def cmd_wait(a):
         print(f"no task finished in {a.timeout:g} min")
     for m in still:
         mins = int((time.time() - m["started"]) // 60) if m.get("started") else 0
+        provider_wait = ""
+        if m["state"] == "queued":
+            busy = {occupied_lane(t) for t in desk.tasks() if lane_occupied(t)} | tried_lanes(desk)
+            detail = waiting_detail(desk, desk.settings(), m, busy)
+            if detail["waiting_code"] == "lanes" and any(
+                    r["code"] == "providers" for r in detail["waiting_values"]["reasons"]):
+                provider_wait = ": " + detail["waiting"]
         print(f"{m['id']} {m['state']}" + (f" {mins} min, so far: {views.progress_text(desk, m)}"
                                            if m["state"] == "running" else
-                                           f": {views.merge_check_text(desk, m)}" if m["state"] == "merging" else ""))
+                                           f": {views.merge_check_text(desk, m)}" if m["state"] == "merging" else provider_wait))
     if still:
         print("hansa wait again to keep waiting. Some providers take minutes per reply; a task is stuck"
               " only when nothing has happened for a long while.")
@@ -3698,7 +3712,11 @@ def main(argv=None):
                      "one to review and merge; a second retry of it is refused. A merged task stays merged, and each "
                      "retry of it is new work on top. A follow-up cancelled before it started gives the earlier task "
                      "back as it was. Its own lane must still be on the desk and, when recorded, on the "
-                     "repository where it ran; otherwise give the work again with hansa add --lane L.")
+                     "repository where it ran; otherwise give the work again with hansa add --lane L. "
+                     "Providers that refused an earlier round are skipped without using a follow-up try, "
+                     "including with --fresh, unless every provider in the destination lane refused earlier rounds; "
+                     "then they are tried in the lane's order. This round's own refusals still stand; "
+                     "choose another lane with --lane L when needed.")
     p.add_argument("--lane", metavar="L", help="queue the follow-up on this work lane on the same repository "
                    "and base branch as the task's own lane, for example when that lane is busy; the task's "
                    "start, text, effort and model are carried as usual")

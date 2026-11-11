@@ -1525,6 +1525,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
     if m.get("verify_after_error"):
         out.append(f"verification could not be queued: {m['verify_after_error']}")
     out += [x for x in (rounds_line(desk, m), "" if verifying else rethink_text(desk, m)) if x]
+    inherited = m.get("inherited_refusals", {})
+    order = desk.settings()["lanes"].get(m.get("lane"), {}).get("providers", [])
+    skipped = sorted(set(order) & refused_by({"inherited_refusals": inherited}, order))
+    if skipped:
+        out.append("providers left out: " + ", ".join(f"{p} (refused {inherited[p]})" for p in skipped)
+                   + "; no follow-up try used")
     if m.get("error"):
         if page_messages is not None:
             page_messages[str(len(out))] = message("task_error", f"error: {m['error']}", reason=describe(m["error"]))
@@ -1754,6 +1760,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
                       if str(m.get("error", "")).startswith("could not start:")
                       else f"hansa retry {tid} \"what to change\" (or --fresh to start over)"),
            "queued": "hansa status shows what it is waiting for", "running": f"hansa cancel {tid} to stop it"}
+    if m["state"] == "failed" and (m.get("attempts") or [{}])[-1].get("kind") == "refused":
+        nxt["failed"] += f' · hansa retry {tid} "..." --lane L to choose another lane on the same repository and base'
     if v and v["verdict"] == "does not hold" and m["state"] == "done":
         nxt["done"] = f"hansa retry {tid} \"fix what {v['task']} found: ...\" · hansa merge {tid} --despite-check"
     newest = (v.get("latest") or v) if v else None
@@ -2183,7 +2191,10 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "a provider that an open request names "
             "becoming ready when it was not as the request was made (once; the request may be done; looked at when a "
             "key, the settings or a check change it, and when its rest after a usage limit runs out, which hansa "
-            "serve sees), hansa serve stopping or "
+            "serve sees), a provider's timed rest leaving queued tasks without a ready provider "
+            "(provider, reason, rest end and up to five task IDs, then the count of any more; the same reason stays "
+            "quiet until a run on that provider finishes instead of returning to wait; no principal alert), "
+            "hansa serve stopping or "
             f"finishing no round for {STUCK_AFTER // 60} minutes (busy or stuck), and then running again, srt not "
             "running. Not what you did yourself and saw. Each message is bullet lines under one [hansa] header with "
             "the desk, only the latest line per task, request or kind of event kept; task lines carry next:, other "

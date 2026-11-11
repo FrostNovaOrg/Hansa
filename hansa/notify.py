@@ -4,8 +4,9 @@ Every interactive Claude Code session listens on a local Unix socket, its inbox:
 there arrives in the session as a message from another session. A follower is a small background process
 per session and desk. It reads the desk's event log from where it left off, picks what the coordinator
 waits for (a task ended, a verification ended, a queued merge check ended,
-a provider an open request names became ready, the principal answered a release, a release
-ended or became void, the server stopped, free space went under the floor or came back over it), and posts it to
+a provider left tasks waiting during a rest, a provider an open request names became ready, the principal
+answered a release, a release ended or became void, the server stopped, free space went under the floor
+or came back over it), and posts it to
 that session's inbox. It ends when the session's process does.
 
     `hansa coordinator`   starts one for the session it launches (--messaging-socket-path, a path it chose)
@@ -344,6 +345,8 @@ def _item(desk: Desk, e: dict, me=None):
         return ("credit", e.get("provider"), e.get("since")), e["text"], None, True, None
     if kind == "provider_model":
         return ("model", e.get("provider"), e.get("since")), e["text"], None, True, None
+    if kind == "provider_rested":
+        return ("provider", e.get("provider")), e["text"], None, True, None
     if kind == "disk_low":
         return ("disk",), (f"free space is under the floor ({e.get('floor') or 0:g} GB): "
                            + "; ".join(e.get("volumes") or []) + f": hansa serve starts {disk.STARTS} until "

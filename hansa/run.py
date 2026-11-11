@@ -1324,8 +1324,9 @@ def _reset_time(text, at):
 
 
 def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "", *, model: str = "") -> float | None:
-    """Rest an unusable provider. Credit and unknown models have no end time; usage limits use their reset time
-    and a minute (at most REST_CAP), else cool_minutes. Announce each credit or model rest once."""
+    """Rest an unusable provider. Credit and unknown models have no end time and are announced once here;
+    usage limits use their reset time and a minute (at most REST_CAP), else cool_minutes, and callers announce
+    those timed rests with provider_rest_news after saving the task's final state or the completed provider check."""
     from .rests import record
     with desk.lock():
         st = desk.provider_state().get(name) or {}
@@ -1375,6 +1376,41 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
         record(desk, name, cool_until=until, cool_since=t, cool_reset=reset or 0,
                quota_probe_blocked=blocked)
         return until
+
+
+def provider_rest_news(desk: Desk, s: dict, name: str) -> None:
+    """Tell the coordinator when a timed rest leaves tasks without a provider. Keep the reason on disk so
+    another rest after the fixed interval or a server restart stays quiet until a run finishes."""
+    with desk.lock():
+        st = desk.provider_state().get(name, {})
+        why = desk.redact(st.get("reason") or "")
+        # credit and unknown-model rests are told once by rest_provider (provider_credit, provider_model)
+        if st.get("credit_since") or st.get("model_since") or st.get("cool_until", 0) <= time.time() or not why \
+                or st.get("rest_notice_reason") == why:
+            return
+        tasks = desk.tasks()
+        queued = [m for m in tasks if m["state"] == "queued"]
+        if not queued:
+            return
+        looks = waiting_looks(desk, s, tasks)
+        busy = {occupied_lane(m) for m in tasks if lane_occupied(m)} | tried_lanes(desk)
+        waiting = []
+        for m in queued:
+            detail = waiting_detail(desk, s, m, busy, looks)
+            if detail["waiting_code"] == "lanes" and any(
+                    r["code"] == "providers" and any(p["values"]["provider"] == name and p["code"] == "rest"
+                                                     for p in r["values"]["providers"])
+                    for r in detail["waiting_values"]["reasons"]):
+                waiting.append(m["id"])
+        if not waiting:
+            return
+        until = st["cool_until"]
+        how = rest_text(st)
+        line = (f"provider {name}: resting until {time.strftime('%m-%d %H:%M', time.localtime(until))} ({why})"
+                + (f": {how}" if how else "") + " · waiting: " + ", ".join(waiting[:5])
+                + (f" (+{len(waiting) - 5} more)" if len(waiting) > 5 else ""))
+        desk.event("provider_rested", provider=name, reason=why, until=until, tasks=waiting, text=line)
+        desk.set_provider_state(name, rest_notice_reason=why)
 
 
 def credit_text(st: dict) -> str:
@@ -1432,7 +1468,7 @@ def providers_waited_for(desk: Desk, s: dict, tasks: list) -> dict:
         lanes = [m["lane"]] if m.get("lane") else s["lanes"]
         providers = {p for ln in lanes if ln in s["lanes"] and not work_lane_problem(s, ln,
                      verifying=m.get("kind") == "verify" and bool(m.get("lane")))
-                     for p in task_providers(s, ln, m) if p not in refused_by(m)}
+                     for p in task_providers(s, ln, m) if p not in refused_by(m, task_providers(s, ln, m))}
         if not providers & ready:
             for p in providers:
                 waiting[p] = waiting.get(p, 0) + 1
@@ -1465,9 +1501,13 @@ def unreachable_text(st: dict) -> str:
     return text
 
 
-def refused_by(m: dict) -> set:
-    """Providers that refused this task; it is not offered to them again."""
-    return {a["provider"] for a in m.get("attempts", []) if a.get("kind") == "refused"}
+def refused_by(m: dict, order: list | None = None) -> set:
+    """Skip this round's refusals and its ancestors'. If every lane provider refused earlier rounds, try
+    them again; this round's own refusals still stand. Inheritance prevents spending each follow-up on
+    the same content filter, and can go when providers no longer refuse individual requests."""
+    own = {a["provider"] for a in m.get("attempts", []) if a.get("kind") == "refused"}
+    inherited = set(m.get("inherited_refusals", {}))
+    return own if order is not None and inherited.issuperset(order) else own | inherited
 
 
 def provider_problem(desk: Desk, s: dict, name: str) -> str:
@@ -4689,7 +4729,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     elif kind == "refused":
         attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "refused"})
         order = desk.settings()["lanes"].get(meta.get("lane"), {}).get("providers", [])
-        left = [p for p in order if p not in refused_by({"attempts": attempts})]
+        left = [p for p in order if p not in refused_by({**meta, "attempts": attempts}, order)]
         state = "queued" if left and tries_used(attempts) < TRIES else "failed"
         error = f"{meta['provider']}: {why}; " + (
             "queued again for the lane's next provider" if state == "queued" else "no other provider in the lane to try")
@@ -4810,6 +4850,12 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         return {"state": "running" if checking else final, "phase": "checking" if checking else "",
                 "error": desk.redact(message), "attempts": tries, "pid_start": "", **fields, **kept, **again}
     meta = desk.change(tid, decide)
+    if kind and kind != "credit":
+        # Only announce after the returning task releases its lane, so all waiting tasks are included.
+        provider_rest_news(desk, desk.settings(), meta["provider"])
+    elif not kind and not net and meta["state"] != "queued" \
+            and (desk.provider_state().get(meta.get("provider")) or {}).get("rest_notice_reason"):
+        desk.set_provider_state(meta["provider"], rest_notice_reason="")
     if meta["state"] == "queued" and meta.get("sandbox_failed"):
         hold(desk, tid, meta.get("lane") or "", meta["error"], "",
              {"verify": "verifier"}.get(meta.get("kind"), "worker"))
@@ -6994,8 +7040,9 @@ class Dispatcher:
                             verifying=m.get("kind") == "verify" and bool(m.get("lane"))) or self.sandbox_waits(ln, s)
                             or self.start_waits(ln, s, waits)):
                         continue
-                    pname = next((p for p in task_providers(s, ln, m)
-                                  if p not in refused_by(m) and not provider_problem(desk, s, p)), None)
+                    order = task_providers(s, ln, m)
+                    pname = next((p for p in order
+                                  if p not in refused_by(m, order) and not provider_problem(desk, s, p)), None)
                     if not pname:
                         continue
                     try:
@@ -7420,8 +7467,8 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
                 f": {waiter['id']}'s worker's process is not known to be gone (hansa could not look for it "
                 f"for {LOOK_LIMIT // 60} minutes)" if waiter else ""), lane=ln))
             continue
-        probs = {p: "refused this task" if p in refused_by(m) else lk["problems"][p]
-                 for p in task_providers(s, ln, m)}
+        order = task_providers(s, ln, m)
+        probs = {p: "refused this task" if p in refused_by(m, order) else lk["problems"][p] for p in order}
         ready = [p for p, prob in probs.items() if not prob]
         if ready:
             running = sum(lane_occupied(x) for x in lk["tasks"])
@@ -7531,6 +7578,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
         elif kind and not quota_probe:
             desk.set_provider_state(name, unreachable_since=0, unreachable_reason="")
             rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}", model=p["model"])
-    desk.event("provider_checked", provider=name, ok=ok, detail=detail)
+        desk.event("provider_checked", provider=name, ok=ok, detail=detail)
+        if kind and not quota_probe:  # a failed automatic check changes nothing, so it tells nothing either
+            provider_rest_news(desk, s, name)
     desk.ready_news()
     return result
