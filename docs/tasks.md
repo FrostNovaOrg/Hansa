@@ -209,9 +209,16 @@ lane, or waits for one.
 - **Other desks on the same account learn the rest too.** Desks sharing a subscription's Claude Code
   folder, or a key provider's exact endpoint and key, hold new runs until the same time. `show` and
   `status` say when another desk found the limit. Different folders or keys do not share rests;
-  expired rests are ignored. The account's `provider-rests.json`, beside `desks.json` in
-  `$XDG_STATE_HOME/hansa` (default `~/.local/state/hansa`), holds SHA-256 login and source-desk hashes,
-  rest times and top-up confirmation times, with no key, endpoint, path or error text in clear.
+  expired rests are ignored. Providers on one desk sharing that login also share usage rests.
+  A good `hansa ping NAME` or page check ends a shared usage rest when the checked provider has the
+  same configured model as the one that found the limit. Other desks become ready on their next
+  provider read, including the desk that recorded the limit. A good check of a different model frees
+  only that provider until a new usage limit is recorded; the original model may still be limited.
+  Older records without a model count as the same model. A failed check does not clear a rest.
+  The account's `provider-rests.json`, beside `desks.json` in
+  `$XDG_STATE_HOME/hansa` (default `~/.local/state/hansa`), holds SHA-256 login, source-desk,
+  source-provider and configured-model hashes, usage-rest start/end and clearing times, and credit
+  rest/top-up times, with no key, endpoint, path, model name or error text in clear.
   Workers, setups and checks cannot read that folder. If the file is missing, unreadable or damaged,
   each desk uses its own rests as before.
 - **A refusal is not a limit.** A provider that refuses one task (its content filter) does not rest: that

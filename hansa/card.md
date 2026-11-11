@@ -328,6 +328,8 @@ or ask `scout` when reading is enough; say what you need back.
   the desk's `cool_minutes`), and the task moves to the lane's next
   provider without using a try (5 times); one that refuses a task (its content filter) does not
   rest. Credit rests until the principal confirms a top-up on the page or saves a new key.
+  A good ping or page check ends a shared usage rest for the same configured model;
+  a different model's good check frees only that provider until a new limit is found.
   `hansa show` says when or why it waits. More: `hansa help provider-limits`.
 - While a task runs, `hansa status` and `hansa show <id>` say how far it got (replies, minutes idle,
   its last note); Codex counts commands and file changes as replies. Some providers take minutes per reply;
