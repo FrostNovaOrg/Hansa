@@ -111,6 +111,11 @@ time ceiling, a line follows them: the last tool call the session record shows t
 or not it ended, and how many minutes before the stop it started (a Bash call's command on one line, cut
 to 300 characters; another tool's name and its file path or pattern). Many minutes there points to one
 long command, not a task too big. No line when the record holds no call or the provider keeps none.
+The optional Codex adapter keeps only its last message as the report at a ceiling or on cancellation, with
+its counted turns and the latest usage Codex reported in `turn.completed`; tokens without a usage event
+cannot be counted. The shim writes these in its stdout answer (`run.json`), which hansa reads at the run's end;
+Codex has no Claude Code session record to fall back to. Before any message, counted item or usage, it leaves
+no answer. See [the adapter](../contrib/codex/README.md).
 
 One Bash call of a task or verification worker may run as long as the lane's
 check may, plus 5 minutes, but never past the worker's own limit: hansa sets
