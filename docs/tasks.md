@@ -206,6 +206,17 @@ lane, or waits for one.
   A time up to an hour past gives about a minute's rest, and a clock time further past means tomorrow's;
   a form hansa is unsure of, a dated time more than an hour past, or a line it cannot read gets the length below.
 - **Else for the desk's `cool_minutes`**, 30 by default.
+- **Check long usage rests while work waits.** `hansa serve` sends the same small request as
+  `hansa ping` every `cool_minutes`, starting one interval after the limit, when a queued task needs
+  that provider and has no ready alternative. This finds limits lifted early by the account's owner.
+  It checks only usage rests with a recorded reset time and more than one interval left; fixed rests,
+  credit, key and login rests are not checked. Pausing the desk or falling below its disk or memory
+  floor prevents checks. A failed automatic check records its answer but leaves the rest unchanged.
+  A good check ends the rest, including shared rests as below. If real work hits the limit again after
+  that check, hansa stops automatic checks for the new rest: wait for its end, ping, or check on the
+  page. This guard prevents a tiny successful request from repeatedly restarting work that cannot run;
+  a real answer consumes the guard. `status` and `explain provider NAME` say the interval or why
+  automatic checks are off. Checks run one at a time per provider, without holding up dispatch.
 - **No lost tries.** A task whose run ended on its provider's usage limit goes back to the queue without
   using one of its 3 tries, 5 times; after that, each such end counts as a try, so a provider that hits its
   limit again right after each rest cannot hold a task forever. Any other failure counts as before.
@@ -222,7 +233,8 @@ lane, or waits for one.
   Older records without a model count as the same model. A failed check does not clear a rest.
   The account's `provider-rests.json`, beside `desks.json` in
   `$XDG_STATE_HOME/hansa` (default `~/.local/state/hansa`), holds SHA-256 login, source-desk,
-  source-provider and configured-model hashes, usage-rest start/end and clearing times, and credit
+  source-provider and configured-model hashes, usage-rest start/end, reset and clearing times,
+  automatic-check success times and the repeated-limit guard, and credit
   rest/top-up times, with no key, endpoint, path, model name or error text in clear.
   Workers, setups and checks cannot read that folder. If the file is missing, unreadable or damaged,
   each desk uses its own rests as before.
