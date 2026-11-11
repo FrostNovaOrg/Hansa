@@ -714,7 +714,7 @@ const T = ZH ? {
   },
   task:"Task", provider:"Provider", titleCol:"Task", changes:"Changes", refused:"Refused", error:"Why",
   taskSteps:"Task steps", taskQueued:"Queued", taskRun:n => `Run ${n}`, taskLaneCheck:"Lane check", taskVerification:"Verification", taskMergeCheck:"Merge check", taskMerged:"Merged",
-  taskRunning:"running", taskCompleted:"completed", taskFailed:"failed", taskCancelled:"cancelled", taskWait:"Wait", taskFirstResult:"First result",
+  taskRunning:"running", taskCompleted:"completed", taskFailed:"failed", taskCancelled:"cancelled", taskWait:"Wait", taskFirstResult:"First result", notKnown:"not known",
   taskMinutes:n => `${n} min`, taskSeconds:n => `${n} s`, taskExit:n => `exit ${n}`, taskVerifies:"Verifies", taskReplaces:"Replaces", taskVerificationUnavailable:"Verification record unavailable",
   asks:"To-dos", todos:"To-dos", todosIntro:"Read-only. Answer in the conversation; the coordinator records the outcome and closes each item. Every item is kept.",
   todoWhat:"What", todoWork:"Work", todoLoading:"Loading to-dos…", todoPage:(p, n, total) => `Page ${p} of ${n} · ${total} to-dos`, todoWhy:"Why only you", todoHolds:"Work waits", todoContinues:"Work goes on", todoSince:"Since", todoOutcome:"Outcome", todoClosed:"Closed at", todoOpen:"Open", todoDone:"Closed", principalDetails:"Details",
@@ -1257,6 +1257,10 @@ function notFromServe() {
   const e = new Error(T.notFromServe + (settingsDirty() ? " " + T.notFromServeUnsaved : ""));
   e.notFromServe = true; return e;
 }
+// A tab's failed load: a retry meets an answer not from hansa serve again, so it offers a reload instead, with its message.
+const reloadButton = () => h("button", {type:"button", onclick:() => location.reload()}, T.reloadPage);
+const loadFailed = (e, failed, retry) => e?.notFromServe ? [h("p", {class:"bad"}, e.message), reloadButton()]
+  : [h("p", {class:"bad"}, failed), h("button", {onclick:retry}, T.retry)];
 async function api(path, body) {
   // The origin's own cookies travel: a sign-in proxy keeps its session in one. hansa serve takes no cookie as a key.
   // A redirect stays visible (an opaque redirect) instead of being followed.
@@ -2368,7 +2372,11 @@ async function loadDispatch() {
 function ensureSettings() {
   const dispatch = loadDispatch();
   if (S && (settingsDirty() || settingsSaving || newProviderName || newPriceName)) return dispatch;
-  if (!settingsLoading) settingsLoading = loadSettings(undefined, false, !!S).finally(() => { settingsLoading = null; });
+  if (!settingsLoading) settingsLoading = loadSettings(undefined, false, !!S).catch(e => {
+    // Never loaded: with nothing to show, an answer not from hansa serve still says so here and offers a reload.
+    if (!S && e?.notFromServe) $("#tab-settings").replaceChildren(h("div", {class:"notice", role:"alert", "data-load-failed":""}, ...loadFailed(e)));
+    throw e;
+  }).finally(() => { settingsLoading = null; });
   return Promise.all([settingsLoading, dispatch]);
 }
 function showSettingsGroup(key) {
@@ -3011,12 +3019,15 @@ function renderSettings(problems = settingsProblems) {
   settingsSaveState = h("span", {class:"save-state", role:"status", "aria-live":"polite"});
   settingsSaveButton = h("button", {class:"primary", onclick:saveSettings}, T.save);
   settingsDiscardButton = h("button", {onclick:discardSettings}, T.reload);
+  const settingsForeign = settingsProblems.some(p => String(p).startsWith(T.notFromServe));
   $("#tab-settings").replaceChildren(...shown([
     h("div", {class:"settings-head"}, h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T.settings), h("h1", {}, T.settings), h("p", {}, T.settingsIntro)), settingsBadge),
     SETTINGS_LOCKED ? h("div", {class:"notice", role:"status", "data-outside-notice":""}, T.outsideLocked) : null,
     settingsRebase ? h("div", {class:"notice", role:"status"}, settingsRebase) : null,
     settingsProblems.length ? h("section", {class:"settings-errors", role:"alert"}, h("h2", {}, icon("error"), settingsFailure === "savedReload" ? T.savedReloadFailed : T.problems),
-      ["stale", "savedReload", "unreached"].includes(settingsFailure) ? null : h("p", {class:"field-note"}, T.retrySave),
+      // An answer not from hansa serve (notFromServe) is met again by another save: the section offers a reload.
+      ["stale", "savedReload", "unreached"].includes(settingsFailure) || settingsForeign ? null : h("p", {class:"field-note"}, T.retrySave),
+      settingsForeign ? reloadButton() : null,
       h("ul", {}, settingsProblems.map(p => h("li", {class:"bad"}, problemTarget(p) ? h("button", {type:"button", onclick:() => focusProblem(p), title:T.jumpToField}, p) : p)))) : null,
     NO_READ_STOP ? section(T.noReadStop, h("p", {class:"bad"}, NO_READ_STOP)) : null,
     h("div", {class:"settings-layout"}, nav, h("div", {class:"settings-content"}, settingsForm,
@@ -3197,7 +3208,7 @@ async function loadNotes() {
       if (note.error) throw new Error();
       detail.replaceChildren(section(file.name, note.binary ? h("p", {}, T.noteBinary) : [
         note.truncated ? h("p", {class:"warn"}, T.noteCut) : null, h("pre", {}, note.text)]));
-    } catch (e) { if (selection === notesEpoch) detail.replaceChildren(h("p", {class:"bad"}, T.notesFailed)); }
+    } catch (e) { if (selection === notesEpoch) detail.replaceChildren(...e?.notFromServe ? loadFailed(e) : [h("p", {class:"bad"}, T.notesFailed)]); }
   };
   host.replaceChildren(pageHeading(T.notes, T.notesIntro), h("label", {class:"tick"},
     h("input", {type:"checkbox", checked:notesArchived, onchange:e => { notesArchived = e.target.checked; return loadNotes(); }}), T.showArchived), detail);
@@ -3209,7 +3220,7 @@ async function loadNotes() {
       h("button", {class:"link", onclick:() => open(file)}, file.name), T.noteSize(file.size), when(file.modified),
       [h("pre", {}, file.headings.map(([i, level, text]) => `${i + 1} ${"#".repeat(level)} ${text}`).join("\n")),
         file.binary ? h("p", {class:"muted"}, T.noteBinary) : null]])) : h("p", {}, T.noNotes));
-  } catch (e) { if (epoch === notesEpoch) host.append(h("p", {class:"bad"}, T.notesFailed), h("button", {onclick:loadNotes}, T.retry)); }
+  } catch (e) { if (epoch === notesEpoch) host.append(...loadFailed(e, T.notesFailed, loadNotes)); }
 }
 
 /* ---------- known gaps ---------- */
@@ -3231,7 +3242,7 @@ async function loadGaps() {
         h("pre", {}, mark.why || "—"), mark.by || "—", when(mark.at)];
     })) : h("p", {}, T.noGaps));
   } catch (e) {
-    if (epoch === gapsEpoch) results.replaceChildren(h("p", {class:"bad"}, T.gapsFailed), h("button", {onclick:loadGaps}, T.retry));
+    if (epoch === gapsEpoch) results.replaceChildren(...loadFailed(e, T.gapsFailed, loadGaps));
   }
 }
 
@@ -3259,7 +3270,7 @@ async function loadTodos() {
         h("button", {disabled:r.page <= 1, onclick:() => turn(r.page - 1)}, T.newerPage),
         h("button", {disabled:r.page >= r.pages, onclick:() => turn(r.page + 1)}, T.olderPage)));
   } catch (e) {
-    if (epoch === todosEpoch) results.replaceChildren(h("p", {class:"bad"}, String(e.message || e)), h("button", {onclick:loadTodos}, T.retry));
+    if (epoch === todosEpoch) results.replaceChildren(...loadFailed(e, String(e.message || e), loadTodos));
   }
 }
 
@@ -3316,8 +3327,7 @@ async function loadTasks() {
         h("button", {disabled:r.page <= 1, onclick:() => turn(r.page - 1)}, T.newerPage),
         h("button", {disabled:r.page >= r.pages, onclick:() => turn(r.page + 1)}, T.olderPage)));
   } catch (e) {
-    if (epoch === tasksEpoch) tasksResults.replaceChildren(h("p", {class:"bad"}, T.tasksLoadFailed),
-      h("button", {onclick:loadTasks}, T.retry));
+    if (epoch === tasksEpoch) tasksResults.replaceChildren(...loadFailed(e, T.tasksLoadFailed, loadTasks));
   } finally {
     if (epoch === tasksEpoch) tasksResults.setAttribute("aria-busy", "false");
   }
@@ -3327,6 +3337,7 @@ async function loadTasks() {
 const savedCostPeriod = keptChoice("sessionStorage", "hansa.costPeriod", COST_PERIODS.map(String), "7");
 let costDays = savedCostPeriod === "all" ? "all" : Number(savedCostPeriod), costEpoch = 0, costLoading = false, costExporting = false, costLoadError = false, costRenderedDays = null;
 let costSelect, costExportButton, costFeedback, costRetryButton, costPlaceholder, costBody;
+let costForeign = false;  // the last failure was an answer not from hansa serve: the button reloads the page
 let calendarPanel, calendarScroll, calendarFetchedAt = null, calendarLoading = false;
 function scrollWorkCalendar() {
   setTimeout(() => { if (calendarScroll) calendarScroll.scrollLeft = calendarScroll.scrollWidth; }, 0);
@@ -3392,6 +3403,8 @@ function costFeedbackState(tone, text, retry = false) {
   if (!costFeedback) return;
   costFeedback.setAttribute("data-tone", tone);
   costFeedback.replaceChildren(icon(tone === "error" ? "error" : tone === "pending" ? "pending" : "check"), h("span", {}, text), costRetryButton);
+  costForeign = retry === "reload";
+  costRetryButton.textContent = costForeign ? T.reloadPage : T.retry;
   costRetryButton.hidden = !retry;
 }
 async function loadCost(withCalendar = true) {
@@ -3412,8 +3425,10 @@ async function loadCost(withCalendar = true) {
   } catch (e) {
     if (epoch !== costEpoch) return;
     costLoadError = true;
-    costFeedbackState("error", T.costLoadFailed + " " + (costRenderedDays === null ? "" : T.costRetained(costRenderedDays) + " ") + String(e.message || e), true);
-    if (costPlaceholder) { costPlaceholder.textContent = T.costLoadFailed; costPlaceholder.className = "bad"; }
+    const retained = costRenderedDays === null ? "" : T.costRetained(costRenderedDays) + " ";
+    if (e?.notFromServe) costFeedbackState("error", retained + e.message, "reload");
+    else costFeedbackState("error", T.costLoadFailed + " " + retained + String(e.message || e), true);
+    if (costPlaceholder) { costPlaceholder.textContent = e?.notFromServe ? e.message : T.costLoadFailed; costPlaceholder.className = "bad"; }
   } finally {
     if (epoch === costEpoch) {
       costLoading = false; host.setAttribute("aria-busy", "false"); costControlsState();
@@ -3499,7 +3514,7 @@ function renderCost(r) {
   costSelect = h("select", {id:"cost-period", "aria-label":T.period}, COST_PERIODS.map(days => h("option", {value:String(days), selected:days === costDays}, T.periodDays(days))));
   costSelect.addEventListener("change", e => { costDays = e.target.value === "all" ? "all" : Number(e.target.value); keepChoice("sessionStorage", "hansa.costPeriod", costDays); loadCost(false).catch(err); });
   costExportButton = h("button", {onclick:() => exportCsv()}, T.export);
-  costRetryButton = h("button", {type:"button", hidden:true, onclick:() => loadCost().catch(err)}, T.retry);
+  costRetryButton = h("button", {type:"button", hidden:true, onclick:() => costForeign ? location.reload() : loadCost().catch(err)}, T.retry);
   costFeedback = h("div", {class:"cost-feedback", role:"status", "aria-live":"polite"});
   costPlaceholder = r ? null : h("p", {class:"field-note"}, T.costLoading);
   const sections = r ? ["seat", "day", "model", "lane", "provider", "task"].map(block).filter(Boolean) : [];
@@ -3562,7 +3577,8 @@ async function exportCsv() {
     document.body.append(...shown([a])); a.click(); a.remove();
     costFeedbackState("success", T.exported);
   } catch (e) {
-    costFeedbackState("error", T.exportFailed + " " + String(e.message || e));
+    if (e?.notFromServe) costFeedbackState("error", e.message, "reload");
+    else costFeedbackState("error", T.exportFailed + " " + String(e.message || e));
   } finally {
     if (url && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(url);
     costExporting = false; costControlsState();
