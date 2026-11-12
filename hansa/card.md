@@ -69,7 +69,7 @@ they show what is merged, missing evidence and released; `show` also gives the g
 |---|---|
 | `hansa status` | whether `hansa serve` runs; when it is not running, `hansa up` starts it again as it last ran; what runs, waits (and why) or failed; lanes, providers, usage |
 | `hansa desks [--json]` | every desk on this account's list: name and folder, server, page address without its key, server version, task counts and principal's waiting release/to-do counts; reads only. More: `hansa help bringing-up` |
-| `hansa add "<task>" [--lane L] [--effort E] [--model M] [--title T] [--max-turns N] [--file PATH] [--attach PATH] [--verify] [--verify-lane L] [--verify-effort E] [--verify-note "text"]` | queue a task |
+| `hansa add "<task>" [--lane L] [--effort E] [--model M] [--title T] [--max-turns N] [--goal G] [--after T] [--file PATH] [--attach PATH] [--verify] [--verify-lane L] [--verify-effort E] [--verify-note "text"]` | queue a task |
 | `hansa show <id> [--full \| --report \| --check \| --check-log \| --merge-check-log]` | report, changes, refused calls, check (failing tests, last lines), next step |
 | `hansa diff <id> [path ...] [--stat] [--new]` | the task branch against its base; `--new`: only what a follow-up added |
 | `hansa git L [--worktree] <git command>` | a git command that reads, in lane L's repository (with every `task/<id>` branch) or worktree, keys hidden |
@@ -89,18 +89,21 @@ they show what is merged, missing evidence and released; `show` also gives the g
 | `hansa lane set L FIELD [VALUE ...]` | change one field (`none`: empty; `--help` lists them) |
 | `hansa lane target L [NAME ["<command>" \| none] [...]]` | list, set or remove a release target |
 | `hansa lane try L [--merge-check] [--log]` | run the setup and check once where tasks run (the worktree at the base's tip, the lane's sandbox, the server's environment), with no worker: after changing them, the network or write list, or moving the desk |
-| `hansa lane brief L ["<text>" \| --file PATH]` | print or replace a lane's standing instructions (recorded) |
+| `hansa lane brief L ["<text>" \| --file PATH \| none]` | print or replace a lane's standing instructions (recorded; `none`: empty) |
 | `hansa lane remove L [--keep \| --discard]` | remove a lane and its worktree |
 | `hansa hide PATH [PATH ...]` | add to what workers may not read; only the principal removes |
 | `hansa concurrency [N]` | how many tasks run at once, over all lanes |
 | `hansa disk-floor [GB]` | the free space under which nothing new starts |
 | `hansa memory-floor [GB]` | available memory under which nothing new starts |
 | `hansa cost [--days N \| --since HH:MM] [--by seat\|lane\|task\|...]` | tokens and their worth at the principal's prices |
-| `hansa ask "<what>" [--why "<why only the principal can do it>"] [--holds]` / `--close N "<outcome>"` | record a principal to-do / close #N with its outcome |
+| `hansa ask "<what>" [--why "<why only the principal can do it>"] [--goal G] [--holds]` / `--close N "<outcome>"` | record a principal to-do / close #N with its outcome; alone: open to-dos in full; `--closed [--page N]`: closed ones, with outcomes |
 | `hansa release [L [TARGET] ["<note>"]]`, `--show ID`, `--stop ID`, `yes\|no ID CODE` | ask for, list, call off or answer a release; `--show` prints its kept output; `--stop` also stops a running watch |
 | `hansa changelog L [TARGET]` | list workers' changelog lines for the next release |
 | `hansa notes [PATH]` / `notes archive FILE HEADING` | notes/ with headings / move a section out |
 | `hansa gaps [--all]` / `gaps show ID` / `gaps mark ID fixed\|later\|wontfix "why"` | notes |
+| `hansa goal add\|list\|show\|done\|drop\|reopen\|tie` | goals and the work tied to them. More: `hansa help intent-records` |
+| `hansa decide "<text>" --why W` / `hansa decisions` | record a product decision / the current ones |
+| `hansa ping [NAME]` | one short answer from a provider (or all); a good one ends a usage-limit, lost-login or unknown-model rest; a credit rest waits for the principal |
 | `hansa help [command \| topic \| card \| topics]` | a command's help, a topic of hansa's docs, this card, the topics |
 
 `--json` on `status`, `desks` or `cost` gives machine-readable output; `hansa <command> --help` gives all of a
