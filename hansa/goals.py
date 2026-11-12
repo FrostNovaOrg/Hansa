@@ -151,7 +151,8 @@ def _chain(tasks: list, tid: str) -> list:
 def tie(desk: Desk, gid: str, refs: list) -> dict:
     """Tie tasks (tN, with their retry chain) and to-dos (#N or N) to an open goal, moving them from any
     other goal. One new entry records what moved and from where; nothing earlier is rewritten. Returns
-    {"tasks": [...], "todos": [...], "from": {item: old goal or ""}, "asked": [...], "already": [...]}."""
+    {"tasks": [...], "todos": [...], "from": {item: old goal or ""}, "asked": [...], "already": [...],
+    "via": {task tied only through a chain: the asked tasks whose chain holds it}}."""
     with desk.lock():
         goal(desk, gid, open_only=True)
         tasks = {m["id"]: m for m in desk.tasks()}
@@ -172,7 +173,9 @@ def tie(desk: Desk, gid: str, refs: list) -> dict:
             else:
                 raise SystemExit(f"hansa: {desk.redact(r)!r} is neither a task (t0001) nor a to-do (#1 or 1); "
                                  "nothing was tied")
-        all_tasks = sorted({t for r in wanted_tasks for t in _chain(list(tasks.values()), r)})
+        chains = {r: _chain(list(tasks.values()), r) for r in dict.fromkeys(wanted_tasks)}
+        all_tasks = sorted({t for c in chains.values() for t in c})
+        via = {t: [r for r, c in chains.items() if t in c] for t in all_tasks if t not in chains}
         todos = sorted(set(wanted_todos))
         before = {t: tasks[t].get("goal") or "" for t in all_tasks}
         before.update({f"#{a['id']}": a.get("goal") or "" for a in asks if a["id"] in todos})
@@ -190,7 +193,7 @@ def tie(desk: Desk, gid: str, refs: list) -> dict:
                         a["goal"] = gid
                 write_json(desk.asks_path, asks)
     return {"tasks": moving, "todos": moving_todos, "from": {i: before[i] for i in before if before[i] != gid},
-            "asked": wanted_tasks + [f"#{n}" for n in wanted_todos], "already": already}
+            "asked": wanted_tasks + [f"#{n}" for n in wanted_todos], "already": already, "via": via}
 
 
 def tied_text(desk: Desk, gid: str, done: dict) -> str:
@@ -203,7 +206,7 @@ def tied_text(desk: Desk, gid: str, done: dict) -> str:
         old = done["from"].get(item)
         how = f"moved from {old}" if old else "had no goal"
         if item.startswith("t") and item not in done["asked"]:
-            how += ", in the retry chain of " + ", ".join(t for t in done["asked"] if t.startswith("t"))
+            how += ", in the retry chain of " + ", ".join(done.get("via", {}).get(item, []))
         out.append(f"  {item}: {how}")
     if done["already"]:
         out.append(f"  already tied: {', '.join(done['already'])}")

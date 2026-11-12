@@ -6030,8 +6030,11 @@ class DeskTest(unittest.TestCase):
         n = self.desk.add_ask("Sign the contract")
         other = self.desk.add_ask("Pick a name", goal="g1")
         files = {p: p.read_bytes() for p in (self.desk.state_dir / "intent").glob("*.json")}
-        out = self.hansa("goal", "tie", "g2", retry, merged, f"#{n}", str(other))
+        out = self.hansa("goal", "tie", "g2", retry, merged, f"#{n}", str(other), retry)
         self.assertEqual(out.split()[0], "g2")
+        # The chain line names only the asked task whose chain holds it, once.
+        line = next(x for x in out.splitlines() if x.strip().startswith(f"{first}:"))
+        self.assertEqual(line.split("retry chain of", 1)[1].strip(), retry)
         for item in (first, retry, merged, f"#{n}", f"#{other}"):
             self.assertIn(item, out)
         self.assertIn("from g1", out)
@@ -6068,6 +6071,22 @@ class DeskTest(unittest.TestCase):
             self.assertEqual(self.desk.meta(merged)["goal"], "g2")
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.hansa("goal", "tie", "g2")
+
+    def test_goal_tie_moves_followups_and_verifications_with_the_chain(self):
+        self.hansa("goal", "add", "Export")
+        self.hansa("goal", "add", "Invoices")
+        first = self.desk.new_task("Build the export", lane="a", goal="g1")
+        self.desk.update(first, state="done")
+        follow = self.desk.new_task("Follow up on the export", lane="a", parent=first)
+        vid = self.desk.new_task("Verify the export", kind="verify", parent=first, lane="a")
+        other = self.desk.new_task("Unrelated", lane="a", goal="g1")
+        out = self.hansa("goal", "tie", "g2", follow)
+        self.assertEqual([self.desk.meta(t)["goal"] for t in (first, follow, vid, other)], ["g2", "g2", "g2", "g1"])
+        for tid in (first, vid):
+            line = next(x for x in out.splitlines() if x.strip().startswith(f"{tid}:"))
+            self.assertIn("from g1", line)
+            self.assertEqual(line.split("retry chain of", 1)[1].strip(), follow)
+        self.assertNotIn(other, out)
 
     def test_goal_done_with_open_work_ends_it_and_lists_what_is_open(self):
         self.hansa("goal", "add", "Export")
