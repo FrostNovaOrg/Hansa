@@ -15578,6 +15578,12 @@ def save():'''))
                       f"next: hansa retry {second} --update \"<how to settle the conflict>\""):
             self.assertIn(words, shown)
         self.assertNotIn("merge check:", shown)
+        post = notify.task_line(self.desk, saved)
+        self.assertIn("conflicts with main", post)
+        for text in (shown.split("next: ", 1)[1], post.split("next: ", 1)[1]):
+            self.assertIn(f'hansa retry {second} --update "<how to settle the conflict>"', text)
+            self.assertIn("--fresh", text)
+            self.assertNotIn(f"hansa merge {second}", text)
         self.assertEqual(self.git_out("rev-parse", "main"), tip)
         self.assertEqual(self.git_out("status", "--porcelain"), "")
 
@@ -29801,6 +29807,173 @@ def save():'''))
             main(["--desk", str(self.desk.root), "merge", m["id"]])
         main(["--desk", str(self.desk.root), "merge", m["id"], "--despite-check"])
         self.assertEqual(self.desk.meta(m["id"])["state"], "merged")
+
+    def review_guidance(self, tid, event):
+        """The CLI's display and the line posted for the same result."""
+        return self.hansa("show", tid), notify._item(self.desk, {"task": tid, **event})[1]
+
+    def test_next_steps_for_a_task_check_that_did_not_finish(self):
+        tid = self.done_with(check="true", timeout_min=20, merge_timeout_min=7)
+        check = {**self.desk.meta(tid)["check"], "ok": False, "exit": 143,
+                 "note": "stopped at the lane's time ceiling"}
+        self.desk.update(tid, check=check)
+        for text in self.review_guidance(tid, {"event": "task_checked"}):
+            self.assertIn("did not finish", text)
+            self.assertIn("time ceiling", text)
+            nxt = text.split("next: ", 1)[1]
+            self.assertIn(f"hansa merge {tid} --recheck", nxt)
+            self.assertIn("hansa lane set a timeout_min N", nxt)
+            self.assertNotIn("merge_timeout_min", nxt)
+            self.assertNotIn("make the check pass", nxt)
+        self.hansa("merge", tid, "--recheck")
+        self.assertEqual(self.settle_merge(Dispatcher(self.desk), tid)["state"], "merged")
+
+    def test_next_steps_for_a_worker_that_never_started_after_setup_failed(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        self.hansa("lane", "set", "b", "setup", "echo missing dependency; exit 3")
+        tid = self.desk.new_task("Add hello.txt", lane="b")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["setup_exit"]), ("failed", 3))
+        self.assertFalse((Path(m["worktree"]) / "hello.txt").exists())
+        for text in self.review_guidance(tid, {"event": "task_finished", "state": "failed"}):
+            self.assertIn("setup", text)
+            nxt = text.split("next: ", 1)[1]
+            self.assertIn('hansa lane set b setup "<command>"', nxt)
+            self.assertIn(f"hansa retry {tid}", nxt)
+            self.assertLess(nxt.index("lane set"), nxt.index("retry"))
+            self.assertNotIn("what to change", nxt)
+        self.hansa("lane", "set", "b", "setup", "true")
+        follow = self.hansa("retry", tid).split()[0]
+        self.assertEqual(self.settle(Dispatcher(self.desk), follow)["state"], "done")
+
+    def test_next_steps_for_a_merge_blocked_by_the_owners_uncommitted_changes(self):
+        d, tid = self.merge_check_lane(check="true", merge_check="echo checked")
+        self.hansa("merge", tid)
+        d.tick()
+        d.merge_procs[tid].wait(timeout=20)
+        (self.repo / "README.md").write_text("the owner's uncommitted work\n")
+        m = self.settle_merge(d, tid)
+        self.assertIn("has uncommitted changes", m["merge_check_result"]["note"])
+        for text in self.review_guidance(tid, self.events("merge_check_ended")[-1]):
+            self.assertIn("merge could not be made", text)
+            self.assertIn("uncommitted changes", text)
+            self.assertNotIn("FAILED", text)
+            nxt = text.split("next: ", 1)[1]
+            for part in ("owner", "commits", "puts aside", f"hansa merge {tid}"):
+                self.assertIn(part, nxt)
+            self.assertNotIn("hansa retry", nxt)
+            self.assertNotIn("--despite-check", nxt)
+        (self.repo / "README.md").rename(self.repo / "owner-work-aside.txt")
+        (self.repo / "README.md").write_text("demo\n")
+        self.hansa("merge", tid)
+        self.assertEqual(self.settle_merge(d, tid)["state"], "merged")
+        # An override after the owner fixed the checkout also describes the earlier obstacle accurately.
+        self.desk.update(tid, merge_check_result=m["merge_check_result"])
+        shown = self.hansa("show", tid)
+        self.assertIn("merged later", shown)
+        self.assertNotIn("failed check", shown)
+
+    def test_next_steps_for_a_merge_check_whose_setup_failed(self):
+        d, tid = self.merge_check_lane(check="true")
+        self.hansa("lane", "add", "m", "--like", "a")
+        self.hansa("lane", "set", "m", "merge_lane", "true")
+        self.hansa("lane", "set", "m", "merge_check", "echo merge checked")
+        self.hansa("lane", "set", "m", "setup", "echo missing dependency; exit 3")
+        self.hansa("merge", tid)
+        m = self.settle_merge(d, tid)
+        self.assertIn("setup failed", m["merge_check_result"]["note"])
+        # A recheck records steps too: none ran when setup failed, whatever exit it left in the record.
+        self.desk.update(tid, merge_check_result={**m["merge_check_result"], "steps": [
+            {"what": "task check", "command": "true", "exit": 3, "ok": False},
+            {"what": "merge check", "command": "echo merge checked", "exit": None, "ok": False}]})
+        for text in self.review_guidance(tid, self.events("merge_check_ended")[-1]):
+            self.assertIn("did not run", text)
+            self.assertIn("setup failed", text)
+            self.assertNotIn("FAILED", text)
+            nxt = text.split("next: ", 1)[1]
+            self.assertIn('hansa lane set m setup "<command>"', nxt)
+            self.assertIn(f"hansa merge {tid}", nxt)
+            self.assertNotIn("hansa retry", nxt)
+            self.assertNotIn("--despite-check", nxt)
+        self.hansa("lane", "set", "m", "setup", "true")
+        self.hansa("merge", tid)
+        self.assertEqual(self.settle_merge(d, tid)["state"], "merged")
+
+    def test_next_steps_for_a_merge_refused_by_forbidden_words(self):
+        d, tid = self.merge_check_lane(check="true", merge_check="echo checked")
+        self.hansa("merge", tid)
+        d.tick()
+        d.merge_procs[tid].wait(timeout=20)
+        self.forbid("hello from")  # found before landing, after the command passed
+        m = self.settle_merge(d, tid)
+        self.assertIn("release_forbidden", m["merge_check_result"]["note"])
+        for text in self.review_guidance(tid, self.events("merge_check_ended")[-1]):
+            self.assertIn("merge could not be made", text)
+            self.assertIn("holds words", text)
+            nxt = text.split("next: ", 1)[1]
+            for part in (f"hansa retry {tid} --fresh", "--title", "merge_message", "identity", "hansa ask",
+                         "hansa help forbidden-words"):
+                self.assertIn(part, nxt)
+            self.assertNotIn("--despite-check", nxt)
+            self.assertNotIn("--update", nxt)
+        self.assertIn("holds words", self.refused("merge", tid, "--despite-check"))
+        # Older/shorter notes need not carry the help link to identify this refusal.
+        note = f"the change in {tid} holds words the principal keeps from going out"
+        self.desk.update(tid, merge_check_result={**m["merge_check_result"], "note": note})
+        for text in self.review_guidance(tid, {"event": "merge_check_ended", "note": note}):
+            self.assertIn(f"hansa retry {tid} --fresh", text.split("next: ", 1)[1])
+            self.assertNotIn("--despite-check", text)
+
+    def test_next_steps_for_a_merge_check_conflict_with_or_without_a_note(self):
+        d, first, second = self.two_lanes(check="true", names=("hello.txt", "hello.txt"))
+        self.hansa("merge", first)
+        self.hansa("merge", second)
+        m = self.settle_merge(d, second)
+        self.assertTrue(m["merge_check_result"]["conflict"])
+        event = self.events("merge_check_ended")[-1]
+        for note in (event["note"], ""):
+            with self.subTest(note=note):
+                self.desk.update(second, merge_check_result={**m["merge_check_result"], "note": note})
+                for text in self.review_guidance(second, {**event, "note": note}):
+                    self.assertIn("conflicts with main", text)
+                    self.assertNotIn("the check failed", text)
+                    nxt = text.split("next: ", 1)[1]
+                    self.assertIn(f'hansa retry {second} --update "<how to settle the conflict>"', nxt)
+                    self.assertIn("--fresh", nxt)
+                    self.assertNotIn(f"hansa merge {second}", nxt)
+
+    def test_next_steps_for_a_merge_check_timeout_name_its_execution_lane_and_limit(self):
+        tid = self.done_with(check="true")
+        self.hansa("lane", "add", "m", "--like", "a")
+        self.hansa("lane", "set", "m", "merge_lane", "true")
+        for setting in ("merge_timeout_min", "timeout_min"):
+            with self.subTest(setting=setting):
+                self.hansa("lane", "set", "m", "merge_timeout_min", "9" if setting == "merge_timeout_min" else "none")
+                result = {"ok": False, "exit": 143, "note": "stopped at the lane's time ceiling", "lane": "m",
+                          "command": "make check", "seconds": 540, "tail": [], "steps": [
+                              {"what": "merge check", "command": "make check", "exit": 143, "ok": False}]}
+                self.desk.update(tid, merge_check_result=result)
+                for text in self.review_guidance(tid, {"event": "merge_check_ended", **result}):
+                    self.assertIn("did not finish", text)
+                    self.assertNotIn("FAILED", text)
+                    nxt = text.split("next: ", 1)[1]
+                    self.assertIn(f"hansa lane set m {setting} N", nxt)
+                    self.assertIn(f"hansa merge {tid} --recheck", nxt)
+                    self.assertNotIn("make the check pass", nxt)
+
+    def test_next_steps_for_a_real_check_failure_still_offer_a_fix_diff_and_override(self):
+        tid = self.done_with(check="echo assertion failed; exit 1")
+        for text in self.review_guidance(tid, {"event": "task_checked"}):
+            nxt = text.split("next: ", 1)[1]
+            for part in (f'hansa retry {tid} "make the check pass: ..."', f"hansa diff {tid}",
+                         f"hansa merge {tid} --despite-check"):
+                self.assertIn(part, nxt)
+        check = self.desk.meta(tid)["check"]
+        self.desk.update(tid, merge_check_result=check)
+        post = self.review_guidance(tid, {"event": "merge_check_ended", "note": "", "command": check["command"]})[1]
+        self.assertIn("exit 1", post.split(" (it ran:", 1)[0])
+        for part in ("the check failed", "exit 1", "echo assertion failed", f"hansa merge {tid} --despite-check"):
+            self.assertIn(part, post)
 
     def test_what_the_worker_left_running_is_stopped_before_the_check_which_runs_to_its_end_without_it(self):
         from hansa.run import alive

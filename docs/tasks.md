@@ -626,6 +626,24 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   the commands and each exit; the event log also records who asked. A passing
   recheck has a short header, followed by the result of each step.
   With `--despite-check`, the checks are skipped and the override recorded.
+- **A check that stopped.** `hansa show ID` and the coordinator's post say why
+  it stopped and give the next step for that reason. A check cut off at the
+  lane's time ceiling did not finish: run it again with `hansa merge ID
+  --recheck`, raising the lane's limit if it needs more time (`hansa lane set L
+  timeout_min N` for a task check; for a merge check, its execution lane's
+  `merge_timeout_min` when set, else `timeout_min`). This does not call for a
+  worker to make the check pass.
+  If setup failed before the worker started, fix it with `hansa lane set L
+  setup "<command>"`, then `hansa retry ID`. If the merge lane's setup failed,
+  the check did not run: fix that lane's setup, then `hansa merge ID`.
+  An owner's uncommitted checkout changes prevent the merge, rather than fail
+  the check: the owner commits or puts them aside, then runs `hansa merge ID`.
+  A [forbidden-word refusal](releases.md#forbidden-words-before-a-release)
+  points to removing the words with a fresh retry, correcting the title or
+  lane's merge message or identity, or asking the principal; `--despite-check`
+  cannot override the word scan. A conflict points to `hansa retry ID --update
+  "<how to settle it>"`, or `--fresh` to redo the work. A check that ran and
+  failed still offers a worker retry, a diff to review, and `--despite-check`.
 - **`merge_check` and `merge_timeout_min`.** A lane's merge check runs its check
   unless the lane has a command of its own for it: `hansa lane set L
   merge_check "<command>"`, for what is too slow to run after every task (the

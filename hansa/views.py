@@ -383,6 +383,60 @@ def silent(r: dict) -> bool:
     return bool(r) and not r.get("could_not_run") and not r.get("ok") and not r.get("note") and not r.get("tail")
 
 
+def check_interruption(r: dict) -> str:
+    """A recorded stop that a worker fixing a failed check cannot remedy. Read notes too, so results
+    saved before this guidance existed get the same advice as new ones."""
+    if not r or r.get("ok"):
+        return ""
+    if r.get("conflict"):
+        return "conflict"
+    note = r.get("note") or ""
+    if "has uncommitted changes" in note:
+        return "checkout"
+    if "hansa help forbidden-words" in note or "holds words the principal keeps from going out" in note:
+        return "forbidden"
+    if note.startswith("the lane's setup failed"):
+        return "setup"
+    if note == "stopped at the lane's time ceiling":
+        return "timeout"
+    if r.get("direct") or r.get("waited") or r.get("merge_error"):
+        return "merge"
+    return ""
+
+
+def interruption_next(s: dict, m: dict, r: dict, merge: bool = False) -> str:
+    """Next steps shared by show and its coordinator post; '' leaves the ordinary check advice alone."""
+    why, tid = check_interruption(r), m["id"]
+    lane = (r.get("lane") if merge else None) or m.get("lane")
+    if why == "timeout":
+        setting = "merge_timeout_min" if merge and s["lanes"].get(lane, {}).get("merge_timeout_min") else "timeout_min"
+        return (f"if the check needs more time: hansa lane set {lane} {setting} N · "
+                f"hansa merge {tid} --recheck (runs the check again and merges if it passes)")
+    if why == "setup":
+        return (f'fix the lane\'s setup: hansa lane set {lane} setup "<command>" · '
+                f"hansa {'merge' if merge else 'retry'} {tid}")
+    if why == "checkout":
+        return f"the checkout's owner commits or puts aside the uncommitted changes, then hansa merge {tid}"
+    if why == "forbidden":
+        return (f'hansa retry {tid} --fresh "<take the forbidden words out>" (continuing keeps the commits; '
+                f"a word in the title: add again with another --title; in merge_message or identity: change the lane) "
+                f"· or ask the principal with hansa ask · hansa help forbidden-words")
+    if why == "conflict":
+        return (f'hansa retry {tid} --update "<how to settle the conflict>" · hansa retry {tid} --fresh '
+                f'"<the same change on the current base>"')
+    if why == "merge":
+        return (f"once what stopped it is fixed (the principal fixes a checkout; tell them with hansa ask): "
+                f"hansa merge {tid} again")
+    return ""
+
+
+def merge_failure_reason(r: dict) -> str:
+    """The saved reason a merge stopped, including older results with advice but no note."""
+    reason = (r.get("note") or r.get("conflict") or r.get("merge_error")
+              or (f"the check failed (exit {r['exit']})" if r.get("exit") is not None else "the check failed"))
+    return reason.removeprefix("hansa: ")
+
+
 def recheck_step(r: dict, tid: str) -> str:
     """The --recheck step for a check that did not pass and may be the machine's doing."""
     return (f"if it should have printed something, once that is fixed: hansa merge {tid} --recheck" if silent(r)
@@ -395,7 +449,7 @@ def machine_hint(r: dict) -> str:
     if r.get("could_not_run"):
         return ("it never ran, so the task is not judged on it: this is the machine's problem, not the task's "
                 "(hansa explain server)")
-    if r.get("ok") or r.get("note"):  # stopped, over the time ceiling, its setup failed: said in the note
+    if r.get("ok") or r.get("note") or check_interruption(r):
         return ""
     if silent(r):
         return ("nothing came out: it printed nothing at all, which usually means the command could not start "
@@ -416,9 +470,13 @@ def waited_text(r: dict) -> str:
 
 def merge_result_lines(m: dict, log: str = "") -> list:
     lines = _merge_result_lines(m, log)
+    interruption = check_interruption(m.get("merge_check_result") or {})
     for step in (m.get("merge_check_result") or {}).get("steps", []):
-        how = "passed (exit 0)" if step.get("ok") else (
-            f"FAILED (exit {step['exit']})" if step.get("exit") is not None else "did not run or was interrupted")
+        how = ("did not run (the setup failed)" if interruption == "setup" else
+               "passed (exit 0)" if step.get("ok") else
+               "did not run or was interrupted" if step.get("exit") is None else
+               f"did not finish (exit {step['exit']})" if interruption == "timeout" else
+               f"FAILED (exit {step['exit']})")
         lines.append(f"  at merge, {step['what']}: {how}: {step['command']}")
     return lines
 
@@ -430,8 +488,9 @@ def _merge_result_lines(m: dict, log: str = "") -> list:
         return []
     past = m.get("state") == "merged" and not r.get("ok")
     label = "previous merge check" if past else "merge check"
+    interruption = check_interruption(r)
     advice = (r.get("conflict") or r.get("merge_error") or "").removeprefix("hansa: ")
-    outcome = (("merged later" if advice or r.get("waited") else "merged despite this failed check")
+    outcome = (("merged later" if advice or interruption else "merged despite this failed check")
                + f" at {notify.when(m.get('merged'))}" if past else "nothing was merged")
     if past:
         advice = advice.replace("nothing was merged", outcome, 1)
@@ -442,6 +501,13 @@ def _merge_result_lines(m: dict, log: str = "") -> list:
                              else waited_text(r))]
     if advice:
         return [f"{label}: " + advice]
+    if interruption in ("checkout", "forbidden"):
+        return [f"{'previous merge' if past else 'merge'} could not be made: "
+                + merge_failure_reason(r).replace("nothing was merged", outcome)]
+    if interruption == "setup":
+        lane = f" in lane {r['lane']}" if r.get("lane") and r["lane"] != m.get("lane") else ""
+        return ([f"{label}{lane}: did not run ({r['note']}); {outcome}"]
+                + failed_check_lines(log, r.get("tail", []), m["id"], "--merge-check-log"))
     where = f"hansa merged it onto the base at {r.get('onto', '')[:10]}"
     if r.get("lane") and r["lane"] != m.get("lane"):
         where += f" in lane {r['lane']}'s worktree"
@@ -450,7 +516,8 @@ def _merge_result_lines(m: dict, log: str = "") -> list:
                 + ("" if r.get("steps") else f": {r.get('command', '')}")]
     if r.get("could_not_run"):
         return [f"{label}: {r['note']}; {outcome}", "  " + machine_hint(r)]
-    how = f"FAILED ({r['note']})" if r.get("note") else f"FAILED (exit {r.get('exit')})"
+    how = (f"did not finish ({r['note']})" if interruption == "timeout" else
+           f"FAILED ({r['note']})" if r.get("note") else f"FAILED (exit {r.get('exit')})")
     hint = machine_hint(r)
     if r.get("steps"):  # a --recheck's steps: named as the per-step lines below name them (merge_result_lines)
         ran = [s for s in r["steps"] if s.get("exit") is not None]
@@ -1773,7 +1840,9 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         out.append(f"check (run by hansa, not the worker): {chk['note']}: {chk['command']}")
         out.append("  " + machine_hint(chk))
     elif chk:
-        how = "passed" if chk["ok"] else "FAILED" + (f" ({chk['note']})" if chk["note"] else f" (exit {chk['exit']})")
+        how = ("passed" if chk["ok"] else "did not finish" if check_interruption(chk) == "timeout" else "FAILED")
+        if not chk["ok"]:
+            how += f" ({chk['note']})" if chk["note"] else f" (exit {chk['exit']})"
         out.append(f"check (run by hansa, not the worker): {how} in {chk['seconds']} s: {chk['command']}")
         if not chk["ok"]:
             out += failed_check_lines(desk.redact(read_text(d / "check.log")), chk["tail"], tid)
@@ -1827,16 +1896,21 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         out.append(f"usage {model}" + (f" ({len(runs)} runs, every try)" if len(runs) > 1 else "")
                    + f": in {u.get('in') or 0:,} · out {u.get('out') or 0:,} · cache read {u.get('cache_read') or 0:,}"
                    f" · cache write {u.get('cache_write') or 0:,}")
+    s = desk.settings()
+    check_next = interruption_next(s, m, chk or {})
     review = (f"hansa merge {tid}" if v and v["verdict"] in HOLDING_VERDICTS
               else f"hansa diff {tid} --stat, then hansa verify {tid} (code or tests) or hansa merge {tid} (text only)")
     nxt = {"done": f"hansa retry {tid} \"what to change\" · hansa close {tid} to close it" if not m.get("commits")
            else f"{review} · hansa retry {tid} \"what to change\"" if not chk or chk["ok"]
+           else check_next if check_next
            else (f"{recheck_step(chk, tid)} (runs the check "
                  f"again and merges if it passes) · hansa retry {tid} \"make the check pass: ...\" · "
                  f"hansa merge {tid} --despite-check") if machine_hint(chk)
            else f"hansa retry {tid} \"make the check pass: ...\" · hansa diff {tid} · hansa merge {tid} --despite-check",
            "failed": (f"read its notes, then split the task or make it clearer (hansa add ...); do not re-run it unchanged"
                       if str(m.get("error", "")).startswith("stopped at the ceiling")
+                      else interruption_next(s, m, {"note": "the lane's setup failed"})
+                      if m.get("setup_exit")
                       else f"once the machine is fixed (hansa explain server): hansa retry {tid} to run it again"
                       if m.get("machine_problem")
                       else (f"first fix what kept it from starting (the error above: the machine or the lane, or what "
@@ -1856,11 +1930,9 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
     if verification_due(m):
         nxt["done"] = "wait for hansa serve to queue the requested verification"
     mr = m.get("merge_check_result") or {}
-    if (mr.get("waited") or mr.get("direct") or mr.get("merge_error")) and m["state"] == "done":
-        nxt["done"] = (f"hansa retry {tid} --update \"<how to settle the conflict>\" · hansa retry {tid} --fresh "
-                       f"\"<the same change on the current base>\"" if mr.get("conflict") else
-                       f"once what stopped it is fixed (the principal fixes a checkout; tell them with hansa ask): "
-                       f"hansa merge {tid} again")
+    merge_next = interruption_next(s, m, mr, merge=True)
+    if m["state"] == "done" and merge_next:
+        nxt["done"] = merge_next
     elif mr and not mr.get("ok") and m["state"] == "done" and machine_hint(mr):
         nxt["done"] = (f"{recheck_step(mr, tid)} (runs the check "
                        f"again and merges if it passes) · hansa retry {tid} \"...\" · hansa merge {tid} --despite-check")
