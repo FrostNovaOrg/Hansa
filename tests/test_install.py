@@ -139,7 +139,7 @@ class InstallTest(unittest.TestCase):
                    for cmd in commands[:2]]
         indices.append(next(i for i, line in enumerate(lines) if line.startswith(command + " ")
                             and "opens the menu" in line))
-        ssh = "ssh -t -L 8765:127.0.0.1:8765 YOUR-HOST " + shlex.quote(shlex.quote(str(self.link)))
+        ssh = next(line for line in lines if line.startswith("ssh "))
         indices += [lines.index(ssh), next(i for i, line in enumerate(lines)
                                          if str(self.install / "docs/getting-started.md") in line)]
         self.assertEqual(indices, sorted(indices))
@@ -152,6 +152,18 @@ class InstallTest(unittest.TestCase):
         self.assert_next_steps(shlex.quote(str(self.link)))
         next_steps = self.output.split("\n\n", 1)[1]
         self.assertTrue(next_steps.startswith('export PATH="$HOME/.local/bin:$PATH"\n'), self.output)
+
+    def test_ssh_next_step_forwards_both_page_ports_in_both_languages(self):
+        for lang in ("C", "zh_CN.UTF-8"):
+            with self.subTest(lang=lang):
+                self.assert_success(self.run_install(LANG=lang))
+                ssh = shlex.split(next(line for line in self.output.splitlines() if line.startswith("ssh ")))
+                forwards = [ssh[i + 1] for i, arg in enumerate(ssh) if arg == "-L"]
+                for port in (8765, 8766):
+                    self.assertIn(f"{port}:127.0.0.1:{port}", forwards)
+                self.assertIn("-t", ssh)
+                self.assertIn("YOUR-HOST", ssh)
+                self.assertEqual(shlex.split(ssh[-1]), [str(self.link)])
 
     def test_path_matches_a_whole_entry_and_accepts_trailing_slash(self):
         self.assert_success(self.run_install(PATH=str(self.link.parent) + "-other:" + str(self.tools)))

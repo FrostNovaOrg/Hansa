@@ -40,6 +40,9 @@ The commit uses the [lane's identity](who-changes-what.md#commit-messages-and-id
 including `lane add --identity`, else the repository's own config, else hansa's.
 The command prints the repository's path and branch. On Linux, `init --user`
 creates it as that account.
+When `init --repo PATH` creates a missing folder, it also says that PATH did not
+exist and was made as a new project. If an existing repository was intended,
+remove the new project folder and the desk, then rerun with the correct `--repo` path.
 
 For these new or empty repositories, `--base` must be a valid branch name and
 becomes the first commit's branch. Without it, git init chooses the branch, or

@@ -8202,6 +8202,23 @@ def save():'''))
                     lane, said = self.start_empty_project(mode, repo, f"{mode}-missing", "--base", "start/here")
                     self.assert_empty_first_commit(repo, lane, said, "start/here")
 
+    def test_init_warns_when_it_creates_a_missing_project_and_gives_recovery_paths(self):
+        for existed in (False, True):
+            with self.subTest(existed=existed):
+                name = f"project-notice-{int(existed)}"
+                repo = self.tmp / name
+                if existed:
+                    repo.mkdir()
+                lane, said = self.start_empty_project("init", repo, name, "--base", "start")
+                self.assert_empty_first_commit(repo, lane, said, "start")
+                self.assertIn("desk ready", said)
+                notices = [line for line in said.splitlines() if "did not exist" in line]
+                self.assertEqual(len(notices), 0 if existed else 1)
+                if not existed:
+                    for words in (str(repo.resolve()), "new project", "existing repository", "remove",
+                                  str((self.tmp / f"{name}-desk").resolve()), "desk", "again", "--repo"):
+                        self.assertIn(words, notices[0])
+
     def test_init_beside_a_new_project_makes_private_parents_under_a_group_umask(self):
         old = os.umask(0o002)
         try:
