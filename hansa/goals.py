@@ -1,6 +1,7 @@
 """Goals and product decisions: immutable entries in the desk's private state."""
 from __future__ import annotations
 
+import re
 import time
 
 from . import cost, notify, release
@@ -16,10 +17,31 @@ def records(desk: Desk) -> tuple[dict, dict]:
     goals, decisions = {}, {}
     for e in entries(desk):
         if e["event"] == "goal_added":
-            goals[e["id"]] = {**e, "state": "open"}
+            goals[e["id"]] = {**e, "state": "open", "history": []}
         elif e["event"] == "goal_ended":
             goals[e["id"]].update(state=e["state"], outcome=e["outcome"], ended=e["created"],
                                    ended_session=e.get("session"))
+            goals[e["id"]]["history"].append({"event": "ended", "state": e["state"], "outcome": e["outcome"],
+                                              "created": e["created"], "session": e.get("session")})
+        elif e["event"] == "goal_reopened":
+            g = goals[e["id"]]
+            g["history"].append({"event": "reopened", "was": g["state"], "why": e["why"],
+                                 "created": e["created"], "session": e.get("session")})
+            g["state"] = "open"
+            for k in ("outcome", "ended", "ended_session"):
+                g.pop(k, None)
+        elif e["event"] == "goal_tied":
+            items = e["tasks"] + [f"#{n}" for n in e["todos"]]
+            goals[e["id"]]["history"].append({"event": "tied", "items": items, "from": e["from"],
+                                              "created": e["created"], "session": e.get("session")})
+            moved = {}
+            for item in items:
+                if e["from"].get(item):
+                    moved.setdefault(e["from"][item], []).append(item)
+            for old, gone in moved.items():
+                if old in goals:
+                    goals[old]["history"].append({"event": "moved", "items": gone, "to": e["id"],
+                                                  "created": e["created"], "session": e.get("session")})
         elif e["event"] == "decision_added":
             decisions[e["id"]] = dict(e)
             if e.get("replaces"):
@@ -63,11 +85,132 @@ def add(desk: Desk, title: str, why: str = "") -> str:
     return gid
 
 
-def end(desk: Desk, gid: str, state: str, outcome: str) -> None:
+def still_open(desk: Desk, gid: str, tasks: list | None = None) -> list:
+    """The goal's work not settled yet: latest tasks queued, running or waiting for review, and open to-dos."""
+    tasks = desk.tasks() if tasks is None else tasks
+    out = [{"id": m["id"], "state": m["state"], "title": m.get("title", "")}
+           for m in latest_tasks(tasks, gid) if m["state"] in OPEN_STATES and not m.get("closed")]
+    return out + [{"id": f"#{a['id']}", "state": "open to-do", "title": a.get("text", "")}
+                  for a in desk.asks() if a.get("goal") == gid and not a.get("closed")]
+
+
+OPEN_STATES = {"queued": "queued", "running": "running", "done": "waiting for review", "merging": "waiting for review"}
+
+
+def end(desk: Desk, gid: str, state: str, outcome: str) -> list:
+    """Ends the goal even with work still open under it, and returns that work (still_open)."""
     with desk.lock():
         goal(desk, gid, open_only=True)
         _text(desk, outcome, "the goal's outcome" if state == "done" else "why the goal was dropped")
         _append(desk, event="goal_ended", id=gid, state=state, outcome=outcome)
+        return still_open(desk, gid)
+
+
+def ended_text(gid: str, state: str, left: list) -> str:
+    """What goal done or drop did; the id and state stay the first words."""
+    if not left:
+        return f"{gid} {state}"
+    return "\n".join([f"{gid} {state}; still open under it ({len(left)}):"]
+                      + [f"  {w['id']} {OPEN_STATES.get(w['state'], w['state'])} · {one_line(w['title'])}"
+                         for w in left])
+
+
+def reopen(desk: Desk, gid: str, why: str) -> dict:
+    """Open a done or dropped goal again; the end stays on record and the reopening is a new entry."""
+    with desk.lock():
+        g = goal(desk, gid)
+        if g["state"] == "open":
+            raise SystemExit(f"hansa: goal {gid} is open; only a done or dropped goal can be reopened; "
+                             "nothing was recorded")
+        _text(desk, why, "why the goal is reopened")
+        _append(desk, event="goal_reopened", id=gid, why=why)
+    return g
+
+
+def reopened_text(g: dict, why: str) -> str:
+    return (f"{g['id']} reopened: {one_line(g['title'])}\n  was {g['state']}: {one_line(g['outcome'])}"
+            f"\n  why: {one_line(why)}")
+
+
+def _chain(tasks: list, tid: str) -> list:
+    """The task with every task linked to it by retries, follow-ups and verifications, in id order."""
+    near = {}
+    for m in tasks:
+        if m.get("parent"):
+            near.setdefault(m["id"], set()).add(m["parent"])
+            near.setdefault(m["parent"], set()).add(m["id"])
+    seen, todo = {tid}, [tid]
+    while todo:
+        for n in near.get(todo.pop(), ()):
+            if n not in seen:
+                seen.add(n)
+                todo.append(n)
+    return sorted(seen)
+
+
+def tie(desk: Desk, gid: str, refs: list) -> dict:
+    """Tie tasks (tN, with their retry chain) and to-dos (#N or N) to an open goal, moving them from any
+    other goal. One new entry records what moved and from where; nothing earlier is rewritten. Returns
+    {"tasks": [...], "todos": [...], "from": {item: old goal or ""}, "asked": [...], "already": [...],
+    "via": {task tied only through a chain: the asked tasks whose chain holds it}}."""
+    with desk.lock():
+        goal(desk, gid, open_only=True)
+        tasks = {m["id"]: m for m in desk.tasks()}
+        asks = desk.asks()
+        ask_ids = {a["id"] for a in asks}
+        wanted_tasks, wanted_todos = [], []
+        for ref in refs:
+            r = ref.strip()
+            number = r[1:] if r.startswith("#") else r
+            if number.isdigit():
+                if int(number) not in ask_ids:
+                    raise SystemExit(f"hansa: no to-do #{int(number)}; nothing was tied")
+                wanted_todos.append(int(number))
+            elif re.fullmatch(r"t\d+", r):
+                if r not in tasks:
+                    raise SystemExit(f"hansa: no task {r}; nothing was tied")
+                wanted_tasks.append(r)
+            else:
+                raise SystemExit(f"hansa: {desk.redact(r)!r} is neither a task (t0001) nor a to-do (#1 or 1); "
+                                 "nothing was tied")
+        chains = {r: _chain(list(tasks.values()), r) for r in dict.fromkeys(wanted_tasks)}
+        all_tasks = sorted({t for c in chains.values() for t in c})
+        via = {t: [r for r, c in chains.items() if t in c] for t in all_tasks if t not in chains}
+        todos = sorted(set(wanted_todos))
+        before = {t: tasks[t].get("goal") or "" for t in all_tasks}
+        before.update({f"#{a['id']}": a.get("goal") or "" for a in asks if a["id"] in todos})
+        moving = [t for t in all_tasks if before[t] != gid]
+        moving_todos = [n for n in todos if before[f"#{n}"] != gid]
+        already = [i for i, g in before.items() if g == gid]
+        if moving or moving_todos:
+            _append(desk, event="goal_tied", id=gid, tasks=moving, todos=moving_todos,
+                    **{"from": {i: before[i] for i in moving + [f"#{n}" for n in moving_todos]}})
+            for t in moving:
+                desk.change(t, lambda m: {"goal": gid})
+            if moving_todos:
+                for a in asks:
+                    if a["id"] in moving_todos:
+                        a["goal"] = gid
+                write_json(desk.asks_path, asks)
+    return {"tasks": moving, "todos": moving_todos, "from": {i: before[i] for i in before if before[i] != gid},
+            "asked": wanted_tasks + [f"#{n}" for n in wanted_todos], "already": already, "via": via}
+
+
+def tied_text(desk: Desk, gid: str, done: dict) -> str:
+    g = records(desk)[0][gid]
+    items = done["tasks"] + [f"#{n}" for n in done["todos"]]
+    if not items:
+        return f"{gid} {one_line(g['title'])}: nothing tied; {', '.join(done['already'])} already tied to it; nothing was recorded"
+    out = [f"{gid} {one_line(g['title'])}: tied {', '.join(items)}"]
+    for item in items:
+        old = done["from"].get(item)
+        how = f"moved from {old}" if old else "had no goal"
+        if item.startswith("t") and item not in done["asked"]:
+            how += ", in the retry chain of " + ", ".join(done.get("via", {}).get(item, []))
+        out.append(f"  {item}: {how}")
+    if done["already"]:
+        out.append(f"  already tied: {', '.join(done['already'])}")
+    return "\n".join(out)
 
 
 def decide(desk: Desk, text: str, why: str, *, gid: str | None = None, by: str = "coordinator",
@@ -294,6 +437,16 @@ def _settled(m: dict) -> bool:
     return m["state"] in ("merged", "cancelled") or bool(m.get("closed"))
 
 
+def history_text(h: dict) -> str:
+    if h["event"] == "ended":
+        return f"{h['state']}: {one_line(h['outcome'])}"
+    if h["event"] == "reopened":
+        return f"reopened (was {h['was']}): {one_line(h['why'])}"
+    if h["event"] == "tied":
+        return "tied " + ", ".join(i + (f" (from {h['from'][i]})" if h["from"].get(i) else "") for i in h["items"])
+    return f"moved to {h['to']}: {', '.join(h['items'])}"
+
+
 def show_text(desk: Desk, gid: str, *, all_: bool = False) -> str:
     g = show(desk, gid)
     decisions = g["decisions"]
@@ -301,6 +454,8 @@ def show_text(desk: Desk, gid: str, *, all_: bool = False) -> str:
            f"session: {g.get('session') or '(none)'}", f"why: {g['why'] or '(none)'}"]
     if g["state"] != "open":
         out += [f"outcome: {g['outcome']}", f"ended: {_when(g['ended'])}"]
+    if any(h["event"] != "ended" for h in g.get("history", [])):  # a goal only ended once shows that above
+        out += ["history:"] + [f"  {_when(h['created'])} {history_text(h)}" for h in g["history"]]
     out += ["current decisions:"]
     out += [decision_text(d) for d in decisions if not d.get("replaced_by")]
     out += ["replaced decisions:"]

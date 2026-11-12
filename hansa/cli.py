@@ -1670,9 +1670,13 @@ def cmd_goal(a):
     elif a.action == "show":
         print(json.dumps(goals.show(desk, a.id), ensure_ascii=False, indent=1) if a.json
               else goals.show_text(desk, a.id, all_=a.all))
+    elif a.action == "reopen":
+        print(goals.reopened_text(goals.reopen(desk, a.id, a.why), a.why))
+    elif a.action == "tie":
+        print(goals.tied_text(desk, a.id, goals.tie(desk, a.id, a.items)))
     else:
-        goals.end(desk, a.id, "done" if a.action == "done" else "dropped", a.outcome)
-        print(f"{a.id} {'done' if a.action == 'done' else 'dropped'}")
+        state = "done" if a.action == "done" else "dropped"
+        print(goals.ended_text(a.id, state, goals.end(desk, a.id, state, a.outcome)))
 
 
 def cmd_decide(a):
@@ -4088,7 +4092,7 @@ def main(argv=None):
     p.add_argument("--timeout", type=float, default=60, help="minutes (default 60)")
     p.add_argument("--every", type=float, default=5.0, help=argparse.SUPPRESS)
     p.epilog = see_more("inbox")
-    p = add("goal", cmd_goal, "record what the principal wants; list open goals, show their decisions and work, or end a goal")
+    p = add("goal", cmd_goal, "record what the principal wants; list open goals, show their decisions and work, end, reopen or tie work to a goal")
     p.epilog = see_more("intent-records")
     goal_commands = p.add_subparsers(dest="action", required=True)
     q = goal_commands.add_parser("add", help="record a goal; prints its new gN id first, then what was recorded",
@@ -4106,9 +4110,23 @@ def main(argv=None):
     q.add_argument("--all", action="store_true", help=f"also list merged or closed tasks older than the newest "
                    f"{goals.SHOWN_TASKS}, which are otherwise counted in one line")
     for action, description in (("done", "end an open goal with its outcome"), ("drop", "drop an open goal with its reason")):
-        q = goal_commands.add_parser(action, help=description, description=description + "; hansa appends an entry and keeps the original.")
+        q = goal_commands.add_parser(action, help=description, description=description + "; hansa appends an entry "
+                                     "and keeps the original. It ends even with work still open under it, and lists "
+                                     "that work: tasks queued, running or waiting for review, and open to-dos.")
         q.add_argument("id", metavar="G")
         q.add_argument("outcome", help="what happened" if action == "done" else "why it was dropped")
+    q = goal_commands.add_parser("reopen", help="open a done or dropped goal again, with the reason",
+                                 description="Open a done or dropped goal again. Hansa appends an entry with the "
+                                 "reason; the earlier outcome stays on record and goal show lists both in its history.")
+    q.add_argument("id", metavar="G")
+    q.add_argument("why", help="why the goal is open again")
+    q = goal_commands.add_parser("tie", help="tie tasks and to-dos to an open goal, moving them from another goal",
+                                 description="Tie existing tasks (t0001) and to-dos (#1 or 1) to an open goal, "
+                                 "whatever state they are in, moving them from another goal if they had one. A task "
+                                 "moves with its retry chain, follow-ups and verifications. Hansa appends one entry "
+                                 "saying what moved and from where; goal show lists it in both goals' history.")
+    q.add_argument("id", metavar="G")
+    q.add_argument("items", nargs="+", metavar="ID", help="a task id (t...) or a to-do number (#N or N)")
     p = add("decide", cmd_decide, "record a product decision with its reason and who took it; prints its new dN id first, then what was recorded")
     p.description += ". Decisions are never edited or deleted: --replaces D appends a new decision replacing a current one. Hansa records the time and session; known keys are refused, with no release word scan."
     p.add_argument("text", help="the product decision, as said")
