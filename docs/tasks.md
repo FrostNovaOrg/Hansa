@@ -44,6 +44,8 @@ with the same counts, decisions, evidence and lifetime cost.
 
 Every record is a new entry: a reopening or a tie never rewrites an earlier one. A goal's
 `history:` in `goal show` appears once it has been reopened or had work tied to it or moved away.
+An invalid task reference in `goal tie` keeps the task-id guidance and spelling suggestion,
+when available, and reminds you that a to-do is given as `#1` or `1`.
 
 Task counts use the latest task in each retry chain: queued/running, waiting for review (`done`
 or `merging`), merged and failed. A merged task stays a chain of its own, with its merge, releases
@@ -755,7 +757,10 @@ A done, failed, closed or cancelled task becomes replaced, so it can be sent bac
 refused and names the follow-up to send back instead. A merged task stays merged: each
 `hansa retry` of it is new work on top of that merge, and it can be sent back more than once.
 `hansa merge`, `hansa verify`, `hansa cancel` and `hansa close` also refuse a replaced
-task and name the follow-up to use instead.
+task and name the follow-up to use instead. If that follow-up was also replaced, all five
+commands name the last follow-up, so using it does not lead to another replacement refusal.
+The lookup stops before revisiting an id if damaged replacement records form a circle;
+keep this guard while following stored replacement links.
 
 A follow-up cancelled while still queued, before it ever started, gives the task it replaced back
 as it was (waiting for review, failed, or closed), and `hansa cancel` says so; `hansa retry` of

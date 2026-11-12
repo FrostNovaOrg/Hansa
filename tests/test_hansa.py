@@ -6247,6 +6247,18 @@ class DeskTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.hansa("goal", "tie", "g2")
 
+    def test_goal_tie_invalid_reference_explains_tasks_and_todos(self):
+        from hansa import goals
+        self.hansa("goal", "add", "Export")
+        tid = self.desk.new_task("Build the export", lane="a")
+        before = goals.entries(self.desk), self.desk.tasks(), self.desk.asks()
+        for ref in ("bogus", "T0001", "t1", "t0001/"):
+            with self.subTest(ref=ref):
+                refused = self.refused("goal", "tie", "g1", tid, ref)
+                for part in ("no task", ref, "lowercase t", "digits", "to-do", "#1 or 1", "nothing was tied"):
+                    self.assertIn(part, refused)
+                self.assertEqual((goals.entries(self.desk), self.desk.tasks(), self.desk.asks()), before)
+
     def test_goal_tie_moves_followups_and_verifications_with_the_chain(self):
         self.hansa("goal", "add", "Export")
         self.hansa("goal", "add", "Invoices")
@@ -6605,6 +6617,48 @@ class DeskTest(unittest.TestCase):
                 for part in (f"{tid} was replaced by {follow}", "use", follow):
                     self.assertIn(part, refused)
                 self.assertEqual((self.desk.events_path.read_bytes(), self.desk.tasks()), before)
+
+    def test_replaced_task_commands_name_last_follow_up_without_changes(self):
+        first = self.desk.new_task("First", lane="a", state="done")
+        next_task = self.hansa("retry", first, "Continue").split()[0]
+        self.desk.update(next_task, state="done")
+        latest = self.hansa("retry", next_task, "Continue again").split()[0]
+        for state in ("queued", "done", "replaced"):
+            # The last record has no replaced_by, even when an old record says it is replaced.
+            self.desk.update(latest, state=state)
+            before = self.desk.events_path.read_bytes(), self.desk.tasks()
+            for command in ("merge", "verify", "cancel", "close", "retry"):
+                with self.subTest(command=command, state=state):
+                    refused = self.refused(command, first)
+                    for part in (first, "replaced by", latest,
+                                 "send that one back" if command == "retry" else "use"):
+                        self.assertIn(part, refused)
+                    self.assertNotIn(next_task, refused)
+                    self.assertEqual((self.desk.events_path.read_bytes(), self.desk.tasks()), before)
+
+    def test_replaced_task_commands_stop_at_circular_links(self):
+        first, middle, last = [self.desk.new_task(title, lane="a", state="replaced")
+                               for title in ("First", "Middle", "Last")]
+        self.desk.update(first, replaced_by=middle)
+        self.desk.update(middle, replaced_by=last)
+        meta = Desk.meta
+        for target in (first, middle, last):
+            self.desk.update(last, replaced_by=target)
+            before = self.desk.events_path.read_bytes(), self.desk.tasks()
+            for command in ("merge", "verify", "cancel", "close", "retry"):
+                with self.subTest(command=command, target=target):
+                    read = set()
+
+                    def read_once(desk, tid):
+                        self.assertNotIn(tid, read, "circular replacement chain was read again")
+                        read.add(tid)
+                        return meta(desk, tid)
+
+                    with unittest.mock.patch.object(Desk, "meta", autospec=True, side_effect=read_once):
+                        refused = self.refused(command, first)
+                    for part in (first, "replaced by", last):
+                        self.assertIn(part, refused)
+                    self.assertEqual((self.desk.events_path.read_bytes(), self.desk.tasks()), before)
 
     def test_task_ids_merge_keeps_the_id_in_the_commit_and_event(self):
         tid = self.desk.new_task("Add hello.txt", lane="a")

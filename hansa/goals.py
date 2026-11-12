@@ -170,7 +170,7 @@ def tie(desk: Desk, gid: str, refs: list) -> dict:
                 try:
                     desk.meta(r)
                 except SystemExit as e:
-                    raise SystemExit(f"{desk.redact(str(e))}; nothing was tied") from None
+                    raise SystemExit(f"{desk.redact(str(e))}; a to-do is given as #1 or 1; nothing was tied") from None
                 wanted_tasks.append(r)
         chains = {r: _chain(list(tasks.values()), r) for r in dict.fromkeys(wanted_tasks)}
         all_tasks = sorted({t for c in chains.values() for t in c})
