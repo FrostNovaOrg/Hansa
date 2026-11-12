@@ -39,7 +39,7 @@ class DoctorTest(unittest.TestCase):
         self.addCleanup(fallback.stop)
         for name, body in {"git": "print('git version 2.43.0')",
                            "node": "print('v22.12.0')", "tmux": "print('tmux 3.5')",
-                           "bwrap": "", "socat": "", "apt-get": ""}.items():
+                           "bwrap": "", "socat": "", "apt-get": "", "brew": ""}.items():
             self.tool(name, body)
         self.claude()
         self.package = self.tmp / "lib/node_modules/@anthropic-ai/sandbox-runtime"
@@ -135,7 +135,7 @@ with open({str(self.calls)!r}, 'a') as out:
 
     def test_missing_tools_and_platform_specific_fixes(self):
         for path in self.bin.iterdir():
-            if path.name != "apt-get":
+            if path.name not in ("apt-get", "brew"):
                 path.unlink()
         for platform, prefix in (("darwin", "brew install "), ("linux", "sudo apt-get install ")):
             with self.subTest(platform=platform):
@@ -159,6 +159,22 @@ with open({str(self.calls)!r}, 'a') as out:
         rows = self.rows(platform="linux")
         for label in ("Git", "tmux", "bubblewrap", "socat"):
             self.assertIn("docs/getting-started.md", rows[label]["fix"])
+
+    def test_macos_without_brew_explains_how_to_get_it_in_both_languages(self):
+        for name in ("brew", "git", "node", "tmux"):
+            (self.bin / name).unlink()
+        for lang, words in (("en", "not on PATH"), ("zh", "PATH 中未找到")):
+            with self.subTest(lang=lang), patch.object(doctor.sys, "version_info", (3, 8, 20)):
+                code, output = self.command("--json", "--lang", lang)
+                self.assertEqual(code, 1)
+                rows = {row["name"]: row for row in json.loads(output)["rows"]}
+                for label, package in (("Python", "python"), ("Git", "git"), ("Node", "node"), ("tmux", "tmux")):
+                    fix = rows[label]["fix"]
+                    self.assertIn(words, fix)
+                    self.assertIn("Homebrew", fix)
+                    self.assertIn("https://brew.sh", fix)
+                    self.assertIn("brew install " + package, fix)
+                    self.assertLess(fix.index("https://brew.sh"), fix.index("brew install"))
 
     def test_node_fix_uses_brew_or_node_download_for_missing_and_old_versions(self):
         for platform in ("darwin", "linux", "freebsd"):
@@ -190,6 +206,7 @@ with open({str(self.calls)!r}, 'a') as out:
         root = self.tmp / "installation"
         chinese = root / "docs/zh-CN/getting-started.md"
         chinese.parent.mkdir(parents=True)
+        (root / "docs/getting-started.md").write_text("# Getting started\n")
         for name in ("git", "apt-get"):
             (self.bin / name).unlink()
         self.tool("srt", "raise SystemExit(1)", self.package / "dist/cli.js")
@@ -199,7 +216,7 @@ with open({str(self.calls)!r}, 'a') as out:
             else:
                 chinese.unlink()
             for lang in ("en", "zh", None):
-                guide = "docs/zh-CN/getting-started.md" if present and lang != "en" else "docs/getting-started.md"
+                guide = str(chinese if present and lang != "en" else root / "docs/getting-started.md")
                 section = "#安装所需工具" if present and lang != "en" else "#install-the-tools"
                 args = ["--lang", lang] if lang else []
                 with self.subTest(present=present, lang=lang), \
@@ -212,10 +229,26 @@ with open({str(self.calls)!r}, 'a') as out:
                     self.assertIn(guide + section, output)
                     other = "docs/getting-started.md" if present and lang != "en" else "docs/zh-CN/getting-started.md"
                     self.assertNotIn(other, output)
-                    with patch.dict(os.environ, {"LANG": "C" if lang == "en" else "zh_CN.UTF-8"}):
+                    with patch.dict(os.environ, {"LANG": "C" if lang == "en" else "zh_CN.UTF-8", "COLUMNS": "45"}):
                         _, help_text = self.command("--help")
                     self.assertIn(guide, help_text)
                     self.assertNotIn(other, help_text)
+
+    def test_guide_references_use_repository_url_when_docs_are_not_installed(self):
+        for name in ("git", "apt-get"):
+            (self.bin / name).unlink()
+        self.tool("srt", "raise SystemExit(1)", self.package / "dist/cli.js")
+        guide = "https://github.com/FrostNovaOrg/Hansa/blob/main/docs/getting-started.md"
+        for lang in ("en", "zh"):
+            with self.subTest(lang=lang), \
+                    patch.object(doctor, "__file__", str(self.tmp / "no-docs/hansa/doctor.py")), \
+                    patch.object(doctor.sys, "platform", "linux"), \
+                    patch.dict(os.environ, {"COLUMNS": "45"}):
+                code, output = self.command("--lang", lang)
+                self.assertEqual(code, 1)
+                self.assertIn(("See " if lang == "en" else "参阅 ") + guide, output)
+                self.assertIn(guide + "#install-the-tools", output)
+                self.assertIn(guide, self.command("--help")[1])
 
     def test_old_unknown_and_new_versions(self):
         for tool, label, versions in (("claude", "Claude Code", ("2.1.305", "unknown", "2.1.306", "2.2.0")),

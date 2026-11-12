@@ -24,10 +24,13 @@ GUIDE = "docs/getting-started.md"
 
 
 def guide_path(lang=None):
+    root = Path(__file__).resolve().parent.parent
     chinese = "docs/zh-CN/getting-started.md"
-    if language(lang) == "zh" and (Path(__file__).resolve().parent.parent / chinese).is_file():
-        return chinese
-    return GUIDE
+    if language(lang) == "zh" and (root / chinese).is_file():
+        return str(root / chinese)
+    if (root / GUIDE).is_file():
+        return str(root / GUIDE)
+    return "https://github.com/FrostNovaOrg/Hansa/blob/main/" + GUIDE
 
 
 def version_text(version):
@@ -67,7 +70,11 @@ def check(lang=None):
         if name == "srt":
             return "npm install -g @anthropic-ai/sandbox-runtime@" + SRT_VERSION
         if sys.platform == "darwin":
-            return "brew install " + name
+            command = "brew install " + name
+            if which("brew"):
+                return command
+            return tr("Homebrew (brew) is not on PATH; install it from https://brew.sh, then run: ",
+                      "PATH 中未找到 Homebrew（brew）；先从 https://brew.sh 安装，再运行：") + command
         if name == "node":
             minimum = version_text(NODE_MIN)
             return tr(f"Install Node {minimum} or newer: https://nodejs.org/en/download",
@@ -196,7 +203,7 @@ def check(lang=None):
     else:
         prerequisites = [r["fix"] for r in rows if r["state"] == "fails"
                          and r["name"] in ("Node", "bubblewrap", "socat")]
-        section = "#安装所需工具" if guide.startswith("docs/zh-CN/") else "#install-the-tools"
+        section = "#安装所需工具" if guide.endswith("/zh-CN/getting-started.md") else "#install-the-tools"
         repair = "; ".join([*prerequisites, tr("See ", "参阅 ") + guide + section])
         try:
             with tempfile.TemporaryDirectory(prefix="hansa-doctor-") as temporary:

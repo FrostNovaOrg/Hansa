@@ -192,7 +192,12 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str | None = No
         s["lanes"][lane] = default_lane(repo, base)
         _settings_refused(validate(s, desk.root), "no desk was made")
         if new_repo:
+            missing_repo = not Path(repo).exists()
             base = make_lane_repo(repo, new_repo, default_lane(repo, base), "no desk was made")
+            if missing_repo:
+                print(f"warning: {repo} did not exist; hansa made it as a new project. If you meant an existing "
+                      f"repository, remove this new folder and the desk at {desk.root}, then run hansa init again "
+                      "with the correct --repo path.")
     for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir, desk.secrets_dir):
         mkdir_private(d)
     s = default_settings()
@@ -3894,7 +3899,9 @@ def main(argv=None):
     p.add_argument("--json", action="store_true", help="machine-readable rows and overall ok status")
     p.add_argument("--lang", choices=("zh", "en"), help="output language (default: the shell's locale)")
     from .doctor import guide_path
-    p.epilog = "Each command has a 15-second limit. Exit 1 if any row fails; notes do not fail. See " + guide_path() + "."
+    p.formatter_class = argparse.RawDescriptionHelpFormatter
+    p.epilog = ("Each command has a 15-second limit. Exit 1 if any row fails;\n"
+                "notes do not fail.\nSee " + guide_path() + ".")
     p = add("add", cmd_add, "queue a task")
     verify_options(p)
     p.add_argument("--after", action="append", default=[], metavar="T", type=_record_reference,

@@ -95,7 +95,7 @@ for args, chinese, english in steps:
 print()
 print('从另一台电脑连接：' if zh else 'From another computer:')
 # SSH joins its arguments into a remote shell command: preserve both shells' quotes.
-print('ssh -t -L 8765:127.0.0.1:8765 YOUR-HOST ' + shlex.quote(shlex.quote(link)))
+print('ssh -t -L 8765:127.0.0.1:8765 -L 8766:127.0.0.1:8766 YOUR-HOST ' + shlex.quote(shlex.quote(link)))
 print()
 print(('上手指南：' if zh else 'Getting started: ') + guide)
 print()
