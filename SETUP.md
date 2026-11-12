@@ -62,9 +62,9 @@ terminal, or, if they will use another provider through its key, to leave that r
 ### 2. Choose the project
 
 Ask which project Hansa should work on: a git repository on this machine. If the current folder is in one, recommend
-it. A repository with no commit yet needs a first one before `hansa init`; the guide's
-[Create and start the desk](docs/getting-started.md#create-and-start-the-desk) gives the commands. The commit's
-author name and email are not secrets: ask for them if the repository has none set.
+it. For a new or empty folder, `hansa init` makes the repository and an empty first commit itself; a folder that
+already holds files needs them committed first ([Create and start the desk](docs/getting-started.md#create-and-start-the-desk)).
+The commit's author name and email are not secrets: ask for them if the repository has none set.
 
 ### 3. Choose where the desk goes
 
@@ -92,12 +92,17 @@ hosts the setup and check download from (such as `registry.npmjs.org` or `pypi.o
 lane's network list is empty by default, so nothing is reached
 ([network lists](docs/sandbox.md#a-lanes-network-list)). For Java, see [Java and Maven](docs/java-and-maven.md).
 
-For an npm project, for example, these go in the plan:
+npm also needs a cache folder it may write: give the lane one of its own on its write list and point
+`npm_config_cache` at it in the lane's env ([write list](docs/sandbox.md#a-lanes-write-list-and-env)). `<desk>` is the
+desk path's last two folders joined by `-` (for `/home/me/shop-desk`, `me-shop-desk`). For an npm project, for
+example, these go in the plan:
 
 ```sh
 hansa --desk ~/shop-desk lane set a check "npm test"
 hansa --desk ~/shop-desk lane set a setup "npm ci"
 hansa --desk ~/shop-desk lane set a network registry.npmjs.org
+hansa --desk ~/shop-desk lane set a write ~/hansa-cache/<desk>/a/npm
+hansa --desk ~/shop-desk lane set a env "npm_config_cache=$HOME/hansa-cache/<desk>/a/npm"
 ```
 
 `hansa --desk ~/shop-desk lane try a` then runs the setup and check once in the lane's sandbox, with no worker. It

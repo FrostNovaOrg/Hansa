@@ -20,7 +20,7 @@
 装好 Node 和 npm 后，运行：
 
 ```sh
-npm install -g @anthropic-ai/claude-code@2.1.307 @anthropic-ai/sandbox-runtime@0.0.79
+npm install -g @anthropic-ai/claude-code@2.1.306 @anthropic-ai/sandbox-runtime@0.0.79
 ```
 
 [工具与升级（英文）](../sandbox.md#tools-and-upgrades)记录了所用版本和升级时要做的检查。
@@ -98,8 +98,8 @@ hansa web
 其中的令牌允许访问网页，也允许批准发布。
 请从普通 shell 启动服务和网页：在 Claude Code 会话里，`hansa web` 会拒绝显示令牌。
 
-在 **Settings → Providers（设置 → 服务商）** 里添加接口地址、默认模型和思考力度；用 **Save settings（保存设置）** 保存设置，密钥要另点 **Save key（保存密钥）**。在 **Coordinator（协调员）** 里，先选好服务商和模型再启动协调员；如果它已经在运行，保存后要重启。
-在 **Prices（价格）** 里，按每百万 token 的美元价格填写。服务商的新设置用于之后的新运行；修改价格还会重新计算过去的用量费用。`hansa ping` 会发一个很小的请求来检查所有服务商；网页上也有检查服务商的按钮。
+在 **设置 → 模型服务商** 里添加接口地址，并设置各家的模型和思考强度；用 **保存设置** 保存设置，密钥要另点 **保存密钥**。在 **协调员** 里，先选好服务商和模型再启动协调员；如果它已经在运行，保存后要重启。
+在 **价目** 里，按每百万 token 的美元价格填写。服务商的新设置用于之后的新运行；修改价目还会重新计算过去的用量费用。`hansa ping` 会发一个很小的请求来检查所有服务商；网页上的 **Ping** 按钮也一样。
 
 ## 完成第一件任务
 
@@ -113,7 +113,7 @@ hansa web
 `hansa lane try a` 会在工作线的沙箱里运行准备步骤和检查。确认它通过了，并且 `hansa explain server` 显示服务的沙箱探测结果为 `hansa serve tried srt` 和 `it ran`。工作智能体自己的沙箱探测也必须通过。
 如果没有 srt，准备步骤和检查会显示 **could not run**，表示机器的运行环境有问题，任务本身还没有失败。如果配置好的准备步骤无法运行，工作智能体就不会启动。把工具装到服务能通过 `PATH` 找到的位置，重启服务，合并前再检查一次（`hansa merge ID --recheck`）。
 
-在网页的 Status（状态）里查看进展。协调员会读 `hansa show ID` 和 `hansa diff ID`；工作智能体的改动由 hansa 提交并检查。任务经过审查、合并进工作线的基础分支后，就算完成。
+在网页的 **状态** 里查看进展。协调员会读 `hansa show ID` 和 `hansa diff ID`；工作智能体的改动由 hansa 提交并检查。任务经过审查、合并进工作线的基础分支后，就算完成。
 
 ## 通过 SSH 使用
 
@@ -125,7 +125,7 @@ hansa web
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -t -L 8765:127.0.0.1:8765 -L 8766:127.0.0.1:8766 HOST '"$HOME/.local/bin/hansa"'
 ```
 
-用空格键选择工作台，按 `s` 启动，按 Enter 打开协调员，或按 `w` 查看网页地址。先按 Ctrl+B、再按 D 可以离开协调员会话；Ctrl+C 退出网页连接。在你选择操作前，什么都不会启动。按 `q` 退出菜单，正在进行的工作会继续运行。
+用空格键选择工作台，按 `s` 启动，按 Enter 打开协调员，或按 `w` 查看网页地址。先按 Ctrl+B、再按 D 可以离开协调员会话；Ctrl+C 退出网页连接。在你选择操作前，什么都不会启动。按 `q` 退出菜单，正在进行的工作会继续运行；按 `x` 再按 `y` 停止该工作台的服务。
 
 在服务器上安装 tmux，这样 SSH 断开后，`hansa up` 启动的协调员也能继续运行。
 重新连接时，用它打印的 attach 命令，包括其中的 `-L` 或 `-S`。`hansa status` 会说明会话情况；如果会话已停止，`hansa up` 会把它重新启动，接着原来的对话继续。
