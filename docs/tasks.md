@@ -497,8 +497,9 @@ A verification ends with `VERDICT: holds`, `VERDICT: holds, with notes`,
 `VERDICT: does not hold` or `VERDICT: unsure`.
 Its completion post suggests `hansa merge ID` for "holds". For "holds, with notes",
 it first points to `hansa show VID --report` for the notes, then to the merge.
-For "does not hold" or "unsure", read that report, then retry the task or merge
-with `--despite-check`. The suggested retry explicitly includes `--verify` and
+For "does not hold" or "unsure", read that report, then retry the task or merge.
+The merge suggestion uses `--despite-check` only for "does not hold"; "unsure"
+offers plain `hansa merge ID`. The suggested retry explicitly includes `--verify` and
 keeps the verification request's lane and effort options when given; a bare
 `hansa retry` still inherits no verification request. A finished verification's
 next step does not offer `hansa close VID`: merging its task closes it too.

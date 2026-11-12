@@ -32534,12 +32534,15 @@ def save():'''))
     def test_unsure_verification_post_reads_report_before_both_options(self):
         tid, vid, nxt = self.verdict_message("unsure")
         report = f"hansa show {vid} --report"
-        self.assertIn(report, nxt)
-        self.assertIn(f'hansa retry {tid} "fix what {vid} found: ..." --verify', nxt)
-        self.assertIn(f"hansa merge {tid} --despite-check", nxt)
-        self.assertLess(nxt.index(report), nxt.index("hansa retry"))
-        self.assertLess(nxt.index(report), nxt.index("hansa merge"))
-        self.assertNotIn("hansa close", nxt)
+        for text in (nxt, self.hansa("show", tid).split("next: ", 1)[1]):
+            with self.subTest(next_step=text):
+                self.assertTrue(text.startswith(report))
+                self.assertIn(f'hansa retry {tid} "fix what {vid} found: ..." --verify', text)
+                self.assertIn(f"hansa merge {tid}", text)
+                self.assertNotIn("--despite-check", text)
+                self.assertLess(text.index(report), text.index("hansa retry"))
+                self.assertLess(text.index(report), text.index("hansa merge"))
+                self.assertNotIn("hansa close", text)
 
     def test_wait_finished_verification_includes_verdict_on_its_line(self):
         for verdict in ("holds", "holds, with notes", "does not hold", "unsure"):
@@ -32881,8 +32884,12 @@ def save():'''))
                     self.assertIn("nothing was merged", self.refused("merge", tid))
                     self.hansa("close", tid)
                 else:
-                    next_step = f"hansa merge {tid}" if verdict == "holds" else f"hansa diff {tid} --stat"
-                    self.assertIn(f"next: {next_step}", self.hansa("show", tid))
+                    shown = self.hansa("show", tid)
+                    next_step = f"hansa merge {tid}" if verdict == "holds" else f"hansa show {vid} --report"
+                    self.assertIn(f"next: {next_step}", shown)
+                    if verdict == "unsure":
+                        self.assertIn(f"hansa merge {tid}", shown)
+                        self.assertNotIn("--despite-check", shown)
                     self.assertIn(f"{tid} merged into main", self.hansa("merge", tid))
 
     def scratch_verification(self, d, tid, text="scratch evidence"):

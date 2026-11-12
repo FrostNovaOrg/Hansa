@@ -311,8 +311,9 @@ def _verification_next(task: dict, v: dict) -> str:
     for field in ("lane", "effort"):
         if request.get(field):
             flags += f" --verify-{field} {shlex.quote(request[field])}"
+    merge = f"hansa merge {tid}" + (" --despite-check" if v["verdict"] == "does not hold" else "")
     return (f'{report}, then hansa retry {tid} "fix what {vid} found: ..." {flags}'
-            f" · hansa merge {tid} --despite-check")
+            f" · {merge}")
 
 
 def _progress_line(p: dict) -> str:
