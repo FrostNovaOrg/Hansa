@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import time
 
 from .desk import HIDDEN_BY, append_event, event_record, now
 
@@ -124,10 +124,6 @@ def _value(entry, side):
     return _json(entry[side])
 
 
-def _time(ts):
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
 def read(desk, kind: str = "", name: str = "", last: int | None = None) -> dict:
     """Newest matching entries, safe for either the command or the page; never write history."""
     with desk.lock():
@@ -160,15 +156,59 @@ def read(desk, kind: str = "", name: str = "", last: int | None = None) -> dict:
     return {"recording_since": since, "entries": entries}
 
 
+def _time(ts):
+    """Local time, in the form hansa status and hansa show use; the JSON keeps the timestamp."""
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+def changes(entries: list) -> list:
+    """Records grouped by the change that wrote them: one command or page save writes all its fields with one
+    time, one actor and one command. Order kept (newest first, as read gives them)."""
+    groups = []
+    for entry in entries:
+        key = (entry.get("ts"), entry.get("by"), entry.get("command"))
+        if groups and groups[-1][0] == key:
+            groups[-1][1].append(entry)
+        else:
+            groups.append((key, [entry]))
+    return [fields for _, fields in groups]
+
+
+def how(entry, word: str = "with") -> str:
+    """Who made a recorded change, as a phrase: 'with hansa init', 'by the principal on the web page'."""
+    if entry.get("command"):
+        return f"{word} {entry['command']}"
+    return "by the principal on the web page" if entry.get("by") == "principal" else "by " + entry.get("by", "unknown")
+
+
+def origin(desk, kind: str, name: str, made_field: str):
+    """(made, last) for a lane or provider, from the records: the newest record that created made_field, and the
+    newest change after it by another command (None when there is none). (None, None) when nothing is recorded."""
+    entries = read(desk, kind, name)["entries"]
+    if not entries:
+        return None, None
+    prefix = f"{'lanes' if kind == 'lane' else 'providers'}.{name}."
+    made = next((e for e in entries if e["path"] == prefix + made_field and e.get("old_missing")), None)
+    newest = entries[0]
+    if made is not None and (newest.get("by"), newest.get("command")) == (made.get("by"), made.get("command")):
+        newest = None  # the command that made it, its later records included (hansa lane add --like's brief)
+    return made, newest
+
+
 def text(desk, kind: str = "", name: str = "", last: int | None = None) -> str:
+    """Newest first, one change per command or page save with its fields under it; last counts changes."""
     with desk.lock():
         _start(desk)  # preserve the command's persistent start on an older desk
-        data = read(desk, kind, name, last)
+        data = read(desk, kind, name)
     lines = [f"Settings changes recorded since {_time(data['recording_since'] or now())}; earlier changes are unavailable."]
-    entries = data["entries"]
-    for entry in entries:
-        who = entry["by"] + (f" ({entry['command']})" if entry.get("command") else "")
-        lines.append(f"{_time(entry['ts'])}  {who}  {entry['path']}: {entry['change']}")
-    if not entries:
+    groups = changes(data["entries"])
+    if last is not None:
+        groups = groups[:last]
+    for fields in groups:
+        first = fields[0]
+        who = first["by"] + (f" ({first['command']})" if first.get("command") else "")
+        lines.append(f"{_time(first['ts'])}  {who}" + (f", {len(fields)} fields" if len(fields) > 1 else ""))
+        lines += [f"  {entry['path']}: {entry['change']}" for entry in reversed(fields)]  # in the order written
+    if not groups:
         lines.append("No settings changes recorded" + (f" for {kind} {name}" if kind else "") + ".")
     return "\n".join(lines)

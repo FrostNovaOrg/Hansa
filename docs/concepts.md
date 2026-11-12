@@ -135,14 +135,26 @@ section, else the file under `docs/` and its heading.
 
 ## Settings history
 
-`hansa explain history` lists settings changes newest first, with UTC time,
-who made the change, its path, and old → new. Page saves are attributed to the
-principal; coordinator changes name the command, such as `hansa lane set`.
-`hansa explain history lane g` limits the list to lane g, including its release
-targets and standing instructions. `hansa explain history provider astra`
-limits it to that provider, including key changes. `--last N` shows the newest
-N matching entries; without it, all matching entries are shown. Removed lanes
-and providers can still be looked up.
+`hansa explain history` lists settings changes newest first. Each change, one
+command or one page save, is a line with its local time (in the form
+`hansa status` uses) and who made it, and under it each setting it changed,
+with its path and old → new: `hansa init` is one change with all its fields.
+Page saves are attributed to the principal; coordinator changes name the
+command, such as `hansa lane set`. `hansa explain history lane g` limits the
+list to lane g, including its release targets and standing instructions.
+`hansa explain history provider astra` limits it to that provider, including
+key changes. `--last N` shows the newest N matching changes, each with all its
+fields; without it, all are shown. Removed lanes and providers can still be
+looked up; a name that is neither a lane nor in the history is refused with a
+failing exit code, as `hansa explain lane` and `hansa explain provider` refuse
+one that is not there. The page's `/api/history` keeps the Unix times and
+counts records.
+
+`hansa explain lane L` and `hansa explain provider P` say, from this history,
+which command made the lane or set the provider (`hansa init`, `hansa lane add`,
+the principal on the web page) and which last changed it, naming the field or
+target: `hansa lane target a preview`, `hansa lane set a check`,
+`hansa lane brief a`.
 
 Each changed setting gets one entry: `lanes.g.env`,
 `providers.astra.model`, or `lanes.g.targets.preview.command`, for example.

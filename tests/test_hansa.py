@@ -5309,14 +5309,14 @@ class DeskTest(unittest.TestCase):
         write_json(desk.settings_path, self.desk.settings())
         with unittest.mock.patch("hansa.history.now", return_value=1900000000):
             shown = history.text(desk)
-        self.assertIn("since 2030-03-17T17:46:40Z", shown)
+        self.assertIn("since " + time.strftime("%Y-%m-%d %H:%M", time.localtime(1900000000)), shown)
         self.assertIn("No settings changes", shown)
         with unittest.mock.patch("hansa.history.now", return_value=1900000100):
             self.assertEqual(history.text(Desk(root)), shown)
         s = desk.settings()
         s["concurrency"] = 2
         self.assertEqual(desk.save_settings(s, by="coordinator", command="hansa concurrency"), [])
-        self.assertIn("since 2030-03-17T17:46:40Z", history.text(desk))
+        self.assertIn("since " + time.strftime("%Y-%m-%d %H:%M", time.localtime(1900000000)), history.text(desk))
         self.assertIn("concurrency: 1 → 2", history.text(desk))
 
     def test_settings_history_other_commands_and_lane_lifecycle(self):
@@ -5399,13 +5399,13 @@ class DeskTest(unittest.TestCase):
             self.hansa("memory-floor", "3")
         self.assertTrue(path.read_bytes().startswith(damaged + b"\n"))
         shown = self.hansa("explain", "history")
-        self.assertIn("since 2030-03-17T17:46:40Z", shown)
-        self.assertIn("coordinator (hansa concurrency)  concurrency: 1 → 2", shown)
-        self.assertIn("coordinator (hansa memory-floor)  memory_floor: 2 → 3", shown)
+        self.assertIn("since " + time.strftime("%Y-%m-%d %H:%M", time.localtime(1900000000)), shown)
+        self.assertIn("coordinator (hansa concurrency)\n  concurrency: 1 → 2", shown)
+        self.assertIn("coordinator (hansa memory-floor)\n  memory_floor: 2 → 3", shown)
         self.assertLess(shown.index("memory_floor:"), shown.index("concurrency:"))
         self.assertEqual(history.text(Desk(self.desk.root)), shown.rstrip("\n"))
         limited = self.hansa("explain", "history", "--last", "1")
-        self.assertIn("since 2030-03-17T17:46:40Z", limited)
+        self.assertIn("since " + time.strftime("%Y-%m-%d %H:%M", time.localtime(1900000000)), limited)
         self.assertNotIn("concurrency:", limited)
 
     def test_settings_history_recording_since_after_entries(self):
@@ -5416,8 +5416,9 @@ class DeskTest(unittest.TestCase):
             self.hansa("concurrency", "2")
         append_event(path, json.dumps({"recording_since": 1900000000}))
         shown = self.hansa("explain", "history")
-        self.assertIn("since 2030-03-17T17:46:40Z", shown)
-        self.assertIn("2030-03-17T17:48:20Z  coordinator (hansa concurrency)", shown)
+        self.assertIn("since " + time.strftime("%Y-%m-%d %H:%M", time.localtime(1900000000)), shown)
+        self.assertIn(time.strftime("%Y-%m-%d %H:%M", time.localtime(1900000100)) + "  coordinator (hansa concurrency)",
+                      shown)
         self.assertIn("concurrency: 1 → 2", shown)
 
     def test_settings_history_only_interrupted_first_append(self):
@@ -5425,7 +5426,7 @@ class DeskTest(unittest.TestCase):
         path.write_bytes(b'{"recording_since":')
         with unittest.mock.patch("hansa.history.now", return_value=1900000000):
             shown = self.hansa("explain", "history")
-        self.assertIn("since 2030-03-17T17:46:40Z", shown)
+        self.assertIn("since " + time.strftime("%Y-%m-%d %H:%M", time.localtime(1900000000)), shown)
         self.assertIn("No settings changes", shown)
 
     def test_settings_history_preserves_filesystem_bytes_and_unicode(self):
@@ -5436,6 +5437,87 @@ class DeskTest(unittest.TestCase):
         self.assertIn("publish-\\udcff.sh", self.hansa("explain", "history", "--last", "1"))
         self.hansa("lane", "brief", "a", "检查完成")
         self.assertIn("检查完成", self.hansa("explain", "history", "--last", "1"))
+
+    def test_explain_lane_names_the_command_of_each_change(self):
+        self.hansa("lane", "target", "a", "preview", "sh release.sh")
+        first = views.explain_text(self.desk, "lane", "a").splitlines()[0]
+        self.assertIn("made with hansa init", first)
+        self.assertIn("last changed with hansa lane target a preview", first)
+        self.assertNotIn("lane set", first)  # there is no hansa lane set a targets
+        self.hansa("lane", "brief", "a", "Run the checks first")
+        self.assertIn("last changed with hansa lane brief a", views.explain_text(self.desk, "lane", "a"))
+        self.hansa("lane", "set", "a", "timeout_min", "50")
+        self.assertIn("last changed with hansa lane set a timeout_min", views.explain_text(self.desk, "lane", "a"))
+
+    def test_explain_provider_says_how_it_was_set_from_the_record(self):
+        first = views.explain_text(self.desk, "provider", "claude").splitlines()[0]
+        self.assertIn("set by hansa init", first)
+        self.assertNotIn("principal", first)
+        s = self.desk.settings()
+        s["providers"]["claude"]["model"] = "sonnet"
+        s["providers"]["page"] = {**s["providers"]["claude"]}
+        self.assertTrue(save_from_page(self.desk, {"settings": s})["ok"])
+        first = views.explain_text(self.desk, "provider", "claude").splitlines()[0]
+        self.assertIn("set by hansa init", first)
+        self.assertIn("last changed by the principal on the web page", first)
+        first = views.explain_text(self.desk, "provider", "page").splitlines()[0]
+        self.assertIn("set by the principal on the web page", first)
+        self.assertNotIn("hansa init", first)
+
+    def test_explain_of_no_such_lane_or_provider_fails(self):
+        for args, words in ((("lane", "zz"), ("no lane zz", "lanes: a")),
+                            (("provider", "zz"), ("no provider zz", "claude"))):
+            with self.subTest(args=args), self.assertRaises(SystemExit) as done:
+                self.hansa("explain", *args)
+            self.assertNotIn(done.exception.code, (0, None))
+            for word in words:
+                self.assertIn(word, str(done.exception.code))
+        self.assertIn("lane a", self.hansa("explain", "lane", "a"))
+
+    def test_explain_history_of_no_such_lane_fails(self):
+        with self.assertRaises(SystemExit) as done:
+            self.hansa("explain", "history", "lane", "zz")
+        self.assertNotIn(done.exception.code, (0, None))
+        self.assertIn("no lane zz", str(done.exception.code))
+        self.assertIn("lanes: a", str(done.exception.code))
+        with self.assertRaises(SystemExit) as done:
+            self.hansa("explain", "history", "provider", "zz")
+        self.assertIn("no provider zz", str(done.exception.code))
+        self.assertIn("lanes.a.repo", self.hansa("explain", "history", "lane", "a"))
+
+    def test_explain_history_shows_local_time_as_status_does(self):
+        from hansa import history
+        with unittest.mock.patch("hansa.history.now", return_value=1900000100):
+            self.hansa("concurrency", "2")
+        shown = self.hansa("explain", "history", "--last", "1")
+        local = time.strftime("%Y-%m-%d %H:%M", time.localtime(1900000100))
+        self.assertIn(local + "  coordinator (hansa concurrency)", shown)
+        self.assertNotRegex(shown, r"\d\d:\d\d:\d\dZ")
+        self.assertEqual(history.read(self.desk, last=1)["entries"][0]["ts"], 1900000100)  # the JSON keeps it
+
+    def test_explain_history_last_counts_commands(self):
+        self.hansa("concurrency", "2")
+        self.hansa("lane", "add", "g", "--like", "a")
+        added = [e["path"] for e in self.history_entries() if e.get("command") == "hansa lane add"]
+        self.assertGreater(len(added), 2)
+        shown = self.hansa("explain", "history", "--last", "2")
+        for path in added:
+            self.assertIn(path + ":", shown)
+        self.assertIn("(hansa concurrency)", shown)
+        self.assertIn("concurrency: 1 → 2", shown)
+        self.assertNotIn("(hansa init)", shown)
+        one = self.hansa("explain", "history", "--last", "1")
+        self.assertIn("lanes.g.repo:", one)
+        self.assertNotIn("concurrency", one)
+
+    def test_explain_history_of_a_new_desk_is_one_change(self):
+        lines = self.hansa("explain", "history").splitlines()[1:]
+        heads = [line for line in lines if not line.startswith("  ")]
+        self.assertEqual(len(heads), 1, heads)
+        self.assertIn("hansa init", heads[0])
+        fields = [line for line in lines if line.startswith("  ")]
+        self.assertEqual(len(fields), len(self.history_entries()))
+        self.assertTrue(any(line.startswith("  lanes.a.repo:") for line in fields))
 
     def setUp(self):
         started = time.time()
@@ -35222,8 +35304,10 @@ def save():'''))
                 self.assertEqual(data, history.read(self.desk, kind, name, 2))
                 args = (kind, name) if kind else ()
                 lines = self.hansa("explain", "history", *args, "--last", "2").splitlines()[1:]
-                self.assertEqual([line.split("  ", 2)[2] for line in lines],
-                                 [e["path"] + ": " + e["change"] for e in data["entries"]])
+                changes = history.changes(history.read(self.desk, kind, name)["entries"])[:2]  # --last counts changes
+                self.assertEqual([line[2:] for line in lines if line.startswith("  ")],
+                                 [e["path"] + ": " + e["change"] for fields in changes for e in reversed(fields)])
+                self.assertEqual(len([line for line in lines if not line.startswith("  ")]), len(changes))
                 expected = [e for e in reversed(self.history_entries()) if not kind or
                             e["path"].startswith(("lanes" if kind == "lane" else "providers") + "." + name + ".")][:2]
                 self.assertEqual([{k: v for k, v in e.items() if k != "change"} for e in data["entries"]], expected)
@@ -36584,7 +36668,11 @@ def save():'''))
         self.assertEqual(views.explain_text(self.desk, "lane", "b").splitlines()[0],
                          "lane b (made with hansa lane add; last changed with hansa lane set b max_turns; "
                          "not by the principal on the web page)")
-        self.desk.events_path.write_text("")  # a desk from before hansa recorded them
+        self.desk.events_path.write_text("")  # the settings history alone names the commands
+        self.assertEqual(views.explain_text(self.desk, "lane", "b").splitlines()[0],
+                         "lane b (made with hansa lane add; last changed with hansa lane set b max_turns; "
+                         "not by the principal on the web page)")
+        (self.desk.state_dir / "settings-history.jsonl").write_text("")  # a desk from before hansa recorded them
         self.assertIn("set by the coordinator with hansa lane add or hansa lane set",
                       views.explain_text(self.desk, "lane", "b").splitlines()[0])
 
