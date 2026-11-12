@@ -209,6 +209,16 @@ def check_links(root):
 
 
 class DocsTest(unittest.TestCase):
+    def test_release_range_docs_qualify_single_remote_rule_and_order_example(self):
+        text = " ".join((ROOT / "docs/releases.md").read_text(encoding="utf-8").split())
+        with self.subTest(rule="single remote"):
+            rule = text.split("commits that go out (", 1)[1].split(") and the files", 1)[0]
+            self.assertIn("one remote or none", rule)
+            self.assertLess(rule.index("one remote or none"), rule.index("on no remote-tracking branch"))
+        with self.subTest(rule="remote order"):
+            example = re.search(r"for example, `([^`]+)`", text)[1]
+            self.assertRegex(example, r"0 not on remote mirror,\s*3 not on remote public")
+
     def test_concepts_close_includes_finished_and_failed_tasks_and_verifications(self):
         for name, words in (("concepts.md", ("finished or failed", "task or verification", "without merging")),
                             ("zh-CN/concepts.md", ("已完成或失败", "任务或核验", "不合并"))):

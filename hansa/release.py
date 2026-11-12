@@ -655,6 +655,7 @@ def command_hits(ln: dict, words: list, only: str | None = None) -> list:
                 if only is not None and target != only:
                     continue
                 for field, where in (("command", "release command"), ("watch", "watch command")):
+                    label = "watch command: " if field == "watch" else ""
                     for line in str(t.get(field) or "").splitlines():
                         before = len(scan.hits)
                         scan.line(line, where=where)
@@ -662,11 +663,11 @@ def command_hits(ln: dict, words: list, only: str | None = None) -> list:
                         w = next((w for w, matcher in scan.matchers
                                   if scan.search(w, matcher, line, low, where=where)), None)
                         if w:
-                            out.append((target, w, ("watch command: " if field == "watch" else "") + line.strip()[:300]))
+                            out.append((target, w, label + line.strip()[:300]))
                         for hit in scan.hits[before:]:
-                            out.append((target, hit["word"], hit["line"] + "; " + pattern_limit_text(hit), hit))
+                            out.append((target, hit["word"], label + hit["line"] + "; " + pattern_limit_text(hit), hit))
         except PatternLimit as e:
-            out.append((target, e.hit["word"], e.hit["line"] + "; " + pattern_limit_text(e.hit), e.hit))
+            out.append((target, e.hit["word"], label + e.hit["line"] + "; " + pattern_limit_text(e.hit), e.hit))
     return out
 
 

@@ -42258,6 +42258,52 @@ def save():'''))
         self.assertIn("watch command: echo falcon watch", told)
         self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["public"]["watch"], "echo falcon watch")
 
+    def test_release_watch_pattern_limits_keep_command_label(self):
+        from hansa import release
+        entry = r"re:\d+\d+\d+x"
+        self.forbid(entry)
+        for limit, line in (("long", "7" * 10001), ("line", "7" * 1000)):
+            with self.subTest(limit=limit), \
+                    unittest.mock.patch.object(release, "PATTERN_LINE_LIMIT", 0.2), \
+                    unittest.mock.patch.object(release, "PATTERN_SCAN_LIMIT", 5.0):
+                if limit == "long":
+                    hits = release.command_hits({"targets": {"public": {"command": "true", "watch": line}}}, [entry])
+                    told = release.command_hits_text(self.desk, "a", hits)
+                else:
+                    told = self.hansa("lane", "target", "a", "public", "true", "--watch", line)
+                    self.assertEqual(self.desk.settings()["lanes"]["a"]["targets"]["public"]["watch"], line)
+                warning = told.split(". The setting is kept", 1)[0]
+                for part in ("release target public", "command line could not be checked", entry,
+                             "watch command: " + line[:100]):
+                    self.assertIn(part, warning)
+                self.assertIn("longer than 10,000" if limit == "long" else "over 0.2 s", warning)
+                self.assertNotIn("holds", warning)
+
+    def test_release_forbidden_command_remedy_names_where_words_were_found(self):
+        self.forbid("zebra")
+        for commands in (("release command",), ("watch command",), ("release command", "watch command")):
+            with self.subTest(commands=commands):
+                self.hansa("lane", "target", "a", "public",
+                           "echo zebra" if "release command" in commands else "true", "--watch",
+                           "echo zebra" if "watch command" in commands else "true")
+                told = self.refused("release", "a", "public")
+                remedy = told.split("Take them out", 1)[1]
+                for command in ("release command", "watch command"):
+                    if command in commands:
+                        self.assertIn(command + ": echo zebra", told)
+                        self.assertIn("the " + command, remedy)
+                    else:
+                        self.assertNotIn(command, remedy)
+                self.assertIn("principal with hansa ask", remedy)
+        self.hansa("lane", "target", "a", "public", "true", "--watch", "true")
+        self.commit_in_repo("history.txt", "zebra\n")
+        told = self.refused("release", "a", "public")
+        self.assertIn("history.txt: zebra", told)
+        remedy = told.split("Take them out", 1)[1]
+        self.assertIn("history of main", remedy)
+        self.assertNotIn("release command", remedy)
+        self.assertNotIn("watch command", remedy)
+
     def test_release_watch_forbidden_word_refuses_request_and_rescans_before_start(self):
         from hansa import release
         self.hansa("lane", "target", "a", "public", "true", "--watch", "echo falcon watch")
@@ -49382,6 +49428,37 @@ else if (ask === "task-steps")'''))
                 self.hansa("release", "a", note)
                 self.assertEqual(release.releases(self.desk)[-1]["note"], note)
 
+    def test_release_help_explains_remote_ranges_and_both_commands(self):
+        with contextlib.redirect_stdout(out := io.StringIO()), self.assertRaises(SystemExit) as ended:
+            main(["release", "--help"])
+        self.assertEqual(ended.exception.code, 0)
+        for shown in (out.getvalue(), self.hansa("help", "release")):
+            shown = " ".join(shown.split())
+            for part in ("one remote or none", "on no remote-tracking branch", "two or more remotes",
+                         "first release", "missing from at least one remote", "each remote",
+                         "no tracking branches", "whole history", "--fixed",
+                         "in the release or watch command line"):
+                self.assertIn(part, shown)
+
+    def test_release_reply_names_replaced_request_without_claiming_a_code_existed(self):
+        from hansa import alert, release
+        self.with_targets(public="true")
+        self.assertFalse(alert.release_codes(self.desk))
+        for channel in ("none", "queued"):
+            with self.subTest(channel=channel):
+                if channel == "queued":
+                    self.alert_fake()
+                self.hansa("release", "a", "public")
+                old = release.releases(self.desk)[-1]
+                self.assertNotIn("code", old)
+                if channel == "queued":
+                    self.assertTrue(alert.queued(self.desk))
+                said = self.hansa("release", "a", "public")
+                self.assertIn(f"Replaces waiting release #{old['id']}", said)
+                self.assertNotIn("code no longer works", said)
+                self.assertEqual(release.get(self.desk, old["id"])["state"], "void")
+                self.assertNotIn("code", release.get(self.desk, old["id"]))
+
     def test_release_reply_names_replaced_request_and_invalid_code(self):
         from hansa import alert, release
         sent = self.alert_fake()
@@ -49432,6 +49509,26 @@ else if (ask === "task-steps")'''))
         self.assertNotIn("Nothing new", self.hansa("release", "a", "preview"))
         self.commit_in_repo("new.txt", "new\n")
         self.assertNotIn("Nothing new", self.hansa("release", "a", "public"))
+
+    def test_release_same_commit_refusal_does_not_claim_it_will_run_again(self):
+        from hansa import release
+        self.with_targets(public="echo zebra")
+        self.tick_targets("public")
+        self.hansa("release", "a", "public")
+        self.assertEqual(self.settle_release(Dispatcher(self.desk), 1)["state"], "done")
+        self.forbid("zebra")
+        for ticked in (False, True):
+            with self.subTest(ticked=ticked):
+                self.tick_targets(*(["public"] if ticked else []))
+                said = self.refused("release", "a", "public")
+                self.assertNotIn("Nothing new", said)
+                self.assertNotIn("asked to run again", said)
+                self.assertIn("0 commit(s) since release #1", said)
+                self.assertIn("refused", said)
+                self.assertIn("release command: echo zebra", said)
+                r = release.releases(self.desk)[-1]
+                self.assertEqual((r["state"], r["since"], r["since_release"]), ("forbidden", r["commit"], 1))
+                self.assertEqual([h["where"] for h in r["hits"]], ["release command"])
 
     def test_release_show_failed_keeps_all_retained_lines_and_request(self):
         from hansa import release
