@@ -40,11 +40,16 @@ class ErrorMappings(Scratch):
         self.assertIsNone(hansa_run.reset_time(f"{run['result']}\n{self.err}"))
 
     def test_workspace_credits_and_plan_upgrade_are_credit_errors(self):
-        for fixture in ("out_of_credits.jsonl", "plan_upgrade.jsonl"):
-            with self.subTest(fixture=fixture):
-                run = self.failed_run(fixture)
-                self.assertEqual((run["api_error_status"], hansa_run.unusable_reason(run, self.err)),
-                                 (402, ("credit", "credit balance too low")))
+        run = self.failed_run("out_of_credits.jsonl")
+        self.assertEqual((run["api_error_status"], hansa_run.unusable_reason(run, self.err)),
+                         (402, ("credit", "credit balance too low")))
+        run = self.failed_run("plan_upgrade.jsonl")
+        kind, why = hansa_run.unusable_reason(run, self.err)
+        self.assertEqual((run["api_error_status"], kind), (402, "credit"))
+        # what is the matter, and the provider's own sentence; not an empty balance
+        for part in ("plan cannot use Codex", "upgrad", "To use Codex with your ChatGPT plan, upgrade to Plus"):
+            self.assertIn(part, why)
+        self.assertNotIn("credit balance", why)
 
     def test_401_is_a_failed_login(self):
         run = self.failed_run("unauthorized.jsonl")
@@ -245,13 +250,26 @@ class ProviderFailures(Scratch):
                 self.assertEqual((st["cool_until"], st["rest_how"]), (0, "credit"))
                 events = self.credit_events()
                 self.assertEqual(len(events), before + 1)
-                self.assertIn("topped up on the page", self.problem())
+                shown = (self.problem(), events[-1]["text"], views.explain_text(self.desk, "provider", "adapter"),
+                         next(x for x in views.status_text(views.status(self.desk)).splitlines()
+                              if "adapter" in x and "rests until" in x))
+                for text in (*shown, m["error"]):  # the task's own error says what, as for credit: no remedy
+                    if fixture == "plan_upgrade.jsonl":  # what is the matter, and what the principal confirms
+                        for part in ("plan cannot use Codex", "upgrade to Plus") + (
+                                ("plan is upgraded", "page") if text in shown else ()):
+                            self.assertIn(part, text)
+                        self.assertNotIn("credit balance too low", text)
+                        self.assertNotIn("topped up", text)
+                    else:
+                        self.assertIn("credit balance too low", text)
+                remedy = "plan is upgraded" if fixture == "plan_upgrade.jsonl" else "topped up on the page"
+                self.assertIn(remedy, self.problem())
                 with mock.patch.object(hansa_run.time, "time", return_value=time.time() + 40 * 86400):
-                    self.assertIn("topped up on the page", self.problem())
+                    self.assertIn(remedy, self.problem())
                 with mock.patch.object(hansa_run.subprocess, "run", return_value=subprocess.CompletedProcess(
                         [], 0, json.dumps({"type": "result", "result": "OK"}), "")):
                     self.assertTrue(hansa_run.check_provider(self.desk, "adapter", claude=str(FAKES / "claude"))["ok"])
-                self.assertIn("topped up on the page", self.problem())
+                self.assertIn(remedy, self.problem())
                 self.desk.write_key("adapter", "sk-topped-up")
                 self.assertEqual(self.problem(), "")
                 self.finish_failure(run)

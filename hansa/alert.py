@@ -417,7 +417,8 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
     elif kind == "provider_credit":
         at = time.strftime('%H:%M', time.localtime(fields.get("since") or time.time()))
         add(desk, "credit", fields["text"],
-            zh=f"服务商 {fields.get('provider')}：余额不足，自 {at} 起休息，等你在网页上确认充值")
+            zh=f"服务商 {fields.get('provider')}：" + (f"套餐无法使用它，需要升级（{fields['plan']}），自 {at} 起休息，等你在网页上确认已升级"
+                                                     if fields.get("plan") else f"余额不足，自 {at} 起休息，等你在网页上确认充值"))
     elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason until cleared (run.hold)
         from .run import sandbox_held_text
         held = {**fields, "kind": fields.get("run")}

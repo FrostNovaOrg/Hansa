@@ -515,7 +515,8 @@ const T = ZH ? {
     sandbox:v => `工作线 ${v.lane} 因沙箱暂缓：${messageText(v.why_message, v.why)}；沙箱试跑通过后会自动恢复（修复后重启 hansa serve）`,
     providers:(v, render) => `工作线 ${v.lane} 没有就绪的服务商（${v.providers.map(p => `${p.values.provider}：${render(p)}`).join("；")}）`,
     refused:() => "拒绝了这件任务", missing_provider:() => "设置中没有这家服务商", no_endpoint:() => "没有接口地址", no_key:() => "没有密钥",
-    credit:v => `余额不足，自 ${when(v.since)} 起休息，等负责人在网页上确认充值`,
+    credit:v => v.plan ? `套餐无法使用该服务商，需要升级（${v.plan}），自 ${when(v.since)} 起休息，等负责人在网页上确认已升级`
+      : `余额不足，自 ${when(v.since)} 起休息，等负责人在网页上确认充值`,
     model:v => `服务商不认识模型 ${v.model}；休息到检查通过，或负责人在网页的“设置 → 服务商”中更改模型或密钥`,
     rest:(v, render, text) => `休息到 ${when(v.until)}（${v.why}）` + (v.how === "reset" ? "；按错误给的重置时间再加一分钟"
       : v.minutes ? `；错误没给重置时间，休息 ${v.minutes} 分钟` : "；修复登录或密钥后运行 hansa ping " + v.provider + (text ? `；${text}` : "")),
@@ -618,7 +619,7 @@ const T = ZH ? {
     lane_tried:(e, result) => `工作线 ${e.lane} 试跑${result(e)}`, lane_try_withdrawn:e => `工作线 ${e.lane} 试跑已撤回`,
     sandbox_held:e => `工作线 ${e.lane} 沙箱暂缓：${e.why || "—"}`, sandbox_ready:e => `工作线 ${e.lane} 沙箱已恢复`,
     provider_model:e => `服务商 ${e.provider} 不认识模型 ${e.model}；请在“设置 → 服务商”中更改模型`,
-    provider_credit:e => `服务商 ${e.provider} 余额不足，等负责人确认充值`, server_stopped:() => "后台已停止，新任务暂停启动",
+    provider_credit:e => e.plan ? `服务商 ${e.provider} 的套餐需要升级，等负责人确认已升级` : `服务商 ${e.provider} 余额不足，等负责人确认充值`, server_stopped:() => "后台已停止，新任务暂停启动",
     task_added:e => e.lane ? `任务已添加：工作线 ${e.lane}` : "任务已添加",
     task_cancel:e => e.closed ? "任务已关闭，未合并" : "任务已取消",
     task_not_started:e => `任务没能开始：${e.error || "—"}`,
@@ -706,7 +707,8 @@ const T = ZH ? {
     sandbox:v => `HELD: lane ${v.lane} cannot run: ${v.why}; resumes after a sandbox try passes (restart hansa serve after a fix)`,
     providers:(v, render) => `lane ${v.lane} has no provider ready (${v.providers.map(p => `${p.values.provider}: ${render(p)}`).join("; ")})`,
     refused:() => "refused this task", missing_provider:() => "not in settings", no_endpoint:() => "no endpoint address", no_key:() => "no key",
-    credit:v => `credit balance too low since ${when(v.since)}; rests until the principal confirms a top-up on the page`,
+    credit:v => v.plan ? `${v.plan} since ${when(v.since)}; rests until the principal confirms on the page that its plan is upgraded`
+      : `credit balance too low since ${when(v.since)}; rests until the principal confirms a top-up on the page`,
     model:v => `the provider does not know model ${v.model}; rests until a check answers or the principal changes its model or key on the page (Settings, Providers)`,
     rest:(v, render, text) => `resting until ${when(v.until)} (${v.why})` + (v.how === "reset" ? "; the reset time its error gave, and a minute"
       : v.minutes ? `; no reset time in its error, so its rest of ${v.minutes} minutes` : "; fix the login or key, then run hansa ping " + v.provider + (text ? `; ${text}` : "")),
@@ -796,7 +798,8 @@ const T = ZH ? {
     lane_tried:(e, result) => `Lane ${e.lane} try ${result(e)}`, lane_try_withdrawn:e => `Lane ${e.lane} try withdrawn`,
     sandbox_held:e => `Sandbox held on lane ${e.lane}: ${e.why || "—"}`, sandbox_ready:e => `Sandbox ready on lane ${e.lane}`,
     provider_model:e => `Provider ${e.provider} does not know model ${e.model}; change the model in Settings, Providers`,
-    provider_credit:e => `Provider ${e.provider} rests until the principal confirms it is topped up`, server_stopped:() => "Server stopped; new tasks will not start",
+    provider_credit:e => e.plan ? `Provider ${e.provider}: its plan needs upgrading; it rests until the principal confirms the upgrade`
+      : `Provider ${e.provider} rests until the principal confirms it is topped up`, server_stopped:() => "Server stopped; new tasks will not start",
     // The everyday records (see the Recent events fold in renderStatus for the rest)
     task_added:e => e.lane ? `Task added on lane ${e.lane}` : "Task added",
     task_cancel:e => e.closed ? "Task closed without merging" : "Task cancelled",
@@ -1543,7 +1546,8 @@ const serverMessagesZh = {
   provider_turn_limit:v => `${v.models}：已答复，但达到轮次上限`,
   provider_overloaded:v => `服务商过载（${v.said}）`, provider_server:v => `服务商出现服务器错误（${v.said}）`,
   provider_network:v => `连接服务商失败（${v.said}）`,
-  provider_credit:v => `余额不足，自 ${when(v.since)} 起休息，等你在网页上确认充值${v.shared ? "；由另一个工作台发现" : ""}`,
+  provider_credit:v => (v.plan ? `套餐无法使用该服务商，需要升级（${v.plan}），自 ${when(v.since)} 起休息，等你在网页上确认已升级`
+    : `余额不足，自 ${when(v.since)} 起休息，等你在网页上确认充值`) + (v.shared ? "；由另一个工作台发现" : ""),
   provider_model:v => `服务商不认识模型 ${v.model}；休息到检查通过，或负责人在网页的“设置 → 服务商”中更改模型或密钥`,
   provider_rest:v => `休息到 ${when(v.until)}（${reasonText(v.reason)}）` + (v.how === "reset" ? "；按错误给的重置时间再加一分钟"
     : v.minutes ? `；错误没给重置时间，休息 ${v.minutes} 分钟` : ""),
@@ -1923,7 +1927,7 @@ async function renderStatus(force) {
     asksSection(st),
     creditProviders(st).length ? dashboardPanel(T.topUpsToConfirm, "providers", creditProviders(st).length,
       creditProviders(st).map(p => h("div", {class:"request-card", "data-principal-provider":p.name},
-        h("div", {class:"request-body"}, h("strong", {}, p.name), T.waitReasons.credit({since:p.credit_since})),
+        h("div", {class:"request-body"}, h("strong", {}, p.name), T.waitReasons.credit({since:p.credit_since, plan:p.credit_plan})),
         h("div", {class:"principal-actions"}, h("button", {disabled:SETTINGS_LOCKED, "data-outside-action":"", "data-status-focus":`top-up:${p.name}`,
           onclick:() => topUpProvider(p.name)}, T.toppedUp))))) : null) : null;
   statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));

@@ -2782,6 +2782,10 @@ class UpTest(unittest.TestCase):
                  "Address already in use; perhaps another desk's hansa serve holds that port"),
                 (PermissionError(errno.EPERM, "Operation not permitted"), ("--port", "80"), "127.0.0.1", 80,
                  "Operation not permitted. Nothing was started or recorded"),
+                (OverflowError("bind(): port must be 0-65535."), ("--port", "70000"), "127.0.0.1", 70000,
+                 "0-65535. Nothing was started or recorded"),
+                (OSError(errno.EINVAL, "Invalid argument."), ("--port", "80"), "127.0.0.1", 80,
+                 "Invalid argument. Nothing was started or recorded"),
                 (socket.gaierror(socket.EAI_NONAME, "Name or service not known"), ("--host", "lcalhost"), "lcalhost",
                  8765, "Name or service not known. Nothing was started or recorded")):
             with self.subTest(error=error):
@@ -2790,7 +2794,8 @@ class UpTest(unittest.TestCase):
                     self.fake_serve(bind, *args)
                 said = str(e.exception.code)
                 self.assertEqual(len(said.splitlines()), 1, said)
-                self.assertIn(f"hansa serve could not serve the page on host {host}, port {port}: {words}", said)
+                self.assertIn(f"host {host}, port {port}", said)
+                self.assertIn(words, said)
                 bind.assert_called_once()
                 self.assertEqual((self.desk.state_dir / "serve-start.json").read_bytes(), saved)
                 self.assertFalse((self.desk.state_dir / "web-port").exists())
@@ -6025,6 +6030,31 @@ class DeskTest(unittest.TestCase):
         self.assertIn("created: " + local, shown)
         self.assertIn("· " + local, shown)
         self.assertNotIn("UTC", shown)
+
+    def test_goal_show_marks_closed_tasks_and_verifications(self):
+        self.hansa("goal", "add", "Export")
+        for state in ("failed", "done"):
+            with self.subTest(state=state):
+                tid = self.desk.new_task("Build the export", goal="g1", lane="a")
+                vid = self.desk.new_task("Verify the export", kind="verify", parent=tid, goal="g1", lane="a")
+                self.desk.update(tid, state=state, verify=vid)
+                self.desk.update(vid, state=state, error="error: no" if state == "failed" else "")
+                shown = self.hansa("goal", "show", "g1")
+                self.assertIn(f"{tid} {state} ·", shown)
+                self.assertIn(f"{vid} {state} ·", shown)
+                self.hansa("close", vid)
+                shown = self.hansa("goal", "show", "g1")
+                self.assertIn(f"{vid} {state} (closed) ·", shown)
+                self.assertIn(f"verification of {tid}", shown)
+                self.assertIn(f"{tid} {state} ·", shown)
+                self.assertEqual(self.desk.meta(vid)["state"], state)
+                self.hansa("close", tid)
+                shown = self.hansa("goal", "show", "g1")
+                self.assertIn(f"{tid} cancelled (closed) ·", shown)
+                self.assertIn(f"{vid} {state} (closed) ·", shown)
+        cancelled = self.desk.new_task("Stop before starting", goal="g1", lane="a")
+        self.hansa("cancel", cancelled)
+        self.assertIn(f"{cancelled} cancelled ·", self.hansa("goal", "show", "g1"))
 
     def test_goal_show_lists_newest_first_and_counts_old_settled_tasks_with_all_listing_them(self):
         self.hansa("goal", "add", "Export")
@@ -17215,6 +17245,27 @@ def save():'''))
         self.assertNotIn("set aside", self.hansa("show", new))
         self.assertEqual(sh_out("git", "show", f"{ref}:hello.txt", cwd=self.repo), f"hello from {tid}")
 
+    def test_a_failed_commit_keeps_up_to_600_characters_of_what_git_said(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = 'touch "$(git rev-parse --git-dir)/index.lock"'  # git's long "Unable to create"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed", m)
+        # the lock's path and git's advice after it run past 300 characters: the end of what git said is kept
+        self.assertGreater(len(m["git_error"]), 300 + len("git add -A failed: "), m["git_error"])
+        self.assertLessEqual(len(m["git_error"]), 600)
+        self.assertIn("remove the file manually", m["git_error"])
+        self.assertIn("remove the file manually", self.hansa("show", tid))
+        # the one-line error stays git's first line; run.git's own message stays as short as before
+        self.assertNotIn("\n", m["error"])
+        self.assertNotIn("remove the file manually", m["error"])
+        with self.assertRaises(RuntimeError) as e:
+            run.git("add", "-A", cwd=Path(m["worktree"]))
+        self.assertLessEqual(len(str(e.exception)), len("git add -A failed: ") + 300)
+        self.assertNotIn("remove the file manually", str(e.exception))
+
     def test_what_a_task_finds_left_in_the_worktree_is_set_aside_and_named_in_its_show(self):
         d = Dispatcher(self.desk)
         first = self.settle(d, self.desk.new_task("Add hello.txt"))
@@ -20784,6 +20835,27 @@ def save():'''))
                 self.assertEqual(shown["posts"], [{"path": "/api/provider/top-up", "body": {"provider": "claude"}}])
                 self.assertNotIn(credit, shown["after"])
                 self.assertEqual(shown["draft"], "kept-model")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_page_words_a_plan_rest_as_a_plan_to_upgrade_and_keeps_its_button(self):
+        from hansa import run
+        plan = "the ChatGPT plan cannot use Codex and needs upgrading (Codex: To use Codex with your ChatGPT plan)"
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "credit", plan, plan=True)
+        harness = self.tmp / "plan-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language, said in (("en", ("plan cannot use Codex", "plan is upgraded")), ("zh-CN", ("需要升级", "确认已升级"))):
+            with self.subTest(language=language):
+                replies = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk),
+                           "/api/events": [], "/api/provider/top-up": {"ok": True}}
+                r = subprocess.run(["node", str(harness), str(page), "credit", language],
+                                   input=json.dumps(replies), capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                shown = json.loads(r.stdout)
+                for part in said:
+                    self.assertIn(part, shown["before"])
+                self.assertNotIn("credit balance too low" if language == "en" else "余额不足，自", shown["before"])
+                self.assertEqual(shown["posts"], [{"path": "/api/provider/top-up", "body": {"provider": "claude"}}])
 
     def test_a_detail_reader_that_raises_does_not_keep_a_run_from_ending(self):
         from hansa import run
@@ -31163,7 +31235,9 @@ def save():'''))
             m = self.desk.meta(tid)
             self.assertEqual((m["state"], m["replaced_by"], m["ended_as"]), ("replaced", follow, "cancelled"))
             self.assertIn(f"Follow-up to {tid} (cancelled)", (self.desk.tasks_dir / follow / "task.md").read_text())
-            self.hansa("cancel", follow)
+            reply = self.hansa("cancel", follow)
+            self.assertIn(f"{follow} cancelled", reply)
+            self.assertIn(f"{tid} restored to closed", reply)
             replies.append(self.desk.meta(tid)["state"])
         self.assertEqual(replies, ["cancelled", "cancelled"])
 

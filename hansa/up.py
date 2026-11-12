@@ -54,7 +54,7 @@ TO_RECORD_FIRST = ("To record one: start it with hansa coordinator, or run hansa
 # In .hansa/: written while the desk is new (new_desk), at hansa init or as the first task from a session is added:
 # from then on hansa records each coordinator's start. An older desk has none, so hansa can tell the two apart
 STARTS_RECORDED = "starts-recorded.json"
-EXTERNAL_ASK ="Allow external CLAUDE.md file imports?"  # Claude Code's question for imports from outside the folder
+EXTERNAL_ASK = "Allow external CLAUDE.md file imports?"  # Claude Code's question for imports from outside the folder
 TO_RECORD = ("Start it as before and run hansa notify on in it, or start it with hansa coordinator; from then on "
              "hansa up starts it again")
 CARD = Path(__file__).with_name("card.md")  # the card hansa puts in a desk (cli.py), and the one its copy holds

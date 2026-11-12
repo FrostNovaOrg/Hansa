@@ -134,13 +134,15 @@ class ProviderCheck(Scratch):
             with self.subTest(fixture=fixture):
                 self.desk.write_key("codex", "sk-placeholder-0001")
                 r = self.check(fixture)
-                self.assertEqual((r["ok"], r["detail"]), (False, "credit balance too low"))
+                self.assertFalse(r["ok"])
+                plan = fixture == "plan_upgrade.jsonl"
+                self.assertIn("plan cannot use Codex" if plan else "credit balance too low", r["detail"])
                 self.assert_codex_ran()
                 st = self.desk.provider_state()["codex"]
                 self.assertGreater(st["credit_since"], 0)
                 self.assertEqual(st["cool_until"], 0)
                 self.assertTrue(self.check()["ok"])
-                self.assertIn("topped up on the page",
+                self.assertIn("plan is upgraded" if plan else "topped up on the page",
                               hansa_run.provider_problem(self.desk, self.desk.settings(), "codex"))
 
     def test_the_check_refuses_a_codex_home_with_instructions(self):

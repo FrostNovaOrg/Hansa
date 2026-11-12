@@ -617,8 +617,9 @@ def watchdog(shim: int, top: int) -> None:
 
 # Codex 0.162.1's own messages (several with ’, U+2019, where ' is read too), each matched in the whole text
 # A provider limit: hansa rests the provider (until the reset a usage limit gives)
-CREDIT_TEXT = re.compile(r"Your workspace is out of credits|"
-                         r"To use Codex with your ChatGPT plan, upgrade to Plus", re.I)
+CREDIT_TEXT = re.compile(r"Your workspace is out of credits", re.I)
+# A plan that cannot use Codex: rested as credit is (until the principal confirms on the page), in its own words
+PLAN_TEXT = re.compile(r"To use Codex with your ChatGPT plan, upgrade to Plus", re.I)
 LIMIT_TEXT = re.compile(r"You[’']ve hit your usage limit|You hit your spend cap|"
                         r"Quota exceeded\. Check your plan and billing details\.", re.I)
 # Overloaded, try later: as Claude's overloaded (529)
@@ -714,6 +715,9 @@ def classify(text: str, home: str = "", codex: str = "codex") -> dict:
                 "stop_reason": "content_filter"}
     if CREDIT_TEXT.search(whole):
         return {"result": f"API Error: 402 credit balance too low (Codex: {said})", "api_error_status": 402}
+    if PLAN_TEXT.search(whole):
+        plan = f"the ChatGPT plan cannot use Codex and needs upgrading (Codex: {said})"
+        return {"result": f"API Error: 402 {plan}", "api_error_status": 402, "plan_upgrade": plan}
     if LIMIT_TEXT.search(whole) or QUOTA_WORDS.search(whole):
         reset = reset_at(whole)
         return {"result": f"API Error: 429 usage limit reached (Codex: {said})"

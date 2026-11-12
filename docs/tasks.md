@@ -54,6 +54,8 @@ only its own rounds. A follow-up cancelled before it started counts as one cance
 leaves the task it was sent back from as it was.
 Cancelled tasks stay in `show` but do not add to these counts.
 Verifications appear as verifications of their task, without counting the product work twice.
+Closed tasks and verifications have `(closed)` beside their state in `goal show`: a closed
+failed task reads `cancelled (closed)`, and a closed failed verification reads `failed (closed)`.
 `hansa status` shows at most five open goals with the task and to-do counts and points to `hansa goal list`
 for the rest. With no goals it adds no goal lines. Ended goals remain readable with `show`,
 `list --all` and `decisions --goal G`.
@@ -281,6 +283,8 @@ lane, or waits for one.
 
 Credit errors (`credit balance is too low`, HTTP/API Error 402, `insufficient balance`,
 `insufficient_balance`, `insufficient_quota`, `余额不足`) rest indefinitely, surviving server restarts.
+A plan that cannot use the provider (the Codex adapter's `upgrade to Plus`) rests the same way, but its words
+keep the provider's own sentence and ask the principal to confirm on the page once the plan is upgraded.
 Only the principal ends this rest: press **Topped up** on that provider's row in **Settings, Providers**,
 or save a new key. The coordinator cannot end it, even with `hansa ping`.
 A **Topped up** confirmation clears that login's credit rest on every desk on the account.
@@ -771,7 +775,8 @@ The lookup stops before revisiting an id if damaged replacement records form a c
 keep this guard while following stored replacement links.
 
 A follow-up cancelled while still queued, before it ever started, gives the task it replaced back
-as it was (waiting for review, failed, or closed), and `hansa cancel` says so; `hansa retry` of
+as it was (waiting for review, failed, closed, or cancelled), and `hansa cancel` says so, using
+`restored to closed` for closed work; `hansa retry` of
 the cancelled follow-up is then refused and points to that task. A follow-up the machine kept from
 starting (`next:` says `hansa retry` it once the machine is fixed) has no commit of its own; its
 retry starts where it would have started, the earlier task's last commit, and is given that

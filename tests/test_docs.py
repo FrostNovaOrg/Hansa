@@ -219,6 +219,15 @@ class DocsTest(unittest.TestCase):
             example = re.search(r"for example, `([^`]+)`", text)[1]
             self.assertRegex(example, r"0 not on remote mirror,\s*3 not on remote public")
 
+    def test_concepts_close_includes_finished_and_failed_tasks_and_verifications(self):
+        for name, words in (("concepts.md", ("finished or failed", "task or verification", "without merging")),
+                            ("zh-CN/concepts.md", ("已完成或失败", "任务或核验", "不合并"))):
+            with self.subTest(name=name):
+                text = (ROOT / "docs" / name).read_text(encoding="utf-8")
+                row = next(line for line in text.splitlines() if "`hansa close ID`" in line)
+                for word in words:
+                    self.assertIn(word, row)
+
     def test_chinese_docs_match_english(self):
         errors = check_translations(ROOT)
         self.assertFalse(errors, "Chinese documentation drift:\n" + "\n".join(errors))
