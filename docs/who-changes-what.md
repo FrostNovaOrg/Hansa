@@ -55,7 +55,9 @@ check and setup commands, limits, and the merge check's own command and limit,
 side by side means lanes on one repository; workers' changelog lines are collected,
 and `hansa changelog` lists them for one task to write up);
 each lane's standing instructions (`hansa lane brief`, kept in
-`lanes/<lane>/brief.md`); pause and resume; each lane's release command
+`lanes/<lane>/brief.md`; `hansa lane brief L none` empties them; a lane added
+under the name of a removed one starts with none, or with its `--like` lane's,
+and the old file is kept as `brief-before-DATE.md`, the path printed); pause and resume; each lane's release command
 (`hansa lane target L default "git push origin main"`) or its named release
 targets (`hansa lane target L NAME "<command>"`) and asking for a release
 (`hansa release L [TARGET] "note"`), never pushing or deploying by itself:

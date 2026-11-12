@@ -2737,24 +2737,26 @@ def cmd_lane(a):
             (desk.lanes_dir / a.name).mkdir(parents=True, exist_ok=True)
             brief = desk.lanes_dir / a.name / "brief.md"
             aside = None
-            if a.like:  # the standing instructions, copied as the settings are
+            text = ""  # a new lane starts with none; --like copies them as the settings are
+            if a.like:
                 copied = desk.lanes_dir / a.like / "brief.md"
                 text = copied.read_text(encoding="utf-8") if copied.is_file() else ""
-                old = brief.read_text(encoding="utf-8") if brief.is_file() else ""
-                if old.strip() and old != text:  # left by an earlier lane of this name: set aside, not lost
-                    aside = brief.with_name(f"brief-before-{time.strftime('%Y%m%d-%H%M%S')}.md")
-                    write_text(aside, old)
+            old = brief.read_text(encoding="utf-8") if brief.is_file() else ""
+            if old.strip() and old != text:  # left by an earlier lane of this name: set aside, not lost
+                aside = brief.with_name(f"brief-before-{time.strftime('%Y%m%d-%H%M%S')}.md")
+                write_text(aside, old)
+            if a.like or old != text or not brief.exists():
                 write_text(brief, text)
+            if a.like or old.strip():
                 history.record(desk, {"lanes": {a.name: {"brief": old}}},
                                {"lanes": {a.name: {"brief": text}}}, "coordinator", "hansa lane add")
-            elif not brief.exists():
-                write_text(brief, "")
             print(_lane_added(a.name, repo, base, ln))
             if aside_wt:
                 print(aside_wt)
             if aside:
                 print(f"An earlier lane {a.name} left standing instructions in {brief}; lane {a.name} now has "
-                      f"{a.like}'s, and the earlier ones are kept in {aside}")
+                      + (f"{a.like}'s" if a.like else "none")
+                      + f", and the earlier ones are kept in {aside}")
             keep_desk_out(desk, repo)
             for f in OUTSIDE_WORKER:
                 if ln.get(f):
@@ -2812,14 +2814,19 @@ def cmd_lane(a):
             if not a.text and not a.file:
                 print(old if old.strip() else f"lane {a.name} has no standing instructions")
                 return
-            text = _text(a)
+            empty = not a.file and a.text == ["none"]  # the help's word for empty, as for a lane's other fields
+            text = "" if empty else _text(a)
             brief.parent.mkdir(parents=True, exist_ok=True)
             write_text(brief, text)
             history.record(desk, {"lanes": {a.name: {"brief": old}}},
                            {"lanes": {a.name: {"brief": text}}}, "coordinator", "hansa lane brief")
             desk.event("lane_brief_changed", lane=a.name, new=text)
-            print(f"lane {a.name}: standing instructions replaced ({len(text)} characters); "
-                  f"every worker in the lane gets them from its next task on")
+            if empty:
+                print(f"lane {a.name}: standing instructions are now empty; "
+                      f"workers in the lane get none from its next task on")
+            else:
+                print(f"lane {a.name}: standing instructions replaced ({len(text)} characters); "
+                      f"every worker in the lane gets them from its next task on")
             return
         value = _lane_value(a.field, a.values)
         old = s["lanes"][a.name].get(a.field, [] if a.field in LANE_LISTS else "")
@@ -4128,9 +4135,9 @@ def main(argv=None):
                    "with merge_timeout_min, commit_message, merge_message, identity, release_files) "
                    "and standing instructions. Release targets are not copied; "
                    "each other option given replaces that one field. It is a copy: later changes to LANE do not "
-                   "reach the new lane. The worktree is the new lane's own. Standing instructions an earlier lane "
-                   "of this name left, when they differ, are kept as brief-before-DATE.md beside the new ones. Not "
-                   "with --repo")
+                   "reach the new lane. The worktree is the new lane's own. Not with --repo. Without --like the "
+                   "lane starts with no standing instructions. Either way, standing instructions an earlier lane "
+                   "of this name left, when they differ, are kept as brief-before-DATE.md beside the new ones")
     q.add_argument("--base", help="base branch; an existing commit, or a valid branch name for a new/empty repository (default: its current branch)")
     q.add_argument("--providers", help="provider order, comma-separated (default: claude)")
     q.add_argument("--check", help="the command hansa runs after each task, and on a merge when the base has moved "
@@ -4262,7 +4269,8 @@ def main(argv=None):
                    "commit made for it, holding nothing; its command names $HANSA_RELEASE_COMMIT, not the base branch "
                    "(none: run in the repository again)")
     q.epilog = see_more("release-flow")
-    q = lane.add_parser("brief", help="print a lane's standing instructions, or replace them with TEXT or --file")
+    q = lane.add_parser("brief", help="print a lane's standing instructions, or replace them with TEXT or --file "
+                        "(none: empty them)")
     q.add_argument("name")
     q.add_argument("text", nargs="*")
     q.add_argument("--file", help="a file with the new instructions; - reads them from standard input")
