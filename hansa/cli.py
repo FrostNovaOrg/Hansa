@@ -1788,11 +1788,13 @@ def cmd_release(a):
             + f", {r['files_count']} file(s) changed; {release.checked_text(r)}; command: {r['command']} "
             f"({release.runs_text(r)})")
     details = "".join("\n" + x for x in [*release.outside.lines(r), *release.direct_lines(r)])
-    if r.get("since_release") and r["since"] == r["commit"]:
+    if r["state"] != "forbidden" and r.get("since_release") and r["since"] == r["commit"]:
         head = (f"Nothing new on {who}: same commit as release #{r['since_release']}, asked to run again.\n"
                 + head)
     for rid in r.get("_replaced", []):
-        details += f"\nReplaces waiting release #{rid}; its one-time code no longer works."
+        had_code = (release.get(desk, rid) or {}).get("code")
+        details += (f"\nReplaces waiting release #{rid}"
+                    + ("; its one-time code no longer works." if had_code else "."))
     if r["state"] == "forbidden":
         head += details
         mailbox = release.mailbox_refusal(r["hits"])
@@ -1801,11 +1803,14 @@ def cmd_release(a):
                 f"hansa: {head}\nrefused: {mailbox}\nNothing waits for the principal and nothing runs"))
         refusal = ("refused" if any(h.get("kind") == "pattern_limit" for h in r["hits"]) else
                    "refused: what goes out holds words the principal keeps from going out (the web page, Settings)")
+        commands = [where for where in ("release command", "watch command")
+                    if any(h["where"] == where for h in r["hits"])]
+        command_remedy = " or out of " + " and ".join("the " + where for where in commands) if commands else ""
         raise SystemExit(desk.redact(
             f"hansa: {head}\n{refusal}, so nothing waits for the principal and nothing runs:\n"
             f"{release.hits_text(r['hits'])}\n"
             f"Take them out of the history of {r['base']} (hansa add a task for it, if it is in the code; a word in "
-            f"a commit message or a file name stays in the history) or out of the release command, or ask the "
+            f"a commit message or a file name stays in the history){command_remedy}, or ask the "
             f"principal with hansa ask. {see_more('forbidden-words')}"))
     heard = notify.hears(desk)
     after = ("hansa tells this session when it is answered and when it ends" if heard else
@@ -4045,9 +4050,15 @@ def main(argv=None):
                      "one of its named release targets (hansa lane target L NAME \"...\"); TARGET is needed when "
                      "the lane has more than one; name the target before a one-word note that could be a target "
                      "name (hansa release L TARGET hotfix). "
-                     "hansa records the commit, the target and its command, the note, the commits that go out (on no "
-                     "remote-tracking branch and not in that target's last release) and the files they change; a word "
-                     "the principal keeps from going out, in the command line or in a line, a file name or a message "
+                     "hansa records the commit, the target and its command, the note, the commits that go out (with "
+                     "one remote or none: on no remote-tracking branch and not in that target's last release; the "
+                     "whole history when there is no remote-tracking branch) and the files they change. For a "
+                     "target's first release with two or more remotes, including a --fixed target, every base "
+                     "commit missing from at least one remote's tracking branches is counted, shown, scanned and "
+                     "checked for direct commits; the heading gives each remote's missing count, and a remote with "
+                     "no tracking branches lacks the whole history. A word "
+                     "the principal keeps from going out, in the release or watch command line or in a line, a file "
+                     "name or a message "
                      "of any of those commits, refuses it. A target that must follow another (--after) is asked only "
                      "for a commit the other one already sent out. It waits for the principal's yes on the web page "
                      "(unless the principal lists that target as released without asking and the desk is not "

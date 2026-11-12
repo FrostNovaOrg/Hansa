@@ -42,19 +42,20 @@ release L [TARGET] [note]` (TARGET needed when there is more than one, and befor
 note that could be a target name, as in `hansa release a public staging`)
 records the request (a new request for the same target replaces one still
 waiting): the target, the commit, the command, the note, the
-commits that go out (on no remote-tracking branch of the repository and not
-in that target's last release; the whole history when it has no
+commits that go out (with one remote or none: on no remote-tracking branch of the repository
+and not in that target's last release; the whole history when it has no
 remote-tracking branch) and the files they change, a file the command names
 (such as `./deploy.sh`) marked. On a one-target lane, an unknown word that `hansa lane target`
 would accept as a new target name is refused, to keep a mistyped target from releasing the only one;
 a quoted note with spaces can still omit TARGET. The reply names any waiting request it replaces
-and says its one-time code no longer works. At the same commit as the target's last finished release,
-the reply first says there is nothing new, names that release and says it was asked to run again;
+and, if it had a one-time code, says that code no longer works. At the same commit as the target's
+last finished release, if the request is not refused, the reply first says there is nothing new,
+names that release and says it was asked to run again;
 asking again stays allowed. These remarks appear in the command's reply, not in the alert.
 For a target's first release with two or more remotes, including a `--fixed` target,
 every base commit missing from at least one remote's tracking branches is counted, shown,
 scanned and checked for direct commits, even if another remote already has it;
-the heading gives each remote's missing count (for example, `3 not on remote public, 0 not on remote mirror`),
+the heading gives each remote's missing count (for example, `0 not on remote mirror, 3 not on remote public`),
 and a remote with no tracking branches lacks the whole history, so an earlier private push cannot hide a first public release.
 A word from the principal's list of words no
 release may send out, in the release or watch command line or in a line, a file name, a
@@ -180,7 +181,9 @@ the watch). `--watch-minutes N` sets a separate limit, default 90 minutes
 stopped release starts no watch. An unfinished watch starts again from the
 beginning after hansa serve restarts, so it should be safe to repeat.
 The watch command gets the same forbidden-word warning when saved and refusal
-when a release is requested as the release command, with `watch command` as the place found;
+when a release is requested as the release command, with `watch command` as the place found,
+including when a pattern could not check it within the limit. A refusal's remedy names the release command,
+the watch command or both, according to where the words were found;
 this prevents a watch from sending words the principal forbids.
 
 hansa posts a line for that release to the coordinator's session: watch passed

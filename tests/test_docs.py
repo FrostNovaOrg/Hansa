@@ -209,6 +209,16 @@ def check_links(root):
 
 
 class DocsTest(unittest.TestCase):
+    def test_release_range_docs_qualify_single_remote_rule_and_order_example(self):
+        text = " ".join((ROOT / "docs/releases.md").read_text(encoding="utf-8").split())
+        with self.subTest(rule="single remote"):
+            rule = text.split("commits that go out (", 1)[1].split(") and the files", 1)[0]
+            self.assertIn("one remote or none", rule)
+            self.assertLess(rule.index("one remote or none"), rule.index("on no remote-tracking branch"))
+        with self.subTest(rule="remote order"):
+            example = re.search(r"for example, `([^`]+)`", text)[1]
+            self.assertRegex(example, r"0 not on remote mirror,\s*3 not on remote public")
+
     def test_chinese_docs_match_english(self):
         errors = check_translations(ROOT)
         self.assertFalse(errors, "Chinese documentation drift:\n" + "\n".join(errors))
