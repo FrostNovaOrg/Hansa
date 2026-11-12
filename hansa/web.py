@@ -193,7 +193,8 @@ def _top_up_provider(desk: Desk, name: str) -> dict:
         if (desk.provider_state().get(name) or {}).get("credit_since"):
             from .rests import record
             record(desk, name, credit_since=0, credit_cleared=time.time())
-            desk.set_provider_state(name, credit_since=0, cool_until=0, reason="", rest_how="", rest_minutes=None)
+            desk.set_provider_state(name, credit_since=0, credit_plan="", cool_until=0, reason="", rest_how="",
+                                    rest_minutes=None)
             desk.event("provider_topped_up", provider=name, by="page")
     desk.ready_news()
     return {"ok": True}

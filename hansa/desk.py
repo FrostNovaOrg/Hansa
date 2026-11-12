@@ -3082,7 +3082,7 @@ class Desk:
             write_text(f, value.strip() + "\n", mode=0o600, follow_symlinks=False)
             record(self, {"providers": {provider: {"key": old}}},
                    {"providers": {provider: {"key": value.strip()}}}, by)
-            self.set_provider_state(provider, cool_until=0, credit_since=0, model_since=0, model_unknown="",
+            self.set_provider_state(provider, cool_until=0, credit_since=0, credit_plan="", model_since=0, model_unknown="",
                                     reason="", rest_how="", rest_minutes=None)
             failed = self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)

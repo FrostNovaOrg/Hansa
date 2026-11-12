@@ -105,7 +105,8 @@ def provider(text: str, state: dict, name: str) -> dict:
     import time
     values = {"provider": name, "reason": describe(state.get("reason", ""))}
     if state.get("credit_since"):
-        return message("provider_credit", text, since=state["credit_since"], shared=bool(state.get("shared_rest")))
+        return message("provider_credit", text, since=state["credit_since"], shared=bool(state.get("shared_rest")),
+                       plan=state.get("credit_plan") or "")
     if state.get("model_since"):
         return message("provider_model", text, model=state["model_unknown"])
     simple = describe(text)
