@@ -294,6 +294,28 @@ def _verification_line(v) -> str:
     return f"{v['task']}: {v['verdict']}" if v["verdict"] else f"{v['task']} {v['state']} without a verdict"
 
 
+def _verification_next(task: dict, v: dict) -> str:
+    """Verdict guidance shared by the task, its verification and the completion post."""
+    tid, vid = task.get("id") or v.get("parent"), v["id"]
+    report = f"hansa show {vid} --report"
+    if v.get("verdict") == "holds":
+        return f"hansa merge {tid}"
+    if v.get("verdict") == "holds, with notes":
+        return f"{report} (its notes), then hansa merge {tid}"
+    if v.get("verdict") not in ("does not hold", "unsure"):
+        return f"{report}, then merge or send back {tid}"
+    # Preserve queue-time choices, leaving automatic lane/effort selection automatic.
+    # A verification requested by hand has its lane and effort on the verification itself.
+    request = task.get("verify_after") or v
+    flags = "--verify"
+    for field in ("lane", "effort"):
+        if request.get(field):
+            flags += f" --verify-{field} {shlex.quote(request[field])}"
+    merge = f"hansa merge {tid}" + (" --despite-check" if v["verdict"] == "does not hold" else "")
+    return (f'{report}, then hansa retry {tid} "fix what {vid} found: ..." {flags}'
+            f" · {merge}")
+
+
 def _progress_line(p: dict) -> str:
     if "setup_min" in p:
         return f"the lane's setup is running ({p['setup_min']} min)"
@@ -1658,7 +1680,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
     meaning = (f"a verification of {m.get('parent')}: a worker ran its change to see whether it holds; never merged"
                if verifying else STATES.get(m["state"], ""))
     if verifying:
-        own = (read_json(desk.tasks_dir / str(m.get("parent")) / "meta.json", {}) or {}).get("lane") or ""
+        verified_task = read_json(desk.tasks_dir / str(m.get("parent")) / "meta.json", {}) or {}
+        own = verified_task.get("lane") or ""
         on = "runs" if m["state"] in ("queued", "running") else "ran"
         meaning += (f"; it {on} on lane {m.get('lane') or 'any'}"
                     + (f", not {m['parent']}'s own lane {own}" if own and own != m.get("lane") else ""))
@@ -1921,8 +1944,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
            "queued": "hansa status shows what it is waiting for", "running": f"hansa cancel {tid} to stop it"}
     if m["state"] == "failed" and (m.get("attempts") or [{}])[-1].get("kind") == "refused":
         nxt["failed"] += f' · hansa retry {tid} "..." --lane L to choose another lane on the same repository and base'
-    if v and v["verdict"] == "does not hold" and m["state"] == "done":
-        nxt["done"] = f"hansa retry {tid} \"fix what {v['task']} found: ...\" · hansa merge {tid} --despite-check"
+    if v and v["verdict"] in ("does not hold", "unsure") and m["state"] == "done":
+        nxt["done"] = _verification_next(m, desk.meta(v["task"]))
     newest = (v.get("latest") or v) if v else None
     if newest and newest["state"] in ("queued", "running") and m["state"] == "done":
         nxt["done"] = (f"wait for the verification: {notify.wait_step(desk, newest['task'], heard)} "
@@ -1951,7 +1974,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         nxt["done"] = (f"hansa retry {tid} --fresh \"...\" (the same work, without the key) · tell the principal with "
                        f"hansa ask (they may want to change that key) · hansa close {tid}")
     if verifying:
-        nxt = {"done": f"read the report above, then merge or send back {m.get('parent')} · hansa close {tid} to close it",
+        nxt = {"done": _verification_next(verified_task, m),
                "failed": f"hansa verify {m.get('parent')} to try again", "running": f"hansa cancel {tid} to stop it",
                "queued": "hansa status shows what it is waiting for"}
         if m.get("closed"):  # its task is closed: nothing is left to do with it

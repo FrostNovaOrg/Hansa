@@ -178,10 +178,13 @@ def read_log(desk: Desk, pos: int, most: int = 8 << 20):
 
 
 def _next_step(desk: Desk, tid: str) -> str:
-    """What hansa show would suggest next for this task, with hansa show first."""
+    """What hansa show suggests next; a finished verification already gives verdict-specific guidance."""
     from .views import show_text
     try:
+        m = desk.meta(tid)
         nxt = next((x[6:] for x in show_text(desk, tid, heard=True).splitlines() if x.startswith("next: ")), "")
+        if nxt and m.get("kind") == "verify" and m["state"] == "done":
+            return nxt
     except (SystemExit, OSError, ValueError, KeyError):
         nxt = ""
     nxt = nxt.replace("read the report above", f"read hansa show {tid}")
