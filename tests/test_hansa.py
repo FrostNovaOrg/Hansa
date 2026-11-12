@@ -30525,7 +30525,7 @@ def save():'''))
         self.assertIn("replaced", self.desk.meta(vid)["closed"])
         self.hansa("cancel", follow)
         self.assertFalse(self.desk.meta(vid).get("closed"))
-        self.assertIn("merge or send back", self.hansa("show", vid))
+        self.assertIn(f"next: hansa merge {tid}", self.hansa("show", vid))
 
     def test_retry_records_machine_failure_keeps_start_and_report(self):
         from hansa import run
@@ -32461,6 +32461,98 @@ def save():'''))
         self.assertIn(f"{vid} · done", self.hansa("show", vid))
         self.assertIn("verdict: holds, with notes", self.hansa("show", vid))
         self.assertIn("VERDICT: holds, with notes", self.hansa("show", vid, "--report"))
+
+    def verdict_message(self, verdict, **options):
+        tid = self.desk.new_task("Add hello.txt", lane="a", **options)
+        vid = self.ended(tid, "done", "Added hello.txt", verdict, "Checked ordinary use")
+        self.desk.update(tid, commits=1)
+        self.desk.event("task_finished", task=vid, state="done")
+        [item] = notify.items_for(self.desk, [{"event": "task_finished", "task": vid, "state": "done"}],
+                                   {"key": "test", "session": None})
+        return tid, vid, item["line"].split(" · next: ", 1)[1]
+
+    def test_show_finished_verification_does_not_offer_close(self):
+        for verdict in ("holds", "holds, with notes", "does not hold", "unsure", ""):
+            with self.subTest(verdict=verdict):
+                tid, vid, _ = self.verdict_message(verdict)
+                shown = self.hansa("show", vid)
+                self.assertIn("next:", shown)
+                self.assertIn(tid, shown.split("next: ", 1)[1])
+                self.assertNotIn(f"hansa close {vid}", shown)
+
+    def test_holding_verification_post_suggests_merge_directly(self):
+        tid, vid, nxt = self.verdict_message("holds")
+        self.assertIn(f"hansa merge {tid}", nxt)
+        self.assertNotIn("hansa show", nxt)
+        self.assertNotIn("hansa close", nxt)
+        self.assertNotIn("send back", nxt)
+
+    def test_verification_with_notes_post_reads_notes_before_merge(self):
+        tid, vid, nxt = self.verdict_message("holds, with notes")
+        self.assertIn(f"hansa show {vid} --report", nxt)
+        self.assertIn("its notes", nxt)
+        self.assertIn(f"hansa merge {tid}", nxt)
+        self.assertLess(nxt.index("--report"), nxt.index("hansa merge"))
+        self.assertNotIn("hansa close", nxt)
+
+    def test_failed_verification_suggested_retry_keeps_verification_request(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        for options in ({"lane": "", "effort": "", "note": ""},
+                        {"lane": "b", "effort": "", "note": ""},
+                        {"lane": "", "effort": "high", "note": ""},
+                        {"lane": "b", "effort": "high", "note": "check ordinary use"}):
+            with self.subTest(options=options):
+                tid, vid, nxt = self.verdict_message("does not hold", verify_after=options)
+                retry = f'hansa retry {tid} "fix what {vid} found: ..." --verify'
+                for text in (nxt, self.hansa("show", tid), self.hansa("show", vid)):
+                    self.assertIn(retry, text)
+                    self.assertIn(f"hansa merge {tid} --despite-check", text)
+                    for field in ("lane", "effort"):
+                        if options[field]:
+                            self.assertIn(f"--verify-{field} {options[field]}", text)
+                        else:
+                            self.assertNotIn(f"--verify-{field}", text)
+                # Copy the offered command: queue-time verification reaches the follow-up.
+                offered = nxt[nxt.index("hansa retry"):].split(" · ", 1)[0]
+                follow = self.hansa(*shlex.split(offered)[1:]).split()[0]
+                request = self.desk.meta(follow)["verify_after"]
+                self.assertEqual((request["lane"], request["effort"]), (options["lane"], options["effort"]))
+
+    def test_failed_manual_verification_suggested_retry_keeps_lane_and_effort(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        tid, vid, _ = self.verdict_message("does not hold")
+        self.desk.update(vid, lane="b", effort="high")
+        nxt = notify._next_step(self.desk, vid)
+        for text in (nxt, self.hansa("show", tid)):
+            self.assertIn(f'hansa retry {tid} "fix what {vid} found: ..." --verify', text)
+            self.assertIn("--verify-lane b", text)
+            self.assertIn("--verify-effort high", text)
+        offered = nxt[nxt.index("hansa retry"):].split(" · ", 1)[0]
+        follow = self.hansa(*shlex.split(offered)[1:]).split()[0]
+        self.assertEqual(self.desk.meta(follow)["verify_after"], {"lane": "b", "effort": "high", "note": ""})
+
+    def test_unsure_verification_post_reads_report_before_both_options(self):
+        tid, vid, nxt = self.verdict_message("unsure")
+        report = f"hansa show {vid} --report"
+        self.assertIn(report, nxt)
+        self.assertIn(f'hansa retry {tid} "fix what {vid} found: ..." --verify', nxt)
+        self.assertIn(f"hansa merge {tid} --despite-check", nxt)
+        self.assertLess(nxt.index(report), nxt.index("hansa retry"))
+        self.assertLess(nxt.index(report), nxt.index("hansa merge"))
+        self.assertNotIn("hansa close", nxt)
+
+    def test_wait_finished_verification_includes_verdict_on_its_line(self):
+        for verdict in ("holds", "holds, with notes", "does not hold", "unsure"):
+            with self.subTest(verdict=verdict):
+                tid, vid, _ = self.verdict_message(verdict)
+                lines = self.hansa("wait", vid).splitlines()
+                line = next(line for line in lines if line.startswith(f"{vid} done:"))
+                self.assertIn(f"verdict: {verdict}", line)
+                self.assertIn(f"hansa show {vid}", line)
+                ordinary = self.hansa("wait", tid)
+                self.assertIn(f"{tid} done: Add hello.txt", ordinary)
+                self.assertIn(f"hansa show {tid}", ordinary)
+                self.assertNotIn("verdict:", ordinary)
 
     def later_verification(self, d, tid, outcome):
         self.hansa("lane", "set", "a", "env", *(["FAKE_VERDICT=" + outcome] if outcome in

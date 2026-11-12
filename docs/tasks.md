@@ -495,6 +495,14 @@ A verification queued by hand leaves the review alert unchanged for tasks queued
 
 A verification ends with `VERDICT: holds`, `VERDICT: holds, with notes`,
 `VERDICT: does not hold` or `VERDICT: unsure`.
+Its completion post suggests `hansa merge ID` for "holds". For "holds, with notes",
+it first points to `hansa show VID --report` for the notes, then to the merge.
+For "does not hold" or "unsure", read that report, then retry the task or merge
+with `--despite-check`. The suggested retry explicitly includes `--verify` and
+keeps the verification request's lane and effort options when given; a bare
+`hansa retry` still inherits no verification request. A finished verification's
+next step does not offer `hansa close VID`: merging its task closes it too.
+
 It says "does not hold" when ordinary use misses something the task asked for
 or breaks something that worked before; in any state, when the change merges
 into the wrong branch, loses work, shows a key, or reports a check passed that
@@ -828,6 +836,9 @@ at once with the reason only if every watched task is queued; running and mergin
 still waited on, even if queued tasks are watched alongside them. With no tasks to watch, or
 with `hansa serve` not running, it returns at once. For a stopped server, it gives the command
 to start that desk.
+
+For an ended verification, its line includes the verdict. Ordinary tasks keep
+their usual completion line.
 
 When a still-queued task waits for a provider, its `ID queued` line includes the
 same waiting reason as status. Provider rests do not make wait return sooner;

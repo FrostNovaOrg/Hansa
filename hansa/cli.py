@@ -1566,7 +1566,8 @@ def cmd_wait(a):
         time.sleep(a.every)
     for m in ended:
         mc = m.get("merge_check_result") or {}
-        print(f"{m['id']} {m['state']}: {m['title']}  (hansa show {m['id']})"
+        verdict = f" · verdict: {m['verdict']}" if m.get("kind") == "verify" and m.get("verdict") else ""
+        print(f"{m['id']} {m['state']}: {m['title']}{verdict}  (hansa show {m['id']})"
               + (f"\n  its merge: {views.waited_text(mc)}" if m["state"] == "done" and mc.get("waited") else
                  f"\n  its merge check did not pass, so nothing was merged: "
                  + (mc.get("note") or f"the check failed (exit {mc.get('exit')})")
