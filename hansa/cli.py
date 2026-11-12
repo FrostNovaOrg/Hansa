@@ -1308,7 +1308,8 @@ def cmd_cancel(a):
     # ended: it ended here, cancelled before it started, and no task_finished follows (a running task's comes from
     # hansa serve as it stops it): the follower posts this event (notify._item), to any session but this one
     desk.event("task_cancel", task=a.id, **({"ended": True} if m["state"] == "queued" else {}))
-    print(f"{a.id} cancelled" + (f"; {restored['id']} restored to "
+    print((f"{a.id} cancel requested; hansa serve will end it as cancelled within seconds"
+           if m["state"] == "running" else f"{a.id} cancelled") + (f"; {restored['id']} restored to "
           + ("waiting for review" if restored["ended_as"] == "done" else restored["ended_as"]) if restored else ""))
 
 

@@ -3874,7 +3874,11 @@ def sweep(desk: Desk, tid: str, *, run: dict | None = None) -> list:
             time.sleep(0.1)
         if not any(running(p, s) for p, _, s in found):
             break
-    stopped = [{"pid": p, "command": desk.redact(" ".join(args))[:120]}
+    def command(args):
+        text = desk.redact(" ".join(args))
+        return text if len(text) <= 120 else text[:58] + " ... " + text[-57:]
+
+    stopped = [{"pid": p, "command": command(args)}
                for p, args, s in in_groups + [x for x in found if not running(x[0], x[2])]]
     if stopped:
         desk.change(tid, lambda x: {"left_running": [*(x.get("left_running") or []), *stopped]})
@@ -4841,6 +4845,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         checking = (final == "done" and bool(lane.get("check")) and bool(fields.get("commits"))
                     and meta.get("kind") != "verify")  # a verification is never merged, so never checked
         tries, kept = attempts, {}
+        if len(attempts) > len(meta.get("attempts", [])):
+            tries = [*attempts[:-1], {**attempts[-1], "run_start": meta.get("run_start")}]
         if final == "queued" and len(attempts) > len(meta.get("attempts", [])):
             # queued for another try: this run's numbers go with its attempt record, and the task's own fields are
             # left for the next run, so each try counts once (cost.task_runs). What this try's resume recorded

@@ -117,6 +117,10 @@ Change them with `hansa lane set L max_turns N` and `hansa lane set L timeout_mi
 that ceiling; `hansa retry ID "..." --max-turns N` overrides it. Without a task
 ceiling, each run uses its lane's current limit.
 
+`hansa show ID` lists the task's supplied goal (id and title), turn ceiling, model
+and effort together on one `task options:` line. Options left to the lane or
+provider defaults are omitted; the run's own line still shows what it actually used.
+
 A run stopped at a ceiling before writing its report has its notes along the way as its report. At the
 time ceiling, a line follows them: the last tool call the session record shows the worker starting, whether
 or not it ended, and how many minutes before the stop it started (a Bash call's command on one line, cut
@@ -161,11 +165,18 @@ dropped connection, say), that try starts with nothing of the earlier try's
 resume: it may be resumed once in its own right, and the earlier try's turns
 and tokens stay on the task's record of its tries.
 
+When hansa stops leftover processes, `hansa show ID` lists their commands. A
+command over 120 characters keeps its beginning and end, with ` ... ` between,
+so a long interpreter path does not hide a script's name at the end.
+
 ## Dropped connections and usage limits
 
 After a dropped connection or usage limit, hansa carries on new commits without keys or markers, unless
 the run began with update conflicts. Otherwise it keeps earlier carried work, or repeats the original
 start and update. `hansa show` says where and why.
+Each attempt keeps its actual starting commit, including a final failed attempt.
+Show labels that final attempt `last try` (or `last run`); earlier attempts keep
+their own starts, including commits carried from another run.
 Time in the queue while a provider is unreachable or resting does not use the run's time ceiling.
 
 A worker or verification the system killed (SIGKILL: exit -9, or 137 through a wrapper) after the lane's
@@ -616,7 +627,10 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   Merges also wait while a release runs in that repository. A plain merge waits
   its turn and goes in without a check if the base has still not moved, or with
   a check as above if it has.
-- **Cancelling.** `hansa cancel ID` on a `merging` task stops its merge check
+- **Cancelling.** On a running task, `hansa cancel ID` acknowledges the request;
+  `hansa serve` ends the task as `cancelled` within seconds. Until then, show and
+  status say `cancel requested`, and show's next step is to wait for it to stop.
+  A queued task is cancelled immediately. On a `merging` task, cancel stops its merge check
   and puts the task back in review. For a batch member it stops the shared check;
   only that member goes back to review, and the others keep their old places,
   each checked alone.
