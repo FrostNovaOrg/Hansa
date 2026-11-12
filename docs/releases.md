@@ -284,7 +284,9 @@ exit 1
 Beside Stop, the page shows a short warning that stopping may leave the server
 partly updated. Tap or click that warning to read the full explanation, including
 TERM, KILL after 30 seconds, and stopping a running watch. It stays open across
-status refreshes while you read, in either page language.
+status refreshes while you read, in either page language. On a phone, Stop and
+its warning sit under the release's number, at the start of its row, so they are
+in view without scrolling the releases table sideways.
 
 A release can be stopped: the coordinator with `hansa release --stop ID
 [reason]`, the principal with Stop on the page. One that has not started yet

@@ -417,9 +417,11 @@ def status_line(st: dict) -> str:
     """The line on the coordinator's session, in hansa status and on the page: what hansa did at its start, and
     nothing else."""
     if st.get("kind") == "notify":
-        return ("the recorded session was started outside hansa coordinator; "
-                "the coordinator's mod and the daily clear are not in it, but for hansa's status line when hansa up "
-                "started it.")
+        # A plain fact, not a fault: it reads first that nothing needs doing (a principal took it for one).
+        return ("the coordinator's session, recorded with hansa notify on, works as it is; nothing needs doing. "
+                "It was started outside hansa coordinator, so the coordinator's mod (which compacts the session when "
+                "it is idle) and the daily clear are not in it; hansa's status line is, when hansa up started it. "
+                "To have them, start the session with hansa coordinator.")
     if st["loaded"] is None:
         mod = "whether hansa loaded the coordinator's mod: not known"
     elif st["loaded"]:

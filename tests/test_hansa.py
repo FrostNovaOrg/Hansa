@@ -42957,7 +42957,7 @@ const storage = (values = {}, mode) => ({values:{...values}, writes:[],
 let session = storage(preferences.session, preferences.sessionMode), local = storage(preferences.local, preferences.localMode);
 let reloads = 0, historyReplacements = [], unloadWarnings = [];
 let timerNow = 0, timerId = 0, timers = new Map();
-const motionQuery = {matches:!!given.reducedMotion};
+const motionQuery = {matches:!!given.reducedMotion}, phoneQuery = {matches:!!given.phone};
 const later = (f, delay, repeat = false) => {
   const id = ++timerId; timers.set(id, {f, at:timerNow + delay, delay, repeat}); return id;
 };
@@ -42992,7 +42992,7 @@ function openPage(search = "", hash = "") {
   URLSearchParams, performance:{now:() => timerNow},
   setTimeout:later, clearTimeout:id => timers.delete(id),
   setInterval(f, delay) { (windowEvents.interval ||= []).push(f); return later(f, delay, true); },
-  window: {scrollTo() {}, matchMedia:() => motionQuery, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
+  window: {scrollTo() {}, matchMedia:q => /max-width/.test(q) ? phoneQuery : motionQuery, addEventListener(k, f) { (windowEvents[k] ||= []).push(f); },
     confirm(message) { confirmations.push(message); return confirmReply; }}, console,
   URL: class extends URL {
     static createObjectURL(blob) { blobs.push(blob); return "blob:page-test-" + blobs.length; }
@@ -45553,6 +45553,44 @@ else if (ask === "task-steps")'''))
         self.assertIn(st["disk"]["low_text"], en["warnings"])
         self.assertIn(st["memory"]["low_text"], en["warnings"])
 
+    def test_page_srt_missing_says_whose_path_in_chinese(self):
+        from hansa import run
+        for where, zh in (("on the PATH of this command; hansa serve has not tried srt yet, and its PATH may differ",
+                           ("本命令的 PATH", "hansa serve 还没试过 srt")),
+                          ("as hansa serve saw it, 11-12 14:52", ("hansa serve 所见", "11-12 14:52")),
+                          ("as hansa serve saw it", ("hansa serve 所见",))):
+            with self.subTest(where=where):
+                with unittest.mock.patch("hansa.views.srt_problem", return_value=f"srt MISSING ({where}): {run.SRT_MISSING}"):
+                    st = views.status(self.desk)
+                warnings = self.message_page(st)["warnings"]
+                for words in zh + ("找不到 srt", "安装"):
+                    self.assertIn(words, warnings)
+                self.assertNotIn("PATH may differ", warnings)
+
+    def test_page_failed_panel_counts_all_failed_and_says_how_many_it_shows(self):
+        st = views.status(self.desk)
+        rows = [{"id": f"t000{i}", "lane": "a", "title": f"Failed {i}", "error": "no output (exit 1)"} for i in range(5)]
+        for count, en, zh in ((7, "latest 5 of 7", "显示最近的 5 个，共 7 个"), (5, None, None)):
+            st.update(failed=rows, failed_count=count)
+            for language, words in (("en", en), ("zh", zh)):
+                with self.subTest(count=count, language=language):
+                    text = self.message_page(st, language=language)["status"]
+                    head = "Failed (latest)" if language == "en" else "失败（最近）"
+                    self.assertIn(f"{head}{count}", text)
+                    if words:
+                        self.assertIn(words, text)
+                    else:
+                        self.assertNotIn("latest 5 of" if language == "en" else "显示最近的", text)
+
+    def test_page_forbidden_words_field_names_everything_the_scan_reads(self):
+        for language, words in (("en", ("release command", "watch command", "messages", "authors' and committers' names and emails",
+                                        "names of the files", "lines they add")),
+                                ("zh", ("发布命令", "监测命令", "提交的说明", "作者和提交者的名字与邮箱", "文件名", "新增的行"))):
+            with self.subTest(language=language):
+                settings = self.message_page(language=language)["settings"]
+                for w in words:
+                    self.assertIn(w, settings)
+
     def test_page_task_failure_and_hold_messages(self):
         from hansa import run
         tid = self.desk.new_task("Failure", lane="a")
@@ -47731,8 +47769,8 @@ else if (ask === "task-steps")'''))
                     for language in ("en", "zh"):
                         [page] = self.page_header("notify-status", status, language)
                         self.assertNotIn("--autocompact", page["text"])
-                        self.assertNotIn("compaction", page["text"])
-                        self.assertNotIn("压缩", page["text"])
+                        self.assertNotIn("coordinator's compaction", page["text"])
+                        self.assertNotIn("the desk's settings", page["text"])
         self.start_with_mod()
         self.assertIn("the mod reads it", views.status(self.desk)["compact_line"])
 
@@ -47748,17 +47786,26 @@ else if (ask === "task-steps")'''))
                 (self.desk.state_dir / "coordinator.json").unlink()
             status = views.status(self.desk)
             printed = self.hansa("status")
-            self.assertIn("started outside hansa coordinator", status["mod_line"])
-            self.assertIn("coordinator's mod and the daily clear are not in it", status["mod_line"])
-            self.assertIn("but for hansa's status line when hansa up started it", status["mod_line"])
+            line = status["mod_line"]
+            # a plain fact first, then what is not in it, then how to have it
+            said = [line.index(x) for x in ("works as it is", "nothing needs doing", "outside hansa coordinator",
+                                            "coordinator's mod", "compacts the session when it is idle",
+                                            "daily clear are not in it", "hansa's status line is",
+                                            "start the session with hansa coordinator")]
+            self.assertEqual(said, sorted(said), line)
             self.assertIn(status["mod_line"], printed)
             self.assertNotIn(previous, printed)
             self.assertNotIn("--autocompact options", printed)
             self.assertEqual(status["clear_line"], "")
             if shutil.which("node"):
-                for language, words in (("en", "started outside hansa coordinator"), ("zh", "在 hansa coordinator 之外启动")):
+                for language, words in (("en", ("works as it is", "nothing needs doing", "daily clear",
+                                                 "start the session with hansa coordinator")),
+                                        ("zh", ("协调员会话照常工作", "无需处理", "协调员的 mod", "空闲时", "每日清空",
+                                                "状态行", "用 hansa coordinator 启动协调员会话"))):
                     [page] = self.page_header("notify-status", status, language)
-                    self.assertIn(words, page["text"])
+                    said = [page["text"].index(w) for w in words]
+                    self.assertEqual(said, sorted(said), page["text"])
+                    self.assertNotIn("记录的会话在", page["text"])
                     self.assertNotIn("--autocompact", page["text"])
                     self.assertNotIn("04-09", page["text"])
         self.start_with_mod("--clear-daily", "04-09")
@@ -48122,7 +48169,12 @@ else if (ask === "task-steps")'''))
             self.assertRegex(css, r"#tab-status table\s*\{[^}]*min-width:680px")
             self.assertRegex(css, r"#tab-status td\s*\{[^}]*min-width:6em;[^}]*max-width:28em")
             self.assertRegex(css, r"#tab-status td button\s*\{[^}]*white-space:nowrap")
-            self.assertRegex(css, r"\.status-pill\s*\{[^}]*overflow-wrap:normal")
+            # A pill keeps a status word whole in a squeezed column (break-word adds no break to the column's least
+            # width, as anywhere would) and breaks only a word longer than the pill, which stays inside its cell.
+            pill = re.search(r"^\.status-pill\s*\{([^}]*)\}", css, re.M)[1]
+            self.assertIn("overflow-wrap:break-word", pill)
+            self.assertIn("max-width:100%", pill)
+            self.assertRegex(css, r"\.status-pill > \.pill-text\s*\{[^}]*min-width:0")
             # Paths, commands and addresses can still wrap within a bounded cell or card.
             self.assertRegex(css, r"body, td, label, code, \.mono\s*\{[^}]*overflow-wrap:anywhere")
 
@@ -48144,6 +48196,39 @@ else if (ask === "task-steps")'''))
                 rule = re.search(re.escape(selector) + r"\s*\{([^}]+)\}", phone)
                 self.assertIsNotNone(rule)
                 self.assertIn(gap, rule[1])
+
+    def test_phone_release_stop_sits_beside_the_release_number(self):
+        # At 390 px the releases table is 680-1024 px wide in a 317 px box; Stop in its last column was out of view.
+        releases = [{"state": "approved", "what": "approved"},
+                    {"id": 18, "state": "done", "what": "done", "watch": "./watch.sh", "watch_run": {"state": "running"}}]
+        for phone in (True, False):
+            for language, page in zip(("en", "zh"), self.principal_layout_page(releases=releases, options={"phone": phone})):
+                with self.subTest(phone=phone, language=language):
+                    rows = [n for n in self.page_nodes(page["root"]) if n["tag"] == "tr"
+                            and any(k["tag"] == "td" and k["text"].startswith("#") for k in n["kids"])]
+                    self.assertEqual(len(rows), 2)
+                    for row, rid in zip(rows, (17, 18)):
+                        cells = [k for k in row["kids"] if k["tag"] == "td"]
+                        holding = [i for i, c in enumerate(cells) for n in self.page_nodes(c)
+                                   if n["attrs"].get("data-status-focus") == f"release:{rid}:stop"]
+                        self.assertEqual(holding, [0] if phone else [len(cells) - 1])
+                        note = [i for i, c in enumerate(cells) for n in self.page_nodes(c)
+                                if n["attrs"].get("data-principal-fold") == f"release-stop:{rid}:note"]
+                        self.assertEqual(note, holding)
+                        self.assertTrue(cells[0]["text"].startswith(f"#{rid}"))
+
+    def test_phone_header_keeps_the_desk_name(self):
+        for page in self.principal_layout_page():
+            css = page["css"]
+            phone = re.search(r"@media \(max-width:640px\)\s*\{\s*header(.*?)\n\}", css, re.S)[1]
+            self.assertNotRegex(phone, r"\.brand-label\s*\{[^}]*display:none")
+            self.assertNotRegex(phone, r"\.brand-caption\s*\{[^}]*display:none")
+            self.assertRegex(phone, r"#title \.brand-name\s*\{[^}]*display:none")
+            # the name's cap leaves the tab strip at least 190 px at 390 px (measured: 36vw left it 137 px, 20vw 183)
+            cap = re.search(r"#title\s*\{[^}]*max-width:(\d+)vw", phone)
+            self.assertIsNotNone(cap)
+            self.assertLessEqual(int(cap[1]), 18)
+            self.assertRegex(css, r"\.brand-caption\s*\{[^}]*overflow:hidden;[^}]*text-overflow:ellipsis")
 
     def test_phone_release_refusal_keeps_its_reason_with_refuse(self):
         for page in self.principal_layout_page(releases=[{}]):
