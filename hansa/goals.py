@@ -160,19 +160,18 @@ def tie(desk: Desk, gid: str, refs: list) -> dict:
         ask_ids = {a["id"] for a in asks}
         wanted_tasks, wanted_todos = [], []
         for ref in refs:
-            r = ref.strip()
-            number = r[1:] if r.startswith("#") else r
+            r = ref
+            number = r.strip().removeprefix("#")
             if number.isdigit():
                 if int(number) not in ask_ids:
                     raise SystemExit(f"hansa: no to-do #{int(number)}; nothing was tied")
                 wanted_todos.append(int(number))
-            elif re.fullmatch(r"t\d+", r):
-                if r not in tasks:
-                    raise SystemExit(f"hansa: no task {r}; nothing was tied")
-                wanted_tasks.append(r)
             else:
-                raise SystemExit(f"hansa: {desk.redact(r)!r} is neither a task (t0001) nor a to-do (#1 or 1); "
-                                 "nothing was tied")
+                try:
+                    desk.meta(r)
+                except SystemExit as e:
+                    raise SystemExit(f"{desk.redact(str(e))}; nothing was tied") from None
+                wanted_tasks.append(r)
         chains = {r: _chain(list(tasks.values()), r) for r in dict.fromkeys(wanted_tasks)}
         all_tasks = sorted({t for c in chains.values() for t in c})
         via = {t: [r for r, c in chains.items() if t in c] for t in all_tasks if t not in chains}
@@ -221,8 +220,11 @@ def decide(desk: Desk, text: str, why: str, *, gid: str | None = None, by: str =
         _text(desk, why, "the decision's reason")
         if gid:
             goal(desk, gid, open_only=True)
-        if task and task not in {m["id"] for m in desk.tasks()}:
-            raise SystemExit(f"hansa: no task {desk.redact(task)}; nothing was recorded")
+        if task:
+            try:
+                desk.meta(task)
+            except SystemExit as e:
+                raise SystemExit(f"{desk.redact(str(e))}; nothing was recorded") from None
         decisions = records(desk)[1]
         if replaces:
             old = decisions.get(replaces)

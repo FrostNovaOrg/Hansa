@@ -1,8 +1,6 @@
 """Tasks queued after other tasks' merges. Waiting never claims a lane or a concurrency slot."""
 from __future__ import annotations
 
-import re
-
 from .desk import event_record, work_lane_problem
 
 
@@ -18,12 +16,10 @@ def validate(desk, opts: dict) -> None:
     if opts.get("lane") and target is None:
         raise SystemExit(f"hansa: --after needs an existing lane {opts['lane']}; nothing was queued")
     for tid in ids:
-        if not re.fullmatch(r"t[0-9]+", tid):
-            raise SystemExit(f"hansa: no task {tid}; nothing was queued")
         try:
             m = desk.meta(tid)
-        except SystemExit:
-            raise SystemExit(f"hansa: no task {tid}; nothing was queued") from None
+        except SystemExit as e:
+            raise SystemExit(f"{e}; nothing was queued") from None
         at = merge_target(s, m.get("lane"))
         if not m.get("lane"):
             known = m.get("after_target")

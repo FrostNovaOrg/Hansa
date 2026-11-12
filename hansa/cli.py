@@ -994,9 +994,15 @@ def _merge_step(lane: dict, task_lane: dict | None = None) -> str:
     return f"the lane's {'setup and ' if lane.get('setup') else ''}{_merge_what(lane, task_lane)} ({merge_command(lane)})"
 
 
+def _refuse_replaced(m: dict) -> None:
+    if m["state"] == "replaced" and m.get("replaced_by"):
+        raise SystemExit(f"hansa: {m['id']} was replaced by {m['replaced_by']}; use {m['replaced_by']} instead")
+
+
 def _mergeable(desk: Desk, a):
     """Everything that must hold before a merge; says why not and exits when something does not."""
     m = desk.meta(a.id)
+    _refuse_replaced(m)
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {a.id} is a verification of {m.get('parent')}; it is never merged. "
                          f"Read it, then merge or send back {m.get('parent')}")
@@ -1256,6 +1262,7 @@ def cmd_cancel(a):
     restored = None
     with desk.lock():  # the state read here is the state changed here
         m = desk.meta(a.id)
+        _refuse_replaced(m)
         if m["state"] == "queued":
             if (m.get("parent") and m.get("kind") != "verify" and not m.get("started")
                     and not m.get("attempts") and not m.get("head")):
@@ -1318,6 +1325,7 @@ def cmd_close(a):
     by = notify.session_here()
     with desk.lock():
         m = desk.meta(a.id)
+        _refuse_replaced(m)
         if m["state"] not in ("done", "failed"):
             raise SystemExit(f"hansa: {a.id} is {m['state']}; only finished or failed tasks or verifications can be "
                              "closed; nothing was changed")
@@ -1370,6 +1378,7 @@ def _verify(desk: Desk, a) -> None:
 def queue_verification(desk: Desk, tid: str, *, lane="", effort="", note="", session=None) -> tuple:
     """Build a verification for the command or server. The caller holds desk.lock()."""
     m = desk.meta(tid)
+    _refuse_replaced(m)
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {tid} is itself a verification; verify the task it checks ({m.get('parent')})")
     if m["state"] != "done" or not m.get("commits"):

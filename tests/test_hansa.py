@@ -6535,6 +6535,97 @@ class DeskTest(unittest.TestCase):
                         outer = True
                         self.assertEqual(Desk.find().root, closed.parent)
 
+    def test_task_ids_refuse_aliases_before_reading_files(self):
+        for title in ("First", "Second", "Third"):
+            self.desk.new_task(title)
+        aliases = ("T0002", "t0003/", "../tasks/t0001", str(self.desk.tasks_dir / "t0001"),
+                   "./t0001", "t0001/../t0002", "t0001\\", "t0001\n", " t0001", "t０００１", "")
+        with unittest.mock.patch("hansa.desk.read_json", side_effect=AssertionError("task file was read")):
+            for tid in aliases:
+                with self.subTest(tid=tid):
+                    with self.assertRaises(SystemExit) as e:
+                        self.desk.meta(tid)
+                    for part in ("no task", "lowercase t", "digits"):
+                        self.assertIn(part, str(e.exception))
+
+    def test_task_ids_are_refused_in_every_task_command(self):
+        for title in ("First", "Second", "Third"):
+            self.desk.new_task(title, lane="a")
+        self.hansa("goal", "add", "Work")
+        commands = [("show",), ("diff",), ("merge",), ("verify",), ("retry",), ("cancel",), ("close",),
+                    ("wait",), ("explain", "task"), ("goal", "tie", "g1")]
+        before = self.desk.events_path.read_bytes()
+        for tid in ("T0002", "t0003/", "../tasks/t0001", " t0001", "t0001 ", "t0001\n", "t０００１"):
+            cases = [(*cmd, tid) for cmd in commands]
+            cases += [("show", tid, flag) for flag in
+                      ("--full", "--report", "--check", "--check-log", "--merge-check-log")]
+            cases += [("add", "Later", "--lane", "a", "--after", tid),
+                      ("decide", "Choice", "--why", "Requested", "--task", tid)]
+            for args in cases:
+                with self.subTest(args=args):
+                    refused = self.refused(*args)
+                    self.assertIn("no task", refused)
+                    self.assertIn("lowercase t", refused)
+                    self.assertEqual(self.desk.events_path.read_bytes(), before)
+        self.assertEqual(len(self.desk.tasks()), 3)
+
+    def test_task_id_suggestions_only_for_case_or_padding_of_existing_tasks(self):
+        self.desk.new_task("First")
+        self.desk.new_task("Second")
+        for tid, suggestion in (("t1", "t0001"), ("T0002", "t0002"), ("T2", "t0002"),
+                                ("t00001", "t0001"), ("t9999", ""), ("T9999", ""),
+                                ("t0001/", ""), ("../tasks/t0001", ""), ("x0001", "")):
+            with self.subTest(tid=tid):
+                refused = self.refused("show", tid)
+                self.assertIn("no task", refused)
+                self.assertIn("use", refused)
+                if suggestion:
+                    self.assertIn(f"did you mean {suggestion}?", refused)
+                else:
+                    self.assertNotIn("did you mean", refused)
+
+    def test_task_reference_errors_keep_id_suggestions(self):
+        self.desk.new_task("First", lane="a")
+        self.hansa("goal", "add", "Work")
+        for tid in ("t1", "T0001"):
+            for args in (("add", "Later", "--lane", "a", "--after", tid),
+                         ("decide", "Choice", "--why", "Requested", "--task", tid),
+                         ("goal", "tie", "g1", tid)):
+                with self.subTest(args=args):
+                    self.assertIn("did you mean t0001?", self.refused(*args))
+
+    def test_replaced_task_commands_name_the_follow_up_without_changes(self):
+        tid = self.desk.new_task("First", lane="a")
+        self.desk.update(tid, state="done")
+        follow = self.hansa("retry", tid, "Continue").split()[0]
+        before = self.desk.events_path.read_bytes(), self.desk.tasks()
+        for command in ("merge", "verify", "cancel", "close"):
+            with self.subTest(command=command):
+                refused = self.refused(command, tid)
+                for part in (f"{tid} was replaced by {follow}", "use", follow):
+                    self.assertIn(part, refused)
+                self.assertEqual((self.desk.events_path.read_bytes(), self.desk.tasks()), before)
+
+    def test_task_ids_merge_keeps_the_id_in_the_commit_and_event(self):
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        self.settle(Dispatcher(self.desk), tid)
+        before = self.desk.events_path.read_bytes(), self.desk.meta(tid)
+        self.assertIn(f"did you mean {tid}?", self.refused("merge", tid.upper()))
+        self.assertEqual((self.desk.events_path.read_bytes(), self.desk.meta(tid)), before)
+        self.assertIn(f"{tid} merged", self.hansa("merge", tid))
+        message = cli.git("log", "-1", "--format=%s", cwd=self.repo)
+        self.assertIn(f"Merge {tid}:", message)
+        self.assertEqual(self.events("task_merged")[-1]["task"], tid)
+
+    def test_release_ids_refuse_paths_before_looking_up_records(self):
+        with unittest.mock.patch("hansa.cli.release.get", side_effect=AssertionError("release was looked up")):
+            for rid in ("../releases/1", "/tmp/1", "1/", "./1"):
+                for action in ("--show", "--stop", "yes", "no"):
+                    with self.subTest(rid=rid, action=action):
+                        refused = self.refused("release", action, rid)
+                        self.assertIn("release", refused)
+                        self.assertIn("number", refused)
+
     def test_task_runs_is_recorded_and_merges(self):
         tid = self.desk.new_task("Add hello.txt")
         m = self.settle(Dispatcher(self.desk), tid)
