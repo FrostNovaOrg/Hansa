@@ -10,6 +10,18 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Tasks and workers
 
+- `hansa add` refuses an empty task, words beside `--file`, `--max-turns` under 1 and titles over one line or 200 characters.
+- Task ids are `t` and digits; other spellings are refused unread. Commands on a replaced task name its last follow-up.
+- `hansa retry` keeps the turn ceiling and refuses, without `--fresh`, a change holding a known key.
+- `hansa show` marks a requested cancel and lists a task's options and each try's start.
+- A finished verification's next step fits its verdict; `hansa wait` gives the verdict.
+- `hansa ask` alone lists open to-dos in full; `--closed` lists closed ones with outcomes.
+- `hansa goal reopen` and `hansa goal tie`; `goal done` lists open work; `goal show` lists newest first.
+- `hansa diff --new` on an updated follow-up leaves out the base's changes; a removed lane's task still shows.
+- `hansa notes archive` moves only a whole-matching heading and loses nothing when two run at once.
+- `hansa lane brief L none` empties standing instructions; a re-added lane no longer takes over old ones.
+- A new desk whose first task came from a session no longer reports an earlier coordinator.
+- `hansa coordinator` removes an unedited card copy left by `hansa notify on` and names an edited one.
 - `hansa retry --model` changes a follow-up's model for Claude subscription providers.
 - Follow-ups skip providers that refused earlier rounds without using tries; if all refused, they run in lane order. `hansa show` names those skipped.
 - Lane provider lists accept spaces after commas and reject duplicates.
@@ -98,6 +110,10 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Merging and checks
 
+- After a check or merge stopped for a reason not the task's doing (a timeout, a failed setup, the owner's uncommitted
+  changes, a forbidden word, a conflict), `hansa show` and the coordinator's post give steps that work.
+- A merge git cannot make is shown as that, not as a failed merge check, and suggests `--update` only for a conflict.
+- hansa reads git's refusals in any language and quotes paths in commands it prints.
 - File names from git keep non-ASCII characters, spaces, quotes and backslashes in task records,
   release file matching and lists, text-only detection, word scans and conflict reports;
   `hansa show`, `hansa diff` and `hansa git` show them correctly.
@@ -133,6 +149,9 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Releases and alerts
 
+- `hansa release` errors say what to do, for `--fixed` on a request, a removed lane or target,
+  and `release yes` without a release number, which counts no try.
+- A Bark entry with an invalid saved encryption key says so, with the fix.
 - Named targets have commands, time limits and optional dependencies on another target releasing
   the same commit. Requests show outgoing changes and direct commits, which can require approval.
 - Release requests and lists show at most ten direct commits, their count and a command to see the full range.
@@ -216,6 +235,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The web page
 
+- Every tab offers **Reload** for an answer not from `hansa serve`; the English page no longer shows “undefined”
+  for a task cancelled while queued. Notes shows subfolders.
 - `hansa web` prints the page key after `#t=` so the address keeps it out of server and proxy logs; older `?t=` links still work.
 - The page sends its origin's cookies for sign-in proxies; answers that are not from `hansa serve` show a notice with **Reload**.
 - Settings and provider keys can be changed from outside this machine only after the principal enables **Allow changing settings from outside this machine** in **Settings → Lanes → General** from the machine's own address. Until then the page shows a notice and disables settings saves, key fields, alert and push tests, push address recognition, provider checks and top-up confirmations; only reading, answering or stopping releases, and pausing or resuming dispatch remain available.
@@ -295,6 +316,11 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The terminal menu and `hansa doctor`
 
+- `hansa init` that cannot make the desk says why and removes what it made; `hansa lane try` and `hansa web`
+  say how to start a stopped server.
+- `hansa explain lane|provider` names what made and last changed it and refuses unknown names;
+  `hansa explain history` uses local time and lists each change once.
+- `hansa cost` shows amounts under a cent as `<$0.01` and keeps `--since` on the local clock across daylight saving.
 - `hansa status` and `hansa cost` show unpriced token counts instead of `$0.00`.
 - Without a table price, Claude workers use Claude Code's recorded figure after provider renames or removal; coordinator usage needs table prices.
 - `hansa init` and `hansa lane add` create a repository with an empty first commit for a new or empty project.
@@ -336,6 +362,7 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Documentation
 
+- `hansa help TOPIC` prints the docs' links as the topic or file to read.
 - The Chinese README links to Simplified Chinese guides for getting started, concepts,
   how a desk is run and push services. Tests keep each guide's headings and code blocks in step with English.
 - The [backup instructions](docs/desk.md#backing-up-and-moving-a-desk) keep goals and decisions.
