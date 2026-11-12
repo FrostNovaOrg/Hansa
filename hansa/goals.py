@@ -450,7 +450,10 @@ def history_text(h: dict) -> str:
 
 
 def show_text(desk: Desk, gid: str, *, all_: bool = False) -> str:
-    g = show(desk, gid)
+    tasks = desk.tasks()
+    g = show(desk, gid, tasks=tasks)
+    closed = {m["id"] for m in tasks if m.get("closed") or
+              (m["state"] == "cancelled" and m.get("error") == "closed without merging")}
     decisions = g["decisions"]
     out = [f"{gid} {g['title']} [{g['state']}]", f"created: {_when(g['created'])}",
            f"session: {g.get('session') or '(none)'}", f"why: {g['why'] or '(none)'}"]
@@ -470,7 +473,8 @@ def show_text(desk: Desk, gid: str, *, all_: bool = False) -> str:
         if any(m is f for f in folded):
             continue
         rounds = m["rounds"]
-        out += [f"{m['id']} {m['state']} · {rounds} round{'s' if rounds != 1 else ''} · {one_line(m['title'])}",
+        out += [f"{m['id']} {m['state']}{' (closed)' if m['id'] in closed else ''} · "
+                f"{rounds} round{'s' if rounds != 1 else ''} · {one_line(m['title'])}",
                 f"  check: {m['check']}", f"  verification: {m['verification']}"
                 + (f" ({m['verification_task']})" if m["verification_task"] else ""), f"  merge: {m['merge']}"]
         out += [f"  release #{r['id']}: {r['target']} · {r['state']}" for r in m["releases"]] or ["  releases: none"]
@@ -479,7 +483,8 @@ def show_text(desk: Desk, gid: str, *, all_: bool = False) -> str:
     if folded:
         out += [f"{len(folded)} older merged or closed task{'s' if len(folded) != 1 else ''} not listed "
                 f"(hansa goal show {gid} --all lists them)"]
-    out += [f"{v['id']} {v['state']} · 1 round · {one_line(v['title'])} · verification of {v['parent']}"
+    out += [f"{v['id']} {v['state']}{' (closed)' if v['id'] in closed else ''} · "
+            f"1 round · {one_line(v['title'])} · verification of {v['parent']}"
             for v in reversed(g["verifications"])]
     c = g["cost"]
     out += [f"cost: {c['tokens']:,} tokens · ${c['usd']:.6f} worth"

@@ -1334,7 +1334,8 @@ def cmd_cancel(a):
     desk.event("task_cancel", task=a.id, **({"ended": True} if m["state"] == "queued" else {}))
     print((f"{a.id} cancel requested; hansa serve will end it as cancelled within seconds"
            if m["state"] == "running" else f"{a.id} cancelled") + (f"; {restored['id']} restored to "
-          + ("waiting for review" if restored["ended_as"] == "done" else restored["ended_as"]) if restored else ""))
+          + ("closed" if restored.get("error") == "closed without merging" else
+             "waiting for review" if restored["ended_as"] == "done" else restored["ended_as"]) if restored else ""))
 
 
 def cmd_close(a):
@@ -2095,7 +2096,7 @@ def cmd_serve(a):
                 port_note = f" ({first_port} was taken)"
                 continue
             said = f"hansa: hansa serve could not serve the page on host {a.host}, port {port}: " \
-                   f"{(e.strerror if isinstance(e, OSError) else '') or e}"
+                   f"{(e.strerror if isinstance(e, OSError) else '') or e}".rstrip(".")
             raise SystemExit(said + ("; perhaps another desk's hansa serve holds that port. Start this desk's server "
                                      "on a free port with hansa serve --port N (hansa web then finds it)" if in_use else
                                      ". Nothing was started or recorded: hansa up starts the server as before"))

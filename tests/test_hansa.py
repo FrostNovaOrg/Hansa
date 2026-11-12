@@ -2782,6 +2782,10 @@ class UpTest(unittest.TestCase):
                  "Address already in use; perhaps another desk's hansa serve holds that port"),
                 (PermissionError(errno.EPERM, "Operation not permitted"), ("--port", "80"), "127.0.0.1", 80,
                  "Operation not permitted. Nothing was started or recorded"),
+                (OverflowError("bind(): port must be 0-65535."), ("--port", "70000"), "127.0.0.1", 70000,
+                 "0-65535. Nothing was started or recorded"),
+                (OSError(errno.EINVAL, "Invalid argument."), ("--port", "80"), "127.0.0.1", 80,
+                 "Invalid argument. Nothing was started or recorded"),
                 (socket.gaierror(socket.EAI_NONAME, "Name or service not known"), ("--host", "lcalhost"), "lcalhost",
                  8765, "Name or service not known. Nothing was started or recorded")):
             with self.subTest(error=error):
@@ -2790,7 +2794,8 @@ class UpTest(unittest.TestCase):
                     self.fake_serve(bind, *args)
                 said = str(e.exception.code)
                 self.assertEqual(len(said.splitlines()), 1, said)
-                self.assertIn(f"hansa serve could not serve the page on host {host}, port {port}: {words}", said)
+                self.assertIn(f"host {host}, port {port}", said)
+                self.assertIn(words, said)
                 bind.assert_called_once()
                 self.assertEqual((self.desk.state_dir / "serve-start.json").read_bytes(), saved)
                 self.assertFalse((self.desk.state_dir / "web-port").exists())
@@ -6025,6 +6030,31 @@ class DeskTest(unittest.TestCase):
         self.assertIn("created: " + local, shown)
         self.assertIn("· " + local, shown)
         self.assertNotIn("UTC", shown)
+
+    def test_goal_show_marks_closed_tasks_and_verifications(self):
+        self.hansa("goal", "add", "Export")
+        for state in ("failed", "done"):
+            with self.subTest(state=state):
+                tid = self.desk.new_task("Build the export", goal="g1", lane="a")
+                vid = self.desk.new_task("Verify the export", kind="verify", parent=tid, goal="g1", lane="a")
+                self.desk.update(tid, state=state, verify=vid)
+                self.desk.update(vid, state=state, error="error: no" if state == "failed" else "")
+                shown = self.hansa("goal", "show", "g1")
+                self.assertIn(f"{tid} {state} ·", shown)
+                self.assertIn(f"{vid} {state} ·", shown)
+                self.hansa("close", vid)
+                shown = self.hansa("goal", "show", "g1")
+                self.assertIn(f"{vid} {state} (closed) ·", shown)
+                self.assertIn(f"verification of {tid}", shown)
+                self.assertIn(f"{tid} {state} ·", shown)
+                self.assertEqual(self.desk.meta(vid)["state"], state)
+                self.hansa("close", tid)
+                shown = self.hansa("goal", "show", "g1")
+                self.assertIn(f"{tid} cancelled (closed) ·", shown)
+                self.assertIn(f"{vid} {state} (closed) ·", shown)
+        cancelled = self.desk.new_task("Stop before starting", goal="g1", lane="a")
+        self.hansa("cancel", cancelled)
+        self.assertIn(f"{cancelled} cancelled ·", self.hansa("goal", "show", "g1"))
 
     def test_goal_show_lists_newest_first_and_counts_old_settled_tasks_with_all_listing_them(self):
         self.hansa("goal", "add", "Export")
@@ -31163,7 +31193,9 @@ def save():'''))
             m = self.desk.meta(tid)
             self.assertEqual((m["state"], m["replaced_by"], m["ended_as"]), ("replaced", follow, "cancelled"))
             self.assertIn(f"Follow-up to {tid} (cancelled)", (self.desk.tasks_dir / follow / "task.md").read_text())
-            self.hansa("cancel", follow)
+            reply = self.hansa("cancel", follow)
+            self.assertIn(f"{follow} cancelled", reply)
+            self.assertIn(f"{tid} restored to closed", reply)
             replies.append(self.desk.meta(tid)["state"])
         self.assertEqual(replies, ["cancelled", "cancelled"])
 
