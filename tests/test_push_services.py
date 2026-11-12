@@ -324,6 +324,50 @@ class SecretFileTest(_PushServicesCase):
     def rewrite(self, entry, text):
         alert_push._file(self.desk, entry["id"], True).write_text(text, encoding="utf-8")
 
+    def test_invalid_saved_bark_key_status_and_explain_before_and_after_push(self):
+        key = "k" * 16
+        damaged = "k" * 15
+        entry = self.save("fixture-bark-key", "bark", secret=key)
+        self.rewrite(entry, damaged + "\n")
+        for result in (None, "sent", "bad_key"):
+            if result:
+                alert_push.record(self.desk, entry, result)
+            for command in ("status", "explain"):
+                with self.subTest(result=result, command=command):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        self.assertEqual(main(["--desk", str(self.desk.root), command]), 0)
+                    text = output.getvalue()
+                    for word in ("encryption is set", "saved encryption key is not valid", "nothing is sent",
+                                 "save the key again", "Settings", "Alerts"):
+                        self.assertIn(word, text)
+                    self.assertEqual(text.count("encryption key is not valid"), 1)
+                    self.assertNotIn(" · encrypted", text)
+                    self.assertNotIn("; encrypted)", text)
+                    self.assertTrue(all(secret not in text for secret in (key, damaged)))
+
+    def test_invalid_saved_bark_key_address_change_needs_resaving_key(self):
+        key = "k" * 16
+        damaged = "k" * 15
+        entry = self.save("fixture-bark-key", "bark", secret=key)
+        self.rewrite(entry, damaged + "\n")
+        address = alert_push._read(self.desk, entry["id"])
+        settings = self.desk.settings_path.read_bytes()
+        edit = {"id": entry["id"], "address": "replacement-device"}
+        with self.assertRaises(ValueError) as caught:
+            alert_push.change(self.desk, [edit], by="page")
+        message = str(caught.exception)
+        for word in ("saved encryption key is not valid", "save the key again", "Settings", "Alerts"):
+            self.assertIn(word, message)
+        self.assertNotIn("AES-128", message)
+        self.assertTrue(all(secret not in message for secret in (key, damaged)))
+        self.assertEqual(alert_push._read(self.desk, entry["id"]), address)
+        self.assertTrue(self.desk.settings_path.read_bytes() == settings)
+        self.assertTrue(alert_push._secret(self.desk, entry) == damaged)
+        alert_push.change(self.desk, [{**edit, "secret": key}], by="page")
+        self.assertTrue(alert_push.encrypts(self.desk, entry))
+        self.assertEqual(alert_push._read(self.desk, entry["id"]), "https://api.day.app/replacement-device")
+
     def test_other_services_extra_secrets_are_read_stripped_and_hidden_stripped(self):
         token = "tk_fixture-auth-token"
         ntfy = self.save("https://ntfy.sh/fixture-private-topic", secret=token)
@@ -368,7 +412,7 @@ class SecretFileTest(_PushServicesCase):
                 status = views.status_text(views.status(self.desk))
                 self.assertIn("last failed: bad_key", status)
                 self.assertIn("encryption key is not valid", status)
-                self.assertIn("set it again on the page", status)
+                self.assertIn("save the key again on the page", status)
                 self.assertNotIn("not allowed", status)
         page = (root / "ui.html").read_text()
         self.assertRegex(page, r'bad_key:"[^"]*encryption key is not valid[^"]*set it again[^"]*"')

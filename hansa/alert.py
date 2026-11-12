@@ -12,7 +12,9 @@ text. Choose Bark explicitly for a self-hosted address if Recognize it asks you 
 For encryption, choose AES-128, AES-192 or AES-256 with mode CBC in Bark's encryption settings. Paste the same
 16, 24 or 32 character ASCII key, or the app's copied example, into Encryption key (optional) on the entry.
 Only the key is saved; the example must match this device and CBC key length. Save settings, then test.
-The entry says encrypted on the page, in hansa status and hansa explain. A phone showing Decryption Failed
+With a valid key, the entry says encrypted on the page, in hansa status and hansa explain. If its saved key
+becomes invalid, each says encryption is set but the saved key is invalid and nothing is sent; save the key
+again on the page (Settings, Alerts). No release code is made for that entry. A phone showing Decryption Failed
 has a different key. Each push uses a fresh random IV; every notification field is encrypted.
 There may be up to ten entries. Each has an on/off switch and an optional name. To replace an address or extra
 secret, paste a new one into that entry; leaving either empty keeps the saved value. Switch, rename or Remove,
@@ -1267,7 +1269,7 @@ def explain_line(s: dict, desk: Desk | None = None) -> str:
     destinations = alert_push.public(desk, s) if desk else []
     pushes = ("Push addresses: " + "; ".join(
         f"{alert_services.SERVICES[e['service']].names['en']} {e['name'] or e['id']} ({e['address']}; "
-        f"{'on' if e['on'] else 'off'}{'; encrypted' if e.get('encrypted') else ''})"
+        f"{'on' if e['on'] else 'off'}{'; ' + alert_push.encryption_text(e) if e.get('encrypted') else ''})"
         for e in destinations) if destinations else "No push addresses are set up")
     a = s.get("alert") if isinstance(s.get("alert"), dict) else {}
     code_channels = ("One-time codes go to the alert command and to Bark entries that encrypt. "

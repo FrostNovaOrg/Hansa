@@ -1256,15 +1256,16 @@ def status_text(st: dict) -> str:
         out.append("Push entries " + ", ".join(names) + " share a push address; remove one on the page (Settings, Alerts)")
     for entry in st.get("alert_push", []):
         last = entry["last"]
+        encryption = alert_push.encryption_text(entry)
         out.append(f"Push {entry['service']} {entry['name'] or entry['id']}: {entry['address'] or 'no address'}"
                    f" · {'on' if entry['on'] else 'off'}"
-                   + (" · encrypted" if entry.get("encrypted") else "")
+                   + (" · " + encryption if encryption else "")
                    + (f" · last {'ok' if last['ok'] else 'failed'}: {last['why']} at "
                       + time.strftime("%Y-%m-%d %H:%M", time.localtime(last["at"]))
                       + (f" · code {last['code']}" if "code" in last else "") if last else " · no push yet"))
         if last and entry["service"] == "discord" and last["why"] == "http_4xx" and last.get("code") == 10015:
             out[-1] += " · this webhook address no longer exists; paste a new address on the page (Settings, Alerts)"
-        if last and last["why"] == "bad_key":
+        if last and last["why"] == "bad_key" and not entry.get("encryption_invalid"):
             out[-1] += (" · this entry's encryption key is not valid; nothing was sent: set it again on the page "
                         "(Settings, Alerts)")
     out += [st["alert_minutes"]] if st.get("alert_minutes") else []

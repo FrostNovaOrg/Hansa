@@ -417,12 +417,22 @@ def public(desk, settings=None):
             hidden = alert_services.SERVICES[entry["service"]].hidden(address) if address else ""
         except ValueError:
             hidden = ""
+        secret_set = bool(_secret(desk, entry))
+        encrypted = entry["service"] == "bark" and secret_set
         out.append({**entry, "name": desk.redact(entry.get("name", "")), "address": hidden,
-                    "address_set": bool(address), "secret_set": bool(_secret(desk, entry)),
+                    "address_set": bool(address), "secret_set": secret_set,
                     # set to encrypt: such an entry never sends in plain text, even with a key that is not valid
-                    "encrypted": entry["service"] == "bark" and bool(_secret(desk, entry)),
+                    "encrypted": encrypted, "encryption_invalid": encrypted and not encrypts(desk, entry),
                     "last": last_result(desk, entry["id"])})
     return out
+
+
+def encryption_text(entry):
+    """Describe the saved encryption setting, including a key that prevents delivery."""
+    from .alert_bark import SAVED_ENCRYPTION_PROBLEM
+    if entry.get("encryption_invalid"):
+        return SAVED_ENCRYPTION_PROBLEM
+    return "encrypted" if entry.get("encrypted") else ""
 
 
 def duplicate_names(desk, settings):

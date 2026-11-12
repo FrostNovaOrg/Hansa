@@ -14,6 +14,8 @@ DEFAULT_SERVER = "https://api.day.app"
 MAX_BYTES = 3500
 LEVELS = {"passive": "passive", "active": "active", "urgent": "timeSensitive"}
 ENCRYPTION_PROBLEM = "choose AES-128, AES-192 or AES-256 with CBC in the Bark app; use a 16, 24 or 32 character ASCII key"
+SAVED_ENCRYPTION_PROBLEM = ("encryption is set but the saved encryption key is not valid; nothing is sent; "
+                            "save the key again on the page (Settings, Alerts)")
 DEVICE_PROBLEM = "this example is for another Bark device"
 BARE_KEY_PROBLEM = "a bare Bark device key needs at least 8 characters; paste the whole address from the Bark app"
 
@@ -158,7 +160,7 @@ class Bark:
 
     def validate(self, address, secret):
         if secret and not _key_valid(secret):
-            raise ValueError(ENCRYPTION_PROBLEM)
+            raise ValueError(SAVED_ENCRYPTION_PROBLEM)
 
     def requests(self, address, secret, title, body, level, *, texts=None):
         parsed = urlsplit(address)

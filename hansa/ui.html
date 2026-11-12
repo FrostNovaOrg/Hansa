@@ -917,6 +917,8 @@ Object.assign(T, ZH ? {
     "paste an address with just its token or key":"请粘贴只带令牌或密钥参数的地址。"
   },
   pushEncrypted:"已加密",
+  pushEncryptionInvalid:"已设置加密，但已保存的加密密钥无效；不会向此地址发送推送。请在“设置 → 提醒”的“加密密钥（选填）”中重新填写密钥，再点“保存设置”。",
+  pushNotSent:"未发送",
   pushBarkKeyProblem:"请在 Bark 应用中选择 AES-128、AES-192 或 AES-256，模式选 CBC，并使用 16、24 或 32 个 ASCII 字符的密钥。",
   pushBarkDeviceProblem:"这个示例属于另一台 Bark 设备。",
   pushRemove:"删除", pushUndo:"保留地址", pushRemoving:"保存设置时删除这个地址。",
@@ -998,6 +1000,8 @@ Object.assign(T, ZH ? {
     "paste an address with just its token or key":"Paste an address with just its token or key."
   },
   pushEncrypted:"encrypted",
+  pushEncryptionInvalid:"encryption is set but the saved encryption key is not valid; nothing is sent; enter the key again in Encryption key (optional) under Settings → Alerts and save settings.",
+  pushNotSent:"not sent",
   pushBarkKeyProblem:"Choose AES-128, AES-192 or AES-256 with CBC in the Bark app and use a 16, 24 or 32 character ASCII key.",
   pushBarkDeviceProblem:"This example is for another Bark device.",
   pushRemove:"Remove", pushUndo:"Keep address", pushRemoving:"This address will be removed when you save settings.",
@@ -2157,6 +2161,7 @@ const pushProblem = problem => {
     "invalid push address":T.pushBadAddress,
     "a bare Bark device key needs at least 8 characters; paste the whole address from the Bark app":T.pushBareKeyProblem,
     "choose AES-128, AES-192 or AES-256 with CBC in the Bark app; use a 16, 24 or 32 character ASCII key":T.pushBarkKeyProblem,
+    "encryption is set but the saved encryption key is not valid; nothing is sent; save the key again on the page (Settings, Alerts)":T.pushEncryptionInvalid,
     "this example is for another Bark device":T.pushBarkDeviceProblem,
     "this push service does not accept the address; check its hint and paste the whole address again":T.pushBadAddress,
     "Bark's saved key could not be moved; the principal should paste the Bark address again on the page (Settings, Alerts)":T.pushLegacyProblem
@@ -2738,6 +2743,7 @@ const commandTestFailure = r => (r.why || (r.timed_out ? "timeout" : `exit ${r.e
   + ((r.tail || []).length ? ": " + r.tail.join(" | ") : r.withheld ? ": " + r.withheld : "");
 const pushResultText = (why, entry, code) => {
   const result = entry.service === "discord" && why === "http_4xx" && code === 10015 ? T.pushDiscordGone
+    : why === "bad_key" && entry.encryption_invalid ? T.pushNotSent
     : why === "sent" ? T.pushSent : why === "refused_by_service"
       ? T.pushRefused + "; " + (T.pushRefusedCheck[entry.service] || T.pushCheckDefault)
       : T.pushWhy[why] || T.pushUnknown;
@@ -2822,7 +2828,8 @@ function pushSection() {
       onchange:e => { draft.on = e.target.checked; refreshSettingsState(); }});
     return h("div", {class:"push-entry", "data-push-id":entry.id},
       h("h3", {}, draft.name || serviceName(entry.service)),
-      h("p", {class:"field-note"}, serviceName(entry.service) + (entry.encrypted ? " · " + T.pushEncrypted : "")), h("p", {}, entry.address),
+      h("p", {class:entry.encryption_invalid ? "warn" : "field-note"}, serviceName(entry.service)
+        + (entry.encryption_invalid ? " · " + T.pushEncryptionInvalid : entry.encrypted ? " · " + T.pushEncrypted : "")), h("p", {}, entry.address),
       draft.remove ? h("p", {class:"warn"}, T.pushRemoving) :
         h("div", {}, fields(field(T.pushOn, on, "", "", true)), editFields(draft)),
       h("div", {class:"row"}, test, said,
