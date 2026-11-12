@@ -209,6 +209,8 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str | None = No
     mkdir_private(desk.root / ".claude")
     write_json(desk.root / ".claude" / "settings.json", {"permissions": permissions(desk)})
     desk.event("desk_created", repo=repo, lane=lane if repo else "")
+    from . import up
+    up.mark_new(desk)  # a coordinator's start is recorded on this desk from its first
     return desk
 
 

@@ -4969,6 +4969,47 @@ class CoordinatorUpTest(unittest.TestCase):
         self.assertIn("not recorded yet", line)
         self.assertIn("hansa notify on in it", line)
 
+    def test_a_new_desks_first_task_from_a_session_tells_of_no_coordinator_before(self):
+        """A desk hansa init made, where no hansa coordinator or hansa notify on ever ran: the first task added from
+        a Claude Code session leaves no coordinator's start unrecorded. hansa status and hansa up say none is
+        recorded yet and how to record one; a desk from before hansa recorded starts keeps saying that it had one."""
+        from hansa import up, views
+        desk = hansa.cli.init_desk(self.tmp / "fresh")
+        self.assertTrue((desk.state_dir / up.STARTS_RECORDED).exists())  # seen new as it was made
+        desk.new_task("Add hello.txt")  # from a shell: still new, no line
+        self.assertEqual(up.coordinator_line(desk), "")
+        desk.new_task("Add bye.txt", session=self.SESS)  # from inside a Claude Code session
+        self.assertFalse(up.new_desk(desk))
+        for said in (up.coordinator_line(desk), views.status_text(views.status(desk))):
+            with self.subTest(said=said[:40]):
+                self.assertIn("no coordinator's session is recorded for this desk yet", said)
+                self.assertIn("hansa coordinator", said)
+                self.assertIn("hansa notify on in the session that coordinates", said)
+                self.assertNotIn("before hansa recorded", said)
+                self.assertNotIn("not recorded yet", said)
+        with unittest.mock.patch.object(up, "program", side_effect=AssertionError("nothing is started")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertFalse(up.coordinator_up(desk))
+        self.assertIn("no coordinator's session is recorded for this desk yet; nothing started", out.getvalue())
+        self.assertNotIn("before hansa recorded", out.getvalue())
+        # a desk made before this record, still new: its first task from a session records it, seen new before
+        older_new = hansa.cli.init_desk(self.tmp / "still new")
+        (older_new.state_dir / up.STARTS_RECORDED).unlink()
+        older_new.new_task("Add hello.txt", session=self.SESS)
+        self.assertIn("no coordinator's session is recorded for this desk yet", up.coordinator_line(older_new))
+        # a desk made before hansa recorded starts has no such record, and gets none once it is no longer new
+        (self.desk.tasks_dir / "t0001").mkdir()
+        write_json(self.desk.tasks_dir / "t0001" / "meta.json", {"id": "t0001", "session": self.SESS})
+        up.mark_new(self.desk)
+        self.assertFalse((self.desk.state_dir / up.STARTS_RECORDED).exists())
+        line = up.coordinator_line(self.desk)
+        self.assertIn("before hansa recorded its start", line)
+        self.assertNotIn("no coordinator's session is recorded", line)
+        # a desk seen new that then heard from a session, or that hansa coordinator prepared, is not that case
+        write_json(desk.state_dir / "coordinator.json", {})
+        self.assertIn("before hansa recorded its start", up.coordinator_line(desk))
+
 
 class LauncherTest(unittest.TestCase):
     def setUp(self):
