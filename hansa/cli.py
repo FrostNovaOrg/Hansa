@@ -20,7 +20,7 @@ import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import account, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
+from . import account, after, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
 from .desk import (EFFORTS, Desk, SettingsError, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
@@ -1099,6 +1099,8 @@ def cmd_retry(a):
 
 
 def _retry(desk: Desk, a) -> None:
+    if a.max_turns is not None and a.max_turns < 1:
+        raise SystemExit("hansa: --max-turns must be 1 or more; nothing was queued")
     m = desk.meta(a.id)
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {a.id} is a verification; send back the task it checked: hansa retry {m.get('parent')} \"...\"")
@@ -1148,6 +1150,13 @@ def _retry(desk: Desk, a) -> None:
         if held:
             raise SystemExit(f"hansa: {held}; nothing was queued. Start over from the base: hansa retry {a.id} "
                              f"--fresh \"...\"")
+        leaked = (m.get("leaked") or earlier.get("leaked")
+                  or (keys_in_change(desk, own["repo"], earlier.get("base") or own.get("base") or "main",
+                                     earlier["head"]) if own else []))
+        if leaked:
+            raise SystemExit(f"hansa: the change in {a.id} holds the key of {', '.join(leaked)}; nothing was queued. "
+                             f"A retry from its commits keeps the key in its history; --fresh is needed: "
+                             f"hansa retry {a.id} --fresh \"...\"")
     note = (_text(a) if a.file else " ".join(a.note)).strip()
     text = (_follow_up_start(desk, m) + f"\nFollow-up to {a.id} ({m['state']})."
             + (f" What to change: {note}" if note else ""))
@@ -1166,6 +1175,7 @@ def _retry(desk: Desk, a) -> None:
         text += (f"\n\nThe report of {vid}, the verification of the earlier task (a worker who ran the change "
                  f"to see whether it holds; its verdict: {verdict}):\n" + vreport.read_text(encoding="utf-8").strip())
     opts = {"lane": lane, "effort": a.effort or m.get("effort", ""), "model": a.model or m.get("model", ""),
+            "max_turns": a.max_turns if a.max_turns is not None else m.get("max_turns", 0),
             "parent": a.id, "title": f"{own_title(m['title'])} (retry of {a.id})",
             **_verify_request(desk, a, {**m, "lane": lane}),
             **notify.recorded(notify.session_here())}
@@ -1218,8 +1228,14 @@ def _follow_up_start(desk: Desk, m: dict) -> str:
         state = m["state"] if r is m else r.get("ended_as") or r["state"]
         verification = standing_verification(desk, r)
         vid = verification["id"] if verification else None
-        how = state + (f", verified by {vid} (verdict: {desk.meta(vid).get('verdict') or 'none'})" if vid
-                       else ", not verified")
+        if not verification:
+            how = state + ", not verified"
+        elif verification.get("verdict"):
+            how = state + f", verified by {vid} (verdict: {verification['verdict']})"
+        else:
+            stopped = (verification["state"] == "cancelled" or verification.get("cancel")
+                       or verification["state"] in ("queued", "running") and state != "merged")
+            how = state + f", verification {vid} " + ("stopped before a verdict" if stopped else "without a verdict")
         f = desk.tasks_dir / r["id"] / NOTE_FILE
         if not r.get("parent"):
             said = "the original task, above"
@@ -1310,6 +1326,14 @@ def cmd_close(a):
             desk.update(a.id, state="cancelled", error="closed without merging", cancel_by=by,
                         **({"failed_error": m.get("error") or ""} if m["state"] == "failed" else {}))
         close_verification(desk, m, f"closed: {a.id} was cancelled", by)
+        waiting = []
+        if m.get("kind") != "verify":
+            tasks = desk.tasks()
+            for task in tasks:
+                if task["state"] == "queued":
+                    dependencies = [d for d in after.pending(task, tasks) if d["latest"] == a.id]
+                    if dependencies:
+                        waiting.append(f"{task['id']} stays queued; {after.waiting(task, dependencies)}")
     had = f"{a.id} had failed; it is now closed" if m["state"] == "failed" else ""
     if m.get("kind") == "verify":
         if not m.get("closed"):
@@ -1321,6 +1345,8 @@ def cmd_close(a):
         desk.event("task_cancel", task=a.id, closed=True, **({"ended": True} if m["state"] == "done" else {}))
         print(f"{had} without merging; hansa show {a.id} still says why it failed" if had else
               f"{a.id} closed without merging")
+        for line in waiting:
+            print(line)
 
 
 def cmd_verify(a):
@@ -3943,6 +3969,8 @@ def main(argv=None):
     p.add_argument("--model", help="override the earlier task's model for this follow-up; as with add --model, "
                    "it applies only when a Claude subscription provider runs the task; other providers use "
                    "their own model")
+    p.add_argument("--max-turns", type=int, metavar="N", help="override the earlier task's ceiling of turns "
+                   "for this follow-up (1 or more); omitted: keep its ceiling, or use the lane's when unset")
     p.epilog = see_more("effort")
     p = add("verify", cmd_verify, "have a worker run a finished task's change to see whether it holds (never merged)")
     p.description = ("have a worker run a finished task's change to see whether it holds (never merged). "
@@ -3962,6 +3990,7 @@ def main(argv=None):
             "check and return it to review; finished work needs close")
     p.add_argument("id")
     p = add("close", cmd_close, "close a finished or failed task or verification without merging")
+    p.description += ". Names queued tasks waiting for its merge; they stay held until a follow-up merges or are cancelled"
     p.add_argument("id")
     p = add("pause", cmd_pause, "stop new tasks from starting")
     p.add_argument("reason", nargs="*")

@@ -108,6 +108,9 @@ existing task, merge and release records; reports and checks remain on their tas
 
 New lanes stop at 200 turns or 240 minutes; saved lanes keep their limits.
 Change them with `hansa lane set L max_turns N` and `hansa lane set L timeout_min N`.
+`hansa add --max-turns N` sets a task's turn ceiling (1 or more). A follow-up keeps
+that ceiling; `hansa retry ID "..." --max-turns N` overrides it. Without a task
+ceiling, each run uses its lane's current limit.
 
 A run stopped at a ceiling before writing its report has its notes along the way as its report. At the
 time ceiling, a line follows them: the last tool call the session record shows the worker starting, whether
@@ -387,6 +390,8 @@ dependency and attempt, naming both tasks and the choices: `hansa cancel ID` to 
 task, or `hansa retry T` (the latest follow-up when there is one). A later retry and merge clears
 the hold automatically. Dependencies and notice records survive a server restart. Cancelling
 the waiting task works as for any queued task; a retry of it keeps its dependencies.
+`hansa close T` also names the queued tasks waiting for T, including through earlier
+rounds, and says they stay queued and held, with the commands to cancel them or retry T.
 
 ## Task text and options
 
@@ -696,6 +701,15 @@ verification's report, with its verdict. Earlier notes are not carried, so
 what still holds of them is said again in the new note. Each round's note is
 kept on its own beside its task, as `note.md` in the task's folder (keys
 removed, as from what else hansa writes there).
+When retry stops a queued or running verification, its record names the task and
+the follow-up that replaced it. The earlier-round line says the verification was
+stopped before a verdict; a verification with no verdict is never called "verified by".
+
+A change holding a key hansa knows cannot continue from its commits: an ordinary
+retry or `--update` keeps that key in history and would be refused at merge again.
+Hansa refuses these retries before queuing; use `hansa retry ID --fresh "..."` to
+redo the change from the base without the key. This check is needed while known
+keys in a change's history prevent merging, even if later commits remove them.
 
 The follow-up keeps the earlier task's model unless `--model M` overrides it. As with
 `hansa add --model M`, it is recorded on the new task and applies only when a Claude subscription
