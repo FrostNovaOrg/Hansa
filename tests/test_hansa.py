@@ -12363,6 +12363,40 @@ def save():'''))
                if e["event"] == "left_running_stopped"]
         self.assertEqual(e["task"], tid)
 
+    def test_leftover_commands_keep_both_ends_only_when_cut_and_redact_before_cutting(self):
+        from hansa import run
+        key = "sk-leftover-command-private-0987"
+        self.desk.write_key("claude", key)
+        for size in (119, 120, 121, 300):
+            with self.subTest(size=size):
+                tid, pid, root = self.leftover_in_fake_proc(b"python3")
+                self.desk.update(tid, started_procs={str(pid): "boot:12345"})
+                last = "test_sweep.py"
+                command = "/interpreters/" + "x" * (size - len("/interpreters/ " + last)) + " " + last
+                (root / str(pid) / "cmdline").write_bytes(command.replace(" ", "\0").encode() + b"\0")
+                with self.linux_proc(root), self.fake_live_process(pid):
+                    [stopped] = run.sweep(self.desk, tid)
+                shown = stopped["command"]
+                if size <= 120:
+                    self.assertEqual(shown, command)
+                else:
+                    self.assertLessEqual(len(shown), 120)
+                    self.assertTrue(shown.startswith("/interpreters/"), shown)
+                    self.assertTrue(shown.endswith(last), shown)
+                    self.assertIn(" ... ", shown)
+                    self.assertNotIn(shown, command)  # the mark makes the missing middle explicit
+                self.assertIn(shown, self.hansa("show", tid))
+                self.assertIn(shown, self.events("left_running_stopped")[-1]["processes"][0])
+        tid, pid, root = self.leftover_in_fake_proc(b"python3")
+        self.desk.update(tid, started_procs={str(pid): "boot:12345"})
+        command = "/python3 " + "x" * 42 + key + " " + "y" * 180 + key + " test_sweep.py"
+        (root / str(pid) / "cmdline").write_bytes(command.replace(" ", "\0").encode() + b"\0")
+        with self.linux_proc(root), self.fake_live_process(pid):
+            [stopped] = run.sweep(self.desk, tid)
+        self.assertNotIn("sk-leftover", stopped["command"])
+        self.assertIn("[key of claude]", stopped["command"])
+        self.assertTrue(stopped["command"].endswith("test_sweep.py"))
+
     def test_a_leftover_whose_name_holds_spaces_and_parentheses_is_stopped_as_before(self):
         from hansa import run
         comm = b"test (1) run.sh"  # 15 bytes, spaces and parentheses, and every byte decodes
@@ -18326,7 +18360,8 @@ def save():'''))
             text = views.show_text(desk, tid)
             self.assertIn(f"error: {failure}", text)
             self.assertIn(f"earlier run on claude: {once.format(-9)}; {lost}\n", text)
-            self.assertIn(f"earlier run on claude: killed by the system (exit -9); {lost}\n", text)
+            for part in ("last run on claude:", "killed by the system (exit -9)", lost):
+                self.assertIn(part, text)
             self.assertIn(f"  {tid} a: {failure}", views.status_text(views.status(desk)))
 
         quota, auth = "API Error: 429 rate_limit_error", "API Error: 401 authentication_error · Invalid API key"
@@ -18764,6 +18799,47 @@ def save():'''))
             self.assertTrue(run.network_reason({"is_error": True, "result": text}, ""), text)
         self.assertEqual(run.network_reason({"is_error": False, "result": "Fixed the ECONNRESET on a dropped connection"}, ""), "")
         self.assertEqual(run.network_reason({"is_error": True, "result": "I could not do it"}, ""), "")
+
+    def test_show_final_interrupted_run_is_last_and_each_attempt_keeps_its_actual_start(self):
+        from hansa import run
+        for cause, runs in (("econnreset", 2), ("quota", run.LIMIT_RETURNS + run.TRIES)):
+            with self.subTest(cause=cause):
+                self.net_lane(cause, runs, FAKE_NET_USAGE="1")
+                tid = self.desk.new_task("Add hello.txt")
+                starts = []
+                for index in range(runs):
+                    proc = run.start(self.desk, tid, "a", "claude")
+                    self.assertIsNotNone(proc)
+                    self.addCleanup(lambda p=proc: p.poll() is None and (p.kill(), p.wait()))
+                    starts.append(self.desk.meta(tid)["run_start"])
+                    self.assertEqual(proc.wait(timeout=60), 1)
+                    m = run.finish(self.desk, tid, 1)
+                    self.assertEqual(m["state"], "failed" if index == runs - 1 else "queued", m)
+                    self.desk.set_provider_state("claude", cool_until=0, unreachable_since=0)
+                shown = self.hansa("show", tid)
+                labels = [line for line in shown.splitlines() if re.match(r"(?:earlier|last) (?:try|run) on ", line)]
+                self.assertEqual(len(labels), runs)
+                self.assertEqual(sum(line.startswith("earlier ") for line in labels), runs - 1)
+                self.assertTrue(labels[-1].startswith("last "), labels)
+                self.assertEqual([a.get("run_start") for a in m["attempts"]], starts)
+                displayed_starts = [line.strip() for line in shown.splitlines() if line.startswith("  started from:")]
+                self.assertEqual(len(displayed_starts), runs)
+                for start, line in zip(starts, displayed_starts):
+                    self.assertIn(start["source"], line)
+                    self.assertIn(start["commit"][:12], line)
+                self.assertEqual(starts[0]["source"], "base")
+                self.assertEqual(starts[-1]["source"], "earlier run's commit")
+                self.assertNotEqual(starts[0]["commit"], starts[-1]["commit"])
+                counted = cost.task_runs(m)
+                self.assertEqual(len(counted), runs)
+                self.assertEqual(sum(r["usage"]["claude-x"]["in"] for r in counted), runs * 40)
+                # A run saved before attempts kept their start still knows its final start on the task.
+                old = self.desk.meta(tid)
+                for attempt in old["attempts"]:
+                    attempt.pop("run_start", None)
+                self.desk.update(tid, attempts=old["attempts"])
+                self.assertIn("  started from: earlier run's commit " + starts[-1]["commit"][:12],
+                              self.hansa("show", tid))
 
     def automatic_restart_from_base(self, reason: str, **env):
         for what in ("econnreset", "limit"):
@@ -30606,6 +30682,51 @@ def save():'''))
             self.assertIn(f"hansa close {t}; nothing was changed", self.refused("cancel", t))
         self.assertEqual([(self.desk.tasks_dir / t / "meta.json").read_bytes() for t in (tid, vid)], before)
         self.assertEqual(self.desk.events_path.read_bytes(), events)
+
+    def test_running_cancel_says_requested_until_serve_records_the_end(self):
+        for phase in ("", "starting", "checking", "verify"):
+            with self.subTest(phase=phase):
+                d = Dispatcher(self.desk)
+                tid, proc = self.serve_process(d, phase="" if phase == "verify" else phase)
+                if phase == "verify":
+                    parent = self.desk.new_task("The task to verify", lane="a", state="done")
+                    self.desk.update(tid, kind="verify", parent=parent)
+                self.assertIn(f"hansa cancel {tid}", self.hansa("show", tid))
+                said = self.hansa("cancel", tid)
+                for part in (tid, "cancel requested", "cancelled", "seconds"):
+                    self.assertIn(part, said)
+                m = self.desk.meta(tid)
+                self.assertEqual((m["state"], m["cancel"]), ("running", True))
+                for text in (self.hansa("show", tid), self.hansa("status")):
+                    self.assertIn("cancel requested", text)
+                next_line = next(line for line in self.hansa("show", tid).splitlines() if line.startswith("next:"))
+                self.assertNotIn(f"hansa cancel {tid}", next_line)
+                proc.wait(timeout=60)
+                self.assertEqual(self.settle(d, tid)["state"], "cancelled")
+                self.assertNotIn("cancel requested", self.hansa("show", tid))
+        queued = self.desk.new_task("Cancel before launch")
+        self.assertIn(f"{queued} cancelled", self.hansa("cancel", queued))
+        self.assertEqual(self.desk.meta(queued)["state"], "cancelled")
+
+    def test_show_queued_task_options_lists_only_requested_values_in_one_line(self):
+        self.hansa("goal", "add", "Export reports")
+        options = (("--goal", "g1", "goal g1 (Export reports)"),
+                   ("--max-turns", "27", "max turns 27"),
+                   ("--model", "sonnet", "model sonnet"),
+                   ("--effort", "high", "effort high"))
+        for given in ((), *[(option,) for option in options], options):
+            with self.subTest(given=given):
+                args = [word for flag, value, _ in given for word in (flag, value)]
+                added = self.hansa("add", "Export the report", "--lane", "a", *args)
+                tid = next(line.split()[0] for line in added.splitlines() if re.match(r"t\d+ queued", line))
+                lines = [line for line in self.hansa("show", tid).splitlines() if line.startswith("task options:")]
+                self.assertEqual(len(lines), int(bool(given)))
+                if lines:
+                    for option in options:
+                        if option in given:
+                            self.assertIn(option[2], lines[0])
+                        else:
+                            self.assertNotIn(option[2], lines[0])
 
     def test_close_of_finished_work_keeps_the_stored_states(self):
         tid = self.desk.new_task("Finished task")

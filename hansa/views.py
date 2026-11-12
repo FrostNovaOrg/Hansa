@@ -1136,6 +1136,7 @@ def status(desk: Desk) -> dict:
                        "problem": provider_status_problem(desk, s, n, tasks), "check": pst.get(n, {}).get("check")}
                       for n, p in sorted(s["providers"].items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
+                     "cancel": bool(m.get("cancel")),
                      "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
                      "limit_min": s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240),
                      "effort": m.get("effort_used", ""), "effort_from": m.get("effort_from"),
@@ -1340,6 +1341,7 @@ def status_text(st: dict) -> str:
                                                + (f", {m['effort_said']}" if m.get("effort_said") else "") + ")")
                 + (" with a browser" if m.get("browser") else "")
                 + (f" ({m['minutes']} min in all)" if m["checking"] else f", {m['minutes']} min") + f": {m['title']}"
+                + (" · cancel requested" if m.get("cancel") else "")
                 + (f"\n      so far: {_progress_line(m['progress'])}" if m.get("progress") else "")
                 for m in st["running"]]
     if st["queued"]:
@@ -1660,7 +1662,10 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
     m = as_closed_now(desk.meta(tid))
     m["markers"] = markers_of(desk, m)
     d = desk.tasks_dir / tid
+    cancelling = m["state"] == "running" and m.get("cancel")
     head = f"{tid} · {m['state']} · lane {m.get('lane') or 'any'}"
+    if cancelling:
+        head += " · cancel requested"
     if m.get("kind") and m["kind"] not in ("task", "verify", "work"):
         head += " · " + str(m["kind"])
     if m.get("provider"):
@@ -1689,7 +1694,17 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         meaning = waiting["waiting"]
     if m["state"] == "running" and m.get("setup_ran") and "setup_min" in (progress := progress_of(desk, m)):
         meaning = _progress_line(progress)
+    if cancelling:
+        meaning = "cancel requested; hansa serve will end it as cancelled within seconds"
     out = [head, f"title: {m['title']}", *task_text_lines(desk, m, full), f"meaning: {meaning}"]
+    options = []
+    if m.get("goal"):
+        goal = goals.records(desk)[0].get(m["goal"], {})
+        options.append(f"goal {m['goal']}" + (f" ({goals.one_line(goal['title'])})" if goal.get("title") else ""))
+    options += [f"{label} {m[key]}" for key, label in (("max_turns", "max turns"), ("model", "model"), ("effort", "effort"))
+                if m.get(key)]
+    if options:
+        out.append("task options: " + " · ".join(options))
     out += [f"attachment: {a['name']} ({a['size']} bytes)" for a in m.get("attachments", [])]
     if m.get("verify_after"):
         request = m["verify_after"]
@@ -1750,16 +1765,19 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         return (f"{start['source']} {start['commit'][:12]}"
                 + (f" ({start['why']})" if start.get("why") else ""))
 
-    for a in m.get("attempts", []):
+    for index, a in enumerate(m.get("attempts", [])):
+        # Requeued attempts keep their end and numbers; the final attempt's numbers stay on the task.
+        current = m["state"] == "failed" and index == len(m["attempts"]) - 1 and not a.get("ended")
+        when = "last" if current else "earlier"
         on = a["provider"]  # with its model and effort when they were not those of the run above
         if a.get("model") and (a["provider"], a["model"], a.get("effort", ""), a.get("effort_from")) != (
                 m.get("provider"), m.get("model_asked"), m.get("effort_used", ""), m.get("effort_from")):
             on = run_text(a, desk.settings()["providers"].get(a["provider"]))
-        out.append(f"earlier run on {on}: {a['error']} ({a['kind']}; no try used)" if a.get("kind") in ("credit", "model") else
-                   f"earlier try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
-                   f"earlier run on {on}: {a['error']}; what it reported, if anything, is not kept"
+        out.append(f"{when} run on {on}: {a['error']} ({a['kind']}; no try used)" if a.get("kind") in ("credit", "model") else
+                   f"{when} try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
+                   f"{when} run on {on}: {a['error']}; what it reported, if anything, is not kept"
                    if a.get("kind") == "killed" else  # it used no try
-                   f"earlier run on {on}: {a['error']} (its usage limit; "
+                   f"{when} run on {on}: {a['error']} (its usage limit; "
                    + ("counted as a try)" if a.get("counted") else "no try used)"))
         if page_messages is not None:
             page_messages[str(len(out) - 1)] = message("task_prior", out[-1], provider=on, reason=describe(a["error"]),
@@ -1769,8 +1787,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
                 out.append(f"  {a['provider']}: {resting}")
         if a.get("turns_unknown_after_resume"):  # run.finish: the system killed the run hansa resumed
             out.append("  its turns after hansa resumed it are unknown: the system killed it before it said")
-        out += ["  " + x for x in oom_lines(a, "earlier run")]
-        start = a.get("run_start")
+        out += ["  " + x for x in oom_lines(a, f"{when} run")]
+        start = a.get("run_start") or (m.get("run_start") if current else None)
         if (not start and a.get("kind") in ("network", "limit", "credit") and m.get("base")
                 and m.get("kind") != "verify"):
             start = {"commit": m.get("start_from") or m["base"],
@@ -1979,6 +1997,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
                "queued": "hansa status shows what it is waiting for"}
         if m.get("closed"):  # its task is closed: nothing is left to do with it
             nxt = {}
+    if cancelling:
+        nxt["running"] = f"wait for it to stop: {notify.wait_step(desk, tid, heard)}"
     if m["state"] in nxt:
         out.append("next: " + nxt[m["state"]])
     if page_messages is not None:
