@@ -2034,8 +2034,9 @@ def cmd_ping(a):
             why = {"quota": "usage limit", "login": "lost login", "model": "unknown model"}[r["rest_ended"]]
             print(f"{n}: ended its rest after the {why}; tasks waiting for it can start again")
         elif r.get("rest_kept") == "credit":
-            print(f"{n}: its credit rest stays; it waits for the principal to confirm a top-up on the page "
-                  "or save a new key")
+            plan = (desk.provider_state().get(n) or {}).get("credit_plan")
+            print(f"{n}: its credit rest stays; it waits for the principal to confirm "
+                  + ("an upgraded plan" if plan else "a top-up") + " on the page or save a new key")
 
 
 LOCK_WAIT = 2.0  # seconds hansa serve waits for serve.lock before it says another server holds it

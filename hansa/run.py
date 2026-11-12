@@ -108,6 +108,7 @@ CREDIT = re.compile(r"credit balance is too low|\bout of credits\b|API Error: 40
 QUOTA = re.compile(r"API Error: 429|rate_limit_error|usage limit reached|"
                    r"you(?:'|’)ve hit your [\w' ]{0,40}limit|"  # Claude Code's own line for a subscription's limit
                    r"insufficient quota|quota exceeded|too many requests|额度不足|额度已用", re.I)
+CREDIT_LOW = "credit balance too low"  # unusable_reason's words for credit, unless an adapter names the plan
 QUOTA_STATUS = {429}
 AUTH = re.compile(r"authentication_error|invalid (x-)?api[ -]key|API Error: 40[13]\b|permission_error", re.I)
 AUTH_STATUS = {401, 403}
@@ -1179,7 +1180,10 @@ def git(*args, cwd, env=None) -> str:
         refused = account.git_refusal(r.stderr or "", cwd)
         if refused:
             raise RuntimeError(refused)
-        raise RuntimeError(f"git {' '.join(args[:2])} failed: {(r.stderr or r.stdout).strip()[:300]}")
+        said, head = (r.stderr or r.stdout).strip(), f"git {' '.join(args[:2])} failed: "
+        e = RuntimeError(head + said[:300])  # short where it is printed; a task's git_error keeps more (finish)
+        e.said = head + said[:600]
+        raise e
     # NUL-delimited names may start or end in whitespace; only scalar/human output is stripped.
     return r.stdout if "-z" in args else r.stdout.strip()
 
@@ -1325,8 +1329,10 @@ def _reset_time(text, at):
     return found
 
 
-def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "", *, model: str = "") -> float | None:
+def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str = "", *, model: str = "",
+                  plan: bool = False) -> float | None:
     """Rest an unusable provider. Credit and unknown models have no end time and are announced once here;
+    a credit rest for a plan that cannot use the provider (plan: an adapter's plan_upgrade) keeps its words;
     usage limits use their reset time and a minute (at most REST_CAP), else cool_minutes, and callers announce
     those timed rests with provider_rest_news after saving the task's final state or the completed provider check."""
     from .rests import record
@@ -1347,12 +1353,14 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
         if st.get("model_since") and kind != "credit":
             return None  # another failing run cannot put a time limit on this rest
         if kind == "credit":
-            desk.set_provider_state(name, credit_since=t, cool_until=0, reason=desk.redact(why),
+            upgrade = desk.redact(why) if plan else ""
+            desk.set_provider_state(name, credit_since=t, cool_until=0, reason=desk.redact(why), credit_plan=upgrade,
                                     rest_how="credit", rest_minutes=None, unreachable_since=0, unreachable_reason="")
             record(desk, name, credit_since=t, cool_until=0)
-            line = (f"provider {name}: credit balance too low at {time.strftime('%H:%M', time.localtime(t))}; "
-                    "it rests until you say on the page that it is topped up")
-            desk.event("provider_credit", provider=name, since=t, text=line)
+            line = (f"provider {name}: {upgrade or 'credit balance too low'} at "
+                    f"{time.strftime('%H:%M', time.localtime(t))}; it rests until you say on the page that "
+                    + ("its plan is upgraded" if upgrade else "it is topped up"))
+            desk.event("provider_credit", provider=name, since=t, text=line, **({"plan": upgrade} if upgrade else {}))
             return None
         if kind != "quota":
             until = t + 60 * KEY_REST_MINUTES
@@ -1420,8 +1428,9 @@ def provider_rest_news(desk: Desk, s: dict, name: str) -> None:
 
 def credit_text(st: dict) -> str:
     """The principal alone ends a credit rest; the same words on the page and in the command views."""
-    since = st.get("credit_since")
-    return ("rests until the principal says it is topped up on the page; credit balance too low since "
+    since, plan = st.get("credit_since"), st.get("credit_plan")
+    return ((f"rests until the principal says on the page that its plan is upgraded; {plan} since " if plan else
+             "rests until the principal says it is topped up on the page; credit balance too low since ")
             + time.strftime('%m-%d %H:%M', time.localtime(since))
             + ("; another desk found it" if st.get("shared_rest") else "")) if since else ""
 
@@ -4483,7 +4492,9 @@ def unusable_reason(run: dict, err: str, subscription: bool = False):
     if subscription and LOST_LOGIN.search(text):  # before the 401: no key brings a subscription back
         return "login", "not logged in (Please run /login)"
     if status == 402 or CREDIT.search(text):
-        return "credit", "credit balance too low"
+        if run.get("plan_upgrade") and isinstance(run["plan_upgrade"], str):  # an adapter's words: the plan, not credit
+            return "credit", run["plan_upgrade"]
+        return "credit", CREDIT_LOW
     if status in QUOTA_STATUS:
         return "quota", f"out of quota (HTTP {status})"
     if status in AUTH_STATUS:
@@ -4708,7 +4719,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         if not recorded:
             fields.update(head="", commits=0, files=[], stat="")
     except (RuntimeError, KeyError, OSError) as e:
-        fields.update(head="", commits=0, files=[], stat="", git_error=desk.redact(str(e))[:600])
+        fields.update(head="", commits=0, files=[], stat="", git_error=desk.redact(getattr(e, "said", str(e)))[:600])
         restart = None
         if meta.get("kind") != "verify":  # the work is not recorded: the task fails, and its files are kept aside
             not_committed = git_first_line(e) or type(e).__name__
@@ -4766,7 +4777,8 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
                 "queued again without using a try; it starts when a provider of its lane is ready"
                 if state == "queued" else f"gave up after {TRIES} tries")
     elif kind in ("credit", "quota"):
-        until = rest_provider(desk, desk.settings(), meta["provider"], kind, why, f"{run.get('result') or ''}\n{err}")
+        until = rest_provider(desk, desk.settings(), meta["provider"], kind, why, f"{run.get('result') or ''}\n{err}",
+                              plan=kind == "credit" and why != CREDIT_LOW)
         counted = kind != "credit" and sum(a.get("kind") == "limit" for a in attempts) >= LIMIT_RETURNS
         attempts.append({"provider": meta["provider"], "at": now(), "error": why,
                          "kind": "credit" if kind == "credit" else "limit", "counted": counted,
@@ -7515,6 +7527,7 @@ def waiting_detail(desk: Desk, s: dict, m: dict, busy: set, looks: dict | None =
             providers.append(reason(code, problem, provider=p, since=st.get("credit_since") or st.get("unreachable_since"),
                                     until=st.get("cool_until"), minutes=st.get("rest_minutes"),
                                     how=st.get("rest_how"), **({"model": st["model_unknown"]} if code == "model" else {}),
+                                    **({"plan": st["credit_plan"]} if code == "credit" and st.get("credit_plan") else {}),
                                     why=(st.get("unreachable_reason") if code == "unreachable" else st.get("reason")) or ""))
         why.append(reason("providers", f"lane {ln} has no provider ready ({'; '.join(f'{p}: {x}' for p, x in probs.items())})",
                           lane=ln, providers=providers))
@@ -7613,7 +7626,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
                                     quota_probe_blocked=False)
         elif kind and not quota_probe:
             desk.set_provider_state(name, unreachable_since=0, unreachable_reason="")
-            rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}", model=p["model"])
+            rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}", model=p["model"],
+                          plan=kind == "credit" and why != CREDIT_LOW)
         desk.event("provider_checked", provider=name, ok=ok, detail=detail)
         if kind and not quota_probe:  # a failed automatic check changes nothing, so it tells nothing either
             provider_rest_news(desk, s, name)

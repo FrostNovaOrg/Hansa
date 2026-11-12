@@ -283,6 +283,8 @@ lane, or waits for one.
 
 Credit errors (`credit balance is too low`, HTTP/API Error 402, `insufficient balance`,
 `insufficient_balance`, `insufficient_quota`, `余额不足`) rest indefinitely, surviving server restarts.
+A plan that cannot use the provider (the Codex adapter's `upgrade to Plus`) rests the same way, but its words
+keep the provider's own sentence and ask the principal to confirm on the page once the plan is upgraded.
 Only the principal ends this rest: press **Topped up** on that provider's row in **Settings, Providers**,
 or save a new key. The coordinator cannot end it, even with `hansa ping`.
 A **Topped up** confirmation clears that login's credit rest on every desk on the account.

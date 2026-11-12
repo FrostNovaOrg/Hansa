@@ -17245,6 +17245,27 @@ def save():'''))
         self.assertNotIn("set aside", self.hansa("show", new))
         self.assertEqual(sh_out("git", "show", f"{ref}:hello.txt", cwd=self.repo), f"hello from {tid}")
 
+    def test_a_failed_commit_keeps_up_to_600_characters_of_what_git_said(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["lanes"]["a"]["setup"] = 'touch "$(git rev-parse --git-dir)/index.lock"'  # git's long "Unable to create"
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "failed", m)
+        # the lock's path and git's advice after it run past 300 characters: the end of what git said is kept
+        self.assertGreater(len(m["git_error"]), 300 + len("git add -A failed: "), m["git_error"])
+        self.assertLessEqual(len(m["git_error"]), 600)
+        self.assertIn("remove the file manually", m["git_error"])
+        self.assertIn("remove the file manually", self.hansa("show", tid))
+        # the one-line error stays git's first line; run.git's own message stays as short as before
+        self.assertNotIn("\n", m["error"])
+        self.assertNotIn("remove the file manually", m["error"])
+        with self.assertRaises(RuntimeError) as e:
+            run.git("add", "-A", cwd=Path(m["worktree"]))
+        self.assertLessEqual(len(str(e.exception)), len("git add -A failed: ") + 300)
+        self.assertNotIn("remove the file manually", str(e.exception))
+
     def test_what_a_task_finds_left_in_the_worktree_is_set_aside_and_named_in_its_show(self):
         d = Dispatcher(self.desk)
         first = self.settle(d, self.desk.new_task("Add hello.txt"))
@@ -20814,6 +20835,27 @@ def save():'''))
                 self.assertEqual(shown["posts"], [{"path": "/api/provider/top-up", "body": {"provider": "claude"}}])
                 self.assertNotIn(credit, shown["after"])
                 self.assertEqual(shown["draft"], "kept-model")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_page_words_a_plan_rest_as_a_plan_to_upgrade_and_keeps_its_button(self):
+        from hansa import run
+        plan = "the ChatGPT plan cannot use Codex and needs upgrading (Codex: To use Codex with your ChatGPT plan)"
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "credit", plan, plan=True)
+        harness = self.tmp / "plan-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        for language, said in (("en", ("plan cannot use Codex", "plan is upgraded")), ("zh-CN", ("需要升级", "确认已升级"))):
+            with self.subTest(language=language):
+                replies = {"/api/settings": public_settings(self.desk), "/api/status": views.status(self.desk),
+                           "/api/events": [], "/api/provider/top-up": {"ok": True}}
+                r = subprocess.run(["node", str(harness), str(page), "credit", language],
+                                   input=json.dumps(replies), capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                shown = json.loads(r.stdout)
+                for part in said:
+                    self.assertIn(part, shown["before"])
+                self.assertNotIn("credit balance too low" if language == "en" else "余额不足，自", shown["before"])
+                self.assertEqual(shown["posts"], [{"path": "/api/provider/top-up", "body": {"provider": "claude"}}])
 
     def test_a_detail_reader_that_raises_does_not_keep_a_run_from_ending(self):
         from hansa import run

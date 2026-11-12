@@ -1132,6 +1132,7 @@ def status(desk: Desk) -> dict:
         "providers": [{"name": n, "kind": p["kind"], "model": p["model"], "effort": p.get("effort", ""),
                        "rest_minutes": s.get("cool_minutes", 30),
                        "credit_since": pst.get(n, {}).get("credit_since", 0),
+                       "credit_plan": pst.get(n, {}).get("credit_plan", "") if pst.get(n, {}).get("credit_since") else "",
                        "model_since": pst.get(n, {}).get("model_since", 0),
                        "automatic_check": quota_probe_text(pst.get(n, {}), s),
                        "problem": provider_status_problem(desk, s, n, tasks), "check": pst.get(n, {}).get("check")}
