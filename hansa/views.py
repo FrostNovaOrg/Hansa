@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, installed, installed_text, memory, notify, plugin, release, up
+from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, history, installed, installed_text, memory, notify, plugin, release, up
 from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError)
 from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
@@ -1985,8 +1985,26 @@ def verify_lane_text(s: dict, name: str) -> str:
     return f"  verifications on lanes {', '.join(verifiers)}" if verifiers else ""
 
 
+def _lane_command(entry, name: str) -> str:
+    """The command that changed a lane, with the field or target it names, as one would type it again."""
+    command = entry.get("command", "")
+    field = entry["path"][len(f"lanes.{name}."):].split(".")
+    if command == "hansa lane set":
+        return f"with hansa lane set {name} {field[0]}"
+    if command == "hansa lane target" and field[0] == "targets" and len(field) > 1:
+        return f"with hansa lane target {name} {field[1]}"
+    if command == "hansa lane brief":
+        return f"with hansa lane brief {name}"
+    return history.how(entry)
+
+
 def lane_origin(desk: Desk, name: str) -> str:
-    """Which command made the lane, and which last changed it, as the event log has them."""
+    """Which command made the lane, and which last changed it: from the settings history, which names the command
+    of every change; on a desk from before it, from the event log."""
+    made, last = history.origin(desk, "lane", name, "repo")
+    if made or last:
+        return "; ".join(x for x in (made and "made " + history.how(made),
+                                     last and "last changed " + _lane_command(last, name)) if x)
     made, last = "", ""
     try:
         lines = desk.events_path.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
@@ -2001,13 +2019,26 @@ def lane_origin(desk: Desk, name: str) -> str:
         if e.get("lane") != name:
             continue
         if e.get("event") == "lane_set" and not last:
-            last = f"hansa lane set {name} {e.get('field', '')}".strip()
+            last = (f"hansa lane target {name} {e.get('target', '')}" if e.get("field") == "targets"
+                    else f"hansa lane set {name} {e.get('field', '')}").strip()
+        elif e.get("event") == "lane_brief_changed" and not last:
+            last = f"hansa lane brief {name}"
         elif e.get("event") in ("lane_added", "desk_created"):
             made = "hansa lane add" if e["event"] == "lane_added" else "hansa init"
             break
     if not made and not last:  # a desk from before hansa recorded either
         return "set by the coordinator with hansa lane add or hansa lane set"
     return "; ".join(x for x in (made and f"made with {made}", last and f"last changed with {last}") if x)
+
+
+def provider_origin(desk: Desk, name: str) -> str:
+    """How the provider was set, as the settings history records it."""
+    made, last = history.origin(desk, "provider", name, "kind")
+    if not made and not last:  # a desk from before the settings history
+        return "set by hansa init or by the principal on the web page; no record says which"
+    return "; ".join(x for x in (made and "set " + history.how(made, "by"),
+                                 last and "last changed " + history.how(last, "by"))
+                     if x)
 
 
 def local_servers_text(mac: bool, listed: bool) -> str:
@@ -2253,7 +2284,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         where = p.get("config_dir") or "the default Claude Code login" if p["kind"] == "subscription" \
             else (p.get("base_url") or "no endpoint yet")
         return "\n".join([
-            f"provider {name} (set by the principal on the web page)",
+            f"provider {name} ({provider_origin(desk, name)})",
             f"  kind: {p['kind']} · model: {p['model']} · effort: {p.get('effort') or 'default'}",
             f"  rest after a usage limit: until the reset time the error gives, and a minute; else "
             f"{s.get('cool_minutes', 30)} minutes"

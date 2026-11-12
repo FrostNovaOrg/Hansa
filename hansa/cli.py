@@ -1898,7 +1898,12 @@ def cmd_explain(a):
         if a.all or (a.name and (a.name not in ("lane", "provider") or not a.history_name)) or (
                 a.history_name and not a.name) or (a.last is not None and a.last < 1):
             raise SystemExit("hansa: hansa explain history [lane L | provider P] [--last N]; N must be at least 1")
-        print(history.text(Desk.find(a.desk), a.name or "", a.history_name or "", a.last))
+        desk = Desk.find(a.desk)
+        if a.name and a.history_name not in desk.settings()["lanes" if a.name == "lane" else "providers"] and not \
+                history.read(desk, a.name, a.history_name)["entries"]:  # a removed one keeps its history
+            raise SystemExit(f"hansa: {views.explain_text(desk, a.name, a.history_name)}; no settings change "
+                             f"was ever recorded for {a.name} {a.history_name}")
+        print(history.text(desk, a.name or "", a.history_name or "", a.last))
         return
     if a.history_name or a.last is not None:
         raise SystemExit("hansa: --last and the extra name are for hansa explain history [lane L | provider P]")
@@ -1908,7 +1913,11 @@ def cmd_explain(a):
     if a.all and a.what != "lane":
         raise SystemExit("hansa: --all is for hansa explain lane NAME: the whole built-in list of what its workers "
                          "may not read")
-    print(views.explain_text(Desk.find(a.desk), a.what or "", a.name or "", a.all))
+    desk = Desk.find(a.desk)
+    shown = views.explain_text(desk, a.what or "", a.name or "", a.all)
+    if a.what in ("lane", "provider") and (a.name or "") not in desk.settings()[a.what + "s"]:
+        raise SystemExit(f"hansa: {shown}")  # no such lane or provider: the line names the ones there are
+    print(shown)
 
 
 def _since(text: str) -> float:
@@ -4097,8 +4106,9 @@ def main(argv=None):
     p.add_argument("--page", type=int, metavar="N", help="with --closed: the Nth twenty")
     p.epilog = see_more("inbox")
     p = add("explain", cmd_explain, "this desk's current settings and state: lane NAME | provider NAME | "
-            "server | notify; history [lane L | provider P] [--last N] lists settings changes newest first: "
-            "when, who (principal or coordinator's command), path, old → new. Keys and values containing "
+            "server | notify; history [lane L | provider P] [--last N] lists settings changes newest first, one "
+            "change per command or page save: when (local time), who (principal or coordinator's command), and "
+            "under it each path, old → new. Keys and values containing "
             "known keys are withheld; long values are marked truncated. An empty history says since when "
             "changes are recorded.")
     p.add_argument("what", nargs="?", choices=["lane", "provider", "task", "server", "notify", "history"],

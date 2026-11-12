@@ -114,7 +114,9 @@ desk/
 
 ## 设置历史
 
-`hansa explain history` 按从新到旧的顺序列出设置变更，包括 UTC 时间、谁改的、设置路径，以及旧值 → 新值。在网页上保存的设置记为负责人所改；协调员的改动则注明所用命令，比如 `hansa lane set`。`hansa explain history lane g` 只列出工作线 g 的变更，包括发布目标和常设说明。`hansa explain history provider astra` 只列出该服务商的变更，包括密钥变更。`--last N` 只显示最新的 N 条匹配记录；不加则显示全部匹配记录。已经移除的工作线和服务商也能查询。
+`hansa explain history` 按从新到旧的顺序列出设置变更：每次变更（一条命令或一次网页保存）占一行，写明本地时间（格式与 `hansa status` 相同）和谁改的，其下逐项列出它改的设置路径，以及旧值 → 新值；`hansa init` 算一次变更。在网页上保存的设置记为负责人所改；协调员的改动则注明所用命令，比如 `hansa lane set`。`hansa explain history lane g` 只列出工作线 g 的变更，包括发布目标和常设说明。`hansa explain history provider astra` 只列出该服务商的变更，包括密钥变更。`--last N` 只显示最新的 N 次匹配变更，每次带上它改的全部设置；不加则全部显示。已经移除的工作线和服务商也能查询；既不是现有工作线（或服务商）、历史里也没有的名字会被拒绝，退出码为失败，与 `hansa explain lane`、`hansa explain provider` 对不存在名字的处理相同。网页的 `/api/history` 仍给出 Unix 时间，并按记录计数。
+
+`hansa explain lane L` 和 `hansa explain provider P` 根据这份历史说明工作线由哪条命令建立、服务商由谁设置（`hansa init`、`hansa lane add`、网页上的负责人），以及最近一次由哪条命令修改，并写明字段或目标：`hansa lane target a preview`、`hansa lane set a check`、`hansa lane brief a`。
 
 每项被修改的设置各记一条，比如 `lanes.g.env`、`providers.astra.model` 或 `lanes.g.targets.preview.command`。列表和工作线的环境变量字典（变量名及其值）都作为一个整体保存，所以清空环境变量时，会显示原来的变量 → `{}`。新增或移除设置时，没有值的一侧显示 `(unset)`。工作线的常设说明使用路径 `lanes.g.brief`。对于协调员加入负责人禁读清单（列出工作智能体不得读取的路径）的条目，hansa 还记录是谁在何时加入的；这些记录不算另一项设置变更。没有实际改动的保存、被拒绝的保存，以及只校验而不保存的操作，都不会写入历史。
 
