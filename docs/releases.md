@@ -999,7 +999,8 @@ padding and standard padded base64, without running a program with the key.
 The 3,500-byte bound applies to the final encrypted JSON request, including
 ciphertext and IV; only the inner body may be shortened. This hides the desk
 name and text from Bark's server and Apple. Without a key, the plain request
-is unchanged. Release codes remain excluded from every push.
+is unchanged. A waiting release's one-time code goes inside the ciphertext only; a Bark entry without a key, like
+every other push entry, gets code-free wording asking for an answer on the page.
 
 Each entry has `.hansa/alert-push-ID-last.json` with `{at, ok, why}` and an
 optional safe service `code` on failure.

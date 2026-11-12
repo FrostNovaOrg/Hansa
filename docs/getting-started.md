@@ -22,7 +22,7 @@ Install these outside the worktree, on the desk account's `PATH` when starting `
 With Node and npm installed:
 
 ```sh
-npm install -g @anthropic-ai/claude-code@2.1.307 @anthropic-ai/sandbox-runtime@0.0.79
+npm install -g @anthropic-ai/claude-code@2.1.306 @anthropic-ai/sandbox-runtime@0.0.79
 ```
 
 [Tools and upgrades](sandbox.md#tools-and-upgrades) records the baseline and upgrade checks.
@@ -172,8 +172,8 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=y
 ```
 
 Space selects desks, `s` starts them, Enter opens a coordinator, `w` gives its page address.
-Ctrl+B then D detaches from a coordinator; Ctrl+C leaves the page. Nothing starts until you
-choose. `q` quits and leaves work running.
+Ctrl+B, D detaches from a coordinator; Ctrl+C leaves the page. Nothing starts until you
+choose. `q` quits, leaving work running; `x`, then `y`, stops the desk's server.
 
 Install tmux on the server; `hansa up` keeps the coordinator open after disconnects.
 Reconnect using its printed attach command (including `-L` or `-S`). `hansa status`

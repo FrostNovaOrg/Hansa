@@ -902,8 +902,9 @@ again in **Settings → Alerts**. See
 refusal cases and what a repair removes.
 
 Every enabled entry with an address receives each gathered batch, even with the
-alert command blank. Sends run independently. One-time release codes go only
-to the alert command; answer push alerts about waiting releases on the page.
+alert command blank. Sends run independently. One-time release codes go to the
+alert command and to Bark entries that encrypt, inside the ciphertext only; other push entries ask for an
+answer on the page, which is always available.
 See [alerts](releases.md#alerts) for gathering, deadlines, levels and failure
 records, and the [service guide](push-services.md) for what leaves this machine
 and who can read it.
