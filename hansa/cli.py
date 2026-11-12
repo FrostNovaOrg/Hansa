@@ -994,9 +994,26 @@ def _merge_step(lane: dict, task_lane: dict | None = None) -> str:
     return f"the lane's {'setup and ' if lane.get('setup') else ''}{_merge_what(lane, task_lane)} ({merge_command(lane)})"
 
 
+def _latest_replacement(desk: Desk, m: dict) -> str:
+    """Follow replacement records to the last task, visiting each id at most once if records form a circle."""
+    seen = {m["id"]}
+    while m.get("replaced_by") and m["replaced_by"] not in seen:
+        tid = m["replaced_by"]
+        seen.add(tid)
+        m = desk.meta(tid)
+    return m["id"]
+
+
+def _refuse_replaced(desk: Desk, m: dict) -> None:
+    if m["state"] == "replaced" and m.get("replaced_by"):
+        latest = _latest_replacement(desk, m)
+        raise SystemExit(f"hansa: {m['id']} was replaced by {latest}; use {latest} instead")
+
+
 def _mergeable(desk: Desk, a):
     """Everything that must hold before a merge; says why not and exits when something does not."""
     m = desk.meta(a.id)
+    _refuse_replaced(desk, m)
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {a.id} is a verification of {m.get('parent')}; it is never merged. "
                          f"Read it, then merge or send back {m.get('parent')}")
@@ -1108,7 +1125,8 @@ def _retry(desk: Desk, a) -> None:
         raise SystemExit(f"hansa: {a.id} was cancelled before it started and restored {m['restored_parent']}; "
                          f"send that task back instead: hansa retry {m['restored_parent']} \"...\"")
     if m["state"] == "replaced":
-        raise SystemExit(f"hansa: {a.id} was already replaced by {m.get('replaced_by')}; send that one back instead")
+        latest = _latest_replacement(desk, m) if m.get("replaced_by") else None
+        raise SystemExit(f"hansa: {a.id} was already replaced by {latest}; send that one back instead")
     if m["state"] in ("queued", "running", "merging"):
         raise SystemExit(f"hansa: {a.id} is {m['state']}; a follow-up is for a task that has ended. "
                          f"{_wait_for(desk, a.id)}, or cancel it first (hansa cancel {a.id})")
@@ -1256,6 +1274,7 @@ def cmd_cancel(a):
     restored = None
     with desk.lock():  # the state read here is the state changed here
         m = desk.meta(a.id)
+        _refuse_replaced(desk, m)
         if m["state"] == "queued":
             if (m.get("parent") and m.get("kind") != "verify" and not m.get("started")
                     and not m.get("attempts") and not m.get("head")):
@@ -1318,6 +1337,7 @@ def cmd_close(a):
     by = notify.session_here()
     with desk.lock():
         m = desk.meta(a.id)
+        _refuse_replaced(desk, m)
         if m["state"] not in ("done", "failed"):
             raise SystemExit(f"hansa: {a.id} is {m['state']}; only finished or failed tasks or verifications can be "
                              "closed; nothing was changed")
@@ -1370,6 +1390,7 @@ def _verify(desk: Desk, a) -> None:
 def queue_verification(desk: Desk, tid: str, *, lane="", effort="", note="", session=None) -> tuple:
     """Build a verification for the command or server. The caller holds desk.lock()."""
     m = desk.meta(tid)
+    _refuse_replaced(desk, m)
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {tid} is itself a verification; verify the task it checks ({m.get('parent')})")
     if m["state"] != "done" or not m.get("commits"):

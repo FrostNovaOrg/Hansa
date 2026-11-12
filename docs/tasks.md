@@ -4,6 +4,13 @@ Time limits and resumes, retries after a dropped connection or a provider's usag
 effort, merging, what work costs, and the states a task goes through. The
 [README](../README.md#how-it-works) has the overview of a task's life.
 
+Use the exact task id printed by hansa: lowercase `t` followed by digits, such as
+`t0001`. Every command taking a task id rejects paths, trailing slashes and other
+spellings before reading the task. This prevents an id from reading another
+folder or appearing differently in merge commits and events; keep this check
+while task files are stored by id. If only case or zero padding differs from an
+existing task, the refusal suggests its id without selecting it for you.
+
 `hansa status`, `hansa show ID` and the page show replies, idle minutes and the last note while a worker runs.
 Claude Code's session record wins; otherwise hansa reads `progress/<session-id>.json` in the provider's Claude
 home (`.hansa/claude-<provider>` for compatible providers): `{"replies": 3, "last": 1790000000, "note": "Checking tests."}`.
@@ -37,6 +44,8 @@ with the same counts, decisions, evidence and lifetime cost.
 
 Every record is a new entry: a reopening or a tie never rewrites an earlier one. A goal's
 `history:` in `goal show` appears once it has been reopened or had work tied to it or moved away.
+An invalid task reference in `goal tie` keeps the task-id guidance and spelling suggestion,
+when available, and reminds you that a to-do is given as `#1` or `1`.
 
 Task counts use the latest task in each retry chain: queued/running, waiting for review (`done`
 or `merging`), merged and failed. A merged task stays a chain of its own, with its merge, releases
@@ -750,6 +759,11 @@ that limit. `--effort E` overrides the inherited effort separately.
 A done, failed, closed or cancelled task becomes replaced, so it can be sent back once; a second `hansa retry` of it is
 refused and names the follow-up to send back instead. A merged task stays merged: each
 `hansa retry` of it is new work on top of that merge, and it can be sent back more than once.
+`hansa merge`, `hansa verify`, `hansa cancel` and `hansa close` also refuse a replaced
+task and name the follow-up to use instead. If that follow-up was also replaced, all five
+commands name the last follow-up, so using it does not lead to another replacement refusal.
+The lookup stops before revisiting an id if damaged replacement records form a circle;
+keep this guard while following stored replacement links.
 
 A follow-up cancelled while still queued, before it ever started, gives the task it replaced back
 as it was (waiting for review, failed, or closed), and `hansa cancel` says so; `hansa retry` of

@@ -3284,10 +3284,26 @@ class Desk:
         return tid
 
     def meta(self, tid: str) -> dict:
+        # Check before joining the path: aliases can read another folder (or keep a different case in a merge).
+        if not re.fullmatch(r"t[0-9]+", tid):
+            self._no_task(tid)
         m = read_json(self.tasks_dir / tid / "meta.json")
         if not isinstance(m, dict):
-            raise SystemExit(f"hansa: no task {tid}")
+            self._no_task(tid)
         return m
+
+    def _no_task(self, tid: str) -> None:
+        message = f"hansa: no task {tid}; use the exact task id: lowercase t followed by digits (for example t0001)"
+        match = re.fullmatch(r"[tT]([0-9]+)", tid)
+        if match:
+            number = match[1].lstrip("0")
+            # Only inspect names and existence, never read a task through an invalid id. No integer size limit.
+            for path in sorted(self.tasks_dir.glob("t[0-9]*")):
+                if (re.fullmatch(r"t[0-9]+", path.name) and path.name != tid
+                        and path.name[1:].lstrip("0") == number and (path / "meta.json").is_file()):
+                    message += f"; did you mean {path.name}?"
+                    break
+        raise SystemExit(message)
 
     def update(self, tid: str, **fields) -> dict:
         return self.change(tid, lambda m: fields)
