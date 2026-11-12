@@ -1375,7 +1375,14 @@ coordinator ever ran on it: `hansa coordinator` never prepared it (no
 `.hansa/coordinator.json`), nothing is under `.hansa/followers/`, and no task
 was added from a Claude Code session (a task records the session that added
 it). Tasks added by hand from a shell, as the guide's `hansa add` before tmux
-was installed, do not count. With no record on any other desk, it starts nothing:
+was installed, do not count. A desk that is new only until its first task from a
+session is not one from before hansa recorded starts: hansa tells the two apart
+by `.hansa/starts-recorded.json`, which `hansa init` writes, and which the first
+task from a session writes on a desk that was still new until then. There
+`hansa up` starts nothing, since that session may be the coordinator, and it and
+`hansa status` say that no coordinator's session is recorded for this desk yet,
+and how to record one: start it with `hansa coordinator`, or run `hansa notify
+on` in the session that coordinates. With no record on any other desk, it starts nothing:
 that desk had a coordinator before hansa recorded its start, maybe a session
 in another folder that ran `hansa notify on`, and a fresh `hansa coordinator`
 would be a second coordinator, in the wrong folder, with a new conversation.

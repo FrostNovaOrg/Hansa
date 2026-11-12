@@ -45,7 +45,16 @@ PRINTS = ("-p", "--print")  # claude's words for a run that is not an interactiv
 # in another folder, so a fresh hansa coordinator would be a second one, in the wrong folder
 NOT_YET = ("its start is not recorded yet: this desk had a coordinator before hansa recorded its start, maybe a "
            "session in another folder")
-EXTERNAL_ASK = "Allow external CLAUDE.md file imports?"  # Claude Code's question for imports from outside the folder
+# With no record on a desk hansa saw new (STARTS_RECORDED) whose only sign of a coordinator is a task added from a
+# Claude Code session: no coordinator's start was ever left unrecorded there, so none ran before; that session is
+# not known to be the coordinator's
+NONE_YET = "no coordinator's session is recorded for this desk yet"
+TO_RECORD_FIRST = ("To record one: start it with hansa coordinator, or run hansa notify on in the session that "
+                   "coordinates; from then on hansa up starts it again")
+# In .hansa/: written while the desk is new (new_desk), at hansa init or as the first task from a session is added:
+# from then on hansa records each coordinator's start. An older desk has none, so hansa can tell the two apart
+STARTS_RECORDED = "starts-recorded.json"
+EXTERNAL_ASK ="Allow external CLAUDE.md file imports?"  # Claude Code's question for imports from outside the folder
 TO_RECORD = ("Start it as before and run hansa notify on in it, or start it with hansa coordinator; from then on "
              "hansa up starts it again")
 CARD = Path(__file__).with_name("card.md")  # the card hansa puts in a desk (cli.py), and the one its copy holds
@@ -864,6 +873,33 @@ def new_desk(desk: Desk) -> bool:
         and not has(notify.register_dir(desk), lambda x: True)
 
 
+def mark_new(desk: Desk) -> None:
+    """While the desk is new, record that hansa records every coordinator's start on it from now on
+    (STARTS_RECORDED). Not written on a desk that is no longer new: one from before hansa recorded starts."""
+    try:
+        if not (desk.state_dir / STARTS_RECORDED).exists() and new_desk(desk):
+            desk.state_dir.mkdir(mode=0o700, exist_ok=True)
+            write_json(desk.state_dir / STARTS_RECORDED, {"since": now()})
+    except OSError:
+        pass  # then the desk reads as an older one: hansa up starts nothing and says what to do
+
+
+def none_yet(desk: Desk) -> bool:
+    """A desk that is not new only for tasks added from a Claude Code session, which hansa saw new: no coordinator
+    ran before hansa recorded starts there, and none has recorded its start since."""
+    return (desk.state_dir / STARTS_RECORDED).exists() and not (desk.state_dir / "coordinator.json").exists() \
+        and not _followers(desk)
+
+
+def _followers(desk: Desk) -> bool:
+    try:
+        return any(notify.register_dir(desk).iterdir())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 def by_hand(plan: dict) -> str:
     then = ", then hansa notify on in it" if plan["kind"] == "notify" else ""
     return shlex.join(["cd", plan["folder"]]) + " && " + shlex.join(plan["hand"]) + then
@@ -1299,7 +1335,11 @@ def coordinator_line(desk: Desk) -> str:
         return (f"the coordinator's session pid {pid} still runs and does not hear from hansa: hansa notify on in it "
                 "(hansa up starts no second one)")
     if rec.get("kind") not in ("coordinator", "notify", "unrecorded"):
-        return "" if new_desk(desk) else f"hansa up starts no coordinator's session: {NOT_YET}. {TO_RECORD}"
+        if new_desk(desk):
+            return ""
+        if none_yet(desk):
+            return f"hansa up starts no coordinator's session: {NONE_YET}. {TO_RECORD_FIRST}"
+        return f"hansa up starts no coordinator's session: {NOT_YET}. {TO_RECORD}"
     if rec.get("kind") == "unrecorded":
         return f"hansa up cannot start the coordinator's session again: its last start was not recorded ({rec.get('why')})"
     plan = restart_plan(desk, rec)
@@ -1345,7 +1385,8 @@ def coordinator_up(desk: Desk) -> bool:
         return False
     rec = rec if rec.get("kind") in ("coordinator", "notify") else {}
     if not rec and not new_desk(desk):
-        print(f"coordinator: {NOT_YET}; nothing started. {TO_RECORD}")
+        print(f"coordinator: {NONE_YET}; nothing started. {TO_RECORD_FIRST}" if none_yet(desk) else
+              f"coordinator: {NOT_YET}; nothing started. {TO_RECORD}")
         return False
     plan = restart_plan(desk, rec)
     if prints(plan["words"]):

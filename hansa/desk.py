@@ -3256,7 +3256,10 @@ class Desk:
             attachments = snapshot(self, opts.pop("attach", ()) or (), opts.pop("attachments_from", ""))
             text = self.redact(text)  # a worker never gets a key in its task
             self.tasks_dir.mkdir(exist_ok=True)
-            ids = [int(d.name[1:]) for d in self.tasks_dir.iterdir() if d.name[1:].isdigit()]
+            if opts.get("session"):  # the desk's first sign of a coordinator, maybe: seen new before it
+                from .up import mark_new
+                mark_new(self)
+            ids =[int(d.name[1:]) for d in self.tasks_dir.iterdir() if d.name[1:].isdigit()]
             tid = f"t{max(ids, default=0) + 1:04d}"
             d = self.tasks_dir / tid
             d.mkdir()
