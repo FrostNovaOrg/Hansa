@@ -896,7 +896,7 @@ def partial_write(path, after=None):
 # | Follow-up `tasks/<id>/note.md`, `cli._retry` | In place; keep link | Whole write; other-sites matrix |
 # | `.hansa/web-port` and `web-host`, `cli.cmd_serve` | In place; keep link | Whole writes; other-sites matrix, two rows |
 # | Refreshed card, helpers and their timestamped `.hansa/` backups, `cli._bring` | In place; keep link | Whole writes; other-sites matrix covers both destination and backup expressions |
-# | Copied, new and edited lane briefs, and `brief-before-*.md`, `cli.cmd_lane` | In place; keep link | Whole writes; other-sites matrix, four rows |
+# | Copied, new and edited lane briefs, and `brief-before-*.md`, `cli.cmd_lane` | In place; keep link | Whole writes; other-sites matrix, three rows |
 # | `.hansa/runs/<id>/lane-env.sh`, `run.env_file` | In place; keep link | Whole replacement at `0600`; private-files matrix |
 # | `.hansa/runs/<id>/worker-argv.json`, `run.start` | In place; keep link | Whole replacement with the existing JSON format; other-sites matrix |
 # | Task `result.md`, `run.finish` | In place; keep link | Whole replacement; other-sites matrix |
@@ -996,7 +996,7 @@ class FailedWriteTest(unittest.TestCase):
                   "paths": ["/example"], "kept": ["/private"]}
         # Each call below is a row; ENOSPC part way is the column. All rows start at 0600.
         scopes = [(cli, cli.init_desk, 3), (cli, cli._retry, 1), (cli, cli.cmd_serve, 2),
-                  (cli, cli._bring, 2), (cli, cli.cmd_lane, 4), (run, run.git_file_changed, 2),
+                  (cli, cli._bring, 2), (cli, cli.cmd_lane, 3), (run, run.git_file_changed, 2),
                   (run, run.start, 1), (run, run.finish, 1),
                   (run, run.around_note, 1), (run, run._srt_writes, 1),
                   (release, release.finish, 1)]
@@ -14932,6 +14932,36 @@ def save():'''))
         out = self.hansa("lane", "add", "q", "--like", "a")  # the same text: nothing to set aside
         self.assertNotIn("kept in", out)
         self.assertEqual(len(list((self.desk.lanes_dir / "q").glob("brief-before-*.md"))), 1)
+
+    def test_lane_add_without_like_sets_an_earlier_brief_aside_and_starts_empty(self):
+        repo = self.desk.settings()["lanes"]["a"]["repo"]
+        self.hansa("lane", "add", "g", "--repo", repo)
+        self.hansa("lane", "brief", "g", "Old rules for g.")
+        self.hansa("lane", "remove", "g")
+        brief = self.desk.lanes_dir / "g" / "brief.md"
+        self.assertEqual(brief.read_text(), "Old rules for g.")  # remove keeps them in the desk
+        out = self.hansa("lane", "add", "g", "--repo", repo)
+        self.assertEqual(brief.read_text(), "")
+        kept = list((self.desk.lanes_dir / "g").glob("brief-before-*.md"))
+        self.assertEqual([k.read_text() for k in kept], ["Old rules for g."])
+        self.assertIn(str(kept[0]), out)
+        self.assertIn("now has none", out)
+        self.assertIn("no standing instructions", self.hansa("lane", "brief", "g"))
+        self.hansa("lane", "remove", "g")
+        self.assertNotIn("kept in", self.hansa("lane", "add", "g", "--repo", repo))  # empty: nothing to set aside
+        self.assertEqual(len(list((self.desk.lanes_dir / "g").glob("brief-before-*.md"))), 1)
+
+    def test_lane_brief_none_empties_them(self):
+        brief = self.desk.lanes_dir / "a" / "brief.md"
+        self.hansa("lane", "brief", "a", "Use C++20.")
+        out = self.hansa("lane", "brief", "a", "none")
+        self.assertEqual(brief.read_text(), "")
+        self.assertIn("now empty", out)
+        self.assertNotIn("characters", out)
+        self.assertIn("no standing instructions", self.hansa("lane", "brief", "a"))
+        out = self.hansa("lane", "brief", "a", "None of the tests may be skipped.")
+        self.assertEqual(brief.read_text(), "None of the tests may be skipped.")
+        self.assertIn("replaced", out)
 
     def run_on(self, lane: str) -> Path:
         """Run one task on the lane and cancel it (no review waits); the lane's worktree."""
