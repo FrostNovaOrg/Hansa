@@ -201,7 +201,9 @@ Retry.
 
 On a phone, the main tabs stay in one row; swipe the row sideways to reach
 the other tabs. The header keeps the desk's name beside the H, cut with an
-ellipsis when it is long (the word Hansa is left out there). Status tables
+ellipsis when it is long (the word Hansa is left out there); the name gets
+little room, so the tab row keeps most of the width (at 390 px, about 70 px
+for the H and the name, and about 190 px for the tabs). Status tables
 scroll sideways inside their own boxes, keeping buttons, task IDs and status
 words readable. Long paths, commands and addresses still wrap within their
 cells or cards; in a status pill only a word longer than the pill breaks.

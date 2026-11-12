@@ -48104,7 +48104,10 @@ else if (ask === "task-steps")'''))
             self.assertNotRegex(phone, r"\.brand-label\s*\{[^}]*display:none")
             self.assertNotRegex(phone, r"\.brand-caption\s*\{[^}]*display:none")
             self.assertRegex(phone, r"#title \.brand-name\s*\{[^}]*display:none")
-            self.assertRegex(phone, r"#title\s*\{[^}]*max-width:\d+vw")
+            # the name's cap leaves the tab strip at least 190 px at 390 px (measured: 36vw left it 137 px, 20vw 183)
+            cap = re.search(r"#title\s*\{[^}]*max-width:(\d+)vw", phone)
+            self.assertIsNotNone(cap)
+            self.assertLessEqual(int(cap[1]), 18)
             self.assertRegex(css, r"\.brand-caption\s*\{[^}]*overflow:hidden;[^}]*text-overflow:ellipsis")
 
     def test_phone_release_refusal_keeps_its_reason_with_refuse(self):
