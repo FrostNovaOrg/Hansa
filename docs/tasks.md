@@ -308,6 +308,11 @@ without using a try. A subscription provider's line says to log in with `claude`
 when it has one) and then `hansa ping NAME`. A key a compatible provider's endpoint rejects (HTTP 401 or 403)
 still uses a try, and saving a new key brings that provider back.
 
+A successful `hansa ping NAME` keeps its `NAME: ok - MODEL` line and also says when it ended the rest
+after a usage limit, lost login or unknown model, so tasks waiting for that provider can start again.
+If a credit rest still holds, the ping says it stays until the principal confirms a top-up on the page
+or saves a new key.
+
 After `hansa lane set L providers ...`, queued tasks, including those waiting for a resting provider,
 use the new order: first ready provider excluding prior refusals; otherwise they wait. A
 dropped-connection retry keeps its provider if still listed. Running work keeps its provider.

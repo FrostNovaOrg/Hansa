@@ -7538,7 +7538,8 @@ def key_stamp(desk: Desk, name: str) -> tuple:
 
 def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *, quota_probe: bool = False) -> dict:
     """Send one tiny request through a provider and record whether it answered, through `claude` when it is given
-    (the program a recorded hansa serve start runs), else through this process's."""
+    (the program a recorded hansa serve start runs), else through this process's. A good answer names any
+    rest_ended (quota, login, model) or rest_kept (credit), separately from the model detail."""
     from .page_messages import annotate
     s = desk.settings()
     p = s["providers"].get(name)
@@ -7589,9 +7590,20 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
             return annotate({**result, "ok": False, "detail": "the provider's key or settings changed while this check "
                                                             "ran, so it says nothing about them now; check again"},
                             ("detail",))
+        st = desk.provider_state().get(name) or {}
+        if ok:
+            if st.get("credit_since"):
+                result["rest_kept"] = "credit"
+            elif st.get("model_since"):
+                result["rest_ended"] = "model"
+            elif st.get("cool_until", 0) > time.time():
+                if st.get("rest_how") in ("fixed", "reset", "shared"):
+                    result["rest_ended"] = "quota"
+                elif str(st.get("reason", "")).startswith("not logged in"):
+                    result["rest_ended"] = "login"
         result = annotate(result, ("detail",))
         desk.set_provider_state(name, check=result)
-        if ok and not (desk.provider_state().get(name) or {}).get("credit_since"):
+        if ok and not st.get("credit_since"):
             from .rests import record
             probe_ok = time.time() if quota_probe else 0
             checked_rest = record(desk, name, checked=True, quota_probe_ok=probe_ok)

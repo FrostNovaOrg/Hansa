@@ -25742,6 +25742,102 @@ def save():'''))
         self.assertEqual(self.desk.save_settings(s), [])
         self.desk.write_key("mimo", "sk-test-ping-0001")
 
+    def ping_ends_rest(self, kind, why, words):
+        from hansa import run
+        run.rest_provider(self.desk, self.desk.settings(), "claude", kind, why)
+        tid = self.desk.new_task("Add hello.txt")
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        out = self.hansa("ping", "claude")
+        self.assertIn("claude: ok - fake-model", out.splitlines()[0])
+        for part in ("ended", "rest", words, "tasks waiting for it", "start again"):
+            self.assertIn(part, out)
+        check = self.desk.provider_state()["claude"]["check"]
+        self.assertEqual(check["rest_ended"], kind)
+        self.assertNotIn("rest_kept", check)
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+        self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertEqual(self.hansa("ping", "claude"), "claude: ok - fake-model\n")
+
+    def test_ping_says_it_ended_the_usage_limit_rest(self):
+        self.ping_ends_rest("quota", "out of quota (HTTP 429)", "usage limit")
+
+    def test_ping_says_it_ended_the_lost_login_rest(self):
+        self.ping_ends_rest("login", "not logged in (Please run /login)", "lost login")
+
+    def test_ping_says_it_ended_the_unknown_model_rest(self):
+        self.ping_ends_rest("model", "unknown model", "unknown model")
+
+    def test_ping_says_the_credit_rest_stays(self):
+        from hansa import run
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "credit", "credit balance too low")
+        before = self.desk.provider_state()["claude"]["credit_since"]
+        tid = self.desk.new_task("Wait for credit")
+        out = self.hansa("ping", "claude")
+        self.assertIn("claude: ok - fake-model", out.splitlines()[0])
+        for part in ("credit rest stays", "principal", "confirm a top-up", "page", "save a new key"):
+            self.assertIn(part, out)
+        self.assertNotIn("ended", out)
+        st = self.desk.provider_state()["claude"]
+        self.assertEqual(st["check"]["rest_kept"], "credit")
+        self.assertNotIn("rest_ended", st["check"])
+        self.assertEqual(st["credit_since"], before)
+        self.assertIn("topped up", provider_problem(self.desk, self.desk.settings(), "claude"))
+        Dispatcher(self.desk).tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+
+    def test_ping_reports_an_imported_usage_rest(self):
+        from hansa import run
+        other = self.shared_rest_desks()
+        run.rest_provider(other, other.settings(), "claude", "quota", "usage limit")
+        self.assertTrue(self.desk.provider_state()["claude"]["shared_rest"])
+        out = self.hansa("ping", "claude")
+        for part in ("claude: ok", "ended", "rest", "usage limit"):
+            self.assertIn(part, out)
+        self.assertEqual(self.desk.provider_state()["claude"]["check"]["rest_ended"], "quota")
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), "")
+
+    def test_credit_ping_keeps_the_pages_ok_result_and_rest_notice(self):
+        from hansa import run
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "credit", "credit balance too low")
+        reply = run.check_provider(self.desk, "claude")
+        self.assertTrue(reply["ok"])
+        self.assertEqual(reply["rest_kept"], "credit")
+        self.assertEqual(reply, self.desk.provider_state()["claude"]["check"])
+        page = self.message_page(language="en", check=reply)
+        for part in ("Ping", "OK", "fake-model"):
+            self.assertIn(part, page["check"])
+        self.assertNotIn("rest", page["check"])
+        for part in ("rests", "principal", "topped up", "Topped up"):
+            self.assertIn(part, page["providers"])
+
+    def test_ping_without_an_answer_keeps_its_output_and_rest(self):
+        from hansa import run
+        for kind, why in (("quota", "usage limit"), ("login", "not logged in (Please run /login)"),
+                          ("model", "unknown model"), ("credit", "credit balance too low")):
+            with self.subTest(kind=kind):
+                run.rest_provider(self.desk, self.desk.settings(), "claude", kind, why)
+                before = provider_problem(self.desk, self.desk.settings(), "claude")
+                with unittest.mock.patch.object(run.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 90)):
+                    out = self.hansa("ping", "claude")
+                self.assertEqual(len(out.splitlines()), 1)
+                for part in ("claude: NOT ok", "no answer", "90s"):
+                    self.assertIn(part, out)
+                check = self.desk.provider_state()["claude"]["check"]
+                self.assertNotIn("rest_ended", check)
+                self.assertNotIn("rest_kept", check)
+                self.assertEqual(provider_problem(self.desk, self.desk.settings(), "claude"), before)
+
+    def test_ping_does_not_claim_to_end_an_expired_rest(self):
+        from hansa import run
+        for kind, why in (("quota", "usage limit"), ("login", "not logged in (Please run /login)")):
+            with self.subTest(kind=kind):
+                run.rest_provider(self.desk, self.desk.settings(), "claude", kind, why)
+                self.desk.set_provider_state("claude", cool_until=time.time() - 60)
+                self.assertEqual(self.hansa("ping", "claude"), "claude: ok - fake-model\n")
+                self.assertNotIn("rest_ended", self.desk.provider_state()["claude"]["check"])
+
     def record_start_with(self, claude):
         """A server start record whose environment finds `claude` as the program; the shell's PATH for the rest."""
         write_json(self.desk.state_dir / "serve-start.json",
