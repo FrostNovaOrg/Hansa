@@ -433,7 +433,8 @@ def interruption_next(s: dict, m: dict, r: dict, merge: bool = False) -> str:
     if why == "timeout":
         setting = "merge_timeout_min" if merge and s["lanes"].get(lane, {}).get("merge_timeout_min") else "timeout_min"
         return (f"if the check needs more time: hansa lane set {lane} {setting} N · "
-                f"hansa merge {tid} --recheck (runs the check again and merges if it passes)")
+                f"hansa merge {tid} --recheck (runs the check again and merges if it passes) · "
+                f'hansa retry {tid} "make the check finish: ..."')
     if why == "setup":
         return (f'fix the lane\'s setup: hansa lane set {lane} setup "<command>" · '
                 f"hansa {'merge' if merge else 'retry'} {tid}")
@@ -515,7 +516,7 @@ def _merge_result_lines(m: dict, log: str = "") -> list:
     outcome = (("merged later" if advice or interruption else "merged despite this failed check")
                + f" at {notify.when(m.get('merged'))}" if past else "nothing was merged")
     if past:
-        advice = advice.replace("nothing was merged", outcome, 1)
+        advice = advice.split("\nNext:", 1)[0].replace("nothing was merged", outcome, 1)
     if r.get("direct"):
         return [f"{'previous merge' if past else 'merge'}: last attempt at {notify.when(r.get('at'))}; {advice}"]
     if r.get("waited"):  # it needed no check: it waited its turn behind other merges, and no check ran
@@ -1168,6 +1169,7 @@ def status(desk: Desk) -> dict:
                     "check": None if not m.get("check") else m["check"]["ok"],
                     "check_could_not_run": bool((m.get("check") or {}).get("could_not_run")), "verify": verification(desk, m),
                     "merge_check": (m.get("merge_check_result") or {}).get("ok"),
+                    "merge_direct": bool((m.get("merge_check_result") or {}).get("direct")),
                     "merge_waited": bool((m.get("merge_check_result") or {}).get("waited")),
                     "merge_note": (m.get("merge_check_result") or {}).get("note")
                     or f"exit {(m.get('merge_check_result') or {}).get('exit')}"}
@@ -1358,6 +1360,7 @@ def status_text(st: dict) -> str:
                 + ("; check could not run (the machine's problem, not the task's)" if m.get("check_could_not_run")
                    else {True: "; check passed", False: "; check FAILED", None: ""}[m["check"]])
                 + (f"; merge: {waited_text({'note': m['merge_note']})}" if m.get("merge_waited") else
+                   f"; merge could not be made ({m['merge_note']}), nothing merged" if m.get("merge_direct") else
                    f"; merge check FAILED ({m['merge_note']}), nothing merged" if m.get("merge_check") is False else "")
                 + (f"; verification {_verification_line(m['verify'])}" if m.get("verify") else "")
                 + (f"; {m['denied']} command(s) refused" if m["denied"] else "")

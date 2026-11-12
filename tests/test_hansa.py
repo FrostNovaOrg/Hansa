@@ -15926,6 +15926,17 @@ def save():'''))
                       f"next: hansa retry {second} --update \"<how to settle the conflict>\""):
             self.assertIn(words, shown)
         self.assertNotIn("merge check:", shown)
+        status = views.status(self.desk)
+        row = next(m for m in status["review"] if m["id"] == second)
+        for text in (self.hansa("status"), views.status_text(status)):
+            for words in ("merge could not be made", "conflicts with main", "nothing merged"):
+                self.assertIn(words, text)
+            self.assertNotIn("merge check FAILED", text)
+        self.assertTrue(row["merge_direct"])
+        page = views.task_page(self.desk, second)["text"]
+        self.assertIn("conflicts with main", page)
+        self.assertIn("nothing was merged", page)
+        self.assertNotIn("merge check FAILED", page)
         post = notify.task_line(self.desk, saved)
         self.assertIn("conflicts with main", post)
         for text in (shown.split("next: ", 1)[1], post.split("next: ", 1)[1]):
@@ -15958,14 +15969,20 @@ def save():'''))
                     self.assertNotIn("--update", text)
                 self.assertEqual(path.read_text(), "the owner's file\n")
                 self.assertEqual(self.git_out("rev-parse", "main"), tip)
-                self.assertEqual(self.desk.meta(tid)["state"], "done")
+                saved = self.desk.meta(tid)
+                self.assertEqual(saved["state"], "done")
+                self.assertIn("Next: the owner", self.hansa("show", tid))
                 path.rename(self.repo / ("moved-" + name))
                 self.assertIn("merged into main", self.hansa("merge", tid))
-                shown = self.hansa("show", tid)
-                self.assertIn("previous merge:", shown)
-                self.assertIn("merged later at", shown)
-                self.assertNotIn("failed check", shown)
-                self.assertNotIn("nothing was merged", shown)
+                for shown in (self.hansa("show", tid), views.task_page(self.desk, tid)["text"]):
+                    self.assertIn("previous merge:", shown)
+                    self.assertIn("merged later at", shown)
+                    self.assertIn("untracked", shown)
+                    self.assertIn(name, shown)
+                    self.assertNotIn("failed check", shown)
+                    self.assertNotIn("nothing was merged", shown)
+                    self.assertNotIn("Next:", shown)
+                self.assertEqual(self.desk.meta(tid)["merge_check_result"], saved["merge_check_result"])
 
     def test_merge_git_errors_without_conflicted_files_are_not_conflicts(self):
         from hansa import run
@@ -16002,6 +16019,17 @@ def save():'''))
                 result = self.desk.meta(tid)["merge_check_result"]
                 self.assertEqual(result["files"], [])
                 self.assertNotIn("conflict", result)
+                if mode == "direct":
+                    status = views.status(self.desk)
+                    row = next(m for m in status["review"] if m["id"] == tid)
+                    text = views.status_text(status)
+                    for words in ("merge could not be made", "could not write the index", "nothing merged"):
+                        self.assertIn(words, text)
+                    self.assertNotIn("merge check FAILED", text)
+                    self.assertTrue(row["merge_direct"])
+                    page = views.task_page(self.desk, tid)["text"]
+                    self.assertIn("merging " + tid + " into main failed", page)
+                    self.assertNotIn("merge check FAILED", page)
                 self.assertEqual(self.git_out("rev-parse", "main"), tip)
 
     def test_merge_check_file_obstruction_keeps_gits_error_and_owner_advice(self):
@@ -30216,6 +30244,10 @@ def save():'''))
             self.assertIn("hansa lane set a timeout_min N", nxt)
             self.assertNotIn("merge_timeout_min", nxt)
             self.assertNotIn("make the check pass", nxt)
+            self.assertIn(f'hansa retry {tid} "make the check finish: ..."', nxt)
+            self.assertLess(nxt.index("lane set"), nxt.index("--recheck"))
+            self.assertLess(nxt.index("--recheck"), nxt.index("hansa retry"))
+            self.assertNotIn("--despite-check", nxt)
         self.hansa("merge", tid, "--recheck")
         self.assertEqual(self.settle_merge(Dispatcher(self.desk), tid)["state"], "merged")
 
@@ -30351,6 +30383,10 @@ def save():'''))
                     self.assertIn(f"hansa lane set m {setting} N", nxt)
                     self.assertIn(f"hansa merge {tid} --recheck", nxt)
                     self.assertNotIn("make the check pass", nxt)
+                    self.assertIn(f'hansa retry {tid} "make the check finish: ..."', nxt)
+                    self.assertLess(nxt.index("lane set"), nxt.index("--recheck"))
+                    self.assertLess(nxt.index("--recheck"), nxt.index("hansa retry"))
+                    self.assertNotIn("--despite-check", nxt)
 
     def test_next_steps_for_a_real_check_failure_still_offer_a_fix_diff_and_override(self):
         tid = self.done_with(check="echo assertion failed; exit 1")

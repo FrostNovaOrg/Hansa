@@ -664,8 +664,8 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   lane's time ceiling did not finish: run it again with `hansa merge ID
   --recheck`, raising the lane's limit if it needs more time (`hansa lane set L
   timeout_min N` for a task check; for a merge check, its execution lane's
-  `merge_timeout_min` when set, else `timeout_min`). This does not call for a
-  worker to make the check pass.
+  `merge_timeout_min` when set, else `timeout_min`). If the change made a test
+  hang, send it back with `hansa retry ID "make the check finish: ..."`.
   If setup failed before the worker started, fix it with `hansa lane set L
   setup "<command>"`, then `hansa retry ID`. If the merge lane's setup failed,
   the check did not run: fix that lane's setup, then `hansa merge ID`.
@@ -700,7 +700,10 @@ A [merge lane](desk.md) serves its repository and base's checks with its own wor
   two sides meet, with the base and task named alike in the legend and markers.
   Even a direct merge with no check saves its failure in the task's
   `merge_check_result` and a `merge_failed` event. `hansa show ID` keeps when
-  that attempt failed, the files and the conflict advice.
+  that attempt failed, the files and the conflict advice. `hansa status`
+  describes a direct failure as a merge that could not be made; no check ran.
+  After a later merge succeeds, `hansa show ID` keeps the earlier failure
+  without its `Next:` advice.
   Settle it with `hansa retry ID --update "<how to settle
   it>"`: the follow-up continues from the task's branch with the current base
   merged in; where that conflicts, the worker finds the conflict markers in the
