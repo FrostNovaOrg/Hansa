@@ -10,6 +10,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Tasks and workers
 
+- `hansa cancel` says “restored to closed” for closed work; `hansa goal show` marks closed work `(closed)`.
+- Uncommitted work keeps up to 600 characters of git's error.
 - `hansa add` refuses an empty task, words beside `--file`, `--max-turns` under 1 and titles over one line or 200 characters.
 - Task ids are `t` and digits; other spellings are refused unread. Commands on a replaced task name its last follow-up.
 - `hansa retry` keeps the turn ceiling and refuses, without `--fresh`, a change holding a known key.
@@ -149,6 +151,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Releases and alerts
 
+- `hansa release` says nothing is new only when it does not refuse, says a replaced code lapses only if it existed,
+  and names the command holding a forbidden word. Its help covers several remotes and the watch command.
 - `hansa release` errors say what to do, for `--fixed` on a request, a removed lane or target,
   and `release yes` without a release number, which counts no try.
 - A Bark entry with an invalid saved encryption key says so, with the fix.
@@ -235,6 +239,9 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The web page
 
+- Long words wrap in status pills. On a phone, Stop leads a release's row and the header shows the desk's name.
+- The Failed panel counts every open failure and says how many it lists. The Chinese missing-srt warning names its PATH;
+  the forbidden-words field names everything scanned; a session recorded with `hansa notify on` reads as a plain fact.
 - Every tab offers **Reload** for an answer not from `hansa serve`; the English page no longer shows “undefined”
   for a task cancelled while queued. Notes shows subfolders.
 - `hansa web` prints the page key after `#t=` so the address keeps it out of server and proxy logs; older `?t=` links still work.
@@ -298,6 +305,7 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Providers and usage limits
 
+- A successful `hansa ping` says which rest it ended (usage limit, lost login, unknown model) or that a credit rest stays.
 - Expired Claude subscription logins say to log in again, then run `hansa ping`; lost Claude and Codex logins use no try.
 - A successful `hansa ping` or page check clears shared usage rests across desks for the same configured model; another model frees only that provider.
 - With no ready alternative for waiting work, `hansa serve` checks long usage rests with reset times every `cool_minutes`. Success ends the rest; another limit prevents checking the next rest. `hansa status` and `hansa explain provider` say which applies.
@@ -316,6 +324,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The terminal menu and `hansa doctor`
 
+- The installer's SSH line forwards both page ports. `hansa doctor` on macOS without Homebrew says where to get it,
+  and names the guide by a full path or address. `hansa init --repo` on a missing folder says it made one.
 - `hansa init` that cannot make the desk says why and removes what it made; `hansa lane try` and `hansa web`
   say how to start a stopped server.
 - `hansa explain lane|provider` names what made and last changed it and refuses unknown names;
@@ -362,6 +372,9 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Documentation
 
+- The coordinator's card lists goal, decision and ping commands, `add --goal`/`--after`, `ask --closed` and `lane brief L none`.
+- Getting started covers `hansa init` on an empty project, stopping a server from the menu, the Claude Code version
+  `hansa doctor` installs and an npm lane's cache; encrypted Bark pushes carry release codes; the Chinese guide uses the page's names.
 - `hansa help TOPIC` prints the docs' links as the topic or file to read.
 - The Chinese README links to Simplified Chinese guides for getting started, concepts,
   how a desk is run and push services. Tests keep each guide's headings and code blocks in step with English.
@@ -369,6 +382,7 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The Codex adapter
 
+- A ChatGPT plan without Codex is named as one to upgrade; it still rests until confirmed.
 - Lost logins ask for `codex login`, then `hansa ping`. Workspaces out of credits and plans without Codex wait for a confirmed top-up or saved key.
 - Cancelled runs and runs stopped at their time ceiling keep their last message, turns and reported usage.
 - `codex.env` accepts `export` lines; misspelt efforts and leftover example notes fail at startup.
