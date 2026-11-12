@@ -167,7 +167,9 @@ section.push-addresses { overflow-wrap:anywhere; }
 .page-head h1 { margin:0 0 8px; font-size:28px; line-height:1.3; font-weight:650; letter-spacing:-.7px; }
 .page-head p { margin:0; color:var(--muted); font-size:13px; max-width:68ch; }
 .page-head > .status-pill { margin-top:4px; flex:none; }
-.status-pill { display:inline-flex; align-items:center; gap:6px; width:fit-content; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--muted); font-size:11px; line-height:1.5; overflow-wrap:normal; }
+.status-pill { display:inline-flex; align-items:center; gap:6px; width:fit-content; max-width:100%; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--muted); font-size:11px; line-height:1.5; overflow-wrap:break-word; }
+/* break-word, not anywhere: a squeezed table column keeps a status word whole, and only a word longer than the pill breaks. */
+.status-pill > .pill-text { min-width:0; }
 .status-pill.ok { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
 .status-pill.warn { color:var(--warn); background:var(--warn-bg); border-color:transparent; }
 .status-pill.bad { color:var(--bad); background:var(--bad-bg); border-color:transparent; }
@@ -312,8 +314,8 @@ td .task-detail { min-width:200px; }
 @media (max-width:640px) { main { padding:16px 12px; } .grid, .facts { grid-template-columns:minmax(0, 1fr); } th, td { padding:7px 6px; } }
 @media (max-width:640px) {
   header { padding:8px 12px; }
-  #title { font-size:14px; } .brand-mark { width:25px; height:25px; }
-  #title .brand-label { display:none; }
+  #title { font-size:14px; max-width:36vw; } .brand-mark { width:25px; height:25px; }
+  #title .brand-name { display:none; }
   #tabs button { padding:6px 9px; }
   #tabs .icon { display:none; }
   .settings-head { display:block; position:relative; margin-bottom:8px; }
@@ -493,7 +495,7 @@ const T = ZH ? {
   serveCodeWarning:"后台代码", unreachedWarning:"协调员未收到", alertFailedWarning:"提醒失败",
   serverStuck:(pid, m) => `后台（pid ${pid}）已 ${m} 分钟没跑完一轮：在忙或卡住了`,
   lanes:"工作线", lane:"工作线", now:"现在", free:"空闲",
-  queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", minutes:"分钟",
+  queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", failedShown:(n, all) => `显示最近的 ${n} 个，共 ${all} 个`, minutes:"分钟",
   waitReasons:{
     paused:() => "派发任务已暂停", no_lanes:() => "设置中没有工作线", no_work_lanes:() => "设置中没有接任务的工作线", slot:v => v.concurrency == null ? "等待空位" : `等待空位（${v.running}/${v.concurrency} 正在运行；hansa concurrency）`,
     after:v => v.dependencies.map(d => {
@@ -543,7 +545,7 @@ const T = ZH ? {
   compactNote:"一轮以回答结束、会话空闲后，若上下文达到第一个数，协调员的 mod 在空闲一分钟后压缩它，这时整个上下文还在提示缓存里。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第二个数时压缩（hansa coordinator 用 --autocompact 传给它）。两个数都在 100,000 到 1,000,000 token 之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或第一个数不小于第二个数），那个压缩就不会发生：Claude Code 自己先压缩了。第二个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。第一个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第二个数从会话下次启动起生效。协调员不能改它们。Claude Code（2.1.299 或更新的版本）还会自己压缩一个有 200,000 token 或更多、空闲了约 54 分钟的对话；这一项 Hansa 既不设置也不读取。mod 需要 Claude Code 2.1.306 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
   modStarted:t => `协调员会话 ${t} 启动：`, modOn:"Hansa 加载了协调员的 mod", modOff:why => `Hansa 没有加载协调员的 mod，因为：${why}`,
   modUnknown:"Hansa 是否加载了协调员的 mod：不知道", modOptions:"命令行里的 --autocompact 选项：", notKnown:"不知道",
-  modOutside:"记录的会话在 hansa coordinator 之外启动；其中没有协调员的 mod 和每日清空，但由 hansa up 启动时会有 Hansa 的状态行",
+  modOutside:"用 hansa notify on 记录的协调员会话照常工作，无需处理。它不是用 hansa coordinator 启动的，所以没有协调员的 mod（会话空闲时由它压缩上下文）和每日清空；由 hansa up 启动时，Hansa 的状态行仍在。想要这些，就用 hansa coordinator 启动协调员会话。",
   clearUnknown:"每日清空：不知道", clearNone:"没有每日清空，因为协调员启动时没带 --clear-daily",
   clearNoMod:(w, why) => `没有每日清空 ${w}，因为 Hansa 没有加载协调员的 mod（${why}）`,
   clearRoot:w => `每日清空 ${w}：上次清空不知道（root 在这个工作台上的会话，Hansa 不记录它的清空）`,
@@ -662,7 +664,7 @@ const T = ZH ? {
   releaseStopSummary:"叫停可能留下部分更新的服务。点开查看详情。",
   releaseStopNote:"发布完成后，叫停会停止仍在运行的监测，发布仍记为完成；监测记录由谁停止及原因，重启后台也不会再次启动。叫停：还没开始的直接关掉；在运行的，命令的整个进程组先收到 TERM，30 秒后还在运行的收到 KILL（它启动后离开进程组的也一样），到那时的输出留着；命令已经结束的，按它的退出码记为完成或失败。发布中途停止可能使服务处于部分更新状态：要紧的话，发布命令要处理 TERM（做完或撤回手上那一步）",
   releasesWithoutAsking:"每个发布目标单独勾。工作线的仓库或基础分支、发布目标的命令或它用到的仓库外文件、监测命令（--watch）、它要跟在哪个发布目标之后或它的运行方式（fixed），只要有一样变了，这个勾就失效：手动提的发布会等你点头，合并后自动跑的要等你重新勾上。",
-  releaseForbidden:"禁词（每行一个词、短语或 re:Python 正则表达式，不分大小写；每项最多 200 字符，正则必须能编译且不能匹配空字符串；在发布命令、要发出去的提交新增的行、新增或改动的文件名和提交说明里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
+  releaseForbidden:"禁词（每行一个词、短语或 re:Python 正则表达式，不分大小写；每项最多 200 字符，正则必须能编译且不能匹配空字符串；在发布命令和发布目标的监测命令（--watch）里，以及要发出去的提交的说明、作者和提交者的名字与邮箱、新增或改动的文件名和新增的行里查，查到就拒绝发布。只在一行之内匹配：被换行拆开的短语查不到；只查能按 UTF-8 读的文字：UTF-16 之类的文件查不到）",
   releaseForbiddenExcept:"按 lane 豁免禁词（从上面的列表选择禁词；lane 用空格或逗号分隔；不影响邮箱规则）",
   forbiddenEntry:"禁词", forbiddenLanes:"豁免的 lane", addForbiddenException:"添加豁免",
   forbiddenEntryUnmatched:"不匹配任何项：此禁词不在禁词列表上", forbiddenLaneUnmatched:"不匹配任何项：此工作线不在工作台上",
@@ -691,7 +693,7 @@ const T = ZH ? {
   serveCodeWarning:"Server code", unreachedWarning:"Coordinator unreached", alertFailedWarning:"Alert failed",
   serverStuck:(pid, m) => `hansa serve (pid ${pid}) has not finished a round for ${m} min: busy or stuck`,
   lanes:"Lanes", lane:"Lane", now:"Now", free:"free",
-  queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", minutes:"min",
+  queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", failedShown:(n, all) => `The latest ${n} of ${all} are shown.`, minutes:"min",
   waitReasons:{
     paused:() => "dispatch is paused", no_lanes:() => "no lanes in settings", no_work_lanes:() => "no lanes that take work in settings", slot:v => v.concurrency == null ? "waiting for a free slot" : `waits for a free slot (${v.running} of ${v.concurrency} running; hansa concurrency)`,
     after:(v, render, text) => text,
@@ -841,7 +843,7 @@ const T = ZH ? {
   releaseStopSummary:"Stop may leave the server partly updated. Tap for details.",
   releaseStopNote:"After a release is done, Stop ends its running watch, keeping the release done; the watch records who stopped it and why and stays stopped after a server restart. Stop: one not started yet is closed; a running one's command gets TERM to its whole process group, then KILL 30 s later to what still runs (also what it started that left the group), and its output so far is kept; one whose command had already ended is recorded done or failed, as its exit says. An install stopped halfway may leave the server half-switched: if that matters, the release command should handle TERM (finish or undo the step it is in)",
   releasesWithoutAsking:"Each target is ticked on its own. A tick stops counting once the lane's repository or base branch, the target's command or an outside file it names, its watch command (--watch), the target it must follow or the way it runs (fixed) changes: a release asked for by hand then waits for your yes, and one that runs by itself after merges waits until you tick it again.",
-  releaseForbidden:"Words, phrases or re:Python patterns no release may send out (one per line, any case; at most 200 characters per entry; patterns must compile and must not match the empty string; looked for in the release command, and in the lines the outgoing commits add, the names of the files they add or change, and their messages; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
+  releaseForbidden:"Words, phrases or re:Python patterns no release may send out (one per line, any case; at most 200 characters per entry; patterns must compile and must not match the empty string; looked for in the release command and the target's watch command (--watch), and in the outgoing commits: their messages, their authors' and committers' names and emails, the names of the files they add or change, and the lines they add; a hit refuses the release. Matched within one line: a phrase split over a line break is not found; only in text read as UTF-8: a UTF-16 file is not looked into)",
   releaseForbiddenExcept:"Exceptions by lane (choose an entry from the list above; lanes separated by spaces or commas; the mailbox rule still applies)",
   forbiddenEntry:"Entry", forbiddenLanes:"Excepted lanes", addForbiddenException:"Add exception",
   forbiddenEntryUnmatched:"matches nothing: this entry is not on the forbidden list", forbiddenLaneUnmatched:"matches nothing: this lane is not on the desk",
@@ -1240,7 +1242,7 @@ function icon(name) {
 const section = (title, ...kids) => h("section", {}, h("h2", {}, title), ...kids);
 const table = (head, rows) => h("div", {class:"scroll"}, h("table", {}, h("tr", {}, head.map(x => h("th", {}, x))),
   rows.map(r => h("tr", {}, r.map(c => h("td", {}, c))))));
-const statusPill = (text, tone = "", symbol = "check") => h("span", {class:"status-pill " + tone}, icon(tone === "warn" ? "error" : symbol), text);
+const statusPill = (text, tone = "", symbol = "check") => h("span", {class:"status-pill " + tone}, icon(tone === "warn" ? "error" : symbol), h("span", {class:"pill-text"}, text));
 const pageHeading = (title, intro, aside) => h("div", {class:"page-head"},
   h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", title), h("h1", {}, title), h("p", {}, intro)), aside);
 const summaryCard = (label, value, note, symbol) => h("div", {class:"metric-card"},
@@ -1517,7 +1519,7 @@ const serverMessagesZh = {
   mod_folder:v => `mod 副本所在的文件夹可被其他账号修改：${v.path}；请修复文件夹权限后重启协调员`,
   serve_code:v => `hansa serve 正在运行 ${v.runs}，当前安装的是 ${v.build}（${v.installed || "安装时间未知"}）；请重启 hansa serve`,
   serve_started:v => `hansa serve 于 ${v.started} 启动，早于 ${v.build} 的安装（${v.installed}）；请重启 hansa serve`,
-  srt_missing:v => `找不到 srt，工作线的准备和检查命令无法运行；请在后台使用的 PATH 上安装 Node ${v.node} 或更新版本，并运行 ${v.install}，然后重启 hansa serve（hansa explain server）`,
+  srt_missing:v => `找不到 srt（${srtWhere(v.where)}），工作线的准备和检查命令无法运行；请在后台使用的 PATH 上安装 Node ${v.node} 或更新版本，并运行 ${v.install}，然后重启 hansa serve（hansa explain server）`,
   srt_failed:v => `hansa serve${v.when ? " 在" + v.when.replace(/^, /, "") : ""} 无法运行 srt：${v.path}；沙箱中的 true 失败，程序报告：“${v.said}”。准备和检查暂停，请修复后重启 hansa serve（hansa explain server）`,
   alert_failed:v => `提醒命令在 ${v.at} 失败（${v.timeout ? `${v.number} 秒后超时` : `退出码 ${v.number}`}）${v.withheld ? "；提醒含有一次性码，因此未保留输出" : v.said ? `，程序报告：“${v.said}”` : ""}；请在设置中检查并测试提醒命令`,
   coordinator_absent:v => `没有会话接收 Hansa 的消息；${v.count} 件事在等协调员，最早的已等 ${v.minutes} 分钟；请在协调员会话中运行 hansa notify on`,
@@ -1557,6 +1559,13 @@ const serverMessagesZh = {
   release_changed:v => `发布 #${v.id} 已与页面显示的不同；请重新加载页面，核对后再答复`,
   release_void:v => `发布 #${v.id} 已作废：${v.why_zh}；什么都没运行。协调员已获通知，请等它重新请求后再答复`
 };
+// Where srt was looked for (hansa/run.py, srt_problem); an unknown form is shown as the server wrote it.
+function srtWhere(where = "") {
+  if (where === "on the PATH of this command; hansa serve has not tried srt yet, and its PATH may differ")
+    return "在本命令的 PATH 上找的；hansa serve 还没试过 srt，它的 PATH 可能不同";
+  const seen = /^as hansa serve saw it(?:, (.+))?$/.exec(where);
+  return seen ? "hansa serve 所见" + (seen[1] ? "，" + seen[1] : "") : where;
+}
 function messageText(record, text = record?.text || "") {
   return ZH && record?.text === text && Object.hasOwn(serverMessagesZh, record.code)
     ? serverMessagesZh[record.code](record.values) : text;
@@ -1954,7 +1963,9 @@ async function renderStatus(force) {
           : [h("span", {class: {holds:"ok", "does not hold":"bad"}[m.verify.verdict] || "warn"}, T["v_" + m.verify.verdict] || T.v_none),
              m.verify.verdict === "holds, with notes" ? [" · ", taskLink(m.verify.task)] : null],
         m.denied ? h("span", {class:"warn"}, m.denied) : "0"]))) : emptyState(T.review, T.none, "security")),
-    st.failed.length ? dashboardPanel(T.failed, "error", st.failed.length, table([T.task, T.lane, T.titleCol, T.error],
+    st.failed.length ? dashboardPanel(T.failed, "error", Math.max(st.failed_count ?? 0, st.failed.length),
+      (st.failed_count ?? 0) > st.failed.length ? h("p", {class:"field-note"}, T.failedShown(st.failed.length, st.failed_count)) : null,
+      table([T.task, T.lane, T.titleCol, T.error],
       st.failed.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"bad"}, fieldText(m, "error"))]))) : null,
     dashboardPanel(T.providers, "providers", st.providers.length, st.providers.length ? table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
       p.name, p.kind === "subscription" ? T.subscription : T.compatible,
@@ -2052,20 +2063,24 @@ function releaseHits(hits) {
         limit ? `; ${patternLimitReason(x)}` : null))) : null;
   });
 }
+// On a phone the releases table scrolls sideways; Stop goes beside the release's number, where it is in view.
+const phoneQuery = typeof window.matchMedia === "function" ? window.matchMedia("(max-width:640px)") : null;
+phoneQuery?.addEventListener?.("change", () => { if (current === "status" && statusShown && !document.hidden) loadStatus().catch(err); });
 function releasesSection(rel, scheduled = []) {
   const waiting = rel.filter(r => r.state === "waiting"), others = rel.filter(r => r.state !== "waiting");
   if (!rel.length && !scheduled.length) return null;
+  const stopFirst = !!phoneQuery?.matches;
   return dashboardPanel(T.releases, "releases", rel.length + scheduled.length,
     scheduled.map(r => h("div", {class:"muted"}, (ZH && r.what_zh) || r.what)),
     waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
     others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
-      "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), releaseWatch(r), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs), releaseOutside(r)),
+      stopFirst ? h("div", {class:"release-first"}, "#" + r.id, releaseStop(r)) : "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), releaseWatch(r), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs), releaseOutside(r)),
       h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
         r.state === "forbidden" ? ((ZH && r.what_zh) || r.what || "").split("\n")[0] : (ZH && r.what_zh) || r.what,
         r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
         releaseHits(r.hits),
         (r.tail || []).length && ["failed", "stopped"].includes(r.state) ? h("pre", {class:"mono muted"}, r.tail.slice(-5).join("\n")) : null,
-        releaseStop(r))]))] : null);
+        stopFirst ? null : releaseStop(r))]))] : null);
 }
 function checkButton(name, after) {
   const b = h("button", {disabled:SETTINGS_LOCKED, "data-outside-action":"", "data-status-focus":`provider:${name}:ping`, onclick: async () => {
@@ -3595,7 +3610,7 @@ async function exportCsv() {
 /* ---------- start ---------- */
 const deskCaption = h("span", {class:"brand-caption"});
 $("#title").replaceChildren(h("span", {class:"brand-mark", "aria-hidden":"true"}, "H"),
-  h("span", {class:"brand-label"}, h("span", {}, "Hansa"), deskCaption));
+  h("span", {class:"brand-label"}, h("span", {class:"brand-name"}, "Hansa"), deskCaption));
 $("#tabs").setAttribute("aria-label", T.primaryNav);
 for (const tab of TABS) {
   mainTabLabels[tab] = h("span", {}, T[tab]);

@@ -200,9 +200,13 @@ ordinary failure, hansa serve down or answering with an error, still offers
 Retry.
 
 On a phone, the main tabs stay in one row; swipe the row sideways to reach
-the other tabs. Status tables scroll sideways inside their own boxes, keeping
-buttons, task IDs and status words readable. Long paths, commands and addresses
-still wrap within their cells or cards.
+the other tabs. The header keeps the desk's name beside the H, cut with an
+ellipsis when it is long (the word Hansa is left out there). Status tables
+scroll sideways inside their own boxes, keeping buttons, task IDs and status
+words readable. Long paths, commands and addresses still wrap within their
+cells or cards; in a status pill only a word longer than the pill breaks.
+The Failed panel counts every failed task not closed, and when it lists fewer
+(the latest five) it says how many it shows.
 
 After upgrading, restart the desk's server and reopen the printed address:
 the token is renewed automatically when its format changes. A current token
