@@ -3028,7 +3028,7 @@ class Desk:
 
     def keys_in_alert(self, old: dict, new: dict) -> list:
         """A new or changed alert command that holds a key the desk knows: refused, as the command is stored and
-        shown as written (in the settings, on the page, in hansa explain)."""
+        shown as written (in the settings, on the page)."""
         cmd = (new.get("alert") or {}).get("command") if isinstance(new.get("alert"), dict) else None
         if not isinstance(cmd, str) or cmd == ((old.get("alert") or {}).get("command")):
             return []

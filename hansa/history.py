@@ -56,7 +56,8 @@ def _keys(desk):
 
 
 def _private(value, keys, path=()):
-    # Item 2: keep this rule while Item 2 applies.
+    # Alert commands and whole alert settings have no history values.
+    # Keep this rule until commands can no longer contain private values.
     if path in (("alert",), ("alert", "command")):
         return True
     if isinstance(value, str):

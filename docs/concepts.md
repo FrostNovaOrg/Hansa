@@ -174,7 +174,9 @@ hansa; edits made directly to files are not observed.
 Provider keys and tokens show only `set (values withheld)` when saved or
 `cleared (values withheld)` when removed; older records still show
 `changed (values withheld)`, with neither
-value stored. If either value contains a key hansa knows, both are withheld.
+value stored. Changes to `alert.command` (or the whole `alert` setting) also show
+`changed (values withheld)` without storing either value, and listing applies
+this rule to older records too. If either value contains a key hansa knows, both are withheld.
 This check happens before shortening a value, including within lists and
 dictionaries. Other values are kept up to 2,048 characters of their JSON
 spelling; longer values explicitly say `truncated`. Listing also withholds

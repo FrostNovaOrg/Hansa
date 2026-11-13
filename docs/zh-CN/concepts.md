@@ -122,7 +122,7 @@ desk/
 
 所有通过 hansa 保存设置的方式都会记录变更：网页、`hansa init`、`hansa example`、`hansa lane add/set/remove/target/brief`、`hansa hide`、`hansa concurrency`、`hansa disk-floor` 和 `hansa memory-floor`。这里只记录通过 hansa 做的改动，直接编辑文件的改动不会被记录。
 
-服务商的密钥和令牌在新记录中，保存时只显示 `set (values withheld)`（已设置，值已隐藏），移除时只显示 `cleared (values withheld)`（已清除，值已隐藏）；旧记录仍显示 `changed (values withheld)`（已更改，值已隐藏），旧值和新值都不保存。如果旧值或新值中有一方含有 hansa 已知的密钥，两方都会隐藏。这个检查在截短内容之前进行，也会检查列表和字典里的内容。其他值按 JSON 文本保存，最多保留 2,048 个字符；更长的值会明确标注 `truncated`（已截短）。查询历史时，含有 hansa 当前已知密钥的值也会隐藏。
+服务商的密钥和令牌在新记录中，保存时只显示 `set (values withheld)`（已设置，值已隐藏），移除时只显示 `cleared (values withheld)`（已清除，值已隐藏）；旧记录仍显示 `changed (values withheld)`（已更改，值已隐藏），旧值和新值都不保存。`alert.command`（或整个 `alert` 设置）的变更也只显示 `changed (values withheld)`（已更改，值已隐藏），不保存旧值或新值，查询时对旧记录也适用这条规则。如果旧值或新值中有一方含有 hansa 已知的密钥，两方都会隐藏。这个检查在截短内容之前进行，也会检查列表和字典里的内容。其他值按 JSON 文本保存，最多保留 2,048 个字符；更长的值会明确标注 `truncated`（已截短）。查询历史时，含有 hansa 当前已知密钥的值也会隐藏。
 
 历史记录在持有工作台锁时追加到 `.hansa/settings-history.jsonl`，与 `events.jsonl` 分开保存，保证同时发生的变更都能记下，也让查询历史无需读取活动记录。服务重启后，这个文件仍会保留；复制或恢复工作台时也要保留它。第一行记录这份历史从何时开始：新工作台是创建时间；旧工作台升级后，则是第一次记录变更或查询历史的时间。命令总会显示这个时间，即使还没有变更记录。更早的设置变更无法从旧事件中还原。
 
