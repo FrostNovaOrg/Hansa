@@ -1064,7 +1064,7 @@ def status(desk: Desk) -> dict:
     queued = [m for m in tasks if m["state"] == "queued"]
     looks = waiting_looks(desk, s, tasks, server) if queued else None  # once for all of them
     followers = notify.live_records(desk)
-    hearing = [notify.who((r.get("session") or {}).get("pid"), r.get("name") or "") for r in followers]
+    hearing = notify.names(desk)
     session = next((seen for r in followers if (seen := up.coordinator_session(desk, r))), None)
     from . import page_messages
     return page_messages.status(desk, s, {
@@ -1087,7 +1087,7 @@ def status(desk: Desk) -> dict:
         # whether their turns' ends are recorded (hansa coordinator-turn), by the record of how each started
         "turns": [up.turn_line(desk, r.get("session") or {}, notify.who((r.get("session") or {}).get("pid"),
                                                                         r.get("name") or ""))
-                  for r in followers],
+                  for r in followers] if hearing else [],
         "coordinator_start": "" if hearing else up.coordinator_line(desk),  # what hansa up does about the session
         "card_note": up.card_note(desk),  # the recorded session's folder does not load the card (the desk's CLAUDE.md)
         "unreached": alert.coordinator_lines(desk, s),  # the coordinator alert's cases that hold now

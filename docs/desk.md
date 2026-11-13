@@ -1445,6 +1445,8 @@ With several listening sessions it describes the first with a fresh observation,
 in the same order as `hansa posts to`. The field and line are absent when no live
 session is posted to, the lookup failed or no longer lists the session, or its
 last observation is older than three minutes. The page's display is separate.
+An unavailable observation does not change which sessions `hansa posts to` lists
+or when their followers count as live.
 
 ### How each of the coordinator's turns ended
 
