@@ -670,8 +670,14 @@ out together)
 and the level in `HANSA_ALERT_LEVEL` (the highest in a batch; see
 [alert settings](desk.md#settings-on-the-web-page)), and the text on standard input: UTF-8, in the saved
 `alert_language` (`en` by default, or `zh`; set only by the principal beside the command), keys removed,
-within 1,000 characters. A long batch shortens each alert separately so every alert shows its start;
-urgent alerts come first, and the header counts the whole batch. A release's text names its lane and target;
+within 1,000 characters. A long batch shortens the explanation before each alert's final next step,
+keeping the step whole and marking omitted text with `…`. If the step cannot fit in its share,
+the alert keeps the existing cut from the end. Code-bearing alerts also keep that cut, so codes
+stay in their original position. Urgent alerts come first, and the header counts the whole batch.
+When the even share would fall below 60 characters of alert text (excluding `- ` and the newline),
+the batch shows as many alerts as fit at that minimum in the same order. Its last line counts
+the rest and names `hansa status`, in the saved alert language. The hourly cap and its held-back
+count are unchanged. A release's text names its lane and target;
 its description, as kept when asked, follows the request, code and instructions, or the result. Alerts use the
 [desk name saved by the principal](desk.md#settings-on-the-web-page), as the
 page title does: `[hansa] desk NAME: ...`. With no name set, they use the last

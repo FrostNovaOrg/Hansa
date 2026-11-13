@@ -102,7 +102,10 @@ with hansa's own environment (not a lane's env),
 the kinds in HANSA_ALERT_KIND (comma-separated when several go out together), the level in HANSA_ALERT_LEVEL,
 and the text on standard input (UTF-8,
 keys removed, within MOST_TEXT characters), stopped after TIMEOUT seconds. Long batches shorten each alert
-separately, urgent ones first, retaining each start and the total count. Alerts that come within GATHER seconds
+separately, urgent ones first, retaining each start and its final next step where it fits, with … marking the cut.
+Code-bearing texts keep their existing prefix cut so codes never move. If the shared room falls below 60 characters
+of alert text, show as many alerts as fit at that minimum, then count the rest with a pointer to hansa status in the
+alert language; the header still counts the whole batch. Alerts that come within GATHER seconds
 of each other go out in one run (none waits more than MOST_WAIT); closed to-dos and release requests that no longer
 wait as asked are left out, while their end alerts still go out.
 Each queued alert has a level: passive for a release that finished successfully and recovery notices;
@@ -171,6 +174,7 @@ GATHER = 20  # seconds: alerts that come within this of each other go out in one
 MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
 TIMEOUT = 30  # seconds a run may take
 MOST_TEXT = 1000  # characters on the command's standard input
+MIN_ALERT_TEXT = 60  # keep crowded batches readable while they share one character cap; excludes "- " and newline
 TAIL = 5  # lines of a failed run's output kept
 WITHHELD = "its output was not kept, as the alert held a one-time code"  # nor any part of it, in any form
 MOST_RUNS = 20  # runs an hour at most; beyond it, alerts are held and go out together
@@ -456,6 +460,20 @@ def desk_name(desk: Desk) -> str:
     return "/".join(str(desk.root).split("/")[-2:]).lstrip("/") or "/"
 
 
+def _fit_alert(line: str, size: int, *, keep_step: bool) -> str:
+    """Shorten the explanation before a final step; code-bearing lines keep their prefix cut."""
+    if len(line) <= size:
+        return line
+    if keep_step:
+        # Labelled steps may themselves contain a middle dot. Other advice (API errors) has no label.
+        at = max(line.rfind(" · next: "), line.rfind(" · 下一步："))
+        if at < 0:
+            at = line.rfind(" · ")
+        if at >= 0 and len(line) - at < size:
+            return line[:size - (len(line) - at) - 1] + "…" + line[at:]
+    return line[:max(0, size - 1)] + "…" if size else ""
+
+
 def text_of(desk: Desk, items: list, held: int = 0) -> str:
     """What the command reads: keys removed, urgent alerts first, each line sharing MOST_TEXT characters.
     held: how many of them the limit of MOST_RUNS runs an hour held back."""
@@ -482,12 +500,25 @@ def text_of(desk: Desk, items: list, held: int = 0) -> str:
         # need; the remaining space is shared by longer ones. Keep this while a batch has one text cap.
         header = text.split("\n", 1)[0]
         budget = max(0, MOST_TEXT - len(header) - 3 * len(lines))  # newline and "- " per line
+        summary = ""
+        if budget // len(lines) < MIN_ALERT_TEXT:
+            # Reserve the summary too: the cap must never turn later alerts into bare bullet stubs.
+            shown = max(0, (MOST_TEXT - len(header)) // (MIN_ALERT_TEXT + 3))
+            while True:
+                rest = len(lines) - shown
+                summary = (f"\n另有 {rest} 条提醒，请查看 hansa status" if zh else
+                           f"\n{rest} more alerts; see hansa status")
+                budget = max(0, MOST_TEXT - len(header) - len(summary) - 3 * shown)
+                if not shown or budget >= shown * MIN_ALERT_TEXT:
+                    break
+                shown -= 1
+            lines, items = lines[:shown], items[:shown]
         sizes = [0] * len(lines)
         for remaining, i in zip(range(len(lines), 0, -1), sorted(range(len(lines)), key=lambda i: len(lines[i]))):
             sizes[i] = min(len(lines[i]), budget // remaining)
             budget -= sizes[i]
-        text = header + "".join("\n- " + (line if len(line) <= size else line[:max(0, size - 1)] + "…" if size else "")
-                                for line, size in zip(lines, sizes))
+        text = header + "".join("\n- " + _fit_alert(line, size, keep_step=not item.get("code"))
+                                for line, size, item in zip(lines, sizes, items)) + summary
     return text if len(text) <= MOST_TEXT else text[:MOST_TEXT - 1] + "…"
 
 
