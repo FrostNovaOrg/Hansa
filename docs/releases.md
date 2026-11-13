@@ -745,9 +745,10 @@ even when it failed or was cut. Neither channel carries the other's failure.
 The page has a button that sends a test alert through every channel that is set
 up; its result lists every channel, and any failed channel makes the test fail.
 No coordinator command sends one.
-`hansa explain` says whether the alert command is set and when it was saved, and lists
+The Alerts summary in `hansa explain` says whether the alert command is set and when it was saved, and lists
 each named push address (service, hidden address and on/off). The principal can view
 and edit the command on the page, Settings, Alerts.
+Item 2 is partly addressed; the desk's existing access model is unchanged.
 
 The `coordinator` alert says that what hansa posts to the coordinator's session (see [hearing from
 hansa](desk.md#hearing-from-hansa)) cannot reach it. Its text names the desk, the session (its pid, and its name

@@ -5186,6 +5186,54 @@ class DeskTest(unittest.TestCase):
         self.assertIn("cleared (values withheld)", output)
         self.assertEqual([e.get("secret_action") for e in entries], ["set", "set", "cleared"])
 
+    def test_settings_history_records_alert_changes_as_status(self):
+        before = len(self.history_entries())
+        commands = ("printf example-first", "printf 示例-second", "")
+        for command in commands:
+            self.assertTrue(self.page_save(lambda s: s.update(alert={"command": command}))["ok"])
+            self.assertEqual(public_settings(self.desk)["settings"]["alert"]["command"], command)
+        entries = self.history_entries()[before:]
+        changes = [e for e in entries if e["path"] == "alert.command"]
+        self.assertEqual(len(changes), 3)
+        for entry in changes:
+            self.assertTrue(entry.get("redacted"))
+            self.assertEqual(entry["by"], "principal")
+            self.assertNotIn("old", entry)
+            self.assertNotIn("new", entry)
+        self.assertTrue(any(e["path"] == "alert.at" and "new" in e for e in entries))
+        raw = (self.desk.state_dir / "settings-history.jsonl").read_text()
+        for command in commands[:2]:
+            self.assertNotIn(command, raw)
+
+    def test_settings_history_records_alert_groups_as_status(self):
+        from hansa import history
+        before = len(self.history_entries())
+        setting = {"alert": {"command": "printf example-group", "at": 1900000000}}
+        for old, new in (({"alert": None}, setting), (setting, {"alert": None})):
+            history.record(self.desk, old, new, "page")
+        for entry in self.history_entries()[before:]:
+            self.assertEqual(entry["path"], "alert")
+            self.assertTrue(entry.get("redacted"))
+            self.assertNotIn("old", entry)
+            self.assertNotIn("new", entry)
+
+    def test_explain_history_reports_earlier_alert_status(self):
+        from hansa.desk import append_event
+        path = self.desk.state_dir / "settings-history.jsonl"
+        for field, old, new in (("alert.command", "printf earlier-first", "printf earlier-second"),
+                                ("alert", {"command": "printf earlier-first"}, None)):
+            with self.subTest(field=field):
+                append_event(path, json.dumps({"ts": 1900000000, "by": "principal", "path": field,
+                                               "old": old, "new": new}))
+                before = path.read_bytes()
+                shown = self.hansa("explain", "history", "--last", "1")
+                self.assertIn(field, shown)
+                self.assertIn("changed", shown)
+                self.assertIn("values withheld", shown)
+                for part in ("earlier-first", "earlier-second"):
+                    self.assertNotIn(part, shown)
+                self.assertEqual(path.read_bytes(), before)
+
     def test_settings_history_check_and_release_commands(self):
         self.hansa("lane", "set", "a", "check", "python3 old_tests.py")
         self.hansa("lane", "target", "a", "preview", "sh old_release.sh")
@@ -36390,6 +36438,28 @@ def save():'''))
                             e["path"].startswith(("lanes" if kind == "lane" else "providers") + "." + name + ".")][:2]
                 self.assertEqual([{k: v for k, v in e.items() if k != "change"} for e in data["entries"]], expected)
         self.assertEqual((self.desk.state_dir / "settings-history.jsonl").read_bytes(), before)
+
+    def test_web_history_reports_earlier_alert_status(self):
+        from hansa.desk import append_event
+        path = self.desk.state_dir / "settings-history.jsonl"
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        for field, old, new in (("alert.command", "printf page-first", "printf page-second"),
+                                ("alert", None, {"command": "printf page-second"})):
+            with self.subTest(field=field):
+                append_event(path, json.dumps({"ts": 1900000000, "by": "principal", "path": field,
+                                               "old": old, "new": new}))
+                before = path.read_bytes()
+                code, data, _ = self.web_request("/api/history?last=1", headers=auth)
+                self.assertEqual(code, 200)
+                [entry] = data["entries"]
+                self.assertEqual(entry["path"], field)
+                self.assertTrue(entry.get("redacted"))
+                self.assertNotIn("old", entry)
+                self.assertNotIn("new", entry)
+                self.assertIn("values withheld", entry["change"])
+                for part in ("page-first", "page-second"):
+                    self.assertNotIn(part, json.dumps(data))
+                self.assertEqual(path.read_bytes(), before)
 
     def test_web_history_withholds_recorded_and_newly_known_keys(self):
         recorded, later = "example-recorded-credential", "example-later-credential"
