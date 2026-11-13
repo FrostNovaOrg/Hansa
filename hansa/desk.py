@@ -2079,6 +2079,19 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
         fenced.append((repo, _overlaps, f"it would open {repo}, the lane's repository; workers change code "
                                         "only in their worktree"))
     fenced += _repo_fences(lanes, contents=True)
+    for d, _ in listed_desks() if root else []:
+        if _above(str(d), str(root)) and _above(str(root), str(d)):
+            continue
+        settings_path = d / "settings.json"
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            if not isinstance(settings, dict):
+                raise ValueError
+        except (OSError, ValueError):
+            return [f"write cannot include {x}: Item 4 cannot be checked until {settings_path} is readable "
+                    "as a UTF-8 JSON object" for x in paths]
+        fenced += [(r, hit, f"{why} (desk {d})")
+                   for r, hit, why in _repo_fences(settings.get("lanes"), contents=True)]
     for name, pv in (providers if isinstance(providers, dict) else {}).items():
         if isinstance(pv, dict) and isinstance(pv.get("config_dir", ""), str) \
                 and (root or pv.get("kind") == "subscription"):

@@ -387,6 +387,9 @@ left out of the worker's, setup's and check's sandbox, with its reason
 recorded on the task and marked by `hansa explain lane L`; the run goes on
 with the entries that pass.
 
+Item 4 is checked when settings are saved and again before a run. Keep this
+check while Item 4 applies.
+
 Point a tool at the lane's folder with the lane's env (`hansa lane set L env
 NAME=/Users/me/hansa-cache/shop-desk/L/TOOL`, and list that folder): pip
 `PIP_CACHE_DIR`, npm `npm_config_cache` (env names may be in either case),

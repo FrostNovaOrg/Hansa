@@ -27694,6 +27694,120 @@ def save():'''))
             with self.subTest(hide=path):
                 self.assertEqual(deny_split([str(path)], self.desk.root, self.desk.settings()["lanes"])[1], [])
 
+    def test_write_entries_are_checked_against_listed_settings(self):
+        repo, paths = self.write_repository_relations()
+        other = self.other_desk()
+        settings = other.settings()
+        settings["lanes"]["c"] = dict(settings["lanes"]["a"], repo=str(repo))
+        settings["lanes"].update(unused=None, incomplete={"repo": 4}, relative={"repo": "cache"})
+        write_json(other.settings_path, settings)
+        cache = self.tmp / "cache"
+        self.hansa("lane", "set", "a", "write", str(cache), str(repo.parent / "sibling-cache"))
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        for path in paths:
+            with self.subTest(path=path):
+                with self.assertRaises(SystemExit) as e:
+                    self.hansa("lane", "set", "a", "write", str(cache), str(path))
+                for word in ("nothing was changed", "lane a", str(path), "lane c", str(other.root)):
+                    self.assertIn(word, str(e.exception.code))
+                self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+
+    def test_saved_entries_follow_listed_settings_at_run_time(self):
+        from hansa import run, up
+        repo, paths = self.write_repository_relations()
+        other = self.other_desk(listed=False)
+        settings = other.settings()
+        settings["lanes"]["c"] = dict(settings["lanes"]["a"], repo=str(repo))
+        write_json(other.settings_path, settings)
+        seen, cache = self.tmp / "argv.jsonl", self.tmp / "cache"
+        self.hansa("lane", "set", "a", "env", f"FAKE_SHOW_ARGV={seen}")
+        self.hansa("lane", "set", "a", "write", *map(str, paths), str(cache))
+        settings = self.desk.settings()
+        lane = settings["lanes"]["a"]
+        self.assertEqual(run.write_list(self.desk, lane), ([str(x) for x in paths] + [str(cache)], []))
+        up.desks_file().parent.mkdir(parents=True, exist_ok=True)
+        write_json(up.desks_file(), [{"desk": str(d.root)} for d in (self.desk, other)])
+        good, left = run.write_list(self.desk, lane)
+        self.assertEqual(good, [str(cache)])
+        self.assertEqual(len(left), len(paths))
+        explained = self.hansa("explain", "lane", "a")
+        for path in paths:
+            with self.subTest(path=path):
+                line = next((x for x in explained.splitlines() if f"a run leaves out {path}:" in x), "")
+                self.assertIn(str(other.root), line)
+                self.assertIn("lane c", line)
+        tid = self.desk.new_task("Add hello.txt")
+        meta = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(meta["state"], "done", meta)
+        self.assertEqual(meta["write_left_out"], left)
+        self.assertEqual([e["why"] for e in self.events("write_left_out")], left)
+        worker = self.sandbox_of(json.loads(seen.read_text().splitlines()[-1]))["filesystem"]
+        check = run.srt_settings(self.desk, lane, "claude", settings["providers"]["claude"],
+                                 self.repo, str(self.tmp / "run-tmp"))["filesystem"]
+        for fs in (worker, check):
+            self.assertIn(str(cache), fs["allowWrite"])
+            for path in paths:
+                with self.subTest(path=path, sandbox=fs):
+                    self.assertNotIn(str(path), fs["allowWrite"])
+        changed = other.settings()
+        changed["lanes"]["c"]["repo"] = str(cache)
+        write_json(other.settings_path, changed)
+        good, left = run.write_list(self.desk, lane)
+        self.assertEqual(good, [str(x) for x in paths])
+        self.assertIn(str(cache), "\n".join(left))
+        self.assertIn(str(other.root), "\n".join(left))
+
+    def test_listed_settings_are_checked_for_nested_locations(self):
+        from hansa import up
+        repo, _ = self.write_repository_relations()
+        alias = self.tmp / "desk-alias"
+        alias.symlink_to(self.desk.root, target_is_directory=True)
+        up.desks_file().parent.mkdir(parents=True, exist_ok=True)
+        for root in (self.tmp, self.desk.root / "inner"):
+            with self.subTest(root=root):
+                (root / "tasks").mkdir(parents=True)
+                write_json(root / "settings.json", {"lanes": {"c": {"repo": str(repo)}}})
+                write_json(up.desks_file(), [{"desk": str(d)} for d in (alias, root)])
+                settings = self.desk.settings()
+                said = write_problems([str(repo)], str(self.repo), self.desk.root, lanes=settings["lanes"])
+                self.assertTrue(said)
+                self.assertIn(str(root), said[0])
+                self.assertIn("lane c", said[0])
+                self.assertEqual(write_problems([str(self.tmp / "cache")], str(self.repo), self.desk.root,
+                                                lanes=settings["lanes"]), [])
+
+    def test_unavailable_listed_settings_leave_writes_out(self):
+        from hansa import run
+        other = self.other_desk()
+        cache = self.tmp / "cache"
+        self.hansa("lane", "set", "a", "write", str(cache))
+        lane = self.desk.settings()["lanes"]["a"]
+        before = self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()
+        saved = other.settings_path.read_bytes()
+        for data in (b"", b"not-json", b"[]", b"\xff"):
+            with self.subTest(data=data):
+                other.settings_path.write_bytes(data)
+                good, left = run.write_list(self.desk, lane)
+                self.assertEqual(good, [])
+                self.assertEqual(len(left), 1)
+                for word in ("Item 4", str(other.settings_path)):
+                    self.assertIn(word, left[0])
+                self.assertTrue(self.desk.save_settings(self.desk.settings()))
+                self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
+        other.settings_path.write_bytes(saved)
+        read_text = Path.read_text
+
+        def read(path, *args, **kwargs):
+            if path == other.settings_path:
+                raise PermissionError("fixture")
+            return read_text(path, *args, **kwargs)
+
+        with unittest.mock.patch.object(Path, "read_text", read):
+            good, left = run.write_list(self.desk, lane)
+            self.assertEqual(good, [])
+            self.assertIn(str(other.settings_path), "\n".join(left))
+        self.assertEqual(run.write_list(self.desk, lane), ([str(cache)], []))
+
     def test_saved_write_repository_entries_are_explained_and_left_out_of_runs(self):
         from hansa import run
         repo, paths = self.write_repository_relations()
