@@ -37,7 +37,7 @@ boundary, and some of its write denies are globs (below). On Linux srt drops eve
 4. **Copy `codex.env.example` to `codex.env`**, beside it, and replace the placeholders. hansa gives a worker a
    clean environment, so settings in `hansa serve`'s environment would not reach the adapter: it reads its
    environment first, then `codex.env` (or `trial.env`, an older name, while there is no `codex.env`). git ignores
-   both, and the default `logs/` here.
+   both. For an existing installation, follow the [upgrade note](../../docs/codex.md#upgrading).
 5. **Start the desk with the adapter:** `HANSA_CLAUDE=<checkout>/contrib/codex/bin/claude-or-codex hansa serve`.
 6. **Add a `compatible` provider** (for example `codex`) with base URL `http://codex.invalid`, a key of at least 20
    random characters, and as its model the Codex model to run (for example `gpt-6.1-sol`): the adapter gives
@@ -52,7 +52,7 @@ boundary, and some of its write denies are globs (below). On Linux srt drops eve
 | `HANSA_CODEX_HOME` | its `CODEX_HOME`, holding the adapter's login | (required) |
 | `HANSA_CODEX_MODEL` | `-m` when hansa passes no `--model`; the provider's model, which hansa passes, comes first | `gpt-6.1-sol` |
 | `HANSA_CODEX_EFFORT` | `model_reasoning_effort`; hansa's `--effort` overrides it; accepts `low`, `medium`, `high`, `xhigh`, `max` ([startup checks](../../docs/tasks.md#effort)) | `high` |
-| `HANSA_CODEX_LOGS` | where each run's `<session-id>.jsonl`, `.err`, `.thread` and `.srt.json` are kept | `logs/` here |
+| `HANSA_CODEX_LOGS` | accepted for compatibility; see [temporary output](../../docs/codex.md) | unused |
 | `HANSA_CODEX_SRT` | srt | `srt` on the worker's PATH |
 | `HANSA_REAL_CLAUDE` | the real claude | the first `claude` on PATH that is not the adapter, else `~/.local/bin/claude` |
 | `HANSA_CODEX_CA_FILE` | the certificates Codex checks TLS against, as `CODEX_CA_CERTIFICATE`; set but empty, none | `/etc/ssl/cert.pem` when it exists |
@@ -64,7 +64,7 @@ Codex's memories (`memories`, `external_agent_memory_import`) are always disable
 ## The Codex run
 
 ```
-srt --settings <logs>/<sid>.srt.json -- /bin/sh -c '<CODEX_CA_CERTIFICATE>; <source the lane env>; exec "$@"' ... \
+srt --settings <tmp>/srt.json -- /bin/sh -c '<CODEX_CA_CERTIFICATE>; <source the lane env>; exec "$@"' ... \
   codex exec --json --ignore-user-config --ignore-rules --ephemeral --strict-config \
     -C <worktree> -m <model> -c model_reasoning_effort="<effort>" \
     -c developer_instructions="<hansa's --append-system-prompt, as a TOML string>" \
@@ -86,8 +86,9 @@ The task goes in on stdin, as hansa gives it. Why each part:
   `SSL_CERT_FILE`, which would change every command's certificates. A lane env that sets it wins.
 - **The lane's env and sandbox prelude** (`CLAUDE_ENV_FILE`, in `.hansa`, which the sandbox may not read) are
   copied into the worker's temporary folder (mode 600), sourced and deleted by the sh inside srt.
-- **Codex's stdout is the run's log file, not a pipe.** Codex panics when a write to a non-blocking stdout fails
+- **Codex's stdout is a temporary file, not a pipe.** Codex panics when a write to a non-blocking stdout fails
   with EAGAIN, as a full pipe makes it on a long line; a file never does. The adapter follows the file.
+  See [temporary output](../../docs/codex.md) for its lifetime.
 - **Its own configuration:** `--ignore-user-config` loads no `config.toml` (`notify`, `mcp_servers`, providers,
   project and hook trust) and no `environments.toml`, which can send commands to another machine; `--ignore-rules`,
   no exec-policy rules; `--ephemeral`, no session files. With `--strict-config` an unknown `-c` key or `--disable`
@@ -188,7 +189,7 @@ the check ends; writes there and in the Codex home only;
 no reads of the usual logins in the home folder (`~/.ssh`, `~/.aws`, `~/.claude`, `~/.codex` and the like), of
 the folder hansa ran the check in, or of the desk's `.hansa`; the network, OpenAI's hosts alone. The rest is a
 worker run's, with `--skip-git-repo-check` and no developer instructions or lane env. A usage limit or a failed
-login rests the provider as for Claude. Its logs are `<logs>/check-<id>.*`.
+login rests the provider as for Claude. Its output is temporary, as for worker runs.
 
 ## Parallel runs and the shared login
 

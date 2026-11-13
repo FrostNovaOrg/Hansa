@@ -2,7 +2,7 @@
 import json
 import os
 
-from .codexkit import FIXTURES, Scratch, hansa_run, shim
+from .codexkit import Scratch, hansa_run, shim
 
 
 class CodexRun(Scratch):
@@ -99,12 +99,9 @@ class CodexRun(Scratch):
             self.run_worker("success.jsonl", argv=self.worker_argv(effort=effort))
             self.assertIn(f'model_reasoning_effort="{effort}"', self.codex_called()["argv"])
 
-    def test_logs_kept(self):
+    def test_answer_keeps_the_thread_id(self):
         run, _ = self.run_worker("success.jsonl")
-        self.assertEqual((self.logs / f"{self.sid}.jsonl").read_text(), (FIXTURES / "success.jsonl").read_text())
-        self.assertTrue((self.logs / f"{self.sid}.err").exists())
         thread = "0199f3a2-7c1e-7d40-9b6a-5c2f0e8d4a11"
-        self.assertEqual((self.logs / f"{self.sid}.thread").read_text().strip(), thread)
         self.assertEqual(run["codex_thread_id"], thread)
 
     def test_toml_string(self):
