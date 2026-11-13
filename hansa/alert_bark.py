@@ -159,7 +159,7 @@ class Bark:
         return _encryption_key(address, value)
 
     def validate(self, address, secret):
-        if secret and not _key_valid(secret):
+        if secret is not None and not _key_valid(secret):
             raise ValueError(SAVED_ENCRYPTION_PROBLEM)
 
     def requests(self, address, secret, title, body, level, *, texts=None):

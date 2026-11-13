@@ -324,6 +324,51 @@ class SecretFileTest(_PushServicesCase):
     def rewrite(self, entry, text):
         alert_push._file(self.desk, entry["id"], True).write_text(text, encoding="utf-8")
 
+    def test_saved_settings_require_usable_credentials(self):
+        from hansa import alert
+        entry = self.save("fixture-bark-key", "bark", secret="1234567890123456")
+        for text in ("", "\n", "\r\n"):
+            with self.subTest(text=text):
+                self.rewrite(entry, text)
+                public = alert_push.public(self.desk)[0]
+                for field in ("secret_set", "encrypted", "encryption_invalid"):
+                    self.assertTrue(public[field], field)
+                self.assertFalse(alert.release_codes(self.desk))
+                for command in ("status", "explain"):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        self.assertEqual(main(["--desk", str(self.desk.root), command]), 0)
+                    for word in ("encryption key is not valid", "nothing is sent", "save the key again"):
+                        self.assertIn(word, output.getvalue())
+                with patch.object(alert_http, "send", return_value=[{"why": "sent"}]) as sending:
+                    self.assertEqual(alert_push.test(self.desk, entry["id"]), "bad_key")
+                    self.assertEqual(alert_push.send(self.desk, entry, [{"kind": "test", "text": "fixture alert"}]),
+                                     "bad_key")
+                sending.assert_not_called()
+                self.assertEqual(alert_push.last_result(self.desk, entry["id"])["why"], "bad_key")
+
+    def test_saved_credentials_can_be_replaced_or_cleared(self):
+        key = "1234567890123456"
+        entry = self.save("fixture-bark-key", "bark", secret=key)
+        for index, text in enumerate(("", "\n", "\r\n")):
+            with self.subTest(text=text):
+                self.rewrite(entry, text)
+                address = alert_push._file(self.desk, entry["id"])
+                before = address.read_bytes(), self.desk.settings_path.read_bytes()
+                edit = {"id": entry["id"], "address": f"replacement-device-{index}"}
+                with self.assertRaisesRegex(ValueError, "save the key again"):
+                    alert_push.change(self.desk, [edit], by="page")
+                self.assertEqual((address.read_bytes(), self.desk.settings_path.read_bytes()), before)
+                alert_push.change(self.desk, [{**edit, "secret": key}], by="page")
+                self.assertTrue(alert_push.encrypts(self.desk, entry))
+                self.assertIn("ciphertext", self.deliver(entry)[1]["json"])
+                self.rewrite(entry, text)
+                alert_push.change(self.desk, [{"id": entry["id"], "secret": ""}], by="page")
+                self.assertFalse(alert_push._file(self.desk, entry["id"], True).exists())
+                self.assertFalse(alert_push.public(self.desk)[0]["secret_set"])
+                self.assertIn("body", self.deliver(entry)[1]["json"])
+                alert_push.change(self.desk, [{"id": entry["id"], "secret": key}], by="page")
+
     def test_invalid_saved_bark_key_status_and_explain_before_and_after_push(self):
         key = "k" * 16
         damaged = "k" * 15
