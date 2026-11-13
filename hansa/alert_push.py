@@ -79,7 +79,7 @@ def _file(desk, id: str, extra=False) -> Path:
     return desk.secrets_dir / f"alert-push-{id}.{'secret' if extra else 'address'}"
 
 
-def _read(desk, id, extra=False, *, strip=None):
+def _read(desk, id, extra=False, *, strip=None, missing=""):
     """A saved value. hansa writes each with one newline at the end. An address is read stripped; an extra secret
     less only that newline (strip=None), as a Bark encryption key may begin or end with spaces. _secret reads
     another service's secret stripped, as a file written by hand or by another program may hold more."""
@@ -87,13 +87,14 @@ def _read(desk, id, extra=False, *, strip=None):
         value = _file(desk, id, extra).read_text(encoding="utf-8")
         return value.strip() if (not extra if strip is None else strip) else value.removesuffix("\n")
     except FileNotFoundError:
-        return ""
+        return missing
 
 
 def _secret(desk, entry):
     """An entry's extra secret: a Bark entry's encryption key as it is, another service's token or signing secret
     stripped."""
-    return _read(desk, entry["id"], True, strip=entry["service"] != "bark")
+    bark = entry["service"] == "bark"
+    return _read(desk, entry["id"], True, strip=not bark, missing=None if bark else "")
 
 
 def has_address(desk, entry) -> bool:
@@ -314,6 +315,8 @@ def prepare(desk, settings, changes, *, by=""):
         if validate and any(id == entry["id"] for id, _, _ in writes):
             address = pending.get((entry["id"], False), _read(desk, entry["id"]))
             secret = pending.get((entry["id"], True), _secret(desk, entry))
+            if entry["service"] == "bark" and (entry["id"], True) in pending and not secret:
+                secret = None
             validate(address, secret)
     # A name must never become another copy of a pasted credential in settings.
     private = []
@@ -417,7 +420,8 @@ def public(desk, settings=None):
             hidden = alert_services.SERVICES[entry["service"]].hidden(address) if address else ""
         except ValueError:
             hidden = ""
-        secret_set = bool(_secret(desk, entry))
+        secret = _secret(desk, entry)
+        secret_set = secret is not None if entry["service"] == "bark" else bool(secret)
         encrypted = entry["service"] == "bark" and secret_set
         out.append({**entry, "name": desk.redact(entry.get("name", "")), "address": hidden,
                     "address_set": bool(address), "secret_set": secret_set,
