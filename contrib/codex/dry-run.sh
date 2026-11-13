@@ -5,8 +5,7 @@
 # made, and no commit (the sandbox denies writing git's data; hansa commits, never the worker), and none of the
 # project settings Codex was asked to make (sub/.claude among them, by mkdir, by renaming a folder into place and
 # as a link). It is also the check of the -c config keys --help does not show:
-# the report naming task dry-run shows developer_instructions arrived; for model_reasoning_effort and
-# check_for_update_on_startup, look in the JSONL log and codex's stderr (<logs>/<session-id>.jsonl, .err).
+# the report naming task dry-run shows developer_instructions arrived; refused configuration appears in the answer.
 #
 # Needs, in codex.env beside this script (or in the environment):
 #   HANSA_CODEX_BIN   a codex outside ~/.codex (hansa's sandbox denies reading ~/.codex, srt too)

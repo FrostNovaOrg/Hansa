@@ -70,6 +70,7 @@ class Kill(Scratch):
         os.kill(p.pid, signal.SIGKILL)  # no chance to pass anything on: the watchdog in srt's group does
         p.wait(10)
         self.assertEqual(self.wait_gone(self.pids, 10), [])
+        self.assertFalse(self.logs.exists())
 
     def test_sigterm_to_the_shim_alone_with_no_watchdog(self):
         # the shim's own handler, nothing else, passes the signal on: srt does not, and no watchdog runs

@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -865,9 +866,13 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
     answered as Claude Code answers. A check runs in a new empty folder of its own, which is its working folder
     and, with the Codex home, its only writable place; its network is CODEX_HOSTS alone. The folder is removed
     afterwards."""
+    with ExitStack() as files:
+        return _run_codex(argv, env, conf, check, files)
+
+
+def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack) -> int:
     a = parse(argv)
     sid = str(uuid.uuid4()) if check else a["--session-id"]
-    name = f"check-{sid}" if check else sid  # the log files'
     # the provider's model, which hansa passes; HANSA_CODEX_MODEL and then DEFAULT_MODEL only when it passes none
     model = a.get("--model") or conf.get("HANSA_CODEX_MODEL") or DEFAULT_MODEL
     effort = a.get("--effort") or conf.get("HANSA_CODEX_EFFORT") or DEFAULT_EFFORT
@@ -877,7 +882,6 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
         max_turns = DEFAULT_MAX_TURNS
     codex = conf.get("HANSA_CODEX_BIN") or ""
     home = conf.get("HANSA_CODEX_HOME") or ""
-    logs = Path(conf.get("HANSA_CODEX_LOGS") or REPO / "logs")
     srt = conf.get("HANSA_CODEX_SRT") or shutil.which("srt", path=env.get("PATH")) or ""
     ca = ca_file(conf)
 
@@ -922,11 +926,11 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
         sys.stderr.write(f"hansa-codex-shim: left out of srt's denyRead for this Codex run, as the Codex home or "
                          f"inside it: {', '.join(map(str, opened))}\n")
     try:
-        logs.mkdir(parents=True, exist_ok=True)
         Path(home).mkdir(parents=True, exist_ok=True)
         if not check:
             # in the run's temporary folder: srt may write it
             Run.mine = mine = tempfile.mkdtemp(prefix="codex-", dir=tmp)
+        files.callback(shutil.rmtree, mine, ignore_errors=True)
     except OSError as e:
         return failed(str(e))
     last = os.path.join(mine, "last-message.txt")
@@ -940,8 +944,15 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
                 out.write(Path(env["CLAUDE_ENV_FILE"]).read_bytes())
         except OSError as e:
             return failed(f"the lane's env could not be read: {e}")
-    sfile = logs / f"{name}.srt.json"
-    sfile.write_text(json.dumps(box_srt, indent=1), encoding="utf-8")
+    sfile = os.path.join(mine, "srt.json")
+    try:
+        fd = os.open(sfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(box_srt, out, indent=1)
+        jsonl = files.enter_context(tempfile.TemporaryFile(dir=mine))
+        err = files.enter_context(tempfile.TemporaryFile(dir=mine))
+    except OSError as e:
+        return failed(str(e))
     cenv = {k: v for k, v in env.items() if k not in DROP_VARS}
     if check:
         cenv["TMPDIR"] = mine  # its only writable place
@@ -950,20 +961,20 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
                *codex_argv(codex, wt, model, effort, a.get("--append-system-prompt") or "", last, *web,
                           zsh_prefix=zsh_prefix, no_repo=check)]
 
-    # Codex's stdout is the log file itself, never a pipe: a write to a regular file does not fail with EAGAIN,
+    # Codex's stdout is a temporary file, never a pipe: a write to a regular file does not fail with EAGAIN,
     # whoever sets O_NONBLOCK on it (codex's print panics on that when a pipe is full). The shim follows the file.
-    jsonl, err = open(logs / f"{name}.jsonl", "wb"), open(logs / f"{name}.err", "wb")
-    follow = open(logs / f"{name}.jsonl", "rb", buffering=0)
     seen, said, errors, failure, usage, thread, done, over = set(), "", [], None, None, "", False, False
     progress = Progress(env.get("CLAUDE_CONFIG_DIR", "") if not check else "", sid)
     retries, warnings = [], []
     partial = b""
+    offset = 0
 
     def read_events(ended, stopping=False):
-        nonlocal partial, said, failure, usage, thread, done, over
-        if follow.closed:
+        nonlocal partial, said, failure, usage, thread, done, over, offset
+        if jsonl.closed:
             return False
-        chunk = follow.read()
+        chunk = os.pread(jsonl.fileno(), os.fstat(jsonl.fileno()).st_size - offset, offset)
+        offset += len(chunk)
         lines = (partial + chunk).split(b"\n")
         partial = lines.pop()  # what follows the last newline: a line not yet complete
         if ended and partial:
@@ -979,7 +990,6 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
             t, item = ev.get("type"), ev.get("item") if isinstance(ev.get("item"), dict) else {}
             if t == "thread.started":
                 thread = str(ev.get("thread_id") or "")
-                (logs / f"{name}.thread").write_text(thread + "\n", encoding="utf-8")
             elif t in ("item.started", "item.completed") and item.get("type") in COUNTED_ITEMS:
                 seen.add(item.get("id") or f"#{len(seen)}")
                 if len(seen) > max_turns:
@@ -1029,7 +1039,6 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
             proc = subprocess.Popen(command, cwd=wt, env=cenv, stdin=sys.stdin, stdout=jsonl, stderr=err,
                                     start_new_session=True, preexec_fn=unmasked)
         except OSError as e:
-            follow.close()
             return failed(f"srt could not start: {e}")
         if env.get(PAUSE_AFTER_START):
             Path(env[PAUSE_AFTER_START]).write_text(str(proc.pid), encoding="utf-8")
@@ -1045,7 +1054,6 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
                 pass
     finally:
         unmasked()
-    sys.stderr.write(f"hansa-codex-shim: Codex's output is kept in {logs}/{name}.jsonl and .err\n")
     looked, ended = 0.0, False
     # Complete lines as they arrive; a partial last one is kept until its newline does
     while not (ended or over):
@@ -1063,14 +1071,12 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
             stop_tree(proc.pid, proc, seen=Run.seen)
         if not changed and not ended:
             time.sleep(POLL)
-    follow.close()
     code = proc.wait()
     stop_tree(proc.pid, None, grace=0, seen=Run.seen)  # what codex left running
     if dog is not None:
         dog.kill()
         dog.wait()
     jsonl.close()
-    err.close()
     try:
         report = Path(last).read_text(encoding="utf-8").strip() or said
     except OSError:
@@ -1095,7 +1101,8 @@ def run_codex(argv: list, env: dict, conf: dict, check: bool = False) -> int:
     text = failure or (errors[-1] if errors else "")
     if not text:
         try:
-            text = (logs / f"{name}.err").read_text(encoding="utf-8", errors="replace")[-4000:].strip()
+            err.seek(0)
+            text = err.read().decode("utf-8", "replace")[-4000:].strip()
         except OSError:
             text = ""
     if not text and retries:

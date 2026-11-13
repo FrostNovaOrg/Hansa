@@ -73,8 +73,7 @@ class ProviderCheck(Scratch):
         self.assertTrue(r["ok"], r)
         self.assertEqual(r["detail"], shim.DEFAULT_MODEL)  # hansa names the models of modelUsage
         self.assert_codex_ran()
-        logs = sorted(p.name for p in self.logs.iterdir())
-        self.assertTrue(logs and all(n.startswith("check-") for n in logs), logs)
+        self.assertFalse(self.logs.exists())
         self.assertTrue(self.desk.provider_state()["codex"]["check"]["ok"])
 
     def test_provider_check_writes_no_progress(self):
@@ -206,6 +205,28 @@ class CheckAnswer(Scratch):
             "inputTokens": 3120 - 2048, "outputTokens": 5, "cacheReadInputTokens": 2048,
             "cacheCreationInputTokens": 0, "reasoningOutputTokens": 0}})
         self.assertEqual(run["usage"], run["modelUsage"])
+
+    def test_output_files_live_only_for_the_check(self):
+        run, _, code = self.ask(self.check_argv())
+        self.assertEqual((code, run["result"]), (0, "OK"))
+        for stream in self.codex_called()["streams"].values():
+            self.assertEqual(stream, {"regular": True, "mode": 0o600, "links": 0})
+        self.assertFalse(self.logs.exists())
+
+    def test_compatibility_setting_does_not_change_the_answer(self):
+        self.logs.write_text("keep")
+        run, _, code = self.ask(self.check_argv())
+        self.assertEqual((code, run["result"]), (0, "OK"))
+        self.assertEqual(self.logs.read_text(), "keep")
+
+    def test_start_failure_removes_temporary_files(self):
+        p = self.start(self.check_argv(), self.env(HANSA_CODEX_SRT=str(self.root / "missing-srt")))
+        out, _ = p.communicate(timeout=60)
+        run = json.loads(out)
+        self.assertEqual((p.returncode, run["subtype"]), (1, "error_during_execution"))
+        self.assertIn("srt could not start", run["result"])
+        self.assertEqual(list(self.tmp.glob("codex-*")), [])
+        self.assertFalse(self.logs.exists())
 
     def test_usage_limit_answer(self):
         run, err, code = self.ask(self.check_argv("--tools="), "usage_limit.jsonl")

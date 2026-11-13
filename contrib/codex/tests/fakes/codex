@@ -20,6 +20,7 @@ FAKE_CODEX_STATUS_RECORD.
 import fcntl
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -48,6 +49,8 @@ if argv[:2] == ["login", "status"]:
 
 stdin = sys.stdin.read()
 record = {"argv": argv, "stdin": stdin, "pid": os.getpid(), "cwd": os.getcwd(),
+          "streams": {str(fd): {"regular": stat.S_ISREG(s.st_mode), "mode": stat.S_IMODE(s.st_mode),
+                                "links": s.st_nlink} for fd in (1, 2) for s in [os.fstat(fd)]},
           "env": {k: os.environ.get(k) for k in ("CODEX_HOME", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "TMPDIR",
                                                   "HANSA_CODEX_BIN", "FROM_LANE_ENV", "CLAUDE_ENV_FILE",
                                                   "CODEX_CA_CERTIFICATE", "TMPPREFIX")}}
