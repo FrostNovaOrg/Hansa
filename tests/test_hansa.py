@@ -2145,6 +2145,111 @@ class DeskNamesTest(unittest.TestCase):
                 self.assertEqual(ran.stdout.strip(), up.desk_server(desk)[1])
 
 
+class AlertTextTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        root = self.tmp / "shop" / "desk"
+        root.mkdir(parents=True)
+        self.desk = Desk(root)
+
+    def test_single_and_fitting_alerts_keep_their_whole_text(self):
+        for zh, step in ((False, " · next: ask the coordinator to review t0001"),
+                         (True, " · 下一步：让协调员审阅 t0001")):
+            with self.subTest(zh=zh), unittest.mock.patch.object(alert, "chinese", return_value=zh):
+                for count in (1, 3):
+                    items = [{"text": f"alert {i}" + step} for i in range(count)]
+                    text = alert.text_of(self.desk, items)
+                    for item in items:
+                        self.assertIn(item["text"], text)
+                    self.assertNotIn("…", text)
+                    self.assertNotIn("hansa status", text)
+
+    def test_long_alert_batch_keeps_steps_in_both_languages(self):
+        # Some session alerts label the next step; API-error advice uses only the middle dot.
+        for zh, step in ((False, " · next: tell the coordinator; it can use hansa explain server"),
+                         (True, " · 下一步：告诉协调员；它可以用 hansa explain server 查明原因"),
+                         (False, " · next: ask the coordinator · hansa explain server can help"),
+                         (True, " · 下一步：告诉协调员 · 可用 hansa explain server 查明原因"),
+                         (False, " · " + alert.TURN_ADVICE["billing_error"][0]),
+                         (True, " · " + alert.TURN_ADVICE["billing_error"][1])):
+            with self.subTest(zh=zh, step=step), unittest.mock.patch.object(alert, "chinese", return_value=zh):
+                items = [{"kind": "coordinator", "text": f"alert {i}: " + "detail " * 100 + step}
+                         for i in range(3)]
+                text = alert.text_of(self.desk, items)
+                self.assertLessEqual(len(text), alert.MOST_TEXT)
+                lines = text.splitlines()[1:]
+                self.assertEqual(len(lines), len(items))
+                for i, line in enumerate(lines):
+                    self.assertTrue(line.startswith(f"- alert {i}:"), line)
+                    self.assertTrue(line.endswith(step), line)
+                    self.assertIn("…", line[:-len(step)])
+
+    def test_a_step_too_long_for_its_share_keeps_the_prefix_cut(self):
+        for zh, separator in ((False, " · next: "), (True, " · 下一步：")):
+            with self.subTest(zh=zh), unittest.mock.patch.object(alert, "chinese", return_value=zh):
+                items = [{"text": f"alert {i}: " + "detail " * 100 + separator + "action " * 100}
+                         for i in range(3)]
+                lines = alert.text_of(self.desk, items).splitlines()[1:]
+                for i, line in enumerate(lines):
+                    self.assertTrue(line.startswith(f"- alert {i}:"), line)
+                    self.assertTrue(line.endswith("…"), line)
+                    self.assertNotIn(separator, line)
+
+    def test_long_batch_keeps_a_release_code_in_its_original_place(self):
+        release_text = "release #7 · code K7P3QX: give it to the coordinator, or answer on the page"
+        items = [{"kind": "ask", "text": "question " * 200},
+                 {"kind": "release_waiting", "release": 7, "code": "K7P3QX", "text": release_text},
+                 {"kind": "disk", "text": "urgent problem"}]
+        text = alert.text_of(self.desk, items)
+        self.assertIn("#7 code K7P3QX", text.splitlines()[0])
+        lines = text.splitlines()[1:]
+        self.assertIn("urgent problem", lines[0])
+        self.assertEqual(lines[1], "- " + release_text)
+        self.assertTrue(lines[2].startswith("- question"))
+
+    def test_a_code_bearing_line_keeps_its_prefix_when_it_cannot_fit_whole(self):
+        line = "release #7 · code K7P3QX: answer on the page · " + "detail " * 200 + " · next: ask again"
+        text = alert.text_of(self.desk, [
+            {"kind": "release_waiting", "release": 7, "code": "K7P3QX", "text": line},
+            {"kind": "ask", "text": "question " * 200}])
+        shown = text.splitlines()[1][2:]
+        self.assertIn("code K7P3QX", shown)
+        self.assertEqual(shown.index("K7P3QX"), line.index("K7P3QX"))
+        self.assertTrue(shown.endswith("…"))
+        self.assertNotIn("next:", shown)
+        self.assertEqual(shown[:-1], line[:len(shown) - 1])
+
+    def test_crowded_alert_batch_shows_readable_lines_and_counts_the_rest(self):
+        for zh in (False, True):
+            for count in (16, 300, 400, 10000):
+                with self.subTest(zh=zh, count=count), \
+                        unittest.mock.patch.object(alert, "chinese", return_value=zh):
+                    items = [{"kind": "ask", "text": f"alert {i:05d}: " + "detail " * 30}
+                             for i in range(count)]
+                    urgent = (count // 2, count - 1)
+                    for i in urgent:
+                        items[i]["kind"] = "disk"
+                    text = alert.text_of(self.desk, items, held=3)
+                    self.assertLessEqual(len(text), alert.MOST_TEXT)
+                    header, *lines, summary = text.splitlines()
+                    self.assertIn(f"{count} 条提醒" if zh else f"{count} alerts", header)
+                    self.assertIn("3 条提醒因此暂缓" if zh else "3 held back", header)
+                    self.assertIn("hansa status", summary)
+                    self.assertIn(str(count - len(lines)), summary)
+                    self.assertIn("提醒" if zh else "alerts", summary)
+                    if zh:
+                        self.assertNotIn("alerts", summary)
+                    order = list(urgent) + [i for i in range(count) if i not in urgent]
+                    self.assertGreater(len(lines), 0)
+                    self.assertLess(len(lines), count)
+                    for i, line in zip(order, lines):
+                        self.assertTrue(line.startswith(f"- alert {i:05d}:"), line)
+                        self.assertGreaterEqual(len(line[2:]), 60)
+                    # Another readable line cannot fit alongside the summary.
+                    self.assertGreater(len(header) + (len(lines) + 1) * 63, alert.MOST_TEXT - len(summary) - 1)
+
+
 class DesksTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -51941,6 +52046,33 @@ else:
         self.assertEqual(text.splitlines()[1], "- free space warning")
         self.assertTrue(text.splitlines()[2].startswith("- release #7 code K7P3QX: answer"))
         self.assertTrue(text.splitlines()[3].startswith("- to-do #9:"))
+
+    def test_long_alert_batches_keep_steps_and_crowded_summaries_on_both_channels(self):
+        out = self.alert_fake()
+        _, http = self.bark_fake()
+        for language, step in (("en", " · next: ask the coordinator to review t0001"),
+                               ("zh", " · 下一步：让协调员审阅 t0001")):
+            self.assertTrue(self.page_save(lambda s: s.update(alert_language=language))["ok"])
+            for count in (3, 300):
+                with self.subTest(language=language, count=count):
+                    for i in range(count):
+                        self.assertTrue(alert.add(self.desk, "coordinator", f"session {i}: " + "detail " * 100 + step))
+                    self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+                    for text in (self.alerted(out)[-1]["text"], http.call_args.args[0][0]["json"]["body"]):
+                        self.assertLessEqual(len(text), alert.MOST_TEXT)
+                        lines = text.splitlines()[1:]
+                        if count == 3:
+                            self.assertEqual(len(lines), count)
+                            for line in lines:
+                                self.assertIn("…", line)
+                                self.assertTrue(line.endswith(step), line)
+                        else:
+                            self.assertIn("hansa status", lines[-1])
+                            self.assertIn(str(count - len(lines) + 1), lines[-1])
+                            for i, line in enumerate(lines[:-1]):
+                                self.assertTrue(line.startswith(f"- session {i}:"), line)
+                                self.assertGreaterEqual(len(line[2:]), 60)
+                    self.assertEqual(alert.queued(self.desk), [])
 
     def test_release_description_follows_request_code_action_and_result(self):
         from hansa import alert, release
