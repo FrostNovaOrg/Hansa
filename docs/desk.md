@@ -1429,13 +1429,18 @@ recorded folder that is not there.
 
 `hansa status` shows what the coordinator's session is doing on the line after
 `hansa posts to`: at work, idle, or waiting for an answer in its own window,
-with the local time it began. The follower looks at `claude agents --json` at
-most once a minute, even without an alert channel or anything waiting. At work
-and waiting count from the first look that saw that stretch; idle uses the last
+with the local time it began. The follower looks the status up in
+`claude agents --json` at most once a minute, even without an alert channel or
+anything waiting.
+A missing session name has its own lookup after 5 seconds, retrying after 15
+seconds and then doubling the wait up to 5 minutes; those retries do not change
+the status lookup's clock. At work and waiting count from the first look that
+saw that stretch; idle uses the last
 turn's end when recorded, otherwise its first idle look. A session in `shell`
 is shown as idle because it has finished posted work; it still does not qualify
 for the idle review alert. Alert thresholds and the waiting they count do not
-change.
+change; continuous status looks can notice idle up to one look earlier than
+when status was checked only for alerts.
 
 The follower saves this observation in its existing whole-file record under
 `.hansa/followers/` with its next feed, without extra writes between looks.

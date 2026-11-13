@@ -22078,12 +22078,12 @@ def save():'''))
             with self.in_session(p, sock):
                 self.assertIn(f"now posts to this session, pid {p.pid} (no name yet), through",
                               self.hansa_out("notify", "on"))
-            self.assertIn(f"hansa posts to: pid {p.pid} (no name yet)\n", self.hansa_out("status"))
+            self.assertIn(f"hansa posts to: pid {p.pid} (no name yet)", self.hansa_out("status"))
             self.assertIn(f"  pid {p.pid} (no name yet) · since ", self.hansa_out("notify"))
             write_json(listed, [{"pid": p.pid, "name": "desk-87"}])
-            # Its status lookup supplies the name too; a listing missed at startup is seen on the next minute.
-            self.soon(lambda: f"hansa posts to: pid {p.pid} (desk-87)\n" in self.hansa_out("status"), timeout=90)
-            self.assertIn(f"hansa posts to: pid {p.pid} (desk-87)\n", self.hansa_out("status"))
+            # Its first name lookup is after 5 s; a missing listing gets its own retry 15 s later.
+            self.soon(lambda: f"hansa posts to: pid {p.pid} (desk-87)" in self.hansa_out("status"), timeout=60)
+            self.assertIn(f"hansa posts to: pid {p.pid} (desk-87)", self.hansa_out("status"))
             self.assertIn(f"  pid {p.pid} (desk-87) · since ", self.hansa_out("notify"))
             with self.in_session(p, sock):
                 self.assertIn(f"already notifies this session, pid {p.pid} (desk-87);", self.hansa_out("notify", "on"))
@@ -22100,8 +22100,7 @@ def save():'''))
                     namer.thread.join()
                 clock[0] += 1
         self.assertEqual([b - a for a, b in zip(looked, looked[1:])][:8],
-                         [60, 60, 61, 121, 241, 301, 301, 301])  # one second of the loop's own after each; the
-        # quick ones (15 s, 30 s) wait out the minute since the last lookup: at most one a minute, counting every run
+                         [16, 31, 61, 121, 241, 301, 301, 301])  # one second of the loop's own after each
         self.assertEqual(looked[0], 1005)
         n = len(looked)
         namer.look = lambda: looked.append(clock[0]) or "desk-87"
@@ -22113,6 +22112,33 @@ def save():'''))
                 clock[0] += 1
         self.assertEqual(namer.name, "desk-87")
         self.assertLessEqual(len(looked) - n, 3)  # once named, every five minutes: Claude Code may rename it
+
+    def test_a_missing_name_retries_without_advancing_the_status_lookup_clock(self):
+        clock, names, statuses, named = [1000.0], [], [], []
+
+        def name():
+            names.append(clock[0])
+            return "desk-87" if clock[0] >= 1010 else ""
+
+        def status():
+            statuses.append(clock[0])
+            return {"name": "desk-87", "status": "busy"} if clock[0] >= 1010 else None
+
+        with unittest.mock.patch.object(notify.time, "time", side_effect=lambda: clock[0]):
+            watch = notify.Watch(1, look=status)
+            namer = notify.Namer(1, look=name, clock=watch.clock)
+            for _ in range(75):
+                watch.tick(clock[0], False, {}, heard=namer.heard, want=True)
+                if namer.tick():
+                    named.append(clock[0])
+                for lookup in (watch, namer):
+                    if lookup.thread:
+                        lookup.thread.join(10)
+                        self.assertFalse(lookup.thread.is_alive())
+                clock[0] += 1
+        self.assertEqual(names, [1005, 1021])  # the first miss retries after NAME_FIRST, before the next status look
+        self.assertEqual(named[0], 1022)
+        self.assertEqual(statuses, [1000, 1060])  # name retries neither advance nor postpone the status clock
 
     def test_posting_does_not_wait_for_a_name_lookup(self):
         release = threading.Event()
@@ -55000,7 +55026,8 @@ else:
                                            7: lambda: self.agents_say({"4242": "idle"})})
             self.assertEqual(before, [[]])
             self.assertEqual(len(self.coordinator_alerts()), 1)
-            self.assertIn("is idle while t0001 has waited for review", self.coordinator_alerts()[0])
+            # Always observing status can find idle one look earlier than the old alert-only schedule.
+            self.assertRegex(self.coordinator_alerts()[0], r"is idle while t0001 has waited for review for [67] min\b")
             self.assertIn("Add a", self.coordinator_alerts()[0])
 
         def row10():
