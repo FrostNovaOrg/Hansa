@@ -45,7 +45,8 @@ A settings save that omits alert_language keeps the saved choice; if none was sa
 hansa runs the command when a release starts waiting for the principal's yes,
 when a release ends (done, failed, void or forbidden), when the coordinator stops one (release_stopped; the principal's
 own Stop on the page sends none), when a to-do for the principal is recorded (hansa ask), when a lane's runs cannot
-start because a provider ran out of credit (once per rest: run.rest_provider), when a lane's runs cannot
+start because a provider ran out of credit or does not know its configured model (once per rest: run.rest_provider),
+when a lane's runs cannot
 start because their sandbox cannot (once for each lane and reason until a passing try clears the hold: run.hold),
 when free space goes under the floor
 and hansa serve starts nothing new (once each time: disk.look),
@@ -111,8 +112,8 @@ of each other go out in one run (none waits more than MOST_WAIT); closed to-dos 
 wait as asked are left out, while their end alerts still go out.
 Each queued alert has a level: passive for a release that finished successfully and recovery notices;
 active for release_waiting, ask,
-a failed, void or forbidden release, release_stopped and test; urgent for server_stuck, coordinator, sandbox, disk
-and credit. A batch takes the highest (passive < active < urgent); Bark maps that level to its own attention levels.
+a failed, void or forbidden release, release_stopped and test; urgent for server_stuck, coordinator, sandbox, disk,
+credit and model. A batch takes the highest (passive < active < urgent); Bark maps that level to its own attention levels.
 One run at a time (.hansa/alert.lock), and at
 most MOST_RUNS in an hour: beyond that, what comes waits and goes out in one run when the hour frees a run, with a
 line saying how many were held back. An entry of the queue that cannot be read is dropped, and recorded once
@@ -168,9 +169,9 @@ from . import without_session
 from .desk import Desk, SettingsError, desk_name_problem, now, read_json, write_json
 
 KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "disk", "coordinator", "credit",
-         "test")
+         "model", "test")
 LEVELS = ("passive", "active", "urgent")  # increasing attention; a batch takes the highest
-URGENT = ("server_stuck", "coordinator", "sandbox", "disk", "credit")
+URGENT = ("server_stuck", "coordinator", "sandbox", "disk", "credit", "model")
 GATHER = 20  # seconds: alerts that come within this of each other go out in one run
 MOST_WAIT = 120  # seconds an alert waits at most for others to gather with it
 TIMEOUT = 30  # seconds a run may take
@@ -425,6 +426,13 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
         add(desk, "credit", fields["text"],
             zh=f"服务商 {fields.get('provider')}：" + (f"套餐无法使用它，需要升级（{fields['plan']}），自 {at} 起休息，等你在网页上确认已升级"
                                                      if fields.get("plan") else f"余额不足，自 {at} 起休息，等你在网页上确认充值"))
+    elif kind == "provider_model":
+        at = time.strftime('%H:%M', time.localtime(fields.get("since") or time.time()))
+        provider, model = fields.get("provider"), fields.get("model")
+        add(desk, "model", f"provider {provider}: it does not know model {model}; resting since {at} "
+                          "· next: change its model or key on the page (Settings, Providers)",
+            zh=f"服务商 {provider}：不认识模型 {model}，自 {at} 起休息 "
+               "· 下一步：在网页上更改它的模型或密钥（设置 → 服务商）")
     elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason until cleared (run.hold)
         from .run import sandbox_held_text
         held = {**fields, "kind": fields.get("run")}
@@ -977,7 +985,7 @@ TASK_STATE_ZH = {"done": "已完成", "failed": "失败了", "cancelled": "已�
                  "queued": "在排队", "running": "在运行", "checking": "在检查"}
 # What waits for the coordinator, by the subject a follower posts it under (notify._item's key), when not a task's
 WHAT_ZH = {"server": "hansa serve 已停止", "srt": "hansa serve 无法运行 srt", "disk": "磁盘空间有变化",
-           "memory": "可用内存有变化", "credit": "服务商余额不足", "start": "工作线无法开始任务",
+           "memory": "可用内存有变化", "credit": "服务商余额不足", "model": "服务商不认识模型", "start": "工作线无法开始任务",
            "ready": "服务商已就绪，待办也许已完成", "after-merge": "合并后的发布在等", "release": "发布有了结果",
            "release-answer": "你已回答发布", "release-watch": "发布监测已结束"}
 
@@ -1006,12 +1014,13 @@ def _what_zh(desk: Desk, x: dict) -> str:
 
 def _named_zh(head: str, parts: list) -> str:
     """What waits, not a task, in Chinese with the names its English line gives (quoted, as they are), taken from its
-    subject (notify._item's key after its first word, split at spaces): the provider ready or out of credit, the lanes
+    subject (notify._item's key after its first word, split at spaces): the provider ready, out of credit or rejecting
+    its model, the lanes
     that cannot start (after the cause), the lane and target whose release waits after merges, the release's number."""
     def q(p):
         return f"「{p}」" if p and p != "None" else ""
-    if head in ("ready", "credit") and q(parts[0] if parts else ""):
-        return f"服务商{q(parts[0])}" + ("已就绪，待办也许已完成" if head == "ready" else "余额不足")
+    if head in ("ready", "credit", "model") and q(parts[0] if parts else ""):
+        return f"服务商{q(parts[0])}" + WHAT_ZH[head].removeprefix("服务商")
     lanes = [q(p) for p in parts[1:] if q(p)]
     if head == "start" and lanes:
         return f"工作线{'、'.join(lanes)}无法开始任务"
@@ -1325,7 +1334,8 @@ def explain_line(s: dict, desk: Desk | None = None) -> str:
                    "the principal approves releases on the page only."))
     return (f"Alerts: the principal's alert command is set (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a to-do is "
-            "recorded for the principal (hansa ask), a provider runs out of credit, a lane's runs cannot start because their sandbox "
+            "recorded for the principal (hansa ask), a provider runs out of credit, a provider does not know its configured model, "
+            "a lane's runs cannot start because their sandbox "
             "cannot, free space goes under the floor (hansa disk-floor), hansa serve finishes no round for a long time, "
             "what hansa posts to your session cannot reach it (no session hears from hansa, its inbox refuses posts, "
             "your session waits on a permission dialog or a question, or a task posted to it waits for review while it "

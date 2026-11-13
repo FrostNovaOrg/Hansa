@@ -20477,10 +20477,10 @@ def save():'''))
                 self.assertIn(expected, page[field])
                 self.assertIn(remedy, page[field])
 
-    def test_unknown_model_posts_once_to_the_coordinator_without_a_principal_alert(self):
+    def test_unknown_model_sends_one_urgent_alert_and_post_per_rest(self):
         from concurrent.futures import ThreadPoolExecutor
         from hansa import alert, notify, run
-        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "cat > /dev/null"}))["ok"])
+        out = self.alert_fake()
         self.model_run()
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(lambda _: run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing"), range(2)))
@@ -20488,10 +20488,97 @@ def save():'''))
         [item] = notify.items_for(self.desk, [event], {"session": None})
         self.assertIn("missing-model", str(item))
         self.assertEqual(notify._item(self.desk, event)[1], event["text"])
-        self.assertEqual(alert.queued(self.desk), [])
+        [queued] = alert.queued(self.desk)
+        self.assertEqual((queued["kind"], queued["level"]), ("model", "urgent"))
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        [sent] = self.alerted(out)
+        self.assertEqual((sent["kind"], sent["level"]), ("model", "urgent"))
+        for words in ("provider claude", "does not know model missing-model", "rest", "next:",
+                      time.strftime("%H:%M", time.localtime(event["since"])),
+                      "change its model or key", "on the page (Settings, Providers)"):
+            self.assertIn(words, sent["text"])
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing")
+        self.assertEqual(alert.queued(self.desk), [])  # no repeat after delivery either
         self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
         run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing")
         self.assertEqual(len(notify.items_for(self.desk, self.events("provider_model"), {})), 2)
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertEqual(len(self.alerted(out)), 2)
+
+    def test_unknown_model_queued_alert_uses_the_saved_language_at_delivery(self):
+        from hansa import alert, run
+        out = self.alert_fake()
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing")
+        since = self.desk.provider_state()["claude"]["model_since"]
+        self.assertTrue(self.page_save(lambda s: s.update(alert_language="zh"))["ok"])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        [sent] = self.alerted(out)
+        self.assertEqual((sent["kind"], sent["level"]), ("model", "urgent"))
+        for words in ("服务商 claude", "不认识模型 opus", time.strftime("%H:%M", time.localtime(since)),
+                      "休息", "下一步", "网页", "模型或密钥", "设置 → 服务商"):
+            self.assertIn(words, sent["text"])
+        self.assertNotIn("负责人", sent["text"])
+
+    def test_unknown_model_alert_still_sends_if_the_rest_ends_while_gathering(self):
+        from hansa import alert, run
+        out = self.alert_fake()
+        for remedy in ("check", "model", "key"):
+            with self.subTest(remedy=remedy):
+                run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing")
+                model = self.desk.provider_state()["claude"]["model_unknown"]
+                if remedy == "check":
+                    self.assertTrue(run.check_provider(self.desk, "claude")["ok"])
+                elif remedy == "model":
+                    self.assertTrue(self.page_save(lambda s: s["providers"]["claude"].update(model="sonnet"))["ok"])
+                else:
+                    self.desk.write_key("claude", "sk-model-rest-ended", by="page")
+                self.assertFalse(self.desk.provider_state()["claude"].get("model_since"))
+                self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+                sent = self.alerted(out)[-1]
+                self.assertEqual(sent["kind"], "model")
+                self.assertIn(f"does not know model {model}", sent["text"])
+        self.assertEqual(len(self.alerted(out)), 3)
+
+    def test_unknown_model_alert_with_push_only_or_no_enabled_channel(self):
+        from hansa import alert, run
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing")
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        self.desk.write_key("claude", "sk-model-before-push", by="page")
+        sender, transport = self.bark_fake()
+        self.assertFalse(alert.command(self.desk.settings()))
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing")
+        [queued] = alert.queued(self.desk)
+        self.assertEqual((queued["kind"], queued["level"]), ("model", "urgent"))
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        sender.assert_called_once()
+        payload = transport.call_args.args[0][0]["json"]
+        self.assertEqual(payload["level"], "timeSensitive")
+        for words in ("provider claude", "model opus", "rest", "change its model or key", "Settings, Providers"):
+            self.assertIn(words, payload["body"])
+        self.assertTrue(self.page_save(lambda s: s["alert_push"][0].update(on=False))["ok"])
+        self.desk.write_key("claude", "sk-model-disabled-push", by="page")
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing")
+        self.assertEqual(alert.queued(self.desk), [])
+        self.assertIsNone(alert.send_due(self.desk, gather=0))
+        sender.assert_called_once()
+
+    def test_provider_rest_alerts_stay_on_the_recording_desk(self):
+        from hansa import alert, run
+        out = self.alert_fake()
+        other = self.shared_rest_desks(compatible=True)
+        self.assertEqual(other.save_settings({**other.settings(), "alert": {"command": "cat > /dev/null"}}, by="page"), [])
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "model", "missing")
+        self.assertEqual(provider_problem(other, other.settings(), "claude"), "")  # model rests stay local
+        self.assertEqual(alert.queued(other), [])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertEqual(self.alerted(out)[-1]["kind"], "model")
+        run.rest_provider(self.desk, self.desk.settings(), "claude", "credit", "low")
+        self.assertIn("another desk", provider_problem(other, other.settings(), "claude"))
+        run.rest_provider(other, other.settings(), "claude", "credit", "low")  # imported rest is already held
+        self.assertEqual(alert.queued(other), [])
+        self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        self.assertEqual([x["kind"] for x in self.alerted(out)], ["model", "credit"])
 
     def test_unknown_model_rest_is_told_once_by_its_own_line_not_by_provider_rest_news(self):
         from hansa import notify, run
@@ -52385,13 +52472,16 @@ else:
                 ("ask", {"id": 99}, "to-do #99 for you:", "你的待办 #99"),
                 ("provider_credit", {"provider": "demo", "since": 100, "text": "provider demo: credit balance too low"},
                  "provider demo: credit balance too low", "服务商 demo：余额不足"),
+                ("provider_model", {"provider": "demo", "since": 100, "model": "missing-model"},
+                 "does not know model missing-model", "不认识模型 missing-model"),
                 ("sandbox_held", {"lane": "a", "alert": True, "run": "worker", "why": "reason", "task": tid},
                  f"task {tid} is held, not failed", f"任务 {tid} 暂缓，没有失败"),
                 ("sandbox_held", {"lane": "a", "alert": True, "run": "check", "why": "reason"},
                  "its tasks are held, not failed", "其任务暂缓，没有失败"),
                 ("disk_low", {"floor": 10, "volumes": ["/volume"]}, "free space is under the floor (10 GB)", "磁盘空间低于下限（10 GB）"),
             ):
-                alert_kind = {"provider_credit": "credit", "sandbox_held": "sandbox", "disk_low": "disk"}.get(kind, kind)
+                alert_kind = {"provider_credit": "credit", "provider_model": "model",
+                              "sandbox_held": "sandbox", "disk_low": "disk"}.get(kind, kind)
                 with self.subTest(language=language, event=kind, fields=fields):
                     check(alert_kind, lambda: self.desk.event(kind, **fields), en, zh,
                           "active" if alert_kind == "ask" else "urgent", language)
@@ -56001,6 +56091,8 @@ else:
                 ("start repo c", "lane c cannot run: its repository folder is not there; not failed",
                  "工作线「c」无法开始任务"),
                 ("credit deepseek 1762800000.5", "deepseek is out of credit since 11:00", "服务商「deepseek」余额不足"),
+                ("model deepseek 1762800000.5", "deepseek does not know model missing-model",
+                 "服务商「deepseek」不认识模型"),
                 ("after-merge a pub", "lane a target pub after merges t0001: its check failed",
                  "工作线「a」目标「pub」合并后的发布在等")):
             with self.subTest(what=what):
@@ -56057,13 +56149,16 @@ else:
         self.alert_fake()
         said = self.hansa("explain")
         self.assertIn("a provider runs out of credit", said)
+        self.assertIn("a provider does not know its configured model", said)
         self.assertIn("your turns keep ending with an API error", said)
         ui = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text()
         en = next(x for x in ui.splitlines() if 'alertCmd:"Alert command' in x)
         zh = next(x for x in ui.splitlines() if 'alertCmd:"提醒命令' in x)
         self.assertIn("a provider runs out of credit", en)
+        self.assertIn("a provider does not know its configured model", en)
         self.assertIn("the coordinator's turns keep ending with an API error", en)
         self.assertIn("服务商余额不足", zh)
+        self.assertIn("服务商不认识所设模型", zh)
         self.assertIn("协调员的轮次接连因 API 错误结束", zh)
         card = " ".join((Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text().split())
         line = card[card.index("`coordinator` alerts say"):][:400]

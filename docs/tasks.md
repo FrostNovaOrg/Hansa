@@ -291,7 +291,8 @@ A **Topped up** confirmation clears that login's credit rest on every desk on th
 Saving a different key lets this desk use that key; it leaves the old login's shared rest in place.
 The task moves to the lane's next provider without using a try; if all rest, it waits.
 Once per credit rest, hansa posts a line to the coordinator and runs the principal's alert command,
-if set. `status`, `show`, `explain provider P`, and the provider's page row say why and since when.
+if set, and sends to enabled push addresses. `status`, `show`, `explain provider P`, and the provider's page row
+say why and since when.
 
 If a provider does not know its configured model (`model_not_found`, or equivalent model wording with
 HTTP 400 or 404), the task returns to the queue for the lane's next ready provider without using a try.
@@ -300,7 +301,11 @@ Compatible and subscription providers, including the Codex adapter, rest without
 the page (**Settings, Providers**), ends this rest. Failed checks and time do not end it; hansa does not
 check it automatically. Status, explain, waiting reasons and the provider's row name the model and remedy.
 Once per rest, hansa posts the reason to the coordinator through the same event inbox as a credit rest;
-it adds no principal alert. A task's own `--model` choice, when used by a subscription provider, fails
+it also sends the principal an urgent `model` alert through the alert command or enabled push addresses,
+naming the provider and model and asking them to change its model or key on the page (**Settings, Providers**).
+Like a credit alert, the queued notice still sends if the rest ends before delivery. Only the desk recording
+the rest alerts; unknown-model rests stay local rather than sharing across desks on the account.
+A task's own `--model` choice, when used by a subscription provider, fails
 immediately with the model reason, without using a try or resting the provider. Other HTTP 400 errors
 keep their usual behavior. This hold prevents every queued task failing on the same configuration;
 keep it while provider model choices can be rejected at runtime.
