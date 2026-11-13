@@ -86,6 +86,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The sandbox
 
+- Security: four fixes.
+- A lane's write list refuses lane repositories of other desks on the account's list.
 - On Linux, leftover processes are stopped and listed by `hansa show` even when the kernel cut a process name
   inside a multi-byte character, which previously left the process running and logged a decoding error.
 - Folders hansa makes for desks, new projects and the coordinator's mod are private whatever the umask.
@@ -151,6 +153,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Releases and alerts
 
+- Shortened alert batches keep each alert's next step when its start stays readable; short alerts use only the room they need, and alerts beyond what fits are counted with a pointer to `hansa status`.
+- Settings history shows `changed (values withheld)` for the alert command; `hansa explain` omits its value. The principal still views and edits it on the page.
 - `hansa release` says nothing is new only when it does not refuse, says a replaced code lapses only if it existed,
   and names the command holding a forbidden word. Its help covers several remotes and the watch command.
 - `hansa release` errors say what to do, for `--fixed` on a request, a removed lane or target,
@@ -239,6 +243,7 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The web page
 
+- A release whose check after the push still runs reads “sent · check after the push running”.
 - Long words wrap in status pills. On a phone, Stop leads a release's row and the header shows the desk's name.
 - The Failed panel counts every open failure and says how many it lists. The Chinese missing-srt warning names its PATH;
   the forbidden-words field names everything scanned; a session recorded with `hansa notify on` reads as a plain fact.
@@ -324,6 +329,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The terminal menu and `hansa doctor`
 
+- `hansa status` and the page show running releases, checks after a push and `hansa lane try` with minutes run and limits; `hansa status --json` lists them in `at_work`. The coordinator's status line names them instead of `idle`.
+- `hansa status` and the page's header show the coordinator's session at work, idle or waiting for an answer in its own window, and since when; `hansa status --json` gives `coordinator_session`.
 - The installer's SSH line forwards both page ports. `hansa doctor` on macOS without Homebrew says where to get it,
   and names the guide by a full path or address. `hansa init --repo` on a missing folder says it made one.
 - `hansa init` that cannot make the desk says why and removes what it made; `hansa lane try` and `hansa web`
@@ -382,6 +389,7 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### The Codex adapter
 
+- The optional Codex adapter no longer keeps run output files; `HANSA_CODEX_LOGS` is accepted and has no effect. After stopping older runs, remove their output from the former `logs/` folder or the folder that setting named.
 - A ChatGPT plan without Codex is named as one to upgrade; it still rests until confirmed.
 - Lost logins ask for `codex login`, then `hansa ping`. Workspaces out of credits and plans without Codex wait for a confirmed top-up or saved key.
 - Cancelled runs and runs stopped at their time ceiling keep their last message, turns and reported usage.
