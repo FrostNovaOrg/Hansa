@@ -804,9 +804,8 @@ NAME_FIRST, NAME_MOST, NAME_LIMIT = 15.0, 300.0, 10.0  # seconds: the first wait
 
 
 class Lookups:
-    """When `claude agents --json` last ran for a follower, by any of its lookups. One run gives both the session's
-    name and its status, so the name lookup (Namer) and the Watch's share this clock: together they run it at most
-    once every LOOK_EVERY seconds."""
+    """When a follower last looked its status up or refreshed a known name. Those share a clock: at most once every
+    LOOK_EVERY seconds. A missing name has its own early retries, without changing this clock."""
 
     def __init__(self, at: float = 0.0):
         self.at = at
@@ -819,8 +818,9 @@ class Namer:
     """The follower's lookups of its session's name (only the follower looks it up; status and notify show what
     it recorded). A lookup runs in a thread of its own, with a time limit, so posting never waits for it. While
     the name is missing it looks again after NAME_FIRST seconds, then waits twice as long each time, up to
-    NAME_MOST; once named, every NAME_MOST (Claude Code may rename it). Each waits too until LOOK_EVERY seconds have
-    passed since any lookup of the follower's began (clock: the Watch's, shared). look: the lookup, for tests."""
+    NAME_MOST; once named, every NAME_MOST (Claude Code may rename it). Refreshing a known name waits too until
+    LOOK_EVERY seconds have passed since the last status lookup or name refresh (clock: the Watch's, shared).
+    Missing-name retries neither wait for nor change that clock. look: the lookup, for tests."""
 
     def __init__(self, pid: int, name: str = "", first: float = 5.0, look=None, clock=None):
         self.name, self.look = name, look or (lambda: session_name(pid, NAME_LIMIT))
@@ -843,8 +843,9 @@ class Namer:
             if not self.found:
                 self.wait = min(self.wait * 2, NAME_MOST)
         t = time.time()
-        if not self.thread and t >= self.next and self.clock.due(t):
-            self.clock.at = t
+        if not self.thread and t >= self.next and (not self.name or self.clock.due(t)):
+            if self.name:
+                self.clock.at = t
             self.found, self.thread = "", threading.Thread(target=self._run, name="hansa-look", daemon=True)
             self.thread.start()
         return self.name
@@ -862,7 +863,7 @@ class Watch:
     The inbox's wait and whether it was alerted are kept in last_post until a post succeeds, and count only while
     lines wait to be posted (refused_since). It looks its
     session's status up in `claude agents --json`, in a thread of its own so that posting never waits for it, at most
-    once every LOOK_EVERY seconds counting the name lookup's (clock, shared with Namer). The follower always wants
+    once every LOOK_EVERY seconds counting known-name refreshes (clock, shared with Namer). The follower always wants
     this for hansa status, even without alerts or anything waiting. minutes: {no_session, window, review} as the desk
     gives them (alert.session_minutes;
     0: off). no_session also covers a running session's inbox refusing posts, once per stretch of failures.
@@ -1398,7 +1399,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             waiting = bool(summary or any(not x.get("startup") for x in pending.values()))
             cases = watch.tick(time.time(), waiting, minutes, heard=lambda n: namer.heard(n),
                                last_post=me["last_post"], want=True)
-            # The always-wanted status lookup gets the shared clock first and supplies the name too.
+            # Status supplies the name too; a missing name also has its own early retries.
             me["name"] = namer.tick()
             # Changes only with a completed look; the next feed replaces the whole record without an extra write.
             me["coordinator_session"] = watch.session()
