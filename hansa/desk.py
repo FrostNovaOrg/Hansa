@@ -2088,8 +2088,8 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
             if not isinstance(settings, dict):
                 raise ValueError
         except (OSError, ValueError):
-            return [f"write cannot include {x}: Item 4 cannot be checked until {settings_path} is readable "
-                    "as a UTF-8 JSON object" for x in paths]
+            return [f"write cannot include {x}: cannot check lane repositories for desk {d}; make "
+                    f"{settings_path} readable as a UTF-8 JSON object" for x in paths]
         fenced += [(r, hit, f"{why} (desk {d})")
                    for r, hit, why in _repo_fences(settings.get("lanes"), contents=True)]
     for name, pv in (providers if isinstance(providers, dict) else {}).items():

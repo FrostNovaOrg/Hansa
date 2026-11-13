@@ -27790,7 +27790,7 @@ def save():'''))
                 good, left = run.write_list(self.desk, lane)
                 self.assertEqual(good, [])
                 self.assertEqual(len(left), 1)
-                for word in ("Item 4", str(other.settings_path)):
+                for word in (str(cache), f"desk {other.root}", str(other.settings_path), "UTF-8 JSON object"):
                     self.assertIn(word, left[0])
                 self.assertTrue(self.desk.save_settings(self.desk.settings()))
                 self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.events_path.read_bytes()), before)
