@@ -643,7 +643,7 @@ set` has nothing like it. `hansa serve` runs it when a release starts waiting
 for the principal's yes (also when a ticked target's tick no longer holds and
 its release goes back to waiting), when a release ends (done, failed, void or
 forbidden), when the coordinator stops a release, when a to-do for the principal is recorded (`hansa ask`), when a
-provider runs out of credit (once per rest), when a
+provider runs out of credit or does not know its configured model (once per rest), when a
 lane's runs cannot start because their sandbox cannot (once for each lane and reason until a passing sandbox try
 clears the hold), when free space goes under the
 floor and `hansa serve` starts nothing new (once each time: see [free space](desk.md#free-space)), when
@@ -651,6 +651,12 @@ its own rounds have stopped for 15 minutes, and when what hansa posts to the coo
 (below); not for ordinary task events,
 which go to the coordinator. After a passing sandbox try clears a lane's hold, a later hold alerts again,
 including for the same reason.
+
+An unknown-model rest sends an urgent `model` alert naming the provider and model, asking you to change
+its model or key on the page (**Settings, Providers**). Like a `credit` alert, it stays queued if the rest
+ends before delivery, and sends only from the desk that records the event; importing an account's shared
+credit rest sends no extra alert. Unknown-model rests themselves stay local to the desk. With no alert
+command or enabled push address, neither kind is queued.
 
 After a `disk`, `sandbox` or `server_stuck` alert, recovery adds one passive line to the next gathered batch:
 free space is back over the floor and its margin, that lane's sandbox passes a try again, or `hansa serve`
@@ -674,7 +680,7 @@ sandbox, in a temporary folder of its own under the desk's `secrets/alert-runs` 
 coordinator, workers and verifiers; removed when the command ends, and what a stopped or killed
 `hansa serve` left there is swept when it starts), with hansa's own environment (not a lane's),
 the kind of alert in `HANSA_ALERT_KIND` (`release_waiting`, `release_ended`,
-`release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `coordinator`, `credit`, `test`; comma-separated when several go
+`release_stopped`, `ask`, `server_stuck`, `sandbox`, `disk`, `coordinator`, `credit`, `model`, `test`; comma-separated when several go
 out together)
 and the level in `HANSA_ALERT_LEVEL` (the highest in a batch; see
 [alert settings](desk.md#settings-on-the-web-page)), and the text on standard input: UTF-8, in the saved
@@ -709,7 +715,7 @@ level, and `HANSA_ALERT_LEVEL` takes the highest in a batch:
 | --- | --- |
 | `passive` | A release that finished successfully; recovery after `disk`, `sandbox`, `server_stuck` or coordinator turn errors |
 | `active` | A waiting release, a to-do, a failed, void, forbidden or stopped release, and the test |
-| `urgent` | Problem notices: `server_stuck`, `coordinator`, `sandbox`, `disk`, `credit` |
+| `urgent` | Problem notices: `server_stuck`, `coordinator`, `sandbox`, `disk`, `credit`, `model` |
 
 Bark maps these to passive, active and time-sensitive notifications, respectively.
 ntfy uses priorities 2, 3 and 4; Gotify uses 2, 5 and 8. Telegram and Discord
