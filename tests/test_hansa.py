@@ -5371,6 +5371,54 @@ class DeskTest(unittest.TestCase):
         self.assertIn("cleared (values withheld)", output)
         self.assertEqual([e.get("secret_action") for e in entries], ["set", "set", "cleared"])
 
+    def test_settings_history_records_alert_changes_as_status(self):
+        before = len(self.history_entries())
+        commands = ("printf example-first", "printf 示例-second", "")
+        for command in commands:
+            self.assertTrue(self.page_save(lambda s: s.update(alert={"command": command}))["ok"])
+            self.assertEqual(public_settings(self.desk)["settings"]["alert"]["command"], command)
+        entries = self.history_entries()[before:]
+        changes = [e for e in entries if e["path"] == "alert.command"]
+        self.assertEqual(len(changes), 3)
+        for entry in changes:
+            self.assertTrue(entry.get("redacted"))
+            self.assertEqual(entry["by"], "principal")
+            self.assertNotIn("old", entry)
+            self.assertNotIn("new", entry)
+        self.assertTrue(any(e["path"] == "alert.at" and "new" in e for e in entries))
+        raw = (self.desk.state_dir / "settings-history.jsonl").read_text()
+        for command in commands[:2]:
+            self.assertNotIn(command, raw)
+
+    def test_settings_history_records_alert_groups_as_status(self):
+        from hansa import history
+        before = len(self.history_entries())
+        setting = {"alert": {"command": "printf example-group", "at": 1900000000}}
+        for old, new in (({"alert": None}, setting), (setting, {"alert": None})):
+            history.record(self.desk, old, new, "page")
+        for entry in self.history_entries()[before:]:
+            self.assertEqual(entry["path"], "alert")
+            self.assertTrue(entry.get("redacted"))
+            self.assertNotIn("old", entry)
+            self.assertNotIn("new", entry)
+
+    def test_explain_history_reports_earlier_alert_status(self):
+        from hansa.desk import append_event
+        path = self.desk.state_dir / "settings-history.jsonl"
+        for field, old, new in (("alert.command", "printf earlier-first", "printf earlier-second"),
+                                ("alert", {"command": "printf earlier-first"}, None)):
+            with self.subTest(field=field):
+                append_event(path, json.dumps({"ts": 1900000000, "by": "principal", "path": field,
+                                               "old": old, "new": new}))
+                before = path.read_bytes()
+                shown = self.hansa("explain", "history", "--last", "1")
+                self.assertIn(field, shown)
+                self.assertIn("changed", shown)
+                self.assertIn("values withheld", shown)
+                for part in ("earlier-first", "earlier-second"):
+                    self.assertNotIn(part, shown)
+                self.assertEqual(path.read_bytes(), before)
+
     def test_settings_history_check_and_release_commands(self):
         self.hansa("lane", "set", "a", "check", "python3 old_tests.py")
         self.hansa("lane", "target", "a", "preview", "sh old_release.sh")
@@ -36690,6 +36738,28 @@ def save():'''))
                 self.assertEqual([{k: v for k, v in e.items() if k != "change"} for e in data["entries"]], expected)
         self.assertEqual((self.desk.state_dir / "settings-history.jsonl").read_bytes(), before)
 
+    def test_web_history_reports_earlier_alert_status(self):
+        from hansa.desk import append_event
+        path = self.desk.state_dir / "settings-history.jsonl"
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        for field, old, new in (("alert.command", "printf page-first", "printf page-second"),
+                                ("alert", None, {"command": "printf page-second"})):
+            with self.subTest(field=field):
+                append_event(path, json.dumps({"ts": 1900000000, "by": "principal", "path": field,
+                                               "old": old, "new": new}))
+                before = path.read_bytes()
+                code, data, _ = self.web_request("/api/history?last=1", headers=auth)
+                self.assertEqual(code, 200)
+                [entry] = data["entries"]
+                self.assertEqual(entry["path"], field)
+                self.assertTrue(entry.get("redacted"))
+                self.assertNotIn("old", entry)
+                self.assertNotIn("new", entry)
+                self.assertIn("values withheld", entry["change"])
+                for part in ("page-first", "page-second"):
+                    self.assertNotIn(part, json.dumps(data))
+                self.assertEqual(path.read_bytes(), before)
+
     def test_web_history_withholds_recorded_and_newly_known_keys(self):
         recorded, later = "example-recorded-credential", "example-later-credential"
         self.hansa("lane", "brief", "a", "text " + later)
@@ -52408,8 +52478,8 @@ else:
                          {"ok": True, "problems": []})
         self.assertEqual(self.desk.settings()["alert"], saved)
         told = self.hansa("explain")
-        self.assertIn("the principal's alert command is", told)
-        self.assertIn(str(out), told)
+        self.assertIn("the principal's alert command is set", told)
+        self.assertNotIn(str(out), told)
         self.assertIn("You send no alerts and cannot set it", told)
         # one line only, and no key
         self.assertFalse(self.page_save(lambda s: s.update(alert={"command": "echo a\necho b"}))["ok"])
@@ -52424,6 +52494,18 @@ else:
         self.assertIn('"/api/alert/test"', ui)
         self.assertNotIn("hansa alert", self.hansa("help", "card"))
         self.assertIn("the coordinator does not send", self.hansa("help", "card"))
+
+    def test_explain_reports_saved_alert_status(self):
+        cmd = "example-alert --destination example-route --key example-value"
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": cmd}))["ok"])
+        saved = self.desk.settings()
+        for shown in (alert.explain_line(saved), alert.explain_line(saved, self.desk), self.hansa("explain")):
+            for part in ("example-alert", "example-route", "example-value"):
+                self.assertNotIn(part, shown)
+            self.assertIn("alert command is set", shown)
+            self.assertIn("saved on the page", shown)
+            self.assertIn(time.strftime("%Y-%m-%d %H:%M", time.localtime(saved["alert"]["at"])), shown)
+        self.assertEqual(public_settings(self.desk)["settings"]["alert"]["command"], cmd)
 
     def test_each_kind_of_alert_reaches_the_command_with_its_text(self):
         from hansa import alert, release
@@ -58413,7 +58495,7 @@ class AlertPushPageTest(unittest.TestCase):
         self.assertNotIn(self.KEY, line)
         self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "echo hi"}))["ok"])
         line = explained()
-        self.assertIn("the principal's alert command is 'echo hi'", line)
+        self.assertIn("the principal's alert command is set", line)
         self.assertIn("Push addresses: Bark", line)
 
     def test_malformed_push_settings_leave_command_working(self):

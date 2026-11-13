@@ -209,6 +209,28 @@ def check_links(root):
 
 
 class DocsTest(unittest.TestCase):
+    def test_alerts_help_describes_command_visibility(self):
+        from hansa.cli import topic_text
+        text = " ".join(topic_text("alerts").split())
+        summary = text.split("The Alerts summary", 1)[1].split("The `coordinator` alert", 1)[0]
+        for words in ("command's value is withheld", "this summary", "settings history",
+                      "`hansa explain history`", "page's History view", "changed (values withheld)",
+                      "principal can view and edit", "Settings, Alerts"):
+            with self.subTest(words=words):
+                self.assertIn(words, summary)
+
+    def test_settings_changes_docs_describe_alert_values(self):
+        from hansa.cli import topic_text
+        texts = ((topic_text("settings-changes"),
+                  ("without storing either value", "older records")),
+                 ((ROOT / "docs/zh-CN/concepts.md").read_text(encoding="utf-8"),
+                  ("不保存旧值或新值", "旧记录")))
+        for text, words in texts:
+            paragraph = next((p for p in text.split("\n\n") if "`alert.command`" in p), "")
+            for word in ("`alert.command`", "`alert`", "changed (values withheld)", *words):
+                with self.subTest(language=words, word=word):
+                    self.assertIn(word, paragraph)
+
     def test_release_range_docs_qualify_single_remote_rule_and_order_example(self):
         text = " ".join((ROOT / "docs/releases.md").read_text(encoding="utf-8").split())
         with self.subTest(rule="single remote"):

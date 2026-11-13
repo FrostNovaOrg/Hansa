@@ -55,11 +55,15 @@ def _keys(desk):
     return keys
 
 
-def _private(value, keys):
+def _private(value, keys, path=()):
+    # Alert commands and whole alert settings have no history values.
+    # Keep this rule until commands can no longer contain private values.
+    if path in (("alert",), ("alert", "command")):
+        return True
     if isinstance(value, str):
         return any(key in value for key in keys)
     if isinstance(value, dict):
-        return any(k.lower() in SECRET_FIELDS or _private(k, keys) or _private(v, keys)
+        return any(k.lower() in SECRET_FIELDS or _private(k, keys) or _private(v, keys, (*path, k))
                    for k, v in value.items())
     if isinstance(value, list):
         return any(_private(v, keys) for v in value)
@@ -97,8 +101,8 @@ def record(desk, old: dict, new: dict, by: str = "", command: str = ""):
                      "path": _clean(".".join(parts), keys)}
             if command:
                 entry["command"] = _clean(command, keys)
-            if (any(p.lower() in SECRET_FIELDS for p in parts) or _private(before, keys)
-                    or _private(after, keys)):
+            if (any(p.lower() in SECRET_FIELDS for p in parts) or _private(before, keys, parts)
+                    or _private(after, keys, parts)):
                 entry["redacted"] = True
                 if parts[-1].lower() in SECRET_FIELDS and (isinstance(after, str) or after is MISSING):
                     entry["secret_action"] = "cleared" if after is MISSING or after == "" else "set"
@@ -143,7 +147,8 @@ def read(desk, kind: str = "", name: str = "", last: int | None = None) -> dict:
     if last is not None:
         entries = entries[:last]
     for entry in entries:
-        if entry.get("redacted") or _private(entry.get("old"), keys) or _private(entry.get("new"), keys):
+        parts = tuple(entry["path"].split("."))
+        if entry.get("redacted") or _private(entry.get("old"), keys, parts) or _private(entry.get("new"), keys, parts):
             entry["redacted"] = True
             for side in ("old", "new"):
                 entry.pop(side, None)
