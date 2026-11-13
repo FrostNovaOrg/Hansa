@@ -2185,6 +2185,86 @@ class AlertTextTest(unittest.TestCase):
                     self.assertTrue(line.endswith(step), line)
                     self.assertIn("…", line[:-len(step)])
 
+    def test_short_alerts_leave_their_unused_room_for_long_alerts(self):
+        for zh in (False, True):
+            for short_first in (False, True):
+                with self.subTest(zh=zh, short_first=short_first), \
+                        unittest.mock.patch.object(alert, "chinese", return_value=zh):
+                    short = [{"text": f"release #{i} done"} for i in range(15)]
+                    long = [{"text": f"alert {i}: " + "detail " * 105} for i in range(5)]
+                    items = short + long if short_first else long + short
+                    text = alert.text_of(self.desk, items)
+                    self.assertLessEqual(len(text), alert.MOST_TEXT)
+                    self.assertIn("20 条提醒" if zh else "20 alerts", text.splitlines()[0])
+                    lines = text.splitlines()[1:]
+                    self.assertEqual(len(lines), 20)
+                    self.assertNotIn("hansa status", text)
+                    for item, line in zip(items, lines):
+                        if item in short:
+                            self.assertIn(item["text"], line)
+                            self.assertNotIn("…", line)
+                        else:
+                            self.assertTrue(line.startswith("- " + item["text"][:20]), line)
+                            self.assertGreaterEqual(len(line[2:]), 60)
+                            self.assertTrue(line.endswith("…"), line)
+
+    def test_crowded_mixed_batch_counts_only_after_short_alerts_take_their_room(self):
+        for zh in (False, True):
+            with self.subTest(zh=zh), unittest.mock.patch.object(alert, "chinese", return_value=zh):
+                short = [{"text": f"release #{i} done"} for i in range(15)]
+                items = short + [{"text": f"alert {i}: " + "detail " * 105} for i in range(20)]
+                text = alert.text_of(self.desk, items)
+                self.assertLessEqual(len(text), alert.MOST_TEXT)
+                header, *lines, summary = text.splitlines()
+                self.assertIn("35 条提醒" if zh else "35 alerts", header)
+                self.assertGreater(len(lines), len(short))
+                self.assertLess(len(lines), len(items))
+                self.assertIn(str(len(items) - len(lines)), summary)
+                self.assertIn("提醒" if zh else "alerts", summary)
+                self.assertIn("hansa status", summary)
+                for item, line in zip(items, lines):
+                    self.assertTrue(line.startswith("- " + item["text"][:20]), line)
+                    if item in short:
+                        self.assertNotIn("…", line)
+                    else:
+                        self.assertGreaterEqual(len(line[2:]), 60)
+                # Even with all shown lines at their minimum, another long alert cannot fit.
+                minimum = len(header) + len(summary) + 1 + sum(
+                    3 + min(len(item["text"]), 60) for item in items[:len(lines)])
+                self.assertGreater(minimum + 63, alert.MOST_TEXT)
+
+    def test_crowded_batch_cuts_the_end_when_keeping_steps_would_hide_alert_starts(self):
+        for zh, step in ((False, " · next: ask the coordinator in that session to review t1600"),
+                         (False, " · next: ask the coordinator in that session to review t160000"),
+                         (True, " · 下一步：" + "让协调员审阅此任务并确认结果" * 3 + "，再回复")):
+            for count in (16, 20):
+                with self.subTest(zh=zh, step=step, count=count), \
+                        unittest.mock.patch.object(alert, "chinese", return_value=zh):
+                    items = [{"text": f"t{i:04d} awaiting review: " + "detail " * 100 + step}
+                             for i in range(count)]
+                    text = alert.text_of(self.desk, items)
+                    self.assertLessEqual(len(text), alert.MOST_TEXT)
+                    lines = [line[2:] for line in text.splitlines() if line.startswith("- ")]
+                    self.assertGreater(len(lines), 0)
+                    self.assertEqual(len(set(lines)), len(lines))
+                    for item, line in zip(items, lines):
+                        self.assertTrue(line.startswith(item["text"][:20]), line)
+                        self.assertTrue(line.endswith("…"), line)
+                        self.assertNotIn(step, line)
+
+    def test_keeping_a_step_requires_twenty_characters_of_the_alert_start(self):
+        for step in (" · next: ask the coordinator", " · 下一步：让协调员审阅"):
+            line = "t0001 awaiting review: " + "detail " * 100 + step
+            for start_size in (19, 20):
+                with self.subTest(step=step, start_size=start_size):
+                    shown = alert._fit_alert(line, len(step) + 1 + start_size, keep_step=True)
+                    self.assertTrue(shown.startswith(line[:20]), shown)
+                    if start_size == 20:
+                        self.assertTrue(shown.endswith(step), shown)
+                    else:
+                        self.assertTrue(shown.endswith("…"), shown)
+                        self.assertNotIn(step, shown)
+
     def test_a_step_too_long_for_its_share_keeps_the_prefix_cut(self):
         for zh, separator in ((False, " · next: "), (True, " · 下一步：")):
             with self.subTest(zh=zh), unittest.mock.patch.object(alert, "chinese", return_value=zh):
