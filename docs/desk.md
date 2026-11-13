@@ -1427,6 +1427,27 @@ says in one line that `hansa up` starts the session again, and how, or why it
 does not, including a start not recorded yet and what to do about it, and a
 recorded folder that is not there.
 
+`hansa status` shows what the coordinator's session is doing on the line after
+`hansa posts to`: at work, idle, or waiting for an answer in its own window,
+with the local time it began. The follower looks at `claude agents --json` at
+most once a minute, even without an alert channel or anything waiting. At work
+and waiting count from the first look that saw that stretch; idle uses the last
+turn's end when recorded, otherwise its first idle look. A session in `shell`
+is shown as idle because it has finished posted work; it still does not qualify
+for the idle review alert. Alert thresholds and the waiting they count do not
+change.
+
+The follower saves this observation in its existing whole-file record under
+`.hansa/followers/` with its next feed, without extra writes between looks.
+`hansa status --json` and the page's status data give `coordinator_session` with
+`name`, `status` (`busy`, `idle`, `waiting`), `since` and `seen` (Unix times).
+With several listening sessions it describes the first with a fresh observation,
+in the same order as `hansa posts to`. The field and line are absent when no live
+session is posted to, the lookup failed or no longer lists the session, or its
+last observation is older than three minutes. The page's display is separate.
+An unavailable observation does not change which sessions `hansa posts to` lists
+or when their followers count as live.
+
 ### How each of the coordinator's turns ended
 
 When the API keeps failing, Claude Code retries, then ends the turn with an API

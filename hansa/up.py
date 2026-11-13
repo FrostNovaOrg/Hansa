@@ -519,6 +519,29 @@ OLDER_START = ("not recorded: started before hansa gave its sessions turn hooks;
                "hansa coordinator or hansa up")
 
 
+def coordinator_session(desk: Desk, follower: dict) -> dict | None:
+    """For status and the page: a live follower's observation, if the session still runs and the look is fresh.
+    Three missed looks can mean the lookup or follower is stuck; hide its answer until it can look again."""
+    seen = follower.get("coordinator_session")
+    sess = follower.get("session") or {}
+    if not isinstance(seen, dict) or not notify.is_live(follower) or notify._proc_gone(sess):
+        return None
+    status, since, at = (seen.get(k) for k in ("status", "since", "seen"))
+    if status not in ("busy", "idle", "waiting") or not isinstance(since, (int, float)) \
+            or not isinstance(at, (int, float)) or time.time() - at > 3 * notify.LOOK_EVERY:
+        return None
+    if status == "idle" and (turn := notify.turn_record(notify.turns_of(desk, sess.get("pid")))):
+        since = turn["at"]
+    return {"name": notify.who(sess.get("pid"), follower.get("name") or ""),
+            "status": status, "since": since, "seen": at}
+
+
+def session_line(session: dict) -> str:
+    what = {"busy": "at work", "idle": "idle", "waiting": "waiting for an answer in its own window"}
+    return (f"coordinator {session['name']}: {what[session['status']]} since "
+            + time.strftime("%H:%M", time.localtime(session["since"])))
+
+
 def turn_line(desk: Desk, sess: dict, name: str) -> str:
     """For hansa status: whether the turns of this session hansa posts to are recorded, and if not, why not. By the
     record of how the session started (COORDINATOR_START), and the turn record its hooks wrote."""

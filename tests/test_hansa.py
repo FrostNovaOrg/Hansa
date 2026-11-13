@@ -22033,8 +22033,8 @@ def save():'''))
             self.assertIn(f"hansa posts to: pid {p.pid} (no name yet)\n", self.hansa_out("status"))
             self.assertIn(f"  pid {p.pid} (no name yet) · since ", self.hansa_out("notify"))
             write_json(listed, [{"pid": p.pid, "name": "desk-87"}])
-            # its first lookup is 5 s after it starts; one that came before the listing tries again 15 s later
-            self.soon(lambda: f"hansa posts to: pid {p.pid} (desk-87)\n" in self.hansa_out("status"), timeout=60)
+            # Its status lookup supplies the name too; a listing missed at startup is seen on the next minute.
+            self.soon(lambda: f"hansa posts to: pid {p.pid} (desk-87)\n" in self.hansa_out("status"), timeout=90)
             self.assertIn(f"hansa posts to: pid {p.pid} (desk-87)\n", self.hansa_out("status"))
             self.assertIn(f"  pid {p.pid} (desk-87) · since ", self.hansa_out("notify"))
             with self.in_session(p, sock):
@@ -22095,7 +22095,8 @@ def save():'''))
 
         def look(pid, timeout=15):
             started.set()
-            return release.wait(60) and "desk-87"
+            release.wait(60)
+            return {"name": "desk-87", "status": "busy"}
 
         def meanwhile():  # the follower runs in this test's own thread; this plays the desk around it
             try:
@@ -22116,8 +22117,7 @@ def save():'''))
         was = signal.getsignal(signal.SIGTERM)
         self.addCleanup(signal.signal, signal.SIGTERM, was)
         th = threading.Thread(target=meanwhile)
-        with unittest.mock.patch.object(notify, "session_name", look), \
-                unittest.mock.patch.object(notify, "Namer", functools.partial(notify.Namer, first=0)), \
+        with unittest.mock.patch.object(notify, "session_row", look), \
                 contextlib.redirect_stdout(io.StringIO()):
             th.start()
             self.assertEqual(notify.follow(self.desk, key, sess, sock, "n"), 0)
@@ -35168,7 +35168,7 @@ def save():'''))
             _, _, carried = self.follow_on_a_clock(5, restart_at=4)
         self.assertEqual(post.call_count, 1)
         self.assertEqual(self.coordinator_alerts(), [])
-        self.assertEqual(self.looked_up(), 0)
+        self.assertGreater(self.looked_up(), 0)
         self.assertIsNone(carried["last_post"])
         self.assertEqual(carried["watch"]["count"], 0)
         self.assertEqual(carried["turns"], notify.Turns().state())
@@ -35180,7 +35180,7 @@ def save():'''))
         self.assertTrue(got["attempts"])
         self.assertEqual(got["posts"], [])
         self.assertEqual(self.coordinator_alerts(), [])
-        self.assertEqual(self.looked_up(), 0)
+        self.assertGreater(self.looked_up(), 0)
         self.assertTrue(all(r["me"]["last_post"] is None for r in got["requests"]))
 
     def test_waiting_startup_notice_gathered_with_a_task_counts_only_the_task(self):
@@ -54259,6 +54259,147 @@ else:
         f = Path(os.environ["FAKE_AGENTS_LOG"])
         return len(f.read_text().splitlines()) if f.exists() else 0
 
+    def coordinator_status_record(self, status="busy", at=None) -> tuple:
+        """An observation in the real follower register, for this test process's live session."""
+        at = time.time() if at is None else at
+        sess = {"pid": os.getpid(), "start": notify.proc_start(os.getpid())}
+        watch = notify.Watch(sess["pid"])
+        watch.saw(at, status, 0, 0)
+        me = {"key": notify.key_of(sess), "session": sess, "name": "desk-status", "seen": time.time(),
+              "coordinator_session": watch.session()}
+        notify._write_record(self.desk, me["key"], me)
+        return watch, me
+
+    def test_coordinator_status_polls_without_alerts_or_pending_work(self):
+        for command in (False, True):
+            with self.subTest(command=command):
+                self.coordinator_desk(f"session-status-{command}", command=command)
+                self.agents_say({"4242": "busy"})
+                start, snapshots, looked, writes = float(int(time.time())), [], [], []
+                real_rows, real_write = notify.agents_rows, notify._write_record
+
+                def rows(timeout=15):
+                    looked.append(notify.time.time())
+                    return real_rows(timeout)
+
+                def write(desk, key, rec):
+                    writes.append((notify.time.time(), json.loads(json.dumps(rec.get("coordinator_session")))))
+                    real_write(desk, key, rec)
+
+                def capture():
+                    with unittest.mock.patch.object(up, "time", notify.time), \
+                            unittest.mock.patch.object(notify, "agents_rows", side_effect=AssertionError("status looked")):
+                        data = json.loads(self.hansa_out("status", "--json"))
+                        self.assertEqual(data["coordinator_session"], views.status(self.desk)["coordinator_session"])
+                        text = self.hansa_out("status").splitlines()
+                    post = next(i for i, line in enumerate(text) if line.startswith("hansa posts to:"))
+                    self.assertIn("coordinator", text[post + 1])
+                    self.assertIn("desk-4242", text[post + 1])
+                    snapshots.append((data["coordinator_session"], text[post + 1]))
+
+                with unittest.mock.patch.object(notify, "agents_rows", rows), \
+                        unittest.mock.patch.object(notify, "_write_record", write), \
+                        unittest.mock.patch.object(notify, "_proc_gone", return_value=False):
+                    self.follow_on_a_clock(6, start=start, namer=True, at={
+                        0.8: capture, 1.5: lambda: self.agents_say({"4242": "waiting"}), 2.8: capture,
+                        3.1: lambda: self.agents_say({"4242": "idle"}), 3.8: capture,
+                        4.1: lambda: self.agents_say({"4242": "shell"}), 4.8: capture,
+                        5.1: lambda: self.agents_say({"4242": "busy"}), 5.8: capture})
+                self.assertEqual([s["status"] for s, _ in snapshots], ["busy", "waiting", "idle", "idle", "busy"])
+                self.assertEqual([s["since"] - start for s, _ in snapshots], [10, 130, 190, 190, 310])
+                for (data, text), what in zip(snapshots, ("at work", "waiting for an answer in its own window",
+                                                         "idle", "idle", "at work")):
+                    self.assertIn(what, text)
+                    self.assertIn(time.strftime("%H:%M", time.localtime(data["since"])), text)
+                    self.assertLessEqual(data["since"], data["seen"])
+                    self.assertEqual(set(data), {"name", "status", "since", "seen"})
+                self.assertTrue(looked and all(b - a >= notify.LOOK_EVERY for a, b in zip(looked, looked[1:])))
+                changed = [t for i, (t, s) in enumerate(writes) if s and (not i or s != writes[i - 1][1])]
+                self.assertTrue(changed and all(b - a >= notify.LOOK_EVERY for a, b in zip(changed, changed[1:])))
+                self.assertEqual(self.coordinator_alerts(), [])
+
+    def test_coordinator_status_idle_uses_the_sessions_last_turn_end(self):
+        at = time.time()
+        _, me = self.coordinator_status_record("idle", at)
+        ended = at - 3600
+        with unittest.mock.patch.object(up, "now", return_value=ended):
+            up.record_turn(self.desk, me["session"]["pid"], {"hook_event_name": "Stop"})
+        data = json.loads(self.hansa_out("status", "--json"))["coordinator_session"]
+        self.assertEqual((data["status"], data["since"], data["seen"]), ("idle", ended, at))
+        line = next(x for x in self.hansa_out("status").splitlines() if x.startswith("coordinator "))
+        self.assertIn("idle since", line)
+        self.assertIn(time.strftime("%H:%M", time.localtime(ended)), line)
+        # A different session's turn record cannot supply this session's idle time.
+        up.forget_turns(self.desk, me["session"]["pid"])
+        with unittest.mock.patch.object(up, "now", return_value=ended):
+            up.record_turn(self.desk, me["session"]["pid"] + 1, {"hook_event_name": "Stop"})
+        self.assertEqual(views.status(self.desk)["coordinator_session"]["since"], at)
+
+    def test_coordinator_status_shell_is_idle_without_a_review_alert(self):
+        at = time.time()
+        watch, me = self.coordinator_status_record("busy", at - 300)
+        watch.posted(at - 240, ["A task ended"], ["t0001"])
+        self.assertEqual(watch.saw(at, "shell", 1, 1), [])
+        self.assertEqual(watch.first, 0)
+        self.assertEqual(watch.holds(at, {"window": 1, "review": 1}), {})
+        notify._write_record(self.desk, me["key"], {**me, "coordinator_session": watch.session()})
+        self.assertEqual(views.status(self.desk)["coordinator_session"]["status"], "idle")
+        self.assertIn("idle since", self.hansa_out("status"))
+
+    def test_coordinator_status_hides_failed_missing_and_unknown_lookups(self):
+        for row, error in ((None, "cannot list sessions"), (None, ""), ({"status": "thinking"}, "")):
+            with self.subTest(row=row, error=error):
+                at = time.time()
+                watch, me = self.coordinator_status_record("busy", at - 30)
+                self.assertIn("at work since", self.hansa_out("status"))
+                watch.thread = unittest.mock.Mock(is_alive=lambda: False)
+                watch.got, watch.clock.at = (at, row, error), at
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(watch.tick(at, False, {}, want=True), [])
+                notify.handle(self.desk, {"op": "feed", "me": {**me, "coordinator_session": watch.session()}})
+                self.assertNotIn("coordinator_session", json.loads(self.hansa_out("status", "--json")))
+                self.assertFalse(any(x.startswith("coordinator ") for x in self.hansa_out("status").splitlines()))
+
+    def test_coordinator_status_hides_observations_older_than_three_looks(self):
+        at = time.time()
+        _, me = self.coordinator_status_record("waiting", at - 3 * notify.LOOK_EVERY)
+        with unittest.mock.patch.object(up.time, "time", return_value=at):
+            self.assertEqual(views.status(self.desk)["coordinator_session"]["status"], "waiting")
+        with unittest.mock.patch.object(up.time, "time", return_value=at + 1):
+            self.assertNotIn("coordinator_session", views.status(self.desk))
+            self.assertFalse(any(x.startswith("coordinator ") for x in self.hansa_out("status").splitlines()))
+        self.assertTrue(notify.is_live(me))  # its heartbeat alone cannot freshen an observation
+
+    def test_coordinator_status_is_absent_without_a_live_posted_session(self):
+        _, me = self.coordinator_status_record()
+        for change in ({"ended": time.time()}, {"seen": time.time() - notify.LIVE_SECONDS - 1}):
+            with self.subTest(change=change):
+                notify._write_record(self.desk, me["key"], {**me, **change})
+                self.assertNotIn("coordinator_session", json.loads(self.hansa_out("status", "--json")))
+                self.assertIn("hansa posts to no session", self.hansa_out("status"))
+        notify._write_record(self.desk, me["key"], me)
+        with unittest.mock.patch.object(notify, "_proc_gone", return_value=True):
+            self.assertNotIn("coordinator_session", views.status(self.desk))
+
+    def test_coordinator_status_wait_before_a_post_does_not_advance_the_window_alert(self):
+        at = time.time()
+        watch, _ = self.coordinator_status_record("waiting", at)
+        self.assertEqual(watch.saw(at + 600, "waiting", 2, 0), [])
+        watch.posted(at + 610, ["A task ended"])
+        self.assertEqual(watch.saw(at + 660, "waiting", 2, 0), [])
+        self.assertEqual(watch.session()["since"], at)
+        self.assertEqual(watch.saw(at + 720, "waiting", 2, 0), [])
+        [(_, alert)] = watch.saw(at + 780, "waiting", 2, 0)
+        self.assertEqual(alert["since"], at + 610)
+        resumed = notify.Watch(1, watch.state())
+        self.assertEqual(resumed.session(), watch.session())
+        self.assertEqual(resumed.saw(at + 840, "waiting", 2, 0), [])
+        legacy = {k: v for k, v in watch.state().items() if k not in ("window_from", "since", "known")}
+        legacy["wait_from"] = at + 610  # before this change, wait_from was only the alert's clock
+        upgraded = notify.Watch(1, legacy)
+        self.assertEqual(upgraded.saw(at + 840, "waiting", 2, 0), [])
+        self.assertEqual(upgraded.holds(at + 840, {"window": 2})["window"], at + 610)
+
     def coordinator_task_ended(self, title) -> str:
         """A task that ended done and waits for review, as hansa serve leaves it and records it."""
         tid = self.desk.new_task(title, lane="a")
@@ -54288,6 +54429,9 @@ else:
         got = {"posts": [], "attempts": [], "requests": [], "start": t0, "resume": None}
 
         def sleep(seconds):
+            for th in threading.enumerate():
+                if th.name == "hansa-look":
+                    th.join(30)
             clock[0] += seconds
             while todo and todo[0][0] <= clock[0] - t0:
                 todo.pop(0)[1]()
@@ -54450,7 +54594,7 @@ else:
                 self.follow_with_refusing_inbox(240, lambda _: False, at={
                     1: lambda: self.coordinator_task_ended("Refused task")})
                 self.assertEqual(self.coordinator_alerts(), [])
-                self.assertEqual(self.looked_up(), 0)
+                self.assertGreater(self.looked_up(), 0)
 
     def test_refused_lines_and_their_alert_survive_a_code_restart(self):
         self.coordinator_desk("inbox-restart", no_session_min=1, window_min=0, review_min=0)
@@ -54709,7 +54853,7 @@ else:
             self.follow_on_a_clock(5, at={0.5: lambda: self.coordinator_task_ended("Add b")})
             self.assertEqual((alert.queued(self.desk), alert.send_due(self.desk, gather=0)), ([], None))
             self.assertFalse(out.exists())
-            self.assertEqual(self.looked_up(), 0)  # with nothing to alert with, a follower looks nothing up
+            self.assertGreater(self.looked_up(), 0)  # status is observed even without an alert channel
             self.assertEqual(len(posted()), 1)  # the session is still posted to
 
         def row5():
@@ -54774,10 +54918,11 @@ else:
                                            7: lambda: self.agents_say({"4242": "idle"})})
             self.assertEqual(before, [[]])
             self.assertEqual(len(self.coordinator_alerts()), 1)
-            self.assertIn("is idle while t0001 has waited for review for 7 min", self.coordinator_alerts()[0])
+            self.assertIn("is idle while t0001 has waited for review", self.coordinator_alerts()[0])
+            self.assertIn("Add a", self.coordinator_alerts()[0])
 
         def row10():
-            """the task merged or closed before N3: none, and nothing looked up for it"""
+            """the task merged or closed before N3: none; status is still observed"""
             self.coordinator_desk(10, window_min=0, review_min=3)
             self.agents_say({"4242": "idle"})
             tids = []
@@ -54787,7 +54932,8 @@ else:
                 self.desk.update(tids[1], state="cancelled", error="closed without merging")
             self.follow_on_a_clock(8, at={0.5: lambda: tids.extend([self.coordinator_task_ended("Add a"), self.coordinator_task_ended("Add b")]),
                                           2: done_with})
-            self.assertEqual((self.coordinator_alerts(), self.looked_up()), ([], 0))
+            self.assertEqual(self.coordinator_alerts(), [])
+            self.assertGreater(self.looked_up(), 0)
 
         def row11():
             """N1, N2 or N3 set to 0 on the page: that case never alerts"""
@@ -54843,7 +54989,7 @@ else:
             self.assertEqual(len(posted()), 3)
 
         def row14():
-            """an idle round with nothing waiting: no claude agents run (and the idle-round test unchanged)"""
+            """an idle round with nothing waiting: status is observed, without an alert"""
             self.coordinator_desk(14, window_min=2, review_min=3)
             self.agents_say({"4242": "waiting"})
             d = Dispatcher(self.desk)
@@ -54851,7 +54997,8 @@ else:
             alert.unheard_check(self.desk)
             log = self.follow_on_a_clock(10, at={5: d.tick, 6: lambda: alert.unheard_check(self.desk)})[0]
             d.tick()
-            self.assertEqual((self.looked_up(), self.coordinator_alerts()), (0, []), log)
+            self.assertGreater(self.looked_up(), 0, log)
+            self.assertEqual(self.coordinator_alerts(), [], log)
 
         def row15():
             """a follower starts named, with something waiting and status waiting: no two runs of claude agents --json
