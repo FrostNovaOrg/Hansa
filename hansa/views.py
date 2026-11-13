@@ -1183,6 +1183,8 @@ def status(desk: Desk) -> dict:
         # the open releases (hansa release) and the latest that ended: the page asks the principal about each waiting one
         "releases": release.page_rows(desk, s, tasks),
         "after_merge_waiting": release.after_merge_rows(desk, s, tasks),
+        # what runs that is not a task: release commands, watches after a push, lane tries (release.at_work)
+        "at_work": release.at_work(desk, s),
         "last_24h": {"finished": sum((m.get("finished") or 0) >= day for m in tasks),
                      "merged": sum(m["state"] == "merged" and (m.get("merged") or 0) >= day for m in tasks),
                      "worker_tokens": sum(sum(r[k] for k in cost.TOKEN_FIELDS) for r in rows),
@@ -1321,12 +1323,15 @@ def status_text(st: dict) -> str:
     if st.get("verification_notes"):
         out.append(f"verification notes: {st['verification_notes']} not marked (hansa gaps)")
     out += [f"sandbox probe: {st['try_note']}"] if st.get("try_note") else []
+    at_work = st.get("at_work") or []
+    ran = lambda w: f"{w['minutes']} min (limit {w['limit_min']})"
+    tries = {w["lane"]: f", running {ran(w)}" for w in at_work if w["kind"] == "try"}
     out.append("lanes:")
     lanes = st["lanes"] or [{"name": "(none)", "providers": [], "task": None}]
     wn, wp = max(len(ln["name"]) for ln in lanes), max(len(" > ".join(ln["providers"])) for ln in lanes)
     for ln in lanes:
         out.append(f"  {ln['name']:<{wn}}  {' > '.join(ln['providers']):<{wp}}  "
-                   + (ln["task"] or ("held by a try (hansa lane try)" if ln.get("trying") else
+                   + (ln["task"] or ("held by a try (hansa lane try)" + tries.get(ln["name"], "") if ln.get("trying") else
                                      "UNABLE TO RUN" if {"work", "start"} & set(ln.get("held") or {}) else "free"))
                    + (f" · waiting: {ln['waiting']}" if ln.get("waiting") else "")
                    + (f" · merge lane for lanes {', '.join(ln['merge_for']) or '(none yet)'}; takes no work"
@@ -1384,10 +1389,19 @@ def status_text(st: dict) -> str:
                    + (f"; {p['automatic_check']}" if p.get("automatic_check") else ""))
     shown_releases = [r for r in st.get("releases") or [] if r["state"] in release.OPEN
                       or any(h.get("kind") == "pattern_limit" for h in r.get("hits") or [])]
-    if shown_releases or st.get("after_merge_waiting"):
+    runs = {w["id"]: w for w in at_work if w["kind"] == "release"}
+    watched = {w["id"]: w for w in at_work if w["kind"] == "watch"}
+    shown_ids = {r["id"] for r in shown_releases}
+    watches = [(r, watched[r["id"]]) for r in st.get("releases") or [] if r["id"] in watched and r["id"] not in shown_ids]
+    if shown_releases or watches or st.get("after_merge_waiting"):
         out.append("releases (hansa release):")
         out += [f"  {r['what']}" for r in st.get("after_merge_waiting") or []]
-        out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}" for r in shown_releases]
+        out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: {r['what']}"
+                + (f"; running {ran(runs[r['id']])}" if r["id"] in runs else "")
+                + (f"; its check after the push has run {ran(watched[r['id']])}" if r["id"] in watched else "")
+                for r in shown_releases]
+        out += [f"  #{r['id']} {release.what(r)} at {(r['commit'] or '')[:10]}: sent; its check after the push has run "
+                f"{ran(w)}" for r, w in watches]
         waiting = [r for r in st["releases"] if r["state"] == "waiting"]
         if waiting:
             # Follow these releases, not the set-up: a code that failed to be made or was voided answers nothing.

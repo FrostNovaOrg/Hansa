@@ -73,7 +73,8 @@ from .desk import (WRITE_FILE, Desk, _is_int, forbidden_exceptions_ok, forbidden
 from .run import (LOOK_LIMIT, SWEEP_GRACE, CannotLook, _state, alive, git, group_running, has_ended, leader,
                   oom_begin, oom_result, oom_text,
                   run_running, save_stopped, serve_step, recording_start, retry_start_failure,
-                  merge_check_lane, merge_target, pids_with_arg, proc_start, record_descendants, stop, stop_recorded)
+                  merge_check_lane, merge_minutes, merge_target, pids_with_arg, proc_start, read_try, record_descendants,
+                  stop, stop_recorded)
 
 OPEN = ("waiting", "approved", "starting", "running")
 WATCH_OPEN = ("waiting", "starting", "running")
@@ -1810,9 +1811,7 @@ def _watch_tick(desk: Desk, rs, procs: dict, starting: bool, pending: dict) -> N
             key = ("release-watch", rid)
             save_stopped(pending, key, w, lambda fields: _watch_change(desk, rid, fields))
             w = (get(desk, rid) or r)["watch_run"]
-            limit = r.get("watch_timeout_min", 90)
-            if not _is_int(limit, 1, 1440):
-                limit = 90
+            limit = watch_minutes(r)
             if not has_ended(proc) and (w.get("timed_out") or time.time() - w["started"] > 60 * limit):
                 try:
                     save_stopped(pending, key, w, lambda fields: _watch_change(desk, rid, fields), {"timed_out": True})
@@ -2374,7 +2373,7 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
     for r in shown:
         row = {k: r.get(k) for k in ("id", "lane", "target", "base", "commit", "command", "note", "state", "asked",
                                      "answered",
-                                     "reason", "void", "exit", "problem", "count", "commits", "files", "files_count",
+                                     "started", "reason", "void", "exit", "problem", "count", "commits", "files", "files_count",
                                      "named", "hits", "ended", "without_asking", "since_release", "remote_counts", "fixed",
                                      "stop_asked", "stopped_by", "stop_reason", "answered_by", "channel",
                                      "outside", "outside_folders")}
@@ -2397,4 +2396,40 @@ def page_rows(desk: Desk, s: dict, tasks=None) -> list:
         if r.get("state") == "waiting":
             row["moved"], row["moved_zh"] = stale_both(desk, s, r)
         out.append(row)
+    return out
+
+
+def watch_minutes(r: dict) -> int:
+    """A release's watch's time limit in minutes: its watch_timeout_min, else 90."""
+    limit = r.get("watch_timeout_min", 90)
+    return limit if _is_int(limit, 1, 1440) else 90
+
+
+AT_WORK_KINDS = ("release", "watch", "try")
+
+
+def at_work(desk: Desk, s: dict, rs: list | None = None) -> list:
+    """What the desk runs that is not a task, for hansa status, its line and the page: each release whose command
+    starts or runs, each running watch (a target's check after the push) and each running `hansa lane try`, as
+    {kind, id, lane, target, started, minutes, limit_min}; id is the release's, None for a try."""
+    t = time.time()
+    mins = lambda since: int((t - since) // 60) if isinstance(since, (int, float)) else 0
+    out = []
+    for r in releases(desk) if rs is None else rs:
+        if r.get("state") in ("starting", "running"):
+            out.append({"kind": "release", "id": r.get("id"), "lane": r.get("lane"), "target": r.get("target"),
+                        "started": r.get("started"), "minutes": mins(r.get("started")),
+                        "limit_min": minutes(s, r)[0]})
+        w = r.get("watch_run") or {}
+        if w.get("state") in ("starting", "running"):
+            out.append({"kind": "watch", "id": r.get("id"), "lane": r.get("lane"), "target": r.get("target"),
+                        "started": w.get("started"), "minutes": mins(w.get("started")), "limit_min": watch_minutes(r)})
+    d = desk.state_dir / "tries"
+    for lane in sorted(f.stem for f in d.glob("*.json")) if d.is_dir() else []:
+        tr = read_try(desk, lane)
+        if tr.get("phase") == "running":
+            ln = s["lanes"].get(lane) or {}
+            out.append({"kind": "try", "id": None, "lane": lane, "target": None, "started": tr.get("started"),
+                        "minutes": mins(tr.get("started")),
+                        "limit_min": merge_minutes(ln) if tr.get("merge") else ln.get("timeout_min", 240)})
     return out

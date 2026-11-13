@@ -499,6 +499,10 @@ def summary(desk: Desk, s: dict | None = None, tasks: list | None = None, releas
     if alert.command(s) and isinstance(f, dict) and not (ok.get("ok") and (ok.get("at") or 0) > (f.get("at") or 0)):
         failed.append("command")
     rows = cost.worker_rows(desk, day, s, tasks)
+    rs = release.releases(desk) if releases is None else releases
+    # what runs that is not a task (release.at_work), in short words: never a command, a commit or a title
+    work = [{"kind": w["kind"], "id": w["id"] if _count(w["id"]) else None, "lane": _escaped(str(w["lane"] or ""))[:20]}
+            for w in release.at_work(desk, s, rs)]
     return {"at": t, "desk": _escaped(alert.desk_name(desk))[:80],
             "language": "zh" if s.get("alert_language") == "zh" else "en",
             "page": views.page_address(*views.web_address(desk)),
@@ -506,10 +510,10 @@ def summary(desk: Desk, s: dict | None = None, tasks: list | None = None, releas
             "api_errors_since": min(since) if since else None,
             "push_failed": sorted({_escaped(x)[:20] for x in failed}),
             "no_channel": not alert.configured(desk, s),
-            "releases": sum(r.get("state") == "waiting" for r in (release.releases(desk) if releases is None
-                                                                  else releases)),
+            "releases": sum(r.get("state") == "waiting" for r in rs),
             "todos": sum(not a.get("closed") for a in desk.asks()),
             "running": sum(m["state"] in ("running", "merging") for m in tasks),
+            "at_work": work,
             "queued": sum(m["state"] == "queued" for m in tasks),
             "review": sum(m["state"] == "done" and m.get("kind") != "verify" for m in tasks),
             "failed_24h": sum(m["state"] == "failed" and _number(m.get("finished")) and m["finished"] >= day
