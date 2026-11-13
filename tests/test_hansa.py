@@ -17223,10 +17223,12 @@ def save():'''))
         tid = self.desk.new_task("Add hello.txt")
         m = self.settle(d, tid)
         self.assertEqual(m["state"], "failed", m)
-        self.assertTrue(m["error"].startswith("hansa could not commit the work: fatal: Unable to create"), m["error"])
+        # hansa's own words, and the file git names: not git's sentence, whose wording varies with its version
+        self.assertTrue(m["error"].startswith("hansa could not commit the work: "), m["error"])
         self.assertIn("index.lock", m["error"])
         shown = self.hansa("show", tid)
-        self.assertIn("git add -A failed: fatal: Unable to create", shown)  # git's words, as git gave them
+        [said] = [x for x in shown.splitlines() if "git add -A failed: " in x]
+        self.assertIn("index.lock", said)  # what git said, as git gave it
         ref = f"refs/hansa/kept/{tid}"
         [line] = [x for x in shown.splitlines() if f"hansa git a show {ref}" in x]
         patch = self.hansa(*shlex.split(line[line.index("hansa git "):])[1:])
@@ -17246,25 +17248,43 @@ def save():'''))
         self.assertEqual(sh_out("git", "show", f"{ref}:hello.txt", cwd=self.repo), f"hello from {tid}")
 
     def test_a_failed_commit_keeps_up_to_600_characters_of_what_git_said(self):
+        # What "git said" is the test's own text, not git's: its wording and length vary with git's version.
         from hansa import run
-        s = self.desk.settings()
-        s["lanes"]["a"]["setup"] = 'touch "$(git rev-parse --git-dir)/index.lock"'  # git's long "Unable to create"
-        self.assertEqual(self.desk.save_settings(s), [])
+        head = "git add -A failed: "
+        said = "fatal: stand-in refusal EARLY-MARK\n"
+        said += "".join(f"filler line {i:02d} of what git said, padded to a fixed width......\n" for i in range(12))
+        lines = said.splitlines(keepends=True)
+        said = "".join(lines[:7]) + "MIDDLE-MARK\n" + "".join(lines[7:11]) + "LATE-MARK\n" + "".join(lines[11:])
+        early = said.index("EARLY-MARK")
+        middle_at, late_at = len(head) + said.index("MIDDLE-MARK"), len(head) + said.index("LATE-MARK")
+        self.assertLess(early, 60)
+        self.assertTrue(300 < middle_at and middle_at + len("MIDDLE-MARK") < 600, middle_at)
+        self.assertGreater(late_at, 600)
+        self.assertTrue(700 <= len(said) <= 900, len(said))
+        real_run = subprocess.run
+
+        def fake_run(cmd, *a, **kw):  # only the commit step's git add -A (snapshot_tree's has an index of its own)
+            if (isinstance(cmd, list) and cmd[:1] == ["git"] and "add" in cmd and "-A" in cmd
+                    and "GIT_INDEX_FILE" not in (kw.get("env") or {})):
+                return subprocess.CompletedProcess(cmd, 128, "", said)
+            return real_run(cmd, *a, **kw)
+
         tid = self.desk.new_task("Add hello.txt")
-        m = self.settle(Dispatcher(self.desk), tid)
+        with unittest.mock.patch.object(run.subprocess, "run", fake_run):
+            m = self.settle(Dispatcher(self.desk), tid)
+            with self.assertRaises(RuntimeError) as e:
+                run.git("add", "-A", cwd=Path(m["worktree"]))
         self.assertEqual(m["state"], "failed", m)
-        # the lock's path and git's advice after it run past 300 characters: the end of what git said is kept
-        self.assertGreater(len(m["git_error"]), 300 + len("git add -A failed: "), m["git_error"])
+        # more than the old 300 characters of what git said are kept, and no more than 600
+        self.assertIn("MIDDLE-MARK", m["git_error"])
         self.assertLessEqual(len(m["git_error"]), 600)
-        self.assertIn("remove the file manually", m["git_error"])
-        self.assertIn("remove the file manually", self.hansa("show", tid))
-        # the one-line error stays git's first line; run.git's own message stays as short as before
+        self.assertNotIn("LATE-MARK", m["git_error"])
+        self.assertIn("MIDDLE-MARK", self.hansa("show", tid))
+        # the one-line error stays one line; run.git's own message stays as short as before
         self.assertNotIn("\n", m["error"])
-        self.assertNotIn("remove the file manually", m["error"])
-        with self.assertRaises(RuntimeError) as e:
-            run.git("add", "-A", cwd=Path(m["worktree"]))
-        self.assertLessEqual(len(str(e.exception)), len("git add -A failed: ") + 300)
-        self.assertNotIn("remove the file manually", str(e.exception))
+        self.assertNotIn("MIDDLE-MARK", m["error"])
+        self.assertLessEqual(len(str(e.exception)), len(head) + 300)
+        self.assertNotIn("MIDDLE-MARK", str(e.exception))
 
     def test_what_a_task_finds_left_in_the_worktree_is_set_aside_and_named_in_its_show(self):
         d = Dispatcher(self.desk)
