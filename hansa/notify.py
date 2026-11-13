@@ -61,7 +61,7 @@ POST_WAIT = 60  # seconds to try a post before gathering new lines and trying ag
 KEEP_DAYS = 7  # ended followers' records are kept this long
 KEY = re.compile(r"^[0-9]+-[0-9a-f]{8}$")
 TASK_ID = re.compile(r"^t[0-9]+$")
-LOOK_EVERY = 60.0  # seconds: a follower looks its session's status up at most this often, for the coordinator alert
+LOOK_EVERY = 60.0  # seconds: a follower looks its session's status up at most this often
 
 
 # -- the session a command runs in ---------------------------------------------------------------------
@@ -862,12 +862,9 @@ class Watch:
     The inbox's wait and whether it was alerted are kept in last_post until a post succeeds, and count only while
     lines wait to be posted (refused_since). It looks its
     session's status up in `claude agents --json`, in a thread of its own so that posting never waits for it, at most
-    once every LOOK_EVERY seconds counting the name lookup's (clock, shared with Namer), and only while one of them
-    could hold: something waits to be posted, or was posted
-    in the last `window` minutes (and the minute after, for the lookup that sees them go by), or the session was last
-    seen busy or waiting with something posted to it that it has not finished; or a task posted to it has waited
-    `review` minutes for review, not yet alerted, or was alerted of and still waits (so that hansa status says it only
-    while the session is idle). minutes: {no_session, window, review} as the desk gives them (alert.session_minutes;
+    once every LOOK_EVERY seconds counting the name lookup's (clock, shared with Namer). The follower always wants
+    this for hansa status, even without alerts or anything waiting. minutes: {no_session, window, review} as the desk
+    gives them (alert.session_minutes;
     0: off). no_session also covers a running session's inbox refusing posts, once per stretch of failures.
         window  something posted to it is not finished (no lookup saw the session otherwise than `busy` or `waiting`
                 since), and the session has been `waiting` (a permission dialog or a question) for `window` minutes:
@@ -879,11 +876,13 @@ class Watch:
                 waiting since they ended
     Any other status ends a stretch of waiting and sends nothing; one other than `busy` (`idle`, `shell`, one hansa
     does not know, or the session not listed) also counts what was posted before as finished. A lookup that fails
-    changes nothing, sends nothing, and is written in the follower's log. state() is carried over a restart on new
+    sends nothing and leaves the alert's state alone, but clears the status shown; it is written in the follower's
+    log. wait_from is the observed wait; window_from counts only waiting on what was posted, for alerts.
+    state() is carried over a restart on new
     code, so what was told stays told. look: the lookup, for tests."""
 
     KEEP = ("first", "count", "oldest", "last", "last_count", "last_line", "told", "status", "seen", "looked",
-            "reviews", "wait_from")
+            "reviews", "wait_from", "window_from", "since", "known")
 
     def __init__(self, pid: int, was=None, look=None):
         w = was if isinstance(was, dict) else {}
@@ -893,6 +892,8 @@ class Watch:
         self.look = look or (lambda: session_row(pid, NAME_LIMIT))
         self.first, self.last, self.told, self.seen, self.wait_from = (
             num(k) for k in ("first", "last", "told", "seen", "wait_from"))
+        self.window_from = num("window_from") if "window_from" in w else self.wait_from
+        self.since, self.known = num("since"), bool(w.get("known"))
         self.clock = Lookups(num("looked"))
         self.count, self.last_count = int(num("count")), int(num("last_count"))
         self.oldest, self.last_line, self.status = (str(w.get(k) or "") for k in ("oldest", "last_line", "status"))
@@ -907,6 +908,14 @@ class Watch:
 
     def state(self) -> dict:
         return {k: getattr(self, k) for k in self.KEEP}
+
+    def session(self) -> dict | None:
+        """The latest successful observation for the follower's record; shell finishes posted work, like idle.
+        Keep the raw status for alerts: shell does not qualify for a review alert."""
+        if not self.known:
+            return None
+        return {"status": "idle" if self.status == "shell" else self.status,
+                "since": self.wait_from if self.status == "waiting" else self.since, "seen": self.seen}
 
     def posted(self, t: float, lines: list, reviews=()) -> None:
         """A message went to the session at t: its lines, and the tasks in it that wait for review."""
@@ -952,6 +961,7 @@ class Watch:
             self.thread = None
             at, row, error = self.got
             if error:
+                self.known = False
                 _say(f"could not look up the session's status for the principal's coordinator alert: {error}")
             else:
                 if heard:
@@ -972,16 +982,21 @@ class Watch:
     def saw(self, at: float, status: str, window: int, review: int) -> list:
         """What a lookup begun at `at` found: the session's status, '' when it is not listed."""
         out = []
+        normalized = lambda s: "idle" if s == "shell" else s
+        if not self.known or normalized(status) != normalized(self.status):
+            self.since = at
+        self.known = status in ("busy", "idle", "waiting", "shell")
         before, self.status, self.seen = self.seen, status, at
         if status == "waiting":
-            if self.first and not self.wait_from:  # it waits since this lookup, or since the post if none came between
-                self.wait_from = self.first if before < self.first else at
-            if window and self.wait_from and at - self.wait_from >= window * 60 and not self.told:
+            self.wait_from = self.since
+            if self.first and not self.window_from:  # the alert counts only waiting on what was posted
+                self.window_from = self.first if before < self.first else at
+            if window and self.window_from and at - self.window_from >= window * 60 and not self.told:
                 self.told = at
-                out.append(("window", {"since": self.wait_from, "posted": self.first, "count": self.count,
+                out.append(("window", {"since": self.window_from, "posted": self.first, "count": self.count,
                                        "oldest": self.oldest}))
         else:  # seen doing something else: a stretch of waiting is over
-            self.told, self.wait_from = 0.0, 0.0
+            self.told, self.wait_from, self.window_from = 0.0, 0.0, 0.0
             if status == "busy":  # at work on what was posted, perhaps: not finished yet
                 pass
             elif self.last >= at:  # finished; posted after the lookup began: not seen yet
@@ -1004,9 +1019,9 @@ class Watch:
         since = refused_since(last_post, pending)
         if minutes.get("no_session") and since is not None and t - since >= minutes["no_session"] * 60:
             out["inbox"] = since
-        if minutes.get("window") and self.status == "waiting" and self.first and self.wait_from \
-                and t - self.wait_from >= minutes["window"] * 60:
-            out["window"] = self.wait_from
+        if minutes.get("window") and self.status == "waiting" and self.first and self.window_from \
+                and t - self.window_from >= minutes["window"] * 60:
+            out["window"] = self.window_from
         told = {k: v["posted"] for k, v in sorted(self.reviews.items()) if v.get("told")}
         if minutes.get("review") and self.status == "idle" and told:
             out["review"] = told
@@ -1319,7 +1334,6 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             if gone(sess):
                 _say("the session's process ended; so does this follower")
                 return 0
-            me["name"] = namer.tick()  # recorded with the next feed, for hansa status and hansa notify
             new_mark = code_mark()
             if new_mark != mark:  # an upgrade: a module imported from now on would come from the new files
                 mark, changed = new_mark, time.time()
@@ -1383,7 +1397,11 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                     return 0
             waiting = bool(summary or any(not x.get("startup") for x in pending.values()))
             cases = watch.tick(time.time(), waiting, minutes, heard=lambda n: namer.heard(n),
-                               last_post=me["last_post"], want=turns.wants())
+                               last_post=me["last_post"], want=True)
+            # The always-wanted status lookup gets the shared clock first and supplies the name too.
+            me["name"] = namer.tick()
+            # Changes only with a completed look; the next feed replaces the whole record without an extra write.
+            me["coordinator_session"] = watch.session()
             repost, said = turns.tick(time.time(), turn_rec, watch.status, watch.seen, minutes.get("turn") or 0)
             if repost:
                 if _deliver(sock, repost_text(str(desk.root), repost, zh), sess, me, beat=beat):

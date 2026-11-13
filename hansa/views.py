@@ -1063,6 +1063,9 @@ def status(desk: Desk) -> dict:
     no_read = no_read_parts_shown(s, desk.root)
     queued = [m for m in tasks if m["state"] == "queued"]
     looks = waiting_looks(desk, s, tasks, server) if queued else None  # once for all of them
+    followers = notify.live_records(desk)
+    hearing = [notify.who((r.get("session") or {}).get("pid"), r.get("name") or "") for r in followers]
+    session = next((seen for r in followers if (seen := up.coordinator_session(desk, r))), None)
     from . import page_messages
     return page_messages.status(desk, s, {
         "desk": str(desk.root),
@@ -1079,11 +1082,12 @@ def status(desk: Desk) -> dict:
         "srt_missing": srt_problem(desk, s),  # what stops setups and checks, as hansa serve last saw srt
         "srt": {**srt_record(desk), "needed": srt_needed(s)},
         "try_note": LINUX_TRY_NOTE if account.LINUX else "",  # what the sandbox try leaves to hansa's checks there
-        "notifying": (hearing := notify.names(desk)),  # the sessions hansa posts to (hansa notify)
+        "notifying": hearing,  # the sessions hansa posts to (hansa notify)
+        **({"coordinator_session": session} if session else {}),
         # whether their turns' ends are recorded (hansa coordinator-turn), by the record of how each started
         "turns": [up.turn_line(desk, r.get("session") or {}, notify.who((r.get("session") or {}).get("pid"),
                                                                         r.get("name") or ""))
-                  for r in notify.live_records(desk)] if hearing else [],
+                  for r in followers],
         "coordinator_start": "" if hearing else up.coordinator_line(desk),  # what hansa up does about the session
         "card_note": up.card_note(desk),  # the recorded session's folder does not load the card (the desk's CLAUDE.md)
         "unreached": alert.coordinator_lines(desk, s),  # the coordinator alert's cases that hold now
@@ -1314,6 +1318,8 @@ def status_text(st: dict) -> str:
     out.append(("hansa posts to: " + ", ".join(st["notifying"]) if st.get("notifying") else
                 "hansa posts to no session (hansa notify on, from the coordinator's session)")
                + (f" · {st['card_note']}" if st.get("card_note") else ""))
+    if session := st.get("coordinator_session"):
+        out.append(up.session_line(session))
     out += [st["coordinator_start"]] if st.get("coordinator_start") and not st.get("notifying") else []
     out += st.get("turns") or []
     out += st.get("unreached") or []
