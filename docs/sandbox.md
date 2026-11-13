@@ -362,7 +362,8 @@ above them (`~/bin/git` with `~/bin` on the `PATH`): hansa would run a program
 put there.
 
 The other refusals hold on top: the home folder or above it, the desk, every
-lane's repository on the desk, a provider's Claude Code folder and
+lane's repository on this desk or another desk on this account's list
+(`hansa up`), a provider's Claude Code folder and
 `~/.claude`, a login, key or history workers may not read (such as `~/.ssh` or
 `~/.cargo/credentials`), what the principal lists on the page as not for
 workers to read, a hidden folder at the top (`/.x`: such a folder can be
@@ -376,8 +377,9 @@ may read as a pattern or a person as another name. Each refusal says what it
 would open. `hansa explain lane L` marks each entry a run would leave out,
 with why. The coordinator tells the principal what it added and why.
 
-No entry may be any lane's repository on this desk, a folder inside it
-(including `.git` and `.git/hooks`), or a folder above it, through links too:
+No entry may be any lane's repository on this desk or another desk on this
+account's list (`hansa up`), a folder inside it (including `.git` and
+`.git/hooks`), or a folder above it, through links too:
 hansa runs git in those repositories outside the sandbox, so a hook or a git
 setting a worker put there would run outside it. `hansa lane set L write ...`
 refuses the whole change and says why. `hansa lane add` refuses a repository
@@ -386,6 +388,11 @@ and the entry; remove that entry first. An entry saved before this check is
 left out of the worker's, setup's and check's sandbox, with its reason
 recorded on the task and marked by `hansa explain lane L`; the run goes on
 with the entries that pass.
+
+Hansa checks the lane repositories on listed desks when settings are saved
+and again before a run. If hansa cannot read another listed desk's
+`settings.json` as a UTF-8 JSON object, fix that file before saving settings;
+runs leave out all write entries until it can be read.
 
 Point a tool at the lane's folder with the lane's env (`hansa lane set L env
 NAME=/Users/me/hansa-cache/shop-desk/L/TOOL`, and list that folder): pip
