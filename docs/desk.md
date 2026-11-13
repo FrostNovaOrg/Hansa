@@ -1836,7 +1836,9 @@ In order, each item only when it is not zero:
   command), no alert channel set up;
 - what waits for the principal: releases waiting for their yes, open to-dos;
 - the work: running (merge checks too), queued, waiting for review, failed in the last 24 hours; `idle` when nothing
-  runs or waits in the queue;
+  runs or waits in the queue. Beside the running tasks, what else runs, two at most and then how many more:
+  `release #1 running` (its command), `release #1: check running` (its watch, the check after the push),
+  `lane a: try running` (`hansa lane try`); while one of these runs, the line does not say `idle`;
 - the workers' worth in the last 24 hours, as `hansa status` gives it, rounded to dollars;
 - the page's address, as `hansa status` gives it, without its key. The key approves releases and the coordinator can
   read its own terminal, so it is never on the line: `hansa web`, run in a terminal of the principal's own, prints

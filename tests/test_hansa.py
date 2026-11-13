@@ -24600,7 +24600,7 @@ def save():'''))
             "at": t, "desk": "/".join(self.desk.root.parts[-2:]), "language": "zh", "page": "http://127.0.0.1:8790/",
             "paused": True, "disk_low": True, "memory_low": True, "api_errors_since": t - 600,
             "push_failed": ["bark"], "no_channel": False, "releases": 2, "todos": 1, "running": 2, "queued": 2,
-            "review": 1, "failed_24h": 1, "usd_24h": 38})
+            "review": 1, "failed_24h": 1, "usd_24h": 38, "at_work": []})
         # a quiet desk: nothing wrong, nothing waiting, no channel set up, the last 24 h's worth from hansa cost
         quiet = init_desk(self.tmp / "quiet", str(self.repo))
         got = plugin.summary(quiet)
@@ -24609,7 +24609,7 @@ def save():'''))
                                "page": "http://127.0.0.1:8765/", "paused": False, "disk_low": False,
                                "memory_low": False, "api_errors_since": None, "push_failed": [], "no_channel": True,
                                "releases": 0, "todos": 0, "running": 0, "queued": 0, "review": 0, "failed_24h": 0,
-                               "usd_24h": 0})
+                               "usd_24h": 0, "at_work": []})
 
     def test_the_status_lines_summary_says_a_failed_alert_command_until_a_later_run_goes_out(self):
         from hansa import alert
@@ -53054,6 +53054,61 @@ else:
         alert.send_due(self.desk, gather=0)
         self.assertTrue(release.code_live(release.get(self.desk, 1)))
         self.assertIn(said, self.hansa("status"))
+
+    def test_status_says_a_running_release_its_check_after_the_push_and_a_lane_try_are_at_work(self):
+        from hansa import release, run
+        self.with_targets(github=("true", {"timeout_min": 30}))
+        t = time.time()
+        commit = "6101f76cf8" + "0" * 30
+        one = {"lane": "a", "target": "github", "commit": commit, "base": "main", "asked": t - 3600}
+        ended = {**one, "state": "done", "ended": t - 3000, "watch": "./watch.sh", "watch_timeout_min": 120}
+        release._write(self.desk, [
+            {**one, "id": 1, "state": "running", "started": t - 4 * 60 - 5},
+            {**ended, "id": 2, "watch_run": {"state": "running", "started": t - 34 * 60 - 5}},
+            # a watch that ended, however it ended, is not at work
+            *({**ended, "id": n, "watch_run": {"state": st, "started": t - 3000, "ended": t - 60}}
+              for n, st in ((3, "passed"), (4, "failed"), (5, "timed_out"), (6, "stopped")))])
+        run.write_try(self.desk, "a", {"phase": "running", "check": "fixture", "started": t - 3 * 60 - 5})
+        st = views.status(self.desk)  # what hansa status --json prints and what the page polls (/api/status)
+        lane_limit = self.desk.settings()["lanes"]["a"].get("timeout_min", 240)
+        self.assertEqual(st["at_work"], [
+            {"kind": "release", "id": 1, "lane": "a", "target": "github", "started": t - 4 * 60 - 5, "minutes": 4,
+             "limit_min": 30},
+            {"kind": "watch", "id": 2, "lane": "a", "target": "github", "started": t - 34 * 60 - 5, "minutes": 34,
+             "limit_min": 120},
+            {"kind": "try", "id": None, "lane": "a", "target": None, "started": t - 3 * 60 - 5, "minutes": 3,
+             "limit_min": lane_limit}])
+        self.assertEqual(next(r for r in st["releases"] if r["id"] == 1)["started"], t - 4 * 60 - 5)
+        self.assertEqual(release.minutes(self.desk.settings(), release.get(self.desk, 1))[0], 30)
+        text = views.status_text(st)
+        rows = text.split("releases (hansa release):\n", 1)[1].splitlines()
+        first = next(x for x in rows if x.startswith("  #1 "))
+        for part in ("lane a target github", "6101f76cf8", "running 4 min (limit 30)"):
+            self.assertIn(part, first)
+        second = next(x for x in rows if x.startswith("  #2 "))
+        for part in ("lane a target github", "6101f76cf8", "sent", "check after the push", "34 min (limit 120)"):
+            self.assertIn(part, second)
+        for n in (3, 4, 5, 6):
+            self.assertFalse(any(x.startswith(f"  #{n} ") for x in rows), text)
+        self.assertIn(f"held by a try (hansa lane try), running 3 min (limit {lane_limit})", text)
+        # the coordinator's status line: no task runs, yet the desk is at work
+        got = plugin.summary(self.desk)
+        self.assertEqual(got["running"], 0)
+        self.assertEqual(got["at_work"], [{"kind": "release", "id": 1, "lane": "a"},
+                                          {"kind": "watch", "id": 2, "lane": "a"},
+                                          {"kind": "try", "id": None, "lane": "a"}])
+        # a try of the merge check: the merge check's limit
+        s = self.desk.settings()
+        s["lanes"]["a"]["merge_timeout_min"] = 45
+        self.assertEqual(self.desk.save_settings(s, by="page"), [])
+        run.write_try(self.desk, "a", {"phase": "running", "merge": True, "started": t})
+        self.assertEqual(release.at_work(self.desk, self.desk.settings())[-1]["limit_min"], 45)
+        # nothing at work: none listed, and the line's summary is idle again
+        release._write(self.desk, [{**ended, "id": 3, "watch_run": {"state": "passed", "started": t - 3000}}])
+        run.write_try(self.desk, "a", {"phase": "done", "started": t - 600, "ended": t})
+        self.assertEqual(views.status(self.desk)["at_work"], [])
+        self.assertEqual(plugin.summary(self.desk)["at_work"], [])
+        self.assertNotIn("check after the push", views.status_text(views.status(self.desk)))
 
     def test_encrypted_bark_code_text_failure_after_the_code_is_made_voids_it(self):
         from hansa import alert, release

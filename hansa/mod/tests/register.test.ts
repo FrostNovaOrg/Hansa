@@ -894,6 +894,44 @@ test('each item only when it is not zero; idle only with nothing running or queu
   expect(last()).toBe('hansa shop/desk · Opus 5.5 max · queued 1 · 24 h $3 · page http://127.0.0.1:8765/')
 })
 
+test('a release, its check after the push or a lane try at work with no task: not idle, and what runs', async ($, on) => {
+  const { last, write, clock } = await lined($, on, { at_work: [{ kind: 'release', id: 1, lane: 'a' }] })
+  expect(last()).not.toContain('idle')
+  expect(last()).toContain('release #1 running')
+  write({ at_work: [{ kind: 'watch', id: 1, lane: 'a' }] })
+  await clock.advance(15_000)
+  expect(last()).not.toContain('idle')
+  expect(last()).toContain('release #1: check running')
+  write({ at_work: [{ kind: 'try', id: null, lane: 'a' }] })
+  await clock.advance(15_000)
+  expect(last()).not.toContain('idle')
+  expect(last()).toContain('lane a: try running')
+  write({ at_work: [] }) // none of these and no task: idle, as before
+  await clock.advance(15_000)
+  expect(last()).toContain('idle')
+})
+
+test('tasks running too: their part as before, and what else runs beside it', async ($, on) => {
+  const { last, write, clock } = await lined($, on, { running: 2, at_work: [{ kind: 'release', id: 4, lane: 'a' }] })
+  expect(last()).toContain('running 2')
+  expect(last()).toContain('release #4 running')
+  expect(last()).not.toContain('idle')
+  write({ running: 1, at_work: [{ kind: 'release', id: 4, lane: 'a' }, { kind: 'watch', id: 3, lane: 'a' },
+    { kind: 'try', id: null, lane: 'b' }] })
+  await clock.advance(15_000)
+  expect(last()).toContain('running 1')
+  expect(last()).toContain('+1 more')
+})
+
+test('at work, in Chinese; what is not one of its kinds is left out', async ($, on) => {
+  const { last } = await lined($, on, { language: 'zh', at_work: [{ kind: 'watch', id: 2, lane: 'a' },
+    { kind: 'release', id: 'x' }, { kind: 'shell', id: 3 }, { kind: 'try', lane: '\u001b[2J' }, 'release'] })
+  expect(last()).not.toContain('空闲')
+  expect(last()).toContain('#2')
+  expect(last()).not.toContain('\u001b')
+  expect(last()).not.toContain('shell')
+})
+
 test('the page\'s address never carries its key, whatever the summary holds', async ($, on) => {
   const { last, write, clock } = await lined($, on, { page: 'http://127.0.0.1:8765/?t=secret-token' })
   expect(last()).not.toContain('secret-token')

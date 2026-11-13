@@ -229,6 +229,8 @@ const WORDS = {
     waiting: parts => `waiting for you: ${parts.join(', ')}`, releases: n => `releases ${n}`, todos: n => `to-dos ${n}`,
     idle: 'idle', running: n => `running ${n}`, queued: n => `queued ${n}`, review: n => `review ${n}`,
     failed: n => `failed ${n} in 24 h`, cost: d => `24 h $${d}`, page: a => `page ${a}`,
+    release: id => `release #${id} running`, watch: id => `release #${id}: check running`,
+    try: lane => `lane ${lane}: try running`, more: n => `+${n} more`,
   },
   zh: {
     none: '后台没在跑（还没有记录）',
@@ -238,6 +240,8 @@ const WORDS = {
     waiting: parts => `等你：${parts.join('、')}`, releases: n => `发布 ${n}`, todos: n => `待办 ${n}`,
     idle: '空闲', running: n => `进行 ${n}`, queued: n => `排队 ${n}`, review: n => `待审 ${n}`,
     failed: n => `24 小时失败 ${n}`, cost: d => `24 小时 $${d}`, page: a => `网页 ${a}`,
+    release: id => `发布 #${id} 进行中`, watch: id => `发布 #${id}：推送后检查进行中`,
+    try: lane => `工作线 ${lane}：试跑进行中`, more: n => `另有 ${n} 项`,
   },
 }
 
@@ -247,6 +251,16 @@ function plain(x, most = 80) {
 }
 
 const count = x => Number.isInteger(x) && x > 0 ? x : 0
+
+// What runs that is not a task (plugin.py: summary's at_work), each of its kind: a release's id, a lane's name
+function atWorkOf(x) {
+  if (!Array.isArray(x)) return []
+  return x.filter(w => w && typeof w === 'object' && (w.kind === 'try' ? plain(w.lane, 20) !== ''
+    : (w.kind === 'release' || w.kind === 'watch') && count(w.id) > 0))
+    .map(w => w.kind === 'try' ? { kind: 'try', lane: plain(w.lane, 20) } : { kind: w.kind, id: count(w.id) })
+}
+
+const AT_WORK_SHOWN = 2 // the rest are counted
 
 // The summary as the line uses it, each field of its kind; null when it is not one (no time it was written)
 function summaryOf(x) {
@@ -260,7 +274,7 @@ function summaryOf(x) {
       ? x.push_failed.filter(s => typeof s === 'string' && /^[A-Za-z0-9_-]{1,20}$/.test(s)).slice(0, 5) : [],
     noChannel: x.no_channel === true, releases: count(x.releases), todos: count(x.todos), running: count(x.running),
     queued: count(x.queued), review: count(x.review), failed: count(x.failed_24h),
-    usd: Number.isFinite(x.usd_24h) && x.usd_24h > 0 ? Math.round(x.usd_24h) : 0,
+    usd: Number.isFinite(x.usd_24h) && x.usd_24h > 0 ? Math.round(x.usd_24h) : 0, atWork: atWorkOf(x.at_work),
   }
 }
 
@@ -288,8 +302,14 @@ function lineText(sum, now, model, effort, given) {
   if (sum.noChannel) out.push(w.noChannel)
   const waits = [sum.releases && w.releases(sum.releases), sum.todos && w.todos(sum.todos)].filter(Boolean)
   if (waits.length) out.push(w.waiting(waits))
-  if (!sum.running && !sum.queued) out.push(w.idle)
-  for (const k of ['running', 'queued', 'review', 'failed']) if (sum[k]) out.push(w[k](sum[k]))
+  const work = sum.atWork.map(x => x.kind === 'try' ? w.try(x.lane) : w[x.kind](x.id))
+  if (!sum.running && !sum.queued && !work.length) out.push(w.idle)
+  if (sum.running) out.push(w.running(sum.running))
+  if (work.length) {
+    out.push(...work.slice(0, AT_WORK_SHOWN))
+    if (work.length > AT_WORK_SHOWN) out.push(w.more(work.length - AT_WORK_SHOWN))
+  }
+  for (const k of ['queued', 'review', 'failed']) if (sum[k]) out.push(w[k](sum[k]))
   out.push(w.cost(sum.usd))
   if (sum.page) out.push(w.page(sum.page))
   return out.join(' · ')

@@ -200,6 +200,15 @@ a request still waiting for approval and stops the target's tick counting,
 as changing its release command does. Changing only `--watch-minutes` keeps
 the tick.
 
+While a release's command runs, `hansa status` adds to its line under `releases (hansa release):` how long it has
+run and its limit (`running 4 min (limit 30)`); while its watch runs, it keeps a line for the release, which is done
+by then (`sent; its check after the push has run 34 min (limit 120)`); a watch that ended is not listed. A lane held
+by `hansa lane try` says the same of the try. `hansa status --json` and the page's status data gather these in
+`at_work`: a row per running release command, running watch and running lane try, with `kind` (`release`, `watch`
+or `try`), `id` (the release's; none for a try), `lane`, `target`, `started`, `minutes` and `limit_min`; each
+`releases[]` row carries its `started`. The coordinator's status line names them instead of `idle`
+([the status line](desk.md#the-status-line)).
+
 For GitHub Actions, this example watches the push run of `tests.yml` for the
 exact pushed commit. It retries empty results and network errors for five
 minutes while the run appears, then uses `gh` to wait for its result and read
