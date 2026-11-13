@@ -1264,7 +1264,7 @@ def failure_line(desk: Desk) -> str:
 
 
 def explain_line(s: dict, desk: Desk | None = None) -> str:
-    """For hansa explain: which channels the principal set up (the alert command and push addresses), and what the command is."""
+    """For hansa explain: which channels the principal set up (the alert command and push addresses)."""
     cmd = command(s)
     from . import alert_push, alert_services
     destinations = alert_push.public(desk, s) if desk else []
@@ -1284,7 +1284,7 @@ def explain_line(s: dict, desk: Desk | None = None) -> str:
                 + (code_channels if desk and release_codes(desk, s) else
                    "With no alert command or enabled Bark entry that encrypts, no release gets a one-time code: "
                    "the principal approves releases on the page only."))
-    return (f"Alerts: the principal's alert command is {cmd!r} (saved on the page {_when(a.get('at'))}); hansa runs it "
+    return (f"Alerts: the principal's alert command is set (saved on the page {_when(a.get('at'))}); hansa runs it "
             "when a release waits for the principal or ends, you stop a release (hansa release --stop), a to-do is "
             "recorded for the principal (hansa ask), a provider runs out of credit, a lane's runs cannot start because their sandbox "
             "cannot, free space goes under the floor (hansa disk-floor), hansa serve finishes no round for a long time, "

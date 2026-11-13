@@ -52082,8 +52082,8 @@ else:
                          {"ok": True, "problems": []})
         self.assertEqual(self.desk.settings()["alert"], saved)
         told = self.hansa("explain")
-        self.assertIn("the principal's alert command is", told)
-        self.assertIn(str(out), told)
+        self.assertIn("the principal's alert command is set", told)
+        self.assertNotIn(str(out), told)
         self.assertIn("You send no alerts and cannot set it", told)
         # one line only, and no key
         self.assertFalse(self.page_save(lambda s: s.update(alert={"command": "echo a\necho b"}))["ok"])
@@ -52098,6 +52098,18 @@ else:
         self.assertIn('"/api/alert/test"', ui)
         self.assertNotIn("hansa alert", self.hansa("help", "card"))
         self.assertIn("the coordinator does not send", self.hansa("help", "card"))
+
+    def test_explain_reports_saved_alert_status(self):
+        cmd = "example-alert --destination example-route --key example-value"
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": cmd}))["ok"])
+        saved = self.desk.settings()
+        for shown in (alert.explain_line(saved), alert.explain_line(saved, self.desk), self.hansa("explain")):
+            for part in ("example-alert", "example-route", "example-value"):
+                self.assertNotIn(part, shown)
+            self.assertIn("alert command is set", shown)
+            self.assertIn("saved on the page", shown)
+            self.assertIn(time.strftime("%Y-%m-%d %H:%M", time.localtime(saved["alert"]["at"])), shown)
+        self.assertEqual(public_settings(self.desk)["settings"]["alert"]["command"], cmd)
 
     def test_each_kind_of_alert_reaches_the_command_with_its_text(self):
         from hansa import alert, release
@@ -57885,7 +57897,7 @@ class AlertPushPageTest(unittest.TestCase):
         self.assertNotIn(self.KEY, line)
         self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "echo hi"}))["ok"])
         line = explained()
-        self.assertIn("the principal's alert command is 'echo hi'", line)
+        self.assertIn("the principal's alert command is set", line)
         self.assertIn("Push addresses: Bark", line)
 
     def test_malformed_push_settings_leave_command_working(self):
