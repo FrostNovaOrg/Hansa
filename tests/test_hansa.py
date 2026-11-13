@@ -43697,8 +43697,15 @@ else if (ask.startsWith("status-picture")) (async () => {
   const run = code => vm.runInContext(code, ctx);
   await run("loadStatus()").catch(e => { if (ask !== "status-picture-initial-error") throw e; });
   const snapshot = async () => {
-    const root = ids["#tab-status"], rows = [], boxes = [], tables = [];
+    const root = ids["#tab-status"], rows = [], boxes = [], tables = [], work = [], progressOrder = [];
     walk(root, el => {
+      if (el.attrs["data-lane-track"] != null) progressOrder.push("task:" + el.attrs["data-lane-track"]);
+      if (el.attrs["data-at-work"] != null) {
+        progressOrder.push(el.attrs["data-at-work"]);
+        work.push({kind:el.attrs["data-at-work"], text:el.textContent,
+          names:descendants(el, "span").filter(n => n.attrs.title != null).map(n => ({text:n.textContent, title:n.attrs.title})),
+          classes:descendants(el, "div").map(n => n.className)});
+      }
       if (el.attrs["data-lane-track"] != null) {
         rows.push({lane:el.attrs["data-lane-track"], step:el.attrs["data-step"], tone:el.className, text:el.textContent, role:el.attrs.title,
           tracks:descendants(el, "div").filter(n => n.className === "lane-steps").length,
@@ -43720,7 +43727,12 @@ else if (ask.startsWith("status-picture")) (async () => {
     for (const box of boxes) {
       await box.click(); clicks.push(!!ids["#" + box.attrs["aria-controls"]]?.scrolled);
     }
-    return {rows, lists, laneCount:descendants(ids["#status-lanes"], "span").find(el => el.className === "count-badge")?.textContent,
+    return {rows, lists, work, progressOrder,
+      releaseStates:descendants(root, "tr").filter(el => el.kids[0]?.tag === "td" && el.kids[0].textContent.startsWith("#"))
+        .map(el => ({id:el.kids[0].textContent,
+          text:el.kids.at(-1).kids[0]?.kids.filter(n => n instanceof Text).map(n => n.textContent).join(""),
+          tone:el.kids.at(-1).kids[0]?.className})),
+      laneCount:descendants(ids["#status-lanes"], "span").find(el => el.className === "count-badge")?.textContent,
       text:root.textContent, state:ids["#state-list"].textContent,
       header:{text:ids["#state-text"].textContent, tone:ids["#state-text"].className},
       warnings:descendants(ids["#state-list"], "li").filter(el => el.className === "warn").map(el => el.textContent),
@@ -43737,6 +43749,11 @@ else if (ask.startsWith("status-picture")) (async () => {
       alerts:descendants(ids["#status-picture"], "div").filter(el => el.attrs.role === "alert").map(el => el.textContent)};
   };
   const snapshots = [await snapshot()];
+  if (ask === "status-picture-work-end") {
+    delete given["/api/status"].at_work;
+    delete given["/api/status"].coordinator_session;
+    await run("loadStatus()"); snapshots.push(await snapshot());
+  }
   if (ask === "status-picture-initial-error") {
     statusGetError = null; await run("loadStatus()"); snapshots.push(await snapshot());
   }
@@ -46098,11 +46115,128 @@ else if (ask === "task-steps")'''))
                 "model": "test-model", "minutes": 16, "limit_min": 20, "checking": False, "starting": False,
                 "progress": {"replies": 7, "idle_min": 3, "note": "Last note <&>\nHidden second line"}, **fields}
 
-    def picture_pages(self, status, scenario="status-picture"):
+    def picture_pages(self, status, scenario="status-picture", clock=None):
         if not shutil.which("node"):
             self.skipTest("needs node to run the page's script")
         for language in ("en", "zh"):
-            yield language, self.page_header(scenario, status, language)
+            yield language, self.page_header(scenario, status, language, clock=clock)
+
+    def work_fixture(self, kind, **fields):
+        return {"kind": kind, "id": None if kind == "try" else 7, "lane": "a", "target": None if kind == "try" else "github",
+                "started": 1700000000, "minutes": 4, "limit_min": 30, **fields}
+
+    def assert_work_row(self, page, language, kind, words):
+        self.assertEqual([w["kind"] for w in page["work"]], [kind])
+        row = page["work"][0]
+        for word in words:
+            self.assertIn(word, row["text"])
+        for word in (("4 min", "30 min", "limit") if language == "en" else ("4 分钟", "30 分钟", "时限")):
+            self.assertIn(word, row["text"])
+        self.assertNotIn("No tasks in progress" if language == "en" else "当前没有进行中的任务", page["text"])
+        self.assertTrue(all(box["count"] == 0 for box in page["boxes"]))
+
+    def test_page_at_work_release(self):
+        st = self.picture_status()
+        st["at_work"] = [self.work_fixture("release")]
+        for language, [page] in self.picture_pages(st):
+            self.assert_work_row(page, language, "release", ("#7", "a", "github", "Release" if language == "en" else "发布"))
+            self.assertIn("Running" if language == "en" else "进行中", page["work"][0]["text"])
+
+    def test_page_at_work_watch_and_recent_state(self):
+        st = self.picture_status()
+        st["at_work"] = [self.work_fixture("watch")]
+        # Supply the server's sentences ourselves, including its pre-existing done text.
+        st["releases"] = [{"id": 7, "lane": "a", "target": "github", "state": "done", "command": "fixture push",
+                           "what": "done (exit 0)", "what_zh": "已完成（退出码 0）", "watch": "fixture watch",
+                           "watch_what": "watch running", "watch_what_zh": "发布监测运行中"}]
+        for state in ("starting", "running", "passed", "failed", "timed_out", "stopped"):
+            st["releases"][0]["watch_run"] = {"state": state}
+            st["at_work"] = [self.work_fixture("watch")] if state in ("starting", "running") else []
+            for language, [page] in self.picture_pages(st):
+                with self.subTest(state=state, language=language):
+                    recent = page["releaseStates"][0]
+                    if st["at_work"]:
+                        words = ("#7", "a", "github", "check after the push" if language == "en" else "发布监测")
+                        self.assert_work_row(page, language, "watch", words)
+                        for word in (("sent", "check after the push", "running") if language == "en" else ("已发出", "发布监测", "进行中")):
+                            self.assertIn(word, recent["text"])
+                        self.assertNotIn("done" if language == "en" else "已完成", recent["text"])
+                        self.assertEqual(recent["tone"], "muted")
+                    else:
+                        self.assertFalse(page["work"])
+                        self.assertIn("done" if language == "en" else "已完成", recent["text"])
+                        self.assertEqual(recent["tone"], "ok")
+
+    def test_page_at_work_lane_try(self):
+        st = self.picture_status()
+        st["lanes"][0]["trying"] = True
+        st["at_work"] = [self.work_fixture("try")]
+        for language, [page] in self.picture_pages(st):
+            self.assert_work_row(page, language, "try", ("a", "Lane try" if language == "en" else "工作线试跑"))
+            self.assertIn("trying" if language == "en" else "试跑中", page["rows"][0]["text"])
+            self.assertNotIn("#", page["work"][0]["text"])
+
+    def test_page_at_work_follows_tasks_without_changing_pipeline_or_lanes(self):
+        st = self.picture_status()
+        st["running"] = [self.picture_worker()]
+        st["queued"] = [{"id": "next", "lane": "a", "title": "Next", "waiting": "busy"}]
+        st["review"] = [{"id": "review", "lane": "b", "title": "Review", "check": True}]
+        st["merging"] = [{"id": "merge", "lane": "m", "title": "Merge", "phase": "running", "minutes": 5, "limit_min": 20}]
+        st["lanes"].append({**st["lanes"][0], "name": "m"})
+        clock = "2026-11-13T08:00:00Z"
+        before = dict(self.picture_pages(st, clock=clock))
+        st["at_work"] = [self.work_fixture(kind) for kind in ("release", "watch", "try")]
+        for language, [page] in self.picture_pages(st, clock=clock):
+            self.assertEqual(page["progressOrder"], ["task:a", "task:m", "release", "watch", "try"])
+            for field in ("rows", "boxes", "lists", "laneCount"):
+                self.assertEqual(page[field], before[language][0][field])
+
+    def test_page_at_work_end_restores_empty_panel_and_missing_fields_draw_nothing(self):
+        st = self.picture_status()
+        st["at_work"] = [self.work_fixture("release")]
+        st["coordinator_session"] = {"name": "coordinator-fixture", "status": "busy", "since": 1700000000, "seen": 1700000300}
+        for language, [working, ended] in self.picture_pages(st, "status-picture-work-end"):
+            self.assertTrue(working["work"])
+            self.assertFalse(ended["work"])
+            self.assertNotIn("coordinator-fixture", ended["state"])
+            self.assertIn("No tasks in progress" if language == "en" else "当前没有进行中的任务", ended["text"])
+        st["at_work"] = []
+        for language, [page] in self.picture_pages(st):
+            self.assertFalse(page["work"])
+            self.assertIn("No tasks in progress" if language == "en" else "当前没有进行中的任务", page["text"])
+
+    def test_page_coordinator_session_activity_and_since_clock(self):
+        st = self.picture_status()
+        since, seen = 1700000000, 1700007200
+        for state, en, zh in (("busy", "at work", "工作中"), ("idle", "idle", "空闲"),
+                              ("waiting", "waiting for an answer in its own window", "在自己的窗口等待答复")):
+            st["coordinator_session"] = {"name": "coordinator <&>", "status": state, "since": since, "seen": seen}
+            for language, [page] in self.picture_pages(st):
+                for word in ("coordinator <&>", en if language == "en" else zh, time.strftime("%H:%M", time.localtime(since))):
+                    self.assertIn(word, page["state"])
+                self.assertFalse(any("coordinator <&>" in warning for warning in page["warnings"]))
+        del st["coordinator_session"]
+        for _, [page] in self.picture_pages(st):
+            self.assertNotIn("coordinator <&>", page["state"])
+
+    def test_page_at_work_phone_names_have_titles_and_wrap(self):
+        st = self.picture_status()
+        lane, target = "lane-" + "long" * 50 + "<&>", "target-" + "long" * 50 + "<&>"
+        st["at_work"] = [self.work_fixture(kind, lane=lane, target=target if kind != "try" else None)
+                         for kind in ("release", "watch", "try")]
+        for language, [page] in self.picture_pages(st, "status-picture-mobile"):
+            self.assertEqual(len(page["work"]), 3)
+            for row in page["work"]:
+                self.assertIn({"text":lane, "title":lane}, row["names"])
+                if row["kind"] != "try":
+                    self.assertIn({"text":target, "title":target}, row["names"])
+            # The harness has no layout engine; the bench measures the rendered page at 390 px too.
+            for selector, rules in ((".work-row", ("display:flex", "flex-wrap:wrap")),
+                                    (".work-info", ("min-width:0", "overflow-wrap:anywhere"))):
+                css = re.search(re.escape(selector) + r"\s*\{([^}]+)\}", page["css"])
+                self.assertIsNotNone(css)
+                for rule in rules:
+                    self.assertIn(rule, css[1])
 
     def test_status_picture_review_excludes_running_verification(self):
         st = self.picture_status()
@@ -47433,12 +47567,15 @@ else if (ask === "task-steps")'''))
                 for store in ("session", "local"):
                     self.assertNotIn("919", json.dumps(loaded[store]))
 
-    def page_header(self, scenario, status, language, events=None):
+    def page_header(self, scenario, status, language, events=None, clock=None):
         harness = self.tmp / "header-page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        given = {"/api/status": status, "/api/events": events or []}
+        if clock:
+            given["pageClock"] = {"now": clock, "browserLanguage": language}
         result = subprocess.run(["node", str(harness), str(page), scenario, language],
-                                input=json.dumps({"/api/status": status, "/api/events": events or []}),
+                                input=json.dumps(given),
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)

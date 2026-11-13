@@ -240,7 +240,7 @@ const WORDS = {
     waiting: parts => `等你：${parts.join('、')}`, releases: n => `发布 ${n}`, todos: n => `待办 ${n}`,
     idle: '空闲', running: n => `进行 ${n}`, queued: n => `排队 ${n}`, review: n => `待审 ${n}`,
     failed: n => `24 小时失败 ${n}`, cost: d => `24 小时 $${d}`, page: a => `网页 ${a}`,
-    release: id => `发布 #${id} 进行中`, watch: id => `发布 #${id}：推送后检查进行中`,
+    release: id => `发布 #${id} 进行中`, watch: id => `发布 #${id}：发布监测进行中`,
     try: lane => `工作线 ${lane}：试跑进行中`, more: n => `另有 ${n} 项`,
   },
 }

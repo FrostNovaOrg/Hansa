@@ -928,6 +928,8 @@ test('at work, in Chinese; what is not one of its kinds is left out', async ($, 
     { kind: 'release', id: 'x' }, { kind: 'shell', id: 3 }, { kind: 'try', lane: '\u001b[2J' }, 'release'] })
   expect(last()).not.toContain('空闲')
   expect(last()).toContain('#2')
+  expect(last()).toContain('发布监测')
+  expect(last()).toContain('进行中')
   expect(last()).not.toContain('\u001b')
   expect(last()).not.toContain('shell')
 })
