@@ -39,6 +39,9 @@ section { background:var(--card); border:1px solid var(--line); border-radius:12
 h2 { font-size:15px; margin:0 0 12px; } h3 { font-size:14px; margin:16px 0 8px; }
 p { margin:8px 0; }
 .scroll { overflow-x:auto; max-width:100%; }
+.work-row { display:flex; flex-wrap:wrap; gap:4px 16px; padding:10px 0; border-top:1px solid var(--line); }
+.work-info { flex:1 1 240px; min-width:0; overflow-wrap:anywhere; }
+.work-time { align-self:center; }
 table { width:100%; border-collapse:collapse; }
 th, td { text-align:left; padding:9px 10px; border-top:1px solid var(--line); vertical-align:top; }
 th { color:var(--muted); font-size:12px; font-weight:500; border-top:none; white-space:nowrap; }
@@ -1138,7 +1141,10 @@ Object.assign(T, ZH ? {
   timeline_failed:"失败", timeline_running:"进行中", timeline_done:"完成", timeline_passed:"通过", timeline_stopped:"已停止", timeline_cancelled:"已取消", timeline_queued:"运行失败，已重新排队", timeline_could_not_run:"无法运行",
   pipeline_worker:"工作智能体运行中", pipeline_check:"检查中", pipeline_verification:"核验中",
   laneTrying:"试跑中", laneHeld:"沙箱暂缓", startedAt:"开始", lastNote:"最近留言", verifyingTask:"核验任务",
-  laneQueued:n => `${n} 件排队`, laneReplies:n => `${n} 轮回复`, laneIdle:n => `空闲 ${n} 分钟`, timeBudget:(n, limit) => `已用 ${n} 分钟，时限 ${limit} 分钟`
+  laneQueued:n => `${n} 件排队`, laneReplies:n => `${n} 轮回复`, laneIdle:n => `空闲 ${n} 分钟`, timeBudget:(n, limit) => `已用 ${n} 分钟，时限 ${limit} 分钟`,
+  atWork:"进行中", workWatch:"发布监测进行中", releaseWatching:"已发出 · 发布监测进行中",
+  coordinatorStates:{busy:"工作中", idle:"空闲", waiting:"在自己的窗口等待答复"},
+  coordinatorSession:(name, state, since) => `协调员 ${name}：${state}（自 ${since} 起）`
 } : {
   pipeline:"Work pipeline", laneTracks:"Lane tracks", principalWaiting:"Waiting on principal", flow_queued:"Queued", flow_worker:"Worker", flow_check:"Check", flow_review:"Awaiting review", flow_verification:"Verification", flow_merge:"Merge check",
   timeline:"Lanes over the last 24 hours", timelineAgo:"24 hours ago", timelineNow:"Now", timelineEmpty:"No work in the last 24 hours",
@@ -1147,7 +1153,10 @@ Object.assign(T, ZH ? {
   timeline_failed:"Failed", timeline_running:"Running", timeline_done:"Done", timeline_passed:"Passed", timeline_stopped:"Stopped", timeline_cancelled:"Cancelled", timeline_queued:"Run failed; queued again", timeline_could_not_run:"could not run",
   pipeline_worker:"Worker running", pipeline_check:"Check running", pipeline_verification:"Verification running",
   laneTrying:"trying", laneHeld:"Sandbox held", startedAt:"Started", lastNote:"Last note", verifyingTask:"Verifying task",
-  laneQueued:n => `${n} queued`, laneReplies:n => `${n} replies`, laneIdle:n => `${n} min idle`, timeBudget:(n, limit) => `${n} min elapsed, ${limit} min limit`
+  laneQueued:n => `${n} queued`, laneReplies:n => `${n} replies`, laneIdle:n => `${n} min idle`, timeBudget:(n, limit) => `${n} min elapsed, ${limit} min limit`,
+  atWork:"In progress", workWatch:"check after the push running", releaseWatching:"sent · check after the push running",
+  coordinatorStates:{busy:"at work", idle:"idle", waiting:"waiting for an answer in its own window"},
+  coordinatorSession:(name, state, since) => `Coordinator ${name}: ${state} since ${since}`
 });
 Object.assign(T, ZH ? {
   notes:"笔记", notesIntro:"只读查看协调员的当前工作和待办。", showArchived:"显示归档", noNotes:"暂无笔记",
@@ -1707,6 +1716,18 @@ function laneTracks(st) {
     st.lanes.length ? [...active, ...idle] : emptyState(T.noLanes, T.noLanesNote, "lanes"));
 }
 
+function atWorkSection(work = []) {
+  if (!work.length) return null;
+  return dashboardPanel(T.atWork, "status", work.length, work.map(w =>
+    h("div", {class:"work-row", "data-at-work":w.kind},
+      h("div", {class:"work-info"},
+        h("strong", {}, w.kind === "try" ? T.timeline_try : `${T.timeline_release} #${w.id}`),
+        h("span", {class:"muted"}, " · ", w.kind === "watch" ? T.workWatch : T.timeline_running),
+        h("div", {}, T.lane, " ", h("span", {title:w.lane}, w.lane),
+          w.target ? [" · ", T.releaseTarget, " ", h("span", {title:w.target}, w.target)] : null)),
+      h("div", {class:"work-time muted"}, T.timeBudget(w.minutes, w.limit_min)))));
+}
+
 let timelinePanel = null, timelineReport = null, timelineFetchedAt = 0, timelinePending = null;
 const TIMELINE_KINDS = ["worker", "check", "verification", "merge", "try", "release"];
 function timelineSection() {
@@ -1903,6 +1924,10 @@ async function renderStatus(force) {
   part("dispatch", st.paused ? T.paused + ": " + st.paused : T.dispatchLimit(st.concurrency), !!st.paused);
   part("server", st.server && st.server.state === "stuck" ? T.serverStuck(st.server.pid, Math.floor(st.server.quiet / 60))
     : st.server_up ? T.serverUp : T.serverDown, !st.server_up || (st.server && st.server.state === "stuck"));
+  if (st.coordinator_session) {
+    const c = st.coordinator_session;
+    part("coordinator", T.coordinatorSession(c.name, T.coordinatorStates[c.status], clock(new Date(c.since * 1000))));
+  }
   part("version", T.version + " " + st.build);
   const stamp = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(d)}`;
   part("installed", T.installed + " " + (st.installed ? stamp(installed) : "?"));
@@ -1939,7 +1964,7 @@ async function renderStatus(force) {
         h("div", {class:"request-body"}, h("strong", {}, p.name), T.waitReasons.credit({since:p.credit_since, plan:p.credit_plan})),
         h("div", {class:"principal-actions"}, h("button", {disabled:SETTINGS_LOCKED, "data-outside-action":"", "data-status-focus":`top-up:${p.name}`,
           onclick:() => topUpProvider(p.name)}, T.toppedUp))))) : null) : null;
-  statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st));
+  statusPicture = h("div", {id:"status-picture"}, pipelineStrip(st), laneTracks(st), atWorkSection(st.at_work));
   $("#tab-status").replaceChildren(...shown([
     principal,
     statusPicture,
@@ -1950,7 +1975,7 @@ async function renderStatus(force) {
       summaryCard(T.tokens, fmt(t.worker_tokens), T.last24h, "status"), summaryCard(T.estimatedCost, money(t.worker_usd), T.listValue, "cost")),
     h("div", waiting ? {} : {id:"status-principal"},
       releasesSection((st.releases || []).filter(r => r.state !== "waiting"), st.after_merge_waiting || [])),
-    !st.running.length && !st.queued.length && !st.review.length && !(st.merging || []).length ? dashboardPanel(T.taskFlow, "status", 0,
+    !st.running.length && !st.queued.length && !st.review.length && !(st.merging || []).length && !(st.at_work || []).length ? dashboardPanel(T.taskFlow, "status", 0,
       emptyState(T.noActiveTasks, T.noActiveTasksNote, "check")) : null,
     h("div", {id:"status-queued"}, st.queued.length ? dashboardPanel(T.queued, "pending", st.queued.length, table([T.task, T.lane, T.titleCol, T.waiting],
       st.queued.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"muted"}, waitingText(m))]))) : emptyState(T.queued, T.none, "pending")),
@@ -2079,8 +2104,9 @@ function releasesSection(rel, scheduled = []) {
     waiting.length ? [h("h3", {}, T.releaseWaiting), waiting.map(releaseBlock)] : null,
     others.length ? [h("h3", {}, T.releaseRecent), table(["#", T.lane, "", T.releaseCommand, T.now], others.map(r => [
       stopFirst ? h("div", {class:"release-first"}, "#" + r.id, releaseStop(r)) : "#" + r.id, r.lane + (r.target ? ` · ${T.releaseTarget} ${r.target}` : ""), h("code", {}, (r.commit || "").slice(0, 10)), h("span", {}, h("span", {class:"mono"}, r.command), releaseWatch(r), h("div", {class:"muted"}, (ZH && r.runs_zh) || r.runs), releaseOutside(r)),
-      h("span", {class: r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
-        r.state === "forbidden" ? ((ZH && r.what_zh) || r.what || "").split("\n")[0] : (ZH && r.what_zh) || r.what,
+      h("span", {class: ["starting", "running"].includes(r.watch_run?.state) ? "muted" : r.state === "done" ? "ok" : ["failed", "void", "forbidden", "refused", "stopped"].includes(r.state) ? "bad" : "muted"},
+        ["starting", "running"].includes(r.watch_run?.state) ? T.releaseWatching
+          : r.state === "forbidden" ? ((ZH && r.what_zh) || r.what || "").split("\n")[0] : (ZH && r.what_zh) || r.what,
         r.without_asking && r.state === "approved" ? " · " + T.releaseListed : "",
         releaseHits(r.hits),
         (r.tail || []).length && ["failed", "stopped"].includes(r.state) ? h("pre", {class:"mono muted"}, r.tail.slice(-5).join("\n")) : null,
