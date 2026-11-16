@@ -1837,10 +1837,12 @@ def progress_of(desk: Desk, m: dict) -> dict:
             replies, last, note = d["replies"], d["last"], d["note"]
         except (OSError, ValueError, UnicodeError, OverflowError):
             pass
-    wu = m.get("wrap_up") or {}  # continued after the time ceiling, writing its report (wrap_up)
+    wu = m.get("wrap_up") or {}  # continued after a ceiling, writing its report (wrap_up): which ceiling
     return {"replies": replies, "idle_min": int((time.time() - last) // 60) if last is not None else None,
             "note": desk.redact(note[:160]),
-            **({"wrap_up_min": wu.get("limit_min")} if wu and m.get("state") == "running" else {})}
+            **({"wrap_up": {"count": wu.get("limit_turns") or wu.get("limit_min"),
+                            "unit": "turns" if wu.get("limit_turns") else "minutes"}}
+               if wu and m.get("state") == "running" else {})}
 
 
 def provider_env(desk: Desk, name: str, p: dict, run: bool = True) -> dict:
@@ -4804,11 +4806,12 @@ def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: 
 #    so the run is not lost: hansa stopped that work with the worker, so it runs it again in the foreground and
 #    then reports. Only once (meta "resumed"): a second time it ends as it is, and the task says what was left
 #    running. Its time limit still counts from the task's start.
-# 2. It was stopped at the lane's time ceiling (timed_out): continued with WRAP_UP_NOTE, for a few minutes and
-#    turns, only to write its report from what it already has (wrap_up, meta "wrap_up"). The task still fails
-#    (a verification with a verdict in that report ends with it): a run that did not finish is not checked or
-#    merged as if it had. Only once (meta "wrap_up"); not after a cancel or any other stop.
-# These are the only times: a run resumed in the first case that then reaches the ceiling is continued once more,
+# 2. It was stopped at a ceiling: the lane's time ceiling (timed_out), or its ceiling of turns (its answer's subtype
+#    error_max_turns). Continued with WRAP_UP_NOTE, for a few minutes and turns, only to write its report from what
+#    it already has (wrap_up, meta "wrap_up", whose "limit_turns" says it was the turn ceiling). The task still
+#    fails (a verification with a verdict in that report ends with it): a run that did not finish is not checked
+#    or merged as if it had. Only once (meta "wrap_up"), whichever ceiling; not after a cancel or any other stop.
+# These are the only times: a run resumed in the first case that then reaches a ceiling is continued once more,
 # in the second; nothing else continues a run. The worker's own command line, without the lane's setup around it,
 # is kept in the run's raw folder (RESUME_ARGV) for both.
 RESUME_ARGV = "worker-argv.json"
@@ -4820,10 +4823,10 @@ minutes), and wait for it to finish. Then
 write your report, as your instructions say. This is the only time hansa resumes you to go on with the work;
 should the run reach its time limit, hansa continues it once more, only to have its report written.
 """
-WRAP_UP_MIN = 10  # the continuation after the time ceiling (wrap_up): its minutes, counted from its start,
+WRAP_UP_MIN = 10  # the continuation after a ceiling (wrap_up): its minutes, counted from its start,
 WRAP_UP_TURNS = 10  # and its turns (--max-turns on a resuming call counts from that call: RESUME_FACTS 4, tests)
 CEILING_NOTES = "ceiling-notes.md"  # the stopped run's notes report, read before the continuation adds to its record
-WRAP_UP_NOTE = """hansa stopped this run because it reached its time limit of {limit} minutes. Whatever you were
+WRAP_UP_NOTE = """hansa stopped this run because it reached {cause}. Whatever you were
 running has been stopped. You have {minutes} minutes now, and hansa will not ask again: start nothing long,
 and do not go on with the work. If a file is left half-edited, say which.
 {what}"""
@@ -4841,7 +4844,7 @@ def resume(desk: Desk, tid: str):
     """Resume a task or verification worker whose run ended well while background work it started was still
     running, once (see RESUME_ARGV): its new process, or None when it is not resumed."""
     meta = desk.meta(tid)
-    if meta.get("resumed") or meta.get("cancel") or meta.get("timed_out"):
+    if meta.get("resumed") or meta.get("cancel") or meta.get("timed_out") or meta.get("wrap_up"):
         return None
     s = desk.settings()
     lane_name, pname = meta.get("lane") or "", meta.get("provider") or ""
@@ -4870,7 +4873,7 @@ def resume(desk: Desk, tid: str):
     env = worker_env(desk, tid, lane_name, lane, pname, p, tmp, wt)
     with desk.lock():  # a cancel or another end lands before this (no resume, its logs as they are) or after it
         now_meta = desk.meta(tid)
-        if now_meta.get("cancel") or now_meta.get("resumed") or now_meta.get("timed_out") \
+        if now_meta.get("cancel") or now_meta.get("resumed") or now_meta.get("timed_out") or now_meta.get("wrap_up") \
                 or now_meta.get("state") != "running" or now_meta.get("session_id") != sid:
             return None
         desk.update(tid, resumed={"at": now(), "left": [desk.redact(x) for x in left],
@@ -4889,17 +4892,21 @@ def resume(desk: Desk, tid: str):
 
 
 def wrap_up(desk: Desk, tid: str):
-    """Continue a task or verification worker stopped at the lane's time ceiling once, in its own session, only to
-    write its report (see RESUME_ARGV): its new process, or None when it is not continued (then it ends as a run
-    stopped at the ceiling did before). Not after a cancel or any other stop, and never twice (meta "wrap_up")."""
+    """Continue a task or verification worker stopped at a ceiling once, in its own session, only to write its
+    report (see RESUME_ARGV): the lane's time ceiling (timed_out; it wins when the run met both), or its ceiling of
+    turns (its answer's subtype error_max_turns). Its new process, or None when it is not continued (then it ends
+    as a run stopped at that ceiling did before). Not after a cancel or any other stop, and never twice (meta
+    "wrap_up"), whichever ceiling."""
     meta = desk.meta(tid)
-    if not meta.get("timed_out") or meta.get("wrap_up") or meta.get("cancel") or meta.get("state") != "running" \
-            or meta.get("phase") in ("starting", "checking"):
+    raw = desk.state_dir / "runs" / tid
+    run = read_json(raw / "run.json", {}) or {}  # the stopped run's answer, before the continuation's replaces it
+    at_turns = not meta.get("timed_out") and run.get("subtype") == "error_max_turns"
+    if not (meta.get("timed_out") or at_turns) or meta.get("wrap_up") or meta.get("cancel") \
+            or meta.get("state") != "running" or meta.get("phase") in ("starting", "checking"):
         return None
     s = desk.settings()
     lane_name, pname = meta.get("lane") or "", meta.get("provider") or ""
     lane, p = s["lanes"].get(lane_name), s["providers"].get(pname)
-    raw = desk.state_dir / "runs" / tid
     sid, tmp = own_session(desk, meta), meta.get("worker_tmp") or ""
     if not (lane and p and sid and tmp and os.path.isdir(tmp) and (raw / RESUME_ARGV).is_file()
             and meta.get("worktree")) or (meta.get("setup_ran") and not (raw / "setup.log.done").exists()):
@@ -4909,33 +4916,48 @@ def wrap_up(desk: Desk, tid: str):
         check_git_file(desk, wt)
         argv = json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8"))
         argv[argv.index("--session-id")] = "--resume"
+        turns = int(argv[argv.index("--max-turns") + 1])  # the ceiling of turns the run had
         argv[argv.index("--max-turns") + 1] = str(WRAP_UP_TURNS)  # counted from this call (RESUME_FACTS 4)
     except (GitFileChanged, OSError, ValueError, IndexError):  # finish says what happened
         return None
     home = config_home(desk, pname, p)
     resumed = meta.get("resumed") or {}
-    # The report a run stopped at the ceiling had (finish), from the record as the stop left it: should the
-    # continuation give none, the task ends with this, not with what the continuation added to the record.
-    notes = read_detail(desk, tid, "notes", "", notes_of, home, sid)
-    kept = STOPPED_NOTE + notes if notes else ""
-    call = read_detail(desk, tid, "last call", "", last_call, home, sid, now())
+    # The report a run stopped at the ceiling had (finish), from its answer and the record as the stop left them:
+    # should the continuation give none, the task ends with this, not with what the continuation added. Its answer's
+    # text, else its notes, with its last call after them at the time ceiling.
+    said = str(run.get("result") or "")
+    notes = "" if said.strip() else read_detail(desk, tid, "notes", "", notes_of, home, sid)
+    kept = said if said.strip() else STOPPED_NOTE + notes if notes else ""
+    call = "" if said.strip() or at_turns else read_detail(desk, tid, "last call", "", last_call, home, sid, now())
     kept += ("\n\n" if kept else "") + call if call else ""
     write_text(raw / CEILING_NOTES, kept)
     sweep(desk, tid)  # what the stopped run left running ends now, as at a run's end
     limit = lane.get("timeout_min", 240)
-    note = WRAP_UP_NOTE.format(limit=limit, minutes=WRAP_UP_MIN,
+    note = WRAP_UP_NOTE.format(cause=f"its limit of {turns} turns" if at_turns else f"its time limit of {limit} minutes",
+                               minutes=WRAP_UP_MIN,
                                what=WRAP_UP_VERIFIER if meta.get("kind") == "verify" else WRAP_UP_WORKER)
-    # the stopped part's tokens, as finish reads a stopped run's: with the run before a resume, if there was one
-    stopped = read_detail(desk, tid, "usage", {}, usage_from_record, home, sid, resumed.get("rows", 0))
-    if resumed:
-        stopped = add_usage(resumed.get("usage") or {}, stopped)
+    # the stopped part's tokens, as finish reads a stopped run's: with the run before a resume, if there was one.
+    # At the time ceiling from its record (Claude Code leaves no answer); at the turn ceiling as finish read them
+    # before there was a continuation: its answer's, else its record's
+    before = forked_before(meta)
+    if at_turns and resumed:
+        stopped = add_usage(resumed.get("usage") or {}, continued_usage(
+            desk, tid, run, add_usage(before, resumed.get("usage") or {}), home, sid, resumed.get("rows", 0)))
+    elif at_turns:
+        stopped = run_usage(desk, tid, meta, run, home, sid)
+    else:
+        stopped = read_detail(desk, tid, "usage", {}, usage_from_record, home, sid, resumed.get("rows", 0))
+        if resumed:
+            stopped = add_usage(resumed.get("usage") or {}, stopped)
     env = worker_env(desk, tid, lane_name, lane, pname, p, tmp, wt, bench_ok=False)
     with desk.lock():  # a cancel or another end lands before this (ended as at the ceiling) or after it (cancelled)
         now_meta = desk.meta(tid)
-        if now_meta.get("cancel") or now_meta.get("wrap_up") or not now_meta.get("timed_out") \
+        if now_meta.get("cancel") or now_meta.get("wrap_up") or not (now_meta.get("timed_out") or at_turns) \
                 or now_meta.get("state") != "running" or now_meta.get("session_id") != sid:
             return None
-        desk.update(tid, wrap_up={"at": now(), "limit_min": limit, "rows": len(_rows(home, sid) or []),
+        desk.update(tid, wrap_up={"at": now(), "limit_min": None if at_turns else limit,
+                                  **({"limit_turns": turns} if at_turns else {}),
+                                  "rows": len(_rows(home, sid) or []),
                                   "usage": stopped, "late": False, "wrote": False})
         with tempfile.TemporaryFile() as stdin, open(raw / "run.json", "wb") as out, open(raw / "run.err", "ab") as err:
             stdin.write(note.encode("utf-8"))
@@ -4944,7 +4966,8 @@ def wrap_up(desk: Desk, tid: str):
                                     stderr=err, start_new_session=True)
         with recording_start(desk, None, proc.pid, proc):
             desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
-    desk.event("task_wrap_up", task=tid, lane=lane_name, provider=pname, limit_min=limit)
+    desk.event("task_wrap_up", task=tid, lane=lane_name, provider=pname,
+               **({"limit_turns": turns} if at_turns else {"limit_min": limit}))
     return proc
 
 
@@ -5208,7 +5231,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}
-    wu = meta.get("wrap_up") or {}  # continued after the time ceiling to write its report (wrap_up)
+    wu = meta.get("wrap_up") or {}  # continued after a ceiling to write its report (wrap_up)
     # what it wrote then is its report only when that continuation ended well, in its time, with text
     wrote = bool(wu) and not wu.get("late") and not run.get("is_error") and run.get("subtype") == "success" \
         and bool(str(run.get("result") or "").strip())
@@ -5220,7 +5243,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     setup = SETUP_FAILED.search(err)  # then the worker never started: nothing here is the provider's doing
     result = (run.get("result") or "") if wrote or not wu else ""  # a failed continuation's words are no report
     report = result
-    stopped = meta.get("timed_out") or run.get("subtype") == "error_max_turns"
+    stopped = meta.get("timed_out") or run.get("subtype") == "error_max_turns" or bool(wu)
     p = desk.settings()["providers"].get(meta.get("provider"))
     home = config_home(desk, meta["provider"], p) if p else None
     resumed = meta.get("resumed") or {}
@@ -5369,18 +5392,19 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     elif setup:
         state, error = "failed", (f"the lane's setup command failed (exit {setup.group(1)}), so the worker never "
                                   f"started; hansa show {tid} has the setup's last lines")
-    elif meta.get("timed_out"):
+    elif meta.get("timed_out") or wu:  # at a ceiling, continued after it or not: the one wrap_up named, if it ran
         lane = desk.settings()["lanes"].get(meta.get("lane"), {})
-        limit = wu.get("limit_min") or lane.get("timeout_min", 240)
+        limit = (f"{wu['limit_turns']} turns" if wu.get("limit_turns")
+                 else f"{wu.get('limit_min') or lane.get('timeout_min', 240)} minutes")
         if wrote and meta.get("kind") == "verify" and fields.get("verdict"):
             state, error = "done", ""  # a verification ends with the verdict it wrote after the stop (wrap_up)
         elif wrote:  # never checked or merged as if it had finished: it failed, with its report
-            state, error = "failed", f"stopped at the ceiling of {limit} minutes; its report was written after the stop: {CEILING}"
+            state, error = "failed", f"stopped at the ceiling of {limit}; its report was written after the stop: {CEILING}"
         elif wu.get("late"):
-            state, error = "failed", (f"stopped at the ceiling of {limit} minutes, and its report was not written in the "
+            state, error = "failed", (f"stopped at the ceiling of {limit}, and its report was not written in the "
                                       f"{WRAP_UP_MIN} minutes given after the stop either: {CEILING}")
         else:
-            state, error = "failed", f"stopped at the ceiling of {limit} minutes: {CEILING}"
+            state, error = "failed", f"stopped at the ceiling of {limit}: {CEILING}"
     elif run.get("subtype") == "error_max_turns":
         turns = meta.get("max_turns") or desk.settings()["lanes"].get(meta.get("lane"), {}).get("max_turns", 300)
         state, error = "failed", f"stopped at the ceiling of {turns} turns: {CEILING}"

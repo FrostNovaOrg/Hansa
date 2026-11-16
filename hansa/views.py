@@ -321,9 +321,9 @@ def _verification_next(task: dict, v: dict) -> str:
 def _progress_line(p: dict) -> str:
     if "setup_min" in p:
         return f"the lane's setup is running ({p['setup_min']} min)"
-    if p.get("wrap_up_min"):  # run.wrap_up: hansa stopped it at its ceiling and continued it for its report
-        return (f"reached its ceiling of {p['wrap_up_min']} minutes and was stopped; it is writing its report now"
-                + (f"; last note: {p['note']}" if p["note"] else ""))
+    if p.get("wrap_up"):  # run.wrap_up: stopped at a ceiling, hansa continued it for its report
+        return (f"reached its ceiling of {p['wrap_up']['count'] or '?'} {p['wrap_up']['unit']} and was stopped; "
+                "it is writing its report now" + (f"; last note: {p['note']}" if p["note"] else ""))
     if p["idle_min"] is None:
         return "no reply from the model yet"
     return (f"{p['replies']} model replies, last activity {p['idle_min']} min ago"
@@ -336,7 +336,8 @@ def after_ceiling(m: dict) -> str:
     wu = m.get("wrap_up") or {}
     if not (wu.get("wrote") and m.get("verdict")):
         return ""
-    return f" (written after the stop at the ceiling of {wu.get('limit_min') or '?'} minutes)"
+    limit = f"{wu['limit_turns']} turns" if wu.get("limit_turns") else f"{wu.get('limit_min') or '?'} minutes"
+    return f" (written after the stop at the ceiling of {limit})"
 
 
 def progress_text(desk: Desk, m: dict) -> str:
@@ -1968,7 +1969,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
     if m["state"] == "running" and m.get("phase") == "starting":
         out.append("so far: hansa is preparing it; the worker starts in a moment")
     elif m["state"] == "running" and m.get("phase") != "checking":
-        out.append(f"so far: {_progress_line(progress_of(desk, m))} (turns and tokens are recorded when it ends)")
+        progress = progress_of(desk, m)
+        if page_messages is not None and progress.get("wrap_up"):  # the page's own words for it (run.wrap_up)
+            page_messages[str(len(out))] = message(
+                "task_writing_report", f"so far: {_progress_line(progress)} (turns and tokens are recorded when it ends)",
+                **progress["wrap_up"], note=progress["note"])
+        out.append(f"so far: {_progress_line(progress)} (turns and tokens are recorded when it ends)")
     v = verification(desk, m)
     if v:
         out.append(f"verification (a worker ran the change): {_verification_line(v)}"
