@@ -151,6 +151,7 @@ autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForw
 
 | 看到的情况 | 原因 | 处理办法 |
 |---|---|---|
+| `doctor`：`invalid choice` / 指向另一处安装 | PATH 优先找到另一份 `hansa` | 在 shell 配置文件中从 PATH 移除其文件夹，或将 `~/.local/bin` 放在前面，然后打开新终端。 |
 | `No module named hansa` | 无法读取项目文件 | 确保工作台所在账号能读取 hansa 的项目文件。 |
 | 初始化时拒绝仓库 | 有文件尚未提交，或指定的文件夹不存在且位于已有仓库内 | 先提交文件，或改用已有仓库的路径。 |
 | 服务在运行，但没有协调员 | 没有 tmux | 安装 tmux 后重新运行 `hansa up`，或运行 `hansa coordinator`。 |

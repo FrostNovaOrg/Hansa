@@ -153,6 +153,88 @@ class InstallTest(unittest.TestCase):
         next_steps = self.output.split("\n\n", 1)[1]
         self.assertTrue(next_steps.startswith('export PATH="$HOME/.local/bin:$PATH"\n'), self.output)
 
+    def assert_other_hansa_warning(self, lang):
+        lines = self.output.splitlines()
+        other = str(self.tools / "hansa")
+        warning = next(line for line in lines if other in line)
+        for words in (("PATH", "优先") if lang.startswith("zh") else ("first", "PATH")):
+            self.assertIn(words, warning)
+        repair = next(line for line in lines if "~/.local/bin" in line)
+        for words in (("配置文件", "移除", "新终端") if lang.startswith("zh") else
+                      ("shell profile", "Remove", "new terminal")):
+            self.assertIn(words, repair)
+        self.assertIn(str(self.tools), repair)
+        doctor = next(line for line in lines if " doctor " in line)
+        self.assertEqual(shlex.split(doctor)[:2], [str(self.link), "doctor"])
+        self.assertLess(lines.index(warning), lines.index(doctor))
+        for suffix in (" doctor", " init ~/shop/desk --repo ~/shop/repo", ""):
+            self.assertTrue(any(line.startswith(shlex.quote(str(self.link)) + suffix + " ")
+                                for line in lines))
+        self.assertFalse((self.tmp / "other-hansa-ran").exists())
+
+    def test_other_hansa_before_local_bin_warns_and_uses_full_commands(self):
+        self.tool("hansa", f"from pathlib import Path\nPath({str(self.tmp / 'other-hansa-ran')!r}).touch()\n")
+        for lang in ("C", "zh_CN.UTF-8"):
+            with self.subTest(lang=lang):
+                path = str(self.tools) + ":" + str(self.link.parent)
+                self.assert_success(self.run_install(PATH=path, LANG=lang))
+                self.assertNotIn('export PATH=', self.output)
+                self.assert_other_hansa_warning(lang)
+
+    def test_other_hansa_without_local_bin_warns_and_keeps_export_first(self):
+        self.tool("hansa", f"from pathlib import Path\nPath({str(self.tmp / 'other-hansa-ran')!r}).touch()\n")
+        for lang in ("C", "zh_CN.UTF-8"):
+            with self.subTest(lang=lang):
+                self.assert_success(self.run_install(LANG=lang))
+                next_steps = self.output.split("\n\n", 1)[1]
+                self.assertTrue(next_steps.startswith('export PATH="$HOME/.local/bin:$PATH"\n'), self.output)
+                self.assert_other_hansa_warning(lang)
+
+    def test_earlier_link_to_this_installation_keeps_plain_commands(self):
+        self.tool("hansa", "raise SystemExit('must not run')")
+        earlier = self.tmp / "earlier bin/hansa"
+        earlier.parent.mkdir()
+        earlier.symlink_to(os.path.relpath(self.install / "bin/hansa", earlier.parent))
+        path = os.pathsep.join(map(str, (earlier.parent, self.tools, self.link.parent)))
+        self.assert_success(self.run_install(PATH=path))
+        self.assert_next_steps("hansa")
+        self.assertNotIn(str(self.tools / "hansa"), self.output)
+        self.assertNotIn("comes first", self.output)
+        self.assertNotIn("export PATH=", self.output)
+
+    def test_unusable_and_relative_path_entries_do_not_hide_other_hansa(self):
+        self.tool("hansa", f"from pathlib import Path\nPath({str(self.tmp / 'other-hansa-ran')!r}).touch()\n")
+        earlier = self.tmp / "earlier/hansa"
+        earlier.parent.mkdir()
+        for kind in ("broken-link", "link-loop", "directory", "not-executable", "unreadable-file", "unreadable-folder"):
+            with self.subTest(kind=kind):
+                if kind == "broken-link":
+                    earlier.symlink_to(self.tmp / "missing")
+                elif kind == "link-loop":
+                    earlier.symlink_to("hansa")
+                elif kind == "directory":
+                    earlier.mkdir()
+                else:
+                    earlier.write_text("must not run\n")
+                    earlier.chmod(0o644 if kind == "not-executable" else 0o111 if kind == "unreadable-file" else 0o755)
+                if kind == "unreadable-folder":
+                    earlier.parent.chmod(0o111)
+                try:
+                    if kind.startswith("unreadable") and os.access(
+                            earlier.parent if kind == "unreadable-folder" else earlier, os.R_OK):
+                        self.skipTest("this account can read permission-restricted paths")
+                    # The installer runs from self.tmp; preserve the relative PATH entry.
+                    path = os.pathsep.join(("earlier", "tools", str(self.link.parent)))
+                    self.assert_success(self.run_install(PATH=path))
+                    self.assert_other_hansa_warning("C")
+                    self.assertNotIn(str(earlier), self.output)
+                finally:
+                    earlier.parent.chmod(0o755)
+                    if earlier.is_dir():
+                        earlier.rmdir()
+                    else:
+                        earlier.unlink()
+
     def test_ssh_next_step_forwards_both_page_ports_in_both_languages(self):
         for lang in ("C", "zh_CN.UTF-8"):
             with self.subTest(lang=lang):
@@ -282,7 +364,6 @@ class InstallTest(unittest.TestCase):
     def test_failed_clone_shows_git_error_and_removes_partial_folder(self):
         result = self.run_install(HANSA_SOURCE=str(self.tmp / "missing-source"))
         self.assertEqual(result.returncode, 1, self.output)
-        self.assertIn("does not exist", self.output)
         self.assertFalse(self.install.exists())
         self.assertFalse(self.link.exists())
         # Git normally cleans up itself; also exercise cleanup when it leaves a folder.

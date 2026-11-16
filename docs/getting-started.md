@@ -54,23 +54,21 @@ To remove hansa (desks stay where they are):
 rm -rf ~/.local/share/hansa ~/.local/bin/hansa
 ```
 
-After installing, run `hansa doctor`; an installing agent runs it first.
+After installing, you or your agent run:
 
 ```sh
 hansa doctor
 ```
 
-It needs no desk and changes nothing: it checks tools and sandbox operation
-without reading credentials, discards login output and removes its temporary
-folder.
-The login row fails until the principal logs in (below); endpoint-only
-setups can ignore that row. Rerun after fixes.
+Doctor checks tools and sandbox operation without a desk or settings changes.
+It reads no credentials, discards login output and removes its temporary folder.
+Login fails until the principal logs in; endpoint-only setups may ignore it.
+Rerun after fixes.
 
-Rows give findings, requirements and fixes; notes do not fail. Exit codes: `0`
-for no failures, `1` for a failed row. `--json` gives `{"ok": ..., "rows": [...]}`
-with `name`, `state`, `found`, `need`, `fix`; states are `ok`, `note`, `fails`,
-`skipped`. `--lang zh|en` selects language as in `hansa menu`.
-Commands time out after 15 seconds.
+Rows give findings, requirements, fixes; notes do not fail. Exit `0` means no
+failures, `1` means a failed row. `--json` gives `{"ok": ..., "rows": [...]}` with
+`name`, `state`, `found`, `need`, `fix` and states `ok`, `note`, `fails`, `skipped`.
+`--lang zh|en` selects language. Commands time out after 15 seconds.
 
 ## Log in (the principal's step)
 
@@ -161,9 +159,9 @@ finished when reviewed and merged into the lane's base branch.
 
 ## Work over SSH
 
-Turn on remote login first: on macOS, System Settings, Sharing, Remote Login; on Linux, an SSH server. Run `whoami`
-in a terminal on that machine for the account name; your network settings or server provider give its name or
-address. Below, `HOST` means `ACCOUNT@HOST`.
+Enable remote login (macOS: System Settings, Sharing, Remote Login;
+Linux: install an SSH server). `whoami` gives the account; network settings or
+your provider give the address. `HOST` below means `ACCOUNT@HOST`.
 
 After a restart, open the desk menu from your computer, forwarding the page ports (8765 and 8766):
 
@@ -205,6 +203,7 @@ autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForw
 
 | What you see | Why | Fix |
 |---|---|---|
+| `doctor`: `invalid choice` / another installation | Earlier `hansa` on PATH | Remove its folder from PATH in your shell profile, or put `~/.local/bin` first; open a new terminal. |
 | `No module named hansa` | Unreadable checkout | Ensure the desk account can read the checkout. |
 | Init refuses the repository | Files not committed, or a missing folder inside a checkout | Commit the files first, or use the existing checkout's path. |
 | Server runs, no coordinator | tmux absent | Install tmux and rerun `hansa up`, or run `hansa coordinator`. |
