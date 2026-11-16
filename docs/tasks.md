@@ -409,8 +409,8 @@ started with another model or effort names its own. On a provider whose endpoint
 `compatible`: any endpoint that speaks the Anthropic API) they add that the endpoint may ignore effort: hansa
 passes it on, but some such endpoints do not act on it.
 
-A provider of the kind `codex` passes the effort on to Codex (`model_reasoning_effort`); with none, the
-[Codex adapter](../contrib/codex/README.md)'s default is `high`. On a desk set up the old way, the adapter also
+The [optional Codex adapter](../contrib/codex/README.md) runs a provider of the kind `codex` and passes the
+effort on to Codex (`model_reasoning_effort`); with none, it uses `high`. On a desk set up the old way, it also
 reads `HANSA_CODEX_EFFORT` from `codex.env`, and `--effort` takes precedence. At startup it refuses an invalid effort, an unknown `HANSA_CODEX_` key in `codex.env`, or a setting whose value
 still holds an example's `(default: ...)` note, before starting Codex. These checks guard against configuration
 typos while the adapter reads user-edited env files (never for a provider of the kind `codex`, whose settings
