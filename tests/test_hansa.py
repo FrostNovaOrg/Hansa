@@ -22231,6 +22231,53 @@ def save():'''))
                 self.assertNotIn("new", entry)
                 self.assertNotIn(key, (self.desk.state_dir / "settings-history.jsonl").read_text())
 
+    def test_saving_settings_clears_leftover_codex_keys_and_keeps_their_rests(self):
+        for by in ("page", "coordinator"):
+            with self.subTest(by=by):
+                s = self.codex_settings()
+                s["providers"]["second"] = dict(s["providers"]["codex"])
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.desk.write_key("claude", "sk-other-provider-keeps-its-key")
+                keys = {name: "sk-leftover-for-" + name for name in ("codex", "second")}
+                for name, key in keys.items():
+                    # A previous switch wrote settings but left the key behind.
+                    self.desk.key_file(name).write_text(key + "\n")
+                    self.desk.set_provider_state(name, cool_until=time.time() + 3600, reason="usage limit",
+                                                 credit_since=123, credit_plan="old plan", model_since=456,
+                                                 model_unknown="old model", rest_how="minutes", rest_minutes=60)
+                files = [self.desk.settings_path, *(self.desk.key_file(name) for name in keys),
+                         self.desk.state_dir / "providers.json", self.desk.state_dir / "settings-history.jsonl"]
+                unchanged = [f.read_bytes() for f in files]
+                s["cool_minutes"] += 1
+                refused = copy.deepcopy(s)
+                refused["providers"]["codex"]["codex_home"] = "relative/login"
+                problems = self.desk.save_settings(refused, by=by)
+                self.assertTrue(any("codex_home" in p for p in problems), problems)
+                self.assertEqual([f.read_bytes() for f in files], unchanged)
+                self.assertEqual(self.desk.save_settings(s, by=by, dry=True), [])
+                self.assertEqual([f.read_bytes() for f in files], unchanged)
+                before = len(self.history_entries())
+                if by == "page":
+                    self.assertTrue(save_from_page(self.desk, {"settings": s, "rev": self.desk.settings_rev()})["ok"])
+                else:
+                    self.assertEqual(self.desk.save_settings(s, by=by), [])
+                self.assertEqual(self.desk.settings()["cool_minutes"], s["cool_minutes"])
+                self.assertEqual(files[-2].read_bytes(), unchanged[-2])
+                self.assertEqual(self.desk.read_key("claude"), "sk-other-provider-keeps-its-key")
+                entries = self.history_entries()[before:]
+                for name, key in keys.items():
+                    self.assertFalse(self.desk.key_file(name).exists())
+                    self.assertNotIn(name, self.desk.keys())
+                    [entry] = [e for e in entries if e["path"] == f"providers.{name}.key"]
+                    self.assertEqual((entry["by"], entry["secret_action"], entry["redacted"]),
+                                     ("principal" if by == "page" else by, "cleared", True))
+                    self.assertNotIn("old", entry)
+                    self.assertNotIn("new", entry)
+                    self.assertNotIn(key, files[-1].read_text())
+                before = len(self.history_entries())
+                self.assertEqual(self.desk.save_settings(s, by=by), [])
+                self.assertEqual(len(self.history_entries()), before)
+
     def test_a_refused_change_to_codex_keeps_the_key_settings_and_rests(self):
         s = self.codex_settings()
         codex = s["providers"].pop("codex")

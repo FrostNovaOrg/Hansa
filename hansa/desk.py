@@ -3094,12 +3094,9 @@ class Desk:
                         self.set_provider_state(name, model_since=0, model_unknown="")
             from .history import record
             record(self, old, new, by, command)
-            if by == "page":
-                for name, provider in new["providers"].items():
-                    before = old["providers"].get(name)
-                    if (before and before.get("kind") != "codex" and provider.get("kind") == "codex"
-                            and self.has_key(name)):
-                        self._clear_key(name, by)
+            for name, provider in new["providers"].items():
+                if provider.get("kind") == "codex" and self.has_key(name):
+                    self._clear_key(name, by)
             if changed:
                 self.event("settings_saved", by=by, changed=changed)
         self.ready_news()
