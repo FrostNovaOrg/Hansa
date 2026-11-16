@@ -1219,6 +1219,8 @@ def _retry(desk: Desk, a) -> None:
     elif not a.fresh and start:
         opts.update(start_from=start, base=m.get("base") or earlier.get("base"))
         text += f"\nYou start from the earlier task's last commit ({start[:10]})."
+    if a.fresh:  # its run starts a new conversation (run.continuation): the earlier one's work is not on its branch
+        opts["fresh"] = True
     tid = desk.new_task(text, attach=a.attach, attachments_from=a.id, **opts)
     write_text(desk.tasks_dir / tid / NOTE_FILE, desk.redact(note) + "\n")  # later rounds quote it
     if m["state"] in ("done", "failed", "cancelled"):  # one replacement carries unmerged work on

@@ -1838,6 +1838,10 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         out.append(f"next run starts from: {started_from(m['restart'])}")
     elif m["state"] != "queued" and m.get("run_start"):
         out.append(f"run started from: {started_from(m['run_start'])}")
+    talk = m.get("conversation") if m["state"] != "queued" else None  # a follow-up's run (run.continuation)
+    if isinstance(talk, dict) and (talk.get("from") or talk.get("new")):
+        out.append(f"conversation: continued that of task {talk['from']}" if talk.get("from") else
+                   f"conversation: a new one, as {talk['new']}")
     out += oom_lines(m, {"verify": "verification"}.get(m.get("kind"), "worker"))
     if limit_wait(desk, m):
         out.append(limit_wait(desk, m))

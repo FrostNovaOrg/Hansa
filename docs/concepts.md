@@ -123,7 +123,7 @@ section, else the file under `docs/` and its heading.
 | `hansa show ID`, `hansa diff ID` | A task's report, its check, the files it changed, what to do next; its changes against the base |
 | `hansa verify ID` | Have a worker run a finished task's change to see whether it holds; the verification itself is never merged |
 | `hansa merge ID` | Merge a finished task into its lane's base branch |
-| `hansa retry ID "<what to change>"` | Queue a follow-up on top of the earlier task (`--fresh`: from the base; `--update`: with the base merged in) |
+| `hansa retry ID "<what to change>"` | Queue a follow-up on top of the earlier task, going on in its conversation where it can (`--fresh`: from the base, in a new conversation; `--update`: with the base merged in) |
 | `hansa cancel ID`, `hansa close ID` | Stop queued, running or merging work; close a finished or failed task or verification without merging |
 | `hansa release L [TARGET] ["<note>"]` | Ask for a release of lane L's base branch; it runs after the principal's yes (a target ticked to go out without asking needs none) |
 | `hansa release yes\|no ID CODE` | Pass on the principal's answer to a release, given in the conversation with their alert's one-time code |

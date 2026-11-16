@@ -161,8 +161,10 @@ says so ([A lane's write list and env](#a-lanes-write-list-and-env)).
 Workers see their checkout's own CLAUDE.md and settings, and hansa's instructions: not the card,
 and not the settings, plugins, hooks or MCP servers of the account they run as. Nor may they, a
 verifier read the card or `notes/`. Claude Code's auto memory is off for every worker and verifier
-run (and the provider check), whatever the repository's settings say, so a run starts with nothing
-an earlier run in its lane remembered; the repository's CLAUDE.md still loads.
+run (and the provider check), whatever the repository's settings say, so no run is given what Claude
+Code remembered of an earlier one; the repository's CLAUDE.md still loads. Each run starts a new
+conversation, but for one case: a follow-up may go on in the conversation of the task it follows up
+([Going on in the earlier conversation](tasks.md#going-on-in-the-earlier-conversation)).
 
 ## Headless browsers
 

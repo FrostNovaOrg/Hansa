@@ -174,6 +174,16 @@ exec(BG_SHAPES)
 #    process group of its own, survives.
 # 4. --max-turns on a resuming call counts from that call.
 # 5. The system prompt of the first call stays in force on a resume.
+# FORK_FACTS: what real `claude -p --resume X --fork-session --session-id V` calls showed (Claude Code 2.1.325), on which
+# the stand-in's forks and the tests of a follow-up going on in its parent's conversation (run.continuation) stand:
+# 1. Accepted: the answer's session_id is V; V.jsonl appears in X's project folder and holds copies of X's user and
+#    assistant rows (with the row uuids they have in X, relabelled with session V), then the new turn; its bookkeeping
+#    rows cover only the new call; X's record is not touched. --resume X --session-id V without --fork-session is
+#    refused before any model call.
+# 2. In its JSON answer usage, num_turns and duration_ms cover that call only; total_cost_usd, modelUsage and
+#    duration_api_ms cover the whole conversation, the parent's part included.
+# 3. The system prompt of a conversation's first call stays in force on a resume, unless the resuming call gives
+#    --system-prompt-snapshot off: then the text passed on that call is used.
 FAKE = r'''#!/usr/bin/env python3
 import json, os, shlex, subprocess, sys, time
 if sys.argv[1:3] == ["agents", "--json"]:  # the live sessions. FAKE_AGENTS: a file the test writes, {pid: status} for
@@ -257,6 +267,30 @@ def killed():
 if "-p" not in sys.argv:  # not a worker's run (claude --version, say): it writes nothing, in no folder
     sys.exit(1)
 prompt = sys.stdin.read()
+if os.environ.get("FAKE_ARGV_LOG"):  # each worker call's command line, as given
+    open(os.environ["FAKE_ARGV_LOG"], "a").write(json.dumps(sys.argv) + "\n")
+FORKED = None  # a fork of another session (FORK_FACTS 1): its copied rows; the call then runs as a new one
+if "--resume" in sys.argv and "--session-id" in sys.argv:
+    if "--fork-session" not in sys.argv:  # refused before any model call (FORK_FACTS 1)
+        sys.stderr.write("stand-in: --session-id with --resume needs --fork-session\n")
+        sys.exit(1)
+    import glob
+    given, parent = list(sys.argv), sys.argv[sys.argv.index("--resume") + 1]
+    new = sys.argv[sys.argv.index("--session-id") + 1]
+    found = glob.glob(os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "*", parent + ".jsonl"))
+    if not found:
+        sys.stderr.write("stand-in: no conversation " + parent + "\n")
+        sys.exit(1)
+    rows = [json.loads(line) for line in open(found[0]) if line.strip()]
+    FORKED = [{**r, "sessionId": new} for r in rows if r.get("type") in ("user", "assistant")]
+    with open(os.path.join(os.path.dirname(found[0]), new + ".jsonl"), "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in FORKED)
+    if os.environ.get("FAKE_FORKED"):  # what the forked call was given
+        open(os.environ["FAKE_FORKED"], "a").write(json.dumps({"argv": given, "prompt": prompt,
+                                                               "tmp": os.environ.get("CLAUDE_CODE_TMPDIR")}) + "\n")
+    i = sys.argv.index("--resume")
+    del sys.argv[i:i + 2]
+    sys.argv.remove("--fork-session")
 if "--resume" in sys.argv:  # hansa resuming a run that left background work: it runs it in the foreground
     sid = sys.argv[sys.argv.index("--resume") + 1]
     left = None  # FAKE_CEILING's leftover, which hansa should have stopped before it resumed the run
@@ -435,12 +469,13 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
     notice = lambda n: {"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
         "role": "user", "content": "<task-notification> <task-id>" + n + "</task-id> timed out"}}
     counted = {"usage": {"input_tokens": 100, "output_tokens": 20}} if os.environ.get("FAKE_RECORD_USAGE") else {}
-    say = lambda mid, t: {"type": "assistant", "message": {"id": mid, "model": "mimo-x", "content": [
+    tag = "f-" if FORKED else ""  # a forked call's replies have ids of their own
+    say = lambda mid, t: {"type": "assistant", "message": {"id": tag + mid, "model": "mimo-x", "content": [
         {"type": "text", "text": t}], **counted}}
     report = "Report: fixed the badge; the tests pass." + (" Key: " + os.environ["FAKE_WRITE"] if os.environ.get("FAKE_WRITE") else "")
     rows = [{"type": "user", "turnOrigin": "sdk", "promptSource": "sdk", "message": {"role": "user", "content": prompt}},
             say("a1", "Starting a watch."),
-            {"type": "assistant", "message": {"id": "a1", "content": [{"type": "tool_use", "id": "u1", "name": "Bash"}]}},
+            {"type": "assistant", "message": {"id": tag + "a1", "content": [{"type": "tool_use", "id": "u1", "name": "Bash"}]}},
             {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "u1"}]}},
             notice("early"), say("a2", "The watch said the tests pass.")]
     kind = os.environ["FAKE_TRANSCRIPT"]
@@ -495,15 +530,21 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
                  {"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
                      "role": "user", "content": BG_NOTICE("bq7w2", "")}},
                  say("a6", "Report: the build passes; fixed the badge.")]
-    with open(rec, "w") as f:
-        f.writelines(json.dumps(r) + "\n" for r in rows)
+    import uuid
+    with open(rec, "a" if FORKED else "w") as f:  # each row with a uuid of its own, as Claude Code writes them
+        f.writelines(json.dumps({"uuid": str(uuid.uuid4()), "sessionId": sid, **r}) + "\n" for r in rows)
+    whole = {"inputTokens": 300, "outputTokens": 60}  # modelUsage: with a fork's, the parent's too (FORK_FACTS 2)
+    for mid, u in {(r.get("message") or {}).get("id"): (r.get("message") or {}).get("usage") for r in FORKED or []
+                   if (r.get("message") or {}).get("usage")}.items():
+        whole = {"inputTokens": whole["inputTokens"] + u.get("input_tokens", 0),
+                 "outputTokens": whole["outputTokens"] + u.get("output_tokens", 0)}
     if os.environ.get("FAKE_TRANSCRIPT_STOPPED"):  # stopped at the turn limit, with no result
         print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 9,
                           "session_id": sid}))
         sys.exit(1)
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                       "num_turns": int(os.environ.get("FAKE_TURNS", "5")), "session_id": sid, "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
-                      **({"modelUsage": {"mimo-x": {"inputTokens": 300, "outputTokens": 60}}} if counted else {})}))
+                      **({"modelUsage": {"mimo-x": whole}} if counted else {})}))
     sys.exit(0)
 if os.environ.get("FAKE_SANDBOX_START"):  # "first", "after-ok": a Bash call whose sandbox could not start
     sid = sys.argv[sys.argv.index("--session-id") + 1]
@@ -34517,6 +34558,199 @@ def save():'''))
         self.assertFalse(run.alive(m.get("pid")))
 
     @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
+    # A follow-up goes on in its parent's conversation (run.continuation), each case and its test:
+    # | plain retry, same lane, provider and model, record there | test_a_follow_up_goes_on_in_its_parents_conversation_and_counts_its_own_part |
+    # | --update                                     | test_a_follow_up_with_update_goes_on_and_is_told_what_was_merged |
+    # | --fresh, --lane L, another provider or model  | test_a_follow_up_starts_a_new_conversation_where_it_cannot_go_on |
+    # | Codex adapter, record gone, restarted by hansa | test_the_one_place_that_decides_says_why_a_follow_up_starts_anew |
+    # | parent failed, at a ceiling, cancelled        | test_how_the_parent_ended_is_no_reason_against_going_on |
+    # | a verification, never across kinds            | test_a_verification_and_a_follow_up_never_go_on_in_the_others_conversation |
+    def continued_parent(self, **env) -> str:
+        """A task on mimo whose stand-in leaves a session record that counts tokens (100 in, 20 out a reply, 300 in,
+        60 out in all), done; its id. FAKE_ARGV_LOG and FAKE_FORKED (tmp/argv.jsonl, tmp/forked.jsonl) see the calls."""
+        self.transcript_run("plain", env={"FAKE_RECORD_USAGE": "1", "FAKE_ARGV_LOG": str(self.tmp / "argv.jsonl"),
+                                          "FAKE_FORKED": str(self.tmp / "forked.jsonl"), **env})
+        return "t0001"
+
+    def calls_of(self, name="argv.jsonl") -> list:
+        f = self.tmp / name
+        return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+    def test_a_follow_up_goes_on_in_its_parents_conversation_and_counts_its_own_part(self):
+        from hansa import run
+        tid = self.continued_parent()
+        parent = self.desk.meta(tid)
+        home = run.config_home(self.desk, "mimo", self.desk.settings()["providers"]["mimo"])
+        [record] = home.glob(f"projects/*/{parent['session_id']}.jsonl")
+        before = record.read_bytes()
+        self.assertEqual(parent["usage"]["mimo-x"]["in"], 300)
+        self.desk.update(tid, error="")  # whatever it ended as, see test_how_the_parent_ended_is_no_reason_against_going_on
+        new, _ = self.follow_up(tid, "Make the badge bold")
+        m = self.settle(Dispatcher(self.desk), new)
+        self.assertEqual(m["state"], "done", m)
+        # the command line (FORK_FACTS 1, 3): forked from the parent's session, with an id of its own
+        [argv] = [a for a in self.calls_of() if "--fork-session" in a]
+        self.assertEqual(argv[argv.index("--resume") + 1], parent["session_id"])
+        sid = argv[argv.index("--session-id") + 1]
+        self.assertNotEqual(sid, parent["session_id"])
+        self.assertEqual(m["session_id"], sid)
+        self.assertEqual(argv[argv.index("--system-prompt-snapshot") + 1], "off")
+        self.assertIn(new, argv[argv.index("--append-system-prompt") + 1])  # its instructions are the new task's
+        # its first message: what changed since, then the task text
+        [seen] = self.calls_of("forked.jsonl")
+        said = seen["prompt"]
+        for part in (new, f"task/{new}", m["start_from"][:12], run.commands_tmp(seen["tmp"]), tid):
+            self.assertIn(part, said)
+        self.assertTrue(said.endswith((self.desk.tasks_dir / new / "task.md").read_text()))
+        self.assertLess(said.index(f"task/{new}"), said.index("Make the badge bold"))
+        self.assertIn("git status", said)
+        self.assertEqual(record.read_bytes(), before)  # the parent's record is as it was
+        self.assertIn(f"conversation: continued that of task {tid}", views.show_text(self.desk, new))
+        # its numbers are its own: the forked record begins with the parent's rows, and its answer counts them in
+        self.assertEqual((m["usage"]["mimo-x"]["in"], m["usage"]["mimo-x"]["out"]), (300, 60))
+        self.assertEqual(self.counted(m), (300, 300))
+        self.assertEqual(sum(r["in"] for r in cost.report(self.desk, 1)["rows"] if r["task"] in (tid, new)), 600)
+        own = run.own_session(self.desk, m)
+        self.assertEqual(run.progress_of(self.desk, m)["replies"], 3)
+        self.assertEqual(len(run._record(home, own)[0]), 3)  # its notes
+        self.assertEqual(len(run._record(home, m["session_id"])[0]), 6)  # the whole record holds the parent's too
+        lost = run.keep_lost_run(self.desk, {**m, "launch": m["session_id"], "earlier_runs": [], "attempts": []})
+        self.assertEqual(lost["earlier_runs"][-1]["usage"]["mimo-x"]["in"], 300)
+
+    def test_a_follow_up_with_update_goes_on_and_is_told_what_was_merged(self):
+        from hansa import run
+        tid = self.continued_parent()
+        wt = self.desk.worktrees_dir / "a"  # the parent's work changes a file the base changes too
+        (wt / "badge.txt").write_text("bold badge\n")
+        sh("git", "add", "badge.txt", cwd=wt)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "badge", cwd=wt)
+        self.desk.update(tid, head=self.git_out("rev-parse", "HEAD", cwd=wt))
+        self.commit_in_repo("badge.txt", "plain badge\n")
+        new, _ = self.follow_up(tid, "--update", "Keep the badge bold")
+        m = self.settle(Dispatcher(self.desk), new)
+        self.assertEqual(m["update_conflicts"], ["badge.txt"])
+        [argv] = [a for a in self.calls_of() if "--fork-session" in a]
+        self.assertEqual(argv[argv.index("--resume") + 1], self.desk.meta(tid)["session_id"])
+        [seen] = self.calls_of("forked.jsonl")
+        said = seen["prompt"]
+        told = said[:said.index("Keep the badge bold")]  # before the task text
+        for part in (f"task/{new}", "main", "badge.txt", "<<<<<<<"):
+            self.assertIn(part, told)
+        self.assertIn(f"conversation: continued that of task {tid}", views.show_text(self.desk, new))
+
+    def test_a_follow_up_starts_a_new_conversation_where_it_cannot_go_on(self):
+        # each a run of its own: --fresh; --lane L; another provider than the earlier task's last run; another model
+        tid = self.continued_parent()
+        s = self.desk.settings()
+        s["providers"]["mimo2"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://y"}
+        s["lanes"]["b"] = {**s["lanes"]["a"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo2", "sk-test-02")
+
+        def follow(earlier, *args, change=None):
+            if change:
+                s = self.desk.settings()
+                change(s)
+                self.assertEqual(self.desk.save_settings(s), [])
+            n = len(self.calls_of())
+            new, _ = self.follow_up(earlier, *args, "Make the badge bold")
+            m = self.settle(Dispatcher(self.desk), new)
+            self.assertEqual(m["state"], "done", m)
+            [argv] = self.calls_of()[n:]
+            self.assertNotIn("--resume", argv)
+            self.assertNotIn("--fork-session", argv)
+            self.assertNotEqual(argv[argv.index("--session-id") + 1], self.desk.meta(earlier)["session_id"])
+            self.assertEqual(m["usage"]["mimo-x"]["in"], 300)
+            return new, views.show_text(self.desk, new)
+
+        t2, shown = follow(tid, "--fresh")
+        self.assertIn("conversation: a new one, as it starts over from the base branch (--fresh)", shown)
+        t3, shown = follow(t2, "--lane", "b")
+        self.assertIn("conversation: a new one, as it runs on lane b, not on a", shown)
+        t4, shown = follow(t3, change=lambda s: s["lanes"]["b"].update(providers=["mimo2"]))
+        self.assertIn("conversation: a new one, as it runs on mimo2, not on mimo", shown)
+        t5, shown = follow(t4, change=lambda s: s["providers"]["mimo2"].update(model="mimo-y"))
+        self.assertIn("conversation: a new one, as it runs model mimo-y, not mimo-x", shown)
+        self.assertEqual(self.calls_of("forked.jsonl"), [])
+
+    def test_the_one_place_that_decides_says_why_a_follow_up_starts_anew(self):
+        from hansa import run
+        tid = self.continued_parent()
+        new, _ = self.follow_up(tid, "Make the badge bold")  # queued, not started
+        p = self.desk.settings()["providers"]["mimo"]
+        m = self.desk.meta(new)
+        decide = lambda m, p=p: run.continuation(self.desk, m, "a", "mimo", p, "mimo-x")
+        self.assertEqual(decide(m)["from"], tid)
+        self.assertIn("Codex", decide(m, {**p, "kind": "codex"})["new"])
+        self.assertIn("started it again", decide({**m, "attempts": [{"kind": "network"}]})["new"])
+        self.assertIsNone(run.continuation(self.desk, self.desk.meta(tid), "a", "mimo", p, "mimo-x"))  # no follow-up
+        self.desk.update(tid, conversation={"from": "t0000", "own": self.desk.meta(tid)["session_id"]})
+        self.assertIn("itself went on", decide(m)["new"])  # a follow-up of one that went on: left for later
+        self.desk.update(tid, conversation=None)
+        home = run.config_home(self.desk, "mimo", p)
+        for f in home.glob(f"projects/*/{self.desk.meta(tid)['session_id']}.jsonl"):
+            f.unlink()  # removed by age, say
+        self.assertIn("record is not on this machine", decide(m)["new"])
+
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
+    def test_a_follow_up_hansa_starts_again_after_a_dropped_connection_starts_a_new_conversation(self):
+        # unchanged by going on: a run hansa starts again by itself begins a new conversation, as before
+        tid = self.continued_parent()
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"]["FAKE_NET"] = f"econnreset:1:{self.tmp / 'net-count'}"
+        self.assertEqual(self.desk.save_settings(s), [])
+        new, _ = self.follow_up(tid, "Make the badge bold")
+        d, end = Dispatcher(self.desk), time.time() + 60
+        while self.desk.meta(new)["state"] in ("queued", "running") and time.time() < end:
+            d.tick()
+            if (self.desk.provider_state().get("mimo") or {}).get("cool_until", 0) > time.time():
+                self.desk.set_provider_state("mimo", cool_until=time.time() - 1)
+            time.sleep(0.1)
+        m = self.desk.meta(new)
+        self.assertEqual(m["state"], "done", m)
+        first, again = [a for a in self.calls_of() if "--session-id" in a][1:]  # not the provider's check
+        self.assertIn("--fork-session", first)
+        self.assertNotIn("--resume", again)
+        self.assertNotIn(first[first.index("--session-id") + 1], again)
+        self.assertIn("started it again", m["conversation"]["new"])
+        self.assertIn("conversation: a new one, as hansa started it again", views.show_text(self.desk, new))
+
+    def test_how_the_parent_ended_is_no_reason_against_going_on(self):
+        from hansa import run
+        tid = self.continued_parent()
+        new, _ = self.follow_up(tid, "Make the badge bold")
+        p = self.desk.settings()["providers"]["mimo"]
+        for ended in ({"ended_as": "failed", "error": "the check failed"}, {"ended_as": "failed", "timed_out": True},
+                      {"ended_as": "cancelled", "cancel": True}):
+            with self.subTest(ended=ended):
+                self.desk.update(tid, **ended)
+                self.assertEqual(run.continuation(self.desk, self.desk.meta(new), "a", "mimo", p, "mimo-x")["from"], tid)
+        self.desk.update(tid, state="failed", error="the check failed")
+        m = self.settle(Dispatcher(self.desk), new)
+        self.assertEqual(m["conversation"]["from"], tid)
+        self.assertEqual(len([a for a in self.calls_of() if "--fork-session" in a]), 1)
+
+    def test_a_verification_and_a_follow_up_never_go_on_in_the_others_conversation(self):
+        from hansa import run
+        tid = self.continued_parent()
+        self.desk.update(tid, commits=1)  # so it can be verified
+        self.hansa("verify", tid)  # a verification of a worker's task: a conversation of its own
+        vid = self.desk.meta(tid)["verify"]
+        v = self.settle(Dispatcher(self.desk), vid)
+        argv = self.calls_of()[-1]
+        self.assertNotIn("--resume", argv)
+        self.assertNotIn("--fork-session", argv)
+        self.assertNotEqual(argv[argv.index("--session-id") + 1], self.desk.meta(tid)["session_id"])
+        self.assertIsNone(v.get("conversation"))
+        self.assertNotIn("conversation:", views.show_text(self.desk, vid))
+        # a follow-up never goes on in a verifier's, though its record is there on the same lane, provider and model
+        p = self.desk.settings()["providers"]["mimo"]
+        home = run.config_home(self.desk, "mimo", p)
+        self.assertTrue(list(home.glob(f"projects/*/{v['session_id']}.jsonl")))
+        new, _ = self.follow_up(tid, "Make the badge bold")
+        talk = run.continuation(self.desk, {**self.desk.meta(new), "parent": vid}, "a", "mimo", p, "mimo-x")
+        self.assertIn("verification", talk["new"])
+
     def test_cost_counts_a_resumed_run_whose_answer_covers_the_whole_conversation_once(self):
         # RESUME_FACTS 2: a resumed call's modelUsage covers the run before it too; its own part is counted once
         m = self.resumed_tries(FAKE_RESUME_WHOLE="1")

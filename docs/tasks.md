@@ -769,10 +769,47 @@ task's own title whole, followed by ` (retry of ID)`, naming only the immediatel
 earlier task; another follow-up replaces that suffix. The follow-up's worker gets the
 original task, one line per earlier round (its id, how it ended, the start of
 its note), this round's note, the previous report and the standing
-verification's report, with its verdict. Earlier notes are not carried, so
+verification's report, with its verdict. Earlier notes are not carried in its text, so
 what still holds of them is said again in the new note. Each round's note is
 kept on its own beside its task, as `note.md` in the task's folder (keys
 removed, as from what else hansa writes there).
+
+#### Going on in the earlier conversation
+
+Where it can, a follow-up's worker goes on in the earlier task's conversation instead of reading the
+code and the task again from nothing. It does when all of these hold, whatever way the earlier task
+ended (done, failed, at a ceiling, cancelled):
+
+- the follow-up starts from the earlier task's last commit (plain, or with `--update`), not from the
+  base (`--fresh`, or an earlier task with no commit);
+- it runs on the earlier task's lane, on the provider and with the model of the earlier task's last
+  run (`--lane L`, a resting first provider or another model start a new conversation: other eyes on
+  the same commits);
+- that run was not on the Codex adapter, and its conversation record is still on this machine (Claude
+  Code removes old ones, by default after 30 days);
+- it is the follow-up's first run: a run hansa starts again by itself (a dropped connection, a usage
+  limit) starts a new conversation, as before;
+- the earlier task did not itself go on from an earlier conversation (not yet carried further).
+
+A verification never goes on in a worker's conversation, nor a follow-up in a verifier's.
+
+A follow-up that goes on gets a conversation of its own, forked from the earlier one (`claude -p
+--resume <earlier session> --fork-session --session-id <new>`), with its instructions written for the
+new task (`--system-prompt-snapshot off`): its time limit and start are its own. Before its task text
+its first message says that it goes on, in a new task, from its earlier conversation; the new task's id
+and branch, and the commit hansa made of what it had left, where the worktree now is; that other tasks
+may have used the worktree in between, so files git does not track may be gone or different; that its
+temporary folder is a new, empty one (the path) and nothing it had running is running; and to look
+(`git status`, `git log`) before relying on memory. With `--update` the same message says which base
+was merged in and which files conflict.
+
+`hansa show ID` of a follow-up says `conversation: continued that of task P`, or `conversation: a new
+one, as ...` with the reason. The forked record begins with copies of the earlier conversation's rows,
+under the uuids they have there; hansa keeps those uuids beside the task (`forked-rows.json`) and leaves
+those rows out of all it reads of the follow-up's record (tokens, replies, last note, notes at a
+ceiling, work left running, a lost run's numbers). Claude Code's answer to such a run counts the
+earlier conversation's tokens and cost in as well; hansa takes them off, so `hansa cost` counts each
+token once. The earlier task's record stays as it was.
 When retry stops a queued or running verification, its record names the task and
 the follow-up that replaced it. The earlier-round line says the verification was
 stopped before a verdict; a verification with no verdict is never called "verified by".
