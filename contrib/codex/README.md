@@ -1,6 +1,6 @@
 # The Codex adapter
 
-An optional part of hansa, for **macOS only**: it lets a worker run OpenAI's Codex command line (`codex exec`)
+An optional part of hansa, for macOS and Linux: it lets a worker run OpenAI's Codex command line (`codex exec`)
 instead of Claude Code, without changing hansa. hansa runs every worker with `claude -p`, and finds `claude` through
 `HANSA_CLAUDE`; `bin/claude-or-codex` takes its place for one desk and looks at each call:
 
@@ -16,9 +16,12 @@ The wrapper is perl because it must hand on the environment exactly: a shell add
 python adds `LC_CTYPE` (macOS's `/usr/bin/python3` more). It passes the shim a snapshot of the environment it got,
 then execs python. The logic is in `shim/hansa_codex_shim.py`: Python 3.9, standard library only, no hansa import.
 
-**Why macOS only.** Codex runs with its own sandbox off, since macOS cannot nest sandboxes, so srt is the only
+**macOS and Linux.** Codex runs with its own sandbox off, since macOS cannot nest sandboxes, so srt is the only
 boundary, and some of its write denies are globs (below). On Linux srt drops every glob from `denyWrite`
-(bubblewrap has none), so Codex could make and write a nested `.claude`: the adapter refuses to run a worker there.
+(bubblewrap has none), so Codex can make a nested `.claude` there; hansa refuses to commit it (below). The
+adapter's tests pass on both systems, but no real Codex run has been tried on a Linux machine yet: try one with
+[the dry run](#the-dry-run). On Linux, `hansa doctor` notes a missing `rg`, which srt uses to find nested settings
+folders.
 
 ## Setting it up
 
@@ -82,8 +85,10 @@ The task goes in on stdin, as hansa gives it. Why each part:
 - **zsh's `TMPPREFIX` is in the run's temporary folder.** zsh makes a here-document's file under `TMPPREFIX`
   (`/tmp/zsh` by default), not `TMPDIR`, and srt refuses that, so `cat > f <<'EOF'` would fail. Claude Code does the
   same for its own commands. `TMPDIR` stays as hansa gives it.
-- **`CODEX_CA_CERTIFICATE`**: macOS's own certificate check, Codex's default, does not complete inside srt. Not
-  `SSL_CERT_FILE`, which would change every command's certificates. A lane env that sets it wins.
+- **`CODEX_CA_CERTIFICATE`**: on macOS, Codex's default, the system's own certificate check, does not complete
+  inside srt. On every system the adapter gives `/etc/ssl/cert.pem` when that file exists and
+  `HANSA_CODEX_CA_FILE` is not set, and none otherwise; whether Codex's TLS check completes inside srt on Linux
+  has not been tried on a real machine. Not `SSL_CERT_FILE`, which would change every command's certificates. A lane env that sets it wins.
 - **The lane's env and sandbox prelude** (`CLAUDE_ENV_FILE`, in `.hansa`, which the sandbox may not read) are
   copied into the worker's temporary folder (mode 600), sourced and deleted by the sh inside srt.
 - **Codex's stdout is a temporary file, not a pipe.** Codex panics when a write to a non-blocking stdout fails
@@ -124,10 +129,12 @@ srt's settings are built from the `--settings` hansa gives the worker, and check
 - **git's data** stays hansa's: every entry hansa's worker settings deny in the worktree's `.git`, the common
   folder and the worktree's own folder must be denied, or the run is refused. So Codex cannot commit.
 - **Project settings:** `.claude`, `.codex` and `.agents` at the top of the worktree are denied whole, and below
-  it, as globs, the folder names themselves and `.claude`'s settings, hooks and skills. Whatever Codex wrote there
-  hansa would commit, and a later Claude Code run on the branch would load it and run its hooks outside the
-  sandbox. srt's move-blocking keeps such a name from being made anywhere, by `mkdir`, link or rename. A worktree
-  path with a glob character is refused, since srt would read it as one.
+  it, as globs, the folder names themselves and `.claude`'s settings, hooks and skills; a later Claude Code run on
+  the branch would load them and run their hooks outside the sandbox. On macOS srt refuses such a name at any
+  depth as it is made, by `mkdir`, link or rename. On Linux srt drops the globs, so only the top-level ones are
+  refused as they are written, and a new nested one can be made. On every system hansa refuses to commit a change
+  to a path with a folder named `.claude`, `.codex` or `.agents` at any depth: nothing is committed and the work
+  is left staged. A worktree path with a glob character is refused, since srt would read it as one.
 - **The Codex home:** `AGENTS.md`, `AGENTS.override.md`, `config.toml`, `environments.toml`, `hooks.json` and
   `rules` there may not be written. Codex reads `AGENTS.md`, `AGENTS.override.md` and `skills/` on every run, so a
   run is refused while either file exists or `skills/` holds anything but Codex's own `.system`; only names are
@@ -230,5 +237,4 @@ the real Codex and its login. hansa's checkout is the one the script is in, unle
 The adapter's tests run in hansa's suite (`python3 tests/run_parallel.py`), and alone with
 `python3 -m unittest contrib.codex.tests`. They import hansa from this checkout (`HANSA_SRC` wins), so hansa's own
 readings judge every answer, and use fakes for codex, srt and claude, replaying hand-written JSONL: no real
-Codex, no network. A test that starts a Codex worker run skips off macOS. `HANSA_CODEX_TEST_*` switches are for
-the tests only.
+Codex, no network. They pass on macOS and on Linux. `HANSA_CODEX_TEST_*` switches are for the tests only.

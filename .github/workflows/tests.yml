@@ -11,8 +11,8 @@
 # tests.test_hansa, which also imports the tests of tests/test_menu.py, tests/test_doctor.py, tests/test_install.py and
 # tests/bench/ (none of them has a step of its own); tests.test_push_services; tests.test_docs; tests.test_mod, the
 # coordinator plugin's validation and tests (claude plugin validate and claude plugin test hansa/mod); and the Codex
-# adapter's suite (worker runs skip off macOS). They use stand-ins too; installing Claude Code's test kit needs no
-# login. HANSA_TESTS_NEED_CLAUDE_PLUGIN makes the plugin's two tests fail rather than skip without a claude that can
+# adapter's suite (worker runs with fakes, on Ubuntu and macOS). They use stand-ins too; installing Claude Code's
+# test kit needs no login. HANSA_TESTS_NEED_CLAUDE_PLUGIN makes the plugin's two tests fail rather than skip without a claude that can
 # run them.
 # Tool versions and the upgrade checks are recorded in docs/sandbox.md, under Tools and upgrades.
 # The tests a sandboxed run cannot run are the ones that call skip_in_sandbox or skip_unless_ports

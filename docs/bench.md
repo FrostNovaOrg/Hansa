@@ -22,7 +22,7 @@ Its fixed Debian 13 VM uses Apple's Virtualization framework (VZ), without host
 shares or application forwarding. Claude Code and Codex workers receive access
 and instructions when started while it is enabled. A worker started while it is off gets the bench folder
 and epoch if resumed after it is turned on, but its pinned system prompt still has
-no bench instructions. Codex's macOS-only sandbox guard still applies.
+no bench instructions. The Codex adapter's sandbox checks still apply.
 
 Coordinator commands accept global `--desk`: `hansa bench build`, `rebuild`,
 `on`, `off`, `status [--json]`, and `selftest [--json]`. Build, rebuild and selftest

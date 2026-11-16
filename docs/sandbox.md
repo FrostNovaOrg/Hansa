@@ -20,7 +20,7 @@ The CI baseline is explicit, so a fresh run selects the same direct tool release
 | Node | 24.22.0 in CI | srt 0.0.79 requires 22.12.0 or newer, on hansa serve's PATH |
 | srt (`@anthropic-ai/sandbox-runtime`) | 0.0.79 | Used for setups, checks and sandbox probes; real CI checks run on macOS on pushes to `main` and manually started workflows; pull requests use Ubuntu with stand-ins |
 | Claude Code | 2.1.307 in CI | The coordinator plugin and its test kit require 2.1.306 or newer |
-| Codex CLI (optional adapter) | 0.160.0 installation example | Worker runs only on macOS; the adapter's automated suite uses fakes |
+| Codex CLI (optional adapter) | 0.160.0 installation example | Worker runs on macOS and Linux; the adapter's automated suite uses fakes |
 
 These are direct release selections, not a lock of the tools' transitive dependencies
 or proof that every tool combination has been exercised. Check the installed package
