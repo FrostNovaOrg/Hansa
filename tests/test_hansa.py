@@ -7656,11 +7656,8 @@ def save():'''))
         before = self.git_out("rev-list", "--all", cwd=wt)
         m = run.finish(self.desk, tid, 0)
         self.assertEqual(m["state"], "failed", m)
-        self.assertEqual(m["error"],
-                         f"refusing to commit changes to protected paths: {', '.join(sorted(paths))}; the workers' "
-                         "sandbox does not let them write these paths, so the changes can only have come through "
-                         "git's index; nothing was committed; the work is left staged. To change these paths, "
-                         "ask the principal: they change them outside a task")
+        for part in (*paths, "nothing was committed", "the work is left staged", "principal", "outside a task"):
+            self.assertIn(part, m["error"])
         self.assertEqual(self.git_out("rev-parse", f"task/{tid}"), base)
         self.assertEqual(self.git_out("rev-list", "--all", cwd=wt), before)
         self.assertIn("ordinary.txt", self.git_out("diff", "--cached", "--name-only", cwd=wt))
@@ -7709,14 +7706,16 @@ def save():'''))
         (wt / "changed.txt").write_text("changed\n")
         (wt / "deleted.txt").unlink()
         (wt / "before.txt").rename(wt / "after.txt")
-        for name in ("added.txt", ".vscodex", ".claudex", "sub/.mcp.json"):
+        for name in ("added.txt", ".vscodex", ".claudex", ".codexx", "sub/.agents-old", "sub/.vscode/settings.json",
+                     "sub/.idea/settings.xml", "sub/.mcp.json"):
             (wt / name).parent.mkdir(parents=True, exist_ok=True)
             (wt / name).write_text("ordinary\n")
         m = run.finish(self.desk, tid, 0)
         self.assertEqual(m["state"], "done", m)
         self.assertNotEqual(m["head"], base)
         self.assertEqual(set(m["files"]), {"changed.txt", "deleted.txt", "after.txt", "added.txt",
-                                          ".vscodex", ".claudex", "sub/.mcp.json"})
+                                          ".vscodex", ".claudex", ".codexx", "sub/.agents-old",
+                                          "sub/.vscode/settings.json", "sub/.idea/settings.xml", "sub/.mcp.json"})
         self.assertIn("R100", self.git_out("diff", "--name-status", "-M", base, m["head"], cwd=wt))
 
     def test_hansas_commit_leaves_out_worker_staged_placeholders(self):
@@ -7734,6 +7733,173 @@ def save():'''))
         for path in paths:
             self.assertTrue((wt / path).is_file())
             self.assertNotIn(path, self.git_out("ls-files", cwd=wt))
+
+    def test_hansas_commit_refuses_project_settings_changes_at_any_depth(self):
+        added = ("sub/.claude/settings.json", "a/b/.Codex/config.toml", ".agents/skills/x.md",
+                 ".codex/config.toml", "leaf/.claude", "leaf/.Codex", "leaf/.AGENTS")
+        tracked = {change: f"{change}/.Codex/config.toml" for change in ("modified", "deleted", "mode", "emptied")}
+        for path in tracked.values():
+            target = self.repo / path
+            target.parent.mkdir(parents=True)
+            target.write_text("principal settings\n")
+        sh("git", "add", "-A", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "principal settings", cwd=self.repo)
+        for change in ("added", "symlink", *tracked):
+            with self.subTest(change=change):
+                tid, wt, base = self.protected_worktree()
+                paths = added if change in ("added", "symlink") else [tracked[change]]
+                for path in paths:
+                    target = wt / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if change == "symlink":
+                        target.symlink_to("missing-target")
+                    elif change == "deleted":
+                        target.unlink()
+                    elif change == "mode":
+                        sh("git", "config", "core.filemode", "true", cwd=wt)
+                        target.chmod(0o755)
+                    else:
+                        target.write_text("" if change == "emptied" else "worker settings\n")
+                self.assert_protected_finish(tid, wt, base, paths)
+                staged = self.git_out("diff", "--cached", "--name-only", "--no-renames", cwd=wt).splitlines()
+                self.assertTrue(set(paths).issubset(staged))
+        # A tracked top-level file emptied by a worker is not a sandbox placeholder.
+        for path in (".codex", ".agents"):
+            (self.repo / path).write_text("principal settings\n")
+        sh("git", "add", "-A", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "principal settings files", cwd=self.repo)
+        tid, wt, base = self.protected_worktree()
+        for path in (".codex", ".agents"):
+            (wt / path).write_text("")
+        self.assert_protected_finish(tid, wt, base, [".codex", ".agents"])
+
+    def test_hansas_commit_refuses_moves_into_and_out_of_project_settings(self):
+        original = "sub/.agents/skills/x.md"
+        (self.repo / original).parent.mkdir(parents=True)
+        (self.repo / original).write_text("principal skill\n")
+        sh("git", "add", "--", original, cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "principal skill", cwd=self.repo)
+        for source, destination, refused in ((original, "moved.md", original),
+                                              ("README.md", "a/.cLaUdE/settings.json", "a/.cLaUdE/settings.json")):
+            with self.subTest(source=source, destination=destination):
+                tid, wt, base = self.protected_worktree()
+                (wt / destination).parent.mkdir(parents=True, exist_ok=True)
+                (wt / source).rename(wt / destination)
+                self.assert_protected_finish(tid, wt, base, [refused])
+                staged = self.git_out("diff", "--cached", "--name-only", "--no-renames", cwd=wt).splitlines()
+                self.assertTrue({source, destination}.issubset(staged))
+
+    def test_hansas_commit_exempts_only_merged_project_settings_content_and_mode(self):
+        from hansa import run
+        for change in ("same", "content", "mode", "deleted"):
+            with self.subTest(change=change):
+                path = f"{change}/.agents/skills/x.md"
+                target = self.repo / path
+                target.parent.mkdir(parents=True)
+                if change == "deleted":
+                    target.write_text("principal skill\n")
+                    sh("git", "add", "--", path, cwd=self.repo)
+                    sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "principal skill", cwd=self.repo)
+                tid, wt, old = self.protected_worktree()
+                if change == "deleted":
+                    target.unlink()
+                else:
+                    target.write_text("demo\n")  # the blob used by stage_protected_blob
+                sh("git", "add", "-A", cwd=self.repo)
+                sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "principal skill", cwd=self.repo)
+                merged = self.git_out("rev-parse", "HEAD")
+                if change == "deleted":
+                    (wt / path).unlink()
+                    head = run.commit_work(self.desk, wt, "merged deletion", f"task/{tid}", [merged])
+                    self.assertEqual(self.git_out("ls-tree", head, "--", path), "")
+                    continue
+                self.stage_protected_blob(wt, path, "100755" if change == "mode" else "100644")
+                if change == "content":
+                    (wt / "other.txt").write_text("different\n")
+                    blob = self.git_out("hash-object", "-w", "other.txt", cwd=wt)
+                    sh("git", "update-index", "--cacheinfo", f"100644,{blob},{path}", cwd=wt)
+                    sh("git", "update-index", "--skip-worktree", "--", path, cwd=wt)
+                if change == "same":
+                    head = run.commit_work(self.desk, wt, "merged settings", f"task/{tid}", [merged])
+                    self.assertEqual(self.git_out("rev-list", "--parents", "-n", "1", head).split()[1:], [old, merged])
+                    self.assertEqual(self.git_out("ls-tree", head, "--", path),
+                                     self.git_out("ls-tree", merged, "--", path))
+                else:
+                    with self.assertRaisesRegex(run.SandboxPathChanged, re.escape(path)):
+                        run.commit_work(self.desk, wt, "changed settings", f"task/{tid}", [merged])
+                    self.assertEqual(self.git_out("rev-parse", f"task/{tid}", cwd=wt), old)
+
+    def test_hansas_commit_refuses_project_settings_only_in_the_index(self):
+        for path in ("sub/.claude/settings.json", "a/b/.Codex/config.toml", ".agents/skills/x.md",
+                     ".codex/config.toml", "leaf/.agents"):
+            with self.subTest(path=path):
+                tid, wt, base = self.protected_worktree()
+                blob = self.stage_protected_blob(wt, path)
+                self.assert_protected_finish(tid, wt, base, [path])
+                self.assertEqual(self.git_out("rev-parse", f":{path}", cwd=wt), blob)
+        for path in (".codex", ".agents", "sub/.claude"):
+            with self.subTest(empty_link=path):
+                tid, wt, base = self.protected_worktree()
+                (wt / "empty.txt").write_text("")
+                blob = self.git_out("hash-object", "-w", "empty.txt", cwd=wt)
+                sh("git", "update-index", "--add", "--cacheinfo", f"120000,{blob},{path}", cwd=wt)
+                sh("git", "update-index", "--skip-worktree", "--", path, cwd=wt)
+                self.assert_protected_finish(tid, wt, base, [path])
+                self.assertFalse(os.path.lexists(wt / path))
+
+    def test_hansas_commit_leaves_out_top_level_project_settings_placeholders(self):
+        from hansa import run
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                tid, wt, base = self.protected_worktree()
+                for path in (".codex", ".agents"):
+                    (wt / path).write_text("")
+                if staged:
+                    sh("git", "add", "--", ".codex", ".agents", cwd=wt)
+                (wt / "ordinary.txt").write_text("work\n")
+                m = run.finish(self.desk, tid, 0)
+                self.assertEqual((m["state"], m["files"]), ("done", ["ordinary.txt"]), m)
+                self.assertNotEqual(m["head"], base)
+                for path in (".codex", ".agents"):
+                    self.assertTrue((wt / path).is_file())
+                    self.assertEqual((wt / path).stat().st_size, 0)
+                    self.assertNotIn(path, self.git_out("ls-files", cwd=wt).splitlines())
+                self.assertEqual(run.commit_work(self.desk, wt, "only placeholders", f"task/{tid}"), m["head"])
+
+    def test_hansas_commit_refuses_nested_empty_project_settings_files(self):
+        for staged in (False, True):
+            for path in ("sub/.codex", "sub/.agents", "sub/.claude", "sub/.Codex/empty.toml",
+                         ".codex/empty.toml", ".agents/empty.md", ".Codex", ".Agents"):
+                with self.subTest(staged=staged, path=path):
+                    tid, wt, base = self.protected_worktree()
+                    (wt / path).parent.mkdir(parents=True, exist_ok=True)
+                    (wt / path).write_text("")
+                    if staged:
+                        sh("git", "add", "--", path, cwd=wt)
+                    self.assert_protected_finish(tid, wt, base, [path])
+                    self.assertIn(path, self.git_out("ls-files", cwd=wt).splitlines())
+
+    def test_hansas_commit_keeps_unchanged_and_ignored_project_settings(self):
+        from hansa import run
+        paths = ("sub/.claude/settings.json", ".codex/config.toml", "a/b/.AGENTS/skills/x.md")
+        for path in paths:
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text("principal settings\n")
+        (self.repo / ".gitignore").write_text("ignored/\n")
+        sh("git", "add", "-A", cwd=self.repo)
+        sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "principal settings", cwd=self.repo)
+        tid, wt, base = self.protected_worktree()
+        ignored = "ignored/.codex/config.toml"
+        (wt / ignored).parent.mkdir(parents=True)
+        (wt / ignored).write_text("ignored settings\n")
+        (wt / "ordinary.txt").write_text("work\n")
+        m = run.finish(self.desk, tid, 0)
+        self.assertEqual((m["state"], m["files"]), ("done", ["ordinary.txt"]), m)
+        for path in paths:
+            self.assertEqual(self.git_out("ls-tree", base, "--", path),
+                             self.git_out("ls-tree", m["head"], "--", path))
+        self.assertTrue((wt / ignored).is_file())
+        self.assertNotIn(ignored, self.git_out("ls-files", cwd=wt).splitlines())
 
     def stopped_at_the_time_ceiling(self, rows):
         """A run stopped at the time ceiling with no result, whose session record holds these rows."""
@@ -15646,19 +15812,20 @@ def save():'''))
         wt = self.run_on("a")
         base = self.git_out("rev-parse", "HEAD", cwd=wt)
         self.stage_protected_blob(wt, ".idea/x.xml")
+        self.stage_protected_blob(wt, "sub/.codex/config.toml")
         with self.assertRaises(SystemExit) as e:
             self.hansa("lane", "remove", "a", "--keep")
         self.assertIn("lane a was not removed", str(e.exception.code))
-        self.assertIn(".idea/x.xml", str(e.exception.code))
-        self.assertIn("the workers' sandbox does not let them write", str(e.exception.code))
-        self.assertTrue(str(e.exception.code).endswith(
-            "To change these paths, ask the principal: they change them outside a task"))
+        for part in (".idea/x.xml", "sub/.codex/config.toml", "nothing was committed", "the work is left staged",
+                     "principal", "outside a task"):
+            self.assertIn(part, str(e.exception.code))
         self.assertIn("a", self.desk.settings()["lanes"])
         self.assertTrue(wt.is_dir())
         self.assertIn(str(wt.resolve()), self.worktrees())
         self.assertEqual(self.git_out("rev-parse", "HEAD", cwd=wt), base)
         self.assertEqual(self.git_out("branch", "--list", "hansa-kept/*"), "")
         self.assertIn(".idea/x.xml", self.git_out("diff", "--cached", "--name-only", cwd=wt))
+        self.assertIn("sub/.codex/config.toml", self.git_out("diff", "--cached", "--name-only", cwd=wt))
 
     def test_lane_remove_clears_the_worktree_of_a_lane_already_gone(self):
         self.hansa("lane", "add", "b", "--like", "a")

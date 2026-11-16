@@ -173,13 +173,23 @@ What each run may write in git's folders, and what hansa checks before it runs g
 
 hansa never commits a worker's change to the repository's top-level `.gitconfig`, `.gitmodules`,
 `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`, `.ripgreprc`, `.mcp.json`, or to `.vscode`,
-`.idea` and `.claude` and anything under them (whole path segments, without regard to case). The sandbox
-protects these paths on disk: an index change would bypass it and could make commands run when someone
-later opens the project. Such a change fails a worker run's end, and stops
-`hansa lane remove --keep`; nothing is committed and the work stays staged. Empty sandbox placeholders
-absent from the branch's tip are left out first; content and mode matching the base merged by
-`retry --update` may be committed. To change a protected path, the principal does it outside a task.
-This check must stay while workers can write git's index and these paths can control commands.
+`.idea` and anything under them. It also refuses changes to `.claude`, `.codex` or `.agents` anywhere
+in a path, including a file or link with that name. Names match whole path segments, without regard
+to case: `sub/.Codex/config.toml` is protected too. These settings can make commands run when someone
+later opens the project. The commit check applies on both systems, including where Linux's sandbox
+lets a worker write a nested settings path on disk.
+
+Adding, modifying, deleting, changing the mode of, or moving into or out of a protected path fails a
+worker run's end, and stops `hansa lane remove --keep`; nothing is committed and the work stays staged.
+The check reads git's index, including entries with no file on disk. Unchanged tracked settings are
+allowed; untracked files that git ignores stay in the worktree and are not committed.
+
+Empty sandbox placeholders absent from the branch's tip are left out first. These include empty
+regular files named exactly `.codex` or `.agents` at the worktree's top, even if already staged;
+empty files at `sub/.codex` or under `.codex/` or `.agents/` are changes, not placeholders.
+Content and mode matching the base merged by `retry --update` may be committed. To change a
+protected path, the principal does it outside a task. This check must stay while workers can change
+git's index or nested project settings and these paths can control commands.
 
 ### What each run may write there
 
