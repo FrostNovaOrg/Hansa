@@ -238,8 +238,9 @@ def killed():
         rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
         os.makedirs(os.path.dirname(rec), exist_ok=True)
         with open(rec, "a") as f:
-            f.write(json.dumps({"type": "assistant", "message": {"id": "k" + str(n), "model": "mimo-x", "content": [
-                {"type": "text", "text": "Working on it."}], "usage": {"input_tokens": 70 * n, "output_tokens": 7}}}) + "\n")
+            f.write(json.dumps({"uuid": "k-" + sid + "-" + str(n), "type": "assistant", "message": {  # its own uuid
+                "id": "k" + str(n), "model": "mimo-x", "content": [{"type": "text", "text": "Working on it."}],
+                "usage": {"input_tokens": 70 * n, "output_tokens": 7}}}) + "\n")
     if os.environ.get("FAKE_KILL_LATE"):
         rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
         os.makedirs(os.path.dirname(rec), exist_ok=True)
@@ -341,18 +342,20 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
         sys.exit(1)
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
     counted = {"usage": {"input_tokens": 10, "output_tokens": 5}} if os.environ.get("FAKE_RECORD_USAGE") else {}
-    gone = os.environ.get("FAKE_RESUME_KILL")  # a file: the first resumed run replies once, then the system kills it
-    if gone and not os.path.exists(gone):
+    import uuid  # each row a resumed run writes has a uuid of its own, as every row Claude Code writes has: a fork
+    row = lambda r: json.dumps({"uuid": str(uuid.uuid4()), "sessionId": sid, **r}) + "\n"  # of this record is then
+    gone = os.environ.get("FAKE_RESUME_KILL")  # told from its copies, as with the real one (FORK_FACTS 1)
+    if gone and not os.path.exists(gone):  # a file: the first resumed run replies once, then the system kills it
         import signal
         open(gone, "w").write("killed\n")
         with open(rec, "a") as f:
-            f.write(json.dumps({"type": "assistant", "message": {"id": "rk", "model": "mimo-x", "content": [], **counted}}) + "\n")
+            f.write(row({"type": "assistant", "message": {"id": "rk", "model": "mimo-x", "content": [], **counted}}))
         os.kill(os.getpid(), signal.SIGKILL)
     limit = os.environ.get("FAKE_RESUME_LIMIT")  # a file: the first resumed run ends on the provider's usage limit
     if limit and not os.path.exists(limit):
         open(limit, "w").write("limit\n")
         with open(rec, "a") as f:
-            f.write(json.dumps({"type": "assistant", "message": {"id": "r0", "model": "mimo-x", "content": [], **counted}}) + "\n")
+            f.write(row({"type": "assistant", "message": {"id": "r0", "model": "mimo-x", "content": [], **counted}}))
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429, "num_turns": 1,
                           "session_id": sid, "result": "API Error: 429 rate_limit_error",
                           "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}))
@@ -373,7 +376,7 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
     rows.append({"type": "assistant", "message": {"id": "r2", "model": "mimo-x", "content": [{"type": "text", "text": report}],
                                                   **counted}})
     with open(rec, "a") as f:
-        f.writelines(json.dumps(r) + "\n" for r in rows)
+        f.writelines(row(r) for r in rows)
     totals = {} if os.environ.get("FAKE_RESUME_NO_TOTALS") else {  # as for a run stopped before it wrote them
         "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}
     if os.environ.get("FAKE_RESUME_WHOLE"):  # as real claude -p --resume answers (RESUME_FACTS 2):
@@ -434,6 +437,17 @@ if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a pro
             "system": sys.argv[sys.argv.index("--append-system-prompt") + 1]}) + "\n")
     open(count, "w").write(str(n + 1))
     if n < int(times):
+        if os.environ.get("FAKE_NET_RECORD"):  # it reached the model first: a reply with its tokens in its record
+            sid = sys.argv[sys.argv.index("--session-id") + 1]
+            rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
+            os.makedirs(os.path.dirname(rec), exist_ok=True)
+            import uuid
+            with open(rec, "a" if FORKED else "w") as f:
+                f.writelines(json.dumps({"uuid": str(uuid.uuid4()), "sessionId": sid, **r}) + "\n" for r in [
+                    {"type": "user", "message": {"role": "user", "content": prompt}},
+                    {"type": "assistant", "message": {"id": "n" + str(n), "model": "mimo-x", "content": [
+                        {"type": "text", "text": "Writing partial.txt."}],
+                        "usage": {"input_tokens": 40, "output_tokens": 2}}}])
         if not os.environ.get("FAKE_NET_NO_COMMIT"):
             open("partial.txt", "w").write(os.environ.get("FAKE_NET_PARTIAL", "half done for " + os.environ["HANSA_TASK"] + "\n"))
         status = int(what) if what.isdigit() else None
@@ -442,6 +456,7 @@ if os.environ.get("FAKE_NET"):  # "what:times:count file": the run ends on a pro
                 "test-timed-out": "Ran 40 tests\nERROR: test_upload (tests.test_api): the upload request timed out after 60s\nFAILED (errors=1)",
                 "log-overloaded": "The suite failed:\n2026-10-08 12:00:01 WARN queue overloaded, shedding requests\nerror: 2 tests failed",
                 "402": "payment required", "limit": os.environ.get("FAKE_LIMIT_TEXT", ""),
+                "login": "Not logged in · Please run /login",
                 "model": os.environ.get("FAKE_MODEL_TEXT", "API Error: 400 model_not_found")}[what]
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
                           "api_error_status": 429 if what in ("quota", "limit") else status,
@@ -34858,7 +34873,7 @@ def save():'''))
     # | plain retry, same lane, provider and model, record there | test_a_follow_up_goes_on_in_its_parents_conversation_and_counts_its_own_part |
     # | --update                                     | test_a_follow_up_with_update_goes_on_and_is_told_what_was_merged |
     # | --fresh, --lane L, another provider or model  | test_a_follow_up_starts_a_new_conversation_where_it_cannot_go_on |
-    # | Codex adapter, record gone, restarted by hansa | test_the_one_place_that_decides_says_why_a_follow_up_starts_anew |
+    # | Codex adapter, record gone                    | test_the_one_place_that_decides_says_why_a_follow_up_starts_anew |
     # | parent failed, at a ceiling, cancelled        | test_how_the_parent_ended_is_no_reason_against_going_on |
     # | a verification, never across kinds            | test_a_verification_and_a_follow_up_never_go_on_in_the_others_conversation |
     # | Claude Code without the switches it needs     | test_a_claude_code_without_the_switches_a_continued_start_needs_starts_anew |
@@ -35007,7 +35022,7 @@ def save():'''))
         decide = lambda m, p=p: run.continuation(self.desk, m, "a", "mimo", p, "mimo-x")
         self.assertEqual(decide(m)["from"], tid)
         self.assertIn("Codex", decide(m, {**p, "kind": "codex"})["new"])
-        self.assertIn("started it again", decide({**m, "attempts": [{"kind": "network"}]})["new"])
+        self.assertIn("left no conversation record", decide({**m, "attempts": [{"kind": "network"}]})["new"])
         self.assertIsNone(run.continuation(self.desk, self.desk.meta(tid), "a", "mimo", p, "mimo-x"))  # no follow-up
         self.desk.update(tid, conversation={"from": "t0000", "own": self.desk.meta(tid)["session_id"],
                                             "before": {"mimo-x": {"in": 5, "out": 1}}})
@@ -35022,7 +35037,8 @@ def save():'''))
 
     @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
     def test_a_follow_up_hansa_starts_again_after_a_dropped_connection_starts_a_new_conversation(self):
-        # unchanged by going on: a run hansa starts again by itself begins a new conversation, as before
+        # its first try went on from its parent's conversation, then the connection dropped before the model replied:
+        # that try's own part holds no reply (only the parent's copied rows), so the next one begins a new conversation
         tid = self.continued_parent()
         s = self.desk.settings()
         s["lanes"]["a"]["env"]["FAKE_NET"] = f"econnreset:1:{self.tmp / 'net-count'}"
@@ -35040,8 +35056,214 @@ def save():'''))
         self.assertIn("--fork-session", first)
         self.assertNotIn("--resume", again)
         self.assertNotIn(first[first.index("--session-id") + 1], again)
-        self.assertIn("started it again", m["conversation"]["new"])
-        self.assertIn("conversation: a new one, as hansa started it again", views.show_text(self.desk, new))
+        self.assertIn("never reached the model", m["conversation"]["new"])
+        self.assertIn("conversation: a new one, as its last try never reached the model",
+                      views.show_text(self.desk, new))
+
+    # A task or verification hansa starts again by itself goes on in its last try's conversation (run.restarted):
+    # | cut off (dropped, killed, limit, login), same lane, provider, model | test_a_task_hansa_starts_again_goes_on_in_its_last_tries_conversation |
+    # | a verification                                   | test_a_verification_hansa_starts_again_goes_on_in_its_last_tries_conversation |
+    # | another provider or model, no record             | test_a_task_hansa_starts_again_elsewhere_or_without_a_record_starts_anew |
+    # | Codex, not cut off, stopped by hansa, not carried | test_the_one_place_that_decides_says_why_a_restarted_try_starts_anew |
+    # | the continued try cannot go on                   | test_a_restarted_try_claude_code_cannot_go_on_with_starts_again_once_anew |
+    # | its last try left no reply of its own            | test_a_follow_up_hansa_starts_again_after_a_dropped_connection_starts_a_new_conversation |
+    def restart_lane(self, what: str, env=None) -> None:
+        """Lane a on mimo (the stand-in's records count tokens: 100 in, 20 out a reply, 300 in, 60 out a run), whose
+        runs end their first time on `what` (FAKE_NET; "kill": killed by the system), after a reply of 40 in, 2 out
+        (killed: 70 in, 7 out) in their record; FAKE_ARGV_LOG and FAKE_FORKED see the calls."""
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        count = self.tmp / f"cut-{what}-{uuid.uuid4().hex[:8]}"  # each lane its own count of runs
+        cut = ({"FAKE_KILL": f"KILL:1:{count}", "FAKE_KILL_USAGE": "1"} if what == "kill" else
+               {"FAKE_NET": f"{what}:1:{count}", "FAKE_NET_RECORD": "1"})
+        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": "plain", "FAKE_RECORD_USAGE": "1",
+                                  "FAKE_ARGV_LOG": str(self.tmp / "argv.jsonl"),
+                                  "FAKE_FORKED": str(self.tmp / "forked.jsonl"), **cut, **(env or {})}
+        s["lanes"]["a"]["env"] = {k: v for k, v in s["lanes"]["a"]["env"].items() if v is not None}  # None: left out
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+
+    def through(self, tid, rested=("mimo",), between=None) -> dict:
+        """Run tid until it ends, each provider's rest cut short (the stand-in's check answers); between(meta) once
+        it is queued again after a try. Its meta."""
+        d, end, called = Dispatcher(self.desk), time.time() + 90, False
+        while self.desk.meta(tid)["state"] in ("queued", "running") and time.time() < end:
+            d.tick()
+            m = self.desk.meta(tid)
+            if between and not called and m["state"] == "queued" and m.get("attempts"):
+                called = True
+                between(m)
+            for name in rested:
+                if (self.desk.provider_state().get(name) or {}).get("cool_until", 0) > time.time():
+                    self.desk.set_provider_state(name, cool_until=time.time() - 1)
+            time.sleep(0.1)
+        return self.desk.meta(tid)
+
+    def workers(self, n=0) -> list:
+        """The worker calls' command lines after the first n calls (not the provider's checks)."""
+        return [a for a in self.calls_of()[n:] if "--append-system-prompt" in a]
+
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
+    def test_a_task_hansa_starts_again_goes_on_in_its_last_tries_conversation(self):
+        from hansa import run
+        ended = {"econnreset": "the connection to the provider dropped", "kill": "the system stopped it (exit ",
+                 "quota": "usage limit", "login": "login was lost", "nothing": "the connection to the provider dropped"}
+        for what, why in ended.items():
+            with self.subTest(what=what):  # "nothing": it left nothing to commit
+                self.restart_lane(*(("econnreset", {"FAKE_NET_NO_COMMIT": "1"}) if what == "nothing" else (what, {})))
+                n, f = len(self.calls_of()), len(self.calls_of("forked.jsonl"))
+                tid = self.desk.new_task("Fix the badge")
+                m = self.through(tid)
+                self.assertEqual(m["state"], "done", m)
+                first, again = self.workers(n)
+                was = first[first.index("--session-id") + 1]
+                self.assertEqual(again[again.index("--resume") + 1], was)  # forked from the last try's session
+                self.assertIn("--fork-session", again)
+                self.assertNotIn(again[again.index("--session-id") + 1], (was, ""))  # a session of its own
+                self.assertEqual(m["session_id"], again[again.index("--session-id") + 1])
+                self.assertEqual(again[again.index("--system-prompt-snapshot") + 1], "off")
+                self.assertIn(tid, again[again.index("--append-system-prompt") + 1])  # this try's instructions
+                [seen] = self.calls_of("forked.jsonl")[f:]
+                said = seen["prompt"]
+                [a] = m["attempts"]
+                self.assertEqual(a["launch"], was)
+                for part in (why, "did not finish", m["run_start"]["commit"][:12], f"task/{tid}", m["worktree"],
+                             run.commands_tmp(seen["tmp"]), "nothing you had running", "time limit", "git status",
+                             "Go on with the task"):
+                    self.assertIn(part, said)
+                if what == "nothing":  # it starts where the last try started, and is told so
+                    self.assertIn("left nothing to commit, so the branch starts where your last try's started", said)
+                    self.assertNotIn("committed what you had left", said)
+                    self.assertEqual(m["run_start"]["commit"], m["base"])
+                else:
+                    self.assertIn("committed what you had left as commit " + m["run_start"]["commit"][:12], said)
+                    self.assertEqual(m["run_start"]["source"], "earlier run's commit")  # what it had left, carried on
+                    self.assertNotEqual(m["run_start"]["commit"], m["base"])
+                self.assertEqual(m["conversation"]["from"], tid)
+                [line] = [x for x in views.show_text(self.desk, tid).splitlines() if x.startswith("conversation: ")]
+                self.assertTrue(line.startswith("conversation: continued its last try's, which ended because "), line)
+                self.assertIn(why, line)
+                # numbers: each try its own part; the forked record begins with the last try's rows
+                own = 70 if what == "kill" else 40
+                self.assertEqual(a["usage"]["mimo-x"]["in"], own)
+                self.assertEqual((m["usage"]["mimo-x"]["in"], m["usage"]["mimo-x"]["out"]), (300, 60))
+                self.assertEqual(sum(r["usage"]["mimo-x"]["in"] for r in cost.task_runs(m)), 300 + own)
+                self.assertEqual(run.progress_of(self.desk, m)["replies"], 3)
+
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
+    def test_a_verification_hansa_starts_again_goes_on_in_its_last_tries_conversation(self):
+        from hansa import run
+        tid = self.continued_parent()
+        self.desk.update(tid, commits=1)  # so it can be verified
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"].update(FAKE_NET=f"econnreset:1:{self.tmp / 'net-v'}", FAKE_NET_RECORD="1",
+                                      FAKE_NET_PARTIAL="a scratch change for a check\n", FAKE_VERDICT_REPORT="holds")
+        self.assertEqual(self.desk.save_settings(s), [])
+        n = len(self.calls_of())
+        self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        v = self.through(vid)
+        self.assertEqual((v["state"], v["verdict"]), ("done", "holds"), v)
+        first, again = self.workers(n)
+        was = first[first.index("--session-id") + 1]
+        self.assertEqual(again[again.index("--resume") + 1], was)
+        self.assertNotEqual(again[again.index("--session-id") + 1], was)
+        [seen] = self.calls_of("forked.jsonl")
+        said = seen["prompt"]
+        ref = f"refs/hansa/scratch/{vid}"
+        for part in (vid, tid, "the connection to the provider dropped", "did not finish", v["start_from"][:12],
+                     "clean again", ref, "takes its place", run.commands_tmp(seen["tmp"]), "verdict"):
+            self.assertIn(part, said)
+        self.assertNotIn("committed what you had left", said)
+        self.assertIn("conversation: continued its last try's, which ended because the connection to the provider "
+                      "dropped", views.show_text(self.desk, vid))
+        self.assertEqual(v["attempts"][0]["usage"]["mimo-x"]["in"], 40)
+        self.assertEqual(v["usage"]["mimo-x"]["in"], 300)
+
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
+    def test_a_task_hansa_starts_again_elsewhere_or_without_a_record_starts_anew(self):
+        from hansa import run
+        s = self.desk.settings()
+        s["providers"]["mimo2"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://y"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo2", "sk-test-02")
+
+        def other_model(m):
+            s = self.desk.settings()
+            s["providers"]["mimo"]["model"] = "mimo-y"
+            self.assertEqual(self.desk.save_settings(s), [])
+
+        def two_providers():
+            s = self.desk.settings()
+            s["lanes"]["a"]["providers"] = ["mimo", "mimo2"]
+            self.assertEqual(self.desk.save_settings(s), [])
+        cases = (("another provider", "quota", {}, two_providers, None, "it runs on mimo2, not on mimo, which its last try used"),
+                 ("another model", "econnreset", {}, None, other_model, "it runs model mimo-y, not mimo-x"),
+                 ("no record", "econnreset", {"FAKE_NET_RECORD": None}, None, None,
+                  "its last try left no conversation record"))
+        for name, what, env, lane, between, why in cases:
+            with self.subTest(name):
+                self.restart_lane(what, env)
+                if lane:
+                    lane()
+                n = len(self.calls_of())
+                tid = self.desk.new_task("Fix the badge")
+                m = self.through(tid, rested=("mimo2",), between=between) if name == "another provider" else \
+                    self.through(tid, between=between)
+                self.assertEqual(m["state"], "done", m)
+                first, again = self.workers(n)
+                self.assertNotIn("--resume", again)
+                self.assertNotIn("--fork-session", again)
+                self.assertNotEqual(again[again.index("--session-id") + 1], first[first.index("--session-id") + 1])
+                self.assertIn(why, m["conversation"]["new"])
+                self.assertIn("conversation: a new one, as " + why, views.show_text(self.desk, tid))
+                self.assertEqual(m["usage"]["mimo-x"]["in"], 300)  # the stand-in names its model so
+                self.assertEqual(len(m["attempts"]), 1)
+        self.assertEqual(self.calls_of("forked.jsonl"), [])
+
+    def test_the_one_place_that_decides_says_why_a_restarted_try_starts_anew(self):
+        from hansa import run
+        self.restart_lane("econnreset")
+        p = self.desk.settings()["providers"]["mimo"]
+        tid = self.desk.new_task("Fix the badge")
+        proc = run.start(self.desk, tid, "a", "mimo")
+        self.assertEqual(proc.wait(timeout=60), 1)
+        m = run.finish(self.desk, tid, 1)
+        self.assertEqual(m["state"], "queued", m)
+        decide = lambda m, p=p, lane="a": run.continuation(self.desk, m, lane, "mimo", p, "mimo-x")
+        self.assertEqual(decide(m)["from"], tid)
+        self.assertEqual(decide(m)["session"], m["attempts"][0]["launch"])
+        self.assertIn("Codex", decide(m, {**p, "kind": "codex"})["new"])
+        self.assertIn("lane b, not on a", decide(m, lane="b")["new"])
+        refused = {**m["attempts"][0], "kind": "refused", "error": "mimo: refused the request (refusal)"}
+        self.assertIn("not cut off: mimo: refused", decide({**m, "attempts": [refused]})["new"])
+        held = {**m, "earlier_runs": [{"launch": m["launch"], "why": "stopped: the sandbox could not start"}]}
+        self.assertIn("did not end on its own: stopped: the sandbox", decide(held)["new"])
+        unsafe = {**m, "restart": {**m["restart"], "source": "base", "why": "the interrupted run's commits hold a key"}}
+        self.assertIn("hold a key", decide(unsafe)["new"])
+        self.assertIn("left no conversation record", decide({**m, "attempts": [{"kind": "network"}]})["new"])
+
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
+    def test_a_restarted_try_claude_code_cannot_go_on_with_starts_again_once_anew(self):
+        from hansa import run
+        self.restart_lane("econnreset", {"FAKE_FORK_LOST": "gone"})
+        tid = self.desk.new_task("Fix the badge")
+        m = self.through(tid)
+        self.assertEqual(m["state"], "done", m)
+        first, lost, fresh = self.workers()
+        self.assertEqual(lost[lost.index("--resume") + 1], first[first.index("--session-id") + 1])
+        self.assertNotIn("--resume", fresh)
+        self.assertEqual([a["kind"] for a in m["attempts"]], ["network", "conversation"])
+        self.assertEqual(run.tries_used(m["attempts"]), 1)  # the dropped connection's, as before; none for this
+        self.assertIn(f"conversation of task {tid}'s last try", m["conversation"]["new"])
+        self.assertIn(f"conversation: a new one, as Claude Code could not go on in the conversation of task {tid}'s "
+                      "last try", views.show_text(self.desk, tid))
+        # it starts from where the try that could not go on started: what the cut-off try had left
+        self.assertEqual(m["run_start"]["source"], "earlier run's commit")
+        self.assertEqual(m["run_start"]["commit"], m["attempts"][1]["run_start"]["commit"])
+        self.assertNotEqual(m["run_start"]["commit"], m["base"])
+        self.assertEqual(m["usage"]["mimo-x"]["in"], 300)
 
     def test_how_the_parent_ended_is_no_reason_against_going_on(self):
         from hansa import run
@@ -35215,7 +35437,7 @@ def save():'''))
                 self.desk.update(v1["id"], **ended)
                 self.assertEqual(decide(self.desk.meta(v2))["from"], v1["id"])
         self.assertIn("Codex", decide(m, {**p, "kind": "codex"})["new"])
-        self.assertIn("started it again", decide({**m, "attempts": [{"kind": "network"}]})["new"])
+        self.assertIn("left no conversation record", decide({**m, "attempts": [{"kind": "network"}]})["new"])
         self.assertIn("lane b", run.continuation(self.desk, m, "b", "mimo", p, "mimo-x")["new"])
         for f in run.config_home(self.desk, "mimo", p).glob(f"projects/*/{v1['session_id']}.jsonl"):
             f.unlink()  # removed by age, say
@@ -35386,7 +35608,7 @@ def save():'''))
                 time.sleep(0.1)
             m = self.desk.meta(new)
             self.assertEqual([a["kind"] for a in m["attempts"]], ["limit"], m)
-            self.assertIn("started it again", m["conversation"]["new"])
+            self.assertIn("never reached the model", m["conversation"]["new"])  # the limit came before any reply
 
     def test_a_chain_of_three_goes_on_from_each_parents_own_session_and_counts_its_part(self):
         # each forked record begins with copies of all the earlier ones' rows (FORK_FACTS 1); each answer counts the

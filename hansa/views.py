@@ -1838,10 +1838,12 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         out.append(f"next run starts from: {started_from(m['restart'])}")
     elif m["state"] != "queued" and m.get("run_start"):
         out.append(f"run started from: {started_from(m['run_start'])}")
-    talk = m.get("conversation") if m["state"] != "queued" else None  # a follow-up's or verification's run
+    talk = m.get("conversation") if m["state"] != "queued" else None  # its current run's
     if isinstance(talk, dict) and (talk.get("from") or talk.get("new")):  # (run.continuation)
-        what = "verification" if m.get("kind") == "verify" else "task"
-        out.append(f"conversation: continued that of {what} {talk['from']}" if talk.get("from") else
+        what, ended = "verification" if m.get("kind") == "verify" else "task", talk.get("ended") or "it was cut off"
+        out.append(f"conversation: continued its last try's, which ended because {ended}"  # started again by
+                   if talk.get("from") and talk.get("again") else  # hansa itself (run.restarted)
+                   f"conversation: continued that of {what} {talk['from']}" if talk.get("from") else
                    f"conversation: a new one, as {talk['new']}")
     out += oom_lines(m, {"verify": "verification"}.get(m.get("kind"), "worker"))
     if limit_wait(desk, m):

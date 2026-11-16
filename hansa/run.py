@@ -4347,10 +4347,50 @@ VERIFY_KEPT = {"ref": "What you had changed there for your checks is not in it: 
                "error": "What you had changed there for your checks is not in it: hansa could not keep it under a "
                         "ref of its own, so it went to git's stash when the worktree was next used.",
                "none": "hansa keeps nothing you had changed there: you left no changes, or they were removed since."}
+# A try hansa starts again by itself after its last try was cut off (restarted) goes on in that try's conversation
+# the same way: its first message is this, and a verification's the same with RESTART_VERIFY_WORK
+RESTART_NOTE = """You go on here, in a new try of this same {what} ({tid}), from your conversation in its last try.
+- Your last try ended because {ended}.
+- The call you were in the middle of did not finish: what it was doing may be half done, and its result is lost.
+{work}- Other tasks may have used this worktree in between: files git does not track (build outputs, ignored files)
+  may be gone or different.
+- Your temporary folder is a new, empty one: {tmp}. The old one is gone, and nothing you had running is running.
+- Your instructions are now this try's, its time limit and when it started included.
+- Look before you rely on what you remember: {look}.
+{update}
+"""
+RESTART_WORK = "- {left}; the worktree, {wt}, is on branch {branch} at {head} now.\n"
+RESTART_VERIFY_WORK = ("- What you verify is the same: task {task}, at commit {commit}. The worktree, {wt}, is clean "
+                       "again at that commit. {kept}\n")
+RESTART_KEPT_AGAIN = " What you leave changed when this try ends takes its place there."
+RESTART_GO_ON = "Go on with the task where you stopped, and end with your report, as your instructions say.\n"
 VERIFY_LOOK = ("The coordinator asks you to look in particular at: {note}\n"
                "End with your verdict on the whole change, in the form your instructions give.\n")
 VERIFY_GO_ON = ("Go on where you stopped, with what you had not reached, and end with your verdict on the whole "
                 "change, in the form your instructions give.\n")
+
+
+def restart_note(desk: Desk, meta: dict, going_on: dict, wt, head: str, commit: str, tmp: str, update: str) -> str:
+    """The first message of a try that goes on in its last try's conversation (restarted): why that try ended,
+    where its work is now (a worker's: committed and carried on, or nothing left; a verification's: its worktree
+    clean at the task's commit again, and where its scratch changes went), its new temporary folder."""
+    tid = meta["id"]
+    if meta.get("kind") == "verify":
+        kept = VERIFY_KEPT["ref" if meta.get("scratch_ref") else "error" if meta.get("scratch_error") else "none"]
+        kept = kept.format(ref=meta.get("scratch_ref") or "", commit=commit[:12]) + (
+            RESTART_KEPT_AGAIN if meta.get("scratch_ref") else "")
+        work = RESTART_VERIFY_WORK.format(task=meta.get("parent") or "", commit=commit[:12], wt=wt, kept=kept)
+        what, look, go_on = "verification", "`git status`", VERIFY_GO_ON
+    else:
+        began = going_on.pop("nothing_left", None)
+        carried = going_on.pop("commit", "")
+        left = (f"hansa committed what you had left as commit {carried[:12]}" if began is None else
+                "You had left nothing to commit" + (", so the branch starts where your last try's started"
+                                                    if began == head else ""))
+        work = RESTART_WORK.format(left=left, wt=wt, branch=f"task/{tid}", head=head[:12])
+        what, look, go_on = "task", "`git status`, `git log`", RESTART_GO_ON
+    return RESTART_NOTE.format(what=what, tid=tid, ended=going_on.get("ended") or "it was cut off", work=work,
+                               tmp=tmp, look=look, update=update.strip() + "\n" if update else "") + go_on
 
 
 def earlier_verifications(desk: Desk, meta: dict) -> list:
@@ -4374,7 +4414,13 @@ def continuation(desk: Desk, meta: dict, lane_name: str, pname: str, p: dict, mo
     with the provider and model of the earlier one's last run, when that run left a record and the installed Claude
     Code has the switches it needs (lacks_switches); a follow-up only from the base the parent's work is on. An
     earlier one that itself went on is no reason against: its own (forked) session is forked again. A verification
-    never goes on in a worker's conversation, nor a follow-up in a verifier's."""
+    never goes on in a worker's conversation, nor a follow-up in a verifier's. A later try that hansa starts again by
+    itself (the task has attempts) goes on, or not, in its own last try's conversation instead (restarted)."""
+    if meta.get("attempts") or meta.get("earlier_runs"):  # hansa starts it again by itself (restarted)
+        lost = [a for a in meta.get("attempts") or [] if isinstance(a, dict) and a.get("kind") == "conversation"]
+        if lost:  # once: this start is not a continued one, so it cannot end so again (conversation_lost)
+            return {"new": lost[-1].get("error") or "Claude Code could not go on in an earlier conversation"}
+        return restarted(desk, meta, lane_name, pname, p, model)
     if not meta.get("parent"):
         return None
     verifying = meta.get("kind") == "verify"
@@ -4387,10 +4433,6 @@ def continuation(desk: Desk, meta: dict, lane_name: str, pname: str, p: dict, mo
         earlier = [read_json(desk.tasks_dir / meta["parent"] / "meta.json", {}) or {}]
     if not verifying and earlier[0].get("kind") == "verify":
         return {"new": "the earlier task is a verification, whose conversation a worker never continues"}
-    if meta.get("attempts") or meta.get("earlier_runs"):
-        lost = [a for a in meta.get("attempts") or [] if isinstance(a, dict) and a.get("kind") == "conversation"]
-        # once: this start is not a continued one, so it cannot end so again (conversation_lost)
-        return {"new": (lost[-1].get("error") if lost else "") or "hansa started it again after an earlier run of it"}
     if not verifying and meta.get("fresh"):
         return {"new": "it starts over from the base branch (--fresh), so the earlier conversation's work is not on its branch"}
     if not verifying and not meta.get("start_from"):
@@ -4429,6 +4471,75 @@ def continuation(desk: Desk, meta: dict, lane_name: str, pname: str, p: dict, mo
     began = (parent.get("run_start") or {}).get("commit")  # where its last run started: then nothing was left
     nothing = parent.get("head") == began if began else parent.get("commits") == 0
     return {"from": meta["parent"], "session": psid, "before": before, **({"nothing_left": True} if nothing else {})}
+
+
+# Why a try hansa starts again by itself went on from its last try's conversation: the kinds of attempt record that
+# cut a run off (finish), in plain words for the try's first message (RESTART_NOTE) and hansa show
+CUT_OFF = {"network": "the connection to the provider dropped",
+           "killed": "the system stopped it (exit {exit})",
+           "limit": "the provider reached a usage limit and had to rest",
+           "credit": "the provider's credit ran out and it had to rest",
+           "login": "the provider's login was lost and it had to rest until it was back"}
+
+
+def restarted(desk: Desk, meta: dict, lane_name: str, pname: str, p: dict, model: str) -> dict:
+    """For continuation: whether a try hansa starts again by itself (the task has attempts, or earlier_runs) goes on
+    in its last try's conversation. It does when that try was cut off (CUT_OFF: a dropped connection, a kill by the
+    system, a usage limit, a lost login), on this lane, provider and model, not on the Codex adapter, left a record
+    with a model's reply in its own part, and, of a worker, its work is what this try starts from (interrupted_restart:
+    carried on, or nothing left to carry). {"from": the task's own id, "session": that try's, "again": its kind,
+    ...} when it does, {"new": why not} when not."""
+    last = next((a for a in reversed(meta.get("attempts") or []) if isinstance(a, dict)), {})
+    launch = meta.get("launch") or ""
+    stopped = [r for r in meta.get("earlier_runs") or []
+               if isinstance(r, dict) and launch and r.get("launch") == launch]
+    if stopped:  # its last run went back to the queue without an attempt record (sandbox_failed, keep_lost_run)
+        return {"new": f"its last run did not end on its own: {stopped[-1].get('why') or 'hansa stopped it'}"}
+    if not last:
+        return {"new": "hansa does not know how its last run ended"}
+    if last.get("kind") not in CUT_OFF:
+        return {"new": f"its last try was not cut off: {last.get('error') or 'it ended on an error'}"[:300]}
+    sid = last.get("launch") or last.get("session_id") or ""
+    if not sid:
+        return {"new": "its last try left no conversation record on this machine"}
+    if (last.get("lane") or "") != lane_name:
+        return {"new": f"it runs on lane {lane_name}, not on {last.get('lane') or '(not recorded)'}, "
+                       "where its last try ran"}
+    if last.get("provider") != pname:
+        return {"new": f"it runs on {pname}, not on {last.get('provider') or '(none)'}, which its last try used"}
+    if (last.get("model") or "") != model:
+        return {"new": f"it runs model {model}, not {last.get('model') or '(unknown)'}, which its last try used"}
+    if p.get("kind") == "codex":
+        return {"new": "its last try ran on the Codex adapter, which leaves no conversation to go on from"}
+    home = config_home(desk, pname, p)
+    if not any(home.glob(f"projects/*/{sid}.jsonl")):
+        return {"new": "its last try left no conversation record on this machine"}
+    # its own part: of a try that itself went on from an earlier conversation, the rows it copied are not its own
+    if not any(d.get("type") == "assistant" and (d.get("message") or {}).get("model") not in (None, "<synthetic>")
+               for d in _rows(home, own_session(desk, {**meta, "session_id": sid})) or []):
+        return {"new": "its last try never reached the model, so its conversation holds nothing to go on from"}
+    going = {"from": meta["id"], "session": sid, "again": last["kind"],
+             "ended": CUT_OFF[last["kind"]].format(exit=last.get("exit"))}
+    if meta.get("kind") != "verify":  # a verification's worktree is cleaned back to its task's commit each time
+        restart = meta.get("restart") or {}
+        carried = restart.get("source") == "earlier run's commit"
+        if carried and not restart.get("why"):
+            going["commit"] = restart.get("commit") or ""
+        elif restart.get("why") == "the interrupted run left no commits":
+            going["nothing_left"] = (last.get("run_start") or {}).get("commit") or ""
+        else:
+            why = restart.get("why") or "hansa did not carry it on"
+            return {"new": f"its last try's work is not what this try starts from ({why}), so that conversation "
+                           "would mislead it"}
+    if lacks := lacks_switches(provider_program(p)):
+        return {"new": lacks}
+    # Claude Code's answers count the whole conversation in (FORK_FACTS 2): the last try's own part, and of a try
+    # that itself went on from an earlier conversation, the part before it too
+    c = meta.get("conversation") or {}
+    before = last.get("usage") or {}
+    if c.get("from") and c.get("own") == sid:
+        before = add_usage(c.get("before") or {}, before)
+    return {**going, "before": before}
 
 
 # The switches a continued start needs (start). Read from the help text, not judged by the version: the help names
@@ -4501,8 +4612,9 @@ def conversation_lost(desk: Desk, meta: dict, run: dict, err: str, home, sid, be
            for d in rows or []):
         return ""
     lines = (str(run.get("result") or "") or err).strip().splitlines()
-    what = "verification" if meta.get("kind") == "verify" else "task"
-    return (f"Claude Code could not go on in the conversation of {what} {c['from']}: the start that went on in it "
+    what = ("verification" if meta.get("kind") == "verify" else "task") + f" {c['from']}" + (
+        "'s last try" if c.get("again") else "")  # a try hansa started again by itself (restarted)
+    return (f"Claude Code could not go on in the conversation of {what}: the start that went on in it "
             f"ended after {max(0, round(took))} seconds with no reply"
             + (f" ({lines[-1][:160]})" if lines else ""))
 
@@ -4593,7 +4705,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
             "--system-prompt-snapshot", "off"]
         head = wgit(desk, wt, "rev-parse", "HEAD")
         commit = meta.get("start_from") or head
-        if verifying:  # its worktree was cleaned back to the task's commit; its scratch changes are under a ref
+        if going_on.get("again"):  # hansa starts it again by itself, after its last try was cut off (restarted)
+            first = restart_note(desk, meta, going_on, wt, head, commit, commands_tmp(tmp), update)
+        elif verifying:  # its worktree was cleaned back to the task's commit; its scratch changes are under a ref
             was = read_json(desk.tasks_dir / going_on["from"] / "meta.json", {}) or {}
             kept = VERIFY_KEPT["ref" if was.get("scratch_ref") else "error" if was.get("scratch_error") else "none"]
             note = meta.get("verify_note") or ""
@@ -5031,7 +5145,8 @@ def read_detail(desk: Desk, tid: str, what: str, default, fn, *args):
 
 
 def interrupted_restart(desk: Desk, wt: Path, meta: dict, fields: dict) -> dict:
-    """When a run is cut off by a dropped connection, the provider's limit or the system, and hansa queues it again:
+    """When a run is cut off by a dropped connection, the provider's limit, a lost login or the system, and hansa
+    queues it again (and when a try that went on in such a run's conversation could not: conversation_lost):
     1. The run's own work is the commits from where it started (run_start) to its head. A run started
        by an older hansa, with no run_start, counts from its start_from, else from its base.
     2. Carry on from its head when that work is not empty, holds no key and no conflict markers,
@@ -5389,7 +5504,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         again = {"resumed": None, "wrap_up": None, "restart": None} if final == "queued" else {}
         if (final == "queued" and len(attempts) > len(meta.get("attempts", []))
                 and meta.get("kind") != "verify"
-                and (kind in ("quota", "credit") or net or attempts[-1].get("kind") == "killed")):
+                and (kind in ("quota", "credit", "login") or net or attempts[-1].get("kind") == "killed"
+                     # a try that went on in its last try's conversation and could not: from where that one started
+                     or (attempts[-1].get("kind") == "conversation"
+                         and (meta.get("conversation") or {}).get("again")))):
             again["restart"] = restart or interrupted_restart(desk, wt, meta, fields)
         if final == "queued" and meta.get("sandbox_failed"):  # its numbers still count (cost), as a run of the task
             kept = {"usage": {}, "turns": None, "earlier_runs": [*(now_meta.get("earlier_runs") or []), {
@@ -5426,6 +5544,7 @@ def run_numbers(meta: dict, fields: dict) -> dict:
             "launch": meta.get("launch", ""), "ran_from": meta.get("started"), "ended": fields.get("finished") or now(),
             "model": meta.get("model_asked", ""), "effort": meta.get("effort_used", ""),
             "effort_from": meta.get("effort_from", ""), "run_start": meta.get("run_start"),
+            "lane": meta.get("lane", ""),  # the lane it ran on (restarted)
             **({"oom_kills": fields["oom_kills"]} if fields.get("oom_kills") else {})}
 
 

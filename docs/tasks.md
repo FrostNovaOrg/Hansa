@@ -196,9 +196,10 @@ so a long interpreter path does not hide a script's name at the end.
 
 ## Dropped connections and usage limits
 
-After a dropped connection or usage limit, hansa carries on new commits without keys or markers, unless
-the run began with update conflicts. Otherwise it keeps earlier carried work, or repeats the original
-start and update. `hansa show` says where and why.
+After a dropped connection, a usage limit or a lost login, hansa carries on new commits without keys or
+markers, unless the run began with update conflicts. Otherwise it keeps earlier carried work, or repeats the
+original start and update. `hansa show` says where and why. The next try goes on in the cut-off try's
+conversation where it can ([A try hansa starts again by itself](#a-try-hansa-starts-again-by-itself)).
 Each attempt keeps its actual starting commit, including a final failed attempt.
 Show labels that final attempt `last try` (or `last run`); earlier attempts keep
 their own starts, including commits carried from another run.
@@ -794,8 +795,8 @@ ended (done, failed, at a ceiling, cancelled):
   the same commits);
 - that run was not on the Codex adapter, and its conversation record is still on this machine (Claude
   Code removes old ones, by default after 30 days);
-- it is the follow-up's first run: a run hansa starts again by itself (a dropped connection, a usage
-  limit) starts a new conversation, as before;
+- it is the follow-up's first run: a try hansa starts again by itself goes on in its own last try's
+  conversation instead ([below](#a-try-hansa-starts-again-by-itself));
 - the installed Claude Code lists `--resume`, `--fork-session`, `--session-id` and
   `--system-prompt-snapshot` in its help text, which hansa reads once per server start (an older
   version without them gets a new conversation; the task does not fail for it);
@@ -828,6 +829,16 @@ those rows out of all it reads of the follow-up's record (tokens, replies, last 
 ceiling, work left running, a lost run's numbers). Claude Code's answer to such a run counts the
 earlier conversation's tokens and cost in as well; hansa takes them off, so `hansa cost` counts each
 token once. The earlier task's record stays as it was.
+
+#### A try hansa starts again by itself
+
+A task or verification hansa queues again by itself after its try was cut off (a dropped connection, a
+kill by the system, a usage limit, a lost login) goes on in that try's conversation the same way, in a
+forked session of its own, when it runs on the same lane, provider and model, that try reached the model,
+and a worker starts from what that try left; its first message says why that try ended, where its work
+is now (a verification's scratch changes: `refs/hansa/scratch/<id>`), that the call it was in did not
+finish and that its temporary folder is a new one. Otherwise, or once more when Claude Code cannot go on
+in it, it starts a new conversation without using a try for that, and `hansa show` says which and why.
 
 #### A repeated verification
 
