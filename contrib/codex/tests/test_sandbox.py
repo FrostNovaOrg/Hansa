@@ -8,6 +8,16 @@ from .codexkit import FAKES, Scratch, git, hansa_run, shim
 
 
 class SrtSettings(Scratch):
+    def sandbox_fs(self):
+        """srt's filesystem settings using hansa's denies for the (possibly patched) platform."""
+        box = copy.deepcopy(self.box)
+        with mock.patch.object(hansa_run.account, "LINUX", shim.sys.platform.startswith("linux")):
+            box["sandbox"]["filesystem"]["denyWrite"] = hansa_run.git_write_deny(self.wt)
+        return shim.srt_settings(box, str(self.wt), str(self.tmp), str(self.home))["filesystem"]
+
+    def sandbox_problem(self, fs):
+        return shim.sandbox_problem(fs, str(self.wt), str(self.home), str(FAKES / "codex"))
+
     def test_settings_given_to_srt(self):
         run, _ = self.run_worker("success.jsonl")
         self.assertEqual(run["subtype"], "success")
@@ -101,6 +111,9 @@ class SrtSettings(Scratch):
 
     def test_each_git_entry_hansa_denies_is_needed(self):
         common, own = self.root / "repo" / ".git", self.root / "repo" / ".git" / "worktrees" / "wt"
+        # Linux requires MERGE_HEAD only while it exists; include that case on both systems.
+        (own / "MERGE_HEAD").write_text("test merge\n")
+        self.box["sandbox"]["filesystem"]["denyWrite"] = hansa_run.git_write_deny(self.wt)
         for p in (common / "objects", common / "refs", common / "HEAD", common / "config", common / "hooks",
                   common / "packed-refs", own / "HEAD", own / "gitdir", own / "commondir", own / "MERGE_HEAD"):
             with self.subTest(p=p):
@@ -118,33 +131,82 @@ class SrtSettings(Scratch):
         for p in hansa_run._git_others(self.wt):
             self.assertTrue(any(x in named + others for x in hansa_run.full_paths([p])), p)
 
+    def test_git_operation_denies_follow_platform_and_presence(self):
+        own = self.root / "repo" / ".git" / "worktrees" / "wt"
+        paths = [str(own / n) for n in shim.GIT_OPS]
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform), mock.patch.object(shim.sys, "platform", platform):
+                named, _ = shim.git_required(str(self.wt))
+                for p in paths:
+                    self.assertEqual(p in named, platform == "darwin", p)
+                (own / "MERGE_HEAD").touch()
+                fs = self.sandbox_fs()
+                self.assertEqual(self.sandbox_problem(fs), "")
+                fs["denyWrite"].remove(str(own / "MERGE_HEAD"))
+                self.assertIn(str(own / "MERGE_HEAD"), self.sandbox_problem(fs))
+                (own / "MERGE_HEAD").unlink()
+
     def test_other_git_entries_need_a_path_or_a_pattern(self):
         # the common folder's index: named in hansa's list, and under its patterns for the common folder
         common = self.root / "repo" / ".git"
-        box = self.without(common / "index")
-        self.assertEqual(self.run_worker("success.jsonl", argv=self.worker_argv(box=box))[0]["subtype"], "success")
-        fs = box["sandbox"]["filesystem"]
-        fs["denyWrite"] = [x for x in fs["denyWrite"] if not x.startswith(f"{common}/[")]
-        self.codex_record.unlink()
-        self.assertIn(f"do not deny writing {common / 'index'}", self.refused(box))
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform), mock.patch.object(shim.sys, "platform", platform):
+                fs = self.sandbox_fs()
+                fs["denyWrite"].remove(str(common / "index"))
+                if platform == "linux":
+                    self.assertIn(str(common / "index"), self.sandbox_problem(fs))
+                else:
+                    self.assertEqual(self.sandbox_problem(fs), "")
+                fs["denyWrite"] = [x for x in fs["denyWrite"] if not x.startswith(f"{common}/[")]
+                self.assertIn(str(common / "index"), self.sandbox_problem(fs))
 
     def test_made_in_git_folder_since_hansa_started(self):
         # hansa's patterns hold what is made after it wrote the settings: another task's worktree, a FETCH_HEAD
         (self.root / "repo" / ".git" / "worktrees" / "t9").mkdir()
         (self.root / "repo" / ".git" / "FETCH_HEAD").write_text("")
-        run, _ = self.run_worker("success.jsonl")
-        self.assertEqual(run["subtype"], "success", run["result"])
+        if shim.sys.platform.startswith("linux"):
+            # Dropped globs cannot cover entries made after hansa took its fixed-path list.
+            self.assertIn("FETCH_HEAD", self.refused())
+        else:
+            run, _ = self.run_worker("success.jsonl")
+            self.assertEqual(run["subtype"], "success", run["result"])
 
     def test_project_folders_required(self):
-        fs = shim.srt_settings(self.box, str(self.wt), str(self.tmp), str(self.home))["filesystem"]
-        with mock.patch.object(shim.sys, "platform", "darwin"):  # where the shim runs a worker
-            self.assertEqual(shim.sandbox_problem(fs, str(self.wt), str(self.home), str(FAKES / "codex")), "")
+        with mock.patch.object(shim.sys, "platform", "darwin"):
+            fs = self.sandbox_fs()
+            self.assertEqual(self.sandbox_problem(fs), "")
             for d in shim.config_deny(str(self.wt)) + shim.home_deny(str(self.home)):
                 with self.subTest(d=d):
                     less = {**fs, "denyWrite": [x for x in fs["denyWrite"] if x != d]}
-                    self.assertIn(f"do not deny writing {d}",
-                                  shim.sandbox_problem(less, str(self.wt), str(self.home), str(FAKES / "codex")))
+                    why = self.sandbox_problem(less)
+                    self.assertIn("do not deny writing", why)
+                    self.assertIn(d, why)
 
+    @mock.patch.object(shim.sys, "platform", "linux")
+    def test_linux_requires_every_fixed_deny(self):
+        fs = self.sandbox_fs()
+        self.assertEqual(self.sandbox_problem(fs), "")
+        named, others = shim.git_required(str(self.wt))
+        required = [*named, *others, *(str(self.wt / n) for n in shim.PROJECT_CONFIG_DIRS),
+                    *shim.home_deny(str(self.home))]
+        for d in required:
+            with self.subTest(d=d):
+                less = {**fs, "denyWrite": [x for x in fs["denyWrite"] if x not in shim.both([d])]}
+                why = self.sandbox_problem(less)
+                self.assertIn("do not deny writing", why)
+                self.assertIn(d, why)
+
+    @mock.patch.object(shim.sys, "platform", "linux")
+    def test_linux_nested_project_denies_are_given_but_not_required(self):
+        fs = self.sandbox_fs()
+        globs = [d for d in shim.config_deny(str(self.wt)) if "/**/" in d]
+        self.assertTrue(globs)
+        for d in globs:
+            self.assertIn(d, fs["denyWrite"])
+        fs["denyWrite"] = [d for d in fs["denyWrite"] if d not in globs]
+        self.assertEqual(self.sandbox_problem(fs), "")
+
+    @mock.patch.object(shim.sys, "platform", "darwin")
     def test_project_folder_patterns_as_srt_reads_them(self):
         wt = str(self.wt)
         deny = shim.config_deny(wt)
@@ -156,6 +218,7 @@ class SrtSettings(Scratch):
                   "a/x.claude", "a/.claude-old/hooks", "a/codex/config.toml", "a/agents"):
             self.assertFalse(shim.denied(f"{wt}/{p}", deny), p)
 
+    @mock.patch.object(shim.sys, "platform", "darwin")
     def test_nested_project_folder_cannot_be_made(self):
         # srt's move-blocking denies file-write-create on whatever a denyWrite pattern matches, so an entry named
         # .claude, .codex or .agents anywhere below the top can be made neither by mkdir, nor as a link, nor by
@@ -169,6 +232,20 @@ class SrtSettings(Scratch):
         files_only = [d for d in deny if not any(d.endswith(f"/**/{n}") for n in shim.PROJECT_CONFIG_DIRS)]
         self.assertEqual(len(deny) - len(files_only), len(shim.PROJECT_CONFIG_DIRS))
         self.assertFalse(shim.denied(f"{wt}/sub/.claude", files_only))
+
+    @mock.patch.object(shim.sys, "platform", "linux")
+    def test_linux_globs_cover_nothing(self):
+        wt = str(self.wt)
+        for pattern in (f"{wt}/**/.claude", f"{wt}/*/.codex", f"{wt}/sub?/x", f"{wt}/[ab]/x"):
+            with self.subTest(pattern=pattern):
+                for p in (".claude", "a/.claude", "a/deep/.claude/settings.json", "a/.codex", "sub1/x", "a/x"):
+                    self.assertFalse(shim.denied(f"{wt}/{p}", [pattern]), p)
+        deny = shim.config_deny(wt)
+        for n in shim.PROJECT_CONFIG_DIRS:
+            self.assertTrue(shim.denied(f"{wt}/{n}", deny))
+            self.assertTrue(shim.denied(f"{wt}/{n}/file", deny))
+            self.assertFalse(shim.denied(f"{wt}/sub/{n}", deny))
+            self.assertFalse(shim.denied(f"{wt}/sub/deeper/{n}/file", deny))
 
     def test_worktree_path_with_a_glob_character(self):
         # srt would read [ ] * ? in the worktree's path, inside the shim's patterns, as a glob
@@ -213,7 +290,7 @@ class SrtSettings(Scratch):
         self.assertIn(str(self.home / "skills"), self.refused())
 
     def test_home_check_reads_no_file(self):
-        # names and existence only: an unreadable AGENTS.md is still found, and nothing is opened
+        # No contents are opened: an unreadable, nonempty AGENTS.md is still found.
         self.home.mkdir()
         p = self.home / "AGENTS.md"
         p.write_text("x")
@@ -222,14 +299,73 @@ class SrtSettings(Scratch):
         self.assertIn(str(p), shim.home_problem(str(self.home)))
         self.assertEqual(shim.home_problem(str(self.root / "no-such-home")), "")
 
-    def test_only_on_macos(self):
-        fs = shim.srt_settings(self.box, str(self.wt), str(self.tmp), str(self.home))["filesystem"]
-        for platform in ("linux", "win32", "freebsd14"):
-            with mock.patch.object(shim.sys, "platform", platform):
-                self.assertIn("only on macOS", shim.sandbox_problem(fs, str(self.wt), str(self.home),
-                                                                     str(FAKES / "codex")))
-        with mock.patch.object(shim.sys, "platform", "darwin"):
-            self.assertEqual(shim.sandbox_problem(fs, str(self.wt), str(self.home), str(FAKES / "codex")), "")
+    def test_workers_supported_on_macos_and_linux(self):
+        for platform in ("darwin", "linux", "linux2"):
+            with self.subTest(platform=platform), mock.patch.object(shim.sys, "platform", platform):
+                self.assertEqual(self.sandbox_problem(self.sandbox_fs()), "")
+
+    def test_other_worker_platforms_refused(self):
+        for platform in ("win32", "freebsd14"):
+            with self.subTest(platform=platform), mock.patch.object(shim.sys, "platform", platform):
+                why = self.sandbox_problem(self.sandbox_fs())
+                for word in ("macOS", "Linux", platform):
+                    self.assertIn(word, why)
+
+    def test_empty_home_instructions_absent_only_on_linux(self):
+        self.home.mkdir()
+        for name in shim.HOME_INSTRUCTIONS:
+            p = self.home / name
+            p.touch()
+            for platform in ("darwin", "linux"):
+                with self.subTest(name=name, platform=platform), mock.patch.object(shim.sys, "platform", platform):
+                    why = shim.home_problem(str(self.home))
+                    if platform == "linux":
+                        self.assertEqual(why, "")
+                    else:
+                        self.assertIn(str(p), why)
+            p.unlink()
+
+    def test_home_instructions_with_content_refuse_on_both_platforms(self):
+        self.home.mkdir()
+        for name in shim.HOME_INSTRUCTIONS:
+            p = self.home / name
+            for content in ("obey\n", "\n"):
+                p.write_text(content)
+                for platform in ("darwin", "linux"):
+                    with self.subTest(name=name, content=content, platform=platform), \
+                            mock.patch.object(shim.sys, "platform", platform):
+                        self.assertIn(str(p), shim.home_problem(str(self.home)))
+            p.unlink()
+
+    @mock.patch.object(shim.sys, "platform", "linux")
+    def test_home_instruction_symlinks_are_not_placeholders(self):
+        self.home.mkdir()
+        empty = self.root / "empty"
+        empty.touch()
+        for name in shim.HOME_INSTRUCTIONS:
+            p = self.home / name
+            for target in (empty, self.root / "missing"):
+                with self.subTest(name=name, target=target):
+                    p.symlink_to(target)
+                    self.assertIn(str(p), shim.home_problem(str(self.home)))
+                    p.unlink()
+
+    def test_worker_leaves_empty_denied_placeholders_in_place(self):
+        self.home.mkdir()
+        paths = [*(self.home / n for n in shim.HOME_DENY),
+                 *(self.wt / n for n in shim.PROJECT_CONFIG_DIRS)]
+        for p in paths:
+            p.touch(mode=0o444)
+        inodes = [p.stat().st_ino for p in paths]
+        if shim.sys.platform.startswith("linux"):
+            run, code = self.run_worker()
+            self.assertEqual((code, run["subtype"]), (0, "success"), run["result"])
+        else:
+            self.assertIn(str(self.home / "AGENTS.md"), self.refused())
+        for p, inode in zip(paths, inodes):
+            self.assertTrue(p.is_file(), p)
+            self.assertEqual(p.stat().st_ino, inode, p)
+            self.assertEqual(p.stat().st_size, 0, p)
 
     def test_no_sandbox_no_run(self):
         self.assertIn("no sandbox", self.refused({}))
