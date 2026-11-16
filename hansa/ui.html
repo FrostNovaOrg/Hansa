@@ -1551,6 +1551,8 @@ const serverMessagesZh = {
   worktree_failed:v => `git 无法准备工作树 ${v.path}，程序报告：“${v.said}”；请修复后重试`,
   setup_failed:v => `工作线的准备命令失败（退出码 ${v.exit}），工作智能体尚未启动；hansa show ${v.task} 可查看准备命令的输出`,
   task_ceiling:v => `达到上限（${v.count} ${v.unit === "minutes" ? "分钟" : "轮"}）；任务可能过大、描述不清或工作智能体卡住，请检查任务后重试`,
+  task_ceiling_reported:v => `达到时间上限（${v.count} 分钟）后被停下，报告是停下后补写的；任务可能过大、描述不清或工作智能体卡住，请检查任务后重试`,
+  task_ceiling_unreported:v => `达到时间上限（${v.count} 分钟）后被停下，停下后给的 ${v.given} 分钟内也没有写出报告；任务可能过大、描述不清或工作智能体卡住，请检查任务后重试`,
   program_error:v => reasonText(v.reason), no_output:v => `没有输出（退出码 ${v.exit}）`,
   task_wait:v => `等待：${waitingText(v.waiting)}`,
   task_prior:v => `先前由 ${v.provider} 运行：${reasonText(v.reason)}` + (v.kind === "credit" ? "（余额不足，不计尝试次数）"

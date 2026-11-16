@@ -33,6 +33,8 @@ PATTERNS = [
     ("worktree_failed", r"git cannot prepare its worktree (?P<path>.+?): (?P<said>.*)"),
     ("setup_failed", r"the lane's setup command failed \(exit (?P<exit>\d+)\), so the worker never started; hansa show (?P<task>t\d+) has the setup's last lines"),
     ("task_ceiling", r"stopped at the ceiling of (?P<count>\d+) (?P<unit>minutes|turns): the task was probably too big or unclear, or the worker got stuck"),
+    ("task_ceiling_reported", r"stopped at the ceiling of (?P<count>\d+) minutes; its report was written after the stop: the task was probably too big or unclear, or the worker got stuck"),
+    ("task_ceiling_unreported", r"stopped at the ceiling of (?P<count>\d+) minutes, and its report was not written in the (?P<given>\d+) minutes given after the stop either: the task was probably too big or unclear, or the worker got stuck"),
     ("no_output", r"no output \(exit (?P<exit>-?\d+)\)"),
     ("mod_old", r"Claude Code (?P<version>[\d.]+) is older than (?P<needs>[\d.]+)"),
     ("mod_folder", r"its copy would be in a folder another account could change: (?P<path>.+)"),

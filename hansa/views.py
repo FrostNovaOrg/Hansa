@@ -250,7 +250,8 @@ def verification(desk: Desk, m: dict, *, latest: bool = False):
         return None
     def row(v):
         v = as_closed_now(v)
-        return {"task": v["id"], "state": v["state"], "verdict": v.get("verdict", ""), "lane": v.get("lane", "")}
+        return {"task": v["id"], "state": v["state"], "verdict": v.get("verdict", ""), "lane": v.get("lane", ""),
+                **({"after_ceiling": after_ceiling(v)} if after_ceiling(v) else {})}
     newest = row(desk.meta(vid))
     if latest:
         return newest
@@ -291,7 +292,8 @@ def _verification_line(v) -> str:
         return _verification_line({k: value for k, value in v.items() if k != "latest"}) + "; latest: " + _verification_line(v["latest"])
     if v["state"] in ("queued", "running"):
         return f"{v['task']} {v['state']}"
-    return f"{v['task']}: {v['verdict']}" if v["verdict"] else f"{v['task']} {v['state']} without a verdict"
+    return (f"{v['task']}: {v['verdict']}{v.get('after_ceiling') or ''}" if v["verdict"]
+            else f"{v['task']} {v['state']} without a verdict")
 
 
 def _verification_next(task: dict, v: dict) -> str:
@@ -319,10 +321,22 @@ def _verification_next(task: dict, v: dict) -> str:
 def _progress_line(p: dict) -> str:
     if "setup_min" in p:
         return f"the lane's setup is running ({p['setup_min']} min)"
+    if p.get("wrap_up_min"):  # run.wrap_up: hansa stopped it at its ceiling and continued it for its report
+        return (f"reached its ceiling of {p['wrap_up_min']} minutes and was stopped; it is writing its report now"
+                + (f"; last note: {p['note']}" if p["note"] else ""))
     if p["idle_min"] is None:
         return "no reply from the model yet"
     return (f"{p['replies']} model replies, last activity {p['idle_min']} min ago"
             + (f"; last note: {p['note']}" if p["note"] else ""))
+
+
+def after_ceiling(m: dict) -> str:
+    """For a verification that wrote its verdict after hansa stopped it at its ceiling (run.wrap_up): the words
+    that say so, after its verdict; '' otherwise."""
+    wu = m.get("wrap_up") or {}
+    if not (wu.get("wrote") and m.get("verdict")):
+        return ""
+    return f" (written after the stop at the ceiling of {wu.get('limit_min') or '?'} minutes)"
 
 
 def progress_text(desk: Desk, m: dict) -> str:
@@ -1642,7 +1656,7 @@ def report_text(desk: Desk, tid: str) -> str:
     report = report_of(desk, tid)
     out = []
     if m.get("kind") == "verify" and (m.get("state") == "done" or m.get("verdict")):
-        out.append(f"verdict: {m.get('verdict') or 'none given'}")
+        out.append(f"verdict: {m.get('verdict') or 'none given'}{after_ceiling(m)}")
     out.append(report or f"(no report: {tid} is {m['state']})")
     return "\n\n".join(out)
 
@@ -1954,7 +1968,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
                    + (f"; on lane {v['lane']}" if v["lane"] and v["lane"] != m.get("lane") else "")
                    + ("" if v["state"] in ("queued", "running") else f"; hansa show {v['task']} says what it ran"))
     if verifying and (m.get("state") == "done" or m.get("verdict")):  # kept after it closes with its task
-        out.append(f"verdict: {m.get('verdict') or 'none given'}")
+        out.append(f"verdict: {m.get('verdict') or 'none given'}{after_ceiling(m)}")
         out += [x for x in (rethink_text(desk, m),) if x]
     runs, usage = cost.task_runs(m), {}  # every try's, each once, as hansa cost counts them
     for r in runs:
