@@ -22184,6 +22184,185 @@ def save():'''))
         self.assertEqual(self.desk.save_settings(s), [])
         return self.desk.settings()
 
+    def test_codex_explain_provider_names_program_home_and_own_login(self):
+        s = self.codex_runtime_settings(codex_home=str(self.tmp / "codex login"))
+        program = self.tmp / "tools with spaces" / "codex"
+        program.parent.mkdir()
+        shutil.copy2(s["providers"]["codex"]["codex_path"], program)
+        s["providers"]["codex"]["codex_path"] = str(program)
+        self.assertEqual(self.desk.save_settings(s), [])
+        shown = self.hansa("explain", "provider", "codex")
+        self.assertIn(str(program), shown)
+        self.assertIn(s["providers"]["codex"]["codex_home"], shown)
+        self.assertIn("Codex's own login", shown)
+        self.assertIn(f"CODEX_HOME={shlex.quote(s['providers']['codex']['codex_home'])} "
+                      f"{shlex.quote(str(program))} login", shown)
+        for word in ("key", "endpoint", "CLAUDE_CONFIG_DIR"):
+            self.assertNotIn(word, shown)
+
+    def test_codex_explain_lane_names_all_provider_homes_for_every_run(self):
+        s = self.codex_runtime_settings()
+        s["providers"]["second"] = {**s["providers"]["codex"], "codex_home": str(self.tmp / "second-login")}
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                s["lanes"]["a"]["providers"] = [provider]
+                self.assertEqual(self.desk.save_settings(s), [])
+                shown = self.hansa("explain", "lane", "a")
+                denial = next((line for line in shown.splitlines() if "Codex homes" in line), "")
+                self.assertIn("every run", denial)
+                for name in ("codex", "second"):
+                    self.assertIn(s["providers"][name]["codex_home"], denial)
+
+    def test_codex_model_reminders_and_alerts_use_pings_model_only_remedy(self):
+        from hansa import run
+        self.codex_runtime_settings()
+        out = self.alert_fake()
+        answer = subprocess.CompletedProcess([], 1, json.dumps({
+            "is_error": True, "api_error_status": 404, "result": "model_not_found"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", return_value=answer):
+            ping = self.hansa("ping", "codex")
+        tid = self.desk.new_task("Wait for a known model", lane="a")
+        self.desk.update(tid, attempts=[{"provider": "codex", "kind": "model", "at": now(),
+                                        "error": "unknown model gpt-example"}])
+        for command, shown in (("ping", ping), ("status", self.hansa("status")),
+                               ("explain provider", self.hansa("explain", "provider", "codex")),
+                               ("explain task", self.hansa("explain", "task", tid))):
+            with self.subTest(command=command):
+                line = next(line for line in shown.splitlines() if "does not know model" in line)
+                self.assertIn("gpt-example", line)
+                self.assertIn("its model in settings", line)
+                self.assertNotIn("key", line)
+                self.assertNotIn("endpoint", line)
+        [event] = self.events("provider_model")
+        post = notify._item(self.desk, event)[1]
+        self.assertIn("its model in settings", post)
+        self.assertNotIn("key", post)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                if language == "zh":
+                    s = self.desk.settings()
+                    s["alert_language"] = language
+                    self.assertEqual(self.desk.save_settings(s, by="page"), [])
+                    self.desk.set_provider_state("codex", model_since=0)
+                    run.rest_provider(self.desk, self.desk.settings(), "codex", "model", "missing")
+                self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+                sent = self.alerted(out)[-1]
+                self.assertEqual(sent["kind"], "model")
+                for word in ("codex", "gpt-example", "its model in settings" if language == "en" else "模型"):
+                    self.assertIn(word, sent["text"])
+                for word in ("key", "endpoint", "密钥"):
+                    self.assertNotIn(word, sent["text"])
+
+    def test_codex_ping_changed_settings_does_not_name_a_key(self):
+        from hansa import run
+        self.codex_runtime_settings()
+
+        def changed_meanwhile(argv, **kwargs):
+            s = self.desk.settings()
+            s["providers"]["codex"]["model"] = "new-model"
+            self.assertEqual(self.desk.save_settings(s), [])
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"result": "OK"}), "")
+
+        with unittest.mock.patch.object(run.subprocess, "run", side_effect=changed_meanwhile):
+            shown = self.hansa("ping", "codex")
+        self.assertIn("codex: NOT ok", shown)
+        self.assertIn("settings changed", shown)
+        self.assertIn("check again", shown)
+        self.assertNotIn("key", shown)
+        self.assertNotIn("endpoint", shown)
+        self.assertNotIn("check", self.desk.provider_state().get("codex", {}))
+
+    def test_missing_lane_providers_does_not_break_missing_claude_hold(self):
+        from hansa import run
+        self.hansa("lane", "add", "b", "--like", "a")
+        s = self.desk.settings()
+        del s["lanes"]["b"]["providers"]
+        write_json(self.desk.settings_path, s)
+        os.environ["HANSA_CLAUDE"] = str(self.tmp / "missing-claude")
+        tids = [self.desk.new_task("Wait for Claude", lane=lane) for lane in ("a", "b")]
+        dispatcher = Dispatcher(self.desk)
+        for _ in range(2):
+            dispatcher.tick()
+        for tid in tids:
+            m = self.desk.meta(tid)
+            self.assertEqual(m["state"], "queued")
+            self.assertEqual(m.get("attempts", []), [])
+        self.assertEqual(self.events("task_started"), [])
+        self.assertEqual(self.events("task_not_started"), [])
+        for lane in ("a", "b"):
+            self.assertEqual(run.sandbox_held(self.desk)[lane]["start"]["cause"], "claude")
+
+    def test_codex_legacy_key_rejection_names_configured_login_and_ping(self):
+        s = self.codex_runtime_settings(codex_home=str(self.tmp / "codex login"))
+        self.desk.set_provider_state("codex", cool_until=time.time() + 3600,
+                                     reason="key rejected (HTTP 401)")
+        problem = provider_problem(self.desk, s, "codex")
+        command = f"CODEX_HOME={shlex.quote(s['providers']['codex']['codex_home'])} " \
+                  f"{shlex.quote(s['providers']['codex']['codex_path'])} login"
+        self.assertIn(command, problem)
+        self.assertIn("hansa ping codex", problem)
+        self.assertIn("401", problem)
+        self.assertNotIn("key", problem)
+        self.assertNotIn("endpoint", problem)
+
+    def test_codex_legacy_key_rejection_rest_expires_without_ping(self):
+        s = self.codex_runtime_settings(codex_home=str(self.tmp / "codex login"))
+        p = s["providers"]["codex"]
+        self.desk.set_provider_state("codex", cool_until=time.time() + 3600,
+                                     reason="key rejected (HTTP 401)")
+        problem = provider_problem(self.desk, s, "codex")
+        self.assertIn(f"CODEX_HOME={shlex.quote(p['codex_home'])} {shlex.quote(p['codex_path'])} login", problem)
+        self.assertIn("hansa ping codex", problem)
+        self.assertNotIn("key", problem)
+        self.desk.set_provider_state("codex", cool_until=time.time() - 3600)
+        self.assertEqual(provider_problem(self.desk, s, "codex"), "")
+        shown = self.hansa("explain", "provider", "codex")
+        self.assertIn("now: ready", shown)
+        self.assertNotIn("key", shown)
+        self.assertNotIn("endpoint", shown)
+
+    def test_task_on_lane_without_providers_waits_and_other_lanes_start(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        s = self.desk.settings()
+        del s["lanes"]["b"]["providers"]
+        write_json(self.desk.settings_path, s)
+        blocked = self.desk.new_task("Wait for a provider", lane="b")
+        claude = os.environ["HANSA_CLAUDE"]
+        os.environ["HANSA_CLAUDE"] = str(self.tmp / "missing-claude")
+        dispatcher = Dispatcher(self.desk)
+        for _ in range(2):
+            dispatcher.tick()
+        self.assertEqual(self.desk.meta(blocked)["state"], "queued")
+        self.assertEqual(self.desk.meta(blocked).get("attempts", []), [])
+        self.assertEqual(self.events("task_started"), [])
+        os.environ["HANSA_CLAUDE"] = claude
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        dispatcher.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "running")
+        self.assertEqual(self.settle(dispatcher, tid)["state"], "done")
+        self.assertEqual((self.desk.worktrees_dir / "a" / "hello.txt").read_text(), f"hello from {tid}\n")
+        self.assertEqual(self.desk.meta(blocked)["state"], "queued")
+        self.assertEqual(self.desk.meta(blocked).get("attempts", []), [])
+        self.assertEqual(self.events("task_not_started"), [])
+
+    def test_missing_lane_providers_does_not_break_tick_recovery_or_rest_news(self):
+        from hansa import run
+        self.hansa("lane", "add", "b", "--like", "a")
+        tid = self.desk.new_task("Wait for a provider", lane="b")
+        run.hold(self.desk, tid, "b", "sandbox refused", kind="worker")
+        s = self.desk.settings()
+        del s["lanes"]["b"]["providers"]
+        write_json(self.desk.settings_path, s)
+        with self.subTest(path="sandbox recovery"):
+            Dispatcher(self.desk).tick()
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")
+            self.assertEqual(self.desk.meta(tid).get("attempts", []), [])
+            self.assertEqual(self.events("sandbox_retry_failed"), [])
+        with self.subTest(path="rest notification"):
+            self.desk.set_provider_state("claude", cool_until=time.time() + 3600, reason="usage limit")
+            run.provider_rest_news(self.desk, s, "claude")
+            self.assertEqual(self.events("provider_rested"), [])
+
     @contextlib.contextmanager
     def codex_runtime(self, fixture="success.jsonl", **extra):
         """Real adapter, fake Codex and the suite's srt; capture the actual adapter boundary.
