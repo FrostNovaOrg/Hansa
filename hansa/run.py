@@ -274,6 +274,9 @@ PROTOCOL = """You are a worker on task {tid} in lane {lane}. You work only in th
 on branch task/{tid}, which was made for this task.
 - Do not commit: when you end, hansa commits everything you changed here. To look at your
   work, git status, git diff, git log and git show are allowed.
+- hansa does not commit a change to a path with a folder named `.claude`, `.codex` or `.agents` at
+  any depth (a file or link with one of those names too), so do not change such paths; if the task
+  needs one changed, say so in the report: the principal changes them outside a task.
 - On Linux the sandbox puts empty files where the paths it protects under .claude/ are missing, so
   while you work git status may list untracked files there that you did not make. Leave them: do not delete
   them or report them as a change. The sandbox removes them and hansa never commits them.
