@@ -102,7 +102,7 @@ desk/
 | `hansa show ID`, `hansa diff ID` | 查看任务报告、检查结果、改了哪些文件、下一步该做什么；查看相对基础分支的改动 |
 | `hansa verify ID` | 让另一个工作智能体实际试用已完成任务的改动，看是否站得住；核验本身的改动不会合并 |
 | `hansa merge ID` | 把已完成的任务合并进工作线的基础分支 |
-| `hansa retry ID "<what to change>"` | 在原任务的改动上安排后续任务（`--fresh`：从基础分支重新开始；`--update`：先合入基础分支的更新） |
+| `hansa retry ID "<what to change>"` | 在原任务的改动上安排后续任务，能接着原任务的对话时就接着做（`--fresh`：从基础分支重新开始，开新对话；`--update`：先合入基础分支的更新） |
 | `hansa cancel ID`, `hansa close ID` | 停止排队、运行或合并中的任务；关闭已完成或失败的任务或核验，不合并 |
 | `hansa release L [TARGET] ["<note>"]` | 请求发布工作线 L 的基础分支，负责人同意后才会运行（负责人已勾选为免询问的发布目标无需再次同意） |
 | `hansa release yes\|no ID CODE` | 转达负责人在对话中给出的发布答复，用提醒里的一次性代码确认 |

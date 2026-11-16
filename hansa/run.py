@@ -1611,6 +1611,26 @@ def config_home(desk: Desk, name: str, p: dict) -> Path:
     return claude_home(desk.state_dir, name, p)
 
 
+class ForkedSession(str):
+    """The session id of a follow-up that went on in its parent's conversation (continuation), with the uuids of
+    the rows its record copied from the parent's: Claude Code's forked record begins with copies of the parent's
+    user and assistant rows, under their uuids there, relabelled with the new session (FORK_FACTS 1 in
+    tests/test_hansa.py). Every reading of a record (_rows, _record) leaves those rows out, so what hansa reads of
+    the follow-up's record (tokens, replies, notes, leftovers, sandbox failures) is its own only."""
+    copied: frozenset = frozenset()
+
+    def __new__(cls, sid: str, copied=()):
+        s = super().__new__(cls, sid)
+        s.copied = frozenset(copied)
+        return s
+
+
+def _own(d: dict, sid) -> bool:
+    """Whether a record's row is the session's own, not a copy of the parent's (ForkedSession)."""
+    copied = getattr(sid, "copied", None)
+    return not copied or d.get("uuid") not in copied
+
+
 def _record(home: Path, sid: str):
     """A worker's session record as Claude Code writes it while it works:
     (texts, replies, last write, {reply id: (model, token counts)})."""
@@ -1621,6 +1641,8 @@ def _record(home: Path, sid: str):
             try:
                 d = json.loads(line)
             except ValueError:
+                continue
+            if not isinstance(d, dict) or not _own(d, sid):
                 continue
             msg = d.get("message") or {} if d.get("type") == "assistant" else {}
             if msg.get("id"):
@@ -1678,7 +1700,7 @@ def _rows(home: Path, sid: str):
                     d = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(d, dict):
+                if isinstance(d, dict) and _own(d, sid):
                     rows.append(d)
     except OSError:
         return None
@@ -1801,7 +1823,7 @@ def progress_of(desk: Desk, m: dict) -> dict:
                 "setup_min": max(0, int((time.time() - (m.get("started") or time.time())) // 60))}
     p = desk.settings()["providers"].get(m.get("provider") or "")
     home = config_home(desk, m["provider"], p) if p else None
-    sid = m.get("session_id", "")
+    sid = own_session(desk, m)
     texts, replies, last, _ = _record(home, sid) if home else ([], 0, None, {})
     note = texts[-1].splitlines()[0] if texts else ""
     if last is None and home and sid:
@@ -4288,6 +4310,80 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: st
     return "".join(x + "\n" for x in out)
 
 
+# A follow-up (hansa retry) goes on in its parent's conversation when it can (continuation decides, in one place):
+# its start forks the parent's session (claude -p --resume P --fork-session --session-id NEW), with its instructions
+# rendered for the new task (--system-prompt-snapshot off), and its first message (CONTINUED_NOTE, then its task
+# text) says what changed since that conversation stopped. Never a verification, nor from one: each starts a
+# conversation of its own. Claude Code's auto memory stays off for every run (provider_env, isolated).
+FORKED_ROWS = "forked-rows.json"  # beside a continued follow-up's task.md: the uuids of the rows its record copied
+CONTINUED_NOTE = """You go on here, in a new task, from your earlier conversation (task {parent}).
+- The new task is {tid}, on branch {branch}. hansa committed what you had left as commit {commit}; the worktree is
+  on that branch now{at}.
+- Other tasks may have used this worktree in between: files git does not track (build outputs, ignored files)
+  may be gone or different.
+- Your temporary folder is a new, empty one: {tmp}. The old one is gone, and nothing you had running is running.
+- Your instructions are now this new task's, its time limit and when it started included.
+- Look before you rely on what you remember: `git status`, `git log`.
+{update}
+The new task follows.
+
+"""
+
+
+def continuation(desk: Desk, meta: dict, lane_name: str, pname: str, p: dict, model: str):
+    """Whether this start of a task goes on in the conversation of the task it follows up (hansa retry), the one
+    place that decides it: {"from": parent id, "session": the parent's session id} when it does, {"new": why not,
+    in plain words} when a follow-up starts a new conversation, None for a task that is no follow-up (a
+    verification among them). A follow-up goes on only on its first run, from the base the parent's work is on,
+    on the parent's lane, with the provider and model of the parent's last run, when that run left a record."""
+    if meta.get("kind") == "verify" or not meta.get("parent"):
+        return None  # a verification never goes on in a worker's conversation
+    parent = read_json(desk.tasks_dir / meta["parent"] / "meta.json", {}) or {}
+    psid = parent.get("session_id") or ""
+    own = parent.get("conversation") or {}
+    if parent.get("kind") == "verify":
+        why = "the earlier task is a verification, whose conversation a worker never continues"
+    elif meta.get("attempts") or meta.get("earlier_runs"):
+        why = "hansa started it again after an earlier run of it"
+    elif meta.get("fresh"):
+        why = "it starts over from the base branch (--fresh), so the earlier conversation's work is not on its branch"
+    elif not meta.get("start_from"):
+        why = "it starts from the base branch, not from the earlier task's commit"
+    elif parent.get("lane") != lane_name:
+        why = f"it runs on lane {lane_name}, not on {parent.get('lane') or '(none)'}, where the earlier task ran"
+    elif parent.get("provider") != pname:
+        why = f"it runs on {pname}, not on {parent.get('provider') or '(none)'}, which the earlier task's last run used"
+    elif (parent.get("model_asked") or "") != model:
+        why = f"it runs model {model}, not {parent.get('model_asked') or '(unknown)'}, which the earlier task's last run used"
+    elif p.get("kind") == "codex":
+        why = "the earlier task ran on the Codex adapter, which leaves no conversation to go on from"
+    elif own.get("from") and own.get("own") == psid:
+        why = "the earlier task itself went on from an earlier conversation, which hansa does not carry on further yet"
+    elif not (psid and any(config_home(desk, pname, p).glob(f"projects/*/{psid}.jsonl"))):
+        why = "the earlier task's conversation record is not on this machine (Claude Code removes old ones)"
+    else:
+        return {"from": meta["parent"], "session": psid, "before": parent.get("usage") or {}}
+    return {"new": why}
+
+
+def own_session(desk: Desk, m: dict) -> str:
+    """The session id of a task's current run, for reading its record: of a follow-up whose run went on in its
+    parent's conversation, a ForkedSession that leaves the rows copied from the parent's record out."""
+    sid = m.get("session_id") or ""
+    c = m.get("conversation") or {}
+    if not sid or not c.get("from") or c.get("own") != sid:
+        return sid
+    copied = read_json(desk.tasks_dir / m["id"] / FORKED_ROWS, []) if m.get("id") else []
+    return ForkedSession(sid, copied if isinstance(copied, list) else [])
+
+
+def forked_before(m: dict) -> dict:
+    """The tokens of the parent's conversation a continued follow-up's run began with: Claude Code's answer to a
+    forked call counts them in its modelUsage and total_cost_usd (FORK_FACTS 2), so they are taken off it."""
+    c = m.get("conversation") or {}
+    return (c.get("before") or {}) if c.get("from") and c.get("own") == m.get("session_id") else {}
+
+
 @git_folders_kept
 def start(desk: Desk, tid: str, lane_name: str, pname: str):
     """Claim a queued task and start its worker. None when the task was no longer queued, or was
@@ -4350,10 +4446,35 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     if effort:
         argv += ["--effort", effort]
     conflicts = desk.meta(tid).get("update_conflicts") if meta.get("update") and not carrying else None
+    update = ""
     if conflicts is not None:
         note = UPDATE_NOTE if conflicts else UPDATE_CLEAN_NOTE
-        argv[argv.index("--append-system-prompt") + 1] += note.format(base=lane.get("base") or "main",
-                                                                       files=", ".join(conflicts))
+        update = note.format(base=lane.get("base") or "main", files=", ".join(conflicts))
+        argv[argv.index("--append-system-prompt") + 1] += update
+    going_on = continuation(desk, meta, lane_name, pname, p, model)
+    first = None  # the first message of a follow-up that goes on in its parent's conversation, before its task text
+    if going_on and going_on.get("from"):
+        # Every read of its record leaves out the rows listed here (own_session): a follow-up that went on without
+        # the list would count the parent's tokens, replies and notes as its own, so it starts anew instead.
+        home = config_home(desk, pname, p)
+        try:
+            write_json(desk.tasks_dir / tid / FORKED_ROWS,
+                       [d["uuid"] for d in _rows(home, going_on["session"]) or [] if isinstance(d.get("uuid"), str)])
+        except OSError as e:
+            going_on = {"new": f"hansa could not save which rows of the conversation record are the earlier "
+                               f"task's ({e.strerror or e}), without which it would count them as its own"}
+    if going_on and going_on.get("from"):
+        # this task's instructions, not those the parent's conversation began with (FORK_FACTS 3); kept for a
+        # resume of its own session (resume, wrap_up) too
+        argv[argv.index("--append-system-prompt") + 2:argv.index("--append-system-prompt") + 2] = [
+            "--system-prompt-snapshot", "off"]
+        head = wgit(desk, wt, "rev-parse", "HEAD")
+        commit = meta.get("start_from") or head
+        first = CONTINUED_NOTE.format(
+            parent=going_on["from"], tid=tid, branch=f"task/{tid}", commit=commit[:12], tmp=commands_tmp(tmp),
+            at="" if head == commit else f", at {head[:12]}, with the base merged in",
+            update=update.strip() + "\n" if update else "")
+        going_on["own"] = sid
     try:
         check_git_file(desk, wt)  # sandbox_settings asks git in the worktree
     except GitFileChanged as e:
@@ -4386,6 +4507,11 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     d, raw = desk.tasks_dir / tid, desk.raw_dir(tid)
     # No key in it: keys are in env only; a resume reuses this command.
     write_text(raw / RESUME_ARGV, json.dumps(argv))
+    if first is not None:  # forked from the parent's session; a resume of its own (above) goes on in its own
+        at = argv.index("--session-id")
+        argv = [*argv[:at], "--resume", going_on["session"], "--fork-session", *argv[at:]]
+        write_text(raw / "first-message.md",
+                   first + (d / "task.md").read_text(encoding="utf-8", errors="replace"))
     if conflicts:  # merged again after the setup, with the markers left in (UPDATE_SCRIPT)
         argv = ["/bin/sh", "-c", UPDATE_SCRIPT, "hansa-update", base,
                 expected_git_line(desk, wt) or "(unknown, so no git runs here)", str(raw / "run.err"), *argv]
@@ -4398,8 +4524,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         # can still find it when it comes back
         desk.change(tid, lambda x: {"launch": sid, "session_id": sid, "base": base, "branch": f"task/{tid}",
                                    "worktree": str(wt), "setup_ran": bool(lane.get("setup")), "resumed": None, "wrap_up": None,
-                                   "check_retry": None, **oom_begin(x)})
-        with open(d / "task.md", "rb") as stdin, open(raw / "run.json", "wb") as out, \
+                                   "check_retry": None, "conversation": going_on, **oom_begin(x)})
+        with open(raw / "first-message.md" if first is not None else d / "task.md", "rb") as stdin, \
+                open(raw / "run.json", "wb") as out, \
                 open(raw / "run.err", "wb") as err:
             proc = subprocess.Popen(with_oom_score(command, str(wt), env), cwd=str(wt), env=env, stdin=stdin, stdout=out,
                                     stderr=err, start_new_session=True)
@@ -4471,7 +4598,7 @@ def resume(desk: Desk, tid: str):
     lane, p = s["lanes"].get(lane_name), s["providers"].get(pname)
     raw = desk.state_dir / "runs" / tid
     run = read_json(raw / "run.json", {}) or {}
-    sid, tmp = meta.get("session_id") or "", meta.get("worker_tmp") or ""
+    sid, tmp = own_session(desk, meta), meta.get("worker_tmp") or ""
     if not (lane and p and sid and tmp and os.path.isdir(tmp) and (raw / RESUME_ARGV).is_file()) \
             or run.get("is_error") or run.get("subtype") != "success":
         return None
@@ -4498,7 +4625,7 @@ def resume(desk: Desk, tid: str):
             return None
         desk.update(tid, resumed={"at": now(), "left": [desk.redact(x) for x in left],
                                   "rows": len(_rows(home, sid) or []),
-                                  "usage": usage_of(run) or read_detail(desk, tid, "usage", {}, usage_from_record, home, sid),
+                                  "usage": run_usage(desk, tid, meta, run, home, sid),
                                   "turns": run.get("num_turns")})
         with tempfile.TemporaryFile() as stdin, open(raw / "run.json", "wb") as out, open(raw / "run.err", "ab") as err:
             stdin.write(note.encode("utf-8"))
@@ -4523,7 +4650,7 @@ def wrap_up(desk: Desk, tid: str):
     lane_name, pname = meta.get("lane") or "", meta.get("provider") or ""
     lane, p = s["lanes"].get(lane_name), s["providers"].get(pname)
     raw = desk.state_dir / "runs" / tid
-    sid, tmp = meta.get("session_id") or "", meta.get("worker_tmp") or ""
+    sid, tmp = own_session(desk, meta), meta.get("worker_tmp") or ""
     if not (lane and p and sid and tmp and os.path.isdir(tmp) and (raw / RESUME_ARGV).is_file()
             and meta.get("worktree")) or (meta.get("setup_ran") and not (raw / "setup.log.done").exists()):
         return None  # no command line, folder or session to continue; or the lane's setup was what ran out of time
@@ -4596,11 +4723,25 @@ def continued_usage(desk: Desk, tid: str, run: dict, before: dict, home, sid: st
     those carry no counts, its answer's, less the part before it (`before`) where the answer holds that part:
     a resumed call's modelUsage and total_cost_usd cover the whole conversation, earlier calls included (RESUME_FACTS 2
     in tests/test_hansa.py), while what Claude Code restores of a stopped call's totals is not known."""
-    own = read_detail(desk, tid, "usage", {}, usage_from_record, home, sid, rows) if home is not None and rows else {}
+    forked = isinstance(sid, ForkedSession)  # its record, less the parent's rows, is its own from its first row
+    own = read_detail(desk, tid, "usage", {}, usage_from_record, home, sid, rows) \
+        if home is not None and (rows or forked) else {}
     if own:
         return own
     said = read_detail(desk, tid, "usage", {}, usage_of, run)
     return less_usage(said, before) if before and holds_usage(said, before) else said
+
+
+def run_usage(desk: Desk, tid: str, m: dict, run: dict, home, sid: str) -> dict:
+    """The tokens of a task's run that began with its own start (not a continuation of it): its answer's, else its
+    record's (a run stopped before Claude Code wrote its totals). Of a follow-up that went on in its parent's
+    conversation (own_session), its own part only: the answer counts the parent's in (FORK_FACTS 2)."""
+    if isinstance(sid, ForkedSession):
+        return continued_usage(desk, tid, run, forked_before(m), home, sid, 0)
+    usage = read_detail(desk, tid, "usage", {}, usage_of, run)
+    if not usage and home is not None:
+        usage = read_detail(desk, tid, "usage", {}, usage_from_record, home, sid)
+    return usage
 
 
 def add_usage(a: dict, b: dict) -> dict:
@@ -4825,35 +4966,33 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     p = desk.settings()["providers"].get(meta.get("provider"))
     home = config_home(desk, meta["provider"], p) if p else None
     resumed = meta.get("resumed") or {}
+    sid = own_session(desk, meta)  # of a follow-up that went on in its parent's conversation: its own rows only
+    before = forked_before(meta)  # and the parent's tokens its answers count in
     if wu:  # the stopped part's (with a resume's first run), as wrap_up read it, and the continuation's own
-        usage = add_usage(wu.get("usage") or {}, continued_usage(desk, tid, run, wu.get("usage") or {}, home,
-                                                                 meta.get("session_id", ""), wu.get("rows", 0)))
+        usage = add_usage(wu.get("usage") or {}, continued_usage(desk, tid, run, add_usage(before, wu.get("usage") or {}),
+                                                                 home, sid, wu.get("rows", 0)))
     elif resumed:  # the first run's, before hansa resumed it, and the resumed run's own
-        usage = add_usage(resumed.get("usage") or {}, continued_usage(desk, tid, run, resumed.get("usage") or {}, home,
-                                                                      meta.get("session_id", ""), resumed.get("rows", 0)))
+        usage = add_usage(resumed.get("usage") or {}, continued_usage(
+            desk, tid, run, add_usage(before, resumed.get("usage") or {}), home, sid, resumed.get("rows", 0)))
     else:
-        usage = read_detail(desk, tid, "usage", {}, usage_of, run)
-        if not usage and p:
-            usage = read_detail(desk, tid, "usage", {}, usage_from_record, home, meta.get("session_id", ""))
+        usage = run_usage(desk, tid, meta, run, home if p else None, sid)
     late = read_detail(desk, tid, "report after notices", None, report_after_notices,
-                       config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
+                       config_home(desk, meta["provider"], p), sid) \
         if p and not stopped else None
     if late:
         report = late[0] + "".join(LATE_NOTE + x for x in late[1])
     if stopped and not result.strip() and wu and stopped_report is not None:
         report = stopped_report  # the continuation gave no report: the one the stop left, as wrap_up read it
     elif stopped and not result.strip() and p:
-        notes = read_detail(desk, tid, "notes", "", notes_of, config_home(desk, meta["provider"], p),
-                            meta.get("session_id", ""))
+        notes = read_detail(desk, tid, "notes", "", notes_of, config_home(desk, meta["provider"], p), sid)
         report = STOPPED_NOTE + notes if notes else ""
         if meta.get("timed_out"):  # what it was doing when the time ran out: a long command, say
-            call = read_detail(desk, tid, "last call", "", last_call, config_home(desk, meta["provider"], p),
-                               meta.get("session_id", ""), now())
+            call = read_detail(desk, tid, "last call", "", last_call, config_home(desk, meta["provider"], p), sid, now())
             report += ("\n\n" if report else "") + call if call else ""
     report = desk.redact(report)
     denied = run.get("permission_denials") or []
     reasons = read_detail(desk, tid, "refusal reasons", {}, refusal_reasons, config_home(desk, meta["provider"], p),
-                          meta.get("session_id", "")) if p and denied else {}
+                          sid) if p and denied else {}
     write_text(d / "result.md", report + ("\n" if report else ""))
     fields = {"finished": now(), "exit": returncode, "pid": None, **memory,
               "session_id": run.get("session_id") or meta.get("session_id", ""),
@@ -4863,7 +5002,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
                                  for x in denied],
               "background_left": [desk.redact(x) for x in read_detail(
                   desk, tid, "background work left", [], background_left, config_home(desk, meta["provider"], p),
-                  meta.get("session_id", ""), wu.get("rows", 0) if wrote else resumed.get("rows", 0))] if p else []}
+                  sid, wu.get("rows", 0) if wrote else resumed.get("rows", 0))] if p else []}
     if wu:  # the stopped part left no count of its turns, so the run's are not known, as for any run stopped so
         fields.update(turns=None, wrap_up={**wu, "wrote": wrote})
     elif resumed.get("turns") and isinstance(fields["turns"], int):
@@ -5155,7 +5294,7 @@ def keep_lost_run(desk: Desk, m: dict) -> dict:
     p = desk.settings()["providers"].get(m.get("provider") or "")
     resumed = m.get("resumed") or {}
     usage = read_detail(desk, m["id"], "usage", {}, lambda: usage_from_record(
-        config_home(desk, m["provider"], p), sid, resumed.get("rows", 0))) if p else {}
+        config_home(desk, m["provider"], p), own_session(desk, m), resumed.get("rows", 0))) if p else {}
     if resumed.get("usage"):
         usage = add_usage(resumed["usage"], usage)
     if not usage:
@@ -6719,7 +6858,7 @@ class Dispatcher:
                 p = s["providers"].get(m.get("provider") or "")
                 if not p:
                     continue
-                line, settled = sandbox_start_failure(config_home(self.desk, m["provider"], p), sid)
+                line, settled = sandbox_start_failure(config_home(self.desk, m["provider"], p), own_session(self.desk, m))
                 if settled:
                     self.sandbox_seen.add(sid)
                 if not line:
