@@ -1018,7 +1018,7 @@ def sandbox_retry(desk: Desk, s: dict) -> list:
                 continue
             kind = h.get("kind") or "worker"
             try:
-                pname = next((x for x in lane["providers"] if x in s["providers"]), "")
+                pname = next((x for x in lane.get("providers", []) if x in s["providers"]), "")
                 wt = desk.worktrees_dir / ln
                 p = s["providers"].get(pname)
                 if not p or not wt.is_dir():
@@ -1509,7 +1509,7 @@ def tries_used(attempts: list) -> int:
 
 def task_providers(s: dict, lane: str, m: dict) -> list:
     """A dropped run waits for its own provider; other tasks keep their lane's provider order."""
-    order = s["lanes"][lane]["providers"]
+    order = s["lanes"][lane].get("providers", [])
     last = (m.get("attempts") or [{}])[-1]
     return [last["provider"]] if last.get("kind") == "network" and last.get("provider") in order else order
 
@@ -1578,8 +1578,9 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
             return "no endpoint address"
         if not desk.has_key(name):
             return "no key"
-    if p["kind"] == "codex" and str(st.get("reason", "")).startswith(("not logged in", "key rejected")):
-        # An earlier rest, or a provider whose kind changed, can still carry the old key wording.
+    if p["kind"] == "codex" and (str(st.get("reason", "")).startswith("not logged in") or
+            st.get("cool_until", 0) > time.time() and str(st.get("reason", "")).startswith("key rejected")):
+        # An earlier rest can carry old key wording; keep its deadline when the provider's kind changes.
         reason = st["reason"].replace("key rejected", "login rejected", 1)
         return f"{reason}; log in with `{codex_login(p)}`, then `hansa ping {name}` brings it back"
     if st.get("cool_until", 0) > time.time():
@@ -7520,7 +7521,7 @@ def waiting_looks(desk: Desk, s: dict, tasks: list | None = None, server: dict |
             "resource": resource, "server": server, "held": sandbox_held(desk),
             "lane_wait": {occupied_lane(x): x for x in tasks if x.get("lane_wait_since")},
             "not_looking": not_looking(desk, server), "desks": desks_list_problem(),
-            "problems": {p: provider_problem(desk, s, p) for ln in s["lanes"].values() for p in ln["providers"]},
+            "problems": {p: provider_problem(desk, s, p) for ln in s["lanes"].values() for p in ln.get("providers", [])},
             "provider_state": desk.provider_state()}
 
 

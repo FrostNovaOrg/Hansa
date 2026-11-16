@@ -22233,6 +22233,64 @@ def save():'''))
         self.assertNotIn("key", problem)
         self.assertNotIn("endpoint", problem)
 
+    def test_codex_legacy_key_rejection_rest_expires_without_ping(self):
+        s = self.codex_runtime_settings(codex_home=str(self.tmp / "codex login"))
+        p = s["providers"]["codex"]
+        self.desk.set_provider_state("codex", cool_until=time.time() + 3600,
+                                     reason="key rejected (HTTP 401)")
+        problem = provider_problem(self.desk, s, "codex")
+        self.assertIn(f"CODEX_HOME={shlex.quote(p['codex_home'])} {shlex.quote(p['codex_path'])} login", problem)
+        self.assertIn("hansa ping codex", problem)
+        self.assertNotIn("key", problem)
+        self.desk.set_provider_state("codex", cool_until=time.time() - 3600)
+        self.assertEqual(provider_problem(self.desk, s, "codex"), "")
+        shown = self.hansa("explain", "provider", "codex")
+        self.assertIn("now: ready", shown)
+        self.assertNotIn("key", shown)
+        self.assertNotIn("endpoint", shown)
+
+    def test_task_on_lane_without_providers_waits_and_other_lanes_start(self):
+        self.hansa("lane", "add", "b", "--like", "a")
+        s = self.desk.settings()
+        del s["lanes"]["b"]["providers"]
+        write_json(self.desk.settings_path, s)
+        blocked = self.desk.new_task("Wait for a provider", lane="b")
+        claude = os.environ["HANSA_CLAUDE"]
+        os.environ["HANSA_CLAUDE"] = str(self.tmp / "missing-claude")
+        dispatcher = Dispatcher(self.desk)
+        for _ in range(2):
+            dispatcher.tick()
+        self.assertEqual(self.desk.meta(blocked)["state"], "queued")
+        self.assertEqual(self.desk.meta(blocked).get("attempts", []), [])
+        self.assertEqual(self.events("task_started"), [])
+        os.environ["HANSA_CLAUDE"] = claude
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        dispatcher.tick()
+        self.assertEqual(self.desk.meta(tid)["state"], "running")
+        self.assertEqual(self.settle(dispatcher, tid)["state"], "done")
+        self.assertEqual((self.desk.worktrees_dir / "a" / "hello.txt").read_text(), f"hello from {tid}\n")
+        self.assertEqual(self.desk.meta(blocked)["state"], "queued")
+        self.assertEqual(self.desk.meta(blocked).get("attempts", []), [])
+        self.assertEqual(self.events("task_not_started"), [])
+
+    def test_missing_lane_providers_does_not_break_tick_recovery_or_rest_news(self):
+        from hansa import run
+        self.hansa("lane", "add", "b", "--like", "a")
+        tid = self.desk.new_task("Wait for a provider", lane="b")
+        run.hold(self.desk, tid, "b", "sandbox refused", kind="worker")
+        s = self.desk.settings()
+        del s["lanes"]["b"]["providers"]
+        write_json(self.desk.settings_path, s)
+        with self.subTest(path="sandbox recovery"):
+            Dispatcher(self.desk).tick()
+            self.assertEqual(self.desk.meta(tid)["state"], "queued")
+            self.assertEqual(self.desk.meta(tid).get("attempts", []), [])
+            self.assertEqual(self.events("sandbox_retry_failed"), [])
+        with self.subTest(path="rest notification"):
+            self.desk.set_provider_state("claude", cool_until=time.time() + 3600, reason="usage limit")
+            run.provider_rest_news(self.desk, s, "claude")
+            self.assertEqual(self.events("provider_rested"), [])
+
     @contextlib.contextmanager
     def codex_runtime(self, fixture="success.jsonl", **extra):
         """Real adapter, fake Codex and the suite's srt; capture the actual adapter boundary.
