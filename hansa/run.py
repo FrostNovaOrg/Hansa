@@ -1539,6 +1539,8 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
     p = s["providers"].get(name)
     if not p:
         return "not in settings"
+    if "kind" not in p:  # a hand-edited file must still let ping and waiting reasons explain the problem
+        return "no kind in settings"
     if p["kind"] == "codex":
         return CODEX_NOT_READY
     st = desk.provider_state().get(name, {})
@@ -7578,7 +7580,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
     if not p:
         return annotate({"ok": False, "detail": "not in settings"}, ("detail",))
     prob = provider_problem(desk, s, name)
-    if prob in ("no key", "no endpoint address", CODEX_NOT_READY):
+    if prob in ("no key", "no endpoint address", "no kind in settings", CODEX_NOT_READY):
         return annotate({"ok": False, "detail": prob}, ("detail",))
     tmp = desk.state_dir / "check"
     tmp.mkdir(parents=True, exist_ok=True)

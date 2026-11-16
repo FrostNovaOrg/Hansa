@@ -1145,18 +1145,29 @@ def _plain(path: str) -> str:
     return "/" + os.path.normpath(path).lstrip("/")
 
 
+@_one_look
 def codex_problems(name: str, pv: dict, s: dict, root=None) -> list:
-    """Settings-only fences for a future Codex run. Compare text with _plain/_ups, without looking at files:
-    a removed program, login folder or CA must not prevent loading a desk. Runtime checks belong to the
-    future Codex run path; these fences keep its login separate from work and from other hidden folders."""
+    """Settings fences for a future Codex run, as the write list sees paths (links and case included).
+    Missing paths are compared below their deepest existing ancestor, so a removed program, login folder
+    or CA does not prevent loading a desk. Runtime checks belong to the future Codex run path."""
     problems, paths = [], {}
 
-    def problem(field, why):
-        problems.append(SettingsProblem(f"provider {name}: {field} {why}", "field_rule", field=field,
-                                        reason="codex", provider=name))
+    def same_as(a, b):
+        # Unlike _as_written, explain case-only matches too, and either direction of an overlap.
+        if _plain(a) in _ups(b) or _plain(b) in _ups(a):
+            return ""
+        for path, other in ((a, b), (b, a)):
+            seen = {_seen(v) for v in _forms(path)}
+            for form in dict.fromkeys([_plain(other), *sorted(_forms(other))]):
+                u = next((u for u in _ups(form) if _seen(u) in seen), "")
+                if u:
+                    return f" ({path} is the same folder as {u})"
+        return ""
 
-    def above(a, b):
-        return _plain(a) in _ups(b)
+    def problem(field, why, other=""):
+        alias = same_as(pv[field], other) if other else ""
+        problems.append(SettingsProblem(f"provider {name}: {field} {why}{alias}", "field_rule", field=field,
+                                        reason="codex", provider=name))
 
     for field in ("codex_path", "codex_home", "ca_file"):
         value = pv.get(field, "")
@@ -1165,7 +1176,7 @@ def codex_problems(name: str, pv: dict, s: dict, root=None) -> list:
         if not isinstance(value, str) or not value.startswith("/") or _has_control(value):
             problem(field, "must be a full path starting with /, without control characters")
         else:
-            paths[field] = _plain(value)
+            paths[field] = value
     if pv.get("web_search") not in ("disabled", "cached", "live"):
         problem("web_search", "must be disabled, cached or live")
     features = pv.get("disabled_features")
@@ -1176,30 +1187,32 @@ def codex_problems(name: str, pv: dict, s: dict, root=None) -> list:
     home = paths.get("codex_home")
     if home:
         own = _plain(account_home())
-        if above(home, own):
-            problem("codex_home", f"cannot be {pv['codex_home']}: it is {own}, the account's home folder, or above it")
-        if above(os.path.join(own, ".codex"), home):
-            problem("codex_home", f"cannot be {pv['codex_home']}: it is inside or equals {own}/.codex, the account's Codex folder")
+        if _above(home, own):
+            problem("codex_home", f"cannot be {pv['codex_home']}: it is {own}, the account's home folder, or above it", own)
+        if _above(os.path.join(own, ".codex"), home):
+            problem("codex_home", f"cannot be {pv['codex_home']}: it is inside or equals {own}/.codex, the account's Codex folder",
+                    os.path.join(own, ".codex"))
         fenced = [(repo, f"lane {lane}'s repository") for lane, repo in lane_repos(s) if repo.startswith("/")]
         if root:
             # Give the worktrees fence its own name even though it is inside the desk.
             fenced = [(str(Path(root) / "worktrees"), "the worktrees folder"), (str(root), "the desk's folder"),
                       *fenced]
         for path, what in fenced:
-            if above(home, path) or above(path, home):
-                problem("codex_home", f"{pv['codex_home']} overlaps {path}, {what}")
+            if _overlaps(home, path):
+                problem("codex_home", f"{pv['codex_home']} overlaps {path}, {what}", path)
     # Use the whole saved list, including hansa hide's additions and entries a run might leave out.
     denied = s.get("workers_may_not_read", [])
     denied = [x for x in denied if isinstance(x, str) and x.startswith("/")] if isinstance(denied, list) else []
     for entry in denied:
-        if home and home != _plain(entry) and (above(home, entry) or above(entry, home)):
-            problem("codex_home", f"{pv['codex_home']} overlaps {entry}, which workers may not read")
+        # Both directions mean equal; exactly one means strictly inside, in either direction.
+        if home and _above(home, entry) != _above(entry, home):
+            problem("codex_home", f"{pv['codex_home']} overlaps {entry}, which workers may not read", entry)
     for field in ("codex_path", "ca_file"):
         if field not in paths:
             continue
         for entry in [*denied, *([pv["codex_home"]] if home else [])]:
-            if above(entry, paths[field]):
-                problem(field, f"{pv[field]} is inside or equals {entry}, which workers may not read")
+            if _above(entry, paths[field]):
+                problem(field, f"{pv[field]} is inside or equals {entry}, which workers may not read", entry)
     return problems
 
 
