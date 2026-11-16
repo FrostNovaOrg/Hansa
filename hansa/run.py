@@ -1442,10 +1442,14 @@ def credit_text(st: dict) -> str:
             + ("; another desk found it" if st.get("shared_rest") else "")) if since else ""
 
 
+def model_change_text(*, codex: bool = False) -> str:
+    return "its model in settings" if codex else "its model or key on the page (Settings, Providers)"
+
+
 def model_text(model: str, *, codex: bool = False) -> str:
     """A model rest has no deadline; use the same remedy in checks and provider views."""
     return (f"the provider does not know model {model}; rests until a check answers or the principal changes "
-            + ("its model in settings" if codex else "its model or key on the page (Settings, Providers)"))
+            + model_change_text(codex=codex))
 
 
 def rest_text(st: dict) -> str:
@@ -1534,6 +1538,11 @@ def refused_by(m: dict, order: list | None = None) -> set:
 CODEX_ADAPTER = Path(__file__).resolve().parent.parent / "contrib" / "codex" / "bin" / "claude-or-codex"
 
 
+def codex_login(p: dict) -> str:
+    """The same login command in provider explanations and lost-login remedies."""
+    return f"CODEX_HOME={shlex.quote(p['codex_home'])} {shlex.quote(p['codex_path'])} login"
+
+
 def codex_problem(p: dict) -> str:
     """Installation checks belong here, not in the rules for saving provider settings."""
     for label, path in (("Codex adapter", CODEX_ADAPTER), ("Codex program", p["codex_path"])):
@@ -1569,9 +1578,10 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
             return "no endpoint address"
         if not desk.has_key(name):
             return "no key"
-    if p["kind"] == "codex" and str(st.get("reason", "")).startswith("not logged in"):
-        login = f"CODEX_HOME={shlex.quote(p['codex_home'])} {shlex.quote(p['codex_path'])} login"
-        return f"{st['reason']}; log in with `{login}`, then `hansa ping {name}` brings it back"
+    if p["kind"] == "codex" and str(st.get("reason", "")).startswith(("not logged in", "key rejected")):
+        # An earlier rest, or a provider whose kind changed, can still carry the old key wording.
+        reason = st["reason"].replace("key rejected", "login rejected", 1)
+        return f"{reason}; log in with `{codex_login(p)}`, then `hansa ping {name}` brings it back"
     if st.get("cool_until", 0) > time.time():
         if str(st.get("reason", "")).startswith("key rejected"):
             return f"{st['reason']}; saving a new key brings it back"
@@ -7156,7 +7166,7 @@ class Dispatcher:
                     except LaneCannotStart as e:  # held, not failed: it starts once the cause is gone
                         # Missing Claude holds the lanes that depend on it; Codex starts its own adapter.
                         shared = sorted(n for n, lane in s["lanes"].items() if not lane.get("merge_lane")
-                                        and all(s["providers"].get(p, {}).get("kind") != "codex" for p in lane["providers"])) \
+                                        and all(s["providers"].get(p, {}).get("kind") != "codex" for p in lane.get("providers", []))) \
                             if e.cause == "claude" else ()
                         start_hold(desk, m["id"], ln, e, shared)
                         waits.clear()  # looked at again with what was just held
@@ -7674,7 +7684,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
     with desk.lock():  # keys and settings are saved under this lock too, so nothing lands in between
         s = desk.settings()
         if (key_stamp(desk, name), json.dumps(s["providers"].get(name), sort_keys=True)) != stamp:
-            return annotate({**result, "ok": False, "detail": "the provider's key or settings changed while this check "
+            changed = "settings" if p["kind"] == "codex" else "key or settings"
+            return annotate({**result, "ok": False, "detail": f"the provider's {changed} changed while this check "
                                                             "ran, so it says nothing about them now; check again"},
                             ("detail",))
         st = desk.provider_state().get(name) or {}

@@ -297,13 +297,15 @@ say why and since when.
 
 If a provider does not know its configured model (`model_not_found`, or equivalent model wording with
 HTTP 400 or 404), the task returns to the queue for the lane's next ready provider without using a try.
-Compatible and subscription providers, including the Codex adapter, rest without a deadline. A passing
-`hansa ping NAME` or page **Check**, or the principal changing that provider's model or saving its key on
-the page (**Settings, Providers**), ends this rest. Failed checks and time do not end it; hansa does not
+Compatible, subscription and Codex providers, including the legacy Codex adapter, rest without a deadline. A passing
+`hansa ping NAME` or page **Check**, or the principal changing that provider's model in settings, ends this rest.
+For compatible and subscription providers, saving its key on the page (**Settings, Providers**) also ends it.
+Failed checks and time do not end it; hansa does not
 check it automatically. Status, explain, waiting reasons and the provider's row name the model and remedy.
 Once per rest, hansa posts the reason to the coordinator through the same event inbox as a credit rest;
 it also sends the principal an urgent `model` alert through the alert command or enabled push addresses,
-naming the provider and model and asking them to change its model or key on the page (**Settings, Providers**).
+naming the provider and model and asking them to change its model in settings for a Codex provider, or its model
+or key on the page (**Settings, Providers**) for other kinds.
 Like a credit alert, the queued notice still sends if the rest ends before delivery. Only the desk recording
 the rest alerts; unknown-model rests stay local rather than sharing across desks on the account.
 A task's own `--model` choice, when used by a subscription provider, fails
