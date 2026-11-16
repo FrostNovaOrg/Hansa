@@ -2456,6 +2456,8 @@ def coordinator_desk(desk: Desk, by: int, talk: bool = True) -> dict:
     s = desk.settings()
     co = s["coordinator"]
     p = s["providers"][co["provider"]]
+    if p["kind"] == "codex":  # also refuse a hand-edited file before preparing a Claude Code session
+        raise SystemExit(f"hansa: coordinator provider {co['provider']} is codex; the coordinator's session is Claude Code")
     card_said = bring_card(desk, starting=True)
     for f in sorted(HELPERS.glob("*.md")):
         _bring(desk, f.read_text(encoding="utf-8"), desk.root / ".claude" / "agents" / f.name, "helper_refreshed")

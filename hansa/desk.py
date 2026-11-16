@@ -188,7 +188,11 @@ MAC_SECRETS = (
     "Library/Application Support/com.vercel.cli", "Library/Application Support/pypoetry/auth.toml",
     "Library/Application Support/io.github.clash-verge-rev.clash-verge-rev",
     "Library/Application Support/com.nssurge.surge-mac", "Library/Application Support/clash-verge")
-PROVIDER_KINDS = ("subscription", "compatible")
+PROVIDER_KINDS = ("subscription", "compatible", "codex")
+# None marks a required Codex field. Optional defaults are copied when settings are loaded or saved.
+CODEX_FIELDS = {"codex_path": None, "codex_home": None, "ca_file": "", "web_search": "disabled",
+                "disabled_features": ["apps", "plugins", "browser_use", "computer_use", "image_generation",
+                                      "multi_agent", "hooks"]}
 EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 PRICE_FIELDS = ("in", "out", "cache_read", "cache_write", "cache_write_1h")
 MANAGED_ENV = ("CLAUDE_CONFIG_DIR", "HANSA_TASK", "HANSA_RUN")
@@ -629,6 +633,10 @@ def current_settings(settings: dict) -> dict:
     for p in (s.get("providers", {}).values() if isinstance(s.get("providers"), dict) else ()):
         if isinstance(p, dict):
             p.pop("rest_minutes", None)
+            if p.get("kind") == "codex":
+                for field, default in CODEX_FIELDS.items():
+                    if default is not None:
+                        p.setdefault(field, copy.deepcopy(default))
     for lane in (s.get("lanes", {}).values() if isinstance(s.get("lanes"), dict) else ()):
         if isinstance(lane, dict):
             for key in ("preview", "preview_wait_s", "note"):
@@ -810,18 +818,22 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             continue
         if {"key", "api_key", "token"} & set(pv):
             p.append(rule(f"{at}: keys are not kept in settings; use the key box on the page", "providers", "key", provider=name))
-        extra = set(pv) - {"kind", "model", "effort", "config_dir", "base_url", "note", "key", "api_key",
-                           "token"}
+        fields = set(CODEX_FIELDS) if pv.get("kind") == "codex" else {"config_dir", "base_url"}
+        extra = set(pv) - {"kind", "model", "effort", "note", "key", "api_key", "token"} - fields
         if extra:
             p.append(rule(f"{at}: unknown field(s): {', '.join(sorted(extra))}", "providers", "unknown_fields",
                           provider=name, fields=sorted(extra)))
         if pv.get("kind") not in PROVIDER_KINDS:
-            p.append(rule(f"{at}: kind must be 'subscription' or 'compatible'", "kind", "kind", provider=name))
+            p.append(rule(f"{at}: kind must be " + ", ".join(repr(k) for k in PROVIDER_KINDS),
+                          "kind", "kind", provider=name))
         if not isinstance(pv.get("model"), str) or not pv.get("model", "").strip():
             p.append(rule(f"{at}: model is required", "model", "required", provider=name))
         if pv.get("effort", "") not in EFFORTS:
             p.append(rule(f"{at}: effort must be one of {', '.join(e or '(blank)' for e in EFFORTS)}", "effort", "effort",
                           provider=name, choices=[e for e in EFFORTS if e]))
+        if pv.get("kind") == "codex":
+            p += codex_problems(name, pv, s, root)
+            continue
         url = pv.get("base_url", "")
         if pv.get("kind") == "compatible" and url and not str(url).startswith(("https://", "http://")):
             p.append(rule(f"{at}: the endpoint address must start with https://", "base_url", "https", provider=name))
@@ -938,6 +950,9 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     else:
         if co.get("provider") not in provs:
             p.append(rule("coordinator: unknown provider", "provider", "provider", scope="coordinator"))
+        elif isinstance(provs[co["provider"]], dict) and provs[co["provider"]].get("kind") == "codex":
+            p.append(rule(f"coordinator: provider {co['provider']} is codex; the coordinator's session is Claude Code",
+                          "provider", "kind", scope="coordinator", provider=co["provider"]))
         if co.get("effort", "") not in EFFORTS:
             p.append(rule("coordinator: effort is not a known level", "effort", "effort", scope="coordinator",
                           choices=[e for e in EFFORTS if e]))
@@ -1120,6 +1135,64 @@ DATA = "/System/Volumes/Data"
 def _plain(path: str) -> str:
     """A full path with . and .. and doubled slashes gone: one slash at its start too (normpath keeps two)."""
     return "/" + os.path.normpath(path).lstrip("/")
+
+
+def codex_problems(name: str, pv: dict, s: dict, root=None) -> list:
+    """Settings-only fences for a future Codex run. Compare text with _plain/_ups, without looking at files:
+    a removed program, login folder or CA must not prevent loading a desk. Runtime checks belong to the
+    future Codex run path; these fences keep its login separate from work and from other hidden folders."""
+    problems, paths = [], {}
+
+    def problem(field, why):
+        problems.append(SettingsProblem(f"provider {name}: {field} {why}", "field_rule", field=field,
+                                        reason="codex", provider=name))
+
+    def above(a, b):
+        return _plain(a) in _ups(b)
+
+    for field in ("codex_path", "codex_home", "ca_file"):
+        value = pv.get(field, "")
+        if field == "ca_file" and value == "":
+            continue
+        if not isinstance(value, str) or not value.startswith("/") or _has_control(value):
+            problem(field, "must be a full path starting with /, without control characters")
+        else:
+            paths[field] = _plain(value)
+    if pv.get("web_search") not in ("disabled", "cached", "live"):
+        problem("web_search", "must be disabled, cached or live")
+    features = pv.get("disabled_features")
+    if not isinstance(features, list) or not all(isinstance(x, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", x)
+                                                 for x in features):
+        problem("disabled_features", "must be a list of plain feature names (letters, digits, '_' and '-')")
+
+    home = paths.get("codex_home")
+    if home:
+        own = _plain(account_home())
+        if above(home, own):
+            problem("codex_home", f"cannot be {pv['codex_home']}: it is {own}, the account's home folder, or above it")
+        if above(os.path.join(own, ".codex"), home):
+            problem("codex_home", f"cannot be {pv['codex_home']}: it is inside or equals {own}/.codex, the account's Codex folder")
+        fenced = [(repo, f"lane {lane}'s repository") for lane, repo in lane_repos(s) if repo.startswith("/")]
+        if root:
+            # Give the worktrees fence its own name even though it is inside the desk.
+            fenced = [(str(Path(root) / "worktrees"), "the worktrees folder"), (str(root), "the desk's folder"),
+                      *fenced]
+        for path, what in fenced:
+            if above(home, path) or above(path, home):
+                problem("codex_home", f"{pv['codex_home']} overlaps {path}, {what}")
+    # Use the whole saved list, including hansa hide's additions and entries a run might leave out.
+    denied = s.get("workers_may_not_read", [])
+    denied = [x for x in denied if isinstance(x, str) and x.startswith("/")] if isinstance(denied, list) else []
+    for entry in denied:
+        if home and home != _plain(entry) and (above(home, entry) or above(entry, home)):
+            problem("codex_home", f"{pv['codex_home']} overlaps {entry}, which workers may not read")
+    for field in ("codex_path", "ca_file"):
+        if field not in paths:
+            continue
+        for entry in [*denied, *([pv["codex_home"]] if home else [])]:
+            if above(entry, paths[field]):
+                problem(field, f"{pv[field]} is inside or equals {entry}, which workers may not read")
+    return problems
 
 
 @_once
@@ -2093,6 +2166,12 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
         fenced += [(r, hit, f"{why} (desk {d})")
                    for r, hit, why in _repo_fences(settings.get("lanes"), contents=True)]
     for name, pv in (providers if isinstance(providers, dict) else {}).items():
+        if isinstance(pv, dict) and pv.get("kind") == "codex":
+            h = pv.get("codex_home")
+            if isinstance(h, str) and h.startswith("/"):
+                fenced.append((h, _overlaps, f"it would open {h}, provider {name}'s Codex home, "
+                                             "which workers may not read"))
+            continue
         if isinstance(pv, dict) and isinstance(pv.get("config_dir", ""), str) \
                 and (root or pv.get("kind") == "subscription"):
             h = str(claude_home(Path(root or "/") / ".hansa", name, pv))
@@ -3075,6 +3154,8 @@ class Desk:
 
     def write_key(self, provider: str, value: str, by: str = "") -> None:
         from .history import record
+        if self.settings()["providers"].get(provider, {}).get("kind") == "codex":
+            raise ValueError(f"provider {provider}: codex has no key")
         f = self.key_file(provider)
         self.secrets_dir.mkdir(mode=0o700, exist_ok=True)
         os.chmod(self.secrets_dir, 0o700)
