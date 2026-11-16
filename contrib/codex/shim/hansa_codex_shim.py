@@ -32,6 +32,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 PLACEHOLDER = "http://codex.invalid"  # the Codex provider's base URL (a `compatible` provider): a Codex worker run
+RUN_SETTING = "HANSA_CODEX_RUN"  # exactly "1": hansa selected this adapter and supplied the provider's settings
 # What the sandbox lets through besides the lane's list: what a ChatGPT login and Codex's API need
 CODEX_HOSTS = ("chatgpt.com", "auth.openai.com", "api.openai.com")
 DEFAULT_MODEL = "gpt-6.1-sol"
@@ -82,7 +83,7 @@ DROP_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", 
              "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
              "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CONFIG_DIR", "CLAUDE_ENV_FILE", "CLAUDE_CODE_MAX_RETRIES",
              "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CODEX_HOME", "CODEX_CA_CERTIFICATE", NO_WATCHDOG, PAUSE_AFTER_START,
-             STATUS_TIMEOUT_SETTING, *SETTINGS)
+             STATUS_TIMEOUT_SETTING, RUN_SETTING, *SETTINGS)
 COUNTED_ITEMS = ("command_execution", "file_change")  # what counts against --max-turns
 STOP_GRACE = 3  # seconds between SIGTERM and SIGKILL; hansa waits 10 on a stop, 5 on a sweep
 POLL = 0.2  # seconds between looks at Codex's log, while it writes nothing new
@@ -147,8 +148,9 @@ def settings_text() -> tuple:
 def settings(env) -> dict:
     """The adapter's settings: from the environment, else from codex.env ([export] KEY=VALUE lines) beside bin/.
     Empty in the environment is unset, except for EMPTY_MEANS_NONE, where empty means none. Unknown adapter keys
-    and values still holding an example's default note raise ValueError, naming the file."""
-    source, text = settings_text()
+    and values still holding an example's default note raise ValueError, naming the file. With HANSA_CODEX_RUN=1,
+    only the environment is used; neither settings file is opened."""
+    source, text = (None, "") if env.get(RUN_SETTING) == "1" else settings_text()
     out = Settings(source)
     for line in text.splitlines():
         line = line.strip()
@@ -216,9 +218,10 @@ def parse(argv: list) -> dict:
 def call_kind(argv: list, env) -> str:
     """"codex" (a worker run on the Codex provider), "check" (hansa's provider check on it: no session id; its
     --tools, any value, the empty one too, is not looked at), "resume" (a resume on it), or "pass" (the real
-    claude's)."""
+    claude's), or "invalid" (explicitly selected, but neither a run nor a check)."""
+    explicit = env.get(RUN_SETTING) == "1"
     url = (env.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
-    if url != PLACEHOLDER:
+    if not explicit and url != PLACEHOLDER:
         return "pass"
     a = parse(argv)
     if "--resume" in a:
@@ -226,7 +229,7 @@ def call_kind(argv: list, env) -> str:
     elif a["print"] and a.get("--output-format") == "json":
         kind = "codex" if a.get("--session-id") else "check"
     else:
-        return "pass"  # an interactive session, --version
+        return "invalid" if explicit else "pass"  # an interactive session, --version
     return kind
 
 
@@ -386,6 +389,20 @@ def home_read_open(deny_read, codex_home: str):
         inside = bool(d) and any(under(x, h) for x in both([str(d)]) for h in homes)
         (left if inside else kept).append(d)
     return kept, left
+
+
+def home_scope_problem(codex_home: str, account_home: str, wt: str = "") -> str:
+    """Refuse a home whose read/write grant covers root, the account home, or a worker's worktree.
+    Compare each path as given and resolved, as srt's grants do. An unknown account home is left unchecked;
+    existence and creation of the Codex home keep their usual handling. Checks have no worker worktree."""
+    homes = both([codex_home])
+    if "/" in homes:
+        return f"HANSA_CODEX_HOME ({codex_home}) is the filesystem root; use a dedicated folder"
+    for what, folder in (("account's home", account_home), ("worktree", wt)):
+        if any(under(p, h) for p in both([folder]) for h in homes):
+            return (f"HANSA_CODEX_HOME ({codex_home}) is the {what} or a folder above it; "
+                    "opening it would grant reads and writes across that folder; use a dedicated folder")
+    return ""
 
 
 def sandbox_problem(fs: dict, wt: str, codex_home: str, codex_bin: str, ca: str = "") -> str:
@@ -907,7 +924,12 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
         return emit(answer("error_during_execution", f"hansa-codex-shim: {why}", sid, model=model))
     for what, v in (("HANSA_CODEX_BIN", codex), ("HANSA_CODEX_HOME", home), ("srt (HANSA_CODEX_SRT)", srt)):
         if not v:
+            if env.get(RUN_SETTING) == "1":
+                return failed(f"{what} is not set; set it in the provider's settings on the page")
             return failed(f"{what} is not set (settings file: {conf.source})")
+    why = home_scope_problem(home, env.get("HOME") or "", "" if check else os.getcwd())
+    if why:
+        return failed(why)
     if effort not in EFFORT_VALUES:
         what = "--effort" if a.get("--effort") else "HANSA_CODEX_EFFORT"
         return failed(f"{what} ({effort}) is not one of {', '.join(EFFORT_VALUES)}")
@@ -1177,6 +1199,11 @@ def main(argv: list) -> int:
     if kind == "resume":
         return emit(answer("error_during_execution", "hansa-codex-shim: resume is not supported on the Codex "
                                                      "provider", parse(argv).get("--resume") or ""))
+    if kind == "invalid":
+        a = parse(argv)
+        return emit(answer("error_during_execution", "hansa-codex-shim: the adapter was started for a call that "
+                           "is neither a run nor a provider check", a.get("--session-id") or "",
+                           model=a.get("--model") or conf.get("HANSA_CODEX_MODEL") or DEFAULT_MODEL))
     return run_codex(argv, env, conf, check=kind == "check")
 
 

@@ -127,3 +127,42 @@ class SettingsFile(Scratch):
         got = self.read_settings()
         for key, value in got.items():
             self.assertNotIn("(default:", value, key)
+
+    def test_switch_uses_only_environment_without_opening_either_file(self):
+        for present in (False, True):
+            with self.subTest(present=present):
+                if present:
+                    self.config.write_text("HANSA_CODEX_HOMEE=bad\n")
+                    self.legacy.write_text("HANSA_CODEX_MODEL=wrong (default: example)\n")
+                with mock.patch.object(shim, "settings_text", side_effect=AssertionError("file settings read")):
+                    self.assertEqual(self.read_settings({"HANSA_CODEX_RUN": "1", "HANSA_CODEX_MODEL": "provider",
+                                                         "HANSA_CODEX_CA_FILE": "", "HANSA_CODEX_DISABLE": ""}),
+                                     {"HANSA_CODEX_MODEL": "provider", "HANSA_CODEX_CA_FILE": "",
+                                      "HANSA_CODEX_DISABLE": ""})
+                run, code = self.run_adapter(argv=["-p", "--output-format", "json"], HANSA_CODEX_RUN="1")
+                self.assertEqual((code, run["subtype"]), (0, "success"), run["result"])
+
+    def test_switch_missing_settings_point_to_provider_settings_on_page(self):
+        self.config.write_text("# File settings are not used.\n")
+        for key, extra in (("HANSA_CODEX_BIN", {"HANSA_CODEX_BIN": ""}),
+                           ("HANSA_CODEX_HOME", {"HANSA_CODEX_HOME": ""}),
+                           ("HANSA_CODEX_SRT", {"HANSA_CODEX_SRT": "", "PATH": str(self.root / "empty-path")})):
+            with self.subTest(key=key):
+                why = self.refused(HANSA_CODEX_RUN="1", **extra)
+                for word in (key, "provider", "settings", "page"):
+                    self.assertIn(word, why)
+                self.assertNotIn("codex.env", why)
+                self.assertNotIn("trial.env", why)
+
+    def test_switch_off_keeps_placeholder_file_settings_and_environment_override(self):
+        for switch in ("", "0", "true", "01", "1 "):
+            for config in (self.config, self.legacy):
+                with self.subTest(switch=switch, config=config):
+                    config.write_text(f"HANSA_CODEX_BIN={self.env()['HANSA_CODEX_BIN']}\n"
+                                      "HANSA_CODEX_MODEL=file-model\n")
+                    run, code = self.run_adapter(argv=["-p", "--output-format", "json"], HANSA_CODEX_BIN="",
+                                                 HANSA_CODEX_RUN=switch, HANSA_CODEX_MODEL="env-model")
+                    self.assertEqual((code, run["subtype"]), (0, "success"), run["result"])
+                    argv = self.codex_called()["argv"]
+                    self.assertEqual(argv[argv.index("-m") + 1], "env-model")
+                    config.unlink()
