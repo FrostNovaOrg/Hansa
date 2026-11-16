@@ -1,5 +1,6 @@
 """Tests for hansa with a stand-in for claude, so no model is called."""
 import contextlib
+import copy
 import ast
 import csv
 import email.message
@@ -46241,6 +46242,89 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         confirmReply = true; await run("discardSettings()");
         check(settingsGetCount === gets + 1 && !run("settingsDirty()"), "confirmed discard did not clear an unadded name");
       }
+    } else if (ask.startsWith("settings-fix-codex-")) {
+      // A provider's card switched to the kind Codex, as the principal does it: its select, its boxes, Save.
+      const zh = process.argv[4] === "zh";
+      run('showSettingsGroup("providers")');
+      const card = name => find(el => el.className === "lane" && el.textContent.startsWith(name), run("settingsPanels.providers"));
+      const kindBox = name => find(el => el.tag === "select" && el.kids.some(o => o.value === "subscription"), card(name));
+      const choose = (select, value) => { select.value = value; select.on.change({target:select}); };
+      const box = (name, label) => { const l = find(el => el.tag === "label" && el.textContent === run(label), card(name));
+        check(l, "no field " + label); return ids["#" + l.attrs.for]; };
+      const more = name => find(el => el.tag === "details" && el.attrs["data-codex-more"] === "", card(name));
+      const fill = () => { change(box("compatible", "T.codexPath"), "/opt/codex tools/bin/codex"); change(box("compatible", "T.codexHome"), "/opt/codex-home"); };
+      check(kindBox("compatible").kids.some(o => o.value === "codex" && o.textContent.includes("Codex") && o.textContent.includes("OpenAI")),
+        "the kind choice does not offer Codex, saying what it is");
+      choose(kindBox("compatible"), "codex");
+      if (ask === "settings-fix-codex-card") {
+        const c = card("compatible");
+        check(run('S.providers.compatible.kind === "codex" && !("base_url" in S.providers.compatible) && !("config_dir" in S.providers.compatible)'),
+          "the draft keeps fields the kind Codex does not have");
+        check(run('S.providers.compatible.web_search === "disabled" && S.providers.compatible.disabled_features.includes("hooks") && S.providers.compatible.codex_path === ""'),
+          "the draft lacks Codex's fields and defaults");
+        check(has(zh ? "Codex（OpenAI" : "Codex (OpenAI", find(el => el.className === "tag", c)), "the card's tag does not say Codex");
+        for (const label of ["T.model", "T.effort", "T.codexPath", "T.codexHome", "T.caFile", "T.webSearch", "T.codexFeatures"]) box("compatible", label);
+        check(!find(el => el.tag === "input" && el.type === "password", c), "a Codex card has a key box");
+        for (const label of ["T.endpoint", "T.loginDir", "T.keyUse", "T.keyTransport", "T.keySeparate"])
+          check(!has(run(label), c), "a Codex card shows " + label);
+        check(!has("HTTP", c), "a Codex card speaks of HTTP");
+        check(!more("compatible").open && !visible(box("compatible", "T.caFile"), c), "the rarer Codex fields are not folded");
+        const help = find(el => el.attrs["data-codex-help"] === "", c);
+        for (const part of zh ? ["单独的目录", "程序的完整路径", "专用的主目录", "登录一次"] : ["folder of its own", "program's full path", "home folder of its own", "log in there once"])
+          check(visibleText(part, help), "Codex help misses: " + part);
+        const command = () => find(el => el.attrs["data-codex-login"] === "", c).textContent;
+        check(command().startsWith("CODEX_HOME=<") && command().endsWith(" login"), "login command before the paths: " + command());
+        change(box("compatible", "T.codexPath"), "/opt/codex tools/bin/codex");
+        check(command().includes("<"), "the command took one path before both were filled");
+        change(box("compatible", "T.codexHome"), "/opt/codex-home");
+        check(command() === "CODEX_HOME=/opt/codex-home '/opt/codex tools/bin/codex' login", "login command with the card's paths: " + command());
+        check(find(el => el.tag === "textarea", c).textContent.includes("browser_use") && has("multi_agent", more("compatible")), "features turned off and their default not shown");
+        choose(kindBox("compatible"), "compatible");
+        check(run('S.providers.compatible.base_url === "https://example.org" && !("codex_path" in S.providers.compatible) && !("web_search" in S.providers.compatible)'),
+          "switching back did not bring back the endpoint and drop Codex's fields");
+        check(has(run("T.endpoint"), card("compatible")), "the endpoint is not back on the card");
+        choose(kindBox("compatible"), "codex");
+        check(run('S.providers.compatible.codex_path === "/opt/codex tools/bin/codex" && !("base_url" in S.providers.compatible)'), "switching again lost the typed program");
+        run('loadStatus()'); await new Promise(r => setTimeout(r, 0));
+        given["/api/status"].providers = [{...given["/api/status"].providers[0], name:"cx", kind:"codex"}];
+        await run("loadStatus(true)");
+        check(has(zh ? "Codex（OpenAI" : "Codex (OpenAI", ids["#tab-status"]), "the dashboard's Kind column does not say Codex");
+      } else if (ask === "settings-fix-codex-reload") {
+        fill();
+        choose(find(el => el.tag === "select" && el.kids.some(o => o.value === "live"), card("compatible")), "live");
+        change(box("compatible", "T.caFile"), "/opt/certs/ca.pem");
+        change(find(el => el.tag === "textarea" && el.attrs["data-codex-features"] === "", card("compatible")), "apps hooks\nplugins\n");
+        settingsPostReply = {ok:true}; await run("saveSettings()");
+        const sent = posted.settings.providers.compatible;
+        check(JSON.stringify(Object.keys(sent).sort()) === JSON.stringify(["ca_file", "codex_home", "codex_path", "disabled_features", "effort", "kind", "model", "web_search"]),
+          "Save sent fields Codex does not have: " + Object.keys(sent));
+        check(JSON.stringify(sent.disabled_features) === '["apps","hooks","plugins"]' && sent.web_search === "live", "Save lost the folded fields");
+        await run("loadSettings()"); run('showSettingsGroup("providers")');
+        check(!run("settingsDirty()"), "a saved Codex provider reloads as changed");
+        check(box("compatible", "T.codexPath").value === "/opt/codex tools/bin/codex" && box("compatible", "T.codexHome").value === "/opt/codex-home"
+          && box("compatible", "T.caFile").value === "/opt/certs/ca.pem", "the reloaded card lost its paths");
+        check(find(el => el.tag === "option" && el.value === "live", card("compatible")).attrs.selected !== undefined, "the reloaded card lost its web search");
+        check(find(el => el.tag === "textarea", card("compatible")).textContent === "apps\nhooks\nplugins", "the reloaded card lost its features");
+        check(has(zh ? "Codex（OpenAI" : "Codex (OpenAI", find(el => el.className === "tag", card("compatible"))), "the reloaded card's tag");
+      } else if (ask === "settings-fix-codex-problem") {
+        fill(); settingsPostReply = given.codexRefusal; await run("saveSettings()");
+        const home = box("compatible", "T.codexHome");
+        check(home.attrs["aria-invalid"] === "true", "the refused home is not marked");
+        const said = home.attrs["aria-describedby"].split(/\s+/).map(id => ids["#" + id]).filter(el => el && !el.hidden).map(el => el.textContent).join(" ");
+        check(said.includes(run("T.codexHome")) && said.includes("/opt/codex-home") && said.includes("overlaps"), "the refusal is not at the home's field: " + said);
+        check(box("compatible", "T.codexPath").attrs["aria-invalid"] !== "true", "the refusal marked the program too");
+        const features = find(el => el.tag === "textarea", card("compatible"));
+        check(features.attrs["aria-invalid"] === "true" && more("compatible").open, "a refused folded field stays hidden or unmarked");
+        const link = find(el => el.tag === "button" && el.textContent.startsWith("compatible · " + run("T.codexHome")));
+        check(link, "the problem list does not name the field"); await link.click();
+        check(document.activeElement === box("compatible", "T.codexHome"), "the problem does not lead to its field");
+      } else if (ask === "settings-fix-codex-coordinator") {
+        run('showSettingsGroup("coordinator")');
+        const select = find(el => el.tag === "select" && el._settingMeta?.matches("coordinator: provider"), run("settingsPanels.coordinator"));
+        const option = select.kids.find(o => o.value === "compatible");
+        check(option && option.disabled && option.textContent.includes("Claude Code"), "a Codex provider is offered to the coordinator");
+        check(select.kids.find(o => o.value === "other") && !select.kids.find(o => o.value === "other").disabled, "other providers are not offered");
+      } else throw new Error("unknown codex scenario: " + ask);
     } else if (ask === "settings-fix-turns") {
       await run("loadCost()");
       const rows = descendants(ids["#tab-cost"], "tr");
@@ -49116,6 +49200,17 @@ else if (ask === "task-steps")'''))
                       "t-no-runs": {"tokens": 10, "usd": 0, "runs": 0, "turns": 7}}}}
         replies = {"/api/settings": public, "/api/status": views.status(self.desk), "/api/events": [],
                    "/api/cost": report}
+        if scenario.startswith("codex-"):
+            # What the settings answer to the card the scenario fills in: a home inside a folder workers may not read,
+            # and a feature name they refuse, in the server's own words.
+            s = copy.deepcopy(public["settings"])
+            s["providers"]["compatible"] = {"kind": "codex", "model": "example-model", "effort": "",
+                                            "codex_path": "/opt/codex tools/bin/codex", "codex_home": "/opt/codex-home",
+                                            "ca_file": "", "web_search": "disabled", "disabled_features": ["not a name"]}
+            s["workers_may_not_read"] = ["/opt/codex-home/inner"]
+            problems = [p for p in validate(s, self.desk.root, page=True) if p.startswith("provider compatible:")]
+            self.assertTrue(problems)
+            replies["codexRefusal"] = {"ok": False, "problems": problems, "problem_details": [p.detail for p in problems]}
         harness = self.tmp / "settings-fixes-page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
@@ -49200,6 +49295,18 @@ else if (ask === "task-steps")'''))
 
     def test_settings_history_shows_set_and_cleared_in_both_languages_and_keeps_old_records(self):
         self.run_settings_fix_scenario("history-key-actions")
+
+    def test_the_kind_codex_shows_its_own_fields_and_help_and_no_key(self):
+        self.run_settings_fix_scenario("codex-card")
+
+    def test_a_saved_codex_provider_reloads_with_its_values(self):
+        self.run_settings_fix_scenario("codex-reload")
+
+    def test_a_refused_codex_field_shows_its_problem_at_the_field(self):
+        self.run_settings_fix_scenario("codex-problem")
+
+    def test_the_coordinator_is_not_offered_a_codex_provider(self):
+        self.run_settings_fix_scenario("codex-coordinator")
 
     def test_cost_tasks_show_turns_when_they_have_runs(self):
         self.run_settings_fix_scenario("turns")
