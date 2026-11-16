@@ -21614,6 +21614,261 @@ def save():'''))
         s["providers"]["claude"]["config_dir"] = "/abs/path"
         self.assertEqual(self.desk.save_settings(s), [])
 
+    def codex_settings(self):
+        s = self.desk.settings()
+        s["providers"]["codex"] = {"kind": "codex", "model": "gpt-example", "effort": "high",
+                                    "codex_path": str(self.tmp / "tools" / "codex"),
+                                    "codex_home": str(self.tmp / "codex-login")}
+        # Every refusal below starts from settings the old code could not accept.
+        self.assertEqual(validate(s, self.desk.root), [])
+        return s
+
+    def codex_refusal(self, s, field, *words):
+        problems = validate(s, self.desk.root)
+        matching = [str(p) for p in problems if "provider codex" in str(p) and field in str(p)]
+        self.assertTrue(matching, problems)
+        for word in words:
+            self.assertTrue(any(word in p for p in matching), (word, problems))
+
+    def test_codex_accepts_paths_and_defaults_without_existing_files(self):
+        s = self.codex_settings()
+        self.assertFalse(Path(s["providers"]["codex"]["codex_path"]).exists())
+        self.assertFalse(Path(s["providers"]["codex"]["codex_home"]).exists())
+        self.assertEqual(self.desk.save_settings(s), [])
+        write_json(self.desk.settings_path, s)  # a hand-written file without the optional fields loads too
+        loaded = Desk(self.desk.root).settings()["providers"]["codex"]
+        self.assertEqual((loaded["ca_file"], loaded["web_search"]), ("", "disabled"))
+        self.assertEqual(loaded["disabled_features"], ["apps", "plugins", "browser_use", "computer_use",
+                                                     "image_generation", "multi_agent", "hooks"])
+        loaded["disabled_features"].append("another")
+        self.assertNotIn("another", self.desk.settings()["providers"]["codex"]["disabled_features"])
+        for field, value in (("model", ""), ("effort", "unknown")):
+            with self.subTest(field=field):
+                changed = self.codex_settings()
+                changed["providers"]["codex"][field] = value
+                self.codex_refusal(changed, field)
+
+    def test_codex_requires_absolute_program_and_home(self):
+        s = self.codex_settings()
+        for field in ("codex_path", "codex_home"):
+            old = s["providers"]["codex"][field]
+            for value in (None, "", "codex", "~/.codex", 42, False, "/bad\0path"):
+                with self.subTest(field=field, value=value):
+                    if value is None:
+                        s["providers"]["codex"].pop(field, None)
+                    else:
+                        s["providers"]["codex"][field] = value
+                    self.codex_refusal(s, field, "full path", "/")
+            s["providers"]["codex"][field] = old
+
+    def test_codex_home_cannot_be_account_home_or_ancestor(self):
+        from hansa.desk import account_home
+        s = self.codex_settings()
+        own = Path(account_home())
+        for path in ("/", str(own), str(own.parent), str(own / "child" / "..")):
+            with self.subTest(path=path):
+                s["providers"]["codex"]["codex_home"] = path
+                self.codex_refusal(s, "codex_home", path, "account", str(own))
+
+    def test_codex_home_cannot_use_accounts_codex_folder(self):
+        from hansa.desk import account_home
+        s = self.codex_settings()
+        own = account_home() + "/.codex"
+        for path in (own, own + "/child", own + "/../.codex//child/."):
+            with self.subTest(path=path):
+                s["providers"]["codex"]["codex_home"] = path
+                self.codex_refusal(s, "codex_home", path, own)
+
+    def test_codex_home_cannot_overlap_desk_repo_or_worktrees(self):
+        s = self.codex_settings()
+        for fence, words in ((self.desk.root, "desk"), (Path(s["lanes"]["a"]["repo"]), "lane a"),
+                             (self.desk.worktrees_dir, "worktrees")):
+            for path in (str(fence), str(fence / "child"), str(fence / "child" / ".."), str(fence.parent)):
+                with self.subTest(fence=fence, path=path):
+                    s["providers"]["codex"]["codex_home"] = path
+                    self.codex_refusal(s, "codex_home", path, str(fence), words)
+        s["providers"]["codex"]["codex_home"] = str(self.tmp / "repository-next-door")
+        self.assertEqual(validate(s, self.desk.root), [])
+        # Every lane's repository is fenced, including one unused by this provider.
+        s["lanes"]["b"] = {**s["lanes"]["a"], "repo": str(self.tmp / "other-repo")}
+        s["providers"]["codex"]["codex_home"] = str(self.tmp / "other-repo" / "login")
+        self.codex_refusal(s, "codex_home", "lane b", "other-repo")
+
+    def test_codex_home_cannot_contain_hidden_entries(self):
+        from hansa.desk import HIDDEN_BY
+        s = self.codex_settings()
+        home = s["providers"]["codex"]["codex_home"]
+        for added in (False, True):
+            entry = home + "/private"
+            s["workers_may_not_read"] = [entry]
+            s[HIDDEN_BY] = {entry: {"by": "coordinator", "at": now()}} if added else {}
+            self.codex_refusal(s, "codex_home", home, entry)
+        # Even an entry a run would leave out must participate in the settings fence.
+        s["providers"]["codex"]["codex_home"] = "/opt"
+        s["workers_may_not_read"] = ["/opt/tools/private"]
+        with unittest.mock.patch.dict(os.environ, {"PATH": "/opt/tools/private/bin"}):
+            self.codex_refusal(s, "codex_home", "/opt/tools/private")
+
+    def test_codex_home_cannot_lie_inside_hidden_entries(self):
+        from hansa.desk import HIDDEN_BY
+        s = self.codex_settings()
+        entry = str(self.tmp / "hidden")
+        for added in (False, True):
+            s["providers"]["codex"]["codex_home"] = entry + "/codex"
+            s["workers_may_not_read"] = [entry]
+            s[HIDDEN_BY] = {entry: {"by": "coordinator", "at": now()}} if added else {}
+            self.codex_refusal(s, "codex_home", entry, entry + "/codex")
+
+    def test_codex_home_can_equal_hidden_entry(self):
+        from hansa.desk import HIDDEN_BY
+        s = self.codex_settings()
+        home = s["providers"]["codex"]["codex_home"]
+        for added in (False, True):
+            s["workers_may_not_read"] = [home + "/child/..//"]
+            s[HIDDEN_BY] = {s["workers_may_not_read"][0]: {"by": "coordinator", "at": now()}} if added else {}
+            self.assertEqual(validate(s, self.desk.root), [])
+        self.assertEqual(self.desk.save_settings(s, by="page"), [])
+
+    def test_codex_program_and_ca_cannot_be_hidden_or_inside_home(self):
+        s = self.codex_settings()
+        home, hidden = s["providers"]["codex"]["codex_home"], str(self.tmp / "hidden")
+        s["workers_may_not_read"] = [hidden]
+        for field in ("codex_path", "ca_file"):
+            old = s["providers"]["codex"].get(field)
+            for entry in (home, hidden):
+                for path in (entry, entry + "/file", entry + "/other/../file"):
+                    with self.subTest(field=field, path=path):
+                        s["providers"]["codex"][field] = path
+                        self.codex_refusal(s, field, path, entry)
+            if old is None:
+                s["providers"]["codex"].pop(field)
+            else:
+                s["providers"]["codex"][field] = old
+        s["providers"]["codex"]["codex_path"] = hidden + "-tools/codex"
+        s["providers"]["codex"]["ca_file"] = home + "-certs/ca.pem"
+        self.assertEqual(validate(s, self.desk.root), [])
+
+    def test_codex_ca_file_requires_an_absolute_path_when_given(self):
+        s = self.codex_settings()
+        for path in ("ca.pem", "~/ca.pem", 12, None, ["/ca.pem"]):
+            with self.subTest(path=path):
+                s["providers"]["codex"]["ca_file"] = path
+                self.codex_refusal(s, "ca_file", "full path", "/")
+        for path in ("", str(self.tmp / "missing-ca.pem")):
+            s["providers"]["codex"]["ca_file"] = path
+            self.assertEqual(validate(s, self.desk.root), [])
+
+    def test_codex_web_search_and_disabled_features_validate_values(self):
+        s = self.codex_settings()
+        for value in ("disabled", "cached", "live"):
+            s["providers"]["codex"]["web_search"] = value
+            self.assertEqual(validate(s, self.desk.root), [])
+        for value in (None, True, "enabled", [], {}):
+            s["providers"]["codex"]["web_search"] = value
+            self.codex_refusal(s, "web_search", "disabled", "cached", "live")
+        s["providers"]["codex"]["web_search"] = "disabled"
+        for value in ("apps", None, {}, [1], [True], [""], ["--apps"], ["apps plugins"], ["apps\nhooks"],
+                      ["apps=on"], [["apps"]]):
+            with self.subTest(value=value):
+                s["providers"]["codex"]["disabled_features"] = value
+                self.codex_refusal(s, "disabled_features", "list", "names")
+        for value in ([], ["apps", "future_feature", "feature2"]):
+            s["providers"]["codex"]["disabled_features"] = value
+            self.assertEqual(validate(s, self.desk.root), [])
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertEqual(self.desk.settings()["providers"]["codex"]["disabled_features"], value)
+
+    def test_codex_refuses_claude_fields(self):
+        s = self.codex_settings()
+        for field in ("base_url", "config_dir"):
+            s["providers"]["codex"][field] = ""
+            self.codex_refusal(s, field, "unknown field")
+            del s["providers"]["codex"][field]
+
+    def test_codex_fields_do_not_belong_to_other_provider_kinds(self):
+        from hansa.desk import CODEX_FIELDS
+        s = self.codex_settings()
+        for kind in ("subscription", "compatible"):
+            for field, default in CODEX_FIELDS.items():
+                with self.subTest(kind=kind, field=field):
+                    s["providers"]["codex"] = {"kind": kind, "model": "example", field: default}
+                    self.codex_refusal(s, field, "unknown field")
+        s["providers"]["codex"] = {"kind": "unknown", "model": "example"}
+        self.codex_refusal(s, "kind", "subscription", "compatible", "codex")
+
+    def test_codex_has_no_key_and_is_not_in_key_settings(self):
+        s = self.codex_settings()
+        self.assertEqual(self.desk.save_settings(s), [])
+        for key in ("sk-unused", ""):
+            with self.assertRaises(ValueError) as raised:
+                self.desk.write_key("codex", key)
+            for word in ("codex", "no key"):
+                self.assertIn(word, str(raised.exception))
+        self.assertFalse(self.desk.key_file("codex").exists())
+        self.assertNotIn("codex", public_settings(self.desk)["keys"])
+
+    def test_codex_cannot_be_coordinators_provider(self):
+        s = self.codex_settings()
+        s["coordinator"]["provider"] = "codex"
+        self.codex_refusal(s, "coordinator", "Claude Code")
+        write_json(self.desk.settings_path, s)
+        result = subprocess.run([sys.executable, "-m", "hansa", "--desk", str(self.desk.root), "coordinator", "-p", "hi"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        for word in ("coordinator", "codex", "Claude Code"):
+            self.assertIn(word, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_codex_home_is_fenced_from_lane_write_lists(self):
+        s = self.codex_settings()
+        s["providers"]["codex"]["codex_home"] = str(self.tmp / "codex-logins" / "login")
+        home = s["providers"]["codex"]["codex_home"]
+        for path in (home, home + "/child", home + "/child/..", str(Path(home).parent)):
+            with self.subTest(path=path):
+                s["lanes"]["a"]["write"] = [path]
+                problems = validate(s, self.desk.root)
+                self.assertTrue(any(all(word in str(p) for word in ("lane a", "provider codex", "Codex home", home))
+                                    for p in problems), problems)
+        s["lanes"]["a"]["write"] = [home + "-cache"]
+        self.assertEqual(validate(s, self.desk.root), [])
+
+    def test_codex_providers_can_share_a_home(self):
+        s = self.codex_settings()
+        s["providers"]["second"] = dict(s["providers"]["codex"])
+        self.assertEqual(self.desk.save_settings(s), [])
+        loaded = self.desk.settings()["providers"]
+        self.assertEqual(loaded["codex"]["codex_home"], loaded["second"]["codex_home"])
+
+    def test_codex_legacy_compatible_endpoint_is_unchanged(self):
+        s = self.codex_settings()
+        s["providers"]["adapter"] = {"kind": "compatible", "model": "example", "base_url": "http://codex.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("adapter", "sk-example")
+        self.assertEqual(provider_problem(self.desk, self.desk.settings(), "adapter"), "")
+        self.assertEqual(self.desk.settings()["providers"]["adapter"]["base_url"], "http://codex.invalid")
+
+    def test_codex_run_and_check_are_not_ready_without_starting_a_program(self):
+        from hansa import run
+        s = self.codex_settings()
+        s["lanes"]["a"]["providers"] = ["codex"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.set_provider_state("codex", credit_since=1, cool_until=time.time() + 3600, reason="old rest")
+        with unittest.mock.patch.object(run.subprocess, "Popen", side_effect=AssertionError("started a program")), \
+                unittest.mock.patch.object(run.subprocess, "run", side_effect=AssertionError("ran a program")):
+            problem = provider_problem(self.desk, self.desk.settings(), "codex")
+            self.assertIn("does not start Codex providers yet", problem)
+            checked = run.check_provider(self.desk, "codex")
+            self.assertFalse(checked["ok"])
+            self.assertEqual(checked["detail"], problem)
+            with self.assertRaises(RuntimeError) as raised:
+                run.provider_env(self.desk, "codex", self.desk.settings()["providers"]["codex"])
+            self.assertIn(problem, str(raised.exception))
+        tid = self.desk.new_task("Wait for Codex", lane="a")
+        self.assertIn(problem, waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set()))
+        self.assertIn(problem, views.status_text(views.status(self.desk)))
+        self.assertIn(problem, self.hansa("ping", "codex"))
+        self.assertIn(problem, self.hansa("explain", "provider", "codex"))
+
     def patch_sleeps(self, action):
         """Patch hansa.cli.time.sleep, the time module's own sleep, for this test's thread only. Another thread of
         this process — one an earlier test left running, say — may sleep while it is patched: its calls sleep as

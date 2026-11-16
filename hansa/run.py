@@ -1530,11 +1530,17 @@ def refused_by(m: dict, order: list | None = None) -> set:
     return own if order is not None and inherited.issuperset(order) else own | inherited
 
 
+# Keep settings usable before a Codex run path exists; remove this gate when that path is implemented.
+CODEX_NOT_READY = "this version does not start Codex providers yet"
+
+
 def provider_problem(desk: Desk, s: dict, name: str) -> str:
     """Why this provider cannot take work right now; '' when it can."""
     p = s["providers"].get(name)
     if not p:
         return "not in settings"
+    if p["kind"] == "codex":
+        return CODEX_NOT_READY
     st = desk.provider_state().get(name, {})
     if st.get("credit_since"):
         return credit_text(st)
@@ -1785,6 +1791,8 @@ def provider_env(desk: Desk, name: str, p: dict, run: bool = True) -> dict:
     worker never inherits keys that are not its own. A run (run=False only for the coordinator's own
     session) has Claude Code's auto memory off, so it starts with nothing an earlier run in its project
     folder remembered (isolated says so too)."""
+    if p["kind"] == "codex":
+        raise RuntimeError(CODEX_NOT_READY)
     env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
     env["TERM"] = "dumb"
     if run:
@@ -7570,7 +7578,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
     if not p:
         return annotate({"ok": False, "detail": "not in settings"}, ("detail",))
     prob = provider_problem(desk, s, name)
-    if prob in ("no key", "no endpoint address"):
+    if prob in ("no key", "no endpoint address", CODEX_NOT_READY):
         return annotate({"ok": False, "detail": prob}, ("detail",))
     tmp = desk.state_dir / "check"
     tmp.mkdir(parents=True, exist_ok=True)
