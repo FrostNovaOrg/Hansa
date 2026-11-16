@@ -133,18 +133,21 @@ ceiling, each run uses its lane's current limit.
 and effort together on one `task options:` line. Options left to the lane or
 provider defaults are omitted; the run's own line still shows what it actually used.
 
-A worker or verification stopped at the time ceiling is continued once, in its own session, only to
-write its report: hansa stops what the run left running, as at any run's end, then resumes the session with
-a note saying so, for at most 10 turns and 10 minutes (fixed, not a setting). That answer is the task's
-report, but the task still fails, its error saying the report was written after the stop: a run that did not
-finish is never checked or merged as if it had. A verification whose answer ends with a verdict ends with that
-verdict, and `hansa show` (the verification's and its task's) and the post say it was written after the stop at
-the ceiling; without a verdict it fails, with the answer as its report. While it writes, `hansa status` and
-`hansa show ID` say so where they say how far a run got. Its tokens count with the stopped run's, each once.
-When the continuation fails, gives no text, cannot start (no saved command line or temporary folder; the Codex
-adapter refuses a resume) or does not end in its 10 minutes (the error then says so too), the run ends as
-below. A cancel cancels it; it is never continued a second time, queued again or a cause for a provider's rest.
-A run cancelled or stopped otherwise, the turn ceiling included, is not continued.
+A worker or verification stopped at a ceiling, of time or of turns, is continued once, in its own session,
+only to write its report: hansa stops what the run left running, as at any run's end, then resumes the session
+with a note saying which limit it reached, for at most 10 turns and 10 minutes of its own (fixed, not a setting;
+the lane's time limit no longer counts then). That answer is the task's report, but the task still fails, its
+error naming the ceiling and saying the report was written after the stop: a run that did not finish is never
+checked or merged as if it had. A verification whose answer ends with a verdict ends with that verdict, and
+`hansa show` (the verification's and its task's) and the post say it was written after the stop at the ceiling
+of N minutes or N turns; without a verdict it fails, with the answer as its report. While it writes, `hansa
+status`, `hansa show ID` and the page (the lane's row and the task's own page) say so where they say how far a
+run got. Its tokens count with the stopped run's, each once. When the continuation fails, gives no text, cannot
+start (no saved command line or temporary folder; the Codex adapter refuses a resume) or does not end in its 10
+minutes (the error then says so too), the run ends as below, with the report it had when it was stopped. A
+cancel cancels it; it is never continued a second time, whichever ceiling it reached (a run that meets both is
+continued once, for the time ceiling), queued again or a cause for a provider's rest. A run cancelled or stopped
+otherwise is not continued.
 
 A run stopped at a ceiling with no report has its notes along the way as its report. At the
 time ceiling, a line follows them: the last tool call the session record shows the worker starting, whether
@@ -183,8 +186,9 @@ came in. A worker that does end its turn while
 background work it started still runs is resumed once, in the same session,
 with a short message: that work was stopped with it, so it runs it again in the
 foreground, waits for it, then reports; the report kept is the one it writes
-after the resume. A second time it is not resumed; `hansa
-show` then says what was still running. The time limit counts from the task's
+after the resume. Only once for background work: a second time it ends as it
+is, and `hansa show` says what was still running (a resumed run that then reaches a ceiling is
+continued once more, for its report, as above). The time limit counts from the task's
 start, across both runs. When the task is queued again for a new try (after a
 dropped connection, say), that try starts with nothing of the earlier try's
 resume: it may be resumed once in its own right, and the earlier try's turns

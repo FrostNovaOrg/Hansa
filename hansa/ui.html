@@ -1176,7 +1176,7 @@ Object.assign(T, ZH ? {
   timeline_failed:"失败", timeline_running:"进行中", timeline_done:"完成", timeline_passed:"通过", timeline_stopped:"已停止", timeline_cancelled:"已取消", timeline_queued:"运行失败，已重新排队", timeline_could_not_run:"无法运行",
   pipeline_worker:"工作智能体运行中", pipeline_check:"检查中", pipeline_verification:"核验中",
   laneTrying:"试跑中", laneHeld:"沙箱暂缓", startedAt:"开始", lastNote:"最近留言", verifyingTask:"核验任务",
-  laneQueued:n => `${n} 件排队`, laneReplies:n => `${n} 轮回复`, laneIdle:n => `空闲 ${n} 分钟`, timeBudget:(n, limit) => `已用 ${n} 分钟，时限 ${limit} 分钟`,
+  laneQueued:n => `${n} 件排队`, writingReport:v => `达到${v.unit === "turns" ? "轮次" : "时间"}上限（${v.count ?? "?"} ${v.unit === "turns" ? "轮" : "分钟"}）后被停下，正在补写报告`, laneReplies:n => `${n} 轮回复`, laneIdle:n => `空闲 ${n} 分钟`, timeBudget:(n, limit) => `已用 ${n} 分钟，时限 ${limit} 分钟`,
   atWork:"进行中", workWatch:"发布监测进行中", releaseWatching:"已发出 · 发布监测进行中",
   coordinatorStates:{busy:"工作中", idle:"空闲", waiting:"在自己的窗口等待答复"},
   coordinatorSession:(name, state, since) => `协调员 ${name}：${state}（自 ${since} 起）`
@@ -1188,7 +1188,7 @@ Object.assign(T, ZH ? {
   timeline_failed:"Failed", timeline_running:"Running", timeline_done:"Done", timeline_passed:"Passed", timeline_stopped:"Stopped", timeline_cancelled:"Cancelled", timeline_queued:"Run failed; queued again", timeline_could_not_run:"could not run",
   pipeline_worker:"Worker running", pipeline_check:"Check running", pipeline_verification:"Verification running",
   laneTrying:"trying", laneHeld:"Sandbox held", startedAt:"Started", lastNote:"Last note", verifyingTask:"Verifying task",
-  laneQueued:n => `${n} queued`, laneReplies:n => `${n} replies`, laneIdle:n => `${n} min idle`, timeBudget:(n, limit) => `${n} min elapsed, ${limit} min limit`,
+  laneQueued:n => `${n} queued`, writingReport:v => `reached its ceiling of ${v.count ?? "?"} ${v.unit} and was stopped; it is writing its report now`, laneReplies:n => `${n} replies`, laneIdle:n => `${n} min idle`, timeBudget:(n, limit) => `${n} min elapsed, ${limit} min limit`,
   atWork:"In progress", workWatch:"check after the push running", releaseWatching:"sent · check after the push running",
   coordinatorStates:{busy:"at work", idle:"idle", waiting:"waiting for an answer in its own window"},
   coordinatorSession:(name, state, since) => `Coordinator ${name}: ${state} since ${since}`
@@ -1553,8 +1553,8 @@ const serverMessagesZh = {
   worktree_failed:v => `git 无法准备工作树 ${v.path}，程序报告：“${v.said}”；请修复后重试`,
   setup_failed:v => `工作线的准备命令失败（退出码 ${v.exit}），工作智能体尚未启动；hansa show ${v.task} 可查看准备命令的输出`,
   task_ceiling:v => `达到上限（${v.count} ${v.unit === "minutes" ? "分钟" : "轮"}）；任务可能过大、描述不清或工作智能体卡住，请检查任务后重试`,
-  task_ceiling_reported:v => `达到时间上限（${v.count} 分钟）后被停下，报告是停下后补写的；任务可能过大、描述不清或工作智能体卡住，请检查任务后重试`,
-  task_ceiling_unreported:v => `达到时间上限（${v.count} 分钟）后被停下，停下后给的 ${v.given} 分钟内也没有写出报告；任务可能过大、描述不清或工作智能体卡住，请检查任务后重试`,
+  task_ceiling_reported:v => `达到${v.unit === "turns" ? "轮次" : "时间"}上限（${v.count} ${v.unit === "turns" ? "轮" : "分钟"}）后被停下，报告是停下后补写的；任务可能过大、描述不清或工作智能体卡住，请检查任务后重试`,
+  task_ceiling_unreported:v => `达到${v.unit === "turns" ? "轮次" : "时间"}上限（${v.count} ${v.unit === "turns" ? "轮" : "分钟"}）后被停下，停下后给的 ${v.given} 分钟内也没有写出报告；任务可能过大、描述不清或工作智能体卡住，请检查任务后重试`,
   program_error:v => reasonText(v.reason), no_output:v => `没有输出（退出码 ${v.exit}）`,
   task_wait:v => `等待：${waitingText(v.waiting)}`,
   task_prior:v => `先前由 ${v.provider} 运行：${reasonText(v.reason)}` + (v.kind === "credit" ? "（余额不足，不计尝试次数）"
@@ -1581,6 +1581,7 @@ const serverMessagesZh = {
   disk_low:v => `磁盘空间不足：${v.volumes.map(x => `${x.mount}${x.places?.length ? "（" + x.places.map(p => messageText(p)).join("、") + "）" : ""} 可用 ${x.free}，下限 ${x.floor}，恢复需 ${x.again}${x.total ? "，总容量 " + x.total : ""}`).join("；")}；请释放空间，所有卷达到恢复线后才开始新任务、核验、试跑、合并及合并检查、发布；正在运行的继续（hansa explain server）`,
   memory_low:v => `可用内存不足：${v.available}，下限 ${v.floor}；恢复到 ${v.again} 后才开始新任务、核验、试跑、合并及合并检查、发布；正在运行的继续（hansa explain server）`,
   task_error:v => `原因：${messageText(v.reason)}`,
+  task_writing_report:v => `进展：${T.writingReport(v)}${v.note ? `；最近留言：${v.note}` : ""}（轮次和用量在结束时记录）`,
   task_start:v => `无法开始：${reasonText(v.reason)}`,
   setup_start:v => `工作线的准备命令无法运行：${reasonText(v.reason)}；请检查运行环境（hansa explain server）`,
   sandbox_start:v => `沙箱无法启动，程序报告：“${messageText(v.reason)}”；请修复后重启 hansa serve`,
@@ -1735,6 +1736,7 @@ function laneTracks(st) {
         parent ? [" · ", T.verifyingTask, " ", taskLink(parent.id)] : null,
         worker?.browser ? T.withBrowser : null,
         worker?.checking ? h("span", {class:"muted"}, " · " + T.checkingWork) : null) : l.task ? taskLink(l.task) : null,
+      p?.wrap_up ? h("div", {class:"warn", "data-writing-report":""}, T.writingReport(p.wrap_up)) : null,
       m ? h("div", {class:"lane-time"}, h("progress", {class:"lane-budget" + (minutes > m.limit_min * .75 ? " warn" : ""),
         value:minutes || 0, max:m.limit_min, "aria-label":T.timeBudget(minutes || 0, m.limit_min)}),
         h("span", {}, worker?.checking ? T.checkMinutes(worker.check_minutes, worker.minutes)
