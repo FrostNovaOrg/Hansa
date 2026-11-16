@@ -653,7 +653,8 @@ which go to the coordinator. After a passing sandbox try clears a lane's hold, a
 including for the same reason.
 
 An unknown-model rest sends an urgent `model` alert naming the provider and model, asking you to change
-its model or key on the page (**Settings, Providers**). Like a `credit` alert, it stays queued if the rest
+its model in settings for a Codex provider, or its model or key on the page (**Settings, Providers**) for other kinds.
+Like a `credit` alert, it stays queued if the rest
 ends before delivery, and sends only from the desk that records the event; importing an account's shared
 credit rest sends no extra alert. Unknown-model rests themselves stay local to the desk. With no alert
 command or enabled push address, neither kind is queued.

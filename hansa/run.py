@@ -1018,7 +1018,7 @@ def sandbox_retry(desk: Desk, s: dict) -> list:
                 continue
             kind = h.get("kind") or "worker"
             try:
-                pname = next((x for x in lane["providers"] if x in s["providers"]), "")
+                pname = next((x for x in lane.get("providers", []) if x in s["providers"]), "")
                 wt = desk.worktrees_dir / ln
                 p = s["providers"].get(pname)
                 if not p or not wt.is_dir():
@@ -1442,10 +1442,14 @@ def credit_text(st: dict) -> str:
             + ("; another desk found it" if st.get("shared_rest") else "")) if since else ""
 
 
+def model_change_text(*, codex: bool = False) -> str:
+    return "its model in settings" if codex else "its model or key on the page (Settings, Providers)"
+
+
 def model_text(model: str, *, codex: bool = False) -> str:
     """A model rest has no deadline; use the same remedy in checks and provider views."""
     return (f"the provider does not know model {model}; rests until a check answers or the principal changes "
-            + ("its model in settings" if codex else "its model or key on the page (Settings, Providers)"))
+            + model_change_text(codex=codex))
 
 
 def rest_text(st: dict) -> str:
@@ -1505,7 +1509,7 @@ def tries_used(attempts: list) -> int:
 
 def task_providers(s: dict, lane: str, m: dict) -> list:
     """A dropped run waits for its own provider; other tasks keep their lane's provider order."""
-    order = s["lanes"][lane]["providers"]
+    order = s["lanes"][lane].get("providers", [])
     last = (m.get("attempts") or [{}])[-1]
     return [last["provider"]] if last.get("kind") == "network" and last.get("provider") in order else order
 
@@ -1532,6 +1536,11 @@ def refused_by(m: dict, order: list | None = None) -> set:
 
 
 CODEX_ADAPTER = Path(__file__).resolve().parent.parent / "contrib" / "codex" / "bin" / "claude-or-codex"
+
+
+def codex_login(p: dict) -> str:
+    """The same login command in provider explanations and lost-login remedies."""
+    return f"CODEX_HOME={shlex.quote(p['codex_home'])} {shlex.quote(p['codex_path'])} login"
 
 
 def codex_problem(p: dict) -> str:
@@ -1569,9 +1578,11 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
             return "no endpoint address"
         if not desk.has_key(name):
             return "no key"
-    if p["kind"] == "codex" and str(st.get("reason", "")).startswith("not logged in"):
-        login = f"CODEX_HOME={shlex.quote(p['codex_home'])} {shlex.quote(p['codex_path'])} login"
-        return f"{st['reason']}; log in with `{login}`, then `hansa ping {name}` brings it back"
+    if p["kind"] == "codex" and (str(st.get("reason", "")).startswith("not logged in") or
+            st.get("cool_until", 0) > time.time() and str(st.get("reason", "")).startswith("key rejected")):
+        # An earlier rest can carry old key wording; keep its deadline when the provider's kind changes.
+        reason = st["reason"].replace("key rejected", "login rejected", 1)
+        return f"{reason}; log in with `{codex_login(p)}`, then `hansa ping {name}` brings it back"
     if st.get("cool_until", 0) > time.time():
         if str(st.get("reason", "")).startswith("key rejected"):
             return f"{st['reason']}; saving a new key brings it back"
@@ -7164,7 +7175,7 @@ class Dispatcher:
                     except LaneCannotStart as e:  # held, not failed: it starts once the cause is gone
                         # Missing Claude holds the lanes that depend on it; Codex starts its own adapter.
                         shared = sorted(n for n, lane in s["lanes"].items() if not lane.get("merge_lane")
-                                        and all(s["providers"].get(p, {}).get("kind") != "codex" for p in lane["providers"])) \
+                                        and all(s["providers"].get(p, {}).get("kind") != "codex" for p in lane.get("providers", []))) \
                             if e.cause == "claude" else ()
                         start_hold(desk, m["id"], ln, e, shared)
                         waits.clear()  # looked at again with what was just held
@@ -7518,7 +7529,7 @@ def waiting_looks(desk: Desk, s: dict, tasks: list | None = None, server: dict |
             "resource": resource, "server": server, "held": sandbox_held(desk),
             "lane_wait": {occupied_lane(x): x for x in tasks if x.get("lane_wait_since")},
             "not_looking": not_looking(desk, server), "desks": desks_list_problem(),
-            "problems": {p: provider_problem(desk, s, p) for ln in s["lanes"].values() for p in ln["providers"]},
+            "problems": {p: provider_problem(desk, s, p) for ln in s["lanes"].values() for p in ln.get("providers", [])},
             "provider_state": desk.provider_state()}
 
 
@@ -7682,7 +7693,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
     with desk.lock():  # keys and settings are saved under this lock too, so nothing lands in between
         s = desk.settings()
         if (key_stamp(desk, name), json.dumps(s["providers"].get(name), sort_keys=True)) != stamp:
-            return annotate({**result, "ok": False, "detail": "the provider's key or settings changed while this check "
+            changed = "settings" if p["kind"] == "codex" else "key or settings"
+            return annotate({**result, "ok": False, "detail": f"the provider's {changed} changed while this check "
                                                             "ran, so it says nothing about them now; check again"},
                             ("detail",))
         st = desk.provider_state().get(name) or {}

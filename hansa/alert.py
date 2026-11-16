@@ -427,12 +427,14 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
             zh=f"服务商 {fields.get('provider')}：" + (f"套餐无法使用它，需要升级（{fields['plan']}），自 {at} 起休息，等你在网页上确认已升级"
                                                      if fields.get("plan") else f"余额不足，自 {at} 起休息，等你在网页上确认充值"))
     elif kind == "provider_model":
+        from .run import model_change_text
         at = time.strftime('%H:%M', time.localtime(fields.get("since") or time.time()))
         provider, model = fields.get("provider"), fields.get("model")
+        codex = desk.settings()["providers"].get(provider, {}).get("kind") == "codex"
         add(desk, "model", f"provider {provider}: it does not know model {model}; resting since {at} "
-                          "· next: change its model or key on the page (Settings, Providers)",
+                          f"· next: change {model_change_text(codex=codex)}",
             zh=f"服务商 {provider}：不认识模型 {model}，自 {at} 起休息 "
-               "· 下一步：在网页上更改它的模型或密钥（设置 → 服务商）")
+               + ("· 下一步：在设置中更改它的模型" if codex else "· 下一步：在网页上更改它的模型或密钥（设置 → 服务商）"))
     elif kind == "sandbox_held" and fields.get("alert"):  # once for each lane and reason until cleared (run.hold)
         from .run import sandbox_held_text
         held = {**fields, "kind": fields.get("run")}

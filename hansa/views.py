@@ -16,7 +16,7 @@ from .desk import (DENY_AT, home_secrets, desks_list_problem, listed_desks, shar
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError)
 from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
-                  credit_text, model_text, provider_problem, providers_waited_for, quota_probe_text, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
+                  codex_login, credit_text, model_text, provider_problem, providers_waited_for, quota_probe_text, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
                   lane_env, server_text, srt_needed, srt_problem, srt_record, srt_when, task_providers, tried_lanes, waiting_detail, waiting_looks, write_list)
 
 STATES = {
@@ -1455,7 +1455,8 @@ def limit_wait(desk: Desk, m: dict) -> str:
         return ""
     st = desk.provider_state().get(last["provider"]) or {}
     if st.get("model_since") and not st.get("credit_since"):
-        return f"{last['provider']}: {model_text(st['model_unknown'])}; that return used no try"
+        codex = desk.settings()["providers"].get(last["provider"], {}).get("kind") == "codex"
+        return f"{last['provider']}: {model_text(st['model_unknown'], codex=codex)}; that return used no try"
     if st.get("credit_since"):
         return (f"{last['provider']}: {credit_text(st)}; it starts when a provider of its lane is ready. "
                 "That return used no try. More: hansa help provider-limits")
@@ -2348,16 +2349,21 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
         if not p:
             return f"no provider {name}; providers: {', '.join(sorted(s['providers']))}"
         st = desk.provider_state().get(name, {})
-        where = p.get("config_dir") or "the default Claude Code login" if p["kind"] == "subscription" \
-            else (p.get("base_url") or "no endpoint yet")
+        if p["kind"] == "codex":
+            access = [f"  Codex program: {p['codex_path']}", f"  Codex home: {p['codex_home']}",
+                      f"  Codex's own login: `{codex_login(p)}`"]
+        elif p["kind"] == "subscription":
+            access = [f"  login: {p.get('config_dir') or 'the default Claude Code login'}"]
+        else:
+            access = [f"  endpoint: {p.get('base_url') or 'no endpoint yet'}"
+                      f" · key: {'present' if desk.has_key(name) else 'missing'}"]
         return "\n".join([
             f"provider {name} ({provider_origin(desk, name)})",
             f"  kind: {p['kind']} · model: {p['model']} · effort: {p.get('effort') or 'default'}",
             f"  rest after a usage limit: until the reset time the error gives, and a minute; else "
             f"{s.get('cool_minutes', 30)} minutes"
             + " (the desk's cool_minutes)",
-            f"  {'login' if p['kind'] == 'subscription' else 'endpoint'}: {where}"
-            + ("" if p["kind"] == "subscription" else f" · key: {'present' if desk.has_key(name) else 'missing'}"),
+            *access,
             f"  now: {provider_problem(desk, s, name) or 'ready'}",
             *([f"  {quota_probe_text(st, s)}"] if quota_probe_text(st, s) else []),
             f"  last ping: {ping_text(st.get('check'))}"])
@@ -2516,6 +2522,7 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
     """For hansa explain lane: what the lane's workers and verifiers, its setup and its check may not read. The
     built-in list as a count, the principal's own entries whole; whole: the built-in list name by name too."""
     homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in s["providers"].items() if isinstance(p, dict))
+    codex_homes = dict.fromkeys(p["codex_home"] for p in s["providers"].values() if p.get("kind") == "codex")
     kept = no_read_parts(s, desk.root)[0]
     own = session_private(desk)
     names = home_secrets()
@@ -2527,6 +2534,8 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
             *([f"    the Claude Code files of the folder hansa notify on recorded for the coordinator's session (built "
                f"in): {', '.join(own)}"] if own else []),
             f"    every provider's Claude Code folder, whichever provider the run uses: {', '.join(homes)}; and ~/.claude",
+            *([f"    the desk's Codex homes, kept from every run, whichever provider it uses: {', '.join(codex_homes)}"]
+              if codex_homes else []),
             "    logins, keys, tokens, browsing data, messages, histories and shell startup files under the home folder (built in): "
             + built_in,
             "    folders and files the principal keeps from workers (the principal's, on the web page, Settings; you"
