@@ -450,6 +450,9 @@ SANDBOX_PLACEHOLDERS = (".gitconfig", ".gitmodules", ".bashrc", ".bash_profile",
 # commands, agents, skills and hooks there, and its exact list changes between versions. Match from the
 # repository's top, without regard to case and by whole path segments, when committing the index.
 SANDBOX_PROTECTED_PATHS = (*SANDBOX_PLACEHOLDERS, ".claude")
+# Project settings may run commands when opened. Refuse worker changes to these names at any depth,
+# including on Linux where the sandbox can only protect fixed paths. Keep while workers can change them.
+PROJECT_SETTINGS_NAMES = (".claude", ".codex", ".agents")
 # A worker is one `claude -p` run: nothing wakes it later, nobody answers or is notified.
 INTERACTIVE_TOOLS = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger", "PushNotification",
                      "AskUserQuestion", "Monitor"]
@@ -2391,21 +2394,23 @@ def wgit(desk: Desk, wt: Path, *args, env=None) -> str:
 
 def sandbox_leftovers(desk: Desk, wt: Path) -> list:
     """Untracked files a worker's sandbox left in the worktree: under .claude/ its .cc-writes and the empty
-    placeholders for what it protects, and at the top the empty SANDBOX_PLACEHOLDERS. Nobody's work, so
-    never committed."""
-    out = wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z", "--", ".claude",
-               *(f":(top,literal){n}" for n in SANDBOX_PLACEHOLDERS))
-    return [f for f in out.split("\0") if f and (f.startswith(".claude/") or f in SANDBOX_PLACEHOLDERS)
+    placeholders for what it protects, and at the top the empty SANDBOX_PLACEHOLDERS and project settings
+    names. Nobody's work, so never committed."""
+    top = (*SANDBOX_PLACEHOLDERS, *PROJECT_SETTINGS_NAMES)
+    out = wgit(desk, wt, "ls-files", "--others", "--exclude-standard", "-z", "--",
+               *(f":(top,literal){n}" for n in top))
+    return [f for f in out.split("\0") if f and (f.startswith(".claude/") or f in top)
             and (Path(f).name == ".cc-writes" or (wt / f).is_file() and not (wt / f).is_symlink()
                  and (wt / f).stat().st_size == 0)]
 
 
 class SandboxPathChanged(RuntimeError):
-    """The index changes a path the worker's sandbox protects on disk."""
+    """The index changes project settings or a path the worker's sandbox protects on disk."""
 
 
 def sandbox_protected(path: str) -> bool:
-    return path.split("/", 1)[0].lower() in SANDBOX_PROTECTED_PATHS
+    parts = path.lower().split("/")
+    return parts[0] in SANDBOX_PROTECTED_PATHS or any(p in PROJECT_SETTINGS_NAMES for p in parts)
 
 
 def stage_work(desk: Desk, wt: Path, old: str, merged=()) -> list:
@@ -2420,7 +2425,10 @@ def stage_work(desk: Desk, wt: Path, old: str, merged=()) -> list:
             continue
         info, path = entry.split("\t", 1)
         mode, blob, stage = info.split()
-        if sandbox_protected(path) and path not in held and stage == "0" and mode in ("100644", "100755") \
+        # Only the old protected roots and exact top-level settings names can be placeholders.
+        # A nested project settings file, even empty, is the worker's change on Linux.
+        placeholder = path.split("/", 1)[0].lower() in SANDBOX_PROTECTED_PATHS or path in PROJECT_SETTINGS_NAMES
+        if placeholder and path not in held and stage == "0" and mode in ("100644", "100755") \
                 and wgit(desk, wt, "cat-file", "-s", blob) == "0":
             left.append(path)
     if left:
@@ -2432,8 +2440,8 @@ def stage_work(desk: Desk, wt: Path, old: str, merged=()) -> list:
         refused.intersection_update(different)
     if refused:
         raise SandboxPathChanged(
-            f"refusing to commit changes to protected paths: {', '.join(sorted(refused))}; the workers' sandbox "
-            "does not let them write these paths, so the changes can only have come through git's index; "
+            f"refusing to commit changes to protected paths: {', '.join(sorted(refused))}; "
+            "workers may not change these paths in a task; "
             "nothing was committed; the work is left staged. To change these paths, ask the principal: "
             "they change them outside a task")
     return paths
