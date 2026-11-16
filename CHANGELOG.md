@@ -8,6 +8,25 @@ entries for those versions keep the names of their time. Commits up to 9 October
 Hansa is a rewrite: one directory holds a desk, with a command line for the coordinator,
 a web page for the principal (the person directing the work), and task workers. MIT License.
 
+Upgrading needs nothing done: a desk that reaches Codex the old way, through the adapter and `HANSA_CLAUDE`,
+keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
+
+### Work that goes on where it stopped
+
+- Each worker and verifier is told its total time limit and the local time it counts from; a run continued
+  for work it left in the background is also told the minutes it has left, and its tokens are counted once.
+- A worker or verifier stopped at its ceiling of time or of turns gets a few more minutes to write its report,
+  so the work it did is described; a verification stopped that way can still give its verdict.
+  The page shows when a run is writing its report.
+- A follow-up made with `hansa retry` goes on in the earlier task's conversation when it runs on the same lane,
+  provider and model, and a follow-up of a follow-up goes on too; each counts only its own tokens.
+  When it cannot (an older Claude Code, a missing or too-long conversation), it starts a new one without
+  failing or using a try. `hansa show` says whether it went on, and why not.
+- `hansa verify` of a task verified before goes on in the earlier verification's conversation;
+  verifying on another lane (`--lane L`) gives a fresh look. `hansa show` says which.
+- A task or verification hansa starts again after a dropped connection, a kill by the system, a usage limit
+  or a lost login carries on in its earlier conversation, told what happened.
+
 ### Tasks and workers
 
 - `hansa cancel` says “restored to closed” for closed work; `hansa goal show` marks closed work `(closed)`.
@@ -87,6 +106,10 @@ a web page for the principal (the person directing the work), and task workers. 
 ### The sandbox
 
 - Security: four fixes.
+- hansa refuses a worker's changes to `.claude`, `.codex` and `.agents` paths at any depth, leaving the work staged.
+- Workers and verifiers are kept from the account's shell startup files.
+- Settings lists the places hansa always keeps from workers and marks which exist on this machine,
+  beside the box for what else workers may not read.
 - A lane's write list refuses lane repositories of other desks on the account's list.
 - On Linux, leftover processes are stopped and listed by `hansa show` even when the kernel cut a process name
   inside a multi-byte character, which previously left the process running and logged a decoding error.
@@ -310,6 +333,8 @@ a web page for the principal (the person directing the work), and task workers. 
 
 ### Providers and usage limits
 
+- A provider resting because it does not know its configured model sends an urgent alert saying how to fix it.
+- Rests recorded by older versions end by themselves once expired; a lane saved without a provider list does not hold dispatch.
 - A successful `hansa ping` says which rest it ended (usage limit, lost login, unknown model) or that a credit rest stays.
 - Expired Claude subscription logins say to log in again, then run `hansa ping`; lost Claude and Codex logins use no try.
 - A successful `hansa ping` or page check clears shared usage rests across desks for the same configured model; another model frees only that provider.
@@ -332,7 +357,10 @@ a web page for the principal (the person directing the work), and task workers. 
 - `hansa status` and the page show running releases, checks after a push and `hansa lane try` with minutes run and limits; `hansa status --json` lists them in `at_work`. The coordinator's status line names them instead of `idle`.
 - `hansa status` and the page's header show the coordinator's session at work, idle or waiting for an answer in its own window, and since when; `hansa status --json` gives `coordinator_session`.
 - The installer's SSH line forwards both page ports. `hansa doctor` on macOS without Homebrew says where to get it,
-  and names the guide by a full path or address. `hansa init --repo` on a missing folder says it made one.
+  and names the guide by a full path or address. `hansa init --repo` on a missing folder notes that it made a new
+  project there and how to undo that.
+- The installer and `hansa doctor` warn when another hansa installation comes first on PATH and say how to fix it.
+  On Linux, `hansa doctor` recommends ripgrep.
 - `hansa init` that cannot make the desk says why and removes what it made; `hansa lane try` and `hansa web`
   say how to start a stopped server.
 - `hansa explain lane|provider` names what made and last changed it and refuses unknown names;
@@ -387,16 +415,29 @@ a web page for the principal (the person directing the work), and task workers. 
   how a desk is run and push services. Tests keep each guide's headings and code blocks in step with English.
 - The [backup instructions](docs/desk.md#backing-up-and-moving-a-desk) keep goals and decisions.
 
-### The Codex adapter
+### Codex, a provider of its own kind
 
+- Settings offers the provider kind Codex, with its own fields: the Codex program and home, its model and
+  more Codex settings. hansa starts and checks such a provider itself, with no `HANSA_CLAUDE` or `codex.env`,
+  and runs its workers on macOS and Linux. [Codex](docs/codex.md) covers setup; the
+  [adapter's guide](contrib/codex/README.md) says what its sandbox protects on each system.
+- Each Codex home is kept from every run but its own provider's and is listed among the folders kept from workers.
+  `/`, the account's home and the folders above it, and a worker's worktree and the folders above it are refused as Codex homes.
+- A Codex provider's rests name no key and give its login command; providers on one Codex home share rests across
+  providers and desks. Command-line explanations and recovery advice match its settings and login.
+- The Chinese page explains a refused Codex field in Chinese.
+- To change a provider set up the old way, choose the kind Codex on the page, fill in the program and the home, and save;
+  `hansa explain provider` and the page say so. Saving clears the provider's stored key, and a key typed before
+  switching is dropped.
+- The Codex dry run checks that nested settings folders are refused at commit.
 - The optional Codex adapter no longer keeps run output files; `HANSA_CODEX_LOGS` is accepted and has no effect. After stopping older runs, remove their output from the former `logs/` folder or the folder that setting named.
 - A ChatGPT plan without Codex is named as one to upgrade; it still rests until confirmed.
 - Lost logins ask for `codex login`, then `hansa ping`. Workspaces out of credits and plans without Codex wait for a confirmed top-up or saved key.
 - Cancelled runs and runs stopped at their time ceiling keep their last message, turns and reported usage.
 - `codex.env` accepts `export` lines; misspelt efforts and leftover example notes fail at startup.
 - Previously working `codex.env` files with unknown `HANSA_CODEX_` keys now fail until those keys are removed.
-- The optional macOS adapter runs Codex workers inside srt, translates results and live progress
-  for hansa, and passes other calls to Claude. [Adapter setup and limits](contrib/codex/README.md)
+- The adapter runs Codex workers inside srt, translates results and live progress for hansa and,
+  on a desk set up the old way, passes other calls to Claude. [Adapter setup and limits](contrib/codex/README.md)
   covers its own login and configuration, provider errors, login access inside its sandbox and tool-rule limits.
 - The adapter now runs the model set for its provider on the page; `HANSA_CODEX_MODEL` is only a fallback.
   Existing providers with placeholder model names must now name the Codex model.
