@@ -128,6 +128,22 @@ def check(lang=None):
     def path_fix(path):
         return "export PATH=" + shlex.quote(str(Path(path).absolute().parent)) + ':"$PATH"'
 
+    # Compare targets without running a possibly older copy. Ignore inaccessible
+    # PATH entries and dangling links so they cannot prevent the remaining checks.
+    search_path = os.pathsep.join(p or os.curdir for p in env.get("PATH", os.defpath).split(os.pathsep)
+                                  if os.access(p or os.curdir, os.R_OK | os.X_OK))
+    first = shutil.which("hansa", path=search_path, mode=os.R_OK | os.X_OK)
+    target = Path(__file__).resolve().parent.parent / "bin/hansa"
+    if first and os.path.realpath(first) != os.path.realpath(target):
+        first = os.path.abspath(first)
+        folder = os.path.dirname(first)
+        row("hansa PATH", "fails",
+            tr(f"{first} comes first on PATH and is another installation",
+               f"{first} 在 PATH 中优先找到，指向另一处安装"),
+            tr(f"hansa on PATH resolves to {target}", f"PATH 中的 hansa 指向 {target}"),
+            tr(f"Remove {folder} from PATH in your shell profile, or put ~/.local/bin before it, then open a new terminal.",
+               f"请在 shell 配置文件中从 PATH 移除 {folder}，或将 ~/.local/bin 放在它前面，然后打开新终端。"))
+
     current = tuple(sys.version_info[:3])
     row("Python", "ok" if current >= PYTHON_MIN else "fails", f"{version_text(current)} ({sys.executable})",
         ">= " + version_text(PYTHON_MIN), fix("python"))
@@ -222,7 +238,7 @@ def check(lang=None):
             row("Sandbox", "fails", str(e), need, repair)
 
     # Keep installation order stable for both people and agents.
-    order = ["Python", "Git", "Node", "Claude Code", "Claude login", "srt", "tmux", "bubblewrap", "socat", "Sandbox"]
+    order = ["hansa PATH", "Python", "Git", "Node", "Claude Code", "Claude login", "srt", "tmux", "bubblewrap", "socat", "Sandbox"]
     rows.sort(key=lambda r: order.index(r["name"]))
     return {"ok": not any(r["state"] == "fails" for r in rows), "rows": rows}
 

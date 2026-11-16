@@ -133,6 +133,96 @@ with open({str(self.calls)!r}, 'a') as out:
         with patch.object(doctor.sys, "version_info", (3, 8, 20)):
             self.assertEqual(self.rows(platform="linux")["Python"]["fix"], "sudo apt-get install python3")
 
+    def test_other_hansa_on_path_fails_in_text_and_json_without_running_it(self):
+        other = self.tool("hansa", "raise SystemExit('must not run')", self.tmp / "old tools/hansa")
+        target = Path(doctor.__file__).resolve().parent.parent / "bin/hansa"
+        local = self.tmp / ".local/bin/hansa"
+        local.parent.mkdir(parents=True)
+        local.symlink_to(target)
+        first = self.tmp / "first bin/hansa"
+        first.parent.mkdir()
+        for kind in ("file", "link", "relative"):
+            with self.subTest(kind=kind):
+                if kind == "file":
+                    first.write_bytes(other.read_bytes())
+                    first.chmod(0o755)
+                else:
+                    first.symlink_to(other)
+                # A relative entry must be resolved from the current directory.
+                path = os.path.relpath(first.parent) if kind == "relative" else str(first.parent)
+                with patch.dict(os.environ, PATH=os.pathsep.join((path, str(self.bin), str(local.parent)))):
+                    for lang in ("en", "zh"):
+                        for output_type in ((), ("--json",)):
+                            with self.subTest(lang=lang, output_type=output_type):
+                                code, output = self.command(*output_type, "--lang", lang)
+                                self.assertEqual(code, 1, output)
+                                if output_type:
+                                    result = json.loads(output)
+                                    self.assertFalse(result["ok"])
+                                    row = next(r for r in result["rows"] if r["name"] == "hansa PATH")
+                                    self.assertEqual(row["state"], "fails")
+                                    self.assertIn(str(first), row["found"])
+                                    self.assertIn(str(target), row["need"])
+                                    self.assertTrue(all(r["state"] == "ok" for r in result["rows"]
+                                                        if r["name"] != "hansa PATH"))
+                                self.assertIn(str(first), output)
+                                self.assertIn("~/.local/bin", output)
+                                for words in (("another installation", "first", "shell profile", "Remove", "new terminal")
+                                              if lang == "en" else ("另一处安装", "优先", "配置文件", "移除", "新终端")):
+                                    self.assertIn(words, output)
+                first.unlink()
+        self.assertFalse(any(c["name"] == "hansa" for c in self.recorded()))
+
+    def test_hansa_path_matching_installation_or_missing_adds_no_row(self):
+        target = Path(doctor.__file__).resolve().parent.parent / "bin/hansa"
+        first = self.bin / "hansa"
+        later = self.tool("hansa", "raise SystemExit('must not run')", self.tmp / "later/hansa")
+        first.symlink_to(os.path.relpath(target, first.parent))
+        with patch.dict(os.environ, PATH=str(self.bin) + os.pathsep + str(later.parent)):
+            result = self.check()
+            self.assertTrue(result["ok"], result)
+            self.assertNotIn("hansa PATH", {row["name"] for row in result["rows"]})
+        first.unlink()
+        result = self.check()
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("hansa PATH", {row["name"] for row in result["rows"]})
+        self.assertFalse(any(c["name"] == "hansa" for c in self.recorded()))
+
+    def test_hansa_path_ignores_unusable_entries(self):
+        other = self.tool("hansa", "raise SystemExit('must not run')")
+        earlier = self.tmp / "earlier/hansa"
+        earlier.parent.mkdir()
+        for kind in ("broken-link", "link-loop", "directory", "not-executable", "unreadable-file", "unreadable-folder"):
+            with self.subTest(kind=kind):
+                if kind == "broken-link":
+                    earlier.symlink_to(self.tmp / "missing")
+                elif kind == "link-loop":
+                    earlier.symlink_to("hansa")
+                elif kind == "directory":
+                    earlier.mkdir()
+                else:
+                    earlier.write_text("must not run\n")
+                    earlier.chmod(0o644 if kind == "not-executable" else 0o111 if kind == "unreadable-file" else 0o755)
+                if kind == "unreadable-folder":
+                    earlier.parent.chmod(0o111)
+                try:
+                    if kind.startswith("unreadable") and os.access(
+                            earlier.parent if kind == "unreadable-folder" else earlier, os.R_OK):
+                        self.skipTest("this account can read permission-restricted paths")
+                    path = os.pathsep.join((os.path.relpath(earlier.parent), str(self.bin)))
+                    with patch.dict(os.environ, PATH=path):
+                        row = self.rows()["hansa PATH"]
+                    self.assertEqual(row["state"], "fails")
+                    self.assertIn(str(other), row["found"])
+                    self.assertNotIn(str(earlier), row["found"])
+                finally:
+                    earlier.parent.chmod(0o755)
+                    if earlier.is_dir():
+                        earlier.rmdir()
+                    else:
+                        earlier.unlink()
+        self.assertFalse(any(c["name"] == "hansa" for c in self.recorded()))
+
     def test_missing_tools_and_platform_specific_fixes(self):
         for path in self.bin.iterdir():
             if path.name not in ("apt-get", "brew"):

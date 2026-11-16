@@ -66,12 +66,18 @@ python3 -B - "$link" "$install_dir/docs/getting-started.md" <<'PY'
 import os
 from pathlib import Path
 import shlex
+import shutil
 import sys
 
 link, guide = sys.argv[1:]
 on_path = any(os.path.abspath(p or '.') == os.path.dirname(link)
               for p in os.environ.get('PATH', '').split(':'))
-command = 'hansa' if on_path else shlex.quote(link)
+# Ignore inaccessible entries and dangling links, as well as non-executable files.
+search_path = os.pathsep.join(p or '.' for p in os.environ.get('PATH', '').split(os.pathsep)
+                              if os.access(p or '.', os.R_OK | os.X_OK))
+first = shutil.which('hansa', path=search_path, mode=os.R_OK | os.X_OK)
+other = os.path.abspath(first) if first and os.path.realpath(first) != os.path.realpath(link) else ''
+command = 'hansa' if on_path and not other else shlex.quote(link)
 lang = os.environ.get('LC_ALL') or os.environ.get('LC_MESSAGES') or os.environ.get('LANG', '')
 zh = lang.startswith('zh')
 chinese_guide = Path(guide).parent / 'zh-CN' / 'getting-started.md'
@@ -81,6 +87,12 @@ if not on_path:
     print('export PATH="$HOME/.local/bin:$PATH"')
     print('请自行将上面这行添加到 shell 配置文件。' if zh else
           'Add the line above to your shell profile yourself.')
+    print()
+if other:
+    print(f'{other} 在 PATH 中优先找到，指向另一处 hansa 安装。' if zh else
+          f'{other} comes first on PATH and is another hansa installation.')
+    print(f'请在 shell 配置文件中从 PATH 移除 {os.path.dirname(other)}，或将 ~/.local/bin 放在它前面，然后打开新终端。' if zh else
+          f'Remove {os.path.dirname(other)} from PATH in your shell profile, or put ~/.local/bin before it, then open a new terminal.')
     print()
 steps = [
     (' doctor', '检查 hansa 所需的工具，并说明如何安装缺少的工具',
