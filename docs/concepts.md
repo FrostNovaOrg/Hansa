@@ -122,7 +122,7 @@ section, else the file under `docs/` and its heading.
 | `hansa status` | Whether `hansa serve` runs, the page's address, the lanes, what is running, waiting or failed, the providers, the last 24 hours |
 | `hansa add "<task>" [--lane L]` | Queue a task |
 | `hansa show ID`, `hansa diff ID` | A task's report, its check, the files it changed, what to do next; its changes against the base |
-| `hansa verify ID` | Have a worker run a finished task's change to see whether it holds; the verification itself is never merged |
+| `hansa verify ID` | Have a worker run a finished task's change to see whether it holds; the verification itself is never merged. Verifying the same task again goes on in the earlier verification's conversation where it can (`--lane L`: other eyes, in a new one) |
 | `hansa merge ID` | Merge a finished task into its lane's base branch |
 | `hansa retry ID "<what to change>"` | Queue a follow-up on top of the earlier task, going on in its conversation where it can (`--fresh`: from the base, in a new conversation; `--update`: with the base merged in) |
 | `hansa cancel ID`, `hansa close ID` | Stop queued, running or merging work; close a finished or failed task or verification without merging |

@@ -397,7 +397,7 @@ if os.environ.get("FAKE_CEILING"):  # a file, written once it works: it works on
             {"type": "assistant", "message": {"id": "c2", "model": "mimo-x", "content": [
                 {"type": "tool_use", "id": "uc", "name": "Bash", "input": {"command": "python3 -m unittest tests.test_slow"}}],
                 **counted}}]
-    with open(rec, "w") as f:
+    with open(rec, "a" if FORKED else "w") as f:  # a fork's record begins with the copied rows (FORK_FACTS 1)
         f.writelines(json.dumps(r) + "\n" for r in rows)
     open("partial.txt", "w").write("half of the work\n")
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True)
@@ -1114,7 +1114,7 @@ class FailedWriteTest(unittest.TestCase):
                   "e": types.SimpleNamespace(path=task / "example.git", found="changed", expected="original"),
                   "log": self.desk.state_dir / "releases" / "1.log", "f": self.root / "command-input.txt",
                   "paths": ["/example"], "kept": ["/private"],
-                  "first": "You go on here, in a new task.\n"}  # start's message before the task text of a follow-up
+                  "first": "You go on here, in a new task.\nthe task text\n"}  # start's first message of a follow-up, task text included
         (task / "task.md").write_text("the task text\n")
         # Each call below is a row; ENOSPC part way is the column. All rows start at 0600.
         scopes = [(cli, cli.init_desk, 3), (cli, cli._retry, 1), (cli, cli.cmd_serve, 2),
@@ -35078,6 +35078,234 @@ def save():'''))
         new, _ = self.follow_up(tid, "Make the badge bold")
         talk = run.continuation(self.desk, {**self.desk.meta(new), "parent": vid}, "a", "mimo", p, "mimo-x")
         self.assertIn("verification", talk["new"])
+
+    # A repeated verification of the same task goes on in the earlier verification's conversation (run.continuation):
+    # | same lane, provider, model, record there; numbers; verdict | test_a_repeated_verification_goes_on_in_the_earlier_ones_conversation |
+    # | another lane, provider or model; several earlier ones      | test_a_repeated_verification_on_other_eyes_starts_a_new_conversation |
+    # | how the earlier one ended; record gone; Codex; restarted    | test_the_one_place_that_decides_says_why_a_verification_starts_anew |
+    # | a verification of a follow-up (a new task id)               | test_a_verification_of_a_follow_up_never_goes_on_in_its_parents_verification |
+    # | queued by itself after the check (--verify)                 | test_a_verification_queued_after_the_check_starts_a_new_conversation |
+    # | the continued start cannot go on                            | test_a_continued_verification_claude_code_cannot_go_on_with_starts_again_anew |
+    # | stopped at its ceiling after it went on                     | test_a_continued_verification_stopped_at_the_ceiling_writes_its_report_in_its_own_session |
+    def verified(self, tid, *args, **env) -> dict:
+        """hansa verify tid with these arguments, run on lane a's env with these values added; its meta once ended."""
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {k: v for k, v in {**s["lanes"]["a"]["env"], **env}.items() if v is not None}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", tid, *args)
+        return self.settle(Dispatcher(self.desk), self.desk.meta(tid)["verify"])
+
+    def forks_of(self, n=0) -> list:
+        """The forked calls' command lines among the worker calls after the first n."""
+        return [a for a in self.calls_of()[n:] if "--fork-session" in a]
+
+    def test_a_repeated_verification_goes_on_in_the_earlier_ones_conversation(self):
+        from hansa import run
+        tid = self.continued_parent()
+        self.desk.update(tid, commits=1)  # so it can be verified
+        v1 = self.verified(tid, FAKE_VERDICT_REPORT="does not hold")
+        self.assertEqual((v1["state"], v1["verdict"]), ("done", "does not hold"), v1)
+        self.assertIsNone(v1.get("conversation"))  # the first verification of the task: a conversation of its own
+        ref = f"refs/hansa/scratch/{v1['id']}"
+        self.desk.update(v1["id"], scratch_ref=ref)  # what it changed for its checks, kept aside as finish keeps it
+        home = run.config_home(self.desk, "mimo", self.desk.settings()["providers"]["mimo"])
+        [record] = home.glob(f"projects/*/{v1['session_id']}.jsonl")
+        before = record.read_bytes()
+        n = len(self.calls_of())
+        v2 = self.verified(tid, FAKE_VERDICT_REPORT=None)  # its own answer gives no verdict
+        self.assertEqual(v2["state"], "done", v2)
+        [argv] = self.forks_of(n)
+        self.assertEqual(argv[argv.index("--resume") + 1], v1["session_id"])
+        sid = argv[argv.index("--session-id") + 1]
+        self.assertNotIn(sid, (v1["session_id"], self.desk.meta(tid)["session_id"]))
+        self.assertEqual(v2["session_id"], sid)
+        self.assertEqual(argv[argv.index("--system-prompt-snapshot") + 1], "off")
+        self.assertIn(v2["id"], argv[argv.index("--append-system-prompt") + 1])  # its instructions are its own
+        [seen] = self.calls_of("forked.jsonl")
+        said = seen["prompt"]
+        for part in (v2["id"], v1["id"], tid, ref, f"git show {ref}", run.commands_tmp(seen["tmp"]), v2["worktree"],
+                     self.desk.meta(tid)["head"][:12], "not reached", "verdict on the whole change"):
+            self.assertIn(part, said)
+        self.assertNotIn("as it was given", said)  # its task text is the one its conversation began with
+        self.assertEqual(record.read_bytes(), before)  # the earlier verification's record is as it was
+        self.assertIn(f"conversation: continued that of verification {v1['id']}", views.show_text(self.desk, v2["id"]))
+        # its verdict is its own answer's, though the rows its record copied end with the earlier one's
+        [forked] = home.glob(f"projects/*/{v2['session_id']}.jsonl")
+        self.assertIn("VERDICT: does not hold", forked.read_text())
+        self.assertEqual(v2["verdict"], "")
+        # its numbers are its own part only
+        self.assertEqual((v2["usage"]["mimo-x"]["in"], v2["usage"]["mimo-x"]["out"]), (300, 60))
+        self.assertEqual(self.counted(v2), (300, 300))
+        own = run.own_session(self.desk, v2)
+        self.assertEqual(len(run._record(home, own)[0]), 3)
+        self.assertEqual(len(run._record(home, v2["session_id"])[0]), 6)
+        self.assertEqual(run.progress_of(self.desk, v2)["replies"], 3)
+        # a third, with what the coordinator asks it to look at, goes on from the second's own session
+        n = len(self.calls_of())
+        v3 = self.verified(tid, "the badge's colour", FAKE_VERDICT_REPORT="holds")
+        self.assertEqual((v3["state"], v3["verdict"], v3["verify_note"]), ("done", "holds", "the badge's colour"), v3)
+        [argv] = self.forks_of(n)
+        self.assertEqual(argv[argv.index("--resume") + 1], v2["session_id"])
+        said = self.calls_of("forked.jsonl")[-1]["prompt"]
+        self.assertIn("the badge's colour", said)
+        self.assertNotIn("not reached", said)
+        self.assertIn("keeps nothing", said)  # the second left no changes kept aside
+        self.assertIn(f"conversation: continued that of verification {v2['id']}", views.show_text(self.desk, v3["id"]))
+        self.assertEqual((v3["usage"]["mimo-x"]["in"], v3["usage"]["mimo-x"]["out"]), (300, 60))
+        self.assertEqual(sum(r["in"] for r in cost.report(self.desk, 1)["rows"]
+                             if r["task"] in (v1["id"], v2["id"], v3["id"])), 900)
+
+    def test_a_repeated_verification_on_other_eyes_starts_a_new_conversation(self):
+        # --lane L, another provider, another model: a new conversation; of several earlier ones, the latest it can
+        tid = self.continued_parent()
+        self.desk.update(tid, commits=1)
+        s = self.desk.settings()
+        s["providers"]["mimo2"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://y"}
+        s["lanes"]["b"] = {**s["lanes"]["a"]}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo2", "sk-test-02")
+
+        def anew(*args, change=None):
+            if change:
+                s = self.desk.settings()
+                change(s)
+                self.assertEqual(self.desk.save_settings(s), [])
+            n = len(self.calls_of())
+            v = self.verified(tid, *args)
+            self.assertEqual(v["state"], "done", v)
+            [argv] = self.calls_of()[n:]
+            self.assertNotIn("--resume", argv)
+            self.assertNotIn("--fork-session", argv)
+            self.assertEqual(v["usage"]["mimo-x"]["in"], 300)
+            return v, views.show_text(self.desk, v["id"])
+
+        v1, shown = anew()
+        self.assertNotIn("conversation:", shown)  # the task's first verification
+        v2, shown = anew("--lane", "b")
+        self.assertIn("conversation: a new one, as it runs on lane b, not on a", shown)
+        n = len(self.calls_of())
+        v3 = self.verified(tid)  # on lane a again: the latest it can go on from is v1, not v2 (lane b)
+        [argv] = self.forks_of(n)
+        self.assertEqual((v3["conversation"]["from"], argv[argv.index("--resume") + 1]), (v1["id"], v1["session_id"]))
+        n = len(self.calls_of())
+        v4 = self.verified(tid)  # and then v3, the latest of all
+        [argv] = self.forks_of(n)
+        self.assertEqual((v4["conversation"]["from"], argv[argv.index("--resume") + 1]), (v3["id"], v3["session_id"]))
+        v5, shown = anew(change=lambda s: s["lanes"]["a"].update(providers=["mimo2"]))
+        self.assertIn("conversation: a new one, as it runs on mimo2, not on mimo", shown)
+        v6, shown = anew(change=lambda s: s["providers"]["mimo2"].update(model="mimo-y"))
+        self.assertIn("conversation: a new one, as it runs model mimo-y, not mimo-x", shown)
+
+    def test_the_one_place_that_decides_says_why_a_verification_starts_anew(self):
+        from hansa import run
+        tid = self.continued_parent()
+        self.desk.update(tid, commits=1)
+        v1 = self.verified(tid)
+        self.hansa("verify", tid)  # queued, not started
+        v2 = self.desk.meta(tid)["verify"]
+        p = self.desk.settings()["providers"]["mimo"]
+        decide = lambda m, p=p: run.continuation(self.desk, m, "a", "mimo", p, "mimo-x")
+        m = self.desk.meta(v2)
+        self.assertEqual((decide(m)["from"], decide(m)["session"]), (v1["id"], v1["session_id"]))
+        for ended in ({"verdict": "holds"}, {"state": "done", "verdict": "", "timed_out": True},
+                      {"state": "done", "verdict": "unsure", "timed_out": True, "wrap_up": {"wrote": True}},
+                      {"state": "failed", "error": "API Error: 500"}, {"state": "cancelled", "cancel": True},
+                      {"closed": f"closed: {v2} verifies {tid} again"}):
+            with self.subTest(ended=ended):  # however it ended, it is gone on from
+                self.desk.update(v1["id"], **ended)
+                self.assertEqual(decide(self.desk.meta(v2))["from"], v1["id"])
+        self.assertIn("Codex", decide(m, {**p, "kind": "codex"})["new"])
+        self.assertIn("started it again", decide({**m, "attempts": [{"kind": "network"}]})["new"])
+        self.assertIn("lane b", run.continuation(self.desk, m, "b", "mimo", p, "mimo-x")["new"])
+        for f in run.config_home(self.desk, "mimo", p).glob(f"projects/*/{v1['session_id']}.jsonl"):
+            f.unlink()  # removed by age, say
+        self.assertIn("record is not on this machine", decide(m)["new"])
+        # never a worker's: a verification of a task never verified before has nothing to go on from
+        self.assertIsNone(decide({**m, "id": v1["id"]}))
+
+    def test_a_verification_of_a_follow_up_never_goes_on_in_its_parents_verification(self):
+        tid = self.continued_parent()
+        self.desk.update(tid, commits=1)
+        v1 = self.verified(tid)
+        new, _ = self.follow_up(tid, "Make the badge bold")
+        self.assertEqual(self.settle(Dispatcher(self.desk), new)["state"], "done")
+        self.desk.update(new, commits=1)
+        n = len(self.calls_of())
+        v2 = self.verified(new)
+        [argv] = self.calls_of()[n:]
+        self.assertNotIn("--resume", argv)
+        self.assertNotIn(argv[argv.index("--session-id") + 1], (v1["session_id"], self.desk.meta(new)["session_id"]))
+        self.assertIsNone(v2.get("conversation"))
+        self.assertNotIn("conversation:", views.show_text(self.desk, v2["id"]))
+
+    def test_a_verification_queued_after_the_check_starts_a_new_conversation(self):
+        # hansa run --verify: queued by the server once the task's check passes, through the same queue_verification;
+        # of a task never verified before, so a conversation of its own
+        tid = self.continued_parent()
+        self.desk.update(tid, commits=1, verify_after={"lane": "", "effort": "", "note": "the badge"})
+        d = Dispatcher(self.desk)
+        d.verify_after(tid)
+        vid = self.desk.meta(tid)["verify"]
+        n = len(self.calls_of())
+        v = self.settle(d, vid)
+        self.assertEqual(v["state"], "done", v)
+        [argv] = self.calls_of()[n:]
+        self.assertNotIn("--resume", argv)
+        self.assertIsNone(v.get("conversation"))
+
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
+    def test_a_continued_verification_claude_code_cannot_go_on_with_starts_again_anew(self):
+        from hansa import run
+        tid = self.continued_parent()
+        self.desk.update(tid, commits=1)
+        v1 = self.verified(tid)
+        n = len(self.calls_of())
+        v2 = self.verified(tid, FAKE_FORK_LOST="gone", FAKE_VERDICT_REPORT="holds")
+        self.assertEqual((v2["state"], v2["verdict"]), ("done", "holds"), v2)
+        first, again = [a for a in self.calls_of()[n:] if "--session-id" in a]
+        self.assertIn("--fork-session", first)
+        self.assertNotIn("--resume", again)
+        self.assertEqual(v2["session_id"], again[again.index("--session-id") + 1])
+        self.assertEqual([a["kind"] for a in v2["attempts"]], ["conversation"])
+        self.assertEqual(run.tries_used(v2["attempts"]), 0)
+        shown = views.show_text(self.desk, v2["id"])
+        self.assertIn(f"conversation: a new one, as Claude Code could not go on in the conversation of verification "
+                      f"{v1['id']}", shown)
+        self.assertIn("no try used", shown)
+        self.assertEqual(v2["usage"]["mimo-x"]["in"], 300)
+
+    def test_a_continued_verification_stopped_at_the_ceiling_writes_its_report_in_its_own_session(self):
+        from hansa import run
+        tid = self.continued_parent()
+        self.desk.update(tid, commits=1)
+        v1 = self.verified(tid)
+        flag, seen = self.tmp / "ceiling.json", self.tmp / "resumed.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {**s["lanes"]["a"]["env"], "FAKE_CEILING": str(flag), "FAKE_RESUMED": str(seen),
+                                  "FAKE_RESUME_REPORT": "Ran the badge tests: they pass.\nVERDICT: unsure"}
+        s["lanes"]["a"]["env"].pop("FAKE_TRANSCRIPT")
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.hansa("verify", tid)
+        vid = self.desk.meta(tid)["verify"]
+        d, end = Dispatcher(self.desk), time.time() + 60
+        while not flag.exists() and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        self.assertTrue(flag.exists(), self.desk.meta(vid))
+        self.desk.update(vid, started=time.time() - 60 * 241)  # and its time is up
+        v2 = self.settle(d, vid)
+        self.assertEqual((v2["state"], v2["verdict"], v2["error"]), ("done", "unsure", ""), v2)
+        self.assertEqual(v2["conversation"]["from"], v1["id"])
+        [call] = [json.loads(x) for x in seen.read_text().splitlines()]
+        argv = call["argv"]  # continued in its own (forked) session, not the earlier verification's
+        self.assertEqual(argv[argv.index("--resume") + 1], v2["session_id"])
+        self.assertNotEqual(v2["session_id"], v1["session_id"])
+        self.assertNotIn("--fork-session", argv)
+        self.assertNotIn("--session-id", argv)
+        self.assertEqual(argv[argv.index("--system-prompt-snapshot") + 1], "off")
+        self.assertIn("Ran the badge tests", (self.desk.tasks_dir / vid / "result.md").read_text())
+        # its own part: the stopped run's two replies (200 in) and the continuation's (10), not v1's copied 300
+        self.assertEqual((v2["usage"]["mimo-x"]["in"], v2["usage"]["mimo-x"]["out"]), (210, 45))
 
     def test_a_claude_code_without_the_switches_a_continued_start_needs_starts_anew(self):
         # hansa reads Claude Code's help text once per server start (per program file) before a continued start
