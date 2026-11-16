@@ -997,6 +997,8 @@ def partial_write(path, after=None):
 # | Copied, new and edited lane briefs, and `brief-before-*.md`, `cli.cmd_lane` | In place; keep link | Whole writes; other-sites matrix, three rows |
 # | `.hansa/runs/<id>/lane-env.sh`, `run.env_file` | In place; keep link | Whole replacement at `0600`; private-files matrix |
 # | `.hansa/runs/<id>/worker-argv.json`, `run.start` | In place; keep link | Whole replacement with the existing JSON format; other-sites matrix |
+# | `.hansa/runs/<id>/first-message.md`, `run.start` (a follow-up that goes on in its parent's conversation) | In place; keep link | Whole replacement; other-sites matrix, second `run.start` row |
+# | `tasks/<id>/forked-rows.json`, `run.start` through `desk.write_json` | Replacement; replace link | Whole replacement (JSON row); a failed one starts a new conversation: `test_a_follow_up_whose_list_of_copied_rows_cannot_be_saved_starts_anew` |
 # | Task `result.md`, `run.finish` | In place; keep link | Whole replacement; other-sites matrix |
 # | Lane `try.log` and `merge-check-try.log`, `run.keep_try_log` | In place; keep link | Whole replacements; private-files matrix also checks the writer's failure return |
 # | `.hansa/web-token`, `Desk.web_token` | In place; keep link | Whole creation at `0600`; failed-creation matrix checks retry |
@@ -1091,11 +1093,13 @@ class FailedWriteTest(unittest.TestCase):
                   "keep": raw / "evidence", "dot": task / "example.git",
                   "e": types.SimpleNamespace(path=task / "example.git", found="changed", expected="original"),
                   "log": self.desk.state_dir / "releases" / "1.log", "f": self.root / "command-input.txt",
-                  "paths": ["/example"], "kept": ["/private"]}
+                  "paths": ["/example"], "kept": ["/private"],
+                  "first": "You go on here, in a new task.\n"}  # start's message before the task text of a follow-up
+        (task / "task.md").write_text("the task text\n")
         # Each call below is a row; ENOSPC part way is the column. All rows start at 0600.
         scopes = [(cli, cli.init_desk, 3), (cli, cli._retry, 1), (cli, cli.cmd_serve, 2),
                   (cli, cli._bring, 2), (cli, cli.cmd_lane, 3), (run, run.git_file_changed, 2),
-                  (run, run.start, 1), (run, run.finish, 1),
+                  (run, run.start, 2), (run, run.finish, 1),
                   (run, run.around_note, 1), (run, run._srt_writes, 1),
                   (release, release.finish, 1)]
         with unittest.mock.patch("time.time", return_value=1700000000):
@@ -34616,6 +34620,28 @@ def save():'''))
         self.assertEqual(len(run._record(home, m["session_id"])[0]), 6)  # the whole record holds the parent's too
         lost = run.keep_lost_run(self.desk, {**m, "launch": m["session_id"], "earlier_runs": [], "attempts": []})
         self.assertEqual(lost["earlier_runs"][-1]["usage"]["mimo-x"]["in"], 300)
+
+    def test_a_follow_up_whose_list_of_copied_rows_cannot_be_saved_starts_anew(self):
+        # without the list its record's reads would count the parent's copied rows as its own (FORK_FACTS 1)
+        from hansa import run
+        tid = self.continued_parent()
+        new, _ = self.follow_up(tid, "Make the badge bold")
+        rows = self.desk.tasks_dir / new / run.FORKED_ROWS
+        with partial_write(rows) as hit:  # a full disk part way through that one write
+            m = self.settle(Dispatcher(self.desk), new)
+        self.assertTrue(hit)
+        self.assertEqual(m["state"], "done", m)
+        self.assertFalse(rows.exists())
+        self.assertEqual(sorted(p.name for p in rows.parent.iterdir() if "forked-rows" in p.name), [])
+        argv = self.calls_of()[-1]
+        self.assertNotIn("--resume", argv)
+        self.assertNotIn("--fork-session", argv)
+        self.assertNotIn("--system-prompt-snapshot", argv)
+        self.assertNotEqual(argv[argv.index("--session-id") + 1], self.desk.meta(tid)["session_id"])
+        self.assertEqual(self.calls_of("forked.jsonl"), [])
+        self.assertIn("rows", m["conversation"]["new"])
+        self.assertIn("conversation: a new one, as hansa could not save", views.show_text(self.desk, new))
+        self.assertEqual(m["usage"]["mimo-x"]["in"], 300)
 
     def test_a_follow_up_with_update_goes_on_and_is_told_what_was_merged(self):
         from hansa import run

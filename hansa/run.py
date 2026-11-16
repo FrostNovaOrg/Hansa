@@ -4454,13 +4454,20 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     going_on = continuation(desk, meta, lane_name, pname, p, model)
     first = None  # the first message of a follow-up that goes on in its parent's conversation, before its task text
     if going_on and going_on.get("from"):
+        # Every read of its record leaves out the rows listed here (own_session): a follow-up that went on without
+        # the list would count the parent's tokens, replies and notes as its own, so it starts anew instead.
+        home = config_home(desk, pname, p)
+        try:
+            write_json(desk.tasks_dir / tid / FORKED_ROWS,
+                       [d["uuid"] for d in _rows(home, going_on["session"]) or [] if isinstance(d.get("uuid"), str)])
+        except OSError as e:
+            going_on = {"new": f"hansa could not save which rows of the conversation record are the earlier "
+                               f"task's ({e.strerror or e}), without which it would count them as its own"}
+    if going_on and going_on.get("from"):
         # this task's instructions, not those the parent's conversation began with (FORK_FACTS 3); kept for a
         # resume of its own session (resume, wrap_up) too
         argv[argv.index("--append-system-prompt") + 2:argv.index("--append-system-prompt") + 2] = [
             "--system-prompt-snapshot", "off"]
-        home = config_home(desk, pname, p)
-        write_json(desk.tasks_dir / tid / FORKED_ROWS,
-                   [d["uuid"] for d in _rows(home, going_on["session"]) or [] if isinstance(d.get("uuid"), str)])
         head = wgit(desk, wt, "rev-parse", "HEAD")
         commit = meta.get("start_from") or head
         first = CONTINUED_NOTE.format(

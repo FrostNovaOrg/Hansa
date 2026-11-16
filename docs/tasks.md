@@ -789,7 +789,9 @@ ended (done, failed, at a ceiling, cancelled):
   Code removes old ones, by default after 30 days);
 - it is the follow-up's first run: a run hansa starts again by itself (a dropped connection, a usage
   limit) starts a new conversation, as before;
-- the earlier task did not itself go on from an earlier conversation (not yet carried further).
+- the earlier task did not itself go on from an earlier conversation (not yet carried further);
+- hansa could save the list of the earlier conversation's rows that the follow-up's record copies (a
+  full disk, say): without it the follow-up's numbers would count the earlier task's again.
 
 A verification never goes on in a worker's conversation, nor a follow-up in a verifier's.
 
