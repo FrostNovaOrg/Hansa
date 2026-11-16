@@ -20,6 +20,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -62,7 +63,7 @@ FIXED_DISABLE = ("memories", "external_agent_memory_import")
 # In the Codex home, what Codex reads on every run whatever the flags, or what the flags above leave unread: a run
 # may not write it (srt's denyWrite), and Codex never writes it during exec
 HOME_DENY = ("AGENTS.md", "AGENTS.override.md", "config.toml", "environments.toml", "hooks.json", "rules")
-HOME_INSTRUCTIONS = ("AGENTS.md", "AGENTS.override.md")  # read on every run: a run refuses while one exists
+HOME_INSTRUCTIONS = ("AGENTS.md", "AGENTS.override.md")  # read on every run; empty Linux placeholders are harmless
 HOME_SKILLS, SYSTEM_SKILLS = "skills", ".system"  # skills/ may hold Codex's own .system, nothing else
 # What a provider check may not read in the user's home (hansa gives a check no sandbox, so no no-read list): the
 # logins of Claude, Codex and other AI tools, and the common credentials (a part of hansa's HOME_SECRETS)
@@ -95,7 +96,7 @@ PROJECT_CONFIG_DIRS = (".claude", ".codex", ".agents")
 # Below the top, as srt's macOS globs (**/ is any folders, or none): the project folders' names themselves, so
 # that srt's move-blocking refuses to make an entry so named, by mkdir, link or rename; and what Claude Code's
 # sandbox protects in a .claude folder. srt on Linux drops globs from denyWrite (sandbox-manager's
-# stripWriteGlobs), so there only the top folders hold.
+# stripWriteGlobs), so there only the top folders hold at write time; hansa refuses nested settings at commit.
 NESTED_CONFIG = (*PROJECT_CONFIG_DIRS,
                  ".claude/settings.json", ".claude/settings.local.json", ".claude/hooks", ".claude/skills")
 # hansa's worker deny list in git's folders (run.py: GIT_COMMON_DENY, GIT_OWN_DENY, GIT_OPS); the tests hold
@@ -288,11 +289,12 @@ def glob_regex(pattern: str):
 
 
 def denied(path: str, deny_write: list) -> bool:
-    """Whether `path`, as given or with links resolved, is in deny_write: at or under a path or a glob there."""
+    """Whether `path`, as given or with links resolved, is at or under a deny_write entry. On Linux srt drops
+    globs, so only fixed paths count; on macOS glob_regex models its glob matching."""
     spellings = both([path])
     for d in deny_write:
         if any(c in d for c in "*?["):
-            if any(glob_regex(d).match(s) for s in spellings):
+            if not sys.platform.startswith("linux") and any(glob_regex(d).match(s) for s in spellings):
                 return True
         elif any(under(s, d) for s in spellings):
             return True
@@ -327,7 +329,8 @@ def git_required(wt: str):
 
 def config_deny(wt: str) -> list:
     """srt's denyWrite for the project folders: PROJECT_CONFIG_DIRS at the top, NESTED_CONFIG below it (and, the
-    globs matching no folders for **/, at the top too)."""
+    macOS globs matching no folders for **/, at the top too). Linux keeps only the fixed entries. Never remove
+    empty placeholders srt leaves at those paths: another run may be binding its deny over them."""
     return both([os.path.join(wt, d) for d in PROJECT_CONFIG_DIRS]) + [
         f"{w}/**/{n}" for w in both([wt]) for n in NESTED_CONFIG]
 
@@ -339,11 +342,22 @@ def home_deny(codex_home: str) -> list:
 
 def home_problem(codex_home: str) -> str:
     """What in the Codex home a run left for later runs, which Codex would read: an AGENTS.md or
-    AGENTS.override.md, or an entry in skills/ other than Codex's own .system. '' when none. Only names and
-    existence are looked at; no file is read."""
+    AGENTS.override.md, or an entry in skills/ other than Codex's own .system. '' when none. Empty regular
+    instruction files on Linux count as absent (srt's placeholders). Only names and metadata are checked;
+    no file contents are read."""
     for n in HOME_INSTRUCTIONS:
         p = os.path.join(codex_home, n)
         if os.path.lexists(p):
+            if sys.platform.startswith("linux"):
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    pass  # keep refusing an entry whose type and size could not be checked
+                else:
+                    if stat.S_ISREG(st.st_mode) and st.st_size == 0:
+                        # Leave srt's placeholder in place, even after a killed run: another run on this home
+                        # may have its read-only bind over it. Unlinking it outside could undo that deny.
+                        continue
             return f"{p} exists in the Codex home, and Codex would follow it on every run; remove it"
     skills = os.path.join(codex_home, HOME_SKILLS)
     if os.path.islink(skills) or (os.path.lexists(skills) and not os.path.isdir(skills)):
@@ -376,12 +390,11 @@ def home_read_open(deny_read, codex_home: str):
 
 def sandbox_problem(fs: dict, wt: str, codex_home: str, codex_bin: str, ca: str = "") -> str:
     """Why srt with these settings (its filesystem part) is not the boundary hansa means; '' when it is. Codex
-    runs with its own sandbox off, so srt alone keeps it out of git's data (hansa commits, never the worker),
-    the project folders other runs obey, what in the Codex home later runs read, and the no-read list. Only on
-    macOS: srt on Linux drops the nested denies."""
-    if sys.platform != "darwin":
-        return (f"Codex runs only on macOS for now ({sys.platform}): srt there does not hold the nested write "
-                "denies")
+    runs with its own sandbox off, so srt keeps it out of git's data (hansa commits, never the worker), the
+    project folders at the top, what in the Codex home later runs read, and the no-read list. macOS also holds
+    the nested project denies; Linux drops the globs, so hansa refuses those settings at commit."""
+    if sys.platform != "darwin" and not sys.platform.startswith("linux"):
+        return f"Codex worker runs require macOS or Linux ({sys.platform})"
     deny_write = [str(x) for x in fs.get("denyWrite") or []]
     if any(c in wt for c in "*?[]"):  # srt would read the worktree's path in its patterns as a glob
         return f"the worktree's path {wt} holds a glob character"
@@ -396,6 +409,8 @@ def sandbox_problem(fs: dict, wt: str, codex_home: str, codex_bin: str, ca: str 
         if not denied(p, deny_write):
             return f"the sandbox settings hansa gave do not deny writing {p}"
     for d in config_deny(wt):
+        if sys.platform.startswith("linux") and any(c in d for c in "*?["):
+            continue  # still given to srt, but Linux drops them; hansa holds nested settings at commit
         if d not in deny_write:
             return f"srt's settings do not deny writing {d}"
     return paths_problem(fs, wt, codex_home, codex_bin, ca)
@@ -444,8 +459,9 @@ def own_git_write(wt: str) -> list:
 def srt_settings(box: dict, wt: str, tmp: str, codex_home: str) -> dict:
     """srt's settings for the Codex run, from the sandbox hansa gave Claude Code in --settings: writes in the
     worktree, its own git folder (own_git_write), its temporary folder, the lane's write list and
-    HANSA_CODEX_HOME; git's data, the project folders (config_deny) and HOME_DENY in the Codex home never
-    written; the no-read list never read, but for the Codex home and what is inside it (home_read_open), and what
+    HANSA_CODEX_HOME; git's data, the top project folders and HOME_DENY in the Codex home never written, nested
+    project folders denied by globs on macOS (on Linux hansa holds them at commit); the no-read list never read,
+    but for the Codex home and what is inside it (home_read_open), and what
     hansa re-allows in it (allowRead: the worktree, the run's temporary folder); the lane's network list and
     CODEX_HOSTS. (hansa's srt_settings needs its desk.)"""
     sb = box.get("sandbox") or {}

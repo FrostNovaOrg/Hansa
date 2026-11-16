@@ -4,7 +4,6 @@ import io
 import json
 import os
 import signal
-import sys
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -16,7 +15,7 @@ from hansa.cli import cmd_cancel, init_desk
 
 class Stopped(Scratch):
     def waiting(self, worker=False, fixture="progress.jsonl", **extra):
-        # Checks use the same run/stop code and can exercise it on Linux without bypassing the worker guard.
+        # Provider checks and workers share the run/stop code.
         argv = self.worker_argv() if worker else ["-p", "--output-format", "json", "--max-turns", "300"]
         self.codex_record.unlink(missing_ok=True)
         p = self.start(argv, self.env(fixture, FAKE_CODEX_HANG_AFTER="1", **extra))
@@ -60,7 +59,7 @@ class Stopped(Scratch):
         return out, err, run
 
     def finish_stop(self, cancel):
-        p = self.waiting(worker=sys.platform == "darwin")
+        p = self.waiting(worker=True)
         desk = init_desk(self.root / "desk", repo=str(self.root / "repo"))
         settings = desk.settings()
         settings["providers"]["codex"] = {"kind": "compatible", "model": shim.DEFAULT_MODEL,

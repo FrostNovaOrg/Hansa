@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .codexkit import Scratch, shim, skip_unless_macos
+from .codexkit import Scratch, shim
 
 ZSH = shutil.which("zsh") or ""
 HEREDOC = "cat <<'EOF'\nhere-document ok\nEOF\n"
@@ -72,7 +72,6 @@ class ZshUnderSrt(Scratch):
     cannot listen on its socket, `listen EPERM`)."""
 
     def test_heredoc_in_srt(self):
-        skip_unless_macos(self)  # the shim's settings are for srt on macOS
         srt = os.environ.get("HANSA_CODEX_SRT") or shutil.which("srt")
         if not srt:
             self.skipTest("no srt here")

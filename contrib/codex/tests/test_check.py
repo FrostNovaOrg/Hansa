@@ -154,6 +154,25 @@ class ProviderCheck(Scratch):
         self.assertEqual([p for p in self.tmp.iterdir() if p.name.startswith("codex-check-")], [],
                          "the check's folder is removed")
 
+    def test_check_keeps_empty_home_instruction_placeholders(self):
+        self.home.mkdir()
+        paths = [self.home / n for n in shim.HOME_INSTRUCTIONS]
+        for p in paths:
+            p.touch(mode=0o444)
+        inodes = [p.stat().st_ino for p in paths]
+        r = self.check()
+        if shim.sys.platform.startswith("linux"):
+            self.assertTrue(r["ok"], r)
+            self.assert_codex_ran()
+        else:
+            self.assertFalse(r["ok"], r)
+            self.assertIn("AGENTS.md", r["detail"])
+            self.assertFalse(self.codex_record.exists())
+        for p, inode in zip(paths, inodes):
+            self.assertTrue(p.is_file(), p)
+            self.assertEqual(p.stat().st_ino, inode, p)
+            self.assertEqual(p.stat().st_size, 0, p)
+
     def set_model(self, model):
         s = self.desk.settings()
         s["providers"]["codex"]["model"] = model

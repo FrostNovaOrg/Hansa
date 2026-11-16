@@ -26,7 +26,7 @@ class SettingsFile(Scratch):
             return shim.settings(env or {})
 
     def run_adapter(self, argv=None, **extra):
-        # Startup errors precede the macOS-only worker sandbox check, so exercise them on Linux too.
+        # Startup errors precede the worker sandbox check.
         proc = subprocess.run([str(self.wrapper), *(self.worker_argv() if argv is None else argv)],
                               env=self.env(**extra), cwd=self.wt, input=b"Reply with OK.\n",
                               capture_output=True, timeout=60)

@@ -28,15 +28,6 @@ import hansa_codex_shim as shim  # noqa: E402
 for f in FAKES.iterdir():
     f.chmod(0o755)
 
-# The adapter refuses a worker run anywhere but macOS (shim.sandbox_problem): a test that starts one skips elsewhere.
-ONLY_MACOS = "the adapter runs Codex workers only on macOS: srt elsewhere drops the nested write denies"
-
-
-def skip_unless_macos(test):
-    if sys.platform != "darwin":
-        test.skipTest(ONLY_MACOS)
-
-
 def git(*args, cwd):
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=str(cwd), check=True,
                    capture_output=True)
@@ -76,9 +67,8 @@ class Scratch(unittest.TestCase):
             d.mkdir()
         self.lane_env = self.root / "lane-env.sh"
         self.lane_env.write_text("export FROM_LANE_ENV='lane value'\n")
-        # hansa's git deny list as on macOS, where the adapter runs (on Linux, hansa lists only the GIT_OPS there)
-        with mock.patch.object(hansa_run.account, "LINUX", False):
-            deny_write = hansa_run.git_write_deny(self.wt)
+        # Use hansa's deny list for this system (on Linux, only existing GIT_OPS are named).
+        deny_write = hansa_run.git_write_deny(self.wt)
         self.box = {"sandbox": {
             "enabled": True, "failIfUnavailable": True, "autoAllowBashIfSandboxed": True,
             "allowUnsandboxedCommands": False,
@@ -119,8 +109,6 @@ class Scratch(unittest.TestCase):
         return argv
 
     def start(self, argv, env, task="Add hello.txt.\n", cwd=None):
-        if shim.call_kind(argv, env) == "codex":
-            skip_unless_macos(self)
         task_file = self.root / "task.md"
         task_file.write_text(task)
         with open(task_file, "rb") as stdin:
