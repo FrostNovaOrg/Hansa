@@ -342,18 +342,20 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
         sys.exit(1)
     rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")
     counted = {"usage": {"input_tokens": 10, "output_tokens": 5}} if os.environ.get("FAKE_RECORD_USAGE") else {}
-    gone = os.environ.get("FAKE_RESUME_KILL")  # a file: the first resumed run replies once, then the system kills it
-    if gone and not os.path.exists(gone):
+    import uuid  # each row a resumed run writes has a uuid of its own, as every row Claude Code writes has: a fork
+    row = lambda r: json.dumps({"uuid": str(uuid.uuid4()), "sessionId": sid, **r}) + "\n"  # of this record is then
+    gone = os.environ.get("FAKE_RESUME_KILL")  # told from its copies, as with the real one (FORK_FACTS 1)
+    if gone and not os.path.exists(gone):  # a file: the first resumed run replies once, then the system kills it
         import signal
         open(gone, "w").write("killed\n")
         with open(rec, "a") as f:
-            f.write(json.dumps({"type": "assistant", "message": {"id": "rk", "model": "mimo-x", "content": [], **counted}}) + "\n")
+            f.write(row({"type": "assistant", "message": {"id": "rk", "model": "mimo-x", "content": [], **counted}}))
         os.kill(os.getpid(), signal.SIGKILL)
     limit = os.environ.get("FAKE_RESUME_LIMIT")  # a file: the first resumed run ends on the provider's usage limit
     if limit and not os.path.exists(limit):
         open(limit, "w").write("limit\n")
         with open(rec, "a") as f:
-            f.write(json.dumps({"type": "assistant", "message": {"id": "r0", "model": "mimo-x", "content": [], **counted}}) + "\n")
+            f.write(row({"type": "assistant", "message": {"id": "r0", "model": "mimo-x", "content": [], **counted}}))
         print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429, "num_turns": 1,
                           "session_id": sid, "result": "API Error: 429 rate_limit_error",
                           "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}))
@@ -374,7 +376,7 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
     rows.append({"type": "assistant", "message": {"id": "r2", "model": "mimo-x", "content": [{"type": "text", "text": report}],
                                                   **counted}})
     with open(rec, "a") as f:
-        f.writelines(json.dumps(r) + "\n" for r in rows)
+        f.writelines(row(r) for r in rows)
     totals = {} if os.environ.get("FAKE_RESUME_NO_TOTALS") else {  # as for a run stopped before it wrote them
         "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}
     if os.environ.get("FAKE_RESUME_WHOLE"):  # as real claude -p --resume answers (RESUME_FACTS 2):
