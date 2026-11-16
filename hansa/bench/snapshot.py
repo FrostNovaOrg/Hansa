@@ -12,7 +12,7 @@ from ..desk import home_secrets
 from .channel import safe_open
 from .archive import MAX_BYTES, MAX_ENTRIES, MAX_ARCHIVE, MAX_NAME
 
-EXCLUDED = {n.split("/")[0].casefold() for n in home_secrets()} | {
+EXCLUDED = {n.split("/")[0].casefold() for n in home_secrets(shell_startup=False)} | {
     ".git", ".hansa", ".claude", "claude.md", "claude.local.md", "agents.md", ".mcp.json",
     ".env", ".cache", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".venv",
     "node_modules", *run.SANDBOX_PLACEHOLDERS}

@@ -804,7 +804,14 @@ What workers may not read shows, read only above the principal's own box, the
 built-in list for this system (`home_secrets()`, with `~` for the home folder),
 how many of its places exist on this machine, and, opened, the whole list with
 those first; `/api/settings` carries it as `built_in_no_read` (`path`, `exists`:
-one `lstat` each when the page asks, no file read). Under it, the same part
+one `lstat` each when the page asks, no file read).
+The list includes the account's shell startup names, such as `~/.zshenv`,
+`~/.zprofile`, `~/.zshrc` and `~/.bashrc`, including missing ones. Workers and
+verifiers cannot read them; the coordinator keeps access to its shell startup
+files. Missing startup paths are left out of run sandboxes so nothing is
+created in the home folder. See [the sandbox](sandbox.md#what-workers-and-verifiers-may-touch)
+for the full shell list and its use by Codex, setup and check commands.
+Under it, the same part
 names the home of each saved Codex provider (kind `codex`), as set, with `~` for
 the account's home folder: every run is kept from it but that provider's own
 Codex runs. `/api/settings` carries them as `codex_homes_no_read` (`provider`,

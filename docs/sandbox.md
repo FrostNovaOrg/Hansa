@@ -59,7 +59,8 @@ in; none when that folder is the desk, a lane's repository or in one, nor for
 an entry the principal's list would refuse; gone for runs that start after
 `hansa notify off` there or another folder is recorded), of any provider's Claude Code folder or
 `~/.claude`, of the logins, keys, tokens, browsers' profiles, messages and
-shell histories hansa knows under the home folder (`HOME_SECRETS` and, for
+shell histories and shell startup files hansa knows under the home folder
+(`HOME_SECRETS`, the shell names in the first entry of `HOME_STARTS`, and, for
 macOS, `MAC_SECRETS` in `hansa/desk.py`: `~/.ssh`, `~/.aws`, Teleport, other
 AI tools and Anthropic's own tool settings in `~/.config/anthropic`, cloud
 tools, git and registry credentials, proxy clients' settings with their
@@ -102,6 +103,20 @@ own branch, and merges only what the coordinator merges. The lane's setup,
 before the worker, and its check, after it, run in the same sandbox (with
 `srt`): the lane's network and write lists hold for them too, so a setup that
 downloads needs its registry on the network list.
+
+The shell startup names kept from workers and verifiers are `~/.bashrc`,
+`~/.bash_profile`, `~/.bash_login`, `~/.bash_logout`, `~/.bash_aliases`,
+`~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`, `~/.zlogout`,
+`~/.kshrc`, `~/.cshrc`, `~/.tcshrc`, `~/.login`, `~/.config/fish` and
+`~/.oh-my-zsh`. Their file tools and sandboxed commands cannot read these paths.
+This also applies to Codex workers and verifiers, and to a lane's setup, check
+and merge check. These files add no exported variables to the run's shell;
+zsh silently skips a startup file it cannot open, including `.zshenv` and,
+for login commands, `.zprofile`. A missing startup path is left out of the
+run's sandbox on both macOS and Linux, so no placeholder is made in the home
+folder. The page still lists every name and whether it exists. The coordinator
+keeps access to its shell startup files, including for correcting a `PATH` line.
+Keep these paths closed while shell startup files can hold exported keys.
 
 Of the desk itself a run reads only its own worktree (and a lane repository's git
 folder inside the desk; on Linux, a lane command's own TMPDIR in `.hansa/tmp`):

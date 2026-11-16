@@ -239,9 +239,9 @@ XDG_OPEN = ("XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 DEFAULT_ALLOW: list = []
 
 
-def home_secrets() -> tuple:
-    """The built-in names, under the home folder, of what no worker may read on this system."""
-    return HOME_SECRETS + (MAC_SECRETS if sys.platform == "darwin" else ())
+def home_secrets(*, shell_startup: bool = True) -> tuple:
+    """The built-in home names kept from workers; the coordinator keeps its shell startup files."""
+    return HOME_SECRETS + (HOME_STARTS[0][1] if shell_startup else ()) + (MAC_SECRETS if sys.platform == "darwin" else ())
 
 
 def built_in_no_read() -> list:
@@ -2225,7 +2225,7 @@ def write_problems(paths, repo=None, root=None, providers=None, denied=(), env=N
     mine = os.path.join(home, ".claude")  # whichever folder the providers use: its settings and hooks
     fenced.append((mine, _overlaps, f"it would open {mine}, the machine owner's Claude Code folder"))
     fenced += [(os.path.join(home, f), _overlaps, f"it would open {os.path.join(home, f)}, a login or key "
-                                                  "that workers may not read") for f in home_secrets()]
+                                                  "that workers may not read") for f in home_secrets(shell_startup=False)]
     fenced += [(d, _overlaps, f"it would open {d}, which the principal keeps workers from reading") for d in denied]
     fenced += _top_fence()
     on_path = [_plain(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d.startswith("/")]

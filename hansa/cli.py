@@ -451,7 +451,7 @@ def launch_rules(desk: Desk, home: str) -> list:
     r = str(desk.root).lstrip("/")
     return [*no_publish_rules(), *desk_read_denials(desk),
             *(f"Edit(//{r}/{n}{end})" for n in names for end in ("", "/**")), *other_desk_rules(desk, "Edit"),
-            *no_read_rules([os.path.join(home, f) for f in home_secrets()])]
+            *no_read_rules([os.path.join(home, f) for f in home_secrets(shell_startup=False)])]
 
 
 # What the coordinator may not run from its own shell, whoever is at the session and whatever its mode: pushing
@@ -2272,7 +2272,7 @@ def cmd_coordinator(a):
     # and the built-in logins and keys under the home folder of whoever runs the session. Not the Claude Code
     # folders, as for workers: its own memory lives in one (own_folder_rules closes the login in it)
     home = env.get("HOME") or os.path.expanduser("~")
-    no_read = no_read_rules([*kept, *(os.path.join(home, f) for f in home_secrets())])
+    no_read = no_read_rules([*kept, *(os.path.join(home, f) for f in home_secrets(shell_startup=False))])
     dirs = repos
     no_edit = [f"Edit(//{str(d).lstrip('/')}/**)" for d in [*repos, desk.worktrees_dir]]
     no_builtin = [f"Agent({n})" for n in BUILTIN_HELPERS]
