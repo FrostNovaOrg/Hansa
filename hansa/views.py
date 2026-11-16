@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, history, installed, installed_text, memory, notify, plugin, release, up
 from .desk import (DENY_AT, home_secrets, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
-                   release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError)
+                   release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError, old_codex_provider)
 from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
                   codex_login, credit_text, model_text, provider_problem, providers_waited_for, quota_probe_text, refused_by, rest_text, rethink_text, rounds_line, sandbox_held, sandbox_held_text, serve_code, serve_session, server_state,
@@ -1666,7 +1666,7 @@ EFFORT_FROM = {"task": "the task's --effort", "provider": "the provider's defaul
 
 def effort_text(effort: str, came_from, provider: dict | None) -> str:
     """The effort a run was started with and where it came from (run.start records both: effort_used and
-    effort_from), and, on a provider whose endpoint is not Claude's own, that it may ignore it. '' for a run
+    effort_from), and, on a compatible provider, that it may ignore it. Codex passes effort on. '' for a run
     started before hansa kept where it came from and with no effort."""
     if came_from is None and not effort:
         return ""
@@ -2378,6 +2378,8 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"{s.get('cool_minutes', 30)} minutes"
             + " (the desk's cool_minutes)",
             *access,
+            *([f"  {name} reaches Codex the old way; choosing the kind Codex for it on the page replaces the made-up "
+               "address and key. More: docs/codex.md"] if old_codex_provider(p) else []),
             f"  now: {provider_problem(desk, s, name) or 'ready'}",
             *([f"  {quota_probe_text(st, s)}"] if quota_probe_text(st, s) else []),
             f"  last ping: {ping_text(st.get('check'))}"])

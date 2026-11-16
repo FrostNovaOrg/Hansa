@@ -12,6 +12,9 @@ and page. `HANSA_CODEX_LOGS` is accepted for compatibility and has no effect.
 
 ## Upgrading
 
+For an old compatible provider, choosing the kind Codex on the page is all the
+switch takes, and the same save removes its stored made-up key.
+
 After stopping runs started with an earlier adapter, remove their output from
 the adapter's former `logs/` folder, or the folder previously selected by
 `HANSA_CODEX_LOGS`. Upgrading does not remove existing files.
