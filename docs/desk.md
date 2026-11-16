@@ -811,6 +811,16 @@ verifiers cannot read them; the coordinator keeps access to its shell startup
 files. Missing startup paths are left out of run sandboxes so nothing is
 created in the home folder. See [the sandbox](sandbox.md#what-workers-and-verifiers-may-touch)
 for the full shell list and its use by Codex, setup and check commands.
+Under it, the same part
+names the home of each saved Codex provider (kind `codex`), as set, with `~` for
+the account's home folder: every run is kept from it but that provider's own
+Codex runs. `/api/settings` carries them as `codex_homes_no_read` (`provider`,
+`path`); nothing there is edited.
+A refused Codex field (`code: field_rule`, `reason: codex`) also carries `rule`
+(`path`, `web_search`, `features`, `account_home`, `account_codex`, `overlaps`,
+`inside_denied`) and the paths it names (`value`, `path`, `place`, `lane`, and
+`alias` when one folder is spelled two ways), so the page words it in its own
+language at the field; a rule it does not know keeps the server's English.
 Remove refuses a provider used by the coordinator or any lane. Choose another
 provider for the coordinator first; for lanes, ask the coordinator to move the
 named lanes to another provider before removing it. Selects show the draft's
@@ -992,6 +1002,8 @@ Keys are saved separately with each provider's Save key button. An unsaved key
 input stays in memory across page and group switches, and across a settings save;
 it is never included in the settings request or put in browser storage. A
 confirmed discard clears those inputs too. Keys already saved are unaffected.
+Switching a provider's kind to Codex drops its unsaved key input (a Codex
+provider has no key); switching back leaves the input empty.
 The eye button shows or hides the current key input without saving or changing it.
 Visible notes beside the input explain [storage and use](#where-a-desks-files-are)
 before saving. HTTP sends keys without encryption: use HTTPS for remote endpoints

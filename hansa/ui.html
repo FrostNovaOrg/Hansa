@@ -126,6 +126,7 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .built-in p { margin:6px 0; }
 .built-in-list ul { max-height:22em; overflow:auto; margin:6px 0; padding-left:18px; overflow-wrap:anywhere; }
 .built-in-list li.here { font-weight:600; }
+.built-in-codex { margin:6px 0; padding-left:18px; overflow-wrap:anywhere; min-width:0; }
 .built-in-list .tag { margin-left:6px; font-family:inherit; }
 .field > input:not([type=checkbox]), .field > select, .field > textarea,
 .field > div > input:not([type=checkbox]) { width:100%; min-width:0; padding:9px 11px; border-radius:7px; }
@@ -543,6 +544,7 @@ const T = ZH ? {
   codex:"Codex（OpenAI 的命令行工具）", codexPath:"Codex 程序（完整路径）", codexHome:"Codex 主目录（完整路径）",
   codexHomeNote:"存放 Codex 登录信息的目录，专给它用。", codexInstall:"把 Codex 安装在单独的目录里（不在 ~/.codex 下，也不在工作智能体不能读的目录里），在上方填写它的程序的完整路径。",
   codexLogin:"给 Codex 一个专用的主目录（不在 ~/.codex、工作台目录和工作线仓库里），并在那里登录一次：", codexProgramHere:"<Codex 程序>", codexHomeHere:"<Codex 主目录>",
+  codexHomeKept:"hansa 会自动让其他服务商上的工作智能体读不到这个主目录，只有这家服务商的 Codex 运行才会打开它。",
   codexMore:"更多 Codex 设置", caFile:"证书文件（可选，完整路径）", caFileNote:"Codex 校验 TLS 连接所用的证书。", webSearch:"网页搜索", webSearchNote:"Codex 自带的网页搜索。",
   webSearchModes:["关闭（disabled）", "缓存（cached）", "实时（live）"], codexFeatures:"关闭的功能", codexFeaturesNote:d => `每行一个，或用空格分隔。默认：${d}`,
   coordinatorNoCodex:"不可选：协调员的会话是 Claude Code，不能用 Codex",
@@ -741,6 +743,7 @@ const T = ZH ? {
   codex:"Codex (OpenAI's command line)", codexPath:"Codex program (full path)", codexHome:"Codex home (full path)",
   codexHomeNote:"The folder that holds Codex's login, a folder of its own.", codexInstall:"Install Codex in a folder of its own, outside ~/.codex and every folder workers may not read, and give its program's full path above.",
   codexLogin:"Give Codex a home folder of its own, outside ~/.codex, the desk and the lanes' repositories, and log in there once:", codexProgramHere:"<Codex program>", codexHomeHere:"<Codex home>",
+  codexHomeKept:"hansa keeps this home from workers on other providers by itself: only this provider's Codex runs open it.",
   codexMore:"More Codex settings", caFile:"Certificate file (optional, full path)", caFileNote:"The certificates Codex checks TLS connections against.", webSearch:"Web search", webSearchNote:"Codex's own web search.",
   webSearchModes:["disabled", "cached", "live"], codexFeatures:"Features turned off", codexFeaturesNote:d => `One per line or separated by spaces. Default: ${d}`,
   coordinatorNoCodex:"not offered: the coordinator's session is Claude Code, not Codex",
@@ -911,6 +914,7 @@ Object.assign(T, ZH ? {
   builtInTitle:"始终不让工作智能体读的（内置）",
   builtInCount:(n, here, ex) => `本系统内置 ${n} 处主文件夹下的位置，这台机器上有 ${here} 处${ex ? `，比如 ${ex}` : ""}。这些不用你再列，下面的框空着也照样挡住。`,
   builtInOpen:n => `展开完整列表（${n} 处，这台机器上有的排在前面）`, builtInHere:"本机有",
+  builtInCodex:"本工作台 Codex 服务商的主目录也始终不让工作智能体读（只有该服务商自己的 Codex 运行会打开）：",
   builtInElse:"不在这个列表里、也始终不让它们读的：工作台的密钥、状态、笔记和卡片（CLAUDE.md）；工作台里除它自己的工作树以外的部分，以及其他运行的临时文件夹；~/.claude 和每个服务商的 Claude Code 文件夹；为协调员会话记下的文件夹里的 Claude Code 文件；这个账号上的其他工作台。",
   releaseApproval:"发布前要不要问你", autoRelease:"不用问你就执行的发布目标", autoReleaseHint:"勾上：提出发布后可以不用问你就执行。不勾：每次等你点头。",
   directPolicy:"直接提交的点头规则", contentRules:"发布内容检查", forbiddenWords:"禁词",
@@ -1004,6 +1008,7 @@ Object.assign(T, ZH ? {
   builtInTitle:"Always kept from workers (built in)",
   builtInCount:(n, here, ex) => `${n} places under the home folder are built in for this system, ${here} of them on this machine${ex ? `, such as ${ex}` : ""}. You need not list them: they are closed even with the box below empty.`,
   builtInOpen:n => `Show the whole list (${n}, those on this machine first)`, builtInHere:"on this machine",
+  builtInCodex:"The homes of this desk's Codex providers are kept from workers too (only that provider's own Codex runs open one):",
   builtInElse:"Also always closed to them, though not on this list: the desk's keys, state, notes and card (CLAUDE.md); the rest of the desk but their own worktree, and the other runs' temporary folders; ~/.claude and every provider's Claude Code folder; the Claude Code files of the folder recorded for the coordinator's session; and the other desks on this account.",
   releaseApproval:"Asking you before a release", autoRelease:"Targets that go out without asking you", autoReleaseHint:"Ticked: a release can run without asking you. Unticked: each one waits for your yes.",
   directPolicy:"Approval for direct commits", contentRules:"Release content checks", forbiddenWords:"Forbidden words",
@@ -1587,7 +1592,7 @@ const serverMessagesZh = {
   provider_network:v => `连接服务商失败（${v.said}）`,
   provider_credit:v => (v.plan ? `套餐无法使用该服务商，需要升级（${v.plan}），自 ${when(v.since)} 起休息，等你在网页上确认已升级`
     : `余额不足，自 ${when(v.since)} 起休息，等你在网页上确认充值`) + (v.shared ? "；由另一个工作台发现" : ""),
-  provider_model:v => `服务商不认识模型 ${v.model}；休息到检查通过，或负责人在网页的“设置 → 服务商”中更改模型或密钥`,
+  provider_model:v => `服务商不认识模型 ${v.model}；休息到检查通过，或负责人在网页的“设置 → 服务商”中更改模型${v.codex ? "" : "或密钥"}`,
   provider_rest:v => `休息到 ${when(v.until)}（${reasonText(v.reason)}）` + (v.how === "reset" ? "；按错误给的重置时间再加一分钟"
     : v.minutes ? `；错误没给重置时间，休息 ${v.minutes} 分钟` : ""),
   provider_save_key:v => `${reasonText(v.reason)}；保存新密钥可恢复，也可在密钥到位后运行 hansa ping ${v.provider}`,
@@ -2157,7 +2162,7 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, MODEL_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], BUILT_IN_NO_READ = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, MODEL_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], BUILT_IN_NO_READ = [], CODEX_HOMES_NO_READ = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
 // Outside and locked: only reading, release answers/stops and pause/resume stay open.
 let SETTINGS_LOCKED = true, outsideRuleLoaded = false, outsideRuleFlight = null;
 function readOutsideRule(reply) {
@@ -2258,7 +2263,12 @@ function settingsReplyProblems(reply) {
     const messages = {
       field_rule:() => {
         const label = labels[v.field], rule = T.validationRules[v.reason];
-        // A Codex field's rule names paths and folders: its English words follow the field's own label.
+        // A Codex field's rule names paths and folders; a rule this page does not know keeps the server's words.
+        const codex = v.reason === "codex" && Object.hasOwn(T.validationCodex, v.rule || "") && T.validationCodex[v.rule](v);
+        if (label && codex) {
+          const alias = Array.isArray(v.alias) ? T.validationCodexAlias(...v.alias) : "";
+          return `${v.provider} · ${label}${ZH ? "：" : ": "}${alias ? codex.replace(/[.。]$/, "") + alias + (ZH ? "。" : ".") : codex}`;
+        }
         if (label && v.reason === "codex" && problem.startsWith(`provider ${v.provider}: ${v.field} `))
           return `${v.provider} · ${label}${ZH ? "：" : ": "}${problem.slice(`provider ${v.provider}: ${v.field} `.length)}`;
         if (!label || !rule) return "";
@@ -2298,6 +2308,16 @@ Object.assign(T, ZH ? {
     unknown_fields:"未知字段：{fields}。", kind:"请选择订阅或兼容接口。", required:"必须填写。", effort:"必须是 {choices} 之一，或留空使用默认值。",
     https:"必须以 https:// 开头。", path:"必须是以 / 开头的完整路径。", provider:"未找到这家服务商。"},
   validationLaneProvider:(lane, provider) => `${T.lanes} ${lane} · ${T.providers}：未找到 ${provider}。`,
+  // A Codex field's refusal (desk.py, codex_problems): its rule, the paths it names, and a folder spelled two ways.
+  validationCodex:{path:() => "必须是以 / 开头的完整路径，不能含控制字符。",
+    web_search:() => "必须是 disabled（关闭）、cached（缓存）或 live（实时）之一。",
+    features:() => "必须是一组简单的功能名（字母、数字、'_' 和 '-'）。",
+    account_home:v => `不能是 ${v.value}：它是本账号的主目录 ${v.path} 或其上层目录。`,
+    account_codex:v => `不能是 ${v.value}：它在本账号的 Codex 目录 ${v.path} 之内或就是它。`,
+    overlaps:v => `${v.value} 与${{lane:`工作线 ${v.lane} 的仓库`, worktrees:"工作树目录", desk:"工作台目录",
+      denied:"工作智能体不能读的路径"}[v.place] || ""} ${v.path} 重叠。`,
+    inside_denied:v => `${v.value} 在工作智能体不能读的路径 ${v.path} 之内或就是它。`},
+  validationCodexAlias:(path, same) => `（${path} 与 ${same} 是同一个目录）`,
   validationPattern:(entry, why) => `${T.forbiddenWords}，第 ${entry} 项：${why}。`,
   validationPatternReasons:{length:"正则表达式连同 re: 前缀最多 {max} 个字符", repeat:"重复两次或以上的部分不能包含分组、分支或其他重复，否则可能回溯过多",
     reference:"不能使用反向引用，否则可能回溯过多", empty:"正则表达式不能匹配空字符串", compile:"正则表达式无法编译：{error}"},
@@ -2324,6 +2344,15 @@ Object.assign(T, ZH ? {
     unknown_fields:"Unknown fields: {fields}.", kind:"Choose Subscription or Compatible endpoint.", required:"Required.", effort:"Must be one of {choices}, or blank for the default.",
     https:"Must start with https://.", path:"Must be a full path starting with /.", provider:"Unknown provider."},
   validationLaneProvider:(lane, provider) => `${T.lanes} ${lane} · ${T.providers}: unknown provider ${provider}.`,
+  validationCodex:{path:() => "must be a full path starting with /, without control characters.",
+    web_search:() => "must be disabled, cached or live.",
+    features:() => "must be a list of plain feature names (letters, digits, '_' and '-').",
+    account_home:v => `cannot be ${v.value}: it is ${v.path}, the account's home folder, or above it.`,
+    account_codex:v => `cannot be ${v.value}: it is inside or equals ${v.path}, the account's Codex folder.`,
+    overlaps:v => `${v.value} overlaps ${v.path}, ${{lane:`lane ${v.lane}'s repository`, worktrees:"the worktrees folder",
+      desk:"the desk's folder", denied:"which workers may not read"}[v.place] || ""}.`,
+    inside_denied:v => `${v.value} is inside or equals ${v.path}, which workers may not read.`},
+  validationCodexAlias:(path, same) => ` (${path} is the same folder as ${same})`,
   validationPattern:(entry, why) => `${T.forbiddenWords}, entry ${entry}: ${why}.`,
   validationPatternReasons:{length:"a pattern must be at most {max} characters, including re:", repeat:"a repeat of two or more must not contain a group, alternation or another repeat: it can backtrack badly",
     reference:"backreferences are not allowed: they can backtrack badly", empty:"the pattern matches the empty string", compile:"the pattern does not compile: {error}"},
@@ -2492,6 +2521,9 @@ function builtInPart() {
     h("details", {class:"built-in-list"}, h("summary", {}, T.builtInOpen(all.length)),
       h("ul", {class:"mono"}, all.map(x => h("li", {class:x.exists ? "here" : "muted"}, x.path,
         x.exists ? h("span", {class:"tag"}, T.builtInHere) : null)))),
+    CODEX_HOMES_NO_READ.length ? h("div", {"data-codex-homes":""}, h("p", {}, T.builtInCodex),
+      h("ul", {class:"built-in-codex"}, CODEX_HOMES_NO_READ.map(x =>
+        h("li", {}, h("code", {class:"mono"}, x.path), " · ", x.provider)))) : null,
     h("p", {class:"field-note"}, T.builtInElse));
 }
 const hiddenByCoordinator = () => Object.entries(S.workers_may_not_read_added || {}).filter(([p]) => (S.workers_may_not_read || []).includes(p));
@@ -2500,7 +2532,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed,lane_allow_changed&n=20")]);
   // A clean page may refresh on return, but a reply must never replace edits begun while it was in flight.
   if (background && (epoch !== settingsEpoch || settingsSaving || settingsDirty() || JSON.stringify(S) !== before || newProviderName || newPriceName)) return;
-  S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; BUILT_IN_NO_READ = r.built_in_no_read || []; NO_READ_STOP = r.no_read_stop || "";
+  S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; BUILT_IN_NO_READ = r.built_in_no_read || []; CODEX_HOMES_NO_READ = r.codex_homes_no_read || []; NO_READ_STOP = r.no_read_stop || "";
   settingsDefaults = r.settings_defaults || {};
   CREDIT_RESTS = r.provider_credit || {}; CREDIT_MESSAGES = r.provider_credit_messages || {};
   MODEL_MESSAGES = r.provider_model_messages || {};
@@ -3001,6 +3033,7 @@ function setProviderKind(name, p, from, kind) {
   const aside = PROVIDER_ASIDE[name] ||= {}, keep = kindFields(kind);
   for (const key of kindFields(from)) if (!keep.includes(key) && key in p) { aside[key] = p[key]; delete p[key]; }
   p.kind = kind;
+  if (kind === "codex") delete KEY_DRAFTS[name];  // a Codex provider has no key: its unsaved one goes, and stays gone
   for (const key of keep) if (!(key in p) && key in aside) { p[key] = aside[key]; delete aside[key]; }
   if (kind === "codex") {
     for (const key of ["codex_path", "codex_home"]) if (!(key in p)) p[key] = "";
@@ -3031,7 +3064,8 @@ function codexFields(name, p) {
       field(T.codexFeatures, features, T.codexFeaturesNote(codexDefaults().disabled_features.join(" ")), "", true)));
   return [field(T.codexPath, program, "", "", true), field(T.codexHome, home, T.codexHomeNote, "", true),
     h("div", {class:"field wide codex-help", "data-codex-help":""}, h("p", {class:"field-note"}, T.codexInstall),
-      h("p", {class:"field-note"}, T.codexLogin), h("pre", {class:"mono"}, command)),
+      h("p", {class:"field-note"}, T.codexLogin), h("pre", {class:"mono"}, command),
+      h("p", {class:"field-note", "data-codex-kept":""}, T.codexHomeKept)),
     h("div", {class:"field wide"}, more)];
 }
 function addSettingsName(kind) {
