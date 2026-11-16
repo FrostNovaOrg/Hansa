@@ -163,8 +163,9 @@ and not the settings, plugins, hooks or MCP servers of the account they run as. 
 verifier read the card or `notes/`. Claude Code's auto memory is off for every worker and verifier
 run (and the provider check), whatever the repository's settings say, so no run is given what Claude
 Code remembered of an earlier one; the repository's CLAUDE.md still loads. Each run starts a new
-conversation, but for one case: a follow-up may go on in the conversation of the task it follows up
-([Going on in the earlier conversation](tasks.md#going-on-in-the-earlier-conversation)).
+conversation, but for two cases: a follow-up may go on in the conversation of the task it follows up
+([Going on in the earlier conversation](tasks.md#going-on-in-the-earlier-conversation)), and a repeated
+verification of the same task in the earlier verification's ([A repeated verification](tasks.md#a-repeated-verification)).
 
 ## Headless browsers
 

@@ -548,7 +548,9 @@ resolution counts removal of the markers. This uses git's `--remerge-diff` (git 
 If git cannot read the change, hansa gives its reason instead of a traceback.
 
 `hansa verify ID` chooses a verify lane listing the task's lane: free first, then fewest queued,
-then lanes' order; otherwise its own lane. `--lane L` overrides this.
+then lanes' order; otherwise its own lane. `--lane L` overrides this. Verifying the same task again
+goes on in the earlier verification's conversation where it can; verify on another lane for other
+eyes ([A repeated verification](#a-repeated-verification)).
 
 `hansa add` and `hansa retry` accept `--verify` to queue this verification after a passing check
 (or with no check), if the task ends done with changes. `--verify-lane L`, `--verify-effort E`
@@ -800,7 +802,8 @@ ended (done, failed, at a ceiling, cancelled):
 - hansa could save the list of the earlier conversation's rows that the follow-up's record copies (a
   full disk, say): without it the follow-up's numbers would count the earlier task's again.
 
-A verification never goes on in a worker's conversation, nor a follow-up in a verifier's. A follow-up
+A verification never goes on in a worker's conversation, nor a follow-up in a verifier's
+([A repeated verification](#a-repeated-verification) goes on in the earlier verification's). A follow-up
 of a follow-up that went on goes on in that follow-up's own (forked) conversation; its numbers and notes
 are still its own part only. A new conversation is started instead when one of the above does not hold,
 and once when the continued start ends within two minutes on an error, with no reply, because Claude
@@ -825,6 +828,32 @@ those rows out of all it reads of the follow-up's record (tokens, replies, last 
 ceiling, work left running, a lost run's numbers). Claude Code's answer to such a run counts the
 earlier conversation's tokens and cost in as well; hansa takes them off, so `hansa cost` counts each
 token once. The earlier task's record stays as it was.
+
+#### A repeated verification
+
+`hansa verify ID` of a task verified before goes on in the earlier verification's conversation the
+same way, whatever way that one ended (with any verdict, at a ceiling, with or without the report it
+wrote after the stop, failed, cancelled), under the same conditions: the new verification's first
+run, on the earlier one's lane, provider and model, not on the Codex adapter, with its record still
+there and the switches listed. Of several earlier verifications of the task it goes on in the latest
+one that meets them. `--lane L`, a verify lane that took it, another provider or model start a new
+conversation: other eyes on the same change. A verification goes on only in an earlier verification
+of the same task: never in a worker's, and a verification of a follow-up (a new task id) starts a
+new conversation though the earlier task was verified. A verification queued by `--verify` goes the
+same way.
+
+Its first message says that it goes on, in a new verification, from its earlier conversation; the
+new verification's id and the task and commit it verifies; that the worktree is clean again at that
+commit, and what it had changed there for its checks is not in it but kept under
+`refs/hansa/scratch/<earlier id>` (git can show it); that its temporary folder is a new, empty one
+(the path) and nothing it had running is running; and that its instructions, time limit included,
+are the new verification's. Then what the coordinator asked it to look at (`hansa verify ID "..."`),
+or, with no such note, to go on where it stopped, with what it had not reached, and to end with its
+verdict on the whole change. Its task text is not sent again. `hansa show` of the verification says
+`conversation: continued that of verification V`, or `conversation: a new one, as ...` with the
+reason (the first verification of a task has no such line). Its numbers, notes and leftovers are its
+own part only, and its verdict is read from its own answer, never from the earlier verification's
+rows its record copied.
 When retry stops a queued or running verification, its record names the task and
 the follow-up that replaced it. The earlier-round line says the verification was
 stopped before a verdict; a verification with no verdict is never called "verified by".

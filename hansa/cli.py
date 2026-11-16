@@ -1436,7 +1436,8 @@ def queue_verification(desk: Desk, tid: str, *, lane="", effort="", note="", ses
                "which restates what still holds of earlier rounds' notes. Where the two differ, the note stands; "
                "judge each of those asks against the whole change.\n" if m.get("parent") else "")
             + f"\n## Task {tid} as it was given\n{task}\n\n## The report of the worker who did it\n{report or '(none)'}\n")
-    vid = desk.new_task(text, kind="verify", parent=tid, lane=lane, effort=effort or "",
+    # the note alone too: a verification that goes on in an earlier one's conversation is given it, not the text
+    vid = desk.new_task(text, kind="verify", parent=tid, lane=lane, effort=effort or "", verify_note=desk.redact(note),
                         attachments_from=tid,
                         start_from=m["head"], base=m["head"], title=f"Verify {tid}: {m['title']}"[:80],
                         **notify.recorded(session))

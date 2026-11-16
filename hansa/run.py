@@ -4314,9 +4314,10 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: st
 # A follow-up (hansa retry) goes on in its parent's conversation when it can (continuation decides, in one place):
 # its start forks the parent's session (claude -p --resume P --fork-session --session-id NEW), with its instructions
 # rendered for the new task (--system-prompt-snapshot off), and its first message (CONTINUED_NOTE, then its task
-# text) says what changed since that conversation stopped. Never a verification, nor from one: each starts a
-# conversation of its own. Claude Code's auto memory stays off for every run (provider_env, isolated).
-FORKED_ROWS = "forked-rows.json"  # beside a continued follow-up's task.md: the uuids of the rows its record copied
+# text) says what changed since that conversation stopped. A repeated verification of the same task goes on in the
+# earlier verification's conversation the same way (CONTINUED_VERIFY_NOTE); never a verification in a worker's, nor
+# a follow-up in a verifier's. Claude Code's auto memory stays off for every run (provider_env, isolated).
+FORKED_ROWS = "forked-rows.json"  # beside a continued run's task.md: the uuids of the rows its record copied
 CONTINUED_NOTE = """You go on here, in a new task, from your earlier conversation (task {parent}).
 - The new task is {tid}, on branch {branch}. {left}; the worktree, {wt}, is on that
   branch now{at}.
@@ -4329,53 +4330,105 @@ CONTINUED_NOTE = """You go on here, in a new task, from your earlier conversatio
 The new task follows.
 
 """
+# A repeated verification of the same task (hansa verify ID again) goes on in the earlier verification's
+# conversation, the same way: its first message is this, then what the coordinator asked it to look at, or GO_ON
+CONTINUED_VERIFY_NOTE = """You go on here, in a new verification, from your earlier conversation (verification {earlier}).
+- The new verification is {tid}. What you verify is the same: task {task}, at commit {commit}.
+- The worktree, {wt}, is clean again at that commit. {kept}
+- Other tasks may have used this worktree in between: files git does not track (build outputs, ignored files)
+  may be gone or different.
+- Your temporary folder is a new, empty one: {tmp}. The old one is gone, and nothing you had running is running.
+- Your instructions are now this new verification's, its time limit and when it started included.
+- Look before you rely on what you remember: `git status`.
+
+"""
+VERIFY_KEPT = {"ref": "What you had changed there for your checks is not in it: hansa keeps it under {ref}, which "
+                      "git can show (`git show {ref}`, `git diff {commit} {ref}`).",
+               "error": "What you had changed there for your checks is not in it: hansa could not keep it under a "
+                        "ref of its own, so it went to git's stash when the worktree was next used.",
+               "none": "hansa keeps nothing you had changed there: you left no changes, or they were removed since."}
+VERIFY_LOOK = ("The coordinator asks you to look in particular at: {note}\n"
+               "End with your verdict on the whole change, in the form your instructions give.\n")
+VERIFY_GO_ON = ("Go on where you stopped, with what you had not reached, and end with your verdict on the whole "
+                "change, in the form your instructions give.\n")
+
+
+def earlier_verifications(desk: Desk, meta: dict) -> list:
+    """The verifications of the same task as this one (its parent) that hansa started before it, newest first: the
+    only conversations a verification may go on in (continuation). Never a worker's, nor another task's."""
+    try:
+        own = int(str(meta.get("id") or "")[1:])
+    except ValueError:
+        return []
+    out = [m for m in desk.tasks() if m.get("kind") == "verify" and m.get("parent") == meta["parent"]
+           and str(m.get("id") or "")[1:].isdigit() and int(m["id"][1:]) < own and m.get("session_id")]
+    return sorted(out, key=lambda m: int(m["id"][1:]), reverse=True)
 
 
 def continuation(desk: Desk, meta: dict, lane_name: str, pname: str, p: dict, model: str):
-    """Whether this start of a task goes on in the conversation of the task it follows up (hansa retry), the one
-    place that decides it: {"from": parent id, "session": the parent's session id} when it does, {"new": why not,
-    in plain words} when a follow-up starts a new conversation, None for a task that is no follow-up (a
-    verification among them). A follow-up goes on only on its first run, from the base the parent's work is on,
-    on the parent's lane, with the provider and model of the parent's last run, when that run left a record and the
-    installed Claude Code has the switches it needs (lacks_switches). A parent that itself went on is no reason
-    against: its own (forked) session is forked again."""
-    if meta.get("kind") == "verify" or not meta.get("parent"):
-        return None  # a verification never goes on in a worker's conversation
-    parent = read_json(desk.tasks_dir / meta["parent"] / "meta.json", {}) or {}
-    psid = parent.get("session_id") or ""
-    own = parent.get("conversation") or {}
-    if parent.get("kind") == "verify":
-        why = "the earlier task is a verification, whose conversation a worker never continues"
-    elif meta.get("attempts") or meta.get("earlier_runs"):
+    """Whether this start of a task goes on in an earlier conversation, the one place that decides it: a follow-up
+    (hansa retry) in that of the task it follows up, a verification in that of the latest earlier verification of
+    the same task that it can go on from. {"from": that task's id, "session": its session id} when it does,
+    {"new": why not, in plain words} when it starts a new conversation, None for a task that is no follow-up and a
+    verification of a task never verified before. It goes on only on its first run, on the earlier one's lane,
+    with the provider and model of the earlier one's last run, when that run left a record and the installed Claude
+    Code has the switches it needs (lacks_switches); a follow-up only from the base the parent's work is on. An
+    earlier one that itself went on is no reason against: its own (forked) session is forked again. A verification
+    never goes on in a worker's conversation, nor a follow-up in a verifier's."""
+    if not meta.get("parent"):
+        return None
+    verifying = meta.get("kind") == "verify"
+    what = "verification" if verifying else "task"
+    if verifying:  # of the same task only: a follow-up's verification is of a new task id, so it starts anew
+        earlier = earlier_verifications(desk, meta)
+        if not earlier:
+            return None
+    else:
+        earlier = [read_json(desk.tasks_dir / meta["parent"] / "meta.json", {}) or {}]
+    if not verifying and earlier[0].get("kind") == "verify":
+        return {"new": "the earlier task is a verification, whose conversation a worker never continues"}
+    if meta.get("attempts") or meta.get("earlier_runs"):
         lost = [a for a in meta.get("attempts") or [] if isinstance(a, dict) and a.get("kind") == "conversation"]
         # once: this start is not a continued one, so it cannot end so again (conversation_lost)
-        why = (lost[-1].get("error") if lost else "") or "hansa started it again after an earlier run of it"
-    elif meta.get("fresh"):
-        why = "it starts over from the base branch (--fresh), so the earlier conversation's work is not on its branch"
-    elif not meta.get("start_from"):
-        why = "it starts from the base branch, not from the earlier task's commit"
-    elif parent.get("lane") != lane_name:
-        why = f"it runs on lane {lane_name}, not on {parent.get('lane') or '(none)'}, where the earlier task ran"
-    elif parent.get("provider") != pname:
-        why = f"it runs on {pname}, not on {parent.get('provider') or '(none)'}, which the earlier task's last run used"
-    elif (parent.get("model_asked") or "") != model:
-        why = f"it runs model {model}, not {parent.get('model_asked') or '(unknown)'}, which the earlier task's last run used"
-    elif p.get("kind") == "codex":
-        why = "the earlier task ran on the Codex adapter, which leaves no conversation to go on from"
-    elif not (psid and any(config_home(desk, pname, p).glob(f"projects/*/{psid}.jsonl"))):
-        why = "the earlier task's conversation record is not on this machine (Claude Code removes old ones)"
-    elif lacks := lacks_switches(provider_program(p)):
-        why = lacks
-    else:
-        # Claude Code's answers count the whole conversation in (FORK_FACTS 2): of a parent that itself went on
-        # from its own parent's, the part before it too, so a chain's third task counts only its own part
-        before = parent.get("usage") or {}
-        if own.get("from") and own.get("own") == psid:
-            before = add_usage(own.get("before") or {}, before)
-        began = (parent.get("run_start") or {}).get("commit")  # where its last run started: then nothing was left
-        nothing = parent.get("head") == began if began else parent.get("commits") == 0
-        return {"from": meta["parent"], "session": psid, "before": before, **({"nothing_left": True} if nothing else {})}
-    return {"new": why}
+        return {"new": (lost[-1].get("error") if lost else "") or "hansa started it again after an earlier run of it"}
+    if not verifying and meta.get("fresh"):
+        return {"new": "it starts over from the base branch (--fresh), so the earlier conversation's work is not on its branch"}
+    if not verifying and not meta.get("start_from"):
+        return {"new": "it starts from the base branch, not from the earlier task's commit"}
+
+    def why_not(e: dict) -> str:
+        sid = e.get("session_id") or ""
+        last = "" if verifying else "'s last run"
+        if e.get("lane") != lane_name:
+            return f"it runs on lane {lane_name}, not on {e.get('lane') or '(none)'}, where the earlier {what} ran"
+        if e.get("provider") != pname:
+            return f"it runs on {pname}, not on {e.get('provider') or '(none)'}, which the earlier {what}{last} used"
+        if (e.get("model_asked") or "") != model:
+            return (f"it runs model {model}, not {e.get('model_asked') or '(unknown)'}, which the earlier "
+                    f"{what}{last} used")
+        if p.get("kind") == "codex":
+            return f"the earlier {what} ran on the Codex adapter, which leaves no conversation to go on from"
+        if not (sid and any(config_home(desk, pname, p).glob(f"projects/*/{sid}.jsonl"))):
+            return f"the earlier {what}'s conversation record is not on this machine (Claude Code removes old ones)"
+        return ""
+    reasons = [why_not(e) for e in earlier]
+    if all(reasons):  # of several earlier verifications, the newest one's says why
+        why = reasons[0] if len(earlier) == 1 else f"{reasons[0]} ({earlier[0]['id']}, the latest)"
+        return {"new": why}
+    if lacks := lacks_switches(provider_program(p)):
+        return {"new": lacks}
+    parent = earlier[reasons.index("")]  # the latest one it can go on from
+    psid, own = parent.get("session_id") or "", parent.get("conversation") or {}
+    # Claude Code's answers count the whole conversation in (FORK_FACTS 2): of a parent that itself went on
+    # from its own parent's, the part before it too, so a chain's third task counts only its own part
+    before = parent.get("usage") or {}
+    if own.get("from") and own.get("own") == psid:
+        before = add_usage(own.get("before") or {}, before)
+    if verifying:
+        return {"from": parent["id"], "session": psid, "before": before}
+    began = (parent.get("run_start") or {}).get("commit")  # where its last run started: then nothing was left
+    nothing = parent.get("head") == began if began else parent.get("commits") == 0
+    return {"from": meta["parent"], "session": psid, "before": before, **({"nothing_left": True} if nothing else {})}
 
 
 # The switches a continued start needs (start). Read from the help text, not judged by the version: the help names
@@ -4428,7 +4481,7 @@ LOST_SEC = 120  # a continued start that ends sooner, with no reply, may be one 
 
 
 def conversation_lost(desk: Desk, meta: dict, run: dict, err: str, home, sid, began) -> str:
-    """Why a follow-up's continued start (continuation) ended because Claude Code could not go on in that
+    """Why a continued start (continuation) ended because Claude Code could not go on in that
     conversation (it found no such conversation, or the conversation is too long to go on); '' when it did not end
     so. Told by what such an end looks like, not by Claude Code's wording: the start carried --resume, ended on an
     error within LOST_SEC seconds, and its own part of the record holds no model's reply (a reply Claude Code makes
@@ -4448,7 +4501,8 @@ def conversation_lost(desk: Desk, meta: dict, run: dict, err: str, home, sid, be
            for d in rows or []):
         return ""
     lines = (str(run.get("result") or "") or err).strip().splitlines()
-    return (f"Claude Code could not go on in the conversation of task {c['from']}: the start that went on in it "
+    what = "verification" if meta.get("kind") == "verify" else "task"
+    return (f"Claude Code could not go on in the conversation of {what} {c['from']}: the start that went on in it "
             f"ended after {max(0, round(took))} seconds with no reply"
             + (f" ({lines[-1][:160]})" if lines else ""))
 
@@ -4521,7 +4575,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         update = note.format(base=lane.get("base") or "main", files=", ".join(conflicts))
         argv[argv.index("--append-system-prompt") + 1] += update
     going_on = continuation(desk, meta, lane_name, pname, p, model)
-    first = None  # the first message of a follow-up that goes on in its parent's conversation, before its task text
+    first = None  # the first message of a run that goes on in an earlier conversation (a follow-up's: then its task text)
     if going_on and going_on.get("from"):
         # Every read of its record leaves out the rows listed here (own_session): a follow-up that went on without
         # the list would count the parent's tokens, replies and notes as its own, so it starts anew instead.
@@ -4539,12 +4593,21 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
             "--system-prompt-snapshot", "off"]
         head = wgit(desk, wt, "rev-parse", "HEAD")
         commit = meta.get("start_from") or head
-        left = (f"Your earlier task left nothing to commit, so the branch starts at {commit[:12]}, where it started"
-                if going_on.pop("nothing_left", False) else f"hansa committed what you had left as commit {commit[:12]}")
-        first = CONTINUED_NOTE.format(
-            parent=going_on["from"], tid=tid, branch=f"task/{tid}", left=left, wt=wt, tmp=commands_tmp(tmp),
-            at="" if head == commit else f", at {head[:12]}, with the base merged in",
-            update=update.strip() + "\n" if update else "")
+        if verifying:  # its worktree was cleaned back to the task's commit; its scratch changes are under a ref
+            was = read_json(desk.tasks_dir / going_on["from"] / "meta.json", {}) or {}
+            kept = VERIFY_KEPT["ref" if was.get("scratch_ref") else "error" if was.get("scratch_error") else "none"]
+            note = meta.get("verify_note") or ""
+            first = CONTINUED_VERIFY_NOTE.format(
+                earlier=going_on["from"], tid=tid, task=meta["parent"], commit=commit[:12], wt=wt,
+                kept=kept.format(ref=was.get("scratch_ref") or "", commit=commit[:12]), tmp=commands_tmp(tmp)) + (
+                VERIFY_LOOK.format(note=note) if note else VERIFY_GO_ON)
+        else:
+            left = (f"Your earlier task left nothing to commit, so the branch starts at {commit[:12]}, where it started"
+                    if going_on.pop("nothing_left", False) else f"hansa committed what you had left as commit {commit[:12]}")
+            first = CONTINUED_NOTE.format(
+                parent=going_on["from"], tid=tid, branch=f"task/{tid}", left=left, wt=wt, tmp=commands_tmp(tmp),
+                at="" if head == commit else f", at {head[:12]}, with the base merged in",
+                update=update.strip() + "\n" if update else "")
         going_on["own"] = sid
     try:
         check_git_file(desk, wt)  # sandbox_settings asks git in the worktree
@@ -4581,8 +4644,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     if first is not None:  # forked from the parent's session; a resume of its own (above) goes on in its own
         at = argv.index("--session-id")
         argv = [*argv[:at], "--resume", going_on["session"], "--fork-session", *argv[at:]]
+        # a verification's text is the one its earlier conversation began with, but for the note (in first)
         write_text(raw / "first-message.md",
-                   first + (d / "task.md").read_text(encoding="utf-8", errors="replace"))
+                   first + ("" if verifying else (d / "task.md").read_text(encoding="utf-8", errors="replace")))
     if conflicts:  # merged again after the setup, with the markers left in (UPDATE_SCRIPT)
         argv = ["/bin/sh", "-c", UPDATE_SCRIPT, "hansa-update", base,
                 expected_git_line(desk, wt) or "(unknown, so no git runs here)", str(raw / "run.err"), *argv]
