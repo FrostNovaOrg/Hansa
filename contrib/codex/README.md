@@ -1,16 +1,17 @@
 # The Codex adapter
 
 An optional part of hansa, for macOS and Linux: it lets a worker run OpenAI's Codex command line (`codex exec`)
-instead of Claude Code, without changing hansa. hansa runs every worker with `claude -p`, and finds `claude` through
-`HANSA_CLAUDE`; `bin/claude-or-codex` takes its place for one desk and looks at each call:
+instead of Claude Code. A provider of the kind **Codex** runs its workers through `bin/claude-or-codex`: hansa
+starts it in `claude`'s place for that provider's runs alone, with the switch `HANSA_CODEX_RUN=1` and the provider's
+settings in the run's environment. The adapter looks at each call:
 
-- **A worker run on the Codex provider** (`-p`, `--output-format json`, `--session-id`, and
-  `ANTHROPIC_BASE_URL=http://codex.invalid`) runs `codex exec` in srt, inside the sandbox hansa gave the worker,
-  and answers on stdout in the shape hansa reads from `claude -p --output-format json`.
-- **hansa's provider check on it** (the same, with no `--session-id`) runs `codex exec` once, in srt, in a new
-  empty folder of its own (below, "The provider check").
-- **`--resume` on it** gets an error answer: resume is not supported.
-- **Every other call** is `exec`ed to the real claude, unchanged: same arguments, stdin, environment, exit code.
+- **A worker run** (`-p`, `--output-format json`, `--session-id`) runs `codex exec` in srt, inside the sandbox
+  hansa gave the worker, and answers on stdout in the shape hansa reads from `claude -p --output-format json`.
+- **hansa's provider check** (the same, with no `--session-id`) runs `codex exec` once, in srt, in a new empty
+  folder of its own (below, "The provider check").
+- **`--resume`** gets an error answer: resume is not supported.
+- Any other call with the switch gets an error answer. (On a desk set up [the old way](#desks-set-up-the-old-way),
+  every call that is not for Codex is `exec`ed to the real claude, unchanged.)
 
 The wrapper is perl because it must hand on the environment exactly: a shell adds `PWD`, `SHLVL` and `_`, and
 python adds `LC_CTYPE` (macOS's `/usr/bin/python3` more). It passes the shim a snapshot of the environment it got,
@@ -27,42 +28,38 @@ folders.
 
 1. **Install codex outside `~/.codex`.** hansa's sandbox denies reading `~/.codex`, and the standalone install keeps
    its program under `~/.codex/packages`, where a sandboxed run cannot start it. Install it into a folder of its
-   own, for example `npm install -g --prefix <codex tools> @openai/codex@0.160.0`, outside every folder workers may not
-   read. The adapter refuses a codex under such a folder.
-   Use the Node and srt baseline and upgrade checks in [Tools and upgrades](../../docs/sandbox.md#tools-and-upgrades).
-2. **Give the adapter its own Codex home and log in there once:**
-   `CODEX_HOME=<Codex home> <codex tools>/bin/codex login`. The home is a folder of its own, outside `~/.codex`
-   and the worktrees, and not inside a folder workers may not read.
-3. **Put that home on the principal's list of folders workers may not read** (Settings, "workers may not read"),
-   so that Claude workers on other lanes cannot read the login. The adapter leaves the home's own entries out of
-   srt's `denyRead` for a Codex run alone, and the run's log names them. An entry *above* the home is kept, and the
-   run is refused: the adapter never opens more than the home itself.
-4. **Copy `codex.env.example` to `codex.env`**, beside it, and replace the placeholders. hansa gives a worker a
-   clean environment, so settings in `hansa serve`'s environment would not reach the adapter: it reads its
-   environment first, then `codex.env` (or `trial.env`, an older name, while there is no `codex.env`). git ignores
-   both. For an existing installation, follow the [upgrade note](../../docs/codex.md#upgrading).
-5. **Start the desk with the adapter:** `HANSA_CLAUDE=<checkout>/contrib/codex/bin/claude-or-codex hansa serve`.
-6. **Add a `compatible` provider** (for example `codex`) with base URL `http://codex.invalid`, a key of at least 20
-   random characters, and as its model the Codex model to run (for example `gpt-6.1-sol`): the adapter gives
-   codex the model hansa passes, so the provider check runs it too and fails, saying the model is not available,
-   when the adapter's login cannot use it. Put the provider in a lane's providers.
-   hansa refuses to merge a change that holds a provider's key, checking changed files, images and other binary
-   files included: a short or common string can turn up in one by chance.
+   own, for example `npm install -g --prefix ~/codex-tools @openai/codex@0.160.0`, outside every folder workers may
+   not read. Use the Node and srt baseline and upgrade checks in
+   [Tools and upgrades](../../docs/sandbox.md#tools-and-upgrades).
+2. **Add a provider of the kind Codex** on the page (Settings, Providers). The principal gives its **Codex
+   program** (for example `~/codex-tools/bin/codex`, as a full path), its **Codex home**, a folder of its own for
+   Codex's login (outside `~/.codex`, the desk, the worktrees and the lanes' repositories), and as its model the
+   Codex model to run (for example `gpt-6.1-sol`). "More Codex settings" holds the optional certificate file, web
+   search and the features turned off (below). The page refuses a program or home that workers may not read, and
+   a home that overlaps an entry on that list. Put the provider in a lane's providers. It has no address and no
+   key, and cannot be the coordinator's provider: the coordinator's session is Claude Code.
+3. **Log in once, with Codex's own login on that home:** `CODEX_HOME=<Codex home> <Codex program> login`. The
+   page and `hansa explain provider NAME` give the command with the provider's paths. Then `hansa ping NAME`.
 
-| setting | meaning | default |
+hansa does the rest by itself: it starts the adapter for the provider (no `HANSA_CLAUDE`, no `codex.env`: the
+adapter does not read `codex.env` for such a run), and keeps the Codex home from every run but that provider's own
+Codex runs, so nothing needs adding to what workers may not read. The page lists these homes under the folders
+workers may not read.
+
+| on the page | the adapter's setting | default |
 |---|---|---|
-| `HANSA_CODEX_BIN` | the codex program | (required) |
-| `HANSA_CODEX_HOME` | its `CODEX_HOME`, holding the adapter's login | (required) |
-| `HANSA_CODEX_MODEL` | `-m` when hansa passes no `--model`; the provider's model, which hansa passes, comes first | `gpt-6.1-sol` |
-| `HANSA_CODEX_EFFORT` | `model_reasoning_effort`; hansa's `--effort` overrides it; accepts `low`, `medium`, `high`, `xhigh`, `max` ([startup checks](../../docs/tasks.md#effort)) | `high` |
-| `HANSA_CODEX_LOGS` | accepted for compatibility; see [temporary output](../../docs/codex.md) | unused |
-| `HANSA_CODEX_SRT` | srt | `srt` on the worker's PATH |
-| `HANSA_REAL_CLAUDE` | the real claude | the first `claude` on PATH that is not the adapter, else `~/.local/bin/claude` |
-| `HANSA_CODEX_CA_FILE` | the certificates Codex checks TLS against, as `CODEX_CA_CERTIFICATE`; set but empty, none | `/etc/ssl/cert.pem` when it exists |
-| `HANSA_CODEX_WEB_SEARCH` | Codex's own web search, `-c web_search=…`: `disabled`, `cached` or `live`; anything else is refused | `disabled` |
-| `HANSA_CODEX_DISABLE` | Codex features turned off, space-separated, one `--disable` each; set but empty, none | `apps plugins browser_use computer_use image_generation multi_agent hooks` |
+| Codex program | `HANSA_CODEX_BIN` | (required) |
+| Codex home | `HANSA_CODEX_HOME`, Codex's `CODEX_HOME`, holding the login | (required) |
+| the provider's model | `-m`; a task's `--model` is not used on a Codex provider | |
+| the task's or provider's effort | `model_reasoning_effort`, from hansa's `--effort`: `low`, `medium`, `high`, `xhigh`, `max` ([startup checks](../../docs/tasks.md#effort)) | `high` |
+| Certificate file | `HANSA_CODEX_CA_FILE`, the certificates Codex checks TLS against, as `CODEX_CA_CERTIFICATE` | `/etc/ssl/cert.pem` when it exists |
+| Web search | `HANSA_CODEX_WEB_SEARCH`, Codex's own web search, `-c web_search=…`: `disabled`, `cached` or `live` | `disabled` |
+| Features turned off | `HANSA_CODEX_DISABLE`, one `--disable` each; an empty list, none | `apps plugins browser_use computer_use image_generation multi_agent hooks` |
+| (none) | `HANSA_CODEX_SRT`, srt: the one hansa uses | |
 
-Codex's memories (`memories`, `external_agent_memory_import`) are always disabled for these runs, whatever `HANSA_CODEX_DISABLE` says.
+Codex's memories (`memories`, `external_agent_memory_import`) are always disabled for these runs, whatever the
+features turned off say. `HANSA_CODEX_LOGS` is accepted for compatibility and unused; see
+[temporary output](../../docs/codex.md#adapter-output).
 
 ## The Codex run
 
@@ -93,13 +90,14 @@ The task goes in on stdin, as hansa gives it. Why each part:
   copied into the worker's temporary folder (mode 600), sourced and deleted by the sh inside srt.
 - **Codex's stdout is a temporary file, not a pipe.** Codex panics when a write to a non-blocking stdout fails
   with EAGAIN, as a full pipe makes it on a long line; a file never does. The adapter follows the file.
-  See [temporary output](../../docs/codex.md) for its lifetime.
+  See [temporary output](../../docs/codex.md#adapter-output) for its lifetime.
 - **Its own configuration:** `--ignore-user-config` loads no `config.toml` (`notify`, `mcp_servers`, providers,
   project and hook trust) and no `environments.toml`, which can send commands to another machine; `--ignore-rules`,
   no exec-policy rules; `--ephemeral`, no session files. With `--strict-config` an unknown `-c` key or `--disable`
   feature fails at once, and the answer says `Codex refused its configuration`. The login still comes from
   `CODEX_HOME`. `multi_agent` is off because a sub-agent's tokens are not counted in `turn.completed`.
-- The `ANTHROPIC_*` keys hansa sets for Claude are removed from Codex's environment.
+- Any `ANTHROPIC_*` keys in the environment (the old way's made-up address and key) are removed from Codex's
+  environment.
 
 **The turn ceiling.** Each `command_execution` and `file_change` counts once; past `--max-turns`, the adapter
 stops codex and answers `error_max_turns`. **The time limit.** srt runs in a session of its own. On SIGTERM, SIGINT
@@ -143,14 +141,14 @@ srt's settings are built from the `--settings` hansa gives the worker, and check
 - **Network:** the lane's hosts, plus `chatgpt.com`, `auth.openai.com` and `api.openai.com`.
 - **The web on OpenAI's side**, which srt cannot stop: Codex's own web search, on by default in codex, and, with a
   ChatGPT login, the `codex_apps` tools, whose `web_run` opens any page. Closing one leaves the other open, so
-  both are off by default (`HANSA_CODEX_WEB_SEARCH`, and `apps` in `HANSA_CODEX_DISABLE`), as hansa's workers have
-  no web tools.
+  both are off by default (Web search, and `apps` in the features turned off), as hansa's workers have no web
+  tools.
 
 What it cannot close:
 
 - **Codex and the commands it runs share one sandbox**, so a run's own commands can read the Codex login and
-  write the rest of the home: Codex refreshes its token into `auth.json` during a run. Claude workers cannot read
-  it (setup, step 3).
+  write the rest of the home: Codex refreshes its token into `auth.json` during a run. Runs on other providers cannot read
+  it: hansa keeps the home from them (setup).
 - A task stopped at a ceiling or cancelled has only Codex's last message as its report.
 - **None of hansa's tool rules** (`--allowedTools`, `--disallowedTools`, Read denials) and no browser
   (`--mcp-config` is ignored): srt's file and network rules are the boundary. `permission_denials` is always empty.
@@ -169,34 +167,31 @@ codex's stderr, and classed on the whole text, so that hansa's own readings take
 | Codex says | hansa reads | hansa does |
 |---|---|---|
 | a usage limit, spend cap, quota, 429 | quota, with Codex's reset time when given | requeues; the provider rests until the reset, or for its configured rest when no time is given |
-| workspace out of credits, or the plan requires an upgrade to use Codex | credit | requeues without using a try; the provider rests until the principal confirms a top-up on the page or saves a key |
+| workspace out of credits, or the plan requires an upgrade to use Codex | credit | requeues without using a try; the provider rests until the principal confirms a top-up on the page |
 | model at capacity, high demand | overloaded (529) | tries once more |
 | `content_filter` | refused | the lane's next provider |
 | a dropped stream, idle timeout | connection dropped | tries once more on the same provider |
 | refused, reset or timed-out connection; `workspace routing discovery failed`; a 5xx | connection error, server error | tries once more |
-| a token that cannot be refreshed, 401, not logged in | login | rests the provider for 24 hours; follow the adapter's `codex login` command, then `hansa ping NAME` |
-| 403 | key | rests the provider |
+| a token that cannot be refreshed, 401, 403, not logged in | login | rests the provider until it is logged in again and `hansa ping NAME` answers; the rest gives the login command |
 | 404 (no such model), a refused configuration, anything else | neither | the task fails, saying why |
 
 Codex's reset time (`try again at 3:05 PM`, or with a date) is read by the adapter and passed on as `resets_at`,
 which hansa reads. A model warning is said in the result and `codex_warnings`; it never fails a run alone.
-The shim supplies the login remedy in `login_hint`, using its configured Codex home and executable, both shell quoted; hansa
-keeps that hint in the rest reason and adds `hansa ping NAME`. The placeholder key cannot renew a Codex login.
+hansa gives the login command from the provider's program and home, both shell quoted, and adds
+`hansa ping NAME`.
 
 ## The provider check
 
 hansa checks a provider (`hansa ping`, the page, `hansa serve` while one cannot be reached) with
 `claude -p --output-format json --max-turns 1 --tools ""`, in `<desk>/.hansa/check`, a clean environment and
-`Reply with the single word OK.` on stdin, and judges the answer as it judges Claude's. Run from a shell,
-`hansa ping` uses the `claude` program the recorded `hansa serve` start used, from the `env` in
-`<desk>/.hansa/serve-start.json` (here the adapter), not whichever `claude` that shell would find, and says so
-first when the two differ. hansa gives a check no sandbox, so the adapter makes one: a new empty folder
+`Reply with the single word OK.` on stdin, and judges the answer as it judges Claude's. For a provider of the
+kind Codex, the program is always this checkout's adapter, however `hansa serve` was started. hansa gives a check no sandbox, so the adapter makes one: a new empty folder
 `codex-check-…` in `TMPDIR`, which is Codex's working folder and `TMPDIR` and is removed afterwards however
 the check ends; writes there and in the Codex home only;
 no reads of the usual logins in the home folder (`~/.ssh`, `~/.aws`, `~/.claude`, `~/.codex` and the like), of
 the folder hansa ran the check in, or of the desk's `.hansa`; the network, OpenAI's hosts alone. The rest is a
 worker run's, with `--skip-git-repo-check` and no developer instructions or lane env. A usage limit or a failed
-login rests the provider as for Claude. Its output is temporary, as for worker runs.
+login rests the provider as above. Its output is temporary, as for worker runs.
 
 ## Parallel runs and the shared login
 
@@ -214,13 +209,20 @@ Then the adapter runs `codex login status` itself, outside the sandbox, on the s
 The adapter never reads `auth.json`, and of the status command looks only at its exit code and first line, passing
 neither on: the line may name the login. Codex's other files in the home are shared as Codex itself shares them.
 
+Providers of the kind Codex on one Codex home share one login, so they share its usage rests too: a usage limit
+found by one rests every provider on that home, on this desk and on the account's other desks. A provider on a home
+of its own rests alone.
+
 ## The dry run
 
-Once the login exists, `./dry-run.sh` makes a scratch repository and worktree and starts one real Codex run through
-the adapter, as hansa starts a worker: the same command line, `--settings` from hansa's own functions, a clean
-environment. It prints the answer, then the worktree. The task asks Codex to make `hello.txt`, try `git commit`,
-and write project settings at the top and below it (`sub/.claude` by `mkdir`, by renaming a folder into place and
-as a link). Afterwards `hello.txt` should be there with only the `init` commit. On macOS there should be no
+Once the login exists, `HANSA_CODEX_BIN=<Codex program> HANSA_CODEX_HOME=<Codex home> ./dry-run.sh` makes a scratch
+repository and worktree and starts one real Codex run through the adapter, as hansa starts a worker on a provider
+of the kind Codex: the same command line, `--settings` from hansa's own functions, a clean environment with the
+switch `HANSA_CODEX_RUN=1` and the provider's settings. The settings come from the environment alone, as on such a
+provider: `HANSA_CODEX_MODEL` (passed as `--model`), `HANSA_CODEX_CA_FILE`, `HANSA_CODEX_WEB_SEARCH` and
+`HANSA_CODEX_DISABLE` may be set too, and `codex.env` is not read. It prints the answer, then the worktree. The
+task asks Codex to make `hello.txt`, try `git commit`, and write project settings at the top and below it
+(`sub/.claude` by `mkdir`, by renaming a folder into place and as a link). Afterwards `hello.txt` should be there with only the `init` commit. On macOS there should be no
 `.claude/`, `.codex/` or `sub/.claude` of any kind (`sub/x` and `sub/y` may be left): srt must refuse them all.
 On Linux srt refuses top-level settings writes, but a new nested folder or link such as `sub/.claude` may remain
 on disk. The script runs hansa's own commit check on the scratch worktree: it stages changes and prints which
@@ -231,6 +233,37 @@ expectation for the system running the script.
 The report should name task `dry-run`, which shows the developer instructions arrived; a key or feature this
 codex does not know ends the run at once with `Codex refused its configuration`. Workers never run it: it needs
 the real Codex and its login. hansa's checkout is the one the script is in, unless `HANSA_SRC` names another.
+
+## Desks set up the old way
+
+Before the kind Codex, a desk reached Codex through a pretence, and that keeps working:
+
+- `hansa serve` started with `HANSA_CLAUDE=<checkout>/contrib/codex/bin/claude-or-codex`, which takes `claude`'s
+  place for every run of the desk; the adapter runs Codex for a call whose environment has
+  `ANTHROPIC_BASE_URL=http://codex.invalid`, and `exec`s every other call to the real claude, unchanged.
+- a `compatible` provider with the address `http://codex.invalid`, a made-up key of at least 20 random characters,
+  and as its model the Codex model to run. hansa refuses to merge a change that holds a provider's key, checking
+  changed files, images and other binary files included: a short or common string can turn up in one by chance.
+  The made-up key cannot renew a Codex login.
+- the adapter's settings in `codex.env` beside `codex.env.example` (or `trial.env`, an older name, while there is no
+  `codex.env`), read after the adapter's environment, since hansa gives a worker a clean one. Its keys are the
+  table's, with `HANSA_CODEX_MODEL` (`-m` when hansa passes no `--model`; default `gpt-6.1-sol`),
+  `HANSA_CODEX_EFFORT` (when hansa passes no `--effort`) and `HANSA_REAL_CLAUDE` (the real claude: the first
+  `claude` on PATH that is not the adapter, else `~/.local/bin/claude`). git ignores both files.
+- hansa does not keep such a provider's Codex home from other runs: the principal puts it on the list of folders
+  workers may not read (Settings, "workers may not read"). The adapter leaves the home's own entries out of srt's
+  `denyRead` for a Codex run alone, and the run's log names them; an entry *above* the home is kept, and the run is
+  refused. A lost login rests the provider for 24 hours, with the adapter's `codex login` command, then
+  `hansa ping NAME`; a 403 rests it as a rejected key. Run from a shell, `hansa ping` uses the `claude` program the
+  recorded `hansa serve` start used, from the `env` in `<desk>/.hansa/serve-start.json`, and says so first when it
+  differs from the one that shell would find.
+
+`hansa explain provider NAME` and the provider's card on the page say when a provider reaches Codex this way. To
+change it: on the page, choose the kind Codex for it, fill in the Codex program and home (`HANSA_CODEX_BIN` and
+`HANSA_CODEX_HOME` from `codex.env`), and save; that save removes the stored made-up key. The home may stay on the
+list of folders workers may not read as it is, but an entry above or inside it is refused on save. Once no
+provider uses the old way, `hansa serve` needs no `HANSA_CLAUDE`, and `codex.env` can go. See also the
+[upgrade note](../../docs/codex.md#upgrading).
 
 ## Tests
 

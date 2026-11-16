@@ -13,7 +13,7 @@ existing task, the refusal suggests its id without selecting it for you.
 
 `hansa status`, `hansa show ID` and the page show replies, idle minutes and the last note while a worker runs.
 Claude Code's session record wins; otherwise hansa reads `progress/<session-id>.json` in the provider's Claude
-home (`.hansa/claude-<provider>` for compatible providers): `{"replies": 3, "last": 1790000000, "note": "Checking tests."}`.
+home (`.hansa/claude-<provider>` for compatible and Codex providers): `{"replies": 3, "last": 1790000000, "note": "Checking tests."}`.
 `last` is epoch seconds. Missing, unreadable or malformed progress means no reply yet. Notes are redacted and
 cut to 160 characters. Codex counts commands and file changes as replies.
 
@@ -301,7 +301,7 @@ lane, or waits for one.
 
 Credit errors (`credit balance is too low`, HTTP/API Error 402, `insufficient balance`,
 `insufficient_balance`, `insufficient_quota`, `余额不足`) rest indefinitely, surviving server restarts.
-A plan that cannot use the provider (the Codex adapter's `upgrade to Plus`) rests the same way, but its words
+A plan that cannot use the provider (a Codex provider's `upgrade to Plus`) rests the same way, but its words
 keep the provider's own sentence and ask the principal to confirm on the page once the plan is upgraded.
 Only the principal ends this rest: press **Topped up** on that provider's row in **Settings, Providers**,
 or save a new key. The coordinator cannot end it, even with `hansa ping`.
@@ -334,7 +334,9 @@ A lost login is not the task's doing either. When a run says it is not logged in
 subscription provider's run ends with HTTP 401 because its login ran out (`OAuth token has expired`), the
 provider rests for a day, until a `hansa ping` of it answers, and the task moves to the lane's next provider
 without using a try. A subscription provider's line says to log in with `claude` (with its `CLAUDE_CONFIG_DIR`
-when it has one) and then `hansa ping NAME`. A key a compatible provider's endpoint rejects (HTTP 401 or 403)
+when it has one) and then `hansa ping NAME`. A Codex provider's run that is not logged in, or ends with HTTP 401
+or 403, rests the provider until it is logged in again and `hansa ping NAME` answers; its line gives Codex's own
+login command with the provider's home. A key a compatible provider's endpoint rejects (HTTP 401 or 403)
 still uses a try, and saving a new key brings that provider back.
 
 A successful `hansa ping NAME` keeps its `NAME: ok - MODEL` line and also says when it ended the rest
@@ -407,11 +409,12 @@ started with another model or effort names its own. On a provider whose endpoint
 `compatible`: any endpoint that speaks the Anthropic API) they add that the endpoint may ignore effort: hansa
 passes it on, but some such endpoints do not act on it.
 
-The [optional Codex adapter](../contrib/codex/README.md) accepts the same five effort values from
-`HANSA_CODEX_EFFORT` and hansa's `--effort`; `--effort` takes precedence, and the adapter's default stays `high`.
-At startup it refuses an invalid effort, an unknown `HANSA_CODEX_` key in `codex.env`, or a setting whose value
+The [optional Codex adapter](../contrib/codex/README.md) runs a provider of the kind `codex` and passes the
+effort on to Codex (`model_reasoning_effort`); with none, it uses `high`. On a desk set up the old way, it also
+reads `HANSA_CODEX_EFFORT` from `codex.env`, and `--effort` takes precedence. At startup it refuses an invalid effort, an unknown `HANSA_CODEX_` key in `codex.env`, or a setting whose value
 still holds an example's `(default: ...)` note, before starting Codex. These checks guard against configuration
-typos while the adapter reads user-edited env files. Unknown-key errors name the file, key and supported keys;
+typos while the adapter reads user-edited env files (never for a provider of the kind `codex`, whose settings
+the page checks). Unknown-key errors name the file, key and supported keys;
 missing-setting errors name the file too (`trial.env` when the older filename was read). Assignments may start
 with `export`; comments, blank lines and unrelated keys are ignored. Environment settings still override the
 file. Keep these checks while this file format is supported; they can go when validated configuration replaces it.

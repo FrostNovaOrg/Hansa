@@ -7,7 +7,8 @@ What the principal sets on the web page, and what the coordinator sets with `han
 
 ### The principal
 
-The principal, on the page: providers, models, endpoints, keys, effort
+The principal, on the page: providers, models, endpoints, keys, a Codex
+provider's program, home, certificate file and web settings, effort
 defaults, the coordinator's model and effort (a new desk starts it on `opus` at
 effort `max`), when the
 coordinator's session compacts ([Compaction](desk.md#compaction)), prices,

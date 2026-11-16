@@ -74,8 +74,9 @@ failures, `1` means a failed row. `--json` gives `{"ok": ..., "rows": [...]}` wi
 
 For a subscription, run `claude auth login` as the desk account; a new desk's
 provider `claude` uses that login.
-Alternatively, set an Anthropic-compatible endpoint and key on the page below,
-which needs no subscription login. The principal alone handles credentials.
+Alternatively, set an Anthropic-compatible endpoint and key, or [Codex](codex.md),
+on the page below: no subscription login.
+The principal alone handles credentials.
 
 ## Try the sample first
 

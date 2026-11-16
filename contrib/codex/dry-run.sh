@@ -1,21 +1,30 @@
 #!/bin/sh
 # One real Codex run through the shim, on a scratch repository, started as hansa starts a worker: the worker's
-# command line (with the sandbox hansa would give it in --settings), a clean environment with the placeholder
-# base URL, the task on stdin. Prints the answer hansa would read, then the scratch worktree's state: hello.txt
+# command line (with the sandbox hansa would give it in --settings), a clean environment with the switch
+# HANSA_CODEX_RUN=1 and the provider's settings, as hansa gives a run on a provider of the kind Codex
+# (run.provider_env), the task on stdin. Prints the answer hansa would read, then the scratch worktree's state: hello.txt
 # made, and no commit (the sandbox denies writing git's data; hansa commits, never the worker). On macOS srt
 # refuses project settings writes, including sub/.claude by mkdir, rename or link. On Linux nested settings
 # may be written; hansa's commit check below stages the work and prints what it refuses, making no commit.
 # It is also the check of the -c config keys --help does not show:
 # the report naming task dry-run shows developer_instructions arrived; refused configuration appears in the answer.
 #
-# Needs, in codex.env beside this script (or in the environment):
+# Needs, in the environment (as the provider's Codex program and home; codex.env is not read):
 #   HANSA_CODEX_BIN   a codex outside ~/.codex (hansa's sandbox denies reading ~/.codex, srt too)
 #   HANSA_CODEX_HOME  its CODEX_HOME, logged in once with:  CODEX_HOME=<it> <codex> login
-# and srt on the PATH (or HANSA_CODEX_SRT). HANSA_CODEX_MODEL in the environment is passed as hansa passes the
-# provider's model (--model); without it the shim takes codex.env's, then its default.
+# and srt on the PATH (or HANSA_CODEX_SRT). HANSA_CODEX_MODEL is passed as hansa passes the provider's model
+# (--model; default gpt-6.1-sol); HANSA_CODEX_CA_FILE, HANSA_CODEX_WEB_SEARCH and HANSA_CODEX_DISABLE stand for
+# the provider's other settings (defaults: the page's).
 # hansa's checkout is the one this script is in (contrib/codex), unless
 # HANSA_SRC names another.
 set -eu
+for need in HANSA_CODEX_BIN HANSA_CODEX_HOME; do
+    eval "given=\${$need:-}"
+    if [ -z "$given" ]; then
+        echo "dry-run.sh: set $need in the environment (the provider's Codex program and home)" >&2
+        exit 2
+    fi
+done
 here=$(cd "$(dirname "$0")" && pwd -P)
 hansa_src=${HANSA_SRC:-$(cd "$here/../.." && pwd -P)}
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/codex-dry-run.XXXXXX")
@@ -34,6 +43,7 @@ from pathlib import Path
 here, tmp, hansa_src = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path.insert(0, hansa_src)
 from hansa import run as hansa_run
+from hansa.desk import CODEX_FIELDS
 wt = Path.cwd()
 box = {"sandbox": {  # hansa's sandbox_settings for a lane with no network list and no write list
     "enabled": True, "failIfUnavailable": True, "autoAllowBashIfSandboxed": True, "allowUnsandboxedCommands": False,
@@ -44,12 +54,20 @@ box = {"sandbox": {  # hansa's sandbox_settings for a lane with no network list 
 system = hansa_run.PROTOCOL.format(tid="dry-run", lane="codex", tmp=tmp, long="")
 argv = [os.path.join(here, "bin", "claude-or-codex"), "-p", "--output-format", "json",
         "--session-id", str(uuid.uuid4()), "--permission-mode", "acceptEdits", "--max-turns", "30",
-        *(("--model", os.environ["HANSA_CODEX_MODEL"]) if os.environ.get("HANSA_CODEX_MODEL") else ()),
+        "--model", os.environ.get("HANSA_CODEX_MODEL") or "gpt-6.1-sol",
         "--append-system-prompt", system, *hansa_run.isolated(wt, box)]
 env = {k: os.environ[k] for k in hansa_run.BASE_ENV if k in os.environ}
-env.update({k: v for k, v in os.environ.items() if k.startswith("HANSA_CODEX_")})
-env.update({"TERM": "dumb", "ANTHROPIC_BASE_URL": "http://codex.invalid", "ANTHROPIC_AUTH_TOKEN": "placeholder",
-            "TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp, "HANSA_TASK": "dry-run"})
+# What run.provider_env gives a run on a provider of the kind Codex: the switch and the provider's settings
+env.update({"TERM": "dumb", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_MAX_RETRIES": "8",
+            "HANSA_CODEX_RUN": "1", "HANSA_CODEX_BIN": os.environ["HANSA_CODEX_BIN"],
+            "HANSA_CODEX_HOME": os.environ["HANSA_CODEX_HOME"],
+            "HANSA_CODEX_SRT": os.environ.get("HANSA_CODEX_SRT") or hansa_run.srt_bin(),
+            "HANSA_CODEX_WEB_SEARCH": os.environ.get("HANSA_CODEX_WEB_SEARCH") or CODEX_FIELDS["web_search"],
+            "HANSA_CODEX_DISABLE": os.environ.get("HANSA_CODEX_DISABLE",
+                                                  " ".join(CODEX_FIELDS["disabled_features"]))})
+if os.environ.get("HANSA_CODEX_CA_FILE"):
+    env["HANSA_CODEX_CA_FILE"] = os.environ["HANSA_CODEX_CA_FILE"]
+env.update({"TMPDIR": tmp, "CLAUDE_CODE_TMPDIR": tmp, "HANSA_TASK": "dry-run"})
 task = ("Create a file hello.txt in this directory holding the line 'hello from codex'. Then run "
         "`git add hello.txt && git commit -m try` once, to see whether the sandbox lets you commit. Then try once "
         "each to write `{}` into .claude/settings.json, .codex/config.toml and sub/.claude/settings.json, making "
