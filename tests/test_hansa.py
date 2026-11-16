@@ -21069,6 +21069,132 @@ def save():'''))
                 desk.write_key("claude", "sk-shared-rest-test")
         return other
 
+    def codex_rest_desks(self):
+        other = init_desk(self.tmp / "other-codex-desk", str(self.repo), "a")
+        s = self.codex_settings()
+        s["providers"]["peer"] = dict(s["providers"]["codex"])
+        s["lanes"]["a"]["providers"] = ["codex", "peer"]
+        for desk in (self.desk, other):
+            self.assertEqual(desk.save_settings(s), [])
+        return other
+
+    def test_codex_shared_rests_same_home_on_one_and_two_desks(self):
+        from hansa import rests, run
+        other = self.codex_rest_desks()
+        home = Path(self.desk.settings()["providers"]["codex"]["codex_home"])
+        home.mkdir()
+        link = self.tmp / "codex-link"
+        link.symlink_to(home, target_is_directory=True)
+        spellings = [str(home), str(home) + "/", str(link), str(link) + "/"]
+        if self.ignores_case():
+            spellings.append(str(home).swapcase())
+        for spelling in spellings:
+            with self.subTest(spelling=spelling):
+                for desk in (self.desk, other):
+                    s = desk.settings()
+                    s["providers"]["peer"]["codex_home"] = spelling
+                    self.assertEqual(desk.save_settings(s), [])
+                until = run.rest_provider(self.desk, self.desk.settings(), "codex", "quota", "usage limit")
+                for desk, name in ((self.desk, "peer"), (other, "codex"), (other, "peer")):
+                    st = Desk(desk.root).provider_state().get(name, {})
+                    self.assertEqual(st.get("cool_until"), until)
+                    self.assertTrue(st.get("shared_rest"))
+                    self.assertEqual(st.get("rest_how"), "shared")
+                self.assertEqual(len(rests.read()), 1)
+                self.assertNotIn(str(home), rests.rests_file().read_text())
+                rests.record(other, "peer", checked=True)
+                for desk in (self.desk, other):
+                    for name in ("codex", "peer"):
+                        self.assertFalse(Desk(desk.root).provider_state().get(name, {}).get("cool_until"))
+        run.rest_provider(self.desk, self.desk.settings(), "codex", "credit", "credit too low")
+        since = self.desk.provider_state()["codex"]["credit_since"]
+        for name in ("codex", "peer"):
+            self.assertEqual(other.provider_state()[name]["credit_since"], since)
+        from hansa.web import _top_up_provider
+        self.assertTrue(_top_up_provider(other, "peer")["ok"])
+        for desk in (self.desk, other):
+            self.assertFalse(desk.provider_state().get("codex", {}).get("credit_since"))
+
+    def test_codex_shared_rests_different_homes_stay_separate(self):
+        from hansa import rests, run
+        other = self.codex_rest_desks()
+        home = Path(self.desk.settings()["providers"]["codex"]["codex_home"])
+        home.mkdir()
+        # On a case-sensitive volume even case-only differences name separate logins.
+        separate = home.with_name(home.name.upper()) if not self.ignores_case() else self.tmp / "other-login"
+        separate.mkdir()
+        s = other.settings()
+        for name in ("codex", "peer"):
+            s["providers"][name]["codex_home"] = str(separate)
+        self.assertEqual(other.save_settings(s), [])
+        until = run.rest_provider(self.desk, self.desk.settings(), "codex", "quota", "usage limit")
+        self.assertEqual(len(rests.read()), 1)
+        for name in ("codex", "peer"):
+            self.assertFalse(other.provider_state().get(name, {}).get("cool_until"))
+        other_until = run.rest_provider(other, s, "codex", "quota", "usage limit")
+        self.assertEqual(len(rests.read()), 2)
+        for desk, expected in ((self.desk, until), (other, other_until)):
+            self.assertEqual(desk.provider_state()["peer"]["cool_until"], expected)
+
+    def test_codex_shared_rests_never_share_with_other_kinds(self):
+        from hansa import rests, run
+        other = self.codex_rest_desks()
+        for desk in (self.desk, other):
+            s = desk.settings()
+            s["providers"]["claude"]["config_dir"] = s["providers"]["codex"]["codex_home"]
+            s["providers"]["api"] = {"kind": "compatible", "model": "gpt-example",
+                                     "base_url": "https://codex.example.invalid"}
+            self.assertEqual(desk.save_settings(s), [])
+            desk.write_key("api", "sk-codex-rest-test")
+        until = run.rest_provider(self.desk, self.desk.settings(), "codex", "quota", "usage limit")
+        self.assertEqual(len(rests.read()), 1)
+        self.assertEqual(other.provider_state()["codex"]["cool_until"], until)
+        for name in ("claude", "api"):
+            self.assertFalse(other.provider_state().get(name, {}).get("cool_until"))
+        rests.record(other, "codex", checked=True)
+        for name in ("claude", "api"):
+            run.rest_provider(other, other.settings(), name, "quota", "usage limit")
+            for codex in ("codex", "peer"):
+                self.assertFalse(self.desk.provider_state().get(codex, {}).get("cool_until"))
+        self.assertEqual(len(rests.read()), 3)
+
+    def test_codex_shared_rests_missing_home_has_no_runtime_default(self):
+        from hansa import rests, run
+        self.codex_rest_desks()
+        run.rest_provider(self.desk, self.desk.settings(), "codex", "quota", "usage limit")
+        original = rests.read()
+        for value in (None, "", 42, False, "relative-home"):
+            with self.subTest(home=value):
+                s = self.desk.settings()
+                if value is None:
+                    del s["providers"]["peer"]["codex_home"]
+                else:
+                    s["providers"]["peer"]["codex_home"] = value
+                problems = validate(s, self.desk.root)
+                self.assertTrue(any(p.detail["values"].get("provider") == "peer" and
+                                    p.detail["values"].get("field") == "codex_home"
+                                    for p in problems))
+                # A hand-written invalid provider must not acquire another login's rest or break its desk's reads.
+                write_json(self.desk.settings_path, s)
+                self.assertFalse(self.desk.provider_state().get("peer", {}).get("cool_until"))
+                rests.record(self.desk, "peer", cool_until=time.time() + 3600)
+                self.assertEqual(rests.read(), original)
+
+    def test_codex_shared_rests_leave_subscription_and_compatible_identities_unchanged(self):
+        from hansa import rests, run
+        from hansa.desk import claude_home
+        for compatible in (False, True):
+            with self.subTest(compatible=compatible):
+                other = self.shared_rest_desks(compatible)
+                p = self.desk.settings()["providers"]["claude"]
+                identity = ([p["base_url"], self.desk.read_key("claude")] if compatible else
+                            str(claude_home(self.desk.state_dir, "claude", p).resolve()))
+                self.assertEqual(rests.login(self.desk, "claude", p), rests.fingerprint(identity))
+                until = run.rest_provider(self.desk, self.desk.settings(), "claude", "quota", "usage limit")
+                st = other.provider_state()["claude"]
+                self.assertEqual(st["cool_until"], until)
+                self.assertTrue(st["shared_rest"])
+
     def test_shared_usage_rest_holds_another_desk_and_explains_show_and_status(self):
         from hansa import rests, run
         other = self.shared_rest_desks()
