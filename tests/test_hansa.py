@@ -1114,7 +1114,7 @@ class FailedWriteTest(unittest.TestCase):
                   "e": types.SimpleNamespace(path=task / "example.git", found="changed", expected="original"),
                   "log": self.desk.state_dir / "releases" / "1.log", "f": self.root / "command-input.txt",
                   "paths": ["/example"], "kept": ["/private"],
-                  "first": "You go on here, in a new task.\n"}  # start's message before the task text of a follow-up
+                  "first": "You go on here, in a new task.\nthe task text\n"}  # start's first message of a follow-up, task text included
         (task / "task.md").write_text("the task text\n")
         # Each call below is a row; ENOSPC part way is the column. All rows start at 0600.
         scopes = [(cli, cli.init_desk, 3), (cli, cli._retry, 1), (cli, cli.cmd_serve, 2),

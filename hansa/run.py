@@ -4607,7 +4607,8 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
             first = CONTINUED_NOTE.format(
                 parent=going_on["from"], tid=tid, branch=f"task/{tid}", left=left, wt=wt, tmp=commands_tmp(tmp),
                 at="" if head == commit else f", at {head[:12]}, with the base merged in",
-                update=update.strip() + "\n" if update else "")
+                update=update.strip() + "\n" if update else "") + (
+                desk.tasks_dir / tid / "task.md").read_text(encoding="utf-8", errors="replace")
         going_on["own"] = sid
     try:
         check_git_file(desk, wt)  # sandbox_settings asks git in the worktree
@@ -4644,9 +4645,9 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     if first is not None:  # forked from the parent's session; a resume of its own (above) goes on in its own
         at = argv.index("--session-id")
         argv = [*argv[:at], "--resume", going_on["session"], "--fork-session", *argv[at:]]
-        # a verification's text is the one its earlier conversation began with, but for the note (in first)
-        write_text(raw / "first-message.md",
-                   first + ("" if verifying else (d / "task.md").read_text(encoding="utf-8", errors="replace")))
+        # a follow-up's first carries its task text; a verification's is the one its earlier conversation
+        # began with, so its first has only what changed and the note
+        write_text(raw / "first-message.md", first)
     if conflicts:  # merged again after the setup, with the markers left in (UPDATE_SCRIPT)
         argv = ["/bin/sh", "-c", UPDATE_SCRIPT, "hansa-update", base,
                 expected_git_line(desk, wt) or "(unknown, so no git runs here)", str(raw / "run.err"), *argv]
