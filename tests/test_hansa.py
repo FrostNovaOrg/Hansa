@@ -19709,6 +19709,120 @@ def save():'''))
                      "Connection refused", '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'):
             self.assertTrue(run.network_reason({"is_error": True, "result": text}, ""), text)
 
+    def test_workers_and_verifiers_are_told_the_total_limit_and_claim_time(self):
+        from hansa import run
+        seen = self.tmp / "time-argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"].update(timeout_min=83, merge_timeout_min=11, setup="true", check="true",
+                                env={"FAKE_SHOW_ARGV": str(seen)})
+        self.assertEqual(self.desk.save_settings(s), [])
+        prepare = run.prepare
+        clock = [1900000000]
+
+        def prepared(*args):
+            result = prepare(*args)
+            clock[0] += 7 * 60  # preparing the lane must not move the advertised start
+            return result
+
+        for kind in ("task", "verify"):
+            with self.subTest(kind=kind):
+                began = clock[0]
+                tid = self.desk.new_task("Add hello.txt", kind=kind, lane="a")
+                with unittest.mock.patch.object(run, "now", side_effect=lambda: clock[0]), \
+                        unittest.mock.patch.object(run, "prepare", side_effect=prepared):
+                    m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(m["state"], "done", m)
+                self.assertEqual(m["started"], began)
+                argv = json.loads(seen.read_text().splitlines()[-1])
+                said = " ".join(argv[argv.index("--append-system-prompt") + 1].split())
+                self.assertIn("83 minutes in all", said)
+                self.assertIn("counted from " + time.strftime("%H:%M", time.localtime(began)), said)
+                self.assertNotIn("counted from " + time.strftime("%H:%M", time.localtime(clock[0])), said)
+                for words in ("local time", "lane setup", "`date`", "hansa stops", "before"):
+                    self.assertIn(words, said)
+                if kind == "verify":
+                    self.assertIn("verdict and report", said)
+                    self.assertIn("a verdict on what you reached is worth more than none", said)
+                else:
+                    self.assertIn("check after you end", said)
+                    self.assertIn("write your report", said)
+
+    def test_later_tries_are_told_their_own_limit_and_claim_time(self):
+        from hansa import run
+        start = run.start
+        for cause in ("econnreset", "quota"):
+            with self.subTest(cause=cause):
+                seen = self.tmp / f"time-{cause}.jsonl"
+                self.net_lane(cause, 1, FAKE_NET_SEE=str(seen))
+                s = self.desk.settings()
+                s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "",
+                                           "base_url": "https://example.invalid"}
+                s["lanes"]["a"].update(timeout_min=83, providers=["mimo", "claude"] if cause == "quota" else ["claude"])
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.desk.write_key("mimo", "sk-test-time")
+                starts = []
+
+                def launch(*args):
+                    began = 1900000000 + len(starts) * 17 * 60
+                    if starts:
+                        settings = self.desk.settings()
+                        settings["lanes"]["a"]["timeout_min"] = 97
+                        self.assertEqual(self.desk.save_settings(settings), [])
+                    with unittest.mock.patch.object(run, "now", return_value=began):
+                        proc = start(*args)
+                    starts.append(self.desk.meta(args[1])["started"])
+                    return proc
+
+                tid = self.desk.new_task("Add hello.txt")
+                with unittest.mock.patch.object(run, "start", side_effect=launch):
+                    m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(m["state"], "done", m)
+                self.assertEqual(starts, [1900000000, 1900001020])
+                self.assertEqual(m["attempts"][0]["ran_from"], starts[0])
+                self.assertEqual(m["started"], starts[1])
+                self.assertEqual([m["attempts"][0]["provider"], m["provider"]],
+                                 ["mimo", "claude"] if cause == "quota" else ["claude", "claude"])
+                calls = [json.loads(line) for line in seen.read_text().splitlines()]
+                self.assertEqual(len(calls), 2)
+                for call, began, minutes in zip(calls, starts, (83, 97)):
+                    self.assertIn(f"{minutes} minutes in all", call["system"])
+                    self.assertIn("counted from " + time.strftime("%H:%M", time.localtime(began)), call["system"])
+
+    def test_total_time_instructions_reach_codex_on_macos(self):
+        if sys.platform != "darwin":
+            self.skipTest("the Codex adapter starts workers only on macOS")
+        from hansa import run
+        from contrib.codex.tests.codexkit import FAKES, FIXTURES, WRAPPER, shim
+        record = self.tmp / "codex-time.json"
+        s = self.desk.settings()
+        s["providers"]["codex"] = {"kind": "compatible", "model": "codex", "effort": "",
+                                   "base_url": shim.PLACEHOLDER}
+        s["lanes"]["a"]["timeout_min"] = 83
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("codex", "sk-placeholder-1234")
+        os.environ["HANSA_CLAUDE"] = str(WRAPPER)
+        adapter_env = dict(HANSA_CODEX_BIN=str(FAKES / "codex"), HANSA_CODEX_HOME=str(self.tmp / "codex-home"),
+                           HANSA_CODEX_LOGS=str(self.tmp / "codex-logs"), HANSA_CODEX_SRT=str(FAKES / "srt"),
+                           HANSA_REAL_CLAUDE=str(FAKES / "claude"), FAKE_CODEX_RECORD=str(record),
+                           FAKE_CODEX_FIXTURE=str(FIXTURES / "success.jsonl"))
+        given = run.provider_env
+        for kind in ("task", "verify"):
+            with self.subTest(kind=kind):
+                tid = self.desk.new_task("Add hello.txt", kind=kind, lane="a")
+                with unittest.mock.patch.object(run, "provider_env", lambda *a: {**given(*a), **adapter_env}), \
+                        unittest.mock.patch.object(run, "now", return_value=1900000000):
+                    proc = run.start(self.desk, tid, "a", "codex")
+                self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+                self.addCleanup(proc.wait, timeout=15)
+                self.addCleanup(lambda p=proc: p.kill() if p.poll() is None else None)
+                self.assertEqual(proc.wait(timeout=60), 0, (self.desk.raw_dir(tid) / "run.err").read_text())
+                argv = json.loads(record.read_text())["argv"]
+                [system] = [json.loads(arg.split("=", 1)[1]) for arg in argv
+                            if arg.startswith("developer_instructions=")]
+                self.assertIn("83 minutes in all", system)
+                self.assertIn("counted from " + time.strftime("%H:%M", time.localtime(self.desk.meta(tid)["started"])), system)
+                self.assertIn("verdict and report" if kind == "verify" else "write your report", system)
+
     def test_workers_and_verifiers_get_bash_limits_from_the_lanes_check_limit(self):
         from hansa import run
         seen, argvs = self.tmp / "bash.jsonl", self.tmp / "argv.jsonl"
@@ -33442,6 +33556,28 @@ def save():'''))
         self.transcript_run("bg-cmd-noticed", env={"FAKE_RESUMED": str(seen)})
         self.transcript_run("plain", env={"FAKE_RESUMED": str(seen)})
         self.assertFalse(seen.exists())
+
+    def test_background_continuation_is_told_minutes_left_on_the_original_clock(self):
+        from hansa import run
+        resume = run.resume
+        s = self.desk.settings()
+        s["lanes"]["a"]["timeout_min"] = 83
+        self.assertEqual(self.desk.save_settings(s), [])
+        for elapsed, left in ((23 * 60 + 41, 59), (84 * 60, 0)):
+            with self.subTest(elapsed=elapsed):
+                seen = self.tmp / f"remaining-{left}.jsonl"
+
+                def continue_run(desk, tid):
+                    began = desk.meta(tid)["started"]
+                    with unittest.mock.patch.object(run, "now", return_value=began + elapsed):
+                        return resume(desk, tid)
+
+                with unittest.mock.patch.object(run, "resume", side_effect=continue_run):
+                    self.transcript_run("bg-cmd", env={"FAKE_RESUMED": str(seen)})
+                [call] = [json.loads(line) for line in seen.read_text().splitlines()]
+                prompt = " ".join(call["prompt"].split())
+                self.assertIn(f"{left} whole minutes left", prompt)
+                self.assertIn("original time limit", prompt)
 
     def test_a_cancel_landing_while_a_resume_is_prepared_prevents_the_resume(self):
         from hansa import run
