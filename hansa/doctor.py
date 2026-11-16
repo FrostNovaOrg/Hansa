@@ -212,6 +212,12 @@ def check(lang=None):
             path = which(executable)
             row(name, "ok" if path else "fails", path or tr("missing", "未找到"),
                 tr("present on Linux", "Linux 上必须安装"), fix(name))
+        path = which("rg")
+        row("rg", "ok" if path else "note", path or
+            tr("missing; srt skips scanning for nested settings folders to keep from workers",
+               "未找到；srt 会跳过扫描需要向工作智能体屏蔽的嵌套设置文件夹"),
+            tr("recommended on Linux for srt's nested settings scan",
+               "Linux 上建议安装，供 srt 扫描嵌套设置文件夹"), fix("ripgrep"))
 
     need = tr("srt runs /usr/bin/true in a sandbox", "srt 在沙箱中运行 /usr/bin/true")
     if not srt:
@@ -238,7 +244,7 @@ def check(lang=None):
             row("Sandbox", "fails", str(e), need, repair)
 
     # Keep installation order stable for both people and agents.
-    order = ["hansa PATH", "Python", "Git", "Node", "Claude Code", "Claude login", "srt", "tmux", "bubblewrap", "socat", "Sandbox"]
+    order = ["hansa PATH", "Python", "Git", "Node", "Claude Code", "Claude login", "srt", "tmux", "bubblewrap", "socat", "rg", "Sandbox"]
     rows.sort(key=lambda r: order.index(r["name"]))
     return {"ok": not any(r["state"] == "fails" for r in rows), "rows": rows}
 

@@ -2,9 +2,10 @@
 # One real Codex run through the shim, on a scratch repository, started as hansa starts a worker: the worker's
 # command line (with the sandbox hansa would give it in --settings), a clean environment with the placeholder
 # base URL, the task on stdin. Prints the answer hansa would read, then the scratch worktree's state: hello.txt
-# made, and no commit (the sandbox denies writing git's data; hansa commits, never the worker), and none of the
-# project settings Codex was asked to make (sub/.claude among them, by mkdir, by renaming a folder into place and
-# as a link). It is also the check of the -c config keys --help does not show:
+# made, and no commit (the sandbox denies writing git's data; hansa commits, never the worker). On macOS srt
+# refuses project settings writes, including sub/.claude by mkdir, rename or link. On Linux nested settings
+# may be written; hansa's commit check below stages the work and prints what it refuses, making no commit.
+# It is also the check of the -c config keys --help does not show:
 # the report naming task dry-run shows developer_instructions arrived; refused configuration appears in the answer.
 #
 # Needs, in codex.env beside this script (or in the environment):
@@ -68,7 +69,34 @@ echo "The scratch worktree ($scratch/wt) after the run:"
 git -C "$scratch/wt" status --short
 git -C "$scratch/wt" log --oneline task/dry-run
 ls -la "$scratch/wt/sub" 2>/dev/null || true
-echo "(hello.txt untracked or added, and only the 'init' commit: the worker could not commit. No .claude/, .codex/,"
-echo " sub/.claude/settings.json, nor any sub/.claude (folder, renamed folder or link; sub/x and sub/y may be there):"
-echo " srt refused them. The report names task dry-run: developer_instructions arrived.)"
+echo "(hello.txt untracked or added, and only the 'init' commit: the worker could not commit.)"
+case "$(uname -s)" in
+    Linux)
+        python3 - "$hansa_src" <<'COMMIT_CHECK'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from hansa import run as hansa_run
+from hansa.desk import Desk
+wt = Path.cwd()
+desk = Desk(wt.parent)
+hansa_run.check_git_file(desk, wt, wt.parent / "repo")
+print("hansa's Linux commit check (stages changes; makes no commit):")
+try:
+    hansa_run.stage_work(desk, wt, hansa_run.wgit(desk, wt, "rev-parse", "HEAD"))
+except hansa_run.SandboxPathChanged as e:
+    print(e)
+else:
+    print("No protected changes to refuse at commit (Git does not track empty folders).")
+COMMIT_CHECK
+        echo "(Top-level .claude/ and .codex/ writes should be refused by srt. Nested paths such as"
+        echo " sub/.claude/settings.json or a sub/.claude link may remain on disk: hansa refuses changes to"
+        echo " paths with a .claude, .codex or .agents component at any depth at commit. Git ignores empty folders.)"
+        ;;
+    *)
+        echo "(No .claude/, .codex/, sub/.claude/settings.json, nor any sub/.claude"
+        echo " (folder, renamed folder or link; sub/x and sub/y may be there): srt refused them.)"
+        ;;
+esac
+echo "(The report names task dry-run: developer_instructions arrived.)"
 rm -rf "$tmp"

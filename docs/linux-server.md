@@ -50,6 +50,11 @@ The locale and output of workers, lane commands and `hansa git` stay as they are
 
 ## What a lane's commands meet in Linux's sandbox
 
+On Linux, `hansa doctor` also checks ripgrep (`rg`). It is recommended for srt to
+find nested settings folders to keep from workers (`sudo apt-get install ripgrep`
+on Debian/Ubuntu). Without it, srt skips that scan; doctor reports a note and runs
+still work. This row can be removed if srt no longer needs `rg` for the scan.
+
 What a lane's commands meet in the sandbox there (bubblewrap), which
 `hansa explain lane` repeats:
 - **The mount table can call a writable folder read-only.** The sandbox mounts
