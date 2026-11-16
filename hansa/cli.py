@@ -195,7 +195,7 @@ def init_desk(root: Path, repo: str = "", lane: str = "a", base: str | None = No
             missing_repo = not Path(repo).exists()
             base = make_lane_repo(repo, new_repo, default_lane(repo, base), "no desk was made")
             if missing_repo:
-                print(f"warning: {repo} did not exist; hansa made it as a new project. If you meant an existing "
+                print(f"note: {repo} did not exist; hansa made it as a new project. If you meant an existing "
                       f"repository, remove this new folder and the desk at {desk.root}, then run hansa init again "
                       "with the correct --repo path.")
     for d in (desk.root, desk.tasks_dir, desk.lanes_dir, desk.state_dir, desk.notes_dir, desk.secrets_dir):

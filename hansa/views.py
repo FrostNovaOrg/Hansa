@@ -2558,7 +2558,8 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
     built_in = (", ".join("~/" + x for x in names) if whole else
                 f"{len(names)} names (the whole list: hansa explain lane {name} --all)")
     return ["  what its workers and verifiers, its setup and its check may not read (the sandbox refuses it to any"
-            " command; missing shell startup paths are left out of run sandboxes):",
+            " command; missing built-in names are refused too, except shell startup paths, which are left out"
+            " of run sandboxes):",
             f"    the desk's keys and state: {desk.secrets_dir}, {desk.state_dir}",
             *([f"    the Claude Code files of the folder hansa notify on recorded for the coordinator's session (built "
                f"in): {', '.join(own)}"] if own else []),

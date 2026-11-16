@@ -7383,9 +7383,7 @@ class DeskTest(unittest.TestCase):
         self.assertIn(self.desk.state_dir.resolve(), stored.resolve().parents)
         self.assertFalse((self.desk.tasks_dir / "t0001" / "attach").exists())
 
-    def test_attachments_reach_the_codex_adapter_on_macos(self):
-        if sys.platform != "darwin":
-            self.skipTest("the Codex adapter starts workers only on macOS")
+    def test_attachments_reach_the_codex_adapter(self):
         from hansa import run
         from contrib.codex.tests.codexkit import FAKES, FIXTURES, WRAPPER, shim
         files, args = self.attachment_files()
@@ -8788,7 +8786,7 @@ def save():'''))
                     lane, said = self.start_empty_project(mode, repo, f"{mode}-missing", "--base", "start/here")
                     self.assert_empty_first_commit(repo, lane, said, "start/here")
 
-    def test_init_warns_when_it_creates_a_missing_project_and_gives_recovery_paths(self):
+    def test_init_notes_when_it_creates_a_missing_project_and_gives_recovery_paths(self):
         for existed in (False, True):
             with self.subTest(existed=existed):
                 name = f"project-notice-{int(existed)}"
@@ -8801,7 +8799,9 @@ def save():'''))
                 notices = [line for line in said.splitlines() if "did not exist" in line]
                 self.assertEqual(len(notices), 0 if existed else 1)
                 if not existed:
-                    for words in (str(repo.resolve()), "new project", "existing repository", "remove",
+                    self.assertTrue(notices[0].startswith("note:"), notices[0])
+                    self.assertNotIn("warning:", notices[0])
+                    for words in (str(repo.resolve()), "made", "new project", "existing repository", "remove",
                                   str((self.tmp / f"{name}-desk").resolve()), "desk", "again", "--repo"):
                         self.assertIn(words, notices[0])
 
@@ -19937,9 +19937,7 @@ def save():'''))
                     self.assertIn(f"{minutes} minutes in all", call["system"])
                     self.assertIn("counted from " + time.strftime("%H:%M", time.localtime(began)), call["system"])
 
-    def test_total_time_instructions_reach_codex_on_macos(self):
-        if sys.platform != "darwin":
-            self.skipTest("the Codex adapter starts workers only on macOS")
+    def test_total_time_instructions_reach_codex(self):
         from hansa import run
         from contrib.codex.tests.codexkit import FAKES, FIXTURES, WRAPPER, shim
         record = self.tmp / "codex-time.json"
@@ -30954,11 +30952,16 @@ def save():'''))
                 explained = self.hansa("explain", "lane", "a", "--all")
                 for name in HOME_STARTS[0][1]:
                     self.assertIn("~/" + name, explained)
-                self.assertIn(f"{len(home_secrets())} names", self.hansa("explain", "lane", "a"))
+                short = self.hansa("explain", "lane", "a")
+                self.assertIn(f"{len(home_secrets())} names", short)
+                denial = next(line for line in short.splitlines() if "may not read (" in line)
+                for part in ("missing built-in names", "refused too", "except shell startup paths", "left out"):
+                    self.assertIn(part, denial)
 
     def test_more_logins_and_keys_are_kept_from_workers_and_the_macos_ones_only_on_macos(self):
         from hansa import run
-        home, p = Path.home(), self.desk.settings()["providers"]["claude"]
+        from hansa.desk import account_home
+        home, p = Path(account_home()), self.desk.settings()["providers"]["claude"]
         everywhere = (".ssh", ".tsh", ".tbot", ".codex", ".gemini", ".cursor", ".grok", ".config/gcloud", ".azure", ".oci",
                       ".git-credentials", ".config/git/credentials", ".cargo/credentials", ".cargo/credentials.toml",
                       ".gem/credentials", ".config/hub", ".config/glab-cli", ".terraform.d", ".vault-token",
@@ -30987,15 +30990,17 @@ def save():'''))
             self.assertIn("a login or key that workers may not read", write_problems([str(home / f)])[0], f)
         self.assertEqual(write_problems([str(home / "hansa-cache" / "a" / "cargo"), str(home / "work" / "m2")]), [])
         # the coordinator's Read tool is denied them too, but no Claude Code folder: its memory lives in one
+        # Its tool rules follow the session's HOME; workers and write lists above follow account_home().
+        session_home = Path.home()
         r = self.echo_coordinator()
         self.assertEqual(r.returncode, 0, r.stderr)
         denied = r.stdout.split("--disallowedTools")[1].split("--model")[0]
         for f in (".ssh", ".tsh", ".config/gcloud"):
-            self.assertIn(f"Read(//{str(home / f).lstrip('/')}/**)", denied)
-        self.assertIn(f"Read(//{str(home / '.git-credentials').lstrip('/')})", denied)  # a file, by its own path
+            self.assertIn(f"Read(//{str(session_home / f).lstrip('/')}/**)", denied)
+        self.assertIn(f"Read(//{str(session_home / '.git-credentials').lstrip('/')})", denied)  # a file, by its own path
         (self.assertIn if sys.platform == "darwin" else self.assertNotIn)(
-            f"Read(//{str(home / 'Library/Keychains').lstrip('/')}/**)", denied)
-        self.assertNotIn(f"Read(//{str(home / '.claude').lstrip('/')}/**)", denied)
+            f"Read(//{str(session_home / 'Library/Keychains').lstrip('/')}/**)", denied)
+        self.assertNotIn(f"Read(//{str(session_home / '.claude').lstrip('/')}/**)", denied)
         told = self.hansa("explain", "lane", "a")
         self.assertIn("may not read", told)
         self.assertNotIn("~/.tsh", told)  # the built-in list as a count, and where the whole of it is

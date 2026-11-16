@@ -89,8 +89,8 @@ More: [The desk: files, keys and notes](desk.md).
   code may reach all of that account's or machine's files.
 - On a [Codex](codex.md) provider, a Codex run's commands can read that provider's Codex login: Codex and the
   commands it runs share one sandbox, and every run on the provider, on any lane, uses the login in its Codex
-  home. Runs on other providers cannot read it, and a Codex run's network reaches only the lane's hosts and
-  OpenAI's.
+  home. Runs on other providers cannot read it unless they use the same Codex home, and a Codex run's network
+  reaches only the lane's hosts and OpenAI's.
 - A release's command runs outside the sandbox, as the desk's account. Anything it builds and starts from the base
   branch also runs outside the sandbox as that account, so list a lane's build and release files as its `release_files`.
 - The coordinator's rules against pushing and publishing catch only the forms they name. A command in another
