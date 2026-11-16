@@ -252,6 +252,20 @@ def built_in_no_read() -> list:
     return [{"path": "~/" + f, "exists": os.path.lexists(os.path.join(home, f))} for f in home_secrets()]
 
 
+def codex_homes_no_read(s: dict) -> list:
+    """The homes of the settings' Codex providers, which every run is kept from (worker_read_denials) but the
+    Codex run of that provider: [{"provider": name, "path": the home as set, ~ for the account's home folder}]."""
+    home = account_home().rstrip("/")
+    out = []
+    for name, pv in sorted((s.get("providers") or {}).items()):
+        at = pv.get("codex_home") if isinstance(pv, dict) and pv.get("kind") == "codex" else None
+        if isinstance(at, str) and at.startswith("/"):
+            if home and (at == home or at.startswith(home + "/")):
+                at = "~" + at[len(home):]
+            out.append({"provider": name, "path": at})
+    return out
+
+
 # When the coordinator's session compacts (hansa/plugin.py): idle_at, in tokens, by the coordinator's mod once a turn
 # has ended and the session has been idle for a minute (the mod reads it here, in the desk's settings file, and keeps
 # the same default and range: hansa/mod/hooks/register.js); working_at, the window hansa gives Claude Code's own
@@ -1154,65 +1168,74 @@ def codex_problems(name: str, pv: dict, s: dict, root=None) -> list:
 
     def same_as(a, b):
         # Unlike _as_written, explain case-only matches too, and either direction of an overlap.
+        # (path, the folder it is the same as), or None when the two are spelled alike.
         if _plain(a) in _ups(b) or _plain(b) in _ups(a):
-            return ""
+            return None
         for path, other in ((a, b), (b, a)):
             seen = {_seen(v) for v in _forms(path)}
             for form in dict.fromkeys([_plain(other), *sorted(_forms(other))]):
                 u = next((u for u in _ups(form) if _seen(u) in seen), "")
                 if u:
-                    return f" ({path} is the same folder as {u})"
-        return ""
+                    return path, u
+        return None
 
-    def problem(field, why, other=""):
-        alias = same_as(pv[field], other) if other else ""
-        problems.append(SettingsProblem(f"provider {name}: {field} {why}{alias}", "field_rule", field=field,
-                                        reason="codex", provider=name))
+    def problem(field, why, other="", rule="", **values):
+        # rule and its values let the page word the refusal in its own languages (validationCodex).
+        alias = same_as(pv[field], other) if other else None
+        problems.append(SettingsProblem(f"provider {name}: {field} {why}"
+                                        + (f" ({alias[0]} is the same folder as {alias[1]})" if alias else ""),
+                                        "field_rule", field=field, reason="codex", provider=name, rule=rule,
+                                        **values, **({"alias": list(alias)} if alias else {})))
 
     for field in ("codex_path", "codex_home", "ca_file"):
         value = pv.get(field, "")
         if field == "ca_file" and value == "":
             continue
         if not isinstance(value, str) or not value.startswith("/") or _has_control(value):
-            problem(field, "must be a full path starting with /, without control characters")
+            problem(field, "must be a full path starting with /, without control characters", rule="path")
         else:
             paths[field] = value
     if pv.get("web_search") not in ("disabled", "cached", "live"):
-        problem("web_search", "must be disabled, cached or live")
+        problem("web_search", "must be disabled, cached or live", rule="web_search")
     features = pv.get("disabled_features")
     if not isinstance(features, list) or not all(isinstance(x, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", x)
                                                  for x in features):
-        problem("disabled_features", "must be a list of plain feature names (letters, digits, '_' and '-')")
+        problem("disabled_features", "must be a list of plain feature names (letters, digits, '_' and '-')", rule="features")
 
     home = paths.get("codex_home")
     if home:
         own = _plain(account_home())
         if _above(home, own):
-            problem("codex_home", f"cannot be {pv['codex_home']}: it is {own}, the account's home folder, or above it", own)
+            problem("codex_home", f"cannot be {pv['codex_home']}: it is {own}, the account's home folder, or above it", own,
+                    "account_home", value=pv["codex_home"], path=own)
         if _above(os.path.join(own, ".codex"), home):
             problem("codex_home", f"cannot be {pv['codex_home']}: it is inside or equals {own}/.codex, the account's Codex folder",
-                    os.path.join(own, ".codex"))
-        fenced = [(repo, f"lane {lane}'s repository") for lane, repo in lane_repos(s) if repo.startswith("/")]
+                    os.path.join(own, ".codex"), "account_codex", value=pv["codex_home"], path=os.path.join(own, ".codex"))
+        fenced = [(repo, f"lane {lane}'s repository", {"place": "lane", "lane": lane})
+                  for lane, repo in lane_repos(s) if repo.startswith("/")]
         if root:
             # Give the worktrees fence its own name even though it is inside the desk.
-            fenced = [(str(Path(root) / "worktrees"), "the worktrees folder"), (str(root), "the desk's folder"),
-                      *fenced]
-        for path, what in fenced:
+            fenced = [(str(Path(root) / "worktrees"), "the worktrees folder", {"place": "worktrees"}),
+                      (str(root), "the desk's folder", {"place": "desk"}), *fenced]
+        for path, what, place in fenced:
             if _overlaps(home, path):
-                problem("codex_home", f"{pv['codex_home']} overlaps {path}, {what}", path)
+                problem("codex_home", f"{pv['codex_home']} overlaps {path}, {what}", path, "overlaps",
+                        value=pv["codex_home"], path=path, **place)
     # Use the whole saved list, including hansa hide's additions and entries a run might leave out.
     denied = s.get("workers_may_not_read", [])
     denied = [x for x in denied if isinstance(x, str) and x.startswith("/")] if isinstance(denied, list) else []
     for entry in denied:
         # Both directions mean equal; exactly one means strictly inside, in either direction.
         if home and _above(home, entry) != _above(entry, home):
-            problem("codex_home", f"{pv['codex_home']} overlaps {entry}, which workers may not read", entry)
+            problem("codex_home", f"{pv['codex_home']} overlaps {entry}, which workers may not read", entry, "overlaps",
+                    value=pv["codex_home"], path=entry, place="denied")
     for field in ("codex_path", "ca_file"):
         if field not in paths:
             continue
         for entry in [*denied, *([pv["codex_home"]] if home else [])]:
             if _above(entry, paths[field]):
-                problem(field, f"{pv[field]} is inside or equals {entry}, which workers may not read", entry)
+                problem(field, f"{pv[field]} is inside or equals {entry}, which workers may not read", entry, "inside_denied",
+                        value=pv[field], path=entry)
     return problems
 
 
@@ -3574,11 +3597,13 @@ def public_settings(desk: Desk) -> dict:
                                          if n in s["providers"] and st.get("credit_since")},
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
-            "provider_model_messages": {n: provider(model_text(st["model_unknown"]), st, n)
+            "provider_model_messages": {n: provider(model_text(st["model_unknown"], codex=s["providers"][n].get("kind") == "codex"),
+                                                    st, n, codex=s["providers"][n].get("kind") == "codex")
                                         for n, st in desk.provider_state().items()
                                         if n in s["providers"] and st.get("model_since") and not st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "built_in_no_read": built_in_no_read(),
+            "codex_homes_no_read": codex_homes_no_read(s),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s), "release_last": release_last(desk),
             "alert_outside": outside.inspect((s.get("alert") if isinstance(s.get("alert"), dict) else {}).get("command") or "",
                                              desk.root / "secrets", fingerprint=False,

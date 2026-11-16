@@ -100,28 +100,30 @@ def annotate(record: dict, fields=("error", "why")) -> dict:
     return {**record, **{key + "_message": describe(record[key]) for key in fields if record.get(key)}}
 
 
-def provider(text: str, state: dict, name: str) -> dict:
-    """The rest's timestamps and policy are already recorded, so do not parse its sentence."""
+def provider(text: str, state: dict, name: str, *, codex: bool = False) -> dict:
+    """The rest's timestamps and policy are already recorded, so do not parse its sentence.
+    codex: the provider is of kind codex, which has no key, so the page's words name none."""
     import time
     values = {"provider": name, "reason": describe(state.get("reason", ""))}
     if state.get("credit_since"):
         return message("provider_credit", text, since=state["credit_since"], shared=bool(state.get("shared_rest")),
                        plan=state.get("credit_plan") or "")
     if state.get("model_since"):
-        return message("provider_model", text, model=state["model_unknown"])
+        return message("provider_model", text, model=state["model_unknown"], codex=codex)
     simple = describe(text)
     if simple["code"] != "unknown" or not text:
         return simple
+    # Login remedies include the exact command (and account) chosen by the server; a Codex provider's lost
+    # login gives its command after its timed rest has ended too (run.py, provider_problem).
+    match = re.fullmatch(r".*; log in with (?P<login>.+), then `hansa ping .+` brings it back", text)
+    if match and (codex or state.get("cool_until", 0) > time.time()):
+        login = match["login"]
+        account = re.fullmatch(r"(?P<command>.+) as (?P<account>.+) \(from root: (?P<root>.+)\)", login)
+        return message("provider_login", text, login=account["command"] if account else login,
+                       account=account["account"] if account else "", root=account["root"] if account else "", **values)
     if state.get("cool_until", 0) > time.time():
-        # Login and key remedies include the exact command (and account) chosen by the server.
         if "; saving a new key brings it back" in text:
             return message("provider_save_key", text, **values)
-        match = re.fullmatch(r".*; log in with (?P<login>.+), then `hansa ping .+` brings it back", text)
-        if match:
-            login = match["login"]
-            account = re.fullmatch(r"(?P<command>.+) as (?P<account>.+) \(from root: (?P<root>.+)\)", login)
-            return message("provider_login", text, login=account["command"] if account else login,
-                           account=account["account"] if account else "", root=account["root"] if account else "", **values)
         return message("provider_rest", text, until=state["cool_until"], how=state.get("rest_how"),
                        minutes=state.get("rest_minutes"), **values)
     if state.get("unreachable_since"):
@@ -156,7 +158,8 @@ def status(desk, s: dict, st: dict) -> dict:
     st["failed"] = [annotate(row) for row in st["failed"]]
     states = desk.provider_state()
     for row in st["providers"]:
-        row["problem_message"] = provider(row["problem"], states.get(row["name"], {}), row["name"])
+        row["problem_message"] = provider(row["problem"], states.get(row["name"], {}), row["name"],
+                                          codex=row.get("kind") == "codex")
         if row["check"]:
             row["check"] = annotate(row["check"], ("detail",))
     low = st["disk"]["low"]

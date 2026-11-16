@@ -804,7 +804,16 @@ What workers may not read shows, read only above the principal's own box, the
 built-in list for this system (`home_secrets()`, with `~` for the home folder),
 how many of its places exist on this machine, and, opened, the whole list with
 those first; `/api/settings` carries it as `built_in_no_read` (`path`, `exists`:
-one `lstat` each when the page asks, no file read).
+one `lstat` each when the page asks, no file read). Under it, the same part
+names the home of each saved Codex provider (kind `codex`), as set, with `~` for
+the account's home folder: every run is kept from it but that provider's own
+Codex runs. `/api/settings` carries them as `codex_homes_no_read` (`provider`,
+`path`); nothing there is edited.
+A refused Codex field (`code: field_rule`, `reason: codex`) also carries `rule`
+(`path`, `web_search`, `features`, `account_home`, `account_codex`, `overlaps`,
+`inside_denied`) and the paths it names (`value`, `path`, `place`, `lane`, and
+`alias` when one folder is spelled two ways), so the page words it in its own
+language at the field; a rule it does not know keeps the server's English.
 Remove refuses a provider used by the coordinator or any lane. Choose another
 provider for the coordinator first; for lanes, ask the coordinator to move the
 named lanes to another provider before removing it. Selects show the draft's
@@ -986,6 +995,8 @@ Keys are saved separately with each provider's Save key button. An unsaved key
 input stays in memory across page and group switches, and across a settings save;
 it is never included in the settings request or put in browser storage. A
 confirmed discard clears those inputs too. Keys already saved are unaffected.
+Switching a provider's kind to Codex drops its unsaved key input (a Codex
+provider has no key); switching back leaves the input empty.
 The eye button shows or hides the current key input without saving or changing it.
 Visible notes beside the input explain [storage and use](#where-a-desks-files-are)
 before saving. HTTP sends keys without encryption: use HTTPS for remote endpoints

@@ -21631,6 +21631,78 @@ def save():'''))
         for word in words:
             self.assertTrue(any(word in p for p in matching), (word, problems))
 
+    def test_every_codex_refusal_gives_the_page_a_rule_it_words_in_both_languages(self):
+        # The page words a refused Codex field from its rule and values (validationCodex), not from the English sentence.
+        page = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text(encoding="utf-8")
+        tables = re.findall(r"validationCodex:\{(.*?)\},\n", page, re.DOTALL)
+        self.assertEqual(len(tables), 2)  # Chinese and English
+        worded = [set(re.findall(r"(?:^|,)\s*(\w+):(?:\(\)|v) =>", t)) for t in tables]
+        s = self.codex_settings()
+        own = self.tmp / "account"
+        (own / ".codex").mkdir(parents=True)
+        link = self.tmp / "desk-link"
+        link.symlink_to(self.desk.root)
+        cases = {"path": {"codex_path": "relative/codex"}, "web_search": {"web_search": "sometimes"},
+                 "features": {"disabled_features": ["not a name"]}, "account_home": {"codex_home": str(own)},
+                 "account_codex": {"codex_home": str(own / ".codex" / "x")},
+                 "overlaps": {"codex_home": str(link / "inner")},
+                 "inside_denied": {"codex_path": str(self.tmp / "codex-login" / "codex")}}
+        seen = {}
+        with as_home(own):
+            for rule, fields in cases.items():
+                changed = copy.deepcopy(s)
+                changed["providers"]["codex"].update(fields)
+                details = [p.detail for p in validate(changed, self.desk.root) if str(p).startswith("provider codex:")]
+                self.assertTrue(details, rule)
+                for d in details:
+                    self.assertEqual((d["code"], d["values"]["reason"], d["values"]["provider"]), ("field_rule", "codex", "codex"))
+                    seen.setdefault(d["values"]["rule"], d["values"])
+        self.assertEqual(set(seen), set(cases))
+        for table in worded:
+            self.assertEqual(table, set(cases))
+        self.assertEqual(seen["overlaps"]["place"], "desk")
+        alias = seen["overlaps"]["alias"]  # the folder spelled two ways: the page names both
+        self.assertEqual(len(alias), 2)
+        self.assertIn(str(link), alias[0] + " " + alias[1])
+        self.assertEqual(seen["inside_denied"]["path"], str(self.tmp / "codex-login"))
+
+    def test_the_settings_answer_names_the_codex_homes_kept_from_workers_in_the_tilde_form(self):
+        own = self.tmp / "account"
+        own.mkdir()
+        s = self.desk.settings()
+        s["providers"]["cx"] = {"kind": "codex", "model": "gpt-example", "effort": "",
+                                "codex_path": str(self.tmp / "tools" / "codex"), "codex_home": str(own / "codex-home")}
+        s["providers"]["outside"] = {**s["providers"]["cx"], "codex_home": str(self.tmp / "other-home")}
+        with as_home(own):
+            self.assertEqual(self.desk.save_settings(s), [])
+            homes = public_settings(self.desk)["codex_homes_no_read"]
+        self.assertEqual(homes, [{"provider": "cx", "path": "~/codex-home"},
+                                 {"provider": "outside", "path": str(self.tmp / "other-home")}])
+
+    def test_codex_rest_messages_name_no_key_and_keep_the_login_command(self):
+        from hansa import page_messages, run as hansa_run
+        s = self.codex_settings()
+        program = Path(s["providers"]["codex"]["codex_path"])
+        program.parent.mkdir(parents=True)
+        program.write_text("#!/bin/sh\n")
+        program.chmod(0o755)
+        self.assertEqual(self.desk.save_settings(s), [])
+        s = self.desk.settings()
+        # A lost login after its timed rest has ended still gives the page the login command hansa built.
+        self.desk.set_provider_state("codex", reason="not logged in (HTTP 401)", cool_until=time.time() - 60)
+        text = provider_problem(self.desk, s, "codex")
+        said = page_messages.provider(text, self.desk.provider_state()["codex"], "codex", codex=True)
+        self.assertEqual(said["code"], "provider_login")
+        self.assertIn("CODEX_HOME=", said["values"]["login"])
+        self.assertIn(" login", said["values"]["login"])
+        self.assertIn(said["values"]["login"], text)
+        # An unknown model: the settings answer's words for a Codex provider name no key.
+        hansa_run.rest_provider(self.desk, s, "codex", "model", "", model="gpt-missing")
+        message = public_settings(self.desk)["provider_model_messages"]["codex"]
+        self.assertEqual((message["code"], message["values"]["codex"]), ("provider_model", True))
+        self.assertNotIn("key", message["text"])
+        self.assertNotIn("endpoint", message["text"])
+
     def test_codex_accepts_paths_and_defaults_without_existing_files(self):
         s = self.codex_settings()
         self.assertFalse(Path(s["providers"]["codex"]["codex_path"]).exists())
@@ -46566,8 +46638,65 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       const fill = () => { change(box("compatible", "T.codexPath"), "/opt/codex tools/bin/codex"); change(box("compatible", "T.codexHome"), "/opt/codex-home"); };
       check(kindBox("compatible").kids.some(o => o.value === "codex" && o.textContent.includes("Codex") && o.textContent.includes("OpenAI")),
         "the kind choice does not offer Codex, saying what it is");
+      if (ask === "settings-fix-codex-key") {
+        change(key(), "sk-typed-not-saved");
+        check(run("KEY_DRAFTS.compatible") === "sk-typed-not-saved" && run("settingsSaveState.textContent").includes(run("T.keyPending")),
+          "the typed key is not pending before the switch");
+      }
+      if (ask === "settings-fix-codex-aside") change(box("compatible", "T.endpoint"), "https://typed.example");
       choose(kindBox("compatible"), "codex");
-      if (ask === "settings-fix-codex-card") {
+      if (ask === "settings-fix-codex-key") {
+        check(!run("Object.hasOwn(KEY_DRAFTS, 'compatible')"), "the Codex provider keeps its unsaved key in the draft");
+        check(!run("settingsSaveState.textContent").includes(run("T.keyPending")), "the page still says a key is unsaved");
+        check(run("KEY_DRAFTS.other") === undefined, "another provider's drafts changed");
+        choose(kindBox("compatible"), "compatible");
+        check(key().value === "" && !run("settingsSaveState.textContent").includes(run("T.keyPending")), "the dropped key came back");
+      } else if (ask === "settings-fix-codex-aside") {
+        check(run("PROVIDER_ASIDE.compatible.base_url") === "https://typed.example", "the endpoint was not set aside");
+        // The settings load again with this provider saved as Codex: what was set aside before belongs to no draft now.
+        given["/api/settings"].settings.providers.compatible = {kind:"codex", model:"example-model", effort:"",
+          codex_path:"/opt/codex/bin/codex", codex_home:"/opt/codex-home", ca_file:"", web_search:"disabled", disabled_features:["hooks"]};
+        await run("loadSettings()"); run('showSettingsGroup("providers")');
+        check(run("S.providers.compatible.kind") === "codex", "the reload did not bring the saved kind");
+        choose(kindBox("compatible"), "compatible");
+        check(run('!("base_url" in S.providers.compatible)') && !has("https://typed.example", card("compatible")),
+          "switching back after a reload brought back the endpoint set aside before it");
+        choose(kindBox("compatible"), "codex");
+        check(run('S.providers.compatible.codex_home === "/opt/codex-home"'), "switching back to Codex lost the reloaded home");
+      } else if (ask === "settings-fix-codex-homes") {
+        given["/api/settings"].codex_homes_no_read = [{provider:"compatible", path:"~/codex-home"}, {provider:"cx", path:"/opt/other codex"}];
+        await run("loadSettings()"); run('showSettingsGroup("security")');
+        const part = find(el => el.attrs["data-codex-homes"] === "", run("settingsPanels.security"));
+        check(part && find(el => el.className === "built-in", run("settingsPanels.security")).kids.includes(part),
+          "the built-in part does not name the Codex homes");
+        for (const part2 of [run("T.builtInCodex"), "~/codex-home", "compatible", "/opt/other codex", "cx"])
+          check(has(part2, part), "the Codex homes miss " + part2);
+        check(!find(el => el.tag === "input" || el.tag === "textarea", part), "the Codex homes can be edited");
+        given["/api/settings"].codex_homes_no_read = [];
+        await run("loadSettings()"); run('showSettingsGroup("security")');
+        check(!find(el => el.attrs["data-codex-homes"] === "", run("settingsPanels.security")), "a desk without Codex shows Codex homes");
+      } else if (ask === "settings-fix-codex-check") {
+        // The dashboard's row for a Codex provider: no endpoint, no key, and its check button runs its check.
+        run('loadStatus()'); await new Promise(r => setTimeout(r, 0));
+        const row = {...given["/api/status"].providers[0], name:"cx", kind:"codex", problem:"", problem_message:null, check:null,
+          credit_since:0, model_since:0};
+        given["/api/status"].providers = [row];
+        await run("loadStatus(true)");
+        const tr = descendants(ids["#tab-status"], "tr").find(r => r.kids[0]?.textContent === "cx");
+        check(tr, "no dashboard row for the Codex provider");
+        for (const word of ["https://", run("T.endpoint"), run("T.key"), run("T.keySet"), run("T.keyMissing")])
+          check(!tr.textContent.includes(word), "the Codex row speaks of " + word);
+        const button = find(el => el.tag === "button" && el.textContent === run("T.check"), tr);
+        check(button && !button.disabled, "the Codex row has no check button");
+        given["/api/check"] = {ok:true, detail:"gpt-5-codex", at:Date.now() / 1000, seconds:2.5};
+        given["/api/status"].providers = [{...row, check:{ok:true, detail:"gpt-5-codex", at:Date.now() / 1000}}];
+        await button.on.click();
+        for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0));
+        check(apiPosts.some(p => p.path === "/api/check" && p.body.provider === "cx"), "the button did not run the Codex provider's check");
+        const after = descendants(ids["#tab-status"], "tr").find(r => r.kids[0]?.textContent === "cx");
+        check(after.textContent.includes("OK gpt-5-codex") && after.textContent.includes(run("T.ready")),
+          "the check's result is not on the Codex row: " + after.textContent);
+      } else if (ask === "settings-fix-codex-card") {
         const c = card("compatible");
         check(run('S.providers.compatible.kind === "codex" && !("base_url" in S.providers.compatible) && !("config_dir" in S.providers.compatible)'),
           "the draft keeps fields the kind Codex does not have");
@@ -46581,7 +46710,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         check(!has("HTTP", c), "a Codex card speaks of HTTP");
         check(!more("compatible").open && !visible(box("compatible", "T.caFile"), c), "the rarer Codex fields are not folded");
         const help = find(el => el.attrs["data-codex-help"] === "", c);
-        for (const part of zh ? ["单独的目录", "程序的完整路径", "专用的主目录", "登录一次"] : ["folder of its own", "program's full path", "home folder of its own", "log in there once"])
+        for (const part of zh ? ["单独的目录", "程序的完整路径", "专用的主目录", "登录一次", "其他服务商", "读不到这个主目录"]
+          : ["folder of its own", "program's full path", "home folder of its own", "log in there once", "workers on other providers", "by itself"])
           check(visibleText(part, help), "Codex help misses: " + part);
         const command = () => find(el => el.attrs["data-codex-login"] === "", c).textContent;
         check(command().startsWith("CODEX_HOME=<") && command().endsWith(" login"), "login command before the paths: " + command());
@@ -46600,6 +46730,10 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         given["/api/status"].providers = [{...given["/api/status"].providers[0], name:"cx", kind:"codex"}];
         await run("loadStatus(true)");
         check(has(zh ? "Codex（OpenAI" : "Codex (OpenAI", ids["#tab-status"]), "the dashboard's Kind column does not say Codex");
+        // A Codex provider has no key: its unknown model's words on the Chinese page name none.
+        const model = kind => run(`serverMessagesZh.provider_model(${JSON.stringify({model:"m", codex:kind === "codex"})})`);
+        check(!model("codex").includes("密钥") && model("codex").includes("更改模型") && model("compatible").includes("密钥"),
+          "the unknown-model words for a Codex provider name a key");
       } else if (ask === "settings-fix-codex-reload") {
         fill();
         choose(find(el => el.tag === "select" && el.kids.some(o => o.value === "live"), card("compatible")), "live");
@@ -46622,10 +46756,18 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         const home = box("compatible", "T.codexHome");
         check(home.attrs["aria-invalid"] === "true", "the refused home is not marked");
         const said = home.attrs["aria-describedby"].split(/\s+/).map(id => ids["#" + id]).filter(el => el && !el.hidden).map(el => el.textContent).join(" ");
-        check(said.includes(run("T.codexHome")) && said.includes("/opt/codex-home") && said.includes("overlaps"), "the refusal is not at the home's field: " + said);
+        check(said.includes(run("T.codexHome")) && said.includes("/opt/codex-home") && said.includes("/opt/codex-home/inner")
+          && said.includes(zh ? "重叠" : "overlaps"), "the refusal is not at the home's field: " + said);
+        for (const english of given.codexRefusal.problems) {
+          const tail = english.replace(/^provider compatible: \w+ /, "");
+          check(!zh || !said.includes(tail) && !/overlaps|which workers|must be/.test(said), "the Chinese page shows the server's English: " + said);
+        }
+        const featuresSaid = () => features.attrs["aria-describedby"].split(/\s+/).map(id => ids["#" + id]).filter(el => el && !el.hidden).map(el => el.textContent).join(" ");
         check(box("compatible", "T.codexPath").attrs["aria-invalid"] !== "true", "the refusal marked the program too");
         const features = find(el => el.tag === "textarea", card("compatible"));
         check(features.attrs["aria-invalid"] === "true" && more("compatible").open, "a refused folded field stays hidden or unmarked");
+        check(featuresSaid().includes(run("T.codexFeatures")) && featuresSaid().includes(zh ? "功能名" : "feature names")
+          && (!zh || !featuresSaid().includes("must be")), "the features' refusal: " + featuresSaid());
         const link = find(el => el.tag === "button" && el.textContent.startsWith("compatible · " + run("T.codexHome")));
         check(link, "the problem list does not name the field"); await link.click();
         check(document.activeElement === box("compatible", "T.codexHome"), "the problem does not lead to its field");
@@ -49618,6 +49760,18 @@ else if (ask === "task-steps")'''))
 
     def test_the_coordinator_is_not_offered_a_codex_provider(self):
         self.run_settings_fix_scenario("codex-coordinator")
+
+    def test_switching_a_provider_to_codex_drops_its_unsaved_key(self):
+        self.run_settings_fix_scenario("codex-key")
+
+    def test_fields_set_aside_by_a_kind_switch_do_not_come_back_after_a_reload(self):
+        self.run_settings_fix_scenario("codex-aside")
+
+    def test_the_built_in_part_names_the_homes_of_the_codex_providers(self):
+        self.run_settings_fix_scenario("codex-homes")
+
+    def test_the_dashboards_check_button_checks_a_codex_provider(self):
+        self.run_settings_fix_scenario("codex-check")
 
     def test_cost_tasks_show_turns_when_they_have_runs(self):
         self.run_settings_fix_scenario("turns")
