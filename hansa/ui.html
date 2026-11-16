@@ -540,6 +540,12 @@ const T = ZH ? {
   asks:"待办", todos:"待办", todosIntro:"仅展示。请在对话中回复，由协调员记录结果并关闭；所有事项永久保留。",
   todoWhat:"待办内容", todoWork:"工作", todoLoading:"正在加载待办…", todoPage:(p, n, total) => `第 ${p} / ${n} 页 · 共 ${total} 件待办`, todoWhy:"为何只有你能做", todoHolds:"工作等待此事", todoContinues:"工作继续", todoSince:"提出时间", todoOutcome:"结果", todoClosed:"关闭时间", todoOpen:"未完成", todoDone:"已关闭", principalDetails:"详情",
   providers:"模型服务商", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
+  codex:"Codex（OpenAI 的命令行工具）", codexPath:"Codex 程序（完整路径）", codexHome:"Codex 主目录（完整路径）",
+  codexHomeNote:"存放 Codex 登录信息的目录，专给它用。", codexInstall:"把 Codex 安装在单独的目录里（不在 ~/.codex 下，也不在工作智能体不能读的目录里），在上方填写它的程序的完整路径。",
+  codexLogin:"给 Codex 一个专用的主目录（不在 ~/.codex、工作台目录和工作线仓库里），并在那里登录一次：", codexProgramHere:"<Codex 程序>", codexHomeHere:"<Codex 主目录>",
+  codexMore:"更多 Codex 设置", caFile:"证书文件（可选，完整路径）", caFileNote:"Codex 校验 TLS 连接所用的证书。", webSearch:"网页搜索", webSearchNote:"Codex 自带的网页搜索。",
+  webSearchModes:["关闭（disabled）", "缓存（cached）", "实时（live）"], codexFeatures:"关闭的功能", codexFeaturesNote:d => `每行一个，或用空格分隔。默认：${d}`,
+  coordinatorNoCodex:"不可选：协调员的会话是 Claude Code，不能用 Codex",
   effortDefault:"默认", endpoint:"接口地址", loginDir:"登录目录（空＝默认）", key:"密钥", keySet:"已填", keyMissing:"未填",
   saveKey:"保存密钥", clearKey:"清除密钥", keyHint:"在这里输入密钥", check:"Ping", checking:"Ping 中…",
   keyUse:"保存在本机；网页不回显已保存的内容。运行 Hansa 的系统账号及工作智能体或适配器可读取密钥。请求会把密钥发给上方的服务商接口地址。",
@@ -732,6 +738,12 @@ const T = ZH ? {
   asks:"To-dos", todos:"To-dos", todosIntro:"Read-only. Answer in the conversation; the coordinator records the outcome and closes each item. Every item is kept.",
   todoWhat:"What", todoWork:"Work", todoLoading:"Loading to-dos…", todoPage:(p, n, total) => `Page ${p} of ${n} · ${total} to-dos`, todoWhy:"Why only you", todoHolds:"Work waits", todoContinues:"Work goes on", todoSince:"Since", todoOutcome:"Outcome", todoClosed:"Closed at", todoOpen:"Open", todoDone:"Closed", principalDetails:"Details",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
+  codex:"Codex (OpenAI's command line)", codexPath:"Codex program (full path)", codexHome:"Codex home (full path)",
+  codexHomeNote:"The folder that holds Codex's login, a folder of its own.", codexInstall:"Install Codex in a folder of its own, outside ~/.codex and every folder workers may not read, and give its program's full path above.",
+  codexLogin:"Give Codex a home folder of its own, outside ~/.codex, the desk and the lanes' repositories, and log in there once:", codexProgramHere:"<Codex program>", codexHomeHere:"<Codex home>",
+  codexMore:"More Codex settings", caFile:"Certificate file (optional, full path)", caFileNote:"The certificates Codex checks TLS connections against.", webSearch:"Web search", webSearchNote:"Codex's own web search.",
+  webSearchModes:["disabled", "cached", "live"], codexFeatures:"Features turned off", codexFeaturesNote:d => `One per line or separated by spaces. Default: ${d}`,
+  coordinatorNoCodex:"not offered: the coordinator's session is Claude Code, not Codex",
   effortDefault:"default", endpoint:"Endpoint", loginDir:"Login directory (blank = default)", key:"Key", keySet:"set", keyMissing:"missing",
   saveKey:"Save key", clearKey:"Clear key", keyHint:"Enter a key here", check:"Ping", checking:"pinging…",
   keyUse:"Saved on this machine; the page does not show the saved value. The OS account running hansa and its worker or adapter can read it. Requests send it to the provider endpoint above.",
@@ -2013,7 +2025,7 @@ async function renderStatus(force) {
       table([T.task, T.lane, T.titleCol, T.error],
       st.failed.map(m => [taskLink(m.id), m.lane, m.title, h("span", {class:"bad"}, fieldText(m, "error"))]))) : null,
     dashboardPanel(T.providers, "providers", st.providers.length, st.providers.length ? table([T.provider, T.kind, T.model, T.now, T.lastCheck, ""], st.providers.map(p => [
-      p.name, p.kind === "subscription" ? T.subscription : T.compatible,
+      p.name, kindLabel(p.kind),
       p.model + (p.effort ? " · " + p.effort : "") + (p.credit_since || p.model_since ? "" : ` · ${T.rest} ${p.rest_minutes} ${ZH ? "分钟" : "min"} (${T.providers})`),
       p.problem ? statusPill(fieldText(p, "problem"), "warn", "error") : !p.check ? statusPill(T.notChecked, "muted", "pending")
         : p.check.ok ? statusPill(T.ready, "ok") : statusPill(T.checkFailed, "warn", "error"),
@@ -2238,6 +2250,7 @@ function settingsReplyProblems(reply) {
     release_mailboxes:T.mailboxTitle, settings_from_outside:T.outsideTitle, release_forbidden:T.forbiddenWords, release_forbidden_except:T.exceptionsTitle,
     alert_language:T.alertLanguage, alert:T.alertCommandTitle, coordinator_alert:T.alertTiming,
     kind:T.kind, model:T.model, effort:T.effort, base_url:T.endpoint, config_dir:T.loginDir,
+    codex_path:T.codexPath, codex_home:T.codexHome, ca_file:T.caFile, web_search:T.webSearch, disabled_features:T.codexFeatures,
     ...Object.fromEntries(Object.entries(MINUTES_LABELS).map(([k, v]) => [k, T[v]]))};
   const prices = {in:T.in, out:T.out, cache_read:T.cacheRead, cache_write:T.cacheWrite, cache_write_1h:T.cacheWrite1h};
   return (reply.problems || [T.problems]).map((problem, i) => {
@@ -2245,6 +2258,9 @@ function settingsReplyProblems(reply) {
     const messages = {
       field_rule:() => {
         const label = labels[v.field], rule = T.validationRules[v.reason];
+        // A Codex field's rule names paths and folders: its English words follow the field's own label.
+        if (label && v.reason === "codex" && problem.startsWith(`provider ${v.provider}: ${v.field} `))
+          return `${v.provider} · ${label}${ZH ? "：" : ": "}${problem.slice(`provider ${v.provider}: ${v.field} `.length)}`;
         if (!label || !rule) return "";
         const values = {...v, choices:(v.choices || []).join(", "), fields:(v.fields || []).join(", "),
           lanes:(v.lanes || []).join(", ") || T.none};
@@ -2502,6 +2518,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   if (!r.alert_language_saved) S.alert_language = ZH ? "zh" : "en";
   if (!keepKeys) { KEY_DRAFTS = {}; PUSH_DRAFTS = {}; PUSH_NEW = emptyPush(); }
   newProviderName = ""; newPriceName = ""; settingsMessage = ""; settingsFailure = ""; settingsRebase = ""; keyProblemProvider = "";
+  PROVIDER_ASIDE = {};
   settingsBaseline = settingText(S);
   forbiddenSeenEntries = new Set(S.release_forbidden || []);
   settingsEpoch++;
@@ -2762,15 +2779,15 @@ function bind(obj, key, kind) {
   input._settingMeta = controlMeta(obj, key);
   return input;
 }
-function pick(obj, key, options, labels) {
+function pick(obj, key, options, labels, disabled = []) {
   // Keep an unknown value visible so the browser cannot silently show another choice.
   const value = obj[key] || "";
   if (!options.includes(value)) {
-    options = [value, ...options];
+    options = [value, ...options]; disabled = [false, ...disabled];
     if (labels) labels = [value || T.effortDefault, ...labels];
   }
   const select = h("select", {onchange: e => { obj[key] = e.target.value; refreshSettingsState(); }},
-    options.map((o, i) => h("option", {value:o, selected: (obj[key] || "") === o}, labels ? labels[i] : (o || T.effortDefault))));
+    options.map((o, i) => h("option", {value:o, selected: (obj[key] || "") === o, disabled:!!disabled[i]}, labels ? labels[i] : (o || T.effortDefault))));
   select._settingMeta = controlMeta(obj, key);
   return select;
 }
@@ -2969,6 +2986,54 @@ function settingsNameProblem(kind) {
   return kind === "provider" ? (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name) || S.providers[name] ? T.invalidName : "")
     : (!name || S.prices[name] ? T.invalidModel : "");
 }
+/* The label of a provider's kind, wherever the page prints one; an unknown kind as it is. */
+const kindLabel = kind => ({subscription:T.subscription, compatible:T.compatible, codex:T.codex})[kind] || kind || "";
+const PROVIDER_KINDS = ["subscription", "compatible", "codex"];
+// The defaults of Codex's optional fields, as the settings copy them; the reply carries them, these stand in for an old one.
+const codexDefaults = () => settingsDefaults.codex || {ca_file:"", web_search:"disabled",
+  disabled_features:["apps", "plugins", "browser_use", "computer_use", "image_generation", "multi_agent", "hooks"]};
+/* The fields each kind has besides kind, model, effort and note; the settings refuse the others. */
+const kindFields = kind => kind === "codex" ? ["codex_path", "codex_home", ...Object.keys(codexDefaults())] : ["config_dir", "base_url"];
+/* A provider's fields its draft's kind does not have, kept aside until the next load, so switching back brings them back. */
+let PROVIDER_ASIDE = {};
+let CODEX_MORE_OPEN = {};
+function setProviderKind(name, p, from, kind) {
+  const aside = PROVIDER_ASIDE[name] ||= {}, keep = kindFields(kind);
+  for (const key of kindFields(from)) if (!keep.includes(key) && key in p) { aside[key] = p[key]; delete p[key]; }
+  p.kind = kind;
+  for (const key of keep) if (!(key in p) && key in aside) { p[key] = aside[key]; delete aside[key]; }
+  if (kind === "codex") {
+    for (const key of ["codex_path", "codex_home"]) if (!(key in p)) p[key] = "";
+    for (const [key, value] of Object.entries(codexDefaults())) if (!(key in p)) p[key] = JSON.parse(JSON.stringify(value));
+  }
+}
+const shellWord = x => /^[A-Za-z0-9_\/.,:@%+=-]+$/.test(x) ? x : "'" + x.replace(/'/g, "'\\''") + "'";
+/* The fields of a Codex provider's card: its program and home, how to set them up, and the rest folded. */
+function codexFields(name, p) {
+  const command = h("code", {class:"mono", "data-codex-login":""});
+  const showCommand = () => {
+    const path = (p.codex_path || "").trim(), home = (p.codex_home || "").trim();
+    command.textContent = `CODEX_HOME=${path && home ? shellWord(home) : T.codexHomeHere} ${path && home ? shellWord(path) : T.codexProgramHere} login`;
+  };
+  showCommand();
+  const program = bind(p, "codex_path"), home = bind(p, "codex_home");
+  for (const input of [program, home]) input.addEventListener("input", showCommand);
+  const features = h("textarea", {rows:3, disabled:SETTINGS_LOCKED, "data-codex-features":"", oninput:e => {
+    p.disabled_features = e.target.value.split(/[\s,]+/).filter(Boolean); refreshSettingsState(); }},
+    Array.isArray(p.disabled_features) ? p.disabled_features.join("\n") : String(p.disabled_features ?? ""));
+  features._settingMeta = controlMeta(p, "disabled_features");
+  const folded = ["ca_file", "web_search", "disabled_features"];
+  const more = h("details", {class:"codex-more", "data-codex-more":"", open:CODEX_MORE_OPEN[name] || settingsProblems.some(problem =>
+      folded.some(key => (settingsProblemSources.get(problem) || problem).startsWith(`provider ${name}: ${key}`))),
+    ontoggle:e => { CODEX_MORE_OPEN[name] = e.target.open; }},
+    h("summary", {}, T.codexMore), fields(field(T.caFile, bind(p, "ca_file"), T.caFileNote, "", true),
+      field(T.webSearch, pick(p, "web_search", ["disabled", "cached", "live"], T.webSearchModes), T.webSearchNote),
+      field(T.codexFeatures, features, T.codexFeaturesNote(codexDefaults().disabled_features.join(" ")), "", true)));
+  return [field(T.codexPath, program, "", "", true), field(T.codexHome, home, T.codexHomeNote, "", true),
+    h("div", {class:"field wide codex-help", "data-codex-help":""}, h("p", {class:"field-note"}, T.codexInstall),
+      h("p", {class:"field-note"}, T.codexLogin), h("pre", {class:"mono"}, command)),
+    h("div", {class:"field wide"}, more)];
+}
 function addSettingsName(kind) {
   const problem = settingsNameProblem(kind);
   if (problem) return problem;
@@ -2984,7 +3049,7 @@ function removeProvider(name) {
   const problems = [S.coordinator.provider === name ? T.providerUsedByCoordinator(name) : "",
     lanes.length ? T.providerUsedByLanes(name, lanes.join(", ")) : ""].filter(Boolean);
   if (problems.length) return renderSettings(problems);
-  delete S.providers[name]; delete KEY_DRAFTS[name]; renderSettings([]);
+  delete S.providers[name]; delete KEY_DRAFTS[name]; delete PROVIDER_ASIDE[name]; renderSettings([]);
 }
 function renderSettings(problems = settingsProblems) {
   settingsProblems = (problems || []).map(pushProblem);
@@ -2999,10 +3064,10 @@ function renderSettings(problems = settingsProblems) {
         const saveKey = h("button", {disabled:SETTINGS_LOCKED || !(KEY_DRAFTS[name] || "").trim(), onclick:() => saveProviderKey(name)}, T.saveKey);
         const keyBox = h("input", {type:"password", value:KEY_DRAFTS[name] || "", placeholder:T.keyHint, autocomplete:"off", disabled:SETTINGS_LOCKED,
           "aria-label":`${name} · ${T.key}`, oninput:e => { KEY_DRAFTS[name] = e.target.value; saveKey.disabled = SETTINGS_LOCKED || !e.target.value.trim(); refreshSettingsState(); }});
-        const kindSel = pick(p, "kind", ["subscription", "compatible"], [T.subscription, T.compatible]);
-        kindSel.addEventListener("change", () => renderSettings());
+        const kindSel = pick(p, "kind", PROVIDER_KINDS, PROVIDER_KINDS.map(kindLabel)), was = p.kind;
+        kindSel.addEventListener("change", e => { setProviderKind(name, p, was, e.target.value); renderSettings(); });
         return h("div", {class:"lane"},
-          h("div", {class:"card-head"}, h("strong", {}, name), h("span", {class:"tag"}, p.kind === "compatible" ? T.compatible : T.subscription),
+          h("div", {class:"card-head"}, h("strong", {}, name), h("span", {class:"tag"}, kindLabel(p.kind)),
             h("div", {class:"card-actions"}, checkButton(name, null),
               h("button", {class:"danger", onclick:() => removeProvider(name)}, T.remove))),
           CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, messageText(CREDIT_MESSAGES[name], CREDIT_RESTS[name])),
@@ -3017,6 +3082,7 @@ function renderSettings(problems = settingsProblems) {
                       KEYS[name] ? h("button", {disabled:SETTINGS_LOCKED, onclick:() => saveProviderKey(name, true)}, T.clearKey) : null)),
                   h("div", {}, T.keySeparate, h("p", {}, T.keyUse), h("p", {class:"warn"}, T.keyTransport)), "", true,
                   {control:keyBox, group:"providers", matches:() => settingsFailure === "key" && keyProblemProvider === name})]
+              : p.kind === "codex" ? codexFields(name, p)
               : [field(T.loginDir, bind(p, "config_dir"), "", "", true)])));
       }),
       h("div", {class:"row add-row"}, newProv, h("button", {onclick:() => {
@@ -3025,7 +3091,9 @@ function renderSettings(problems = settingsProblems) {
       section(T.cooldown, fields(field(T.cooldown, bind(S, "cool_minutes", "number"), T.defaultMinutes(settingsDefaults.cool_minutes))))],
     coordinator: [
       section(T.compactTitle, fields(
-        field(T.provider, pick(S.coordinator, "provider", Object.keys(S.providers), Object.keys(S.providers))),
+        field(T.provider, pick(S.coordinator, "provider", Object.keys(S.providers),
+          Object.entries(S.providers).map(([name, p]) => p?.kind === "codex" ? `${name} (${T.coordinatorNoCodex})` : name),
+          Object.values(S.providers).map(p => p?.kind === "codex"))),
         field(T.baseModel, bind(S.coordinator, "model")), field(T.effort, pick(S.coordinator, "effort", EFFORTS)))),
       section(T.contextTitle, fields(
         field(T.compactIdle, bind(S.coordinator_compact, "idle_at", "number"), T.defaultTokens(settingsDefaults.coordinator_compact?.idle_at)),
