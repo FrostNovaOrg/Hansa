@@ -26857,6 +26857,18 @@ def save():'''))
                 self.assertIn(r, allowed)
         self.assertNotIn("WebFetch", verifier)
 
+    def test_the_page_is_given_the_built_in_list_of_what_workers_may_not_read_with_what_is_here(self):
+        from hansa.desk import home_secrets
+        home = self.tmp / "account-home"
+        (home / ".ssh").mkdir(parents=True)
+        (home / ".netrc").symlink_to(home / "gone")  # a link counts as there, its target unread
+        with unittest.mock.patch("hansa.desk.account_home", return_value=str(home)):
+            given = public_settings(self.desk)["built_in_no_read"]
+        self.assertEqual([x["path"] for x in given], ["~/" + f for f in home_secrets()])
+        here = [x["path"] for x in given if x["exists"]]
+        self.assertEqual(here, ["~/.ssh", "~/.netrc"])
+        self.assertEqual(public_settings(self.desk)["settings"]["workers_may_not_read"], [])  # not the principal's
+
     def test_a_refused_rule_saved_earlier_does_not_lock_the_page(self):
         s = self.desk.settings()
         s["lanes"]["a"]["allow"] = ["Bash(pnpm test:*)", "WebFetch", "Bash(git commit:*)", "Bash(x),WebFetch"]
@@ -45488,6 +45500,33 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         : ["While the list holds", "()[]{}*?\\", "hansa starts no worker, verifier or coordinator", "until it is changed here"];
       for (const part of parts) check(visibleText(part, run("settingsPanels.security")),
         "visible not-read warning does not describe starting no runs: " + part);
+    } else if (ask === "settings-fix-built-in") {
+      const zh = process.argv[4] === "zh";
+      check(Array.isArray(given["/api/settings"].built_in_no_read) && run("BUILT_IN_NO_READ.length") > 50,
+        "the page did not take the server's built-in list");
+      run('BUILT_IN_NO_READ = [{path:"~/.aws", exists:false}, {path:"~/.ssh", exists:true}, ' +
+          '{path:"~/Library/Application Support/Google/Chrome", exists:false}, {path:"~/.gnupg", exists:true}]');
+      run('S.workers_may_not_read = []; renderSettings(); showSettingsGroup("security")');
+      const panel = run("settingsPanels.security");
+      const part = find(el => el.className === "built-in", panel);
+      check(part && visibleText(run("T.builtInTitle"), panel), "built-in part missing");
+      for (const text of zh ? ["4 处", "这台机器上有 2 处", "~/.ssh、~/.gnupg", "工作台的密钥", "~/.claude"]
+                            : ["4 places", "2 of them on this machine", "~/.ssh, ~/.gnupg", "desk's keys", "~/.claude"])
+        check(visibleText(text, panel), "built-in summary missing: " + text);
+      check(!visibleText("~/.aws", panel), "an absent path shown as an example or unfolded");
+      const list = find(el => el.tag === "details" && el.className === "built-in-list", part);
+      check(list && !list.attrs.open, "built-in list not folded");
+      list.attrs.open = "";
+      const items = [];
+      walk(list, el => { if (el.tag === "li") items.push(el); });
+      check(JSON.stringify(items.map(li => li.kids[0].textContent)) ===
+        JSON.stringify(["~/.ssh", "~/.gnupg", "~/.aws", "~/Library/Application Support/Google/Chrome"]),
+        "whole list not shown with those here first: " + items.map(li => li.textContent).join(" | "));
+      check(items.slice(0, 2).every(li => li.textContent.includes(run("T.builtInHere"))) &&
+        !items.slice(2).some(li => li.textContent.includes(run("T.builtInHere"))), "those here not marked");
+      const box = find(el => el.tag === "textarea", panel);
+      check(box && box.attrs.placeholder.includes(zh ? "你自己的" : "your own"), "the box does not say it is for additions");
+      check(visibleText(zh ? "你自己加的" : "Your own additions", panel), "the box's label does not say additions");
     } else if (ask === "settings-fix-values") {
       const field = number(); change(field, ""); change(field, "37");
       check(!run("settingsDirty()") && run('SETTINGS_GROUPS.every(([k]) => !groupDirty(k))'),
@@ -48508,6 +48547,9 @@ else if (ask === "task-steps")'''))
 
     def test_visible_not_read_warning_says_hansa_starts_no_runs_until_changed(self):
         self.run_settings_fix_scenario("not-read-starts")
+
+    def test_the_built_in_list_of_what_workers_may_not_read_shows_and_opens_to_the_whole_list(self):
+        self.run_settings_fix_scenario("built-in")
 
     def test_draft_markers_compare_values_and_ignore_blank_optional_fields(self):
         self.run_settings_fix_scenario("values")

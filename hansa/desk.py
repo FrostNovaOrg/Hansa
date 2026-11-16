@@ -240,6 +240,14 @@ def home_secrets() -> tuple:
     return HOME_SECRETS + (MAC_SECRETS if sys.platform == "darwin" else ())
 
 
+def built_in_no_read() -> list:
+    """home_secrets for the page, as it asks: [{"path": "~/name", "exists": whether it is on this machine}], under
+    the account's home folder (account_home), as the runs' fence is. One lstat a path, no file read: a link
+    counts as there."""
+    home = account_home()
+    return [{"path": "~/" + f, "exists": os.path.lexists(os.path.join(home, f))} for f in home_secrets()]
+
+
 # When the coordinator's session compacts (hansa/plugin.py): idle_at, in tokens, by the coordinator's mod once a turn
 # has ended and the session has been idle for a minute (the mod reads it here, in the desk's settings file, and keeps
 # the same default and range: hansa/mod/hooks/register.js); working_at, the window hansa gives Claude Code's own
@@ -3474,6 +3482,7 @@ def public_settings(desk: Desk) -> dict:
                                         for n, st in desk.provider_state().items()
                                         if n in s["providers"] and st.get("model_since") and not st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
+            "built_in_no_read": built_in_no_read(),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s), "release_last": release_last(desk),
             "alert_outside": outside.inspect((s.get("alert") if isinstance(s.get("alert"), dict) else {}).get("command") or "",
                                              desk.root / "secrets", fingerprint=False,

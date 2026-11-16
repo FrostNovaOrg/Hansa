@@ -800,6 +800,11 @@ may not read, Releases, Alerts and Prices. Select a group in the directory; full
 explanations and other read-only lane fields expand in place. Network, write and
 allowed-command rules remain visible, as do the warnings needed before saving.
 Providers includes the rest minutes that apply to every provider.
+What workers may not read shows, read only above the principal's own box, the
+built-in list for this system (`home_secrets()`, with `~` for the home folder),
+how many of its places exist on this machine, and, opened, the whole list with
+those first; `/api/settings` carries it as `built_in_no_read` (`path`, `exists`:
+one `lstat` each when the page asks, no file read).
 Remove refuses a provider used by the coordinator or any lane. Choose another
 provider for the coordinator first; for lanes, ask the coordinator to move the
 named lanes to another provider before removing it. Selects show the draft's
