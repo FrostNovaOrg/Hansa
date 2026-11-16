@@ -996,7 +996,7 @@ def env_problems(env: dict, root=None) -> list:
     for k, v in env.items():
         if not isinstance(k, str) or not ENV_NAME.match(k) or not isinstance(v, str):
             p.append((k, "must be NAME=text"))
-        elif k in MANAGED_ENV or k.startswith("ANTHROPIC_"):
+        elif k in MANAGED_ENV or k.startswith(("ANTHROPIC_", "HANSA_CODEX_")):
             p.append((k, "is set from the provider, not the lane"))
         elif k.startswith(RUN_ENV_PREFIXES) or k in RUN_ENV_NAMES:
             p.append((k, RUN_ENV_WHY))

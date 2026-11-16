@@ -19709,6 +19709,120 @@ def save():'''))
                      "Connection refused", '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'):
             self.assertTrue(run.network_reason({"is_error": True, "result": text}, ""), text)
 
+    def test_workers_and_verifiers_are_told_the_total_limit_and_claim_time(self):
+        from hansa import run
+        seen = self.tmp / "time-argv.jsonl"
+        s = self.desk.settings()
+        s["lanes"]["a"].update(timeout_min=83, merge_timeout_min=11, setup="true", check="true",
+                                env={"FAKE_SHOW_ARGV": str(seen)})
+        self.assertEqual(self.desk.save_settings(s), [])
+        prepare = run.prepare
+        clock = [1900000000]
+
+        def prepared(*args):
+            result = prepare(*args)
+            clock[0] += 7 * 60  # preparing the lane must not move the advertised start
+            return result
+
+        for kind in ("task", "verify"):
+            with self.subTest(kind=kind):
+                began = clock[0]
+                tid = self.desk.new_task("Add hello.txt", kind=kind, lane="a")
+                with unittest.mock.patch.object(run, "now", side_effect=lambda: clock[0]), \
+                        unittest.mock.patch.object(run, "prepare", side_effect=prepared):
+                    m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(m["state"], "done", m)
+                self.assertEqual(m["started"], began)
+                argv = json.loads(seen.read_text().splitlines()[-1])
+                said = " ".join(argv[argv.index("--append-system-prompt") + 1].split())
+                self.assertIn("83 minutes in all", said)
+                self.assertIn("counted from " + time.strftime("%H:%M", time.localtime(began)), said)
+                self.assertNotIn("counted from " + time.strftime("%H:%M", time.localtime(clock[0])), said)
+                for words in ("local time", "lane setup", "`date`", "hansa stops", "before"):
+                    self.assertIn(words, said)
+                if kind == "verify":
+                    self.assertIn("verdict and report", said)
+                    self.assertIn("a verdict on what you reached is worth more than none", said)
+                else:
+                    self.assertIn("check after you end", said)
+                    self.assertIn("write your report", said)
+
+    def test_later_tries_are_told_their_own_limit_and_claim_time(self):
+        from hansa import run
+        start = run.start
+        for cause in ("econnreset", "quota"):
+            with self.subTest(cause=cause):
+                seen = self.tmp / f"time-{cause}.jsonl"
+                self.net_lane(cause, 1, FAKE_NET_SEE=str(seen))
+                s = self.desk.settings()
+                s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "",
+                                           "base_url": "https://example.invalid"}
+                s["lanes"]["a"].update(timeout_min=83, providers=["mimo", "claude"] if cause == "quota" else ["claude"])
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.desk.write_key("mimo", "sk-test-time")
+                starts = []
+
+                def launch(*args):
+                    began = 1900000000 + len(starts) * 17 * 60
+                    if starts:
+                        settings = self.desk.settings()
+                        settings["lanes"]["a"]["timeout_min"] = 97
+                        self.assertEqual(self.desk.save_settings(settings), [])
+                    with unittest.mock.patch.object(run, "now", return_value=began):
+                        proc = start(*args)
+                    starts.append(self.desk.meta(args[1])["started"])
+                    return proc
+
+                tid = self.desk.new_task("Add hello.txt")
+                with unittest.mock.patch.object(run, "start", side_effect=launch):
+                    m = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(m["state"], "done", m)
+                self.assertEqual(starts, [1900000000, 1900001020])
+                self.assertEqual(m["attempts"][0]["ran_from"], starts[0])
+                self.assertEqual(m["started"], starts[1])
+                self.assertEqual([m["attempts"][0]["provider"], m["provider"]],
+                                 ["mimo", "claude"] if cause == "quota" else ["claude", "claude"])
+                calls = [json.loads(line) for line in seen.read_text().splitlines()]
+                self.assertEqual(len(calls), 2)
+                for call, began, minutes in zip(calls, starts, (83, 97)):
+                    self.assertIn(f"{minutes} minutes in all", call["system"])
+                    self.assertIn("counted from " + time.strftime("%H:%M", time.localtime(began)), call["system"])
+
+    def test_total_time_instructions_reach_codex_on_macos(self):
+        if sys.platform != "darwin":
+            self.skipTest("the Codex adapter starts workers only on macOS")
+        from hansa import run
+        from contrib.codex.tests.codexkit import FAKES, FIXTURES, WRAPPER, shim
+        record = self.tmp / "codex-time.json"
+        s = self.desk.settings()
+        s["providers"]["codex"] = {"kind": "compatible", "model": "codex", "effort": "",
+                                   "base_url": shim.PLACEHOLDER}
+        s["lanes"]["a"]["timeout_min"] = 83
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("codex", "sk-placeholder-1234")
+        os.environ["HANSA_CLAUDE"] = str(WRAPPER)
+        adapter_env = dict(HANSA_CODEX_BIN=str(FAKES / "codex"), HANSA_CODEX_HOME=str(self.tmp / "codex-home"),
+                           HANSA_CODEX_LOGS=str(self.tmp / "codex-logs"), HANSA_CODEX_SRT=str(FAKES / "srt"),
+                           HANSA_REAL_CLAUDE=str(FAKES / "claude"), FAKE_CODEX_RECORD=str(record),
+                           FAKE_CODEX_FIXTURE=str(FIXTURES / "success.jsonl"))
+        given = run.provider_env
+        for kind in ("task", "verify"):
+            with self.subTest(kind=kind):
+                tid = self.desk.new_task("Add hello.txt", kind=kind, lane="a")
+                with unittest.mock.patch.object(run, "provider_env", lambda *a: {**given(*a), **adapter_env}), \
+                        unittest.mock.patch.object(run, "now", return_value=1900000000):
+                    proc = run.start(self.desk, tid, "a", "codex")
+                self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+                self.addCleanup(proc.wait, timeout=15)
+                self.addCleanup(lambda p=proc: p.kill() if p.poll() is None else None)
+                self.assertEqual(proc.wait(timeout=60), 0, (self.desk.raw_dir(tid) / "run.err").read_text())
+                argv = json.loads(record.read_text())["argv"]
+                [system] = [json.loads(arg.split("=", 1)[1]) for arg in argv
+                            if arg.startswith("developer_instructions=")]
+                self.assertIn("83 minutes in all", system)
+                self.assertIn("counted from " + time.strftime("%H:%M", time.localtime(self.desk.meta(tid)["started"])), system)
+                self.assertIn("verdict and report" if kind == "verify" else "write your report", system)
+
     def test_workers_and_verifiers_get_bash_limits_from_the_lanes_check_limit(self):
         from hansa import run
         seen, argvs = self.tmp / "bash.jsonl", self.tmp / "argv.jsonl"
@@ -21990,29 +22104,353 @@ def save():'''))
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "adapter"), "")
         self.assertEqual(self.desk.settings()["providers"]["adapter"]["base_url"], "http://codex.invalid")
 
-    def test_codex_run_and_check_are_not_ready_without_starting_a_program(self):
-        from hansa import run
+    def codex_runtime_settings(self, **fields):
+        from contrib.codex.tests.codexkit import FAKES
         s = self.codex_settings()
+        s["providers"]["codex"].update(codex_path=str(FAKES / "codex"), **fields)
         s["lanes"]["a"]["providers"] = ["codex"]
         self.assertEqual(self.desk.save_settings(s), [])
-        self.desk.set_provider_state("codex", credit_since=1, cool_until=time.time() + 3600, reason="old rest")
-        with unittest.mock.patch.object(run.subprocess, "Popen", side_effect=AssertionError("started a program")), \
-                unittest.mock.patch.object(run.subprocess, "run", side_effect=AssertionError("ran a program")):
-            problem = provider_problem(self.desk, self.desk.settings(), "codex")
-            self.assertIn("does not start Codex providers yet", problem)
-            checked = run.check_provider(self.desk, "codex")
-            self.assertFalse(checked["ok"])
-            self.assertEqual(checked["detail"], problem)
-            with self.assertRaises(RuntimeError) as raised:
-                run.provider_env(self.desk, "codex", self.desk.settings()["providers"]["codex"])
-            self.assertIn(problem, str(raised.exception))
-        tid = self.desk.new_task("Wait for Codex", lane="a")
-        self.assertIn(problem, waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set()))
-        self.assertIn(problem, views.status_text(views.status(self.desk)))
-        self.assertIn(problem, self.hansa("ping", "codex"))
-        self.assertIn(problem, self.hansa("explain", "provider", "codex"))
+        return self.desk.settings()
 
-    def test_codex_gate_does_not_crash_a_resting_provider_without_kind(self):
+    @contextlib.contextmanager
+    def codex_runtime(self, fixture="success.jsonl", **extra):
+        """Real adapter, fake Codex and the suite's srt; capture the actual adapter boundary.
+        Only FAKE_* controls are added to provider_env; all adapter settings must come from hansa."""
+        from contrib.codex.tests.codexkit import FIXTURES
+        from hansa import run
+        given, popen, calls = run.provider_env, run.subprocess.Popen, []
+        record = self.tmp / "codex-record.json"
+
+        def env(*args, **kwargs):
+            return {**given(*args, **kwargs), "FAKE_CODEX_FIXTURE": str(FIXTURES / fixture),
+                    "FAKE_CODEX_RECORD": str(record), **extra}
+
+        def started(argv, *args, **kwargs):
+            if str(run.CODEX_ADAPTER) in argv:
+                calls.append({"argv": list(argv), "env": dict(kwargs["env"])})
+            return popen(argv, *args, **kwargs)
+
+        with unittest.mock.patch.object(run, "provider_env", env), \
+                unittest.mock.patch.object(run.subprocess, "Popen", started):
+            yield calls, record
+
+    def assert_codex_adapter_env(self, call, p, *, check=False):
+        from hansa import run
+        env, argv = call["env"], call["argv"]
+        self.assertIn(str(run.CODEX_ADAPTER), argv)
+        self.assertEqual({k: env[k] for k in env if k.startswith("HANSA_CODEX_")},
+                         {"HANSA_CODEX_RUN": "1", "HANSA_CODEX_BIN": p["codex_path"],
+                          "HANSA_CODEX_HOME": p["codex_home"], "HANSA_CODEX_SRT": run.srt_bin(),
+                          "HANSA_CODEX_WEB_SEARCH": p["web_search"],
+                          "HANSA_CODEX_DISABLE": " ".join(p["disabled_features"]),
+                          **({"HANSA_CODEX_CA_FILE": p["ca_file"]} if p.get("ca_file") else {})})
+        self.assertFalse([k for k in env if k.startswith("ANTHROPIC_")])
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(run.config_home(self.desk, "codex", p)))
+        self.assertEqual(env["CLAUDE_CODE_MAX_RETRIES"], "0" if check else "8")
+        self.assertEqual(env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
+        self.assertEqual(argv[argv.index("--model") + 1], p["model"])
+        self.assertFalse(self.desk.key_file("codex").exists())
+
+    def codex_attempt(self, **fields):
+        """A real run, waited for and finished through hansa, including when it returns to the queue."""
+        from hansa import run
+        tid = self.desk.new_task("Report the result", lane="a", **fields)
+        proc = run.start(self.desk, tid, "a", "codex")
+        code = proc.wait(timeout=60)
+        return run.finish(self.desk, tid, code)
+
+    def test_codex_queued_worker_uses_own_adapter_and_provider_environment(self):
+        s = self.codex_runtime_settings(web_search="cached", disabled_features=["apps", "hooks"])
+        os.environ.update(HANSA_CLAUDE=str(self.tmp / "missing-claude"), ANTHROPIC_API_KEY="not-for-codex",
+                          HANSA_CODEX_BIN="ignored", HANSA_CODEX_CA_FILE="ignored",
+                          HANSA_CODEX_DISABLE="ignored", HANSA_CODEX_WEB_SEARCH="live")
+        tid = self.desk.new_task("Report the result", lane="a")
+        with self.codex_runtime() as (calls, record):
+            m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual((m["state"], m["provider"]), ("done", "codex"), m)
+        self.assertEqual(len(calls), 1)
+        self.assert_codex_adapter_env(calls[0], s["providers"]["codex"])
+        self.assertEqual(json.loads(record.read_text())["env"]["CODEX_HOME"], s["providers"]["codex"]["codex_home"])
+        self.assertTrue((self.desk.tasks_dir / tid / "result.md").read_text().strip())
+        self.assertTrue(m["usage"])
+
+    def test_codex_checks_use_own_adapter_for_ping_page_and_automatic_probe(self):
+        from hansa import run, up
+        s = self.codex_runtime_settings()
+        os.environ["HANSA_CLAUDE"] = str(self.tmp / "missing-claude")
+        with self.codex_runtime("check_ok.jsonl") as (calls, record), \
+                unittest.mock.patch.object(up, "recorded_program", return_value="/missing/recorded-claude"):
+            shown = self.hansa("ping", "codex")
+            self.assertIn("codex: ok", shown)
+            self.assertNotIn("/missing/recorded-claude", shown)
+            self.assertTrue(run.check_provider(self.desk, "codex", claude="/missing/page-claude")["ok"])
+            self.desk.set_provider_state("codex", unreachable_since=time.time() - 3600, probe_at=0)
+            d = Dispatcher(self.desk)
+            d.probe_providers(s)
+            for th in d.probes.values():
+                th.join(60)
+                self.assertFalse(th.is_alive(), "automatic provider check did not finish")
+        self.assertEqual(len(calls), 3)
+        for call in calls:
+            self.assert_codex_adapter_env(call, s["providers"]["codex"], check=True)
+            argv = call["argv"]
+            self.assertEqual(argv[argv.index("--tools") + 1], "")
+            self.assertEqual(argv[argv.index("--max-turns") + 1], "1")
+            self.assertNotIn("--session-id", argv)
+        self.assertTrue(self.desk.provider_state()["codex"]["check"]["ok"])
+        self.assertEqual(json.loads(record.read_text())["stdin"], "Reply with the single word OK.")
+
+    def test_codex_worker_is_not_held_when_another_lane_cannot_find_claude(self):
+        self.codex_runtime_settings()
+        self.hansa("lane", "add", "b", "--like", "a")
+        s = self.desk.settings()
+        s["lanes"]["b"]["providers"] = ["claude"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        os.environ["HANSA_CLAUDE"] = str(self.tmp / "missing-claude")
+        blocked = self.desk.new_task("Wait for Claude", lane="b")
+        tid = self.desk.new_task("Report the result", lane="a")
+        # An unrelated, hand-edited provider without a kind must not break the shared hold either.
+        s["providers"]["unfinished"] = {"model": "example"}
+        s["lanes"]["b"]["providers"].append("unfinished")
+        write_json(self.desk.settings_path, s)
+        d = Dispatcher(self.desk)
+        with self.codex_runtime():
+            d.tick()
+            self.assertEqual(self.desk.meta(tid)["state"], "running")
+            self.assertEqual(self.settle(d, tid)["state"], "done")
+        self.assertEqual(self.desk.meta(blocked)["state"], "queued")
+
+    def test_codex_certificate_and_empty_features_are_passed_only_from_settings(self):
+        from hansa import run
+        ca = self.tmp / "ca.pem"
+        ca.write_text("fixture certificate")
+        for cert in (str(ca), ""):
+            with self.subTest(cert=cert):
+                s = self.codex_runtime_settings(ca_file=cert, web_search="live", disabled_features=[])
+                os.environ.update(HANSA_CODEX_CA_FILE="/ignored/ca.pem", HANSA_CODEX_DISABLE="apps")
+                with self.codex_runtime("check_ok.jsonl") as (calls, record):
+                    self.assertTrue(run.check_provider(self.desk, "codex")["ok"])
+                self.assert_codex_adapter_env(calls[0], s["providers"]["codex"], check=True)
+                argv = json.loads(record.read_text())["argv"]
+                self.assertIn('web_search="live"', argv)
+                self.assertNotIn("apps", argv)
+                actual_ca = json.loads(record.read_text())["env"]["CODEX_CA_CERTIFICATE"]
+                default = "/etc/ssl/cert.pem" if Path("/etc/ssl/cert.pem").is_file() else None
+                self.assertEqual(actual_ca, cert or default)
+
+    def test_codex_missing_installation_or_program_waits_with_path_and_no_start(self):
+        from hansa import run
+        self.codex_runtime_settings()
+        tid = self.desk.new_task("Wait for installation", lane="a")
+        bad = self.tmp / "bad-program"
+        cases = (("missing", None), ("not-executable", "#!/bin/sh\n"), ("directory", None))
+        for which in ("adapter", "codex"):
+            for state, text in cases:
+                path = bad / which / state
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if text:
+                    path.write_text(text)
+                    path.chmod(0o644)
+                elif state == "directory":
+                    path.mkdir()
+                s = self.desk.settings()
+                if which == "codex":
+                    s["providers"]["codex"]["codex_path"] = str(path)
+                    self.assertEqual(self.desk.save_settings(s), [])
+                with self.subTest(which=which, state=state), \
+                        unittest.mock.patch.object(run, "CODEX_ADAPTER", path if which == "adapter" else run.CODEX_ADAPTER), \
+                        unittest.mock.patch.object(run, "provider_env", side_effect=AssertionError("started adapter")):
+                    problem = provider_problem(self.desk, self.desk.settings(), "codex")
+                    self.assertIn(str(path), problem)
+                    self.assertIn("cannot be run", problem)
+                    self.assertFalse(run.check_provider(self.desk, "codex")["ok"])
+                    Dispatcher(self.desk).tick()
+                    self.assertEqual(self.desk.meta(tid)["state"], "queued")
+                    self.assertIn(str(path), waiting_reason(self.desk, self.desk.settings(), self.desk.meta(tid), set()))
+                    self.assertIn(str(path), self.hansa("ping", "codex"))
+                    self.assertNotIn("Traceback", self.hansa("ping", "codex"))
+        self.codex_runtime_settings()
+        wrapper = self.tmp / "incomplete" / "bin" / "claude-or-codex"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text("#!/bin/sh\n")
+        wrapper.chmod(0o755)
+        with unittest.mock.patch.object(run, "CODEX_ADAPTER", wrapper):
+            self.assertIn(str(wrapper.parent.parent / "shim" / "hansa_codex_shim.py"),
+                          provider_problem(self.desk, self.desk.settings(), "codex"))
+
+    def test_codex_usage_credit_plan_model_and_login_rests_record_real_adapter_results(self):
+        from hansa import run
+        self.codex_runtime_settings()
+        cases = (("usage_limit.jsonl", "limit", "cool_until"),
+                 ("out_of_credits.jsonl", "credit", "credit_since"),
+                 ("plan_upgrade.jsonl", "credit", "credit_since"),
+                 ("model_not_found.jsonl", "model", "model_since"),
+                 ("not_logged_in.jsonl", "login", "cool_until"))
+        for fixture, kind, field in cases:
+            with self.subTest(fixture=fixture):
+                write_json(self.desk.state_dir / "providers.json", {})
+                with self.codex_runtime(fixture):
+                    m = self.codex_attempt()
+                self.assertEqual((m["state"], m["attempts"][-1]["kind"], run.tries_used(m["attempts"])),
+                                 ("queued", kind, 0), m)
+                st = self.desk.provider_state()["codex"]
+                self.assertGreater(st[field], time.time() if field == "cool_until" else 0)
+                problem = provider_problem(self.desk, self.desk.settings(), "codex")
+                self.assertNotIn("key", problem)
+                self.assertNotIn("endpoint", problem)
+                if kind == "limit":
+                    self.assertEqual(st["rest_how"], "reset")
+                    self.assertAlmostEqual(st["cool_until"], time.time() + 3 * 3600 + 60, delta=180)
+                if fixture == "plan_upgrade.jsonl":
+                    self.assertIn("plan", st["credit_plan"])
+                with self.codex_runtime("check_ok.jsonl"):
+                    checked = run.check_provider(self.desk, "codex")
+                    if kind == "credit":
+                        self.assertNotIn("key", self.hansa("ping", "codex"))
+                self.assertTrue(checked["ok"])
+                self.assertEqual(checked.get("rest_kept") if kind == "credit" else checked.get("rest_ended"),
+                                 "credit" if kind == "credit" else "quota" if kind == "limit" else kind)
+                self.assertEqual(bool(provider_problem(self.desk, self.desk.settings(), "codex")), kind == "credit")
+
+    def test_codex_401_and_403_are_login_rests_until_ping_with_configured_command(self):
+        from hansa import run
+        s = self.codex_runtime_settings()
+        p = s["providers"]["codex"]
+        for status in (401, 403):
+            with self.subTest(status=status):
+                write_json(self.desk.state_dir / "providers.json", {})
+                fixture = self.tmp / f"http-{status}.jsonl"
+                fixture.write_text(json.dumps({"type": "turn.failed", "error": {
+                    "message": f"unexpected status {status}: authentication_error"}}) + "\n")
+                with self.codex_runtime(str(fixture)):
+                    m = self.codex_attempt()
+                self.assertEqual((m["state"], m["attempts"][-1]["kind"], run.tries_used(m["attempts"])),
+                                 ("queued", "login", 0), m)
+                self.desk.set_provider_state("codex", cool_until=time.time() - 1)
+                problem = provider_problem(self.desk, self.desk.settings(), "codex")
+                command = f"CODEX_HOME={shlex.quote(p['codex_home'])} {shlex.quote(p['codex_path'])} login"
+                self.assertIn(command, problem)
+                self.assertIn("hansa ping codex", problem)
+                self.assertNotIn("key", problem)
+                self.assertNotIn("/login", problem)
+                with self.codex_runtime(str(fixture)):
+                    self.assertFalse(run.check_provider(self.desk, "codex")["ok"])
+                self.desk.set_provider_state("codex", cool_until=time.time() - 1)
+                with self.codex_runtime("check_ok.jsonl"):
+                    shown = self.hansa("ping", "codex")
+                    self.assertIn("codex: ok", shown)
+                    self.assertIn("lost login", shown)
+                self.assertEqual(provider_problem(self.desk, self.desk.settings(), "codex"), "")
+
+    def test_codex_task_model_uses_provider_model(self):
+        s = self.codex_runtime_settings()
+        with self.codex_runtime() as (calls, record):
+            m = self.codex_attempt(model="task-model-ignored")
+        self.assertEqual(m["state"], "done", m)
+        self.assert_codex_adapter_env(calls[0], s["providers"]["codex"])
+        self.assertEqual(m["model_asked"], s["providers"]["codex"]["model"])
+        self.assertNotIn("task-model-ignored", json.loads(record.read_text())["argv"])
+
+    def test_codex_homes_are_denied_to_all_runs_and_adapter_opens_only_its_own(self):
+        from hansa import run
+        s = self.codex_runtime_settings()
+        s["providers"]["second"] = {**s["providers"]["codex"], "codex_home": str(self.tmp / "second-login")}
+        # The principal need not list either home; a linked spelling must also be fenced.
+        own = Path(s["providers"]["codex"]["codex_home"])
+        own.mkdir()
+        alias = self.tmp / "login-alias"
+        alias.symlink_to(own)
+        s["providers"]["codex"]["codex_home"] = str(alias)
+        self.assertEqual(self.desk.save_settings(s), [])
+        denied = run.worker_read_denials(self.desk)
+        homes = run.full_paths([alias, s["providers"]["second"]["codex_home"]])
+        self.assertIn(str(own.resolve()), homes)
+        for home in homes:
+            self.assertIn(home, denied)
+        self.assertEqual(s["workers_may_not_read"], [])
+        wt = run.prepare(self.desk, "a", s["lanes"]["a"], self.desk.meta(self.desk.new_task("Prepare sandbox")))[0]
+        for pname in ("claude", "codex", "second"):
+            for fs in (run.sandbox_settings(self.desk, s["lanes"]["a"], pname, s["providers"][pname], wt)["sandbox"]["filesystem"],
+                       run.srt_settings(self.desk, s["lanes"]["a"], pname, s["providers"][pname], wt, str(self.tmp))["filesystem"]):
+                for home in homes:
+                    self.assertIn(home, fs["denyRead"])
+        with self.codex_runtime():
+            m = self.codex_attempt()
+        self.assertEqual(m["state"], "done", m)
+        adapter_box = self.srt_calls()[-1]["settings"]["filesystem"]
+        self.assertNotIn(str(own.resolve()), adapter_box["denyRead"])
+        self.assertNotIn(str(alias), adapter_box["denyRead"])
+        self.assertIn(s["providers"]["second"]["codex_home"], adapter_box["denyRead"])
+
+    def test_codex_homes_and_shell_startup_files_are_kept_from_workers(self):
+        from hansa import run
+        home = self.tmp / "shell-home"
+        home.mkdir()
+        startup = home / ".zshenv"
+        startup.write_text("export EXAMPLE=value\n")
+        s = self.codex_settings()
+        self.assertEqual(self.desk.save_settings(s), [])
+        with unittest.mock.patch("hansa.run.account_home", return_value=str(home)):
+            box = run.sandbox_settings(self.desk, s["lanes"]["a"], "claude", s["providers"]["claude"], self.repo)
+        for path in run.full_paths([s["providers"]["codex"]["codex_home"], startup]):
+            self.assertIn(path, box["sandbox"]["filesystem"]["denyRead"])
+
+    def test_codex_lane_env_is_refused_and_old_values_are_filtered_before_adapter(self):
+        from hansa import run
+        self.codex_runtime_settings()
+        reserved = {"HANSA_CODEX_": "prefix", "HANSA_CODEX_RUN": "0", "HANSA_CODEX_BIN": "/bad/codex",
+                    "HANSA_CODEX_HOME": "/bad/home", "HANSA_CODEX_CA_FILE": "/bad/ca",
+                    "HANSA_CODEX_DISABLE": "apps", "HANSA_CODEX_FUTURE_SETTING": "ignored"}
+        for key, value in reserved.items():
+            with self.subTest(key=key), self.assertRaises(SystemExit) as e:
+                self.hansa("lane", "set", "a", "env", f"{key}={value}")
+            self.assertIn(key, str(e.exception))
+            self.assertIn("provider", str(e.exception))
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {**reserved, "FROM_LANE_ENV": "lane value"}
+        write_json(self.desk.settings_path, s)
+        loaded = Desk(self.desk.root).settings()
+        self.assertEqual(loaded["lanes"]["a"]["env"], s["lanes"]["a"]["env"])
+        self.assertEqual(run.lane_env(self.desk, loaded["lanes"]["a"])[0], {"FROM_LANE_ENV": "lane value"})
+        with self.codex_runtime() as (calls, record):
+            m = self.codex_attempt()
+        self.assertEqual(m["state"], "done", m)
+        self.assert_codex_adapter_env(calls[0], loaded["providers"]["codex"])
+        self.assertTrue(all(any(k in line for line in m["env_left_out"]) for k in reserved))
+        called = json.loads(record.read_text())
+        self.assertEqual(called["env"]["FROM_LANE_ENV"], "lane value")
+        self.assertIsNone(called["env"]["HANSA_CODEX_BIN"])
+        self.assertIsNone(called["env"]["HANSA_CODEX_RUN"])
+
+    def test_codex_legacy_compatible_adapter_start_still_runs_alongside_native_kind(self):
+        from contrib.codex.tests.codexkit import FAKES, WRAPPER
+        from hansa import run
+        s = self.codex_runtime_settings()
+        s["providers"]["adapter"] = {"kind": "compatible", "model": "gpt-example", "base_url": "http://codex.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("adapter", "sk-example")
+        os.environ["HANSA_CLAUDE"] = str(WRAPPER)
+        # The legacy adapter gets these from codex.env in a real desk; supply them at the same boundary.
+        with self.codex_runtime("check_ok.jsonl", HANSA_CODEX_BIN=str(FAKES / "codex"),
+                                HANSA_CODEX_HOME=s["providers"]["codex"]["codex_home"], HANSA_CODEX_SRT=run.srt_bin()):
+            self.assertTrue(run.check_provider(self.desk, "adapter")["ok"])
+            self.assertTrue(run.check_provider(self.desk, "codex")["ok"])
+        with self.codex_runtime(HANSA_CODEX_BIN=str(FAKES / "codex"),
+                                HANSA_CODEX_HOME=s["providers"]["codex"]["codex_home"], HANSA_CODEX_SRT=run.srt_bin()):
+            tid = self.desk.new_task("Legacy report", lane="a")
+            proc = run.start(self.desk, tid, "a", "adapter")
+            m = run.finish(self.desk, tid, proc.wait(timeout=60))
+        self.assertEqual((m["state"], m["provider"]), ("done", "adapter"), m)
+
+    def test_codex_native_provider_works_when_serve_was_started_with_adapter(self):
+        from contrib.codex.tests.codexkit import WRAPPER
+        self.codex_runtime_settings()
+        os.environ["HANSA_CLAUDE"] = str(WRAPPER)
+        with self.codex_runtime():
+            m = self.settle(Dispatcher(self.desk), self.desk.new_task("Report the result", lane="a"))
+        self.assertEqual((m["state"], m["provider"]), ("done", "codex"), m)
+
+    def test_codex_check_does_not_crash_a_resting_provider_without_kind(self):
         from hansa import run
         s = self.desk.settings()
         del s["providers"]["claude"]["kind"]
@@ -33535,6 +33973,28 @@ def save():'''))
         self.transcript_run("bg-cmd-noticed", env={"FAKE_RESUMED": str(seen)})
         self.transcript_run("plain", env={"FAKE_RESUMED": str(seen)})
         self.assertFalse(seen.exists())
+
+    def test_background_continuation_is_told_minutes_left_on_the_original_clock(self):
+        from hansa import run
+        resume = run.resume
+        s = self.desk.settings()
+        s["lanes"]["a"]["timeout_min"] = 83
+        self.assertEqual(self.desk.save_settings(s), [])
+        for elapsed, left in ((23 * 60 + 41, 59), (84 * 60, 0)):
+            with self.subTest(elapsed=elapsed):
+                seen = self.tmp / f"remaining-{left}.jsonl"
+
+                def continue_run(desk, tid):
+                    began = desk.meta(tid)["started"]
+                    with unittest.mock.patch.object(run, "now", return_value=began + elapsed):
+                        return resume(desk, tid)
+
+                with unittest.mock.patch.object(run, "resume", side_effect=continue_run):
+                    self.transcript_run("bg-cmd", env={"FAKE_RESUMED": str(seen)})
+                [call] = [json.loads(line) for line in seen.read_text().splitlines()]
+                prompt = " ".join(call["prompt"].split())
+                self.assertIn(f"{left} whole minutes left", prompt)
+                self.assertIn("original time limit", prompt)
 
     def test_a_cancel_landing_while_a_resume_is_prepared_prevents_the_resume(self):
         from hansa import run

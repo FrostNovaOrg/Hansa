@@ -124,6 +124,7 @@ existing task, merge and release records; reports and checks remain on their tas
 
 New lanes stop at 200 turns or 240 minutes; saved lanes keep their limits.
 Change them with `hansa lane set L max_turns N` and `hansa lane set L timeout_min N`.
+Each run is told its total time limit and the local clock time it counts from, including lane setup and, for a worker, the check after it ends.
 `hansa add --max-turns N` sets a task's turn ceiling (1 or more). A follow-up keeps
 that ceiling; `hansa retry ID "..." --max-turns N` overrides it. Without a task
 ceiling, each run uses its lane's current limit.

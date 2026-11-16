@@ -2026,9 +2026,11 @@ def cmd_cost(a):
 
 def cmd_ping(a):
     desk = Desk.find(a.desk)
-    names = [a.provider] if a.provider else sorted(desk.settings()["providers"])
+    providers = desk.settings()["providers"]
+    names = [a.provider] if a.provider else sorted(providers)
     # the program the recorded hansa serve start runs its workers through, which need not be this shell's
-    served, mine = up.recorded_program(desk), program("claude")
+    uses_claude = any(providers.get(n, {}).get("kind") != "codex" for n in names)
+    served, mine = (up.recorded_program(desk), program("claude")) if uses_claude else ("", "")
     if served and served != mine:
         print(f"pinging with {served}, the program the recorded hansa serve start uses; "
               f"this shell's is {mine or 'none'}")
@@ -2041,7 +2043,8 @@ def cmd_ping(a):
         elif r.get("rest_kept") == "credit":
             plan = (desk.provider_state().get(n) or {}).get("credit_plan")
             print(f"{n}: its credit rest stays; it waits for the principal to confirm "
-                  + ("an upgraded plan" if plan else "a top-up") + " on the page or save a new key")
+                  + ("an upgraded plan" if plan else "a top-up") + " on the page"
+                  + ("" if providers[n]["kind"] == "codex" else " or save a new key"))
 
 
 LOCK_WAIT = 2.0  # seconds hansa serve waits for serve.lock before it says another server holds it
