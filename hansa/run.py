@@ -1350,11 +1350,12 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
         if kind == "model":
             if not st.get("model_since"):
                 model = model or s["providers"][name]["model"]
+                reason = model_text(model, codex=s["providers"][name]["kind"] == "codex")
                 desk.set_provider_state(name, model_since=t, model_unknown=model, cool_until=0,
-                                        reason=model_text(model), rest_how="model", rest_minutes=None,
+                                        reason=reason, rest_how="model", rest_minutes=None,
                                         unreachable_since=0, unreachable_reason="")
                 desk.event("provider_model", provider=name, since=t, model=model,
-                           text=f"provider {name}: {model_text(model)}")
+                           text=f"provider {name}: {reason}")
             return None
         if st.get("model_since") and kind != "credit":
             return None  # another failing run cannot put a time limit on this rest
@@ -1441,10 +1442,10 @@ def credit_text(st: dict) -> str:
             + ("; another desk found it" if st.get("shared_rest") else "")) if since else ""
 
 
-def model_text(model: str) -> str:
+def model_text(model: str, *, codex: bool = False) -> str:
     """A model rest has no deadline; use the same remedy in checks and provider views."""
     return (f"the provider does not know model {model}; rests until a check answers or the principal changes "
-            "its model or key on the page (Settings, Providers)")
+            + ("its model in settings" if codex else "its model or key on the page (Settings, Providers)"))
 
 
 def rest_text(st: dict) -> str:
@@ -1530,8 +1531,23 @@ def refused_by(m: dict, order: list | None = None) -> set:
     return own if order is not None and inherited.issuperset(order) else own | inherited
 
 
-# Keep settings usable before a Codex run path exists; remove this gate when that path is implemented.
-CODEX_NOT_READY = "this version does not start Codex providers yet"
+CODEX_ADAPTER = Path(__file__).resolve().parent.parent / "contrib" / "codex" / "bin" / "claude-or-codex"
+
+
+def codex_problem(p: dict) -> str:
+    """Installation checks belong here, not in the rules for saving provider settings."""
+    for label, path in (("Codex adapter", CODEX_ADAPTER), ("Codex program", p["codex_path"])):
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            return f"{label} cannot be run: {path} (missing or not an executable file)"
+    shim = CODEX_ADAPTER.parent.parent / "shim" / "hansa_codex_shim.py"
+    if not shim.is_file():
+        return f"Codex adapter is missing: {shim}"
+    return ""
+
+
+def provider_program(p: dict, claude: str = "") -> str:
+    """Codex always uses this installation's adapter, regardless of how serve was started."""
+    return str(CODEX_ADAPTER) if p["kind"] == "codex" else claude or claude_bin()
 
 
 def provider_problem(desk: Desk, s: dict, name: str) -> str:
@@ -1541,18 +1557,21 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
         return "not in settings"
     if "kind" not in p:  # a hand-edited file must still let ping and waiting reasons explain the problem
         return "no kind in settings"
-    if p["kind"] == "codex":
-        return CODEX_NOT_READY
+    if p["kind"] == "codex" and (problem := codex_problem(p)):
+        return problem
     st = desk.provider_state().get(name, {})
     if st.get("credit_since"):
         return credit_text(st)
     if st.get("model_since"):
-        return model_text(st["model_unknown"])
+        return model_text(st["model_unknown"], codex=p["kind"] == "codex")
     if p["kind"] == "compatible":
         if not p.get("base_url"):
             return "no endpoint address"
         if not desk.has_key(name):
             return "no key"
+    if p["kind"] == "codex" and str(st.get("reason", "")).startswith("not logged in"):
+        login = f"CODEX_HOME={shlex.quote(p['codex_home'])} {shlex.quote(p['codex_path'])} login"
+        return f"{st['reason']}; log in with `{login}`, then `hansa ping {name}` brings it back"
     if st.get("cool_until", 0) > time.time():
         if str(st.get("reason", "")).startswith("key rejected"):
             return f"{st['reason']}; saving a new key brings it back"
@@ -1789,12 +1808,10 @@ def progress_of(desk: Desk, m: dict) -> dict:
 
 
 def provider_env(desk: Desk, name: str, p: dict, run: bool = True) -> dict:
-    """Environment for one Claude Code run on this provider. Starts clean, so a
+    """Environment for one run on this provider. Starts clean, so a
     worker never inherits keys that are not its own. A run (run=False only for the coordinator's own
     session) has Claude Code's auto memory off, so it starts with nothing an earlier run in its project
     folder remembered (isolated says so too)."""
-    if p["kind"] == "codex":
-        raise RuntimeError(CODEX_NOT_READY)
     env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
     env["TERM"] = "dumb"
     if run:
@@ -1810,8 +1827,16 @@ def provider_env(desk: Desk, name: str, p: dict, run: bool = True) -> dict:
     else:
         home = config_home(desk, name, p)
         home.mkdir(parents=True, exist_ok=True)
+        env["CLAUDE_CONFIG_DIR"] = str(home)
+        if p["kind"] == "codex":
+            env.update({"HANSA_CODEX_RUN": "1", "HANSA_CODEX_BIN": p["codex_path"],
+                        "HANSA_CODEX_HOME": p["codex_home"], "HANSA_CODEX_SRT": srt_bin(),
+                        "HANSA_CODEX_WEB_SEARCH": p["web_search"],
+                        "HANSA_CODEX_DISABLE": " ".join(p["disabled_features"])})
+            if p.get("ca_file"):
+                env["HANSA_CODEX_CA_FILE"] = p["ca_file"]
+            return env
         env.update({
-            "CLAUDE_CONFIG_DIR": str(home),
             "ANTHROPIC_BASE_URL": p["base_url"],
             "ANTHROPIC_AUTH_TOKEN": desk.read_key(name),
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -2837,8 +2862,11 @@ def desk_fence_rules(desk: Desk, wt: Path, tmp: str) -> list:
 def worker_read_denials(desk: Desk) -> list:
     """The read fence shared by worker sandboxes and file content admission."""
     home = Path(account_home())
-    homes = [config_home(desk, n, p) for n, p in desk.settings()["providers"].items()
+    providers = desk.settings()["providers"]
+    homes = [config_home(desk, n, p) for n, p in providers.items()
              if isinstance(p, dict) and isinstance(p.get("config_dir", ""), str)]
+    homes += [Path(p["codex_home"]) for p in providers.values()
+              if isinstance(p, dict) and p.get("kind") == "codex"]
     return full_paths([*desk_private(desk), *(h for h in homes if h.is_absolute()), home / ".claude",
                        *(home / f for f in home_secrets()), *no_read(desk)[0], *session_private(desk),
                        *other_desks_hidden(desk)])
@@ -4235,7 +4263,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     if tid in getattr(desk, "_bench_removing", ()):
         return None  # Finish the earlier run's folder cleanup before reusing the task.
     try:  # what the machine or the lane lacks holds the task, before anything of it is changed (start_hold)
-        claude_bin()
+        provider_program(desk.settings()["providers"][pname])
     except RuntimeError as e:
         raise LaneCannotStart(str(e), "claude") from None
     repo = (desk.settings()["lanes"].get(lane_name) or {}).get("repo") or ""
@@ -4284,7 +4312,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     if brief.is_file() and brief.read_text(encoding="utf-8").strip():
         system += "\nStanding instructions for this lane:\n" + brief.read_text(encoding="utf-8")
     sid = str(uuid.uuid4())  # known up front, so a worker stopped before its report still has a record
-    argv = [claude_bin(), "-p", "--output-format", "json", "--session-id", sid, "--permission-mode", "acceptEdits",
+    argv = [provider_program(p), "-p", "--output-format", "json", "--session-id", sid, "--permission-mode", "acceptEdits",
             "--max-turns", str(meta.get("max_turns") or lane.get("max_turns", 300)),
             "--model", model, "--append-system-prompt", system]
     if effort:
@@ -4503,9 +4531,9 @@ def refusal_reasons(home: Path, sid: str) -> dict:
     return out
 
 
-def unusable_reason(run: dict, err: str, subscription: bool = False):
+def unusable_reason(run: dict, err: str, subscription: bool = False, *, codex: bool = False):
     """Why this provider cannot be used: ("credit" | "quota" | "key" | "login" | "model" | "refused" | "", words).
-    A subscription provider (subscription) whose login has run out answers 401 too: that is a login, not a key."""
+    Codex's 401/403 and a subscription's expired OAuth token need a login rather than a new key."""
     if run.get("stop_reason") in REFUSED_STOPS:
         return "refused", f"refused the request ({run['stop_reason']})"
     status = run.get("api_error_status")
@@ -4518,6 +4546,8 @@ def unusable_reason(run: dict, err: str, subscription: bool = False):
         return "credit", CREDIT_LOW
     if status in QUOTA_STATUS:
         return "quota", f"out of quota (HTTP {status})"
+    if codex and (status in AUTH_STATUS or AUTH.search(text) or LOGIN.search(text)):
+        return "login", "not logged in" + (f" (HTTP {status})" if status in AUTH_STATUS else "")
     if status in AUTH_STATUS:
         return "key", f"key rejected (HTTP {status})"
     m = QUOTA.search(text)
@@ -4751,7 +4781,9 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     if setup:
         fields["setup_exit"] = int(setup.group(1))
     subscription = (desk.settings()["providers"].get(meta.get("provider")) or {}).get("kind") == "subscription"
-    kind, why = ("", "") if meta.get("cancel") or setup or changed or killed else unusable_reason(run, err, subscription)
+    codex = (p or {}).get("kind") == "codex"
+    kind, why = ("", "") if meta.get("cancel") or setup or changed or killed else \
+        unusable_reason(run, err, subscription, codex=codex)
     # a report written before the connection went is the worker's finished work: that run ends as it did
     net = "" if kind or late else network_reason(run, err)
     if not kind and not net and run and not run.get("is_error"):
@@ -4784,10 +4816,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             "queued again for the lane's next provider" if state == "queued" else "no other provider in the lane to try")
     elif kind == "model":
         model = meta.get("model_asked") or (p or {}).get("model", "")
-        # Only subscription providers use the task's --model; compatible providers keep their own model.
+        # Only subscription providers use the task's --model; other kinds keep their own model.
         requested = subscription and bool(meta.get("model"))
         why = (f"the provider does not know model {model}; this task requested it with --model; "
-               "choose another model for the task") if requested else model_text(model)
+               "choose another model for the task") if requested else model_text(model, codex=codex)
         attempts.append({"provider": meta["provider"], "at": now(), "error": why, "kind": "model"})
         if requested:
             state, error = "failed", f"{meta['provider']}: {why}"
@@ -7107,8 +7139,11 @@ class Dispatcher:
                     except SandboxRefused as e:  # held, not failed: it starts once a try passes
                         self.hold(m["id"], ln, s, e)
                     except LaneCannotStart as e:  # held, not failed: it starts once the cause is gone
-                        start_hold(desk, m["id"], ln, e, sorted(n for n in s["lanes"] if not s["lanes"][n].get("merge_lane"))
-                                   if e.cause == "claude" else ())
+                        # Missing Claude holds the lanes that depend on it; Codex starts its own adapter.
+                        shared = sorted(n for n, lane in s["lanes"].items() if not lane.get("merge_lane")
+                                        and all(s["providers"].get(p, {}).get("kind") != "codex" for p in lane["providers"])) \
+                            if e.cause == "claude" else ()
+                        start_hold(desk, m["id"], ln, e, shared)
                         waits.clear()  # looked at again with what was just held
                     except Exception as e:  # noqa: BLE001 - any failure to start is recorded on the task
                         not_started(desk, m["id"], e)
@@ -7572,7 +7607,8 @@ def key_stamp(desk: Desk, name: str) -> tuple:
 
 def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *, quota_probe: bool = False) -> dict:
     """Send one tiny request through a provider and record whether it answered, through `claude` when it is given
-    (the program a recorded hansa serve start runs), else through this process's. A good answer names any
+    (the program a recorded hansa serve start runs), else through this process's; Codex always uses its adapter.
+    A good answer names any
     rest_ended (quota, login, model) or rest_kept (credit), separately from the model detail."""
     from .page_messages import annotate
     s = desk.settings()
@@ -7580,7 +7616,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
     if not p:
         return annotate({"ok": False, "detail": "not in settings"}, ("detail",))
     prob = provider_problem(desk, s, name)
-    if prob in ("no key", "no endpoint address", "no kind in settings", CODEX_NOT_READY):
+    if prob in ("no key", "no endpoint address", "no kind in settings") or \
+            (p.get("kind") == "codex" and codex_problem(p)):
         return annotate({"ok": False, "detail": prob}, ("detail",))
     tmp = desk.state_dir / "check"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -7589,14 +7626,15 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
     kind = ""
     try:
         # no tools: a model behind a compatible endpoint often calls one before it answers, and one turn ends there
-        argv = [claude or claude_bin(), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"], "--tools", ""]
+        argv = [provider_program(p, claude), "-p", "--output-format", "json", "--max-turns", "1", "--model", p["model"], "--tools", ""]
         argv += isolated(tmp)
         env = {**provider_env(desk, name, p), "CLAUDE_CODE_MAX_RETRIES": "0"}
         r = subprocess.run(argv, cwd=str(tmp), env=env, input="Reply with the single word OK.",
                            capture_output=True, text=True, timeout=timeout)
         run = json.loads(r.stdout) if r.stdout.strip().startswith("{") else {}
         ok = bool(run) and not run.get("is_error") and "ok" in (run.get("result") or "").lower()
-        kind, why = ("", "") if ok else unusable_reason(run, r.stderr, p["kind"] == "subscription")
+        kind, why = ("", "") if ok else \
+            unusable_reason(run, r.stderr, p["kind"] == "subscription", codex=p["kind"] == "codex")
         # the model answered with a tool call and the one turn ran out: it is reachable all the same, unless
         # hansa's own readings (an API error status, a usage limit, a refused key) found something first
         stopped = not ok and not kind and not run.get("api_error_status") and \
@@ -7607,7 +7645,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
             detail += ": answered, but stopped at the turn limit" if stopped else ""
         else:
             said =re.search(r'"message"\s*:\s*"([^"]{1,120})"', f"{run.get('result') or ''} {r.stderr}")
-            detail = model_text(p["model"]) if kind == "model" else \
+            detail = model_text(p["model"], codex=p["kind"] == "codex") if kind == "model" else \
                 (why or (run.get("result") or r.stderr or r.stdout or "no answer").strip()[:200]) + \
                 (f": {said.group(1)}" if said and why else "")
     except subprocess.TimeoutExpired:
@@ -7630,6 +7668,8 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
                 result["rest_kept"] = "credit"
             elif st.get("model_since"):
                 result["rest_ended"] = "model"
+            elif p["kind"] == "codex" and str(st.get("reason", "")).startswith("not logged in"):
+                result["rest_ended"] = "login"
             elif st.get("cool_until", 0) > time.time():
                 if st.get("rest_how") in ("fixed", "reset", "shared"):
                     result["rest_ended"] = "quota"
