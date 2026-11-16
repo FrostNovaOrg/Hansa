@@ -264,6 +264,15 @@ def killed():
         sys.exit(128 - rc)
     os.kill(os.getpid(), sig)
     time.sleep(30)
+if sys.argv[1:] == ["--help"]:  # the switches a continued start needs, as 2.1.325's help lists them, less those
+    lacks = os.environ.get("FAKE_HELP_LACKS", "").split()  # named here (an older version); FAKE_HELP_LOG: each read
+    if os.environ.get("FAKE_HELP_LOG"):
+        open(os.environ["FAKE_HELP_LOG"], "a").write("help\n")
+    lines = {"--resume": "-r, --resume [value]", "--fork-session": "--fork-session", "--session-id": "--session-id <uuid>",
+             "--system-prompt-snapshot": "--system-prompt-snapshot <on|off>"}
+    sys.stdout.write("Usage: claude [options] [command] [prompt]\n" + "".join(
+        "  " + line + "  (stand-in)\n" for name, line in lines.items() if name not in lacks))
+    sys.exit(0)
 if "-p" not in sys.argv:  # not a worker's run (claude --version, say): it writes nothing, in no folder
     sys.exit(1)
 prompt = sys.stdin.read()
@@ -278,7 +287,15 @@ if "--resume" in sys.argv and "--session-id" in sys.argv:
     given, parent = list(sys.argv), sys.argv[sys.argv.index("--resume") + 1]
     new = sys.argv[sys.argv.index("--session-id") + 1]
     found = glob.glob(os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "*", parent + ".jsonl"))
-    if not found:
+    lost = os.environ.get("FAKE_FORK_LOST")  # "gone": as if the conversation were not there; "long": too long to go on
+    if lost == "long":  # an error answer after the request, and a reply made up for it, before any model's reply
+        with open(os.path.join(os.path.dirname(found[0]), new + ".jsonl"), "w") as f:
+            f.write(json.dumps({"uuid": "lost-1", "sessionId": new, "type": "assistant", "message": {
+                "id": "lost-1", "model": "<synthetic>", "content": [{"type": "text", "text": "stand-in: too long"}]}}) + "\n")
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 400,
+                          "num_turns": 1, "duration_ms": 2400, "session_id": new, "result": "stand-in: too long"}))
+        sys.exit(1)
+    if not found or lost == "gone":
         sys.stderr.write("stand-in: no conversation " + parent + "\n")
         sys.exit(1)
     rows = [json.loads(line) for line in open(found[0]) if line.strip()]
@@ -469,6 +486,9 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
     notice = lambda n: {"type": "user", "turnOrigin": "task_notification", "promptSource": "system", "message": {
         "role": "user", "content": "<task-notification> <task-id>" + n + "</task-id> timed out"}}
     counted = {"usage": {"input_tokens": 100, "output_tokens": 20}} if os.environ.get("FAKE_RECORD_USAGE") else {}
+    totals = bool(counted)  # FAKE_FORK_UNCOUNTED: a forked call's own rows carry no counts; its answer still has them
+    if FORKED is not None and os.environ.get("FAKE_FORK_UNCOUNTED"):
+        counted = {}
     tag = "f-" if FORKED else ""  # a forked call's replies have ids of their own
     say = lambda mid, t: {"type": "assistant", "message": {"id": tag + mid, "model": "mimo-x", "content": [
         {"type": "text", "text": t}], **counted}}
@@ -544,7 +564,7 @@ if os.environ.get("FAKE_TRANSCRIPT"):  # "late": a background notice opens a tur
         sys.exit(1)
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                       "num_turns": int(os.environ.get("FAKE_TURNS", "5")), "session_id": sid, "result": rows[-1]["message"]["content"][0]["text"],  # its record's three replies, when counted
-                      **({"modelUsage": {"mimo-x": whole}} if counted else {})}))
+                      **({"modelUsage": {"mimo-x": whole}} if totals else {})}))
     sys.exit(0)
 if os.environ.get("FAKE_SANDBOX_START"):  # "first", "after-ok": a Bash call whose sandbox could not start
     sid = sys.argv[sys.argv.index("--session-id") + 1]
@@ -34834,7 +34854,6 @@ def save():'''))
         self.assertIn("not written in the", m["error"])
         self.assertFalse(run.alive(m.get("pid")))
 
-    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
     # A follow-up goes on in its parent's conversation (run.continuation), each case and its test:
     # | plain retry, same lane, provider and model, record there | test_a_follow_up_goes_on_in_its_parents_conversation_and_counts_its_own_part |
     # | --update                                     | test_a_follow_up_with_update_goes_on_and_is_told_what_was_merged |
@@ -34842,6 +34861,11 @@ def save():'''))
     # | Codex adapter, record gone, restarted by hansa | test_the_one_place_that_decides_says_why_a_follow_up_starts_anew |
     # | parent failed, at a ceiling, cancelled        | test_how_the_parent_ended_is_no_reason_against_going_on |
     # | a verification, never across kinds            | test_a_verification_and_a_follow_up_never_go_on_in_the_others_conversation |
+    # | Claude Code without the switches it needs     | test_a_claude_code_without_the_switches_a_continued_start_needs_starts_anew |
+    # | the continued start cannot go on (gone, long) | test_a_continued_start_claude_code_cannot_go_on_with_starts_again_once_anew |
+    # | a follow-up of a follow-up that went on       | test_a_chain_of_three_goes_on_from_each_parents_own_session_and_counts_its_part |
+    # | own rows with no counts: answer less before   | test_a_continued_run_whose_own_rows_have_no_counts_takes_the_parents_off_its_answer |
+    # | a parent that left nothing to commit          | test_a_follow_up_of_a_task_that_left_nothing_is_told_so_and_where_the_worktree_is |
     def continued_parent(self, **env) -> str:
         """A task on mimo whose stand-in leaves a session record that counts tokens (100 in, 20 out a reply, 300 in,
         60 out in all), done; its id. FAKE_ARGV_LOG and FAKE_FORKED (tmp/argv.jsonl, tmp/forked.jsonl) see the calls."""
@@ -34933,8 +34957,10 @@ def save():'''))
         [seen] = self.calls_of("forked.jsonl")
         said = seen["prompt"]
         told = said[:said.index("Keep the badge bold")]  # before the task text
-        for part in (f"task/{new}", "main", "badge.txt", "<<<<<<<"):
+        for part in (f"task/{new}", "main", "badge.txt", "<<<<<<<", "committed what you had left",
+                     self.desk.meta(tid)["head"][:12], m["worktree"]):
             self.assertIn(part, told)
+        self.assertNotIn("nothing to commit", told)
         self.assertIn(f"conversation: continued that of task {tid}", views.show_text(self.desk, new))
 
     def test_a_follow_up_starts_a_new_conversation_where_it_cannot_go_on(self):
@@ -34983,8 +35009,11 @@ def save():'''))
         self.assertIn("Codex", decide(m, {**p, "kind": "codex"})["new"])
         self.assertIn("started it again", decide({**m, "attempts": [{"kind": "network"}]})["new"])
         self.assertIsNone(run.continuation(self.desk, self.desk.meta(tid), "a", "mimo", p, "mimo-x"))  # no follow-up
-        self.desk.update(tid, conversation={"from": "t0000", "own": self.desk.meta(tid)["session_id"]})
-        self.assertIn("itself went on", decide(m)["new"])  # a follow-up of one that went on: left for later
+        self.desk.update(tid, conversation={"from": "t0000", "own": self.desk.meta(tid)["session_id"],
+                                            "before": {"mimo-x": {"in": 5, "out": 1}}})
+        went = decide(m)  # a follow-up of one that went on goes on too, from its own (forked) session
+        self.assertEqual((went["from"], went["session"]), (tid, self.desk.meta(tid)["session_id"]))
+        self.assertEqual(went["before"]["mimo-x"]["in"], 300 + 5)  # its answer counts the whole chain in
         self.desk.update(tid, conversation=None)
         home = run.config_home(self.desk, "mimo", p)
         for f in home.glob(f"projects/*/{self.desk.meta(tid)['session_id']}.jsonl"):
@@ -35050,6 +35079,139 @@ def save():'''))
         talk = run.continuation(self.desk, {**self.desk.meta(new), "parent": vid}, "a", "mimo", p, "mimo-x")
         self.assertIn("verification", talk["new"])
 
+    def test_a_claude_code_without_the_switches_a_continued_start_needs_starts_anew(self):
+        # hansa reads Claude Code's help text once per server start (per program file) before a continued start
+        from hansa import run
+        help_log = self.tmp / "help.log"
+        tid = self.continued_parent()
+        run._HELP_SEEN.clear()
+        with unittest.mock.patch.dict(os.environ, {"FAKE_HELP_LACKS": "--fork-session", "FAKE_HELP_LOG": str(help_log)}):
+            new, _ = self.follow_up(tid, "Make the badge bold")
+            m = self.settle(Dispatcher(self.desk), new)
+            self.assertEqual(m["state"], "done", m)
+            argv = self.calls_of()[-1]
+            self.assertNotIn("--resume", argv)
+            self.assertNotIn("--fork-session", argv)
+            self.assertNotEqual(argv[argv.index("--session-id") + 1], self.desk.meta(tid)["session_id"])
+            self.assertEqual(m.get("attempts") or [], [])  # no try, nothing failed
+            self.assertIn("--fork-session", m["conversation"]["new"])
+            shown = views.show_text(self.desk, new)
+            self.assertIn("conversation: a new one, as the installed Claude Code", shown)
+            self.assertIn("--fork-session", shown[shown.index("conversation: "):])
+            self.assertEqual(help_log.read_text().count("help"), 1)
+            # read once: a second follow-up asks the same program again without reading its help
+            p = self.desk.settings()["providers"]["mimo"]
+            self.assertIn("--fork-session", run.continuation(self.desk, self.desk.meta(new), "a", "mimo", p,
+                                                             "mimo-x")["new"])
+            self.assertEqual(help_log.read_text().count("help"), 1)
+        run._HELP_SEEN.clear()
+        with unittest.mock.patch.dict(os.environ, {"FAKE_HELP_LACKS": "--system-prompt-snapshot"}):
+            self.assertIn("--system-prompt-snapshot", run.lacks_switches(run.provider_program(p)))
+        run._HELP_SEEN.clear()
+        self.assertEqual(run.lacks_switches(run.provider_program(p)), "")  # all listed: it goes on
+        self.assertIn("no-such-claude", run.lacks_switches(str(self.tmp / "no-such-claude")))  # not there: no going on
+
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
+    def test_a_continued_start_claude_code_cannot_go_on_with_starts_again_once_anew(self):
+        # Told by its shape (run.conversation_lost): a start that carried --resume ended at once on an error, with no
+        # model's reply; the stand-in's "gone" ends with no answer at all, its "long" with an error answer and a
+        # made-up reply. Then queued again once, in a new conversation, without using a try.
+        from hansa import run
+        tid = last = self.continued_parent()
+        for how in ("gone", "long"):  # each a follow-up of the last
+            with self.subTest(how=how):
+                s = self.desk.settings()
+                s["lanes"]["a"]["env"]["FAKE_FORK_LOST"] = how
+                self.assertEqual(self.desk.save_settings(s), [])
+                n = len(self.calls_of())
+                tid = last
+                new, _ = self.follow_up(tid, "Make the badge bold")
+                m = self.settle(Dispatcher(self.desk), new)
+                self.assertEqual(m["state"], "done", m)
+                first, again = [a for a in self.calls_of()[n:] if "--session-id" in a]
+                self.assertIn("--fork-session", first)
+                self.assertNotIn("--resume", again)
+                self.assertNotIn("--fork-session", again)
+                fresh = again[again.index("--session-id") + 1]
+                self.assertNotIn(fresh, (first[first.index("--session-id") + 1], self.desk.meta(tid)["session_id"]))
+                self.assertEqual(m["session_id"], fresh)
+                self.assertEqual([a["kind"] for a in m["attempts"]], ["conversation"])
+                self.assertEqual(run.tries_used(m["attempts"]), 0)
+                self.assertIn(tid, m["conversation"]["new"])
+                shown = views.show_text(self.desk, new)
+                self.assertIn("conversation: a new one, as Claude Code could not go on in the conversation of task "
+                              + tid, shown)
+                self.assertIn("no try used", shown)
+                self.assertEqual(m["usage"]["mimo-x"]["in"], 300)  # the new conversation's own
+                last = new
+        with self.subTest("a usage limit on the continued start is handled as before"):
+            s = self.desk.settings()
+            s["lanes"]["a"]["env"].pop("FAKE_FORK_LOST")
+            s["lanes"]["a"]["env"]["FAKE_NET"] = f"quota:1:{self.tmp / 'quota-count'}"
+            self.assertEqual(self.desk.save_settings(s), [])
+            new, _ = self.follow_up(last, "Make the badge bold")
+            d, end = Dispatcher(self.desk), time.time() + 60
+            while self.desk.meta(new)["state"] in ("queued", "running") and time.time() < end:
+                d.tick()
+                if (self.desk.provider_state().get("mimo") or {}).get("cool_until", 0) > time.time():
+                    self.desk.set_provider_state("mimo", cool_until=time.time() - 1)
+                time.sleep(0.1)
+            m = self.desk.meta(new)
+            self.assertEqual([a["kind"] for a in m["attempts"]], ["limit"], m)
+            self.assertIn("started it again", m["conversation"]["new"])
+
+    def test_a_chain_of_three_goes_on_from_each_parents_own_session_and_counts_its_part(self):
+        # each forked record begins with copies of all the earlier ones' rows (FORK_FACTS 1); each answer counts the
+        # whole conversation in (FORK_FACTS 2): 300 in a run, so 900 in the third's answer, of which 300 its own
+        from hansa import run
+        t1 = self.continued_parent()
+        t2, _ = self.follow_up(t1, "Make the badge bold")
+        m2 = self.settle(Dispatcher(self.desk), t2)
+        t3, _ = self.follow_up(t2, "Make the badge blue")
+        m3 = self.settle(Dispatcher(self.desk), t3)
+        self.assertEqual((m2["state"], m3["state"]), ("done", "done"), m3)
+        forks = [a for a in self.calls_of() if "--fork-session" in a]
+        self.assertEqual([a[a.index("--resume") + 1] for a in forks],
+                         [self.desk.meta(t1)["session_id"], m2["session_id"]])
+        self.assertNotIn(m3["session_id"], (m2["session_id"], self.desk.meta(t1)["session_id"]))
+        self.assertEqual(m3["conversation"]["from"], t2)
+        self.assertIn(f"conversation: continued that of task {t2}", views.show_text(self.desk, t3))
+        self.assertEqual((m3["usage"]["mimo-x"]["in"], m3["usage"]["mimo-x"]["out"]), (300, 60))
+        self.assertEqual(self.counted(m3), (300, 300))
+        self.assertEqual(sum(r["in"] for r in cost.report(self.desk, 1)["rows"] if r["task"] in (t1, t2, t3)), 900)
+        home = run.config_home(self.desk, "mimo", self.desk.settings()["providers"]["mimo"])
+        own = run.own_session(self.desk, m3)
+        self.assertEqual(len(run._record(home, m3["session_id"])[0]), 9)  # its record begins with two earlier runs'
+        self.assertEqual(len(run._record(home, own)[0]), 3)  # its notes: its own only
+        self.assertEqual(run.progress_of(self.desk, m3)["replies"], 3)
+        # with its own rows uncounted, its answer less the two earlier parts
+        self.assertEqual(run.continued_usage(self.desk, t3, {"modelUsage": {"mimo-x": {"inputTokens": 900, "outputTokens": 180}}},
+                                             run.forked_before(m3), None, own, 0)["mimo-x"]["in"], 300)
+
+    def test_a_continued_run_whose_own_rows_have_no_counts_takes_the_parents_off_its_answer(self):
+        # its answer's modelUsage covers the parent's part too (FORK_FACTS 2); its own rows say nothing to count
+        tid = self.continued_parent(FAKE_FORK_UNCOUNTED="1")
+        new, _ = self.follow_up(tid, "Make the badge bold")
+        m = self.settle(Dispatcher(self.desk), new)
+        self.assertEqual(m["conversation"]["from"], tid)
+        self.assertEqual((m["usage"]["mimo-x"]["in"], m["usage"]["mimo-x"]["out"]), (300, 60))
+        self.assertEqual(self.counted(m), (300, 300))
+
+    def test_a_follow_up_of_a_task_that_left_nothing_is_told_so_and_where_the_worktree_is(self):
+        tid = self.continued_parent()  # the stand-in changes no file: its head is where it started
+        parent = self.desk.meta(tid)
+        self.assertEqual(parent["head"], parent["run_start"]["commit"])
+        new, _ = self.follow_up(tid, "Make the badge bold")
+        m = self.settle(Dispatcher(self.desk), new)
+        self.assertEqual(m["conversation"]["from"], tid)
+        [seen] = self.calls_of("forked.jsonl")
+        told = seen["prompt"][:seen["prompt"].index("Make the badge bold")]
+        self.assertIn("nothing to commit", told)
+        self.assertNotIn("committed what you had left", told)
+        self.assertIn(m["worktree"], told)
+        self.assertIn(parent["head"][:12], told)
+
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
     def test_cost_counts_a_resumed_run_whose_answer_covers_the_whole_conversation_once(self):
         # RESUME_FACTS 2: a resumed call's modelUsage covers the run before it too; its own part is counted once
         m = self.resumed_tries(FAKE_RESUME_WHOLE="1")
