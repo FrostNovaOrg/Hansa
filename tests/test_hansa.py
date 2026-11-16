@@ -27449,15 +27449,18 @@ def save():'''))
         self.assertNotIn("WebFetch", verifier)
 
     def test_the_page_is_given_the_built_in_list_of_what_workers_may_not_read_with_what_is_here(self):
-        from hansa.desk import home_secrets
+        from hansa.desk import HOME_STARTS, home_secrets
         home = self.tmp / "account-home"
         (home / ".ssh").mkdir(parents=True)
         (home / ".netrc").symlink_to(home / "gone")  # a link counts as there, its target unread
+        (home / ".zshenv").write_text("export EXAMPLE=value\n")
         with unittest.mock.patch("hansa.desk.account_home", return_value=str(home)):
             given = public_settings(self.desk)["built_in_no_read"]
         self.assertEqual([x["path"] for x in given], ["~/" + f for f in home_secrets()])
+        for name in HOME_STARTS[0][1]:
+            self.assertIn("~/" + name, [x["path"] for x in given])
         here = [x["path"] for x in given if x["exists"]]
-        self.assertEqual(here, ["~/.ssh", "~/.netrc"])
+        self.assertCountEqual(here, ["~/.ssh", "~/.netrc", "~/.zshenv"])
         self.assertEqual(public_settings(self.desk)["settings"]["workers_may_not_read"], [])  # not the principal's
 
     def test_a_refused_rule_saved_earlier_does_not_lock_the_page(self):
@@ -29738,6 +29741,96 @@ def save():'''))
             self.assertIn(str(cc), deny)  # not the provider this run uses
             self.assertIn(str(Path.home() / ".claude"), deny)  # the machine owner's, whatever the providers use
             self.assertIn(str(self.desk.state_dir / "claude-mimo"), deny)  # its own, as before
+
+    def test_shell_startup_files_are_kept_from_workers_and_verifiers(self):
+        from hansa import run
+        from hansa.desk import HOME_STARTS
+        from contrib.codex.tests.codexkit import shim
+        home, seen = self.tmp / "shell-home", self.tmp / "argv.jsonl"
+        for name in HOME_STARTS[0][1]:
+            path = home / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("export EXAMPLE=value\n")
+        settings = self.desk.settings()
+        settings["lanes"]["a"].update(setup="true", check="true", merge_check="true", env={"FAKE_SHOW_ARGV": str(seen)})
+        self.assertEqual(self.desk.save_settings(settings), [])
+        with unittest.mock.patch("hansa.desk.account_home", return_value=str(home)), \
+                unittest.mock.patch("hansa.run.account_home", return_value=str(home)):
+            worker_tid = tid = self.desk.new_task("Add hello.txt")
+            for role in ("worker", "verifier"):
+                if role == "verifier":
+                    self.hansa("verify", tid)
+                    tid = self.desk.meta(tid)["verify"]
+                meta = self.settle(Dispatcher(self.desk), tid)
+                self.assertEqual(meta["state"], "done", meta)
+                argv = json.loads(seen.read_text().splitlines()[-1])
+                box, rules = self.sandbox_of(argv), self.denied_by(argv)
+                codex = shim.srt_settings({"sandbox": box}, meta["worktree"], str(self.tmp / "codex-tmp"),
+                                          str(self.tmp / "codex-home"))["filesystem"]
+                for path in run.full_paths(home / name for name in HOME_STARTS[0][1]):
+                    self.assertIn(path, box["filesystem"]["denyRead"], role)
+                    self.assertIn(f"Read(//{path.lstrip('/')})", rules, role)
+                    self.assertIn(f"Read(//{path.lstrip('/')}/**)", rules, role)
+                    self.assertIn(path, codex["denyRead"], role)
+            self.hansa("merge", worker_tid)
+            self.assertEqual(self.settle_merge(Dispatcher(self.desk), worker_tid)["state"], "merged")
+            calls = self.srt_calls()
+            self.assertTrue(calls)
+            for call in calls:
+                for name in HOME_STARTS[0][1]:
+                    self.assertIn(str(home / name), call["settings"]["filesystem"]["denyRead"])
+
+    def test_missing_shell_startup_files_are_left_out_of_run_sandboxes(self):
+        from hansa import run
+        from hansa.desk import HOME_STARTS
+        from contrib.codex.tests.codexkit import shim
+        home = self.tmp / "shell-home"
+        home.mkdir()
+        (home / ".zshenv").write_text("export EXAMPLE=value\n")
+        target = self.tmp / "shell-startup"
+        target.write_text("export EXAMPLE=value\n")
+        (home / ".zprofile").symlink_to(target)
+        (home / ".zlogin").symlink_to(home / ".bash_login")
+        (home / ".config" / "fish").mkdir(parents=True)
+        lane, provider = self.desk.settings()["lanes"]["a"], self.desk.settings()["providers"]["claude"]
+        for system in ("linux", "darwin"):
+            with self.subTest(system=system), unittest.mock.patch.object(sys, "platform", system), \
+                    unittest.mock.patch.object(run.account, "LINUX", system == "linux"), \
+                    unittest.mock.patch("hansa.run.account_home", return_value=str(home)):
+                worker = run.sandbox_settings(self.desk, lane, "claude", provider, self.repo)
+                check = run.srt_settings(self.desk, lane, "claude", provider, self.repo, str(self.tmp / "check"))
+                codex = shim.srt_settings(worker, str(self.repo), str(self.tmp / "codex-tmp"), str(self.tmp / "codex-home"))
+                for fs in (worker["sandbox"]["filesystem"], check["filesystem"], codex["filesystem"]):
+                    for name in HOME_STARTS[0][1]:
+                        self.assertEqual(str(home / name) in fs["denyRead"], os.path.exists(home / name), name)
+                    self.assertIn(str(target.resolve()), fs["denyRead"])
+                self.assertEqual(sorted(p.relative_to(home).as_posix() for p in home.rglob("*")),
+                                 [".config", ".config/fish", ".zlogin", ".zprofile", ".zshenv"])
+
+    def test_the_coordinator_keeps_access_to_shell_startup_files(self):
+        from hansa.desk import HOME_STARTS
+        result = self.echo_coordinator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launch = cli.launch_rules(self.desk, str(Path.home()))
+        project = read_json(self.desk.root / ".claude" / "settings.json")["permissions"]["deny"]
+        for name in HOME_STARTS[0][1]:
+            path = str(Path.home() / name).lstrip("/")
+            for tool in ("Read", "Edit"):
+                for end in ("", "/**"):
+                    rule = f"{tool}(//{path}{end})"
+                    self.assertNotIn(rule, result.stdout)
+                    self.assertNotIn(rule, launch)
+                    self.assertNotIn(rule, project)
+        self.assertIn(f"Read(//{str(Path.home() / '.ssh').lstrip('/')})", result.stdout)
+
+    def test_explain_lists_shell_startup_files_kept_from_workers(self):
+        from hansa.desk import HOME_STARTS, home_secrets
+        for system in ("linux", "darwin"):
+            with self.subTest(system=system), unittest.mock.patch.object(sys, "platform", system):
+                explained = self.hansa("explain", "lane", "a", "--all")
+                for name in HOME_STARTS[0][1]:
+                    self.assertIn("~/" + name, explained)
+                self.assertIn(f"{len(home_secrets())} names", self.hansa("explain", "lane", "a"))
 
     def test_more_logins_and_keys_are_kept_from_workers_and_the_macos_ones_only_on_macos(self):
         from hansa import run

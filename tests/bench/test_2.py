@@ -68,6 +68,12 @@ class BenchSnapshotTest(unittest.TestCase):
         (self.wt / "tracked").unlink()
         self.assertNotIn("tracked", self.contents())
 
+    def test_project_shell_startup_files_are_copied(self):
+        (self.wt / ".zshenv").write_text("export PROJECT=value\n")
+        (self.wt / ".bash_aliases").write_text("alias project=true\n")
+        self.assertEqual(self.contents(), {"tracked": b"committed", ".zshenv": b"export PROJECT=value\n",
+                                          ".bash_aliases": b"alias project=true\n"})
+
     def test_secret_link_and_mutation_refused(self):
         secret = self.root / "secret"
         secret.write_text("private")

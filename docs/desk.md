@@ -805,6 +805,12 @@ built-in list for this system (`home_secrets()`, with `~` for the home folder),
 how many of its places exist on this machine, and, opened, the whole list with
 those first; `/api/settings` carries it as `built_in_no_read` (`path`, `exists`:
 one `lstat` each when the page asks, no file read).
+The list includes the account's shell startup names, such as `~/.zshenv`,
+`~/.zprofile`, `~/.zshrc` and `~/.bashrc`, including missing ones. Workers and
+verifiers cannot read them; the coordinator keeps access to its shell startup
+files. Missing startup paths are left out of run sandboxes so nothing is
+created in the home folder. See [the sandbox](sandbox.md#what-workers-and-verifiers-may-touch)
+for the full shell list and its use by Codex, setup and check commands.
 Remove refuses a provider used by the coordinator or any lane. Choose another
 provider for the coordinator first; for lanes, ask the coordinator to move the
 named lanes to another provider before removing it. Selects show the draft's

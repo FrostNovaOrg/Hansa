@@ -53,6 +53,24 @@ class SrtSettings(Scratch):
         self.assertEqual(called["command"][:3], ["/bin/sh", "-c", shim.INNER])
         self.assertEqual(called["command"][7:9], [str(FAKES / "codex"), "exec"])
 
+    def test_shell_startup_files_are_kept_from_codex_runs(self):
+        from hansa.cli import init_desk
+        from hansa.desk import HOME_STARTS
+        account_home = self.root / "account-home"
+        for name in HOME_STARTS[0][1]:
+            path = account_home / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("export EXAMPLE=value\n")
+        desk = init_desk(self.root / "desk")
+        provider = desk.settings()["providers"]["claude"]
+        with mock.patch("hansa.run.account_home", return_value=str(account_home)):
+            box = hansa_run.sandbox_settings(desk, {}, "claude", provider, self.wt, str(self.tmp))
+        result, _ = self.run_worker("success.jsonl", argv=self.worker_argv(box=box))
+        self.assertEqual(result["subtype"], "success")
+        denied = self.srt_called()["settings"]["filesystem"]["denyRead"]
+        for path in hansa_run.full_paths(account_home / name for name in HOME_STARTS[0][1]):
+            self.assertIn(path, denied)
+
     def test_own_git_folder_only_for_a_linked_worktree(self):
         # a main checkout: hansa denies its .git whole, so nothing of it is opened
         main = self.root / "repo"

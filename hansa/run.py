@@ -35,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import account, after, build, installed, installed_text, session_vars, without_session
-from .desk import (DENY_AT, HANSA_IDENTITY, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
+from .desk import (DENY_AT, HANSA_IDENTITY, HOME_STARTS, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
                    refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, claude_bin,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems)
 from .desk import lane_env as checked_env
@@ -2834,13 +2834,20 @@ def desk_fence_rules(desk: Desk, wt: Path, tmp: str) -> list:
     return no_read_rules(list(dict.fromkeys(paths + runs)))
 
 
+def worker_home_denials() -> list:
+    """The built-in home paths kept from workers, without missing shell startup paths."""
+    home = Path(account_home())
+    # Leave missing shell startup paths out so Linux's sandbox makes no placeholders in the home folder.
+    return [home / ".claude", *(home / f for f in home_secrets()
+                               if f not in HOME_STARTS[0][1] or os.path.exists(home / f))]
+
+
 def worker_read_denials(desk: Desk) -> list:
     """The read fence shared by worker sandboxes and file content admission."""
-    home = Path(account_home())
     homes = [config_home(desk, n, p) for n, p in desk.settings()["providers"].items()
              if isinstance(p, dict) and isinstance(p.get("config_dir", ""), str)]
-    return full_paths([*desk_private(desk), *(h for h in homes if h.is_absolute()), home / ".claude",
-                       *(home / f for f in home_secrets()), *no_read(desk)[0], *session_private(desk),
+    return full_paths([*desk_private(desk), *(h for h in homes if h.is_absolute()),
+                       *worker_home_denials(), *no_read(desk)[0], *session_private(desk),
                        *other_desks_hidden(desk)])
 
 
@@ -4315,6 +4322,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         desk.event("no_read_left_out", task=tid, lane=lane_name, why=line)
     argv += ["--disallowedTools", *desk_read_rules(desk), *desk_fence_rules(desk, wt, tmp), *no_read_rules(kept),
              *no_read_rules(session_private(desk)), *no_read_rules(other_desks_hidden(desk)),
+             *no_read_rules(Path(account_home()) / f for f in HOME_STARTS[0][1]),
              *[r for r in GIT_DENY if not (verifying and r in VERIFY_ALLOW)], *INTERACTIVE_TOOLS]
     argv += ["--allowedTools", *lane_allow(desk, lane, wt), *WORKER_ALLOW,
              *[rule(t, x) for x in full_paths([tmp]) for t in ("Read", "Edit")], *(VERIFY_ALLOW if verifying else [])]

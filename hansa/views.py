@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, history, installed, installed_text, memory, notify, plugin, release, up
-from .desk import (DENY_AT, HOME_SECRETS, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, MAC_SECRETS, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
+from .desk import (DENY_AT, home_secrets, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError)
 from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
@@ -2518,19 +2518,16 @@ def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
     homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in s["providers"].items() if isinstance(p, dict))
     kept = no_read_parts(s, desk.root)[0]
     own = session_private(desk)
-    mac = (f"; on macOS also, under ~/Library: {', '.join(x.removeprefix('Library/') for x in MAC_SECRETS)}"
-           if sys.platform == "darwin" else "")
-    built_in = (f"{', '.join('~/' + x for x in HOME_SECRETS)}{mac}" if whole else
-                f"{len(HOME_SECRETS)} names" + (f", and {len(MAC_SECRETS)} more on macOS under ~/Library"
-                                                if sys.platform == "darwin" else "")
-                + f" (the whole list: hansa explain lane {name} --all)")
+    names = home_secrets()
+    built_in = (", ".join("~/" + x for x in names) if whole else
+                f"{len(names)} names (the whole list: hansa explain lane {name} --all)")
     return ["  what its workers and verifiers, its setup and its check may not read (the sandbox refuses it to any"
-            " command; a name that does not exist is refused all the same):",
+            " command; missing shell startup paths are left out of run sandboxes):",
             f"    the desk's keys and state: {desk.secrets_dir}, {desk.state_dir}",
             *([f"    the Claude Code files of the folder hansa notify on recorded for the coordinator's session (built "
                f"in): {', '.join(own)}"] if own else []),
             f"    every provider's Claude Code folder, whichever provider the run uses: {', '.join(homes)}; and ~/.claude",
-            "    logins, keys, tokens, browsing data, messages and histories under the home folder (built in): "
+            "    logins, keys, tokens, browsing data, messages, histories and shell startup files under the home folder (built in): "
             + built_in,
             "    folders and files the principal keeps from workers (the principal's, on the web page, Settings; you"
             " add to it with hansa hide, and only the principal removes an entry; Read is denied there to workers,"

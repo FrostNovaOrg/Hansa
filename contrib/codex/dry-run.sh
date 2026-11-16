@@ -33,12 +33,10 @@ from pathlib import Path
 here, tmp, hansa_src = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path.insert(0, hansa_src)
 from hansa import run as hansa_run
-from hansa.desk import home_secrets
-
-wt, home = Path.cwd(), Path.home()
+wt = Path.cwd()
 box = {"sandbox": {  # hansa's sandbox_settings for a lane with no network list and no write list
     "enabled": True, "failIfUnavailable": True, "autoAllowBashIfSandboxed": True, "allowUnsandboxedCommands": False,
-    "filesystem": {"denyRead": hansa_run.full_paths([home / ".claude", *(home / f for f in home_secrets())]),
+    "filesystem": {"denyRead": hansa_run.full_paths(hansa_run.worker_home_denials()),
                    "denyWrite": hansa_run.git_write_deny(wt)},
     "network": {"allowedDomains": [], "strictAllowlist": True},
     "credentials": {"envVars": [{"name": v, "mode": "deny"} for v in hansa_run.KEY_VARS]}}}
