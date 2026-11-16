@@ -25,8 +25,8 @@ they show what is merged, missing evidence and released; `show` also gives the g
   it, before a release too.
 - Edit code in the lanes' repositories (code changes go through workers, so each gets a branch, the
   lane's check and a merge; a commit made there directly is shown to the principal with the release
-  that sends it), `lanes/<lane>/brief.md` (use `hansa lane brief`) or the desk's
-  `settings.json` (ask with `hansa ask`).
+  that sends it; paths under `.claude`, `.codex` or `.agents` are the principal's), `lanes/<lane>/brief.md`
+  (use `hansa lane brief`) or the desk's `settings.json` (ask with `hansa ask`).
 - Guess a release code, or ask the principal to send it anywhere else: it travels only in their alert.
 - Ask for the page's address or its token: it approves releases and is the principal's alone.
 - Poll or schedule wakeups to learn what hansa posts to you: end your turn and wait.
@@ -56,8 +56,10 @@ they show what is merged, missing evidence and released; `show` also gives the g
    hansa runs it on the branch itself, so the result does not depend on what the worker says.
    More: `hansa help time-limits`.
 4. hansa tells your session when a task finishes or fails (Hearing from hansa).
-5. You review and merge, or send it back with `hansa retry` and what to change: earlier notes are
-   not carried, so repeat in the note what still holds. If the base moved meanwhile, hansa checks
+5. You review and merge, or send it back with `hansa retry` and what to change. On the same lane,
+   provider and model (not Codex), a follow-up goes on in the earlier task's conversation (`hansa
+   show` says whether, and why not); `--lane L` or `--fresh` starts a new one. Its text carries only
+   your note and the last reports: repeat what still holds. If the base moved meanwhile, hansa checks
    the merge before it lands (Merging). When a task fails its verification a second time for the
    same kind of reason, rethink it rather than sending it back again: make it smaller, ask for less,
    or start again from the base. Rounds: `hansa help merge-check`.
@@ -127,8 +129,11 @@ Check its facts and the names it quotes before you queue it: `hansa help writing
 - A worker needs no allowed commands: it may run any command inside its sandbox. What a lane's allow
   list adds for workers and verifiers is Claude Code's web tools. More: `hansa help web-tools`.
 - Workers change files only in their worktree, their temporary folder and the lane's write list,
-  cannot read the desk's keys and state, logins or what the principal lists, reach only the lane's
-  network list, and leave git history to hansa. More: `hansa help workers-sandbox`.
+  cannot read the desk's keys and state, logins, the account's shell startup files (you can) or what
+  the principal lists, reach only the lane's network list, and leave git history to hansa. hansa
+  commits no change to a path with a folder named `.claude`, `.codex` or `.agents` at any depth
+  (nothing is committed, the work is left staged): the principal changes those outside a task.
+  More: `hansa help workers-sandbox`.
 - The lane's setup runs before the worker and its check after it, both in the lane's sandbox (run by
   `srt`): what a check needs from outside is a host on the network list or a folder on the write list
   (`hansa explain lane L` shows both), and a setup that downloads needs its registry on the network
@@ -168,9 +173,10 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   while it runs, nor after "does not hold" unless you say `--despite-check`.
   "Holds, with notes" counts as "holds"; its verification's report lists the rare-state gaps under "Notes".
   Notes go to `hansa gaps`, to be marked.
-- `--lane L` verifies on another lane of the same repository: another model sees other things than
-  the same model, but may judge more strictly and send more work back; use it if the task's provider is
-  new to the desk or its lane is busy.
+- Verifying the same task again goes on in the earlier verification's conversation (same lane, provider
+  and model; never a worker's). `--lane L` gives a fresh look, on another lane of the same repository:
+  another model sees other things than the same model, but may judge more strictly and send more work
+  back; use it if the task's provider is new to the desk or its lane is busy.
 - A verify lane (`hansa lane set V verify_for L ...`) takes the verifications of the lanes it lists.
 - Security, credentials, money, releases or stored data: `hansa verify <id>`, and also have the
   `reviewer` helper read the change.
@@ -236,7 +242,8 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   the coordinator does not send alerts. Only the alert command and Bark entries that encrypt receive release codes. `coordinator`
   alerts say your session has not heard hansa, waits on a dialog, leaves a finished task waiting
   for review, or keeps ending its turns with an API error; `credit` alerts, that a provider ran out of credit;
-  when they mention it, run `hansa status`. Push addresses and their secrets are also the
+  `model` alerts, that a provider rests because it does not know its configured model (the principal
+  changes the model on the page); when they mention it, run `hansa status`. Push addresses and their secrets are also the
   principal's, set and tested on the page (Settings, Alerts). More: `hansa help alerts`.
 
 ## Hearing from hansa
@@ -333,18 +340,23 @@ or ask `scout` when reading is enough; say what you need back.
   provider without using a try (5 times); one that refuses a task (its content filter) does not
   rest. Credit rests until the principal confirms a top-up on the page or saves a new key.
   A lost login (an expired Claude login included) rests that provider until it logs in and
-  `hansa ping NAME` answers; the task moves on without using a try.
-  `hansa show` says when or why it waits. More: `hansa help provider-limits`.
+  `hansa ping NAME` answers; the task moves on without using a try. A task or verification hansa
+  starts again by itself on the same lane, provider and model (not Codex) goes on in its earlier
+  conversation, told what happened. `hansa show` says when or why it waits. More: `hansa help provider-limits`.
+- A provider of the kind Codex (OpenAI's command line) has a program and home the principal sets on
+  the page, and no key; its lost login is Codex's own (log in, then `hansa ping NAME`); providers on
+  one Codex home share usage rests, and a lane's env cannot set `HANSA_CODEX_*`.
 - While a task runs, `hansa status` and `hansa show <id>` say how far it got (replies, minutes idle,
   its last note); Codex counts commands and file changes as replies. Some providers take minutes per reply;
   a task is stuck only when nothing has happened for a long while. Where a run's effort came from:
   `hansa help effort`.
 - Every JVM in a lane prints `Picked up JAVA_TOOL_OPTIONS: ...` first on stderr, so a script that
   reads a version must look for the line holding `version "`. More: `hansa help java`.
-- Each task stops at its lane's ceiling of turns and minutes, set high: reaching it means the task
-  was too big or unclear, or the worker got stuck. It fails with the worker's notes as its report
-  (at the minutes ceiling, then the last call it started and how long before the stop: a long one
-  points to a stuck command): read them, then split the task or make it clearer rather than re-running it unchanged.
+- Every run is told its total time and when it counts from. One that reaches its lane's ceiling of
+  turns or minutes (set high: the task was too big or unclear, or the worker got stuck) is continued
+  once, for at most ten minutes, only to write its report (`hansa status` and `hansa show` say so). A
+  task still fails, with that report (else the worker's notes and last call); a verification's verdict
+  then stands, marked as written after the stop. Split or clarify the task rather than re-run it unchanged.
 - A failed write (a full disk) does not stop `hansa serve`: free space so it can record what it kept.
   More: `hansa help free-space`.
 - hansa replaces the keys it knows wherever it shows or records text. It cannot see into compressed
