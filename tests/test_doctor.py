@@ -39,7 +39,7 @@ class DoctorTest(unittest.TestCase):
         self.addCleanup(fallback.stop)
         for name, body in {"git": "print('git version 2.43.0')",
                            "node": "print('v22.12.0')", "tmux": "print('tmux 3.5')",
-                           "bwrap": "", "socat": "", "apt-get": "", "brew": ""}.items():
+                           "bwrap": "", "socat": "", "rg": "", "apt-get": "", "brew": ""}.items():
             self.tool(name, body)
         self.claude()
         self.package = self.tmp / "lib/node_modules/@anthropic-ai/sandbox-runtime"
@@ -107,7 +107,7 @@ with open({str(self.calls)!r}, 'a') as out:
                 self.assertTrue(result["ok"], result)
                 expected = ["Python", "Git", "Node", "Claude Code", "Claude login", "srt", "tmux"]
                 if platform == "linux":
-                    expected += ["bubblewrap", "socat"]
+                    expected += ["bubblewrap", "socat", "rg"]
                 self.assertEqual([r["name"] for r in result["rows"]], expected + ["Sandbox"])
                 for row in result["rows"]:
                     self.assertEqual(set(row), {"name", "state", "found", "need", "fix"})
@@ -249,6 +249,33 @@ with open({str(self.calls)!r}, 'a') as out:
         rows = self.rows(platform="linux")
         for label in ("Git", "tmux", "bubblewrap", "socat"):
             self.assertIn("docs/getting-started.md", rows[label]["fix"])
+
+    def test_linux_rg_found(self):
+        row = self.rows(platform="linux")["rg"]
+        self.assertEqual(row["state"], "ok")
+        self.assertEqual(row["found"], str(self.bin / "rg"))
+        self.assertEqual(row["fix"], "")
+
+    def test_linux_missing_rg_is_a_note(self):
+        (self.bin / "rg").unlink()
+        for lang, words in (("en", ("missing", "srt", "skips", "nested", "settings")),
+                            ("zh", ("未找到", "srt", "跳过", "嵌套", "设置"))):
+            with self.subTest(lang=lang):
+                result = self.check(platform="linux", lang=lang)
+                self.assertTrue(result["ok"], result)
+                row = next(r for r in result["rows"] if r["name"] == "rg")
+                self.assertEqual(row["state"], "note")
+                for word in words:
+                    self.assertIn(word, row["found"])
+                self.assertIn("sudo apt-get install ripgrep", row["fix"])
+                self.assertIn("rg:", doctor.text(result, lang))
+        (self.bin / "apt-get").unlink()
+        self.assertIn("docs/getting-started.md", self.rows(platform="linux")["rg"]["fix"])
+
+    def test_macos_has_no_rg_row(self):
+        self.assertNotIn("rg", self.rows())
+        (self.bin / "rg").unlink()
+        self.assertNotIn("rg", self.rows())
 
     def test_macos_without_brew_explains_how_to_get_it_in_both_languages(self):
         for name in ("brew", "git", "node", "tmux"):

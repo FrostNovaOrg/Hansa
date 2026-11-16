@@ -213,11 +213,17 @@ Once the login exists, `./dry-run.sh` makes a scratch repository and worktree an
 the adapter, as hansa starts a worker: the same command line, `--settings` from hansa's own functions, a clean
 environment. It prints the answer, then the worktree. The task asks Codex to make `hello.txt`, try `git commit`,
 and write project settings at the top and below it (`sub/.claude` by `mkdir`, by renaming a folder into place and
-as a link). Afterwards `hello.txt` should be there with only the `init` commit, and no `.claude/`, `.codex/` or
-`sub/.claude` of any kind (`sub/x` and `sub/y` may be left): srt must refuse them all. The report should name task
-`dry-run`, which shows the developer instructions arrived; a key or feature this codex does not know ends the run
-at once with `Codex refused its configuration`. Workers never run it: it needs the real Codex and its login. hansa's
-checkout is the one the script is in, unless `HANSA_SRC` names another.
+as a link). Afterwards `hello.txt` should be there with only the `init` commit. On macOS there should be no
+`.claude/`, `.codex/` or `sub/.claude` of any kind (`sub/x` and `sub/y` may be left): srt must refuse them all.
+On Linux srt refuses top-level settings writes, but a new nested folder or link such as `sub/.claude` may remain
+on disk. The script runs hansa's own commit check on the scratch worktree: it stages changes and prints which
+protected paths it refuses, without making a commit. Changes to paths with a `.claude`, `.codex` or `.agents`
+component at any depth are refused at commit; Git does not track empty folders. The closing lines describe the
+expectation for the system running the script.
+
+The report should name task `dry-run`, which shows the developer instructions arrived; a key or feature this
+codex does not know ends the run at once with `Codex refused its configuration`. Workers never run it: it needs
+the real Codex and its login. hansa's checkout is the one the script is in, unless `HANSA_SRC` names another.
 
 ## Tests
 
