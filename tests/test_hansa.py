@@ -163,6 +163,17 @@ def BG_NOTICE(bid, what):
 '''
 exec(BG_SHAPES)
 
+# RESUME_FACTS: what real `claude -p --resume ID` calls showed (Claude Code 2.1.325), on which the stand-in's resumes
+# and the tests of hansa's continuations (run.resume, run.wrap_up) stand:
+# 1. --resume ID keeps the session id; new rows are appended to the same record.
+# 2. In a resumed call's JSON answer, usage (every token number), num_turns and duration_ms cover that call only;
+#    total_cost_usd, modelUsage and duration_api_ms cover the whole conversation, earlier calls included.
+# 3. A run stopped in the middle of a Bash call can be resumed, after SIGTERM and after SIGKILL alike: the interrupted
+#    call is closed with an error result and the new prompt is answered normally. After SIGTERM to its process group
+#    claude exits within about a second with no JSON answer; after SIGKILL the Bash tool's command, which runs in a
+#    process group of its own, survives.
+# 4. --max-turns on a resuming call counts from that call.
+# 5. The system prompt of the first call stays in force on a resume.
 FAKE = r'''#!/usr/bin/env python3
 import json, os, shlex, subprocess, sys, time
 if sys.argv[1:3] == ["agents", "--json"]:  # the live sessions. FAKE_AGENTS: a file the test writes, {pid: status} for
@@ -248,9 +259,29 @@ if "-p" not in sys.argv:  # not a worker's run (claude --version, say): it write
 prompt = sys.stdin.read()
 if "--resume" in sys.argv:  # hansa resuming a run that left background work: it runs it in the foreground
     sid = sys.argv[sys.argv.index("--resume") + 1]
+    left = None  # FAKE_CEILING's leftover, which hansa should have stopped before it resumed the run
+    if os.environ.get("FAKE_CEILING") and os.path.exists(os.environ["FAKE_CEILING"]):
+        try:
+            os.kill(json.load(open(os.environ["FAKE_CEILING"]))["leftover"], 0)
+            left = True
+        except ProcessLookupError:
+            left = False
     if os.environ.get("FAKE_RESUMED"):
-        open(os.environ["FAKE_RESUMED"], "a").write(json.dumps({"prompt": prompt, "argv": sys.argv, "env": {
-            k: os.environ.get(k) for k in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "HANSA_TASK")}}) + "\n")
+        open(os.environ["FAKE_RESUMED"], "a").write(json.dumps({"prompt": prompt, "argv": sys.argv, "leftover_alive": left,
+            "env": {k: os.environ.get(k) for k in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "HANSA_TASK",
+                                                   "HANSA_RUN")}}) + "\n")
+    if os.environ.get("FAKE_RESUME_FAIL"):  # the resumed call ends on an error: a limit, or a program that refuses
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429,  # a resume
+                          "num_turns": 0, "session_id": sid, "result": "API Error: 429 rate_limit_error"}))
+        sys.exit(1)
+    if os.environ.get("FAKE_RESUME_EMPTY"):  # it ends well, with no text
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "session_id": sid,
+                          "result": ""}))
+        sys.exit(0)
+    if os.environ.get("FAKE_RESUME_HANG"):  # a file, written once it runs: it does not end by itself
+        open(os.environ["FAKE_RESUME_HANG"], "w").write("running\n")
+        time.sleep(120)
+        sys.exit(0)
     drop = os.environ.get("FAKE_RESUME_DROP")  # a file: the first resumed run ends on a dropped connection
     if drop and not os.path.exists(drop):
         open(drop, "w").write("dropped\n")
@@ -287,15 +318,40 @@ if "--resume" in sys.argv:  # hansa resuming a run that left background work: it
                  {"type": "user", "message": {"role": "user", "content": [
                      {"type": "tool_result", "tool_use_id": "u9", "content": [{"type": "text", "text": said}]}]},
                   "toolUseResult": result}]
-    report = "Report after the resume: the suite passes."
+    report = os.environ.get("FAKE_RESUME_REPORT") or "Report after the resume: the suite passes."
     rows.append({"type": "assistant", "message": {"id": "r2", "model": "mimo-x", "content": [{"type": "text", "text": report}],
                                                   **counted}})
     with open(rec, "a") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)
     totals = {} if os.environ.get("FAKE_RESUME_NO_TOTALS") else {  # as for a run stopped before it wrote them
         "modelUsage": {"mimo-x": {"inputTokens": 10, "outputTokens": 5}}}
+    if os.environ.get("FAKE_RESUME_WHOLE"):  # as real claude -p --resume answers (RESUME_FACTS 2):
+        whole = {"inputTokens": 0, "outputTokens": 0}  # modelUsage covers the whole conversation, earlier calls too
+        for line in open(rec):
+            u = (json.loads(line).get("message") or {}).get("usage") or {}
+            whole["inputTokens"] += u.get("input_tokens") or 0
+            whole["outputTokens"] += u.get("output_tokens") or 0
+        totals = {"modelUsage": {"mimo-x": whole}, "total_cost_usd": 1.0}
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "session_id": sid,
                       "result": report, **totals}))
+    sys.exit(0)
+if os.environ.get("FAKE_CEILING"):  # a file, written once it works: it works on until hansa stops it at the ceiling,
+    sid = sys.argv[sys.argv.index("--session-id") + 1]  # with a long command left running in a process group of its
+    rec = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "-work", sid + ".jsonl")  # own, as Claude Code's
+    os.makedirs(os.path.dirname(rec), exist_ok=True)  # Bash tool runs one (RESUME_FACTS 3)
+    counted = {"usage": {"input_tokens": 100, "output_tokens": 20}} if os.environ.get("FAKE_RECORD_USAGE") else {}
+    rows = [{"type": "user", "message": {"role": "user", "content": prompt}},
+            {"type": "assistant", "message": {"id": "c1", "model": "mimo-x", "content": [
+                {"type": "text", "text": "Working through the slow tests."}], **counted}},
+            {"type": "assistant", "message": {"id": "c2", "model": "mimo-x", "content": [
+                {"type": "tool_use", "id": "uc", "name": "Bash", "input": {"command": "python3 -m unittest tests.test_slow"}}],
+                **counted}}]
+    with open(rec, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    open("partial.txt", "w").write("half of the work\n")
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True)
+    open(os.environ["FAKE_CEILING"], "w").write(json.dumps({"leftover": child.pid}))
+    time.sleep(120)
     sys.exit(0)
 killed()
 compat =bool(os.environ.get("ANTHROPIC_BASE_URL"))
@@ -33841,7 +33897,7 @@ def save():'''))
                       argv[argv.index("--append-system-prompt") + 1])
         self.assertIn("Run the full test suite", prompt)
         self.assertIn("in the foreground, in one Bash call", prompt)
-        self.assertIn("This is the only time hansa resumes you", prompt)
+        self.assertIn("This is the only time hansa resumes you to go on with the work", prompt)
         self.assertEqual(calls[0]["env"]["HANSA_TASK"], tid)
         self.assertEqual(calls[0]["env"]["BASH_MAX_TIMEOUT_MS"], str(60000 * 240))
         self.assertEqual(calls[0]["env"]["BASH_DEFAULT_TIMEOUT_MS"], str(60000 * 10))
@@ -33914,6 +33970,214 @@ def save():'''))
         self.assertIsNone(m.get("resumed"))
         self.assertFalse(seen.exists())
         self.assertEqual(self.events("task_resumed"), [])
+
+    # A run stopped at the time ceiling is continued once, in its own session, to write its report (run.wrap_up).
+    # The stand-in claude's FAKE_CEILING run works on until hansa stops it; its --resume branch is the continuation.
+    # Each case of the change and its test:
+    # | a worker reaches the ceiling                | test_a_worker_stopped_at_the_ceiling_writes_its_report_after_the_stop |
+    # | a verifier reaches it, with/without verdict | test_a_verifier_stopped_at_the_ceiling_gives_the_verdict_it_writes_after_the_stop |
+    # | the continuation fails, gives no text, is   | test_a_continuation_that_gives_no_report_ends_the_task_as_a_stop_at_the_ceiling |
+    # |   refused, or cannot start                  |                                                           |
+    # | it does not end in its few minutes          | test_a_continuation_that_runs_out_of_its_minutes_is_stopped_and_says_so |
+    # | hansa cancel while it runs                  | test_a_cancel_while_the_run_writes_its_report_cancels_it |
+    # | hansa serve restarts while it runs          | test_a_restarted_server_keeps_the_continuations_deadline_and_never_continues_twice |
+    # | status and show while it runs               | test_a_continuation_that_runs_out_of_its_minutes_is_stopped_and_says_so |
+    # | tokens and worth                            | the worker's test; test_cost_counts_a_resumed_run_whose_answer_covers_the_whole_conversation_once |
+    # | the post and its next step                  | the worker's test                                         |
+    # | cancelled, or stopped at the turn ceiling   | test_a_run_cancelled_or_stopped_at_the_turn_ceiling_is_not_continued |
+
+    def ceiling_run(self, kind="work", env=None, during=None, parent=None) -> tuple:
+        """A worker (or verifier) on mimo that works until hansa stops it at the lane's time ceiling (240 minutes),
+        with its session record counting 100 in, 20 out a reply (two replies); then settled. during(d, tid): called
+        once the continuation runs, if it is. (its meta, the continuation calls the stand-in saw)."""
+        flag, seen = self.tmp / f"ceiling-{uuid.uuid4().hex}.json", self.tmp / f"resumed-{uuid.uuid4().hex}.jsonl"
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://x"}
+        s["lanes"]["a"]["providers"] = ["mimo"]
+        s["lanes"]["a"]["env"] = {"FAKE_CEILING": str(flag), "FAKE_RESUMED": str(seen), "FAKE_RECORD_USAGE": "1",
+                                  **(env or {})}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("mimo", "sk-test-01")
+        tid = (self.desk.new_task("Verify the badge", kind="verify", lane="a", **({"parent": parent} if parent else {}))
+               if kind == "verify" else self.desk.new_task("Fix the badge"))
+        if parent:
+            self.desk.update(parent, verify=tid)
+        d, end = Dispatcher(self.desk), time.time() + 60
+        while not flag.exists() and time.time() < end:  # the run works, and has left its long command running
+            d.tick()
+            time.sleep(0.1)
+        self.assertTrue(flag.exists(), self.desk.meta(tid))
+        self.desk.update(tid, started=time.time() - 60 * 241)  # and its time is up
+        if during:
+            while time.time() < end and self.desk.meta(tid)["state"] == "running" and not (
+                    self.desk.meta(tid).get("wrap_up") and self.desk.meta(tid).get("pid")
+                    and Path((env or {}).get("FAKE_RESUME_HANG", "/nonexistent")).exists()):
+                d.tick()
+                time.sleep(0.1)
+            d = during(d, tid) or d
+        m = self.settle(d, tid)
+        calls = [json.loads(x) for x in seen.read_text().splitlines()] if seen.exists() else []
+        return m, calls
+
+    def test_a_worker_stopped_at_the_ceiling_writes_its_report_after_the_stop(self):
+        from hansa import run
+        m, calls = self.ceiling_run()
+        report = "Report after the resume: the suite passes."
+        # still failed, with its own report: never checked or merged as a finished run is
+        self.assertEqual((m["state"], m.get("phase")), ("failed", ""), m)
+        self.assertTrue(m["error"].startswith("stopped at the ceiling of 240 minutes"), m["error"])
+        self.assertIn("report was written after the stop", m["error"])
+        self.assertEqual((self.desk.tasks_dir / m["id"] / "result.md").read_text(), report + "\n")
+        self.assertEqual(m["files"], ["partial.txt"])  # its work is committed as before
+        self.assertIsNone(m.get("check"))
+        # continued once, in its own session (RESUME_FACTS 1), a few turns (RESUME_FACTS 4), told why and what for
+        [call] = calls
+        argv, prompt = call["argv"], " ".join(call["prompt"].split())
+        self.assertEqual(argv[argv.index("--resume") + 1], m["session_id"])
+        self.assertNotIn("--session-id", argv)
+        self.assertEqual(argv[argv.index("--max-turns") + 1], str(run.WRAP_UP_TURNS))
+        self.assertEqual(call["env"]["HANSA_TASK"], m["id"])
+        for words in ("240 minutes", "has been stopped", f"{run.WRAP_UP_MIN} minutes", "will not ask again",
+                      "start nothing long", "half-edited", "what is done", "not done or not checked"):
+            self.assertIn(words, prompt)
+        self.assertNotIn("VERDICT", prompt)
+        self.assertIs(call["leftover_alive"], False)  # what it left running was stopped first (RESUME_FACTS 3)
+        self.assertTrue(m["wrap_up"]["wrote"])
+        self.assertFalse((self.desk.state_dir / "runs" / m["id"] / run.RESUME_ARGV).exists())
+        # tokens, each once: the stopped part's from its record (200 in, 40 out), the continuation's own (10, 5)
+        self.assertEqual((m["usage"]["mimo-x"]["in"], m["usage"]["mimo-x"]["out"]), (210, 45))
+        self.assertEqual(sum(r["in"] for r in cost.report(self.desk, 1)["rows"] if r["task"] == m["id"]), 210)
+        # and the same when the continuation's answer covers the whole conversation (RESUME_FACTS 2)
+        m2, _ = self.ceiling_run(env={"FAKE_RESUME_WHOLE": "1"})
+        self.assertEqual((m2["usage"]["mimo-x"]["in"], m2["usage"]["mimo-x"]["out"]), (210, 45))
+        # the post carries the new error; its next step is the one a run stopped at the ceiling has
+        line = notify.task_line(self.desk, m)
+        self.assertIn("report was written after the stop", line)
+        self.assertIn("read its notes, then split the task", line.split(" · next: ")[1])
+        self.assertIn(("task_wrap_up", m["id"]), [(e["event"], e.get("task")) for e in
+                                                  map(json.loads, self.desk.events_path.read_text().splitlines())])
+
+    def test_a_verifier_stopped_at_the_ceiling_gives_the_verdict_it_writes_after_the_stop(self):
+        parent = self.desk.new_task("Fix the badge")
+        self.desk.update(parent, state="done", commits=1)
+        m, [call] = self.ceiling_run("verify", parent=parent, env={
+            "FAKE_RESUME_REPORT": "Ran the badge tests: they pass. Did not reach the docs.\nVERDICT: unsure"})
+        self.assertEqual((m["state"], m["verdict"], m["error"]), ("done", "unsure", ""), m)
+        prompt = " ".join(call["prompt"].split())
+        for words in ("what you ran", "did not reach", "verdict", "holds only if everything", "does not hold if",
+                      "otherwise unsure"):
+            self.assertIn(words, prompt)
+        for shown in (views.show_text(self.desk, m["id"]), views.show_text(self.desk, parent),
+                      notify.task_line(self.desk, m)):
+            self.assertIn("unsure (written after the stop at the ceiling of 240 minutes)", shown)
+        # without a verdict in its answer: failed, with the answer as its report
+        m, _ = self.ceiling_run("verify", env={"FAKE_RESUME_REPORT": "Ran the badge tests; no time for more."})
+        self.assertEqual((m["state"], m["verdict"]), ("failed", ""), m)
+        self.assertIn("report was written after the stop", m["error"])
+        self.assertEqual((self.desk.tasks_dir / m["id"] / "result.md").read_text(),
+                         "Ran the badge tests; no time for more.\n")
+        self.assertNotIn("written after the stop at the ceiling", views.show_text(self.desk, m["id"]))
+
+    def test_a_continuation_that_gives_no_report_ends_the_task_as_a_stop_at_the_ceiling(self):
+        from hansa import run
+        today = f"stopped at the ceiling of 240 minutes: {run.CEILING}"
+        for case, env in (("an error answer (a limit, or a program that refuses a resume)", {"FAKE_RESUME_FAIL": "1"}),
+                          ("no text", {"FAKE_RESUME_EMPTY": "1"})):
+            with self.subTest(case):
+                m, calls = self.ceiling_run(env=env)
+                self.assertEqual(len(calls), 1)  # tried once, and only once
+                self.assertEqual((m["state"], m["error"]), ("failed", today), m)
+                text = (self.desk.tasks_dir / m["id"] / "result.md").read_text()
+                self.assertTrue(text.startswith(run.STOPPED_NOTE + "Working through the slow tests."), text)
+                self.assertIn("Bash: python3 -m unittest tests.test_slow", text)  # its last call, before the stop
+                self.assertNotIn("Report after the resume", text)
+                self.assertEqual([a.get("kind") for a in m.get("attempts") or []], [])  # not queued again
+                self.assertFalse((self.desk.provider_state().get("mimo") or {}).get("cool_until"))  # no rest
+                self.assertEqual(m["usage"]["mimo-x"]["in"], 200)
+        with self.subTest("its temporary folder is gone"):
+            real = run.wrap_up
+
+            def folder_gone(desk, tid):
+                shutil.rmtree(desk.meta(tid)["worker_tmp"], ignore_errors=True)
+                return real(desk, tid)
+            with unittest.mock.patch.object(run, "wrap_up", side_effect=folder_gone):
+                m, calls = self.ceiling_run()
+            self.assertEqual((calls, m["state"], m["error"], m.get("wrap_up")), ([], "failed", today, None), m)
+
+    def test_a_continuation_that_runs_out_of_its_minutes_is_stopped_and_says_so(self):
+        from hansa import run
+        hang = self.tmp / "hang"
+        seen = {}
+
+        def look(d, tid):  # while it writes: status and show say so where they say how far the run got
+            seen["show"] = views.show_text(self.desk, tid)
+            seen["status"] = views.status_text(views.status(self.desk))
+            wu = self.desk.meta(tid)["wrap_up"]
+            self.desk.update(tid, wrap_up={**wu, "at": wu["at"] - 60 * run.WRAP_UP_MIN - 5})  # its minutes are up
+        m, calls = self.ceiling_run(env={"FAKE_RESUME_HANG": str(hang)}, during=look)
+        for where in ("show", "status"):
+            self.assertIn("reached its ceiling of 240 minutes and was stopped; it is writing its report", seen[where])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertTrue(m["error"].startswith("stopped at the ceiling of 240 minutes"), m["error"])
+        self.assertIn(f"not written in the {run.WRAP_UP_MIN} minutes given after the stop", m["error"])
+        self.assertTrue((self.desk.tasks_dir / m["id"] / "result.md").read_text().startswith(run.STOPPED_NOTE))
+        self.assertNotIn("writing its report", views.show_text(self.desk, m["id"]))
+
+    def test_a_cancel_while_the_run_writes_its_report_cancels_it(self):
+        def cancel(d, tid):
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["--desk", str(self.desk.root), "cancel", tid])
+        m, calls = self.ceiling_run(env={"FAKE_RESUME_HANG": str(self.tmp / "hang")}, during=cancel)
+        self.assertEqual((m["state"], m["error"], len(calls)), ("cancelled", "cancelled", 1), m)
+
+    def test_a_restarted_server_keeps_the_continuations_deadline_and_never_continues_twice(self):
+        from hansa import run
+
+        def restart(d, tid):  # a new server, which did not start the continuation, takes it over
+            wu = self.desk.meta(tid)["wrap_up"]
+            self.desk.update(tid, wrap_up={**wu, "at": wu["at"] - 60 * run.WRAP_UP_MIN - 5})
+            new, old = Dispatcher(self.desk), d.procs[tid]
+            # the old server's child, once stopped, is reaped by the system, as a real restart leaves it
+            return types.SimpleNamespace(tick=lambda: (new.tick(), old.poll()))
+        m, calls = self.ceiling_run(env={"FAKE_RESUME_HANG": str(self.tmp / "hang")}, during=restart)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(m["state"], "failed", m)
+        self.assertIn("not written in the", m["error"])
+        self.assertFalse(run.alive(m.get("pid")))
+
+    @unittest.mock.patch("hansa.run.PROBE_MINUTES", 0, create=True)
+    def test_cost_counts_a_resumed_run_whose_answer_covers_the_whole_conversation_once(self):
+        # RESUME_FACTS 2: a resumed call's modelUsage covers the run before it too; its own part is counted once
+        m = self.resumed_tries(FAKE_RESUME_WHOLE="1")
+        self.assertTrue(m["resumed"])
+        self.assertEqual((m["usage"]["mimo-x"]["in"], m["usage"]["mimo-x"]["out"]), (300 + 10, 60 + 5))
+        self.assertEqual(self.counted(m), (310, 310))
+
+    def test_a_run_cancelled_or_stopped_at_the_turn_ceiling_is_not_continued(self):
+        from hansa import run
+        seen = self.tmp / "resumed.jsonl"
+        self.transcript_run("plain")  # sets lane a up on mimo
+        s = self.desk.settings()
+        s["lanes"]["a"]["env"] = {"FAKE_TRANSCRIPT": "late-tool", "FAKE_TRANSCRIPT_STOPPED": "1", "FAKE_RESUMED": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        m = self.settle(Dispatcher(self.desk), self.desk.new_task("Fix the badge again"))
+        self.assertEqual(m["state"], "failed", m)
+        self.assertTrue(m["error"].startswith("stopped at the ceiling of 200 turns"), m)
+        self.assertTrue((self.desk.tasks_dir / m["id"] / "result.md").read_text().startswith(run.STOPPED_NOTE))
+        flag = self.tmp / "ceiling.json"
+        s["lanes"]["a"]["env"] = {"FAKE_CEILING": str(flag), "FAKE_RESUMED": str(seen)}
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Fix the badge once more")
+        d, end = Dispatcher(self.desk), time.time() + 60
+        while not flag.exists() and time.time() < end:
+            d.tick()
+            time.sleep(0.1)
+        self.desk.update(tid, cancel=True)
+        m = self.settle(d, tid)
+        self.assertEqual(m["state"], "cancelled", m)
+        self.assertIsNone(m.get("wrap_up"))
+        self.assertFalse(seen.exists())
 
     def test_read_bounded_drops_a_margin_so_no_part_of_a_key_survives_a_cut(self):
         from hansa import run
@@ -47378,6 +47642,9 @@ else if (ask === "task-steps")'''))
             ("the lane's setup command failed (exit 4), so the worker never started; hansa show t0001 has the setup's last lines", "退出码 4"),
             (f"stopped at the ceiling of 30 minutes: {run.CEILING}", "30 分钟"),
             (f"stopped at the ceiling of 12 turns: {run.CEILING}", "12 轮"),
+            (f"stopped at the ceiling of 45 minutes; its report was written after the stop: {run.CEILING}", "补写"),
+            (f"stopped at the ceiling of 45 minutes, and its report was not written in the 10 minutes given after the "
+             f"stop either: {run.CEILING}", "10 分钟内也没有"),
             ("error: no output (exit 1)", "没有输出"),
             ("error: model said <&>", "程序报告"),
             ("hansa serve stopped as it started the release, so whether its command ran is not known: read its output (hansa release), and ask again if it has to go out", "hansa up"),

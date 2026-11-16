@@ -1803,8 +1803,10 @@ def progress_of(desk: Desk, m: dict) -> dict:
             replies, last, note = d["replies"], d["last"], d["note"]
         except (OSError, ValueError, UnicodeError, OverflowError):
             pass
+    wu = m.get("wrap_up") or {}  # continued after the time ceiling, writing its report (wrap_up)
     return {"replies": replies, "idle_min": int((time.time() - last) // 60) if last is not None else None,
-            "note": desk.redact(note[:160])}
+            "note": desk.redact(note[:160]),
+            **({"wrap_up_min": wu.get("limit_min")} if wu and m.get("state") == "running" else {})}
 
 
 def provider_env(desk: Desk, name: str, p: dict, run: bool = True) -> dict:
@@ -4376,7 +4378,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         # the session id is on the worker's command line: a server that stops right after starting it
         # can still find it when it comes back
         desk.change(tid, lambda x: {"launch": sid, "session_id": sid, "base": base, "branch": f"task/{tid}",
-                                   "worktree": str(wt), "setup_ran": bool(lane.get("setup")), "resumed": None,
+                                   "worktree": str(wt), "setup_ran": bool(lane.get("setup")), "resumed": None, "wrap_up": None,
                                    "check_retry": None, **oom_begin(x)})
         with open(d / "task.md", "rb") as stdin, open(raw / "run.json", "wb") as out, \
                 open(raw / "run.err", "wb") as err:
@@ -4389,9 +4391,11 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     return proc
 
 
-def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: dict, tmp: str, wt=None) -> dict:
-    """The environment of a task or verification worker's Claude Code, for its start and its one resume."""
-    bench = None if getattr(desk, "_bench_off", False) else getattr(desk, "_bench", None)
+def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: dict, tmp: str, wt=None,
+               bench_ok: bool = True) -> dict:
+    """The environment of a task or verification worker's Claude Code, for its start and its continuations
+    (resume, wrap_up; the one after the ceiling is given no bench: it starts nothing)."""
+    bench = None if getattr(desk, "_bench_off", False) or not bench_ok else getattr(desk, "_bench", None)
     extra = bench.register(tid, lane, tmp, wt) if bench and desk.settings()["bench"]["enabled"] else {}
     return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), **extra, "HANSA_TASK": tid,
             "HANSA_RUN": tmp_mark(desk, tid, tmp), "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
@@ -4399,18 +4403,41 @@ def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: 
             "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
 
 
-# A worker that ended its turn while background work it started still ran (background_left) has its session
-# resumed once, with RESUME_NOTE, so the run is not lost: hansa stopped that work with the worker, so it runs
-# it again in the foreground and then reports. Only once (meta "resumed"): a second time it ends as it is,
-# and the task says what was left running. The worker's own command line, without the lane's setup around it,
-# is kept in the run's raw folder (RESUME_ARGV) for this; its time limit still counts from the task's start.
+# hansa continues a worker's own session (claude -p --resume) in two cases only, each at most once:
+# 1. It ended its turn while background work it started still ran (background_left): resumed with RESUME_NOTE,
+#    so the run is not lost: hansa stopped that work with the worker, so it runs it again in the foreground and
+#    then reports. Only once (meta "resumed"): a second time it ends as it is, and the task says what was left
+#    running. Its time limit still counts from the task's start.
+# 2. It was stopped at the lane's time ceiling (timed_out): continued with WRAP_UP_NOTE, for a few minutes and
+#    turns, only to write its report from what it already has (wrap_up, meta "wrap_up"). The task still fails
+#    (a verification with a verdict in that report ends with it): a run that did not finish is not checked or
+#    merged as if it had. Only once (meta "wrap_up"); not after a cancel or any other stop.
+# These are the only times: a run resumed in the first case that then reaches the ceiling is continued once more,
+# in the second; nothing else continues a run. The worker's own command line, without the lane's setup around it,
+# is kept in the run's raw folder (RESUME_ARGV) for both.
 RESUME_ARGV = "worker-argv.json"
 RESUME_NOTE = """Your turn ended while work you started in the background was still running: {left}.
 You have {remaining} whole minutes left under this run's original time limit.
 hansa stopped it when your turn ended. Run what you still need of it again in the foreground, in one
 Bash call with a long enough timeout (the Bash tool's timeout, in milliseconds, up to {bash_ms}: {bash_min}
 minutes), and wait for it to finish. Then
-write your report, as your instructions say. This is the only time hansa resumes you.
+write your report, as your instructions say. This is the only time hansa resumes you to go on with the work;
+should the run reach its time limit, hansa continues it once more, only to have its report written.
+"""
+WRAP_UP_MIN = 10  # the continuation after the time ceiling (wrap_up): its minutes, counted from its start,
+WRAP_UP_TURNS = 10  # and its turns (--max-turns on a resuming call counts from that call: RESUME_FACTS 4, tests)
+CEILING_NOTES = "ceiling-notes.md"  # the stopped run's notes report, read before the continuation adds to its record
+WRAP_UP_NOTE = """hansa stopped this run because it reached its time limit of {limit} minutes. Whatever you were
+running has been stopped. You have {minutes} minutes now, and hansa will not ask again: start nothing long,
+and do not go on with the work. If a file is left half-edited, say which.
+{what}"""
+WRAP_UP_WORKER = """Write your report now, from what you already know: what is done and in the worktree, what you
+checked and how it came out, and what is not done or not checked. End it as your instructions say.
+"""
+WRAP_UP_VERIFIER = """Write your report now, from what you already know: what you ran and what happened, and what
+you did not reach. Then end with the verdict line, in the form your instructions give: holds only if
+everything the task asks had been checked and only this report was missing; does not hold if you found a
+defect; otherwise unsure.
 """
 
 
@@ -4463,6 +4490,98 @@ def resume(desk: Desk, tid: str):
             desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
     desk.event("task_resumed", task=tid, lane=lane_name, provider=pname, left=[desk.redact(x) for x in left])
     return proc
+
+
+def wrap_up(desk: Desk, tid: str):
+    """Continue a task or verification worker stopped at the lane's time ceiling once, in its own session, only to
+    write its report (see RESUME_ARGV): its new process, or None when it is not continued (then it ends as a run
+    stopped at the ceiling did before). Not after a cancel or any other stop, and never twice (meta "wrap_up")."""
+    meta = desk.meta(tid)
+    if not meta.get("timed_out") or meta.get("wrap_up") or meta.get("cancel") or meta.get("state") != "running" \
+            or meta.get("phase") in ("starting", "checking"):
+        return None
+    s = desk.settings()
+    lane_name, pname = meta.get("lane") or "", meta.get("provider") or ""
+    lane, p = s["lanes"].get(lane_name), s["providers"].get(pname)
+    raw = desk.state_dir / "runs" / tid
+    sid, tmp = meta.get("session_id") or "", meta.get("worker_tmp") or ""
+    if not (lane and p and sid and tmp and os.path.isdir(tmp) and (raw / RESUME_ARGV).is_file()
+            and meta.get("worktree")) or (meta.get("setup_ran") and not (raw / "setup.log.done").exists()):
+        return None  # no command line, folder or session to continue; or the lane's setup was what ran out of time
+    wt = Path(meta["worktree"])
+    try:
+        check_git_file(desk, wt)
+        argv = json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8"))
+        argv[argv.index("--session-id")] = "--resume"
+        argv[argv.index("--max-turns") + 1] = str(WRAP_UP_TURNS)  # counted from this call (RESUME_FACTS 4)
+    except (GitFileChanged, OSError, ValueError, IndexError):  # finish says what happened
+        return None
+    home = config_home(desk, pname, p)
+    resumed = meta.get("resumed") or {}
+    # The report a run stopped at the ceiling had (finish), from the record as the stop left it: should the
+    # continuation give none, the task ends with this, not with what the continuation added to the record.
+    notes = read_detail(desk, tid, "notes", "", notes_of, home, sid)
+    kept = STOPPED_NOTE + notes if notes else ""
+    call = read_detail(desk, tid, "last call", "", last_call, home, sid, now())
+    kept += ("\n\n" if kept else "") + call if call else ""
+    write_text(raw / CEILING_NOTES, kept)
+    sweep(desk, tid)  # what the stopped run left running ends now, as at a run's end
+    limit = lane.get("timeout_min", 240)
+    note = WRAP_UP_NOTE.format(limit=limit, minutes=WRAP_UP_MIN,
+                               what=WRAP_UP_VERIFIER if meta.get("kind") == "verify" else WRAP_UP_WORKER)
+    # the stopped part's tokens, as finish reads a stopped run's: with the run before a resume, if there was one
+    stopped = read_detail(desk, tid, "usage", {}, usage_from_record, home, sid, resumed.get("rows", 0))
+    if resumed:
+        stopped = add_usage(resumed.get("usage") or {}, stopped)
+    env = worker_env(desk, tid, lane_name, lane, pname, p, tmp, wt, bench_ok=False)
+    with desk.lock():  # a cancel or another end lands before this (ended as at the ceiling) or after it (cancelled)
+        now_meta = desk.meta(tid)
+        if now_meta.get("cancel") or now_meta.get("wrap_up") or not now_meta.get("timed_out") \
+                or now_meta.get("state") != "running" or now_meta.get("session_id") != sid:
+            return None
+        desk.update(tid, wrap_up={"at": now(), "limit_min": limit, "rows": len(_rows(home, sid) or []),
+                                  "usage": stopped, "late": False, "wrote": False})
+        with tempfile.TemporaryFile() as stdin, open(raw / "run.json", "wb") as out, open(raw / "run.err", "ab") as err:
+            stdin.write(note.encode("utf-8"))
+            stdin.seek(0)
+            proc = subprocess.Popen(with_oom_score(argv, str(wt), env), cwd=str(wt), env=env, stdin=stdin, stdout=out,
+                                    stderr=err, start_new_session=True)
+        with recording_start(desk, None, proc.pid, proc):
+            desk.update(tid, pid=proc.pid, pid_start=proc_start(proc.pid))
+    desk.event("task_wrap_up", task=tid, lane=lane_name, provider=pname, limit_min=limit)
+    return proc
+
+
+def holds_usage(total: dict, part: dict) -> bool:
+    """Whether usage `total` (usage_of) holds `part` in full: each of its models, with at least its tokens."""
+    return all(m in total and all((total[m].get(k) or 0) >= (u.get(k) or 0)
+                                  for k in ("in", "out", "cache_read", "cache_write")) for m, u in part.items())
+
+
+def less_usage(total: dict, part: dict) -> dict:
+    """Usage `total` without `part` (holds_usage), by model; a model left with no tokens is left out."""
+    out = {}
+    for m, u in total.items():
+        t, b = dict(u), part.get(m) or {}
+        for k in ("in", "out", "cache_read", "cache_write"):
+            t[k] = (t.get(k) or 0) - (b.get(k) or 0)
+        cost = (t.get("claude_code_usd"), b.get("claude_code_usd") if b else 0)
+        t["claude_code_usd"] = None if None in cost else cost[0] - cost[1]
+        if any(t[k] for k in ("in", "out", "cache_read", "cache_write")):
+            out[m] = t
+    return out
+
+
+def continued_usage(desk: Desk, tid: str, run: dict, before: dict, home, sid: str, rows: int) -> dict:
+    """A continued run's own tokens (resume, wrap_up): the session record's rows after it began (rows); when
+    those carry no counts, its answer's, less the part before it (`before`) where the answer holds that part:
+    a resumed call's modelUsage and total_cost_usd cover the whole conversation, earlier calls included (RESUME_FACTS 2
+    in tests/test_hansa.py), while what Claude Code restores of a stopped call's totals is not known."""
+    own = read_detail(desk, tid, "usage", {}, usage_from_record, home, sid, rows) if home is not None and rows else {}
+    if own:
+        return own
+    said = read_detail(desk, tid, "usage", {}, usage_of, run)
+    return less_usage(said, before) if before and holds_usage(said, before) else said
 
 
 def add_usage(a: dict, b: dict) -> dict:
@@ -4665,32 +4784,46 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     set_up = not meta.get("setup_ran") or done.exists()  # else the worker never started: nothing is its work
     done.unlink(missing_ok=True)
     (done.parent / RESUME_ARGV).unlink(missing_ok=True)
+    kept_notes = done.parent / CEILING_NOTES  # wrap_up's: the report of a run stopped at the ceiling, before it
+    stopped_report = kept_notes.read_text(encoding="utf-8", errors="replace") if kept_notes.is_file() else None
+    kept_notes.unlink(missing_ok=True)
     remove_sandbox_tmp(desk, tid)
     publish(desk, tid, "run.json", "run.err", "setup.log")
     run = read_json(d / "run.json", {}) or {}
+    wu = meta.get("wrap_up") or {}  # continued after the time ceiling to write its report (wrap_up)
+    # what it wrote then is its report only when that continuation ended well, in its time, with text
+    wrote = bool(wu) and not wu.get("late") and not run.get("is_error") and run.get("subtype") == "success" \
+        and bool(str(run.get("result") or "").strip())
     # killed by the system once the lane's setup had finished, before the worker wrote its result; hansa's own stops
     # (a changed .git file, cancel, sandbox_failed, timed_out) keep their branches, which come first.
     # Then the kill, before its stderr is read for the provider's quota, key, login or refusal (unusable_reason)
     killed = not run and set_up and returncode in KILLED_EXITS
     err = (d / "run.err").read_text(encoding="utf-8", errors="replace")[-3000:] if (d / "run.err").exists() else ""
     setup = SETUP_FAILED.search(err)  # then the worker never started: nothing here is the provider's doing
-    result = run.get("result") or ""
+    result = (run.get("result") or "") if wrote or not wu else ""  # a failed continuation's words are no report
     report = result
     stopped = meta.get("timed_out") or run.get("subtype") == "error_max_turns"
     p = desk.settings()["providers"].get(meta.get("provider"))
-    usage = read_detail(desk, tid, "usage", {}, usage_of, run)
-    if not usage and p:
-        usage = read_detail(desk, tid, "usage", {}, lambda: usage_from_record(
-            config_home(desk, meta["provider"], p), meta.get("session_id", ""), (meta.get("resumed") or {}).get("rows", 0)))
+    home = config_home(desk, meta["provider"], p) if p else None
     resumed = meta.get("resumed") or {}
-    if resumed.get("usage"):  # the first run's, before hansa resumed it
-        usage = add_usage(resumed["usage"], usage)
+    if wu:  # the stopped part's (with a resume's first run), as wrap_up read it, and the continuation's own
+        usage = add_usage(wu.get("usage") or {}, continued_usage(desk, tid, run, wu.get("usage") or {}, home,
+                                                                 meta.get("session_id", ""), wu.get("rows", 0)))
+    elif resumed:  # the first run's, before hansa resumed it, and the resumed run's own
+        usage = add_usage(resumed.get("usage") or {}, continued_usage(desk, tid, run, resumed.get("usage") or {}, home,
+                                                                      meta.get("session_id", ""), resumed.get("rows", 0)))
+    else:
+        usage = read_detail(desk, tid, "usage", {}, usage_of, run)
+        if not usage and p:
+            usage = read_detail(desk, tid, "usage", {}, usage_from_record, home, meta.get("session_id", ""))
     late = read_detail(desk, tid, "report after notices", None, report_after_notices,
                        config_home(desk, meta["provider"], p), meta.get("session_id", "")) \
         if p and not stopped else None
     if late:
         report = late[0] + "".join(LATE_NOTE + x for x in late[1])
-    if stopped and not result.strip() and p:
+    if stopped and not result.strip() and wu and stopped_report is not None:
+        report = stopped_report  # the continuation gave no report: the one the stop left, as wrap_up read it
+    elif stopped and not result.strip() and p:
         notes = read_detail(desk, tid, "notes", "", notes_of, config_home(desk, meta["provider"], p),
                             meta.get("session_id", ""))
         report = STOPPED_NOTE + notes if notes else ""
@@ -4711,8 +4844,10 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
                                  for x in denied],
               "background_left": [desk.redact(x) for x in read_detail(
                   desk, tid, "background work left", [], background_left, config_home(desk, meta["provider"], p),
-                  meta.get("session_id", ""), resumed.get("rows", 0))] if p else []}
-    if resumed.get("turns") and isinstance(fields["turns"], int):
+                  meta.get("session_id", ""), wu.get("rows", 0) if wrote else resumed.get("rows", 0))] if p else []}
+    if wu:  # the stopped part left no count of its turns, so the run's are not known, as for any run stopped so
+        fields.update(turns=None, wrap_up={**wu, "wrote": wrote})
+    elif resumed.get("turns") and isinstance(fields["turns"], int):
         fields["turns"] += resumed["turns"]
     if meta.get("kind") == "verify":
         found = VERDICT.findall(report if late else result)
@@ -4797,10 +4932,12 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
         fields["setup_exit"] = int(setup.group(1))
     subscription = (desk.settings()["providers"].get(meta.get("provider")) or {}).get("kind") == "subscription"
     codex = (p or {}).get("kind") == "codex"
-    kind, why = ("", "") if meta.get("cancel") or setup or changed or killed else \
+    # what the continuation after the ceiling met (a limit, a dropped connection, a refusal) rests no provider and
+    # queues nothing again: the task ends as one stopped at the ceiling
+    kind, why = ("", "") if meta.get("cancel") or setup or changed or killed or wu else \
         unusable_reason(run, err, subscription, codex=codex)
     # a report written before the connection went is the worker's finished work: that run ends as it did
-    net = "" if kind or late else network_reason(run, err)
+    net = "" if kind or late or wu else network_reason(run, err)
     if not kind and not net and run and not run.get("is_error"):
         # A real answer consumes the early-check guard; a later, unrelated limit can be probed.
         with desk.lock():
@@ -4818,7 +4955,16 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
                                   f"started; hansa show {tid} has the setup's last lines")
     elif meta.get("timed_out"):
         lane = desk.settings()["lanes"].get(meta.get("lane"), {})
-        state, error = "failed", f"stopped at the ceiling of {lane.get('timeout_min', 240)} minutes: {CEILING}"
+        limit = wu.get("limit_min") or lane.get("timeout_min", 240)
+        if wrote and meta.get("kind") == "verify" and fields.get("verdict"):
+            state, error = "done", ""  # a verification ends with the verdict it wrote after the stop (wrap_up)
+        elif wrote:  # never checked or merged as if it had finished: it failed, with its report
+            state, error = "failed", f"stopped at the ceiling of {limit} minutes; its report was written after the stop: {CEILING}"
+        elif wu.get("late"):
+            state, error = "failed", (f"stopped at the ceiling of {limit} minutes, and its report was not written in the "
+                                      f"{WRAP_UP_MIN} minutes given after the stop either: {CEILING}")
+        else:
+            state, error = "failed", f"stopped at the ceiling of {limit} minutes: {CEILING}"
     elif run.get("subtype") == "error_max_turns":
         turns = meta.get("max_turns") or desk.settings()["lanes"].get(meta.get("lane"), {}).get("max_turns", 300)
         state, error = "failed", f"stopped at the ceiling of {turns} turns: {CEILING}"
@@ -4933,7 +5079,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             # (resumed) is keyed to its session, and its usage is in this run's: a new try starts without it
             tries = [*attempts[:-1], {**attempts[-1], **run_numbers(meta, fields)}]
             kept = {"usage": {}, "turns": None}
-        again = {"resumed": None, "restart": None} if final == "queued" else {}
+        again = {"resumed": None, "wrap_up": None, "restart": None} if final == "queued" else {}
         if (final == "queued" and len(attempts) > len(meta.get("attempts", []))
                 and meta.get("kind") != "verify"
                 and (kind in ("quota", "credit") or net or attempts[-1].get("kind") == "killed")):
@@ -6570,11 +6716,14 @@ class Dispatcher:
         if self.desk.meta(tid).get("phase") == "checking":
             finish_check(self.desk, tid)
         else:
-            try:
-                proc = resume(self.desk, tid)
-            except Exception as e:  # noqa: BLE001 - the run ends as it did, and the event log says why
-                self.desk.event("resume_failed", task=tid, error=self.desk.redact(f"{type(e).__name__}: {e}")[:300])
-                proc = None
+            proc = None
+            for go_on, failed in ((resume, "resume_failed"), (wrap_up, "wrap_up_failed")):
+                try:
+                    proc = go_on(self.desk, tid)
+                except Exception as e:  # noqa: BLE001 - the run ends as it did, and the event log says why
+                    self.desk.event(failed, task=tid, error=self.desk.redact(f"{type(e).__name__}: {e}")[:300])
+                if proc:
+                    break
             if proc:
                 self.procs[tid] = proc
                 return
@@ -7097,16 +7246,18 @@ class Dispatcher:
                 limit = 60 * s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240)
                 began = ((m.get("check_started") or time.time()) if m.get("phase") == "checking" and m.get("check_retry")
                          else m.get("started", time.time()))
-                over = time.time() - began > limit
+                wu = m.get("wrap_up") if m.get("phase") != "checking" else None  # writing its report after the ceiling
+                over = (time.time() - (wu.get("at") or 0) > 60 * WRAP_UP_MIN) if wu else time.time() - began > limit
                 if m.get("cancel") or over:
                     bench_revoke(desk, m["id"])  # cancel the guest while the existing worker stop proceeds.
                     proc = self.procs.get(m["id"])
                     if not run_running(m, proc):
                         continue  # an end whose record failed, or one just before this observation
                     try:
-                        if not m.get("cancel"):
+                        if not m.get("cancel"):  # the continuation after the ceiling (wrap_up) has its own few minutes
                             save_stopped(self.pending_stops, ("task", m["id"]), m,
-                                         lambda fields: desk.update(m["id"], **fields), {"timed_out": True})
+                                         lambda fields: desk.update(m["id"], **fields),
+                                         {"wrap_up": {**wu, "late": True}} if wu else {"timed_out": True})
                     finally:
                         stop(m.get("pid"), m.get("pid_start", ""), proc)
         with serve_step():

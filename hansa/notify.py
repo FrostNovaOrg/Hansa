@@ -194,9 +194,10 @@ def _next_step(desk: Desk, tid: str) -> str:
 def task_line(desk: Desk, m: dict) -> str:
     """A task that ended, as it is now, in one line with the next command."""
     tid, st = m["id"], m["state"]
+    from .views import after_ceiling
     if m.get("kind") == "verify":
         head = (f"{tid}, the verification of {m.get('parent')}, ended: "
-                + (f"verdict: {m['verdict']}" if m.get("verdict") else f"{st}, without a verdict"))
+                + (f"verdict: {m['verdict']}{after_ceiling(m)}" if m.get("verdict") else f"{st}, without a verdict"))
     else:
         head = f"{tid} {st}"
     head += f": {m.get('title', '')}"

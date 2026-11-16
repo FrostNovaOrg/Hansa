@@ -133,7 +133,20 @@ ceiling, each run uses its lane's current limit.
 and effort together on one `task options:` line. Options left to the lane or
 provider defaults are omitted; the run's own line still shows what it actually used.
 
-A run stopped at a ceiling before writing its report has its notes along the way as its report. At the
+A worker or verification stopped at the time ceiling is continued once, in its own session, only to
+write its report: hansa stops what the run left running, as at any run's end, then resumes the session with
+a note saying so, for at most 10 turns and 10 minutes (fixed, not a setting). That answer is the task's
+report, but the task still fails, its error saying the report was written after the stop: a run that did not
+finish is never checked or merged as if it had. A verification whose answer ends with a verdict ends with that
+verdict, and `hansa show` (the verification's and its task's) and the post say it was written after the stop at
+the ceiling; without a verdict it fails, with the answer as its report. While it writes, `hansa status` and
+`hansa show ID` say so where they say how far a run got. Its tokens count with the stopped run's, each once.
+When the continuation fails, gives no text, cannot start (no saved command line or temporary folder; the Codex
+adapter refuses a resume) or does not end in its 10 minutes (the error then says so too), the run ends as
+below. A cancel cancels it; it is never continued a second time, queued again or a cause for a provider's rest.
+A run cancelled or stopped otherwise, the turn ceiling included, is not continued.
+
+A run stopped at a ceiling with no report has its notes along the way as its report. At the
 time ceiling, a line follows them: the last tool call the session record shows the worker starting, whether
 or not it ended, and how many minutes before the stop it started (a Bash call's command on one line, cut
 to 300 characters; another tool's name and its file path or pattern). Many minutes there points to one
@@ -279,7 +292,9 @@ lane, or waits for one.
   dropped connection, a provider that refused it), that run's tokens, turns and worth are kept on the
   task's record of its tries; a run an earlier `hansa serve` started and lost track of is read from its session record
   as the task goes back. A run hansa resumed counts with the run before it, the resumed part read from
-  the session record after the resume only. `hansa cost` (also `--by task`, which shows each task's runs
+  the session record after the resume only (when those rows carry no counts, from its answer, less the run
+  before it: a resumed answer's totals cover the whole conversation). A run continued after the time ceiling
+  counts the same way. `hansa cost` (also `--by task`, which shows each task's runs
   and turns), `hansa show`, and the page's cost and task view count every try once, by when each run ended.
 
 Credit errors (`credit balance is too low`, HTTP/API Error 402, `insufficient balance`,
