@@ -1501,8 +1501,9 @@ def providers_waited_for(desk: Desk, s: dict, tasks: list) -> dict:
 
 
 def tries_used(attempts: list) -> int:
-    """Earlier runs except free usage-limit returns, unknown models, kills, lost logins and known outages."""
-    return sum(1 for a in attempts if a.get("kind") not in ("killed", "credit", "login", "model")
+    """Earlier runs except free usage-limit returns, unknown models, kills, lost logins, known outages and a
+    continued start Claude Code could not go on with (conversation_lost)."""
+    return sum(1 for a in attempts if a.get("kind") not in ("killed", "credit", "login", "model", "conversation")
                and (a.get("kind") != "limit" or a.get("counted"))
                and (a.get("kind") != "network" or a.get("counted", True)))
 
@@ -4317,8 +4318,8 @@ def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: st
 # conversation of its own. Claude Code's auto memory stays off for every run (provider_env, isolated).
 FORKED_ROWS = "forked-rows.json"  # beside a continued follow-up's task.md: the uuids of the rows its record copied
 CONTINUED_NOTE = """You go on here, in a new task, from your earlier conversation (task {parent}).
-- The new task is {tid}, on branch {branch}. hansa committed what you had left as commit {commit}; the worktree is
-  on that branch now{at}.
+- The new task is {tid}, on branch {branch}. {left}; the worktree, {wt}, is on that
+  branch now{at}.
 - Other tasks may have used this worktree in between: files git does not track (build outputs, ignored files)
   may be gone or different.
 - Your temporary folder is a new, empty one: {tmp}. The old one is gone, and nothing you had running is running.
@@ -4335,7 +4336,9 @@ def continuation(desk: Desk, meta: dict, lane_name: str, pname: str, p: dict, mo
     place that decides it: {"from": parent id, "session": the parent's session id} when it does, {"new": why not,
     in plain words} when a follow-up starts a new conversation, None for a task that is no follow-up (a
     verification among them). A follow-up goes on only on its first run, from the base the parent's work is on,
-    on the parent's lane, with the provider and model of the parent's last run, when that run left a record."""
+    on the parent's lane, with the provider and model of the parent's last run, when that run left a record and the
+    installed Claude Code has the switches it needs (lacks_switches). A parent that itself went on is no reason
+    against: its own (forked) session is forked again."""
     if meta.get("kind") == "verify" or not meta.get("parent"):
         return None  # a verification never goes on in a worker's conversation
     parent = read_json(desk.tasks_dir / meta["parent"] / "meta.json", {}) or {}
@@ -4344,7 +4347,9 @@ def continuation(desk: Desk, meta: dict, lane_name: str, pname: str, p: dict, mo
     if parent.get("kind") == "verify":
         why = "the earlier task is a verification, whose conversation a worker never continues"
     elif meta.get("attempts") or meta.get("earlier_runs"):
-        why = "hansa started it again after an earlier run of it"
+        lost = [a for a in meta.get("attempts") or [] if isinstance(a, dict) and a.get("kind") == "conversation"]
+        # once: this start is not a continued one, so it cannot end so again (conversation_lost)
+        why = (lost[-1].get("error") if lost else "") or "hansa started it again after an earlier run of it"
     elif meta.get("fresh"):
         why = "it starts over from the base branch (--fresh), so the earlier conversation's work is not on its branch"
     elif not meta.get("start_from"):
@@ -4357,13 +4362,48 @@ def continuation(desk: Desk, meta: dict, lane_name: str, pname: str, p: dict, mo
         why = f"it runs model {model}, not {parent.get('model_asked') or '(unknown)'}, which the earlier task's last run used"
     elif p.get("kind") == "codex":
         why = "the earlier task ran on the Codex adapter, which leaves no conversation to go on from"
-    elif own.get("from") and own.get("own") == psid:
-        why = "the earlier task itself went on from an earlier conversation, which hansa does not carry on further yet"
     elif not (psid and any(config_home(desk, pname, p).glob(f"projects/*/{psid}.jsonl"))):
         why = "the earlier task's conversation record is not on this machine (Claude Code removes old ones)"
+    elif lacks := lacks_switches(provider_program(p)):
+        why = lacks
     else:
-        return {"from": meta["parent"], "session": psid, "before": parent.get("usage") or {}}
+        # Claude Code's answers count the whole conversation in (FORK_FACTS 2): of a parent that itself went on
+        # from its own parent's, the part before it too, so a chain's third task counts only its own part
+        before = parent.get("usage") or {}
+        if own.get("from") and own.get("own") == psid:
+            before = add_usage(own.get("before") or {}, before)
+        began = (parent.get("run_start") or {}).get("commit")  # where its last run started: then nothing was left
+        nothing = parent.get("head") == began if began else parent.get("commits") == 0
+        return {"from": meta["parent"], "session": psid, "before": before, **({"nothing_left": True} if nothing else {})}
     return {"new": why}
+
+
+# The switches a continued start needs (start). Read from the help text, not judged by the version: the help names
+# each switch itself, while the version that brought each in is not known here (FORK_FACTS stand on 2.1.325)
+CONTINUE_SWITCHES = ("--resume", "--fork-session", "--session-id", "--system-prompt-snapshot")
+_HELP_SEEN: dict = {}  # program file -> its help text, read once per server start (and again once it is replaced)
+
+
+def lacks_switches(program: str) -> str:
+    """Why the installed Claude Code cannot start a continued run, in plain words; '' when its help text lists every
+    switch the start needs (CONTINUE_SWITCHES). A help text that cannot be read counts as lacking them."""
+    try:
+        st = os.stat(program)
+        key = (program, os.path.realpath(program), st.st_mtime_ns, st.st_size)
+    except OSError as e:
+        return f"Claude Code ({program}) could not be looked at ({e.strerror or e})"
+    if key not in _HELP_SEEN:
+        try:
+            said = subprocess.run([program, "--help"], capture_output=True, text=True, errors="replace",
+                                  stdin=subprocess.DEVNULL, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:  # not kept: read again at the next follow-up
+            return f"the help text of Claude Code ({program}) could not be read ({type(e).__name__})"
+        if said.returncode != 0:
+            return f"the help text of Claude Code ({program}) could not be read (exit {said.returncode})"
+        _HELP_SEEN[key] = said.stdout + said.stderr
+    missing = [x for x in CONTINUE_SWITCHES if not re.search(r"(?<![\w-])" + re.escape(x) + r"(?![\w-])", _HELP_SEEN[key])]
+    return (f"the installed Claude Code ({program}) does not list {', '.join(missing)} in its help text, which going "
+            f"on in the earlier conversation needs (an older version, say)") if missing else ""
 
 
 def own_session(desk: Desk, m: dict) -> str:
@@ -4382,6 +4422,35 @@ def forked_before(m: dict) -> dict:
     forked call counts them in its modelUsage and total_cost_usd (FORK_FACTS 2), so they are taken off it."""
     c = m.get("conversation") or {}
     return (c.get("before") or {}) if c.get("from") and c.get("own") == m.get("session_id") else {}
+
+
+LOST_SEC = 120  # a continued start that ends sooner, with no reply, may be one Claude Code could not go on with
+
+
+def conversation_lost(desk: Desk, meta: dict, run: dict, err: str, home, sid, began) -> str:
+    """Why a follow-up's continued start (continuation) ended because Claude Code could not go on in that
+    conversation (it found no such conversation, or the conversation is too long to go on); '' when it did not end
+    so. Told by what such an end looks like, not by Claude Code's wording: the start carried --resume, ended on an
+    error within LOST_SEC seconds, and its own part of the record holds no model's reply (a reply Claude Code makes
+    up for an error names the model "<synthetic>"). finish asks only once nothing else explained the end: a
+    usage limit, a lost login, a refused key or a dropped connection is handled as for any run."""
+    c = meta.get("conversation") or {}
+    if not (c.get("from") and c.get("own") == meta.get("session_id")) or meta.get("resumed") or meta.get("wrap_up"):
+        return ""
+    if run and not run.get("is_error") and run.get("subtype") in ("success", None):
+        return ""
+    took = run.get("duration_ms") / 1000 if isinstance(run.get("duration_ms"), (int, float)) else \
+        time.time() - began if began else None
+    if took is None or took > LOST_SEC or home is None:
+        return ""
+    rows = _rows(home, sid)
+    if any(d.get("type") == "assistant" and (d.get("message") or {}).get("model") not in (None, "<synthetic>")
+           for d in rows or []):
+        return ""
+    lines = (str(run.get("result") or "") or err).strip().splitlines()
+    return (f"Claude Code could not go on in the conversation of task {c['from']}: the start that went on in it "
+            f"ended after {max(0, round(took))} seconds with no reply"
+            + (f" ({lines[-1][:160]})" if lines else ""))
 
 
 @git_folders_kept
@@ -4470,8 +4539,10 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
             "--system-prompt-snapshot", "off"]
         head = wgit(desk, wt, "rev-parse", "HEAD")
         commit = meta.get("start_from") or head
+        left = (f"Your earlier task left nothing to commit, so the branch starts at {commit[:12]}, where it started"
+                if going_on.pop("nothing_left", False) else f"hansa committed what you had left as commit {commit[:12]}")
         first = CONTINUED_NOTE.format(
-            parent=going_on["from"], tid=tid, branch=f"task/{tid}", commit=commit[:12], tmp=commands_tmp(tmp),
+            parent=going_on["from"], tid=tid, branch=f"task/{tid}", left=left, wt=wt, tmp=commands_tmp(tmp),
             at="" if head == commit else f", at {head[:12]}, with the base merged in",
             update=update.strip() + "\n" if update else "")
         going_on["own"] = sid
@@ -4942,6 +5013,13 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     d = desk.tasks_dir / tid
     done = desk.state_dir / "runs" / tid / "setup.log.done"
     set_up = not meta.get("setup_ran") or done.exists()  # else the worker never started: nothing is its work
+    began = None  # when Claude Code started, as near as hansa knows: the lane's setup's end, else the first message
+    for f in (done, desk.state_dir / "runs" / tid / "first-message.md"):
+        try:
+            began = f.stat().st_mtime
+            break
+        except OSError:
+            continue
     done.unlink(missing_ok=True)
     (done.parent / RESUME_ARGV).unlink(missing_ok=True)
     kept_notes = done.parent / CEILING_NOTES  # wrap_up's: the report of a run stopped at the ceiling, before it
@@ -5212,6 +5290,12 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
             attempts[-1]["turns_unknown_after_resume"] = True
         if meta.get("kind") == "verify":  # a killed run gives no verdict, whatever its record said before the kill
             fields["verdict"] = ""
+    elif lost := (set_up and not setup and not any(a.get("kind") == "conversation" for a in attempts)
+                                and conversation_lost(desk, meta, run, err, home if p else None, sid, began)):
+        # queued again once, in a new conversation (continuation), without using a try
+        attempts.append({"provider": meta["provider"], "at": now(), "error": desk.redact(lost),
+                         "kind": "conversation"})
+        state, error = "queued", f"{lost}; queued again once, in a new conversation, without using a try"
     elif run.get("is_error") or run.get("subtype") not in ("success", None) or not run:
         state = "failed"
         lines = (result or err).strip().splitlines()

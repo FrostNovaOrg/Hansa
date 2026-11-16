@@ -782,8 +782,8 @@ Where it can, a follow-up's worker goes on in the earlier task's conversation in
 code and the task again from nothing. It does when all of these hold, whatever way the earlier task
 ended (done, failed, at a ceiling, cancelled):
 
-- the follow-up starts from the earlier task's last commit (plain, or with `--update`), not from the
-  base (`--fresh`, or an earlier task with no commit);
+- the follow-up starts from the earlier task's last commit (plain, or with `--update`; of an earlier
+  task that left no commit, the commit it started from), not from the base (`--fresh`);
 - it runs on the earlier task's lane, on the provider and with the model of the earlier task's last
   run (`--lane L`, a resting first provider or another model start a new conversation: other eyes on
   the same commits);
@@ -791,17 +791,25 @@ ended (done, failed, at a ceiling, cancelled):
   Code removes old ones, by default after 30 days);
 - it is the follow-up's first run: a run hansa starts again by itself (a dropped connection, a usage
   limit) starts a new conversation, as before;
-- the earlier task did not itself go on from an earlier conversation (not yet carried further);
+- the installed Claude Code lists `--resume`, `--fork-session`, `--session-id` and
+  `--system-prompt-snapshot` in its help text, which hansa reads once per server start (an older
+  version without them gets a new conversation; the task does not fail for it);
 - hansa could save the list of the earlier conversation's rows that the follow-up's record copies (a
   full disk, say): without it the follow-up's numbers would count the earlier task's again.
 
-A verification never goes on in a worker's conversation, nor a follow-up in a verifier's.
+A verification never goes on in a worker's conversation, nor a follow-up in a verifier's. A follow-up
+of a follow-up that went on goes on in that follow-up's own (forked) conversation; its numbers and notes
+are still its own part only. A new conversation is started instead when one of the above does not hold,
+and once when the continued start ends within two minutes on an error, with no reply, because Claude
+Code could not go on in that conversation (it could not find it, or it is too long): the task is queued
+again at once, in a new conversation, without using a try, and `hansa show` says why.
 
 A follow-up that goes on gets a conversation of its own, forked from the earlier one (`claude -p
 --resume <earlier session> --fork-session --session-id <new>`), with its instructions written for the
 new task (`--system-prompt-snapshot off`): its time limit and start are its own. Before its task text
 its first message says that it goes on, in a new task, from its earlier conversation; the new task's id
-and branch, and the commit hansa made of what it had left, where the worktree now is; that other tasks
+and branch, and the commit hansa made of what it had left (or, when it left nothing to commit, that
+it did not and where the branch starts), where the worktree now is; that other tasks
 may have used the worktree in between, so files git does not track may be gone or different; that its
 temporary folder is a new, empty one (the path) and nothing it had running is running; and to look
 (`git status`, `git log`) before relying on memory. With `--update` the same message says which base
@@ -905,7 +913,9 @@ JSON keeps the unrounded dollar values.
 When the table has no entry for a Claude model, workers use Claude Code's
 recorded list-price total for the run. This fallback follows the model even if
 its provider was renamed, removed or changed kind. A worker's run without a
-recorded figure stays unpriced. The coordinator's own usage and its helpers need
+recorded figure stays unpriced; so does a follow-up's run that went on in its earlier task's
+conversation, whose tokens hansa reads from its record, which holds no dollar figure of Claude Code's.
+The coordinator's own usage and its helpers need
 an entry in the table: their session records have no recorded dollar figure.
 Other models without an entry stay unpriced; a third-party model's placeholder
 dollars are never used. The principal's table takes precedence, including a

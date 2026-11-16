@@ -1812,7 +1812,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         if a.get("model") and (a["provider"], a["model"], a.get("effort", ""), a.get("effort_from")) != (
                 m.get("provider"), m.get("model_asked"), m.get("effort_used", ""), m.get("effort_from")):
             on = run_text(a, desk.settings()["providers"].get(a["provider"]))
-        out.append(f"{when} run on {on}: {a['error']} ({a['kind']}; no try used)" if a.get("kind") in ("credit", "model") else
+        out.append(f"{when} run on {on}: {a['error']} ({a['kind']}; no try used)" if a.get("kind") in ("credit", "model", "conversation") else
                    f"{when} try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
                    f"{when} run on {on}: {a['error']}; what it reported, if anything, is not kept"
                    if a.get("kind") == "killed" else  # it used no try
