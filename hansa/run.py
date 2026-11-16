@@ -4216,6 +4216,18 @@ def not_started(desk: Desk, tid: str, e: Exception) -> None:
     desk.failed_starts.pop(("task", tid, desk.meta(tid).get("launch")), None)
 
 
+def total_time_note(lane: dict, meta: dict) -> str:
+    """The ceiling's lane limit and claim time, so the run can report before hansa stops it."""
+    verifying = meta.get("kind") == "verify"
+    began = time.strftime("%H:%M", time.localtime(meta["started"]))
+    included = "lane setup" if verifying else "lane setup and the check after you end"
+    report = "your verdict and report" if verifying else "your report"
+    verdict = "; a verdict on what you reached is worth more than none" if verifying else ""
+    return (f"- This run may take {lane.get('timeout_min', 240)} minutes in all, counted from {began} "
+            f"(this machine's local time), including {included}.\n"
+            f"  `date` gives the time now; hansa stops the run when time is up, so write {report} before then{verdict}.\n")
+
+
 def around_note(desk: Desk, lane: dict, meta: dict, lane_name: str = "", tmp: str = "") -> str:
     """What hansa runs around a task or verification worker, for its instructions: the lane's setup and
     check as hansa runs them, and its merge check when that runs another command (the lane's env is set for the
@@ -4296,7 +4308,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     long = LONG_RUNS.format(bash_ms=60000 * bash_minutes(lane), bash_min=bash_minutes(lane),
                             default_min=bash_default_minutes(lane), check_min=merge_minutes(lane))
     system = (VERIFY_PROTOCOL if verifying else PROTOCOL).format(tid=tid, lane=lane_name, tmp=commands_tmp(tmp),
-                                                                 long=long)
+                                                                 long=total_time_note(lane, meta) + long)
     system += around_note(desk, lane, meta, lane_name, tmp)
     if getattr(desk, "_bench", None) and not getattr(desk, "_bench_off", False) and s["bench"]["enabled"]:
         system += BENCH_NOTE
@@ -4394,6 +4406,7 @@ def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: 
 # is kept in the run's raw folder (RESUME_ARGV) for this; its time limit still counts from the task's start.
 RESUME_ARGV = "worker-argv.json"
 RESUME_NOTE = """Your turn ended while work you started in the background was still running: {left}.
+You have {remaining} whole minutes left under this run's original time limit.
 hansa stopped it when your turn ended. Run what you still need of it again in the foreground, in one
 Bash call with a long enough timeout (the Bash tool's timeout, in milliseconds, up to {bash_ms}: {bash_min}
 minutes), and wait for it to finish. Then
@@ -4428,7 +4441,9 @@ def resume(desk: Desk, tid: str):
     except (GitFileChanged, OSError, ValueError):  # finish says what happened
         return None
     sweep(desk, tid)  # what the first run left out of its process group: it is run again, not met halfway
-    note = RESUME_NOTE.format(left="; ".join(left), bash_ms=60000 * bash_minutes(lane), bash_min=bash_minutes(lane))
+    remaining = max(0, int((meta["started"] + 60 * lane.get("timeout_min", 240) - now()) // 60))
+    note = RESUME_NOTE.format(left="; ".join(left), bash_ms=60000 * bash_minutes(lane), bash_min=bash_minutes(lane),
+                              remaining=remaining)
     env = worker_env(desk, tid, lane_name, lane, pname, p, tmp, wt)
     with desk.lock():  # a cancel or another end lands before this (no resume, its logs as they are) or after it
         now_meta = desk.meta(tid)
