@@ -7545,6 +7545,13 @@ def save():'''))
             for name in run.SANDBOX_PLACEHOLDERS:  # git in the sandbox does not list these (LINUX_PRELUDE)
                 self.assertNotIn(name, flat)
 
+    def test_worker_instructions_name_every_project_settings_folder_hansa_refuses(self):
+        from hansa import run
+        flat = " ".join(run.PROTOCOL.split())
+        for name in run.PROJECT_SETTINGS_NAMES:  # the sentence cannot drift from the rule
+            self.assertIn(f"`{name}`", flat)
+        self.assertIn("do not change such paths", flat)
+
     # The table maps protected-index regression cases to the tests that cover them:
     # | # | Case | Test below |
     # | 1 | cacheinfo .claude/settings.json, absent on disk, skip-worktree | protected_blobs |
