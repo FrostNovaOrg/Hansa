@@ -3,8 +3,9 @@ import fcntl
 import hashlib
 import json
 import time
+from pathlib import Path
 
-from .desk import claude_home, read_json, write_json
+from .desk import claude_home, read_json, stored, write_json
 
 
 def rests_file():
@@ -19,6 +20,11 @@ def fingerprint(value):
 def login(desk, name, p):
     if p["kind"] == "subscription":
         return fingerprint(str(claude_home(desk.state_dir, name, p).resolve()))
+    if p["kind"] == "codex":
+        home = p.get("codex_home")
+        if not isinstance(home, str) or not home.startswith("/"):
+            return ""
+        return fingerprint({"codex_home": stored(str(Path(home).resolve()))})
     return fingerprint([p.get("base_url"), desk.read_key(name)]) if desk.has_key(name) else ""
 
 

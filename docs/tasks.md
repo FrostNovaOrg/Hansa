@@ -271,9 +271,11 @@ lane, or waits for one.
   `hansa show ID` says until when the task waits; `hansa status` and `hansa explain provider P` say until
   when each provider rests and why (the reset time it read, or its fixed length), and its rest length.
 - **Other desks on the same account learn the rest too.** Desks sharing a subscription's Claude Code
-  folder, or a key provider's exact endpoint and key, hold new runs until the same time. `show` and
-  `status` say when another desk found the limit. Different folders or keys do not share rests;
-  expired rests are ignored. Providers on one desk sharing that login also share usage rests.
+  folder, a Codex provider's Codex home (`codex_home`, with links and case-insensitive spellings resolved),
+  or a key provider's exact endpoint and key, hold new runs until the same time. Codex rests never share
+  with other provider kinds. `show` and `status` say when another desk found the limit. Different folders
+  or keys do not share rests; expired rests are ignored. Providers on one desk sharing that login also
+  share usage rests.
   A good `hansa ping NAME` or page check ends a shared usage rest when the checked provider has the
   same configured model as the one that found the limit. Other desks become ready on their next
   provider read, including the desk that recorded the limit. A good check of a different model frees
