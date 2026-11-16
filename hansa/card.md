@@ -57,8 +57,8 @@ they show what is merged, missing evidence and released; `show` also gives the g
    More: `hansa help time-limits`.
 4. hansa tells your session when a task finishes or fails (Hearing from hansa).
 5. You review and merge, or send it back with `hansa retry` and what to change. On the same lane,
-   provider and model (not Codex), a follow-up goes on in the earlier task's conversation (`hansa
-   show` says whether, and why not); `--lane L` or `--fresh` starts a new one. Its text carries only
+   provider and model (not Codex), a follow-up goes on in the earlier task's conversation (once it
+   starts, `hansa show` says whether, and why not); `--lane L` or `--fresh` starts a new one. Its text carries only
    your note and the last reports: repeat what still holds. If the base moved meanwhile, hansa checks
    the merge before it lands (Merging). When a task fails its verification a second time for the
    same kind of reason, rethink it rather than sending it back again: make it smaller, ask for less,
@@ -174,7 +174,7 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   "Holds, with notes" counts as "holds"; its verification's report lists the rare-state gaps under "Notes".
   Notes go to `hansa gaps`, to be marked.
 - Verifying the same task again goes on in the earlier verification's conversation (same lane, provider
-  and model; never a worker's). `--lane L` gives a fresh look, on another lane of the same repository:
+  and model, not Codex; never a worker's). `--lane L` gives a fresh look, on another lane of the same repository:
   another model sees other things than the same model, but may judge more strictly and send more work
   back; use it if the task's provider is new to the desk or its lane is busy.
 - A verify lane (`hansa lane set V verify_for L ...`) takes the verifications of the lanes it lists.
@@ -354,9 +354,10 @@ or ask `scout` when reading is enough; say what you need back.
   reads a version must look for the line holding `version "`. More: `hansa help java`.
 - Every run is told its total time and when it counts from. One that reaches its lane's ceiling of
   turns or minutes (set high: the task was too big or unclear, or the worker got stuck) is continued
-  once, for at most ten minutes, only to write its report (`hansa status` and `hansa show` say so). A
-  task still fails, with that report (else the worker's notes and last call); a verification's verdict
-  then stands, marked as written after the stop. Split or clarify the task rather than re-run it unchanged.
+  once (not Codex), for at most ten minutes, only to write its report (`hansa status` and `hansa show`
+  say so). A task still fails, with that report (else the worker's notes and last call); a
+  verification's verdict then stands, marked as written after the stop. Split or clarify the task
+  rather than re-run it unchanged.
 - A failed write (a full disk) does not stop `hansa serve`: free space so it can record what it kept.
   More: `hansa help free-space`.
 - hansa replaces the keys it knows wherever it shows or records text. It cannot see into compressed
