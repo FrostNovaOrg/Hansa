@@ -252,6 +252,11 @@ def built_in_no_read() -> list:
     return [{"path": "~/" + f, "exists": os.path.lexists(os.path.join(home, f))} for f in home_secrets()]
 
 
+def old_codex_provider(p: dict) -> bool:
+    """A compatible provider that reaches Codex through the adapter's made-up address."""
+    return p.get("kind") == "compatible" and str(p.get("base_url", "")).rstrip("/") == "http://codex.invalid"
+
+
 def codex_homes_no_read(s: dict) -> list:
     """The homes of the settings' Codex providers, which every run is kept from (worker_read_denials) but the
     Codex run of that provider: [{"provider": name, "path": the home as set, ~ for the account's home folder}]."""
@@ -3089,6 +3094,9 @@ class Desk:
                         self.set_provider_state(name, model_since=0, model_unknown="")
             from .history import record
             record(self, old, new, by, command)
+            for name, provider in new["providers"].items():
+                if provider.get("kind") == "codex" and self.has_key(name):
+                    self._clear_key(name, by)
             if changed:
                 self.event("settings_saved", by=by, changed=changed)
         self.ready_news()
@@ -3196,6 +3204,16 @@ class Desk:
     def read_key(self, provider: str) -> str:
         return self.key_file(provider).read_text(encoding="utf-8").strip()
 
+    def _clear_key(self, provider: str, by: str = "") -> None:
+        from .history import record
+        with self.lock():
+            f = self.key_file(provider)
+            old = self.read_key(provider) if f.exists() else ""
+            f.unlink(missing_ok=True)
+            record(self, {"providers": {provider: {"key": old}}},
+                   {"providers": {provider: {"key": ""}}}, by)
+        self.event("key_removed", provider=provider, by=by)
+
     def write_key(self, provider: str, value: str, by: str = "") -> None:
         from .history import record
         if self.settings()["providers"].get(provider, {}).get("kind") == "codex":
@@ -3204,12 +3222,7 @@ class Desk:
         self.secrets_dir.mkdir(mode=0o700, exist_ok=True)
         os.chmod(self.secrets_dir, 0o700)
         if not value.strip():
-            with self.lock():
-                old = self.read_key(provider) if f.exists() else ""
-                f.unlink(missing_ok=True)
-                record(self, {"providers": {provider: {"key": old}}},
-                       {"providers": {provider: {"key": ""}}}, by)
-            self.event("key_removed", provider=provider, by=by)
+            self._clear_key(provider, by)
             self.ready_news()
             return
         problem = key_problem(value.strip())
@@ -3593,6 +3606,7 @@ def public_settings(desk: Desk) -> dict:
                                                          if v is not None}},
             "alert_push": alert_push.public(desk), "alert_push_services": alert_services.public(), "alert_language_saved": "alert_language" in desk._saved_settings(),
             "keys": keys, "problems": problems, "rev": rev,
+            "old_codex_providers": [n for n, p in s["providers"].items() if old_codex_provider(p)],
             "provider_credit_messages": {n: provider(credit_text(st), st, n) for n, st in desk.provider_state().items()
                                          if n in s["providers"] and st.get("credit_since")},
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()

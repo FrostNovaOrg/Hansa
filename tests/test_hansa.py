@@ -22318,6 +22318,121 @@ def save():'''))
         self.assertFalse(self.desk.key_file("codex").exists())
         self.assertNotIn("codex", public_settings(self.desk)["keys"])
 
+    def test_saving_a_provider_as_codex_clears_its_key_and_keeps_its_rests(self):
+        from hansa import run
+        for kind in ("compatible", "subscription"):
+            with self.subTest(kind=kind):
+                s = self.codex_settings()
+                codex = s["providers"].pop("codex")
+                s["providers"]["adapter"] = {"kind": kind, "model": codex["model"],
+                                              "base_url": "http://codex.invalid"}
+                self.assertEqual(self.desk.save_settings(s), [])
+                key = "sk-made-up-for-codex-" + kind
+                self.desk.write_key("adapter", key)
+                self.desk.write_key("claude", "sk-other-provider-keeps-its-key")
+                self.desk.set_provider_state("adapter", cool_until=time.time() + 3600, reason="usage limit",
+                                             credit_since=123, credit_plan="old plan", model_since=456,
+                                             model_unknown="old model", rest_how="minutes", rest_minutes=60)
+                rests = (self.desk.state_dir / "providers.json").read_bytes()
+                base = sh_out("git", "rev-parse", "HEAD", cwd=self.repo)
+                (self.repo / "example.txt").write_text(key + "\n")
+                sh("git", "add", "example.txt", cwd=self.repo)
+                sh("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Example text", cwd=self.repo)
+                self.assertEqual(run.keys_in_change(self.desk, self.repo, base, "HEAD"), ["adapter"])
+                before = len(self.history_entries())
+                s["providers"]["adapter"] = codex
+                self.assertEqual(self.desk.save_settings(s, by="page", dry=True), [])
+                self.assertEqual(self.desk.read_key("adapter"), key)
+                self.assertEqual(len(self.history_entries()), before)
+                self.assertTrue(save_from_page(self.desk, {"settings": s, "rev": self.desk.settings_rev()})["ok"])
+                self.assertFalse(self.desk.key_file("adapter").exists())
+                self.assertNotIn("adapter", self.desk.keys())
+                self.assertEqual(self.desk.read_key("claude"), "sk-other-provider-keeps-its-key")
+                self.assertEqual((self.desk.state_dir / "providers.json").read_bytes(), rests)
+                self.assertEqual(run.keys_in_change(self.desk, self.repo, base, "HEAD"), [])
+                [entry] = [e for e in self.history_entries()[before:] if e["path"] == "providers.adapter.key"]
+                self.assertEqual((entry["by"], entry["secret_action"], entry["redacted"]),
+                                 ("principal", "cleared", True))
+                self.assertNotIn("old", entry)
+                self.assertNotIn("new", entry)
+                self.assertNotIn(key, (self.desk.state_dir / "settings-history.jsonl").read_text())
+
+    def test_saving_settings_clears_leftover_codex_keys_and_keeps_their_rests(self):
+        for by in ("page", "coordinator"):
+            with self.subTest(by=by):
+                s = self.codex_settings()
+                s["providers"]["second"] = dict(s["providers"]["codex"])
+                self.assertEqual(self.desk.save_settings(s), [])
+                self.desk.write_key("claude", "sk-other-provider-keeps-its-key")
+                keys = {name: "sk-leftover-for-" + name for name in ("codex", "second")}
+                for name, key in keys.items():
+                    # A previous switch wrote settings but left the key behind.
+                    self.desk.key_file(name).write_text(key + "\n")
+                    self.desk.set_provider_state(name, cool_until=time.time() + 3600, reason="usage limit",
+                                                 credit_since=123, credit_plan="old plan", model_since=456,
+                                                 model_unknown="old model", rest_how="minutes", rest_minutes=60)
+                files = [self.desk.settings_path, *(self.desk.key_file(name) for name in keys),
+                         self.desk.state_dir / "providers.json", self.desk.state_dir / "settings-history.jsonl"]
+                unchanged = [f.read_bytes() for f in files]
+                s["cool_minutes"] += 1
+                refused = copy.deepcopy(s)
+                refused["providers"]["codex"]["codex_home"] = "relative/login"
+                problems = self.desk.save_settings(refused, by=by)
+                self.assertTrue(any("codex_home" in p for p in problems), problems)
+                self.assertEqual([f.read_bytes() for f in files], unchanged)
+                self.assertEqual(self.desk.save_settings(s, by=by, dry=True), [])
+                self.assertEqual([f.read_bytes() for f in files], unchanged)
+                before = len(self.history_entries())
+                if by == "page":
+                    self.assertTrue(save_from_page(self.desk, {"settings": s, "rev": self.desk.settings_rev()})["ok"])
+                else:
+                    self.assertEqual(self.desk.save_settings(s, by=by), [])
+                self.assertEqual(self.desk.settings()["cool_minutes"], s["cool_minutes"])
+                self.assertEqual(files[-2].read_bytes(), unchanged[-2])
+                self.assertEqual(self.desk.read_key("claude"), "sk-other-provider-keeps-its-key")
+                entries = self.history_entries()[before:]
+                for name, key in keys.items():
+                    self.assertFalse(self.desk.key_file(name).exists())
+                    self.assertNotIn(name, self.desk.keys())
+                    [entry] = [e for e in entries if e["path"] == f"providers.{name}.key"]
+                    self.assertEqual((entry["by"], entry["secret_action"], entry["redacted"]),
+                                     ("principal" if by == "page" else by, "cleared", True))
+                    self.assertNotIn("old", entry)
+                    self.assertNotIn("new", entry)
+                    self.assertNotIn(key, files[-1].read_text())
+                before = len(self.history_entries())
+                self.assertEqual(self.desk.save_settings(s, by=by), [])
+                self.assertEqual(len(self.history_entries()), before)
+
+    def test_a_refused_change_to_codex_keeps_the_key_settings_and_rests(self):
+        s = self.codex_settings()
+        codex = s["providers"].pop("codex")
+        s["providers"]["adapter"] = {"kind": "compatible", "model": codex["model"],
+                                      "base_url": "http://codex.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("adapter", "sk-made-up-for-codex")
+        self.desk.set_provider_state("adapter", cool_until=time.time() + 3600, reason="usage limit")
+        files = [self.desk.settings_path, self.desk.key_file("adapter"),
+                 self.desk.state_dir / "providers.json", self.desk.state_dir / "settings-history.jsonl"]
+        before = [f.read_bytes() for f in files]
+        codex["codex_home"] = "relative/login"
+        s["providers"]["adapter"] = codex
+        reply = save_from_page(self.desk, {"settings": s, "rev": self.desk.settings_rev()})
+        self.assertFalse(reply["ok"])
+        self.assertTrue(any("codex_home" in p for p in reply["problems"]), reply)
+        self.assertEqual([f.read_bytes() for f in files], before)
+
+    def test_codex_effort_has_no_endpoint_warning_and_compatible_effort_keeps_it(self):
+        for kind, address in (("codex", ""), ("subscription", ""),
+                              ("compatible", "https://example.invalid"), ("compatible", "http://codex.invalid")):
+            with self.subTest(kind=kind, address=address):
+                provider = {"kind": kind, "base_url": address}
+                for effort, source in (("high", "task"), ("", "provider")):
+                    shown = views.effort_text(effort, source, provider)
+                    self.assertIn("effort high from the task's --effort" if effort else "claude's default effort", shown)
+                    self.assertEqual("may ignore effort" in shown, kind == "compatible")
+                    self.assertEqual("endpoint is not Claude's own" in shown, kind == "compatible")
+
     def test_codex_cannot_be_coordinators_provider(self):
         s = self.codex_settings()
         s["coordinator"]["provider"] = "codex"
@@ -22357,6 +22472,38 @@ def save():'''))
         self.desk.write_key("adapter", "sk-example")
         self.assertEqual(provider_problem(self.desk, self.desk.settings(), "adapter"), "")
         self.assertEqual(self.desk.settings()["providers"]["adapter"]["base_url"], "http://codex.invalid")
+
+    def test_old_codex_provider_explains_how_to_change_it_without_changing_it(self):
+        s = self.desk.settings()
+        s["providers"]["adapter"] = {"kind": "compatible", "model": "example", "base_url": "http://codex.invalid"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("adapter", "sk-made-up-for-codex")
+        self.desk.set_provider_state("adapter", cool_until=time.time() + 3600, reason="usage limit")
+        for kind, address, matches in (("compatible", "http://codex.invalid", True),
+                                       ("compatible", "http://codex.invalid/", True),
+                                       ("compatible", "https://codex.invalid", False),
+                                       ("compatible", "http://codex.invalid/api", False),
+                                       ("compatible", "http://codex.invalid.example", False),
+                                       ("subscription", "http://codex.invalid", False)):
+            with self.subTest(kind=kind, address=address):
+                s["providers"]["adapter"]["kind"] = kind
+                s["providers"]["adapter"]["base_url"] = address
+                self.assertEqual(self.desk.save_settings(s), [])
+                files = [self.desk.settings_path, self.desk.key_file("adapter"), self.desk.events_path,
+                         self.desk.state_dir / "providers.json", self.desk.state_dir / "settings-history.jsonl"]
+                before = [f.read_bytes() for f in files]
+                shown = self.hansa("explain", "provider", "adapter")
+                notes = [line for line in shown.splitlines() if "docs/codex.md" in line]
+                self.assertEqual(len(notes), int(matches))
+                if matches:
+                    for part in ("adapter", "Codex", "old way", "choosing", "kind Codex", "page", "replaces",
+                                 "made-up address and key", "More: docs/codex.md"):
+                        self.assertIn(part, notes[0])
+                    self.assertNotIn("automatically", notes[0])
+                    self.assertEqual(public_settings(self.desk)["old_codex_providers"], ["adapter"])
+                else:
+                    self.assertEqual(public_settings(self.desk)["old_codex_providers"], [])
+                self.assertEqual([f.read_bytes() for f in files], before)
 
     def codex_runtime_settings(self, **fields):
         from contrib.codex.tests.codexkit import FAKES
@@ -47449,6 +47596,26 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         confirmReply = true; await run("discardSettings()");
         check(settingsGetCount === gets + 1 && !run("settingsDirty()"), "confirmed discard did not clear an unadded name");
       }
+    } else if (ask === "settings-fix-old-codex") {
+      const zh = process.argv[4] === "zh";
+      run('showSettingsGroup("providers")');
+      const card = name => find(el => el.className === "lane" && el.textContent.startsWith(name), run("settingsPanels.providers"));
+      const notes = () => descendants(run("settingsPanels.providers"), "p").filter(el => el.attrs["data-old-codex"] === "");
+      check(notes().length === 1, "the old Codex provider needs one line of guidance");
+      const note = notes()[0];
+      check(card("compatible").kids.includes(note), "the line is not on its provider's card");
+      for (const part of ["compatible", run("T.codex"), "docs/codex.md", ...(zh
+        ? ["旧方式", "本页", "选择", "替换", "虚构的地址和密钥"]
+        : ["old way", "page", "choosing", "replaces", "made-up address and key"])])
+        check(note.textContent.includes(part), "the old Codex line misses: " + part);
+      check(!/automatically|自动/.test(note.textContent), "the line promises an automatic change");
+      check(!note.className.includes("warn"), "the guidance is an alert");
+      check(!run("settingsDirty()") && apiPosts.length === 0, "showing the line changed settings");
+      check(run('S.providers.compatible.kind === "compatible" && S.providers.compatible.base_url === "http://codex.invalid/"'),
+        "the old provider was converted");
+      const select = find(el => el.tag === "select" && el.kids.some(o => o.value === "codex"), card("compatible"));
+      select.value = "codex"; select.on.change({target:select});
+      check(notes().length === 0, "a card of kind Codex still shows the old-way guidance");
     } else if (ask.startsWith("settings-fix-codex-")) {
       // A provider's card switched to the kind Codex, as the principal does it: its select, its boxes, Save.
       const zh = process.argv[4] === "zh";
@@ -50462,13 +50629,18 @@ else if (ask === "task-steps")'''))
     def run_settings_fix_scenario(self, scenario):
         if not shutil.which("node"):
             self.skipTest("needs node to run the page's script")
+        if scenario == "old-codex":
+            s = self.desk.settings()
+            s["providers"]["compatible"] = {"kind": "compatible", "model": "example-model", "effort": "",
+                                             "base_url": "http://codex.invalid/"}
+            self.assertEqual(self.desk.save_settings(s), [])
         public = public_settings(self.desk)
         public["settings"]["cool_minutes"] = 37
         public["settings"]["coordinator"].pop("model", None)
         public["settings"]["coordinator_alert"] = {}
         for name in ("compatible", "other"):
-            public["settings"]["providers"][name] = {
-                "kind": "compatible", "model": "example-model", "effort": "", "base_url": "https://example.org"}
+            public["settings"]["providers"].setdefault(name, {
+                "kind": "compatible", "model": "example-model", "effort": "", "base_url": "https://example.org"})
             public["keys"][name] = True
         public["settings"]["prices"]["example/engine"] = {"in": 1, "out": 2}
         public["settings"]["lanes"]["a"].update(
@@ -50578,6 +50750,9 @@ else if (ask === "task-steps")'''))
 
     def test_the_kind_codex_shows_its_own_fields_and_help_and_no_key(self):
         self.run_settings_fix_scenario("codex-card")
+
+    def test_the_old_codex_provider_card_says_how_to_change_it_in_both_languages(self):
+        self.run_settings_fix_scenario("old-codex")
 
     def test_a_saved_codex_provider_reloads_with_its_values(self):
         self.run_settings_fix_scenario("codex-reload")

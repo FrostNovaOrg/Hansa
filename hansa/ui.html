@@ -542,6 +542,7 @@ const T = ZH ? {
   todoWhat:"待办内容", todoWork:"工作", todoLoading:"正在加载待办…", todoPage:(p, n, total) => `第 ${p} / ${n} 页 · 共 ${total} 件待办`, todoWhy:"为何只有你能做", todoHolds:"工作等待此事", todoContinues:"工作继续", todoSince:"提出时间", todoOutcome:"结果", todoClosed:"关闭时间", todoOpen:"未完成", todoDone:"已关闭", principalDetails:"详情",
   providers:"模型服务商", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
   codex:"Codex（OpenAI 的命令行工具）", codexPath:"Codex 程序（完整路径）", codexHome:"Codex 主目录（完整路径）",
+  oldCodex:(name, kind) => `${name} 通过旧方式使用 Codex；在本页为它选择类型 ${kind}，即可替换虚构的地址和密钥。更多：docs/codex.md。`,
   codexHomeNote:"存放 Codex 登录信息的目录，专给它用。", codexInstall:"把 Codex 安装在单独的目录里（不在 ~/.codex 下，也不在工作智能体不能读的目录里），在上方填写它的程序的完整路径。",
   codexLogin:"给 Codex 一个专用的主目录（不在 ~/.codex、工作台目录和工作线仓库里），并在那里登录一次：", codexProgramHere:"<Codex 程序>", codexHomeHere:"<Codex 主目录>",
   codexHomeKept:"hansa 会自动让其他服务商上的工作智能体读不到这个主目录，只有这家服务商的 Codex 运行才会打开它。",
@@ -741,6 +742,7 @@ const T = ZH ? {
   todoWhat:"What", todoWork:"Work", todoLoading:"Loading to-dos…", todoPage:(p, n, total) => `Page ${p} of ${n} · ${total} to-dos`, todoWhy:"Why only you", todoHolds:"Work waits", todoContinues:"Work goes on", todoSince:"Since", todoOutcome:"Outcome", todoClosed:"Closed at", todoOpen:"Open", todoDone:"Closed", principalDetails:"Details",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
   codex:"Codex (OpenAI's command line)", codexPath:"Codex program (full path)", codexHome:"Codex home (full path)",
+  oldCodex:(name, kind) => `${name} reaches Codex the old way; choosing the kind ${kind} for it on this page replaces the made-up address and key. More: docs/codex.md`,
   codexHomeNote:"The folder that holds Codex's login, a folder of its own.", codexInstall:"Install Codex in a folder of its own, outside ~/.codex and every folder workers may not read, and give its program's full path above.",
   codexLogin:"Give Codex a home folder of its own, outside ~/.codex, the desk and the lanes' repositories, and log in there once:", codexProgramHere:"<Codex program>", codexHomeHere:"<Codex home>",
   codexHomeKept:"hansa keeps this home from workers on other providers by itself: only this provider's Codex runs open it.",
@@ -2164,7 +2166,7 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, MODEL_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], BUILT_IN_NO_READ = [], CODEX_HOMES_NO_READ = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, MODEL_MESSAGES = {}, OLD_CODEX_PROVIDERS = [], REV = null, LANE_CMDS = [], DENY_SKIPPED = [], BUILT_IN_NO_READ = [], CODEX_HOMES_NO_READ = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
 // Outside and locked: only reading, release answers/stops and pause/resume stay open.
 let SETTINGS_LOCKED = true, outsideRuleLoaded = false, outsideRuleFlight = null;
 function readOutsideRule(reply) {
@@ -2538,6 +2540,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   settingsDefaults = r.settings_defaults || {};
   CREDIT_RESTS = r.provider_credit || {}; CREDIT_MESSAGES = r.provider_credit_messages || {};
   MODEL_MESSAGES = r.provider_model_messages || {};
+  OLD_CODEX_PROVIDERS = r.old_codex_providers || [];
   RELEASE_UNMATCHED = r.release_unmatched || []; RELEASE_LAST = r.release_last || {}; LANE_WARNINGS = r.lane_warnings || [];
   ALERT_OUTSIDE = r.alert_outside || [];
   readOutsideRule(r);
@@ -3106,6 +3109,8 @@ function renderSettings(problems = settingsProblems) {
           h("div", {class:"card-head"}, h("strong", {}, name), h("span", {class:"tag"}, kindLabel(p.kind)),
             h("div", {class:"card-actions"}, checkButton(name, null),
               h("button", {class:"danger", onclick:() => removeProvider(name)}, T.remove))),
+          OLD_CODEX_PROVIDERS.includes(name) && p.kind === "compatible"
+            ? h("p", {class:"field-note", "data-old-codex":""}, T.oldCodex(name, T.codex)) : null,
           CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, messageText(CREDIT_MESSAGES[name], CREDIT_RESTS[name])),
             h("button", {disabled:SETTINGS_LOCKED, onclick:() => topUpProvider(name)}, T.toppedUp)) : null,
           MODEL_MESSAGES[name] ? h("div", {class:"row warn"}, messageText(MODEL_MESSAGES[name])) : null,
