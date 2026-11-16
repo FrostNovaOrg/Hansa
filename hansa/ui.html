@@ -121,6 +121,12 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .field-label { display:block; font-size:12px; font-weight:550; }
 .field:focus-within > .field-label { color:var(--link); }
 .field-note { color:var(--muted); font-size:12px; line-height:1.65; }
+.built-in { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:0 0 14px; background:var(--surface); min-width:0; }
+.built-in h3 { margin:0 0 6px; font-size:13px; }
+.built-in p { margin:6px 0; }
+.built-in-list ul { max-height:22em; overflow:auto; margin:6px 0; padding-left:18px; overflow-wrap:anywhere; }
+.built-in-list li.here { font-weight:600; }
+.built-in-list .tag { margin-left:6px; font-family:inherit; }
 .field > input:not([type=checkbox]), .field > select, .field > textarea,
 .field > div > input:not([type=checkbox]) { width:100%; min-width:0; padding:9px 11px; border-radius:7px; }
 .field input[type=number] { width:100%; }
@@ -889,6 +895,11 @@ Object.assign(T, ZH ? {
   providerName:"服务商名称", priceName:"模型名称", baseModel:"模型（空＝用服务商的）",
   cooldown:"额度用完后休息（分钟）", contextTitle:"上下文压缩", compactHint:"范围 100,000–1,000,000 token。详细生效方式见说明。",
   protectedPaths:"不可读取的路径", protectedHint:"每行一个绝对路径。常见登录信息、密钥与浏览器数据已内置保护。",
+  protectedAdd:"你自己加的（内置列表以外）", protectedPlaceholder:"在这里加你自己的，每行一个完整路径，比如 /Users/me/.config/myproject/keys",
+  builtInTitle:"始终不让工作智能体读的（内置）",
+  builtInCount:(n, here, ex) => `本系统内置 ${n} 处主文件夹下的位置，这台机器上有 ${here} 处${ex ? `，比如 ${ex}` : ""}。这些不用你再列，下面的框空着也照样挡住。`,
+  builtInOpen:n => `展开完整列表（${n} 处，这台机器上有的排在前面）`, builtInHere:"本机有",
+  builtInElse:"不在这个列表里、也始终不让它们读的：工作台的密钥、状态、笔记和卡片（CLAUDE.md）；工作台里除它自己的工作树以外的部分，以及其他运行的临时文件夹；~/.claude 和每个服务商的 Claude Code 文件夹；为协调员会话记下的文件夹里的 Claude Code 文件；这个账号上的其他工作台。",
   releaseApproval:"发布前要不要问你", autoRelease:"不用问你就执行的发布目标", autoReleaseHint:"勾上：提出发布后可以不用问你就执行。不勾：每次等你点头。",
   directPolicy:"直接提交的点头规则", contentRules:"发布内容检查", forbiddenWords:"禁词",
   forbiddenHint:"每行一个词、短语或 re:Python 正则表达式，每项最多 200 字符；只在一行之内匹配，只查 UTF-8 文字。", exceptionsTitle:"按工作线豁免", mailboxTitle:"检查新增行中的邮箱",
@@ -977,6 +988,11 @@ Object.assign(T, ZH ? {
   providerName:"Provider name", priceName:"Model name", baseModel:"Model (blank = the provider's)",
   cooldown:"Rest after a usage limit (minutes)", contextTitle:"Context management", compactHint:"100,000–1,000,000 tokens. See the explanation for when each applies.",
   protectedPaths:"Paths workers must not read", protectedHint:"One absolute path per line. Common logins, keys and browser data are already protected.",
+  protectedAdd:"Your own additions (besides the built-in list)", protectedPlaceholder:"Add your own here, one full path per line, e.g. /Users/me/.config/myproject/keys",
+  builtInTitle:"Always kept from workers (built in)",
+  builtInCount:(n, here, ex) => `${n} places under the home folder are built in for this system, ${here} of them on this machine${ex ? `, such as ${ex}` : ""}. You need not list them: they are closed even with the box below empty.`,
+  builtInOpen:n => `Show the whole list (${n}, those on this machine first)`, builtInHere:"on this machine",
+  builtInElse:"Also always closed to them, though not on this list: the desk's keys, state, notes and card (CLAUDE.md); the rest of the desk but their own worktree, and the other runs' temporary folders; ~/.claude and every provider's Claude Code folder; the Claude Code files of the folder recorded for the coordinator's session; and the other desks on this account.",
   releaseApproval:"Asking you before a release", autoRelease:"Targets that go out without asking you", autoReleaseHint:"Ticked: a release can run without asking you. Unticked: each one waits for your yes.",
   directPolicy:"Approval for direct commits", contentRules:"Release content checks", forbiddenWords:"Forbidden words",
   forbiddenHint:"One word, phrase or re:Python pattern per line, at most 200 characters per entry. Matches within one line, in UTF-8 text only.", exceptionsTitle:"Exceptions by lane", mailboxTitle:"Check mailboxes in added lines",
@@ -2129,7 +2145,7 @@ function checkButton(name, after) {
 }
 
 /* ---------- settings ---------- */
-let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, MODEL_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
+let S = null, DISK_FREE = null, KEYS = {}, CREDIT_RESTS = {}, CREDIT_MESSAGES = {}, MODEL_MESSAGES = {}, REV = null, LANE_CMDS = [], DENY_SKIPPED = [], BUILT_IN_NO_READ = [], NO_READ_STOP = "", RELEASE_UNMATCHED = [], RELEASE_LAST = {}, LANE_WARNINGS = [], ALERT_OUTSIDE = [];
 // Outside and locked: only reading, release answers/stops and pause/resume stay open.
 let SETTINGS_LOCKED = true, outsideRuleLoaded = false, outsideRuleFlight = null;
 function readOutsideRule(reply) {
@@ -2450,13 +2466,25 @@ window.addEventListener("beforeunload", event => {
   if (settingsDirty()) { event.preventDefault(); event.returnValue = ""; }
 });
 /* the entries of what workers may not read that the coordinator added with hansa hide, as hansa recorded them */
+// What hansa always keeps from workers, read only: the server's list for this system (desk.built_in_no_read), those
+// on this machine first and marked, folded; then what else is closed that is not a path under the home folder
+function builtInPart() {
+  const all = [...BUILT_IN_NO_READ.filter(x => x.exists), ...BUILT_IN_NO_READ.filter(x => !x.exists)];
+  const here = all.filter(x => x.exists);
+  return h("div", {class:"built-in"}, h("h3", {}, T.builtInTitle),
+    h("p", {}, T.builtInCount(all.length, here.length, here.slice(0, 4).map(x => x.path).join(ZH ? "、" : ", "))),
+    h("details", {class:"built-in-list"}, h("summary", {}, T.builtInOpen(all.length)),
+      h("ul", {class:"mono"}, all.map(x => h("li", {class:x.exists ? "here" : "muted"}, x.path,
+        x.exists ? h("span", {class:"tag"}, T.builtInHere) : null)))),
+    h("p", {class:"field-note"}, T.builtInElse));
+}
 const hiddenByCoordinator = () => Object.entries(S.workers_may_not_read_added || {}).filter(([p]) => (S.workers_may_not_read || []).includes(p));
 async function loadSettings(problems, keepKeys = false, background = false) {
   const before = background ? JSON.stringify(S) : null, epoch = settingsEpoch;
   const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed,lane_allow_changed&n=20")]);
   // A clean page may refresh on return, but a reply must never replace edits begun while it was in flight.
   if (background && (epoch !== settingsEpoch || settingsSaving || settingsDirty() || JSON.stringify(S) !== before || newProviderName || newPriceName)) return;
-  S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; NO_READ_STOP = r.no_read_stop || "";
+  S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; BUILT_IN_NO_READ = r.built_in_no_read || []; NO_READ_STOP = r.no_read_stop || "";
   settingsDefaults = r.settings_defaults || {};
   CREDIT_RESTS = r.provider_credit || {}; CREDIT_MESSAGES = r.provider_credit_messages || {};
   MODEL_MESSAGES = r.provider_model_messages || {};
@@ -3024,8 +3052,8 @@ function renderSettings(problems = settingsProblems) {
         LANE_CMDS.length ? table([T.at, T.lane, T.field, T.change], LANE_CMDS.map(e => [when(e.ts), e.lane,
           (CHANGE_LABELS[changedField(e)] || changedField(e)) + (e.target ? ` · ${T.releaseTarget} ${e.target}` : ""),
           h("span", {class:"mono"}, `${JSON.stringify(e.old ?? "")} -> ${JSON.stringify(e.new ?? "")}`)])) : h("p", {class:"muted"}, T.none))],
-    security: [section(T.protectedPaths, fields(field(T.protectedPaths,
-      h("textarea", {placeholder:"/Users/me/.config/myproject/keys", oninput:e => {
+    security: [section(T.protectedPaths, builtInPart(), fields(field(T.protectedAdd,
+      h("textarea", {placeholder:T.protectedPlaceholder, oninput:e => {
         S.workers_may_not_read = e.target.value.split("\n").map(x => x.trim()).filter(Boolean); refreshSettingsState();
       }}, (S.workers_may_not_read || []).join("\n")), T.protectedHint, T.workersMayNotRead, true)),
       h("p", {class:"field-note"}, T.protectedStop),
