@@ -75,7 +75,9 @@ failures, `1` means a failed row. `--json` gives `{"ok": ..., "rows": [...]}` wi
 For a subscription, run `claude auth login` as the desk account; a new desk's
 provider `claude` uses that login.
 Alternatively, set an Anthropic-compatible endpoint and key on the page below,
-which needs no subscription login. The principal alone handles credentials.
+which needs no subscription login. Or add a provider of the kind Codex, which runs
+OpenAI's Codex command line with its own login ([Codex](codex.md)).
+The principal alone handles credentials.
 
 ## Try the sample first
 

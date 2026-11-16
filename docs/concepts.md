@@ -14,7 +14,7 @@ The [README](../README.md) has the overview.
 | **Worker** | One `claude -p` run per task, or per verification (`hansa verify`). It may run any command inside Claude Code's sandbox; its commands write only in its worktree and the folders its lane allows, and reach only its lane's hosts. It never commits. |
 | **Desk** | One folder that holds a team's settings, keys, tasks and an append-only event log. The command line, the web page and the agents all read the same files. |
 | **Lane** | A git checkout for workers: its base branch, a worktree of its own, its provider order, the hosts and folders its workers may reach, and its setup, check and release commands. A lane runs one task at a time; lanes on the same repository run tasks side by side, up to `hansa concurrency`. |
-| **Provider** | Where a run gets its model: a Claude Code login (a subscription), or any endpoint that speaks the Anthropic API, with its key. A provider that hits its usage limit rests, and its task moves to the lane's next ready provider, or waits for one. |
+| **Provider** | Where a run gets its model: a Claude Code login (a subscription), any endpoint that speaks the Anthropic API, with its key, or OpenAI's Codex command line, with its own login ([Codex](codex.md)). A provider that hits its usage limit rests, and its task moves to the lane's next ready provider, or waits for one. |
 | **Check** | A lane's test command. hansa runs it on each task's branch, in the lane's sandbox; a failed check blocks the merge unless the coordinator overrides it, which is recorded. |
 | **Release** | Sending a lane's base branch out through one of its named release targets, after the principal's yes. It runs outside the sandbox, as the desk's account. |
 
@@ -87,9 +87,10 @@ More: [The desk: files, keys and notes](desk.md).
 - A worker's commands and the lane's setup and check run in the operating system's sandbox. The coordinator
   runs as the desk's user (or as root on a Linux server). Use a user account or machine for a desk only if that
   code may reach all of that account's or machine's files.
-- With the [Codex adapter](../contrib/codex/README.md), a Codex run's commands can read the Codex login: Codex and
-  the commands it runs share one sandbox, and every Codex run, on any lane, uses that one login. Claude workers
-  cannot read it, and a Codex run's network reaches only the lane's hosts and OpenAI's.
+- On a [Codex](codex.md) provider, a Codex run's commands can read that provider's Codex login: Codex and the
+  commands it runs share one sandbox, and every run on the provider, on any lane, uses the login in its Codex
+  home. Runs on other providers cannot read it, and a Codex run's network reaches only the lane's hosts and
+  OpenAI's.
 - A release's command runs outside the sandbox, as the desk's account. Anything it builds and starts from the base
   branch also runs outside the sandbox as that account, so list a lane's build and release files as its `release_files`.
 - The coordinator's rules against pushing and publishing catch only the forms they name. A command in another
