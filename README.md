@@ -84,8 +84,8 @@ Developers: [How work moves](docs/concepts.md#how-work-moves) has the detailed c
 
 ## Several models, on purpose
 
-A lane can use a Claude Code login, any endpoint that speaks the Anthropic API (for example DeepSeek's or Kimi's), or,
-on macOS, Codex's command line through [`contrib/codex`](contrib/codex/README.md). One model can write a change and
+A lane can use a Claude Code login, any endpoint that speaks the Anthropic API (for example DeepSeek's or Kimi's), or
+Codex's command line through [`contrib/codex`](contrib/codex/README.md). One model can write a change and
 another check it, and a provider at its usage limit hands its task to the next. The page totals the cost of all of them in one
 place, and `hansa cost --by provider` breaks it down by provider.
 

@@ -68,7 +68,7 @@ flowchart LR
 
 ## 有意用多家模型
 
-一条工作线可以用 Claude Code 的登录、任何兼容 Anthropic API 的接口（比如 DeepSeek 或 Kimi 的），在 macOS 上还可以通过 [`contrib/codex`（英文）](contrib/codex/README.md) 用 Codex 的命令行。可以让一家模型写改动、另一家来核验；某家服务商的用量到了上限，任务会转给下一家。所有服务商的费用在网页上汇总在一处，`hansa cost --by provider` 还能按服务商分开看。
+一条工作线可以用 Claude Code 的登录、任何兼容 Anthropic API 的接口（比如 DeepSeek 或 Kimi 的），还可以通过 [`contrib/codex`（英文）](contrib/codex/README.md) 用 Codex 的命令行。可以让一家模型写改动、另一家来核验；某家服务商的用量到了上限，任务会转给下一家。所有服务商的费用在网页上汇总在一处，`hansa cost --by provider` 还能按服务商分开看。
 
 ## 它做过什么
 
