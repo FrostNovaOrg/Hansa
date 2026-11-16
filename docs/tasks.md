@@ -786,6 +786,71 @@ what still holds of them is said again in the new note. Each round's note is
 kept on its own beside its task, as `note.md` in the task's folder (keys
 removed, as from what else hansa writes there).
 
+When retry stops a queued or running verification, its record names the task and
+the follow-up that replaced it. The earlier-round line says the verification was
+stopped before a verdict; a verification with no verdict is never called "verified by".
+
+A change holding a key hansa knows cannot continue from its commits: an ordinary
+retry or `--update` keeps that key in history and would be refused at merge again.
+Hansa refuses these retries before queuing; use `hansa retry ID --fresh "..."` to
+redo the change from the base without the key. This check is needed while known
+keys in a change's history prevent merging, even if later commits remove them.
+
+The follow-up keeps the earlier task's model unless `--model M` overrides it. As with
+`hansa add --model M`, it is recorded on the new task and applies only when a Claude subscription
+provider runs it; other providers use their own model. Both commands print the same note about
+that limit. `--effort E` overrides the inherited effort separately.
+
+A done, failed, closed or cancelled task becomes replaced, so it can be sent back once; a second `hansa retry` of it is
+refused and names the follow-up to send back instead. A merged task stays merged: each
+`hansa retry` of it is new work on top of that merge, and it can be sent back more than once.
+`hansa merge`, `hansa verify`, `hansa cancel` and `hansa close` also refuse a replaced
+task and name the follow-up to use instead. If that follow-up was also replaced, all five
+commands name the last follow-up, so using it does not lead to another replacement refusal.
+The lookup stops before revisiting an id if damaged replacement records form a circle;
+keep this guard while following stored replacement links.
+
+A follow-up cancelled while still queued, before it ever started, gives the task it replaced back
+as it was (waiting for review, failed, closed, or cancelled), and `hansa cancel` says so, using
+`restored to closed` for closed work; `hansa retry` of
+the cancelled follow-up is then refused and points to that task. A follow-up the machine kept from
+starting (`next:` says `hansa retry` it once the machine is fixed) has no commit of its own; its
+retry starts where it would have started, the earlier task's last commit, and is given that
+earlier task's report and, if the never-started round has no standing verification, the
+earlier task's standing verification report. Closing that verification because the earlier
+task was replaced does not discard its verdict or report.
+
+A verification of a follow-up judges each ask in the original task together with
+this round's note, which restates what still holds of earlier rounds' notes and
+takes precedence where they differ, against the whole change.
+
+`hansa show` of a follow-up says which round it is, the earlier rounds' ids,
+oldest first, and how many of them a verification found do not hold. When a
+verification of a follow-up finds that it does not hold, and that is the second
+such verdict in its rounds or more, `hansa show` and what the coordinator is
+told add: "This task has not held N times. Before sending it back again,
+rethink it: make it smaller, ask for less, or start again from the base."
+
+The worker is told that hansa runs the lane's check after it ends, with the
+command, so it runs only the tests related to its change. A verification is
+told the command of the task's last check and how it ended, and that the whole
+check need not be run again unless it needs to.
+A verification's scratch changes are kept under `refs/hansa/scratch/ID`, leaving its worktree clean
+and the shared stash alone; `hansa show ID` gives the `hansa git` command to read them, and the daily
+trim removes the ref 30 days after it ends. When git cannot keep them (the ref is locked, say), the
+verdict stands and `hansa show ID` says the scratch changes could not be kept, with git's words.
+
+When hansa cannot commit a worker's work as the run ends (a locked git index, or any other git error
+there), the task fails: "hansa could not commit the work: " and git's first line. `hansa show ID` gives
+all git said and the command that reads the work, which hansa keeps under `refs/hansa/kept/ID` (made
+without the worktree's index, so a locked one does not stop it). The lane's next task starts clean:
+if git could not clear the worktree then, that task clears it, as the work is kept. `hansa retry ID`
+works as for any failed task: it starts from the base, since the work was never committed.
+
+Anything else a task finds in its lane's worktree when it starts is set aside in `git stash`, named
+"hansa: left over before ID". That task's `hansa show` says so: the stash commit, the last task that
+ran in that worktree, and the `hansa git` commands that show the changes and the new files.
+
 #### Going on in the earlier conversation
 
 Where it can, a follow-up's worker goes on in the earlier task's conversation instead of reading the
@@ -869,70 +934,6 @@ verdict on the whole change. Its task text is not sent again. `hansa show` of th
 reason (the first verification of a task has no such line). Its numbers, notes and leftovers are its
 own part only, and its verdict is read from its own answer, never from the earlier verification's
 rows its record copied.
-When retry stops a queued or running verification, its record names the task and
-the follow-up that replaced it. The earlier-round line says the verification was
-stopped before a verdict; a verification with no verdict is never called "verified by".
-
-A change holding a key hansa knows cannot continue from its commits: an ordinary
-retry or `--update` keeps that key in history and would be refused at merge again.
-Hansa refuses these retries before queuing; use `hansa retry ID --fresh "..."` to
-redo the change from the base without the key. This check is needed while known
-keys in a change's history prevent merging, even if later commits remove them.
-
-The follow-up keeps the earlier task's model unless `--model M` overrides it. As with
-`hansa add --model M`, it is recorded on the new task and applies only when a Claude subscription
-provider runs it; other providers use their own model. Both commands print the same note about
-that limit. `--effort E` overrides the inherited effort separately.
-
-A done, failed, closed or cancelled task becomes replaced, so it can be sent back once; a second `hansa retry` of it is
-refused and names the follow-up to send back instead. A merged task stays merged: each
-`hansa retry` of it is new work on top of that merge, and it can be sent back more than once.
-`hansa merge`, `hansa verify`, `hansa cancel` and `hansa close` also refuse a replaced
-task and name the follow-up to use instead. If that follow-up was also replaced, all five
-commands name the last follow-up, so using it does not lead to another replacement refusal.
-The lookup stops before revisiting an id if damaged replacement records form a circle;
-keep this guard while following stored replacement links.
-
-A follow-up cancelled while still queued, before it ever started, gives the task it replaced back
-as it was (waiting for review, failed, closed, or cancelled), and `hansa cancel` says so, using
-`restored to closed` for closed work; `hansa retry` of
-the cancelled follow-up is then refused and points to that task. A follow-up the machine kept from
-starting (`next:` says `hansa retry` it once the machine is fixed) has no commit of its own; its
-retry starts where it would have started, the earlier task's last commit, and is given that
-earlier task's report and, if the never-started round has no standing verification, the
-earlier task's standing verification report. Closing that verification because the earlier
-task was replaced does not discard its verdict or report.
-
-A verification of a follow-up judges each ask in the original task together with
-this round's note, which restates what still holds of earlier rounds' notes and
-takes precedence where they differ, against the whole change.
-
-`hansa show` of a follow-up says which round it is, the earlier rounds' ids,
-oldest first, and how many of them a verification found do not hold. When a
-verification of a follow-up finds that it does not hold, and that is the second
-such verdict in its rounds or more, `hansa show` and what the coordinator is
-told add: "This task has not held N times. Before sending it back again,
-rethink it: make it smaller, ask for less, or start again from the base."
-
-The worker is told that hansa runs the lane's check after it ends, with the
-command, so it runs only the tests related to its change. A verification is
-told the command of the task's last check and how it ended, and that the whole
-check need not be run again unless it needs to.
-A verification's scratch changes are kept under `refs/hansa/scratch/ID`, leaving its worktree clean
-and the shared stash alone; `hansa show ID` gives the `hansa git` command to read them, and the daily
-trim removes the ref 30 days after it ends. When git cannot keep them (the ref is locked, say), the
-verdict stands and `hansa show ID` says the scratch changes could not be kept, with git's words.
-
-When hansa cannot commit a worker's work as the run ends (a locked git index, or any other git error
-there), the task fails: "hansa could not commit the work: " and git's first line. `hansa show ID` gives
-all git said and the command that reads the work, which hansa keeps under `refs/hansa/kept/ID` (made
-without the worktree's index, so a locked one does not stop it). The lane's next task starts clean:
-if git could not clear the worktree then, that task clears it, as the work is kept. `hansa retry ID`
-works as for any failed task: it starts from the base, since the work was never committed.
-
-Anything else a task finds in its lane's worktree when it starts is set aside in `git stash`, named
-"hansa: left over before ID". That task's `hansa show` says so: the stash commit, the last task that
-ran in that worktree, and the `hansa git` commands that show the changes and the new files.
 
 ## What work costs
 
