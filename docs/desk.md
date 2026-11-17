@@ -163,6 +163,7 @@ When the proxy's sign-in ends and it answers instead, the page says “This answ
 Afterwards the same tab keeps its key in session storage (the first way) or needs none (the second); without session storage, reopen the address with `#t=KEY`.
 
 From outside, while **Allow changing settings from outside this machine** (`settings_from_outside`, off by default) is off, the page may only read, answer or stop releases, and pause or resume dispatch. Saving settings and keys, testing alerts or pushes, recognizing push addresses, checking providers (Ping) and confirming top-ups require the switch; turn it on in **Settings → Lanes → General** from the machine's own address through the SSH tunnel.
+Settings shows this restriction at the top of every section and locks its fields, while text remains readable and copyable.
 A request counts as from outside if its `Host` is not a loopback name (`127.0.0.1`, `localhost`, `[::1]`) or it carries `Forwarded`, `X-Forwarded-*`, `X-Real-IP` or `Via`.
 A proxy that hides both its outside host name and these headers would not be recognised as outside: do not set one up that way.
 

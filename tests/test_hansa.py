@@ -46318,6 +46318,7 @@ class El {
   removeAttribute(k) { delete this.attrs[k]; if (k === "disabled" || k === "hidden") this[k] = false; }
   scrollIntoView() { this.scrolled = true; }
   querySelector(tag) { return descendants(this, tag)[0] || null; }
+  querySelectorAll(selectors) { return selectors.split(",").flatMap(tag => descendants(this, tag.trim())); }
   closest(selectors) {
     for (let el = this; el; el = el.parentElement) {
       if (selectors.split(",").some(s => { s = s.trim();
@@ -48158,6 +48159,68 @@ else if (ask === "settings-unavailable") vm.runInContext('show("settings")', ctx
   console.log(JSON.stringify(ids["#state"].textContent));
 }, e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else vm.runInContext("loadSettings()", ctx).then(async () => {
+  if (ask === "outside-settings-view") {
+    const run = code => vm.runInContext(code, ctx), tab = ids["#tab-settings"];
+    await run('show("settings")');
+    run("renderSettings()");  // The existing dispatch controls must survive a settings redraw too.
+    const disabled = el => {
+      for (let node = el; node; node = node.parentElement) if (node.disabled) return true;
+      return false;
+    };
+    const controls = root => ["input", "textarea", "select", "button"].flatMap(tag => descendants(root, tag));
+    const button = (root, key) => descendants(root, "button").find(el => el.textContent === run("T." + key));
+    const describe = el => ({tag:el.tag, type:el.type, text:el.textContent, value:el.value,
+      disabled:disabled(el), readOnly:!!el.readOnly});
+    const groups = [];
+    for (const [key] of run("SETTINGS_GROUPS")) {
+      await run(`settingsNavButtons.${key}`).click();
+      const panel = run(`settingsPanels.${key}`);
+      const edits = controls(panel).filter(el => !el.closest(".runtime-toolbar") &&
+        !(el.tag === "button" && (el.closest(".password-control") || el.textContent === run("T.saveKey"))));
+      const folds = descendants(panel, "details");
+      for (const fold of folds) if (!fold.open) await descendants(fold, "summary")[0].click();
+      const saves = descendants(tab, "button").filter(el => [run("T.save"), run("T.saveKey")].includes(el.textContent));
+      groups.push({key, shown:!panel.hidden, firstIsNotice:"data-outside-notice" in tab.kids[0].attrs,
+        notices:descendants(tab, "div").filter(el => "data-outside-notice" in el.attrs).map(el => el.textContent),
+        edits:edits.map(describe), folds:folds.map(el => el.open),
+        saves:saves.map(el => ({...describe(el), title:el.getAttribute("title") || el.title || ""}))});
+    }
+    const secret = descendants(run("settingsPanels.alerts"), "input").find(el => el.attrs["data-push-field"] === "secret");
+    const beforePaste = run("JSON.stringify(PUSH_DRAFTS)");
+    if (given["/api/settings"].from_outside && !given["/api/settings"].settings.settings_from_outside) {
+      await secret.on.paste({target:secret, preventDefault() {}, clipboardData:{getData:() => "fixture paste"}});
+    }
+    const pasteKeptReadOnly = beforePaste === run("JSON.stringify(PUSH_DRAFTS)");
+    const model = descendants(run("settingsPanels.providers"), "input").find(el => el.value === "copyable-model");
+    const copyable = describe(model), dirty = run("settingsDirty()");
+    const dispatchBefore = controls(run("dispatchPanel")).map(describe);
+    const history = ids["#settings-history"];
+    await descendants(history, "summary")[0].click();
+    const historyControls = controls(history).filter(el => !el.hidden).map(describe);
+    // Reading a masked draft still permits Show/Hide, without editing the settings.
+    const reveal = descendants(run("settingsPanels.providers"), "button").find(el => el.attrs["aria-pressed"] === "false");
+    const revealEnabled = !disabled(reveal);
+    await reveal.click();
+    const revealed = reveal.getAttribute("aria-pressed") === "true" && !run("settingsDirty()");
+    await run("loadStatus()"); await run("loadDispatch()");
+    const openControls = [];
+    for (const key of ["releaseYes", "releaseNo", "releaseStop"]) {
+      const el = button(ids["#tab-status"], key);
+      openControls.push({key, ...describe(el)}); await el.click();
+    }
+    for (const key of ["pause", "resume"]) {
+      const root = run("dispatchPanel");
+      openControls.push(...descendants(root, "input").map(el => ({key:"pauseReason", ...describe(el)})));
+      const el = button(root, key);
+      openControls.push({key, ...describe(el)}); await el.click();
+    }
+    if (!given["/api/settings"].from_outside || given["/api/settings"].settings.settings_from_outside) {
+      model.value = "changed-model"; model.on.input({target:model});
+      await run("settingsSaveButton").click();
+    }
+    console.log(JSON.stringify({groups, copyable, dirty, pasteKeptReadOnly, historyOpen:history.open, historyControls,
+      revealEnabled, revealed, dispatchBefore, openControls, posts:apiPosts, posted})); return;
+  }
   if (ask === "outside-settings") {
     const run = code => vm.runInContext(code, ctx), tab = ids["#tab-settings"];
     const found = pred => { const out = []; walk(tab, el => { if (pred(el)) out.push(el); }); return out; };
@@ -62050,6 +62113,112 @@ class PageLanguageTest(unittest.TestCase):
     setUp = AlertPushPageTest.setUp
     page = AlertPushPageTest.page
     PAGE_HARNESS = AlertPushPageTest.PAGE_HARNESS
+
+    def outside_settings_page(self, language, outside=True, switch=False):
+        if not shutil.which("node"):
+            self.skipTest("needs node to run the page's script")
+        if not self.desk.settings()["alert_push"]:
+            alert_push.change(self.desk, [{"address": "https://api.day.app/outside-settings-fixture"}], by="page")
+        settings = public_settings(self.desk)
+        settings.update(from_outside=outside, keys={"mimo": True})
+        settings["settings"].update(settings_from_outside=switch,
+            providers={**settings["settings"]["providers"],
+                "mimo": {"kind": "compatible", "model": "copyable-model", "base_url": "https://api.example/v1"},
+                "codex": {"kind": "codex", "model": "fixture-model", "codex_path": "/opt/codex/bin/codex",
+                          "codex_home": "/opt/codex-home", "web_search": "disabled", "disabled_features": ["hooks"]}},
+            lanes={"a": {"repo": "/example/repo", "base": "main", "providers": ["claude"],
+                          "targets": {"push": {"command": "publish"}}}},
+            release_forbidden=["fixture-word"], release_forbidden_except=[{"entry": "fixture-word", "lanes": ["a"]}])
+        status = views.status(self.desk)
+        waiting = {"id": 17, "state": "waiting", "lane": "a", "target": "push", "base": "main",
+                   "commit": "a" * 40, "command": "publish", "what": "fixture release"}
+        status["releases"] = [waiting, {**waiting, "id": 18, "state": "approved"}]
+        harness = self.tmp / "outside-settings-view.js"
+        harness.write_text(self.PAGE_HARNESS)
+        result = subprocess.run(["node", str(harness), str(Path(hansa.__file__).parent / "ui.html"),
+                                 "outside-settings-view", "zh-CN" if language == "zh" else "en"],
+                                input=json.dumps({"/api/settings": settings, "/api/status": status, "/api/events": []}),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_outside_settings_notice_is_first_in_every_section_in_both_languages(self):
+        for lang in ("en", "zh"):
+            with self.subTest(lang=lang):
+                page = self.outside_settings_page(lang)
+                self.assertFalse(page["dirty"])
+                self.assertEqual({g["key"] for g in page["groups"]},
+                                 {"providers", "coordinator", "lanes", "security", "releases", "alerts", "prices"})
+                for group in page["groups"]:
+                    self.assertTrue(group["shown"], group["key"])
+                    self.assertTrue(group["firstIsNotice"], group["key"])
+                    [notice] = group["notices"]
+                    for word in (("cannot be changed", "outside this machine", "SSH", "or", "Settings → Lanes → General",
+                                  "Allow changing settings from outside this machine") if lang == "en" else
+                                 ("不能更改", "本机以外", "SSH", "或", "设置 → 工作线 → 总体", "允许从本机以外更改设置")):
+                        self.assertIn(word, notice)
+
+    def test_outside_settings_fields_and_mutation_buttons_are_locked_but_reading_works(self):
+        for lang in ("en", "zh"):
+            with self.subTest(lang=lang):
+                page = self.outside_settings_page(lang)
+                kinds = set()
+                for group in page["groups"]:
+                    self.assertTrue(group["edits"], group["key"])
+                    for control in group["edits"]:
+                        kinds.add(control["type"] if control["type"] == "checkbox" else control["tag"])
+                        self.assertTrue(control["disabled"] or control["readOnly"], (group["key"], control))
+                    self.assertTrue(all(group["folds"]), group["key"])
+                self.assertTrue({"input", "select", "textarea", "checkbox", "button"}.issubset(kinds))
+                self.assertEqual(page["copyable"]["value"], "copyable-model")
+                self.assertTrue(page["copyable"]["readOnly"])
+                self.assertFalse(page["copyable"]["disabled"])
+                self.assertTrue(page["pasteKeptReadOnly"])
+                self.assertTrue(page["historyOpen"])
+                self.assertTrue(all(not c["disabled"] and not c["readOnly"] for c in page["historyControls"]))
+                self.assertTrue(page["revealEnabled"] and page["revealed"])
+
+    def test_outside_settings_save_buttons_explain_why_in_both_languages(self):
+        for lang in ("en", "zh"):
+            with self.subTest(lang=lang):
+                page = self.outside_settings_page(lang)
+                for group in page["groups"]:
+                    self.assertGreaterEqual(len(group["saves"]), 2)
+                    for save in group["saves"]:
+                        self.assertTrue(save["disabled"])
+                        self.assertTrue(save["title"])
+                        self.assertTrue(group["notices"][0].startswith(save["title"]))
+                        for word in (("cannot be changed", "outside this machine") if lang == "en" else ("不能更改", "本机以外")):
+                            self.assertIn(word, save["title"])
+
+    def test_outside_settings_lock_keeps_release_answers_stops_pause_and_resume_usable(self):
+        for lang in ("en", "zh"):
+            with self.subTest(lang=lang):
+                page = self.outside_settings_page(lang)
+                self.assertTrue(page["dispatchBefore"])
+                self.assertTrue(all(not c["disabled"] and not c["readOnly"] for c in page["dispatchBefore"]))
+                self.assertEqual({c["key"] for c in page["openControls"]},
+                                 {"releaseYes", "releaseNo", "releaseStop", "pauseReason", "pause", "resume"})
+                for control in page["openControls"]:
+                    self.assertFalse(control["disabled"] or control["readOnly"], control)
+                self.assertEqual([p["path"] for p in page["posts"]],
+                                 ["/api/release/answer", "/api/release/answer", "/api/release/stop", "/api/pause", "/api/resume"])
+                self.assertEqual([p["body"]["yes"] for p in page["posts"][:2]], [True, False])
+
+    def test_local_and_switch_on_settings_stay_editable_without_a_notice(self):
+        for lang in ("en", "zh"):
+            for outside, switch in ((False, False), (False, True), (True, True)):
+                with self.subTest(lang=lang, outside=outside, switch=switch):
+                    page = self.outside_settings_page(lang, outside, switch)
+                    for group in page["groups"]:
+                        self.assertFalse(group["firstIsNotice"])
+                        self.assertEqual(group["notices"], [])
+                        self.assertTrue(all(not c["disabled"] and not c["readOnly"] for c in group["edits"]), group["key"])
+                        save = next(c for c in group["saves"] if c["text"] == ("保存设置" if lang == "zh" else "Save settings"))
+                        self.assertFalse(save["disabled"])
+                        self.assertEqual(save["title"], "")
+                    self.assertEqual(page["posted"]["settings"]["providers"]["mimo"]["model"], "changed-model")
+                    self.assertEqual(page["posted"]["settings"]["settings_from_outside"], switch)
 
     def outside_actions_page(self, language, outside=True, switch=False, refusal=False):
         if not shutil.which("node"):

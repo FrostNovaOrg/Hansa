@@ -558,7 +558,8 @@ const T = ZH ? {
   general:"总体", deskName:"工作台名称",
   outsideTitle:"允许从本机以外更改设置",
   outsideNote:"默认关闭。关闭时，从本机以外（例如经由代理）只能查看、答复或停止发布、暂停或恢复派发任务。开启后，还能保存设置和服务商密钥、测试提醒、发送测试推送、识别推送地址、Ping 和确认已充值，和本机自己的地址（SSH 隧道）一样。",
-  outsideLocked:"本页是从本机以外打开的（例如经由代理）：这里只能查看、答复或停止发布、暂停或恢复派发任务。保存设置和密钥、测试提醒、发送测试推送、识别推送地址、Ping 和确认已充值均已禁用。如需使用，请在本机自己的地址（SSH 隧道）打开的页面中开启 设置 → 工作线 → 总体 里的“允许从本机以外更改设置”。",
+  outsideReadOnly:"本页是从本机以外打开的（例如经由代理），因此这里只能查看设置，不能更改。",
+  outsideLocked:"如需更改，请通过 SSH 隧道在本机自己的地址打开页面；或先在那里开启 设置 → 工作线 → 总体 里的“允许从本机以外更改设置”，再重新加载本页。这里仍可答复或停止发布、暂停或恢复派发任务；测试提醒、发送测试推送、识别推送地址、Ping 和确认已充值均已禁用。",
   deskNameHint:"最多 40 个字符，任何语言均可；只用一行，不含控制字符、Unicode 格式字符或已保存的密钥。保存时去掉两端空格；留空或只填空格使用路径的最后两级文件夹。只有负责人在此保存才会更改，并记入设置历史。名称用于提醒、推送标题和分组、网页、status、工作台列表和菜单；列表和菜单同时显示文件夹，以区分同名工作台。",
   concurrency:"同时最多做几件", compactIdle:"空闲时压缩于（token）", compactWorking:"工作中压缩于（token）",
   compactNote:"一轮以回答结束、会话空闲后，若上下文达到第一个数，协调员的 mod 在空闲一分钟后压缩它，这时整个上下文还在提示缓存里。新的一轮取消等待。工作中不打断，由 Claude Code 自己的自动压缩在第二个数时压缩（hansa coordinator 用 --autocompact 传给它）。两个数都在 100,000 到 1,000,000 token 之间。默认值适合上下文窗口 1M token 的模型。哪个数达到或接近模型的窗口（或第一个数不小于第二个数），那个压缩就不会发生：Claude Code 自己先压缩了。第二个数超过模型的窗口时，Claude Code 按模型自己的窗口压缩，和不设一样。第一个数改了，从会话下一次判断（一轮结束或一次等待结束时）起生效；第二个数从会话下次启动起生效。协调员不能改它们。Claude Code（2.1.299 或更新的版本）还会自己压缩一个有 200,000 token 或更多、空闲了约 54 分钟的对话；这一项 Hansa 既不设置也不读取。mod 需要 Claude Code 2.1.306 或更新的版本；页面顶上的状态行说会话启动时有没有带上 mod，没带上的话为什么。",
@@ -758,7 +759,8 @@ const T = ZH ? {
   general:"General", deskName:"Desk name",
   outsideTitle:"Allow changing settings from outside this machine",
   outsideNote:"Off by default. Off: from outside this machine (through a proxy, say), you may only read, answer or stop releases, and pause or resume dispatch. On: you may also save settings and provider keys, test alerts, send test pushes, recognize push addresses, Ping and confirm top-ups, as at this machine's own address (the SSH tunnel).",
-  outsideLocked:"This page was opened from outside this machine (through a proxy, say): here you may only read, answer or stop releases, and pause or resume dispatch. Saving settings and keys, testing alerts, sending test pushes, recognizing push addresses, Ping and confirming top-ups are disabled. To use them here, turn on “Allow changing settings from outside this machine” in Settings → Lanes → General on the page opened at this machine's own address (the SSH tunnel).",
+  outsideReadOnly:"Settings can be read here but cannot be changed because this page was opened from outside this machine (through a proxy, say).",
+  outsideLocked:"To change them, open the page at this machine's own address through the SSH tunnel, or turn on “Allow changing settings from outside this machine” there in Settings → Lanes → General and reload this page. Here you may only read, answer or stop releases, and pause or resume dispatch. Testing alerts, sending test pushes, recognizing push addresses, Ping and confirming top-ups are disabled.",
   deskNameHint:"Up to 40 characters in any language, on one line, without control or Unicode format characters or saved keys. Saving trims surrounding spaces. Leave blank or use only spaces for the last two folders of the path. Only the principal can save it here; settings history records the change. Used in alerts, push titles and groups, the page, status, desk lists and the menu. Lists and the menu also show the folder to distinguish desks with the same name.",
   concurrency:"Tasks at once", compactIdle:"Compact when idle at (tokens)", compactWorking:"Compact while working at (tokens)",
   compactNote:"Once a turn has ended with an answer and the session is idle, the coordinator's mod compacts it after a minute if its context is at or above the first figure, while the whole context is still in the prompt cache. A new turn cancels the wait. While it works nothing interrupts it: Claude Code's own auto-compact compacts it at the second (hansa coordinator gives it with --autocompact). Both figures take 100,000 to 1,000,000 tokens. The defaults suit a model with a 1M-token window. A figure at or near the model's window, or a first figure at or above the second, never comes: Claude Code compacts on its own first. A second figure above the model's window is taken as that window: Claude Code compacts at the model's own limit, as with no figure. A change to the first applies from the session's next decision (when a turn ends, or a wait ends); a change to the second from the session's next start. The coordinator cannot change them. Claude Code (2.1.299 or later) also compacts by itself a conversation of 200,000 tokens or more left idle about 54 minutes; hansa neither sets nor reads that. The mod needs Claude Code 2.1.306 or later; the status line at the top says whether the session was started with it, and why not.",
@@ -888,6 +890,8 @@ const T = ZH ? {
   laneTargets:"Release targets: the ways the base branch goes out, each with its command, its time limit in minutes and the target that must go first (after); a release that runs in the repository holds it, so merges there wait for it; a fixed target runs from a checkout of the commit made for it and holds nothing",
   laneMergeCheck:"Merge check command: hansa runs it before a merge, on the task merged with the base branch, in place of the check; it runs before every merge of a task that changed something, never after a task (blank = the merge check runs the check)", mergeTimeout:"Max minutes for the merge check (blank = the same as per task)", f_merge_check:"merge check"
 };
+// Save's short reason is also the first sentence of the notice and outside refusals.
+T.outsideLocked = T.outsideReadOnly + " " + T.outsideLocked;
 Object.assign(T, ZH ? {
   protectedStop:"只要列表里有一条含 ()[]{}*?\\ 的路径，Hansa 就不启动任何工作智能体、核验者或协调员，直到这里改掉它。",
   alertBoundary:"提醒命令以这台机器的账号在沙箱外运行。",
@@ -2445,6 +2449,7 @@ function refreshSettingsState() {
   if (settingsForm) { settingsForm.disabled = settingsSaving; settingsForm.setAttribute("aria-busy", String(settingsSaving)); }
   if (settingsSaveButton) {
     settingsSaveButton.disabled = settingsSaving || SETTINGS_LOCKED;
+    settingsSaveButton.title = SETTINGS_LOCKED ? T.outsideReadOnly : "";
     settingsSaveButton.replaceChildren(icon(settingsSaving ? "pending" : "check"), h("span", {}, settingsSaving ? pending : T.save));
   }
   if (settingsDiscardButton) { settingsDiscardButton.disabled = settingsSaving; settingsDiscardButton.textContent = dirty ? T.reload : T.refresh; }
@@ -2909,7 +2914,7 @@ function pushSection() {
       const el = h("input", {type, disabled:key === "address" && SETTINGS_LOCKED,
         value:barkSecret ? draft[key].replace(/[\r\n]/g, " ") : draft[key], autocomplete:"off", "aria-label":label, "data-push-field":key,
         onpaste:e => {
-          if (key !== "secret" || draft.service !== "bark") return;
+          if (SETTINGS_LOCKED || key !== "secret" || draft.service !== "bark") return;
           // Password inputs strip line breaks. Preserve the copied script in
           // memory for parsing; show only its flattened, masked input value.
           e.preventDefault(); draft[key] = e.clipboardData.getData("text"); draft.clearSecret = false;
@@ -3092,6 +3097,15 @@ function removeProvider(name) {
   if (problems.length) return renderSettings(problems);
   delete S.providers[name]; delete KEY_DRAFTS[name]; delete PROVIDER_ASIDE[name]; renderSettings([]);
 }
+function lockSettingsFields(panel) {
+  if (!SETTINGS_LOCKED) return;
+  for (const control of panel.querySelectorAll("input, textarea, select, button")) {
+    // Dispatch remains allowed; text and Show/Hide remain available for reading and copying.
+    if (control.closest(".runtime-toolbar")) continue;
+    if (["INPUT", "TEXTAREA"].includes(control.tagName) && !["checkbox", "radio"].includes(control.type)) control.readOnly = true;
+    else if (!control.closest(".password-control")) control.disabled = true;
+  }
+}
 function renderSettings(problems = settingsProblems) {
   settingsProblems = (problems || []).map(pushProblem);
   exceptionRefreshers = []; fieldRecords = [];
@@ -3102,7 +3116,8 @@ function renderSettings(problems = settingsProblems) {
   const groups = {
     providers: [section(T.connection,
       Object.entries(S.providers).map(([name, p]) => {
-        const saveKey = h("button", {disabled:SETTINGS_LOCKED || !(KEY_DRAFTS[name] || "").trim(), onclick:() => saveProviderKey(name)}, T.saveKey);
+        const saveKey = h("button", {disabled:SETTINGS_LOCKED || !(KEY_DRAFTS[name] || "").trim(),
+          title:SETTINGS_LOCKED ? T.outsideReadOnly : null, onclick:() => saveProviderKey(name)}, T.saveKey);
         const keyBox = h("input", {type:"password", value:KEY_DRAFTS[name] || "", placeholder:T.keyHint, autocomplete:"off", disabled:SETTINGS_LOCKED,
           "aria-label":`${name} · ${T.key}`, oninput:e => { KEY_DRAFTS[name] = e.target.value; saveKey.disabled = SETTINGS_LOCKED || !e.target.value.trim(); refreshSettingsState(); }});
         const kindSel = pick(p, "kind", PROVIDER_KINDS, PROVIDER_KINDS.map(kindLabel)), was = p.kind;
@@ -3204,6 +3219,7 @@ function renderSettings(problems = settingsProblems) {
   settingsForm = h("fieldset", {class:"settings-form", "aria-label":T.settings}, SETTINGS_GROUPS.map(([key, label, description]) => {
     const panel = h("div", {id:"settings-" + key, class:"settings-group", "aria-labelledby":"settings-title-" + key},
       h("div", {class:"group-head"}, h("span", {class:"group-symbol"}, icon(key)), h("div", {}, h("h2", {id:"settings-title-" + key}, label), h("p", {}, description))), groups[key]);
+    lockSettingsFields(panel);
     settingsPanels[key] = panel; return panel;
   }));
   settingsBadge = h("span", {class:"draft-badge"});
@@ -3212,8 +3228,8 @@ function renderSettings(problems = settingsProblems) {
   settingsDiscardButton = h("button", {onclick:discardSettings}, T.reload);
   const settingsForeign = settingsProblems.some(p => String(p).startsWith(T.notFromServe));
   $("#tab-settings").replaceChildren(...shown([
-    h("div", {class:"settings-head"}, h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T.settings), h("h1", {}, T.settings), h("p", {}, T.settingsIntro)), settingsBadge),
     SETTINGS_LOCKED ? h("div", {class:"notice", role:"status", "data-outside-notice":""}, T.outsideLocked) : null,
+    h("div", {class:"settings-head"}, h("div", {}, h("div", {class:"eyebrow"}, "HANSA / ", T.settings), h("h1", {}, T.settings), h("p", {}, T.settingsIntro)), settingsBadge),
     settingsRebase ? h("div", {class:"notice", role:"status"}, settingsRebase) : null,
     settingsProblems.length ? h("section", {class:"settings-errors", role:"alert"}, h("h2", {}, icon("error"), settingsFailure === "savedReload" ? T.savedReloadFailed : T.problems),
       // An answer not from hansa serve (notFromServe) is met again by another save: the section offers a reload.
