@@ -45942,6 +45942,8 @@ def save():'''))
         said = self.refused("release", "a")
         self.assertIn("release command: ./deploy --to staging-7", said)
         self.assertIn("Take them out of the release command", said)
+        self.assertNotIn("A task does not help", said)
+        self.assertNotIn("still go out", said)
         self.assertEqual([h["where"] for h in release.releases(self.desk)[-1]["hits"]], ["release command"])
         # one added to the command after the yes stops it before it runs
         self.with_release("./deploy --to prod")
@@ -46135,6 +46137,10 @@ def save():'''))
                     else:
                         self.assertNotIn(command, remedy)
                 self.assertIn("principal with hansa ask", remedy)
+                self.assertIn("except the entry for lane a", remedy)
+                self.assertIn("remove it on the page", remedy)
+                self.assertNotIn("A task does not help", told)
+                self.assertNotIn("still go out", told)
         self.hansa("lane", "target", "a", "public", "true", "--watch", "true")
         self.commit_in_repo("history.txt", "zebra\n")
         told = self.refused("release", "a", "public")
@@ -46145,6 +46151,20 @@ def save():'''))
         self.assertIn("remove it on the page", remedy)
         self.assertNotIn("release command", remedy)
         self.assertNotIn("watch command", remedy)
+        for command in ("release command", "watch command"):
+            with self.subTest(mixed=command):
+                self.hansa("lane", "target", "a", "public",
+                           "echo zebra" if command == "release command" else "true", "--watch",
+                           "echo zebra" if command == "watch command" else "true")
+                told = self.refused("release", "a", "public")
+                self.assertIn("history.txt: zebra", told)
+                self.assertIn(command + ": echo zebra", told)
+                self.assertIn("Take them out of the " + command, told)
+                self.assertIn("A task does not help", told)
+                self.assertIn("commits that hold the words still go out", told)
+                self.assertIn("principal with hansa ask", told)
+                self.assertIn("except the entry for lane a", told)
+                self.assertIn("remove it on the page", told)
 
     def test_release_watch_forbidden_word_refuses_request_and_rescans_before_start(self):
         from hansa import release
@@ -46153,6 +46173,8 @@ def save():'''))
         told = self.refused("release", "a", "public")
         self.assertIn("watch command: echo falcon watch", told)
         self.assertIn("Take them out of the watch command", told)
+        self.assertNotIn("A task does not help", told)
+        self.assertNotIn("still go out", told)
         r = release.releases(self.desk)[-1]
         self.assertEqual(r["state"], "forbidden")
         self.assertEqual([(h["where"], h["commit"]) for h in r["hits"]], [("watch command", "")])
