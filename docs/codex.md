@@ -34,7 +34,9 @@ checks may read that folder, as named and with links resolved. It stays read-onl
 `~/.codex` stays closed, including the account's login, settings, rules, instructions, skills, memories,
 sessions, history and logs. The provider still uses its separate home and login. The principal's no-read entries
 always win, including an entry for packages or anything inside it. Claude workers and verifiers, Codex providers
-whose program is elsewhere, and lane setups and checks get no package exception. The page refuses other
+whose program is elsewhere, and lane setups and checks get no package exception. On macOS the repository's
+tests run this rule against the real sandbox, with a stand-in for the program; on Linux the settings handed to
+the sandbox are checked, and a run with the real sandbox and the real program has not been done yet. The page refuses other
 built-in no-read locations on save, including a program reached through a link, the desk's own folders,
 other hidden desks and other providers' homes. These checks prevent saving a program that its runs cannot read.
 

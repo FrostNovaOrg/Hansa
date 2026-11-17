@@ -275,6 +275,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - `hansa web` prints the page key after `#t=` so the address keeps it out of server and proxy logs; older `?t=` links still work.
 - The page sends its origin's cookies for sign-in proxies; answers that are not from `hansa serve` show a notice with **Reload**.
 - Settings and provider keys can be changed from outside this machine only after the principal enables **Allow changing settings from outside this machine** in **Settings → Lanes → General** from the machine's own address. Until then the page shows a notice and disables settings saves, key fields, alert and push tests, push address recognition, provider checks and top-up confirmations; only reading, answering or stopping releases, and pausing or resuming dispatch remain available.
+- Opened from outside while that switch is off, Settings says so at the top of every section and locks its fields;
+  their text stays readable and copyable.
 - [The desk guide](docs/desk.md#opening-the-page-from-outside-the-machine) explains sign-in proxy precautions and how either the browser or proxy supplies the page key.
 - English and Chinese views show the pipeline, active lanes, waiting decisions and searchable tasks.
   Task details show each step, reports, checks and verification. Notes and known gaps are readable.
@@ -421,6 +423,14 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
   more Codex settings. hansa starts and checks such a provider itself, with no `HANSA_CLAUDE` or `codex.env`,
   and runs its workers on macOS and Linux. [Codex](docs/codex.md) covers setup; the
   [adapter's guide](contrib/codex/README.md) says what its sandbox protects on each system.
+- A Codex installed the standard way, its program under the account's `~/.codex/packages`, can be used as it is.
+  Only that folder is opened, read-only, and only to that provider's own runs; the login, settings and history
+  in `~/.codex` stay closed. On macOS the repository's tests run this rule against the real sandbox, with a
+  stand-in for the program; on Linux the settings handed to the sandbox are checked, and a run with the real
+  sandbox and the real program has not been done yet.
+- Choosing the kind Codex on the page fills in the program it finds and proposes a separate home, `~/codex-home`;
+  the one step left is the login the page shows. A program found where it could not be saved is left out, with
+  the reason, and saving refuses a program in a place kept from workers.
 - Each Codex home is kept from every run but its own provider's and is listed among the folders kept from workers.
   `/`, the account's home and the folders above it, and a worker's worktree and the folders above it are refused as Codex homes.
 - A Codex provider's rests name no key and give its login command; providers on one Codex home share rests across
