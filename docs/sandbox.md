@@ -66,7 +66,8 @@ AI tools and Anthropic's own tool settings in `~/.config/anthropic`, cloud
 tools, git and registry credentials, proxy clients' settings with their
 server passwords or subscription links, password stores and keyrings, the
 keychains, cookies, mail and messages under `~/Library`; Maven's master
-password, `~/.m2/settings-security.xml`), or of
+password, `~/.m2/settings-security.xml`; a Codex provider's own runs may read its program folder
+`~/.codex/packages`, read-only, when its program is installed there, but nothing else in `~/.codex`), or of
 the folders and files the principal lists on the page (Settings, "workers may
 not read": this machine's own folders of keys, and `~/.m2/settings.xml` or
 `~/.gradle/gradle.properties` when they hold deploy credentials the project's

@@ -249,7 +249,7 @@ def built_in_no_read() -> list:
     the account's home folder (account_home), as the runs' fence is. One lstat a path, no file read: a link
     counts as there."""
     home = account_home()
-    return [{"path": "~/" + f, "exists": os.path.lexists(os.path.join(home, f))} for f in home_secrets()]
+    return [{"path": "~/" + f, "exists": _name_stat(os.path.join(home, f)) is not None} for f in home_secrets()]
 
 
 def old_codex_provider(p: dict) -> bool:
@@ -1135,6 +1135,15 @@ def _one_look(fn):
 
 
 @_once
+def _name_stat(path: str):
+    """A name's metadata, shared with the page's built-in list during one settings load; no file read."""
+    try:
+        return os.lstat(path)
+    except (OSError, ValueError):
+        return None
+
+
+@_once
 def _seen(path: str) -> tuple:
     """A full path as the disk sees it: which file its deepest existing folder is (os.stat, so through links
     and in any spelling), and the names below that do not exist, in one case where the volume ignores case."""
@@ -1240,15 +1249,59 @@ def codex_problems(name: str, pv: dict, s: dict, root=None) -> list:
                          and (not package_target.startswith(codex_target.rstrip("/") + "/")
                               or package_target == os.path.join(codex_target, "packages")
                               or package_target.startswith(os.path.join(codex_target, "packages") + "/")))
+    executable = bool(program and os.path.isfile(program) and os.access(program, os.X_OK))
+    package_parents = {}
+
+    def builtin_above(entry, path):
+        # An existing executable cannot be below a missing entry. For existing entries, stat follows a
+        # link and its inode is enough to compare with the program's named and resolved ancestors.
+        # This reuses the page's lstat results rather than resolving every missing built-in path.
+        info = _name_stat(entry)
+        if info is not None and stat.S_ISLNK(info.st_mode):
+            try:
+                info = os.stat(entry)
+            except OSError:
+                info = None
+        return info is not None and (info.st_dev, info.st_ino, ()) in _chain(path)
+
+    def inside_packages(entry):
+        # Missing descendants of packages are still protected. Follow their existing ancestor once,
+        # including a parent linked into packages; never open or scan a built-in folder.
+        if entry not in package_parents:
+            up = os.path.dirname(entry)
+            package_parents[entry] = (_above(packages, entry) if _name_stat(entry) is not None else
+                                      inside_packages(up) if up != entry else False)
+        return package_parents[entry]
     for entry in denied:
         # Both directions mean equal; exactly one means strictly inside, in either direction.
         if home and _above(home, entry) != _above(entry, home):
             problem("codex_home", f"{pv['codex_home']} overlaps {entry}, which workers may not read", entry, "overlaps",
                     value=pv["codex_home"], path=entry, place="denied")
+    # These run fences must also refuse an unusable program at save time. In particular, a packages
+    # symlink must not grant access to a desk or another provider's login. Keep the home rules above:
+    # providers may share a home, but may not run a program from inside one.
+    program_denied = []
+    if root:
+        repos = [r for _, r in lane_repos(s) if r.startswith("/")]
+        program_denied += [str(root), str(desks_file().parent),
+                           *(d for d in other_desks(root) if not any(_above(d, r) for r in repos)),
+                           *holding_desks_parts(root, repos)]
+    for n, provider in (s.get("providers") or {}).items():
+        if not isinstance(provider, dict):
+            continue
+        if provider.get("kind") == "codex":
+            at = provider.get("codex_home")
+        elif isinstance(provider.get("config_dir", ""), str):
+            at = str(claude_home(Path(root or "/") / ".hansa", n, provider))
+        else:
+            at = None
+        if isinstance(at, str) and at.startswith("/"):
+            program_denied.append(at)
     for field in ("codex_path", "ca_file"):
         if field not in paths:
             continue
-        for entry in [*denied, *([pv["codex_home"]] if home else [])]:
+        for entry in dict.fromkeys([*denied, *([pv["codex_home"]] if home else []),
+                                    *(program_denied if field == "codex_path" else [])]):
             if _above(entry, paths[field]):
                 problem(field, f"{pv[field]} is inside or equals {entry}, which workers may not read", entry, "inside_denied",
                         value=pv[field], path=entry)
@@ -1261,10 +1314,11 @@ def codex_problems(name: str, pv: dict, s: dict, root=None) -> list:
             for entry in [os.path.join(own, ".claude"), *(os.path.join(own, n) for n in home_secrets())]:
                 if packaged and package_scope and entry == os.path.join(own, ".codex"):
                     continue
-                if _above(entry, program):
+                if (builtin_above(entry, program) if executable else _above(entry, program)):
                     problem(field, f"{pv[field]} is inside or equals {entry}, which workers may not read", entry, "inside_denied",
                             value=pv[field], path=entry)
-                elif packaged and _overlaps(entry, packages):
+                elif packaged and ((builtin_above(entry, packages) or inside_packages(entry)) if executable
+                                   else _overlaps(entry, packages)):
                     problem(field, f"{pv[field]}'s packages folder overlaps {entry}, which workers may not read", entry, "overlaps",
                             value=pv[field], path=entry, place="denied")
     return problems
@@ -1887,6 +1941,8 @@ def program_candidates(name: str, env=None) -> list:
     found = shutil.which(name, path=env.get("PATH", os.defpath))
     if name == "claude":
         return [env.get("HANSA_CLAUDE"), found, os.path.expanduser("~/.local/bin/claude")]
+    if name == "codex":
+        return [env.get("HANSA_CODEX_BIN"), found, os.path.join(account_home(), ".local", "bin", name)]
     if name == "tmux":
         return [env.get("HANSA_TMUX"), found, "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"]
     return [found]
@@ -1899,7 +1955,8 @@ def program(name: str, env=None) -> str:
             return claude_bin(env)
         except RuntimeError:
             return ""
-    return next((c for c in program_candidates(name, env) if c and os.access(c, os.X_OK)), "")
+    return next((c for c in program_candidates(name, env) if c and os.access(c, os.X_OK)
+                 and (name != "codex" or os.path.isfile(c))), "")
 
 
 def claude_bin(env=None) -> str:
@@ -3594,6 +3651,7 @@ def release_last(desk: Desk) -> dict:
             for r in releases(desk) if r.get("state") in ("done", "failed", "stopped")}
 
 
+@_one_look
 def public_settings(desk: Desk) -> dict:
     """Settings plus which keys are present, with no key values."""
     from .run import credit_text, model_text
@@ -3643,8 +3701,24 @@ def public_settings(desk: Desk) -> dict:
                                         if n in s["providers"] and st.get("model_since") and not st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
             "built_in_no_read": built_in_no_read(),
+            "codex_suggestion": codex_suggestion(s, desk.root),
             "codex_homes_no_read": codex_homes_no_read(s),
             "release_unmatched": unmatched, "lane_warnings": lane_warnings(s), "release_last": release_last(desk),
             "alert_outside": outside.inspect((s.get("alert") if isinstance(s.get("alert"), dict) else {}).get("command") or "",
                                              desk.root / "secrets", fingerprint=False,
                                              directory=desk.root / "secrets" / "alert-runs" / "run")["outside"]}
+
+
+@_one_look
+def codex_suggestion(s: dict, root=None, env=None) -> dict:
+    """Draft paths on the server, without reading a login, running Codex or creating its home.
+    Keep the program's spelling (including links), and reuse save's refusal and its translated rule.
+    Only the program is checked here: a future provider's home is still validated when saved."""
+    found = program("codex", env)
+    suggestion = {"codex_path": found, "codex_home": os.path.join(account_home(), "codex-home")}
+    if found:
+        pv = {**CODEX_FIELDS, "codex_path": found, "codex_home": suggestion["codex_home"]}
+        problems = [p for p in codex_problems("", pv, s, root) if p.detail["values"]["field"] == "codex_path"]
+        if problems:
+            suggestion.update(codex_path="", found=found, problem=problems[0].detail)
+    return suggestion

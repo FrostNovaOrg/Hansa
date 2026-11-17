@@ -41,6 +41,12 @@ folders.
    covering packages, anything inside it, or the program always wins; the exception never overrides it.
    Put the provider in a lane's providers. It has no address and no key, and cannot be the coordinator's provider:
    the coordinator's session is Claude Code.
+   When Codex is chosen, empty fields propose the server's program (`HANSA_CODEX_BIN`, then `PATH`, then
+   `~/.local/bin/codex`) and `~/codex-home`, both as full paths. Program links keep their spelling; a program
+   that cannot be used is left blank with the save refusal's reason. Existing text and providers already saved
+   as Codex stay as they are. The paths become settings only on Save. Detection does not create the home or
+   read its login; if that home already holds a login, reuse it. Older servers and pages where settings cannot
+   be changed offer no paths.
 3. **Log in once, with Codex's own login on that home:** `CODEX_HOME=<Codex home> <Codex program> login`. The
    page and `hansa explain provider NAME` give the command with the provider's paths. Then `hansa ping NAME`.
 
