@@ -26,18 +26,21 @@ folders.
 
 ## Setting it up
 
-1. **Install codex outside `~/.codex`.** hansa's sandbox denies reading `~/.codex`, and the standalone install keeps
-   its program under `~/.codex/packages`, where a sandboxed run cannot start it. Install it into a folder of its
-   own, for example `npm install -g --prefix ~/codex-tools @openai/codex@0.160.0`, outside every folder workers may
-   not read. Use the Node and srt baseline and upgrade checks in
+1. **Install Codex.** The standard install works: its program lives under `~/.codex/packages`, reached through
+   a link such as `~/.local/bin/codex`. Only providers using a program that resolves there get read-only access
+   to `~/.codex/packages`, as named and with links resolved. Other installs must be outside every folder workers
+   may not read, for example `npm install -g --prefix ~/codex-tools @openai/codex@0.160.0`.
+   Use the Node and srt baseline and upgrade checks in
    [Tools and upgrades](../../docs/sandbox.md#tools-and-upgrades).
 2. **Add a provider of the kind Codex** on the page (Settings, Providers). The principal gives its **Codex
    program** (for example `~/codex-tools/bin/codex`, as a full path), its **Codex home**, a folder of its own for
    Codex's login (outside `~/.codex`, the desk, the worktrees and the lanes' repositories), and as its model the
    Codex model to run (for example `gpt-6.1-sol`). "More Codex settings" holds the optional certificate file, web
-   search and the features turned off (below). The page refuses a program or home that workers may not read, and
-   a home that overlaps an entry on that list. Put the provider in a lane's providers. It has no address and no
-   key, and cannot be the coordinator's provider: the coordinator's session is Claude Code.
+   search and the features turned off (below). The page refuses a program in a built-in no-read folder, except
+   for this package install, and a program or home that conflicts with the principal's no-read list. An entry
+   covering packages, anything inside it, or the program always wins; the exception never overrides it.
+   Put the provider in a lane's providers. It has no address and no key, and cannot be the coordinator's provider:
+   the coordinator's session is Claude Code.
 3. **Log in once, with Codex's own login on that home:** `CODEX_HOME=<Codex home> <Codex program> login`. The
    page and `hansa explain provider NAME` give the command with the provider's paths. Then `hansa ping NAME`.
 
@@ -137,7 +140,13 @@ srt's settings are built from the `--settings` hansa gives the worker, and check
   `rules` there may not be written. Codex reads `AGENTS.md`, `AGENTS.override.md` and `skills/` on every run, so a
   run is refused while either file exists or `skills/` holds anything but Codex's own `.system`; only names are
   looked at.
-- **Reads:** hansa's no-read list, less the Codex home's own entries (above).
+- **Reads:** hansa's no-read list, less the Codex home's own entries (above). When the program resolves under
+  the account's `~/.codex/packages`, that folder alone is readable, read-only, by this provider's worker runs
+  and provider checks. The enclosing `~/.codex` stays denied: its `auth.json`, `config.toml`, `environments.toml`,
+  `hooks.json`, `rules`, `AGENTS.md`, `AGENTS.override.md`, `skills/`, memories, sessions, history, logs and every
+  other entry beside `packages` stay closed. Nothing there becomes writable. The principal's no-read entries
+  always win. Claude workers and verifiers, other Codex providers whose program is elsewhere, and every lane's
+  setup and check get no package exception. The same rule applies to an adapter reached through `codex.env`.
 - **Network:** the lane's hosts, plus `chatgpt.com`, `auth.openai.com` and `api.openai.com`.
 - **The web on OpenAI's side**, which srt cannot stop: Codex's own web search, on by default in codex, and, with a
   ChatGPT login, the `codex_apps` tools, whose `web_run` opens any page. Closing one leaves the other open, so
@@ -188,7 +197,8 @@ hansa checks a provider (`hansa ping`, the page, `hansa serve` while one cannot 
 kind Codex, the program is always this checkout's adapter, however `hansa serve` was started. hansa gives a check no sandbox, so the adapter makes one: a new empty folder
 `codex-check-…` in `TMPDIR`, which is Codex's working folder and `TMPDIR` and is removed afterwards however
 the check ends; writes there and in the Codex home only;
-no reads of the usual logins in the home folder (`~/.ssh`, `~/.aws`, `~/.claude`, `~/.codex` and the like), of
+no reads of the usual logins in the home folder (`~/.ssh`, `~/.aws`, `~/.claude`, `~/.codex` and the like;
+the read-only exception for the program's `~/.codex/packages` above still applies), of
 the folder hansa ran the check in, or of the desk's `.hansa`; the network, OpenAI's hosts alone. The rest is a
 worker run's, with `--skip-git-repo-check` and no developer instructions or lane env. A usage limit or a failed
 login rests the provider as above. Its output is temporary, as for worker runs.

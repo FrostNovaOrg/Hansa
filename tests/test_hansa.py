@@ -22139,6 +22139,141 @@ def save():'''))
                 s["providers"]["codex"]["codex_home"] = path
                 self.codex_refusal(s, "codex_home", path, own)
 
+    def test_codex_save_refuses_programs_in_builtin_no_read_folders(self):
+        s = self.codex_settings()
+        own = self.tmp / "account"
+        own.mkdir()
+        link = own / "codex-link"
+        with as_home(own):
+            for folder in (own / ".codex", own / ".codex" / "packages-next", own / ".ssh", own / ".aws"):
+                target = folder / "bin" / "codex"
+                link.symlink_to(target)
+                for path in (str(target), str(link)):
+                    with self.subTest(path=path, target=target):
+                        s["providers"]["codex"]["codex_path"] = path
+                        problems = self.desk.save_settings(s)
+                        matching = [p for p in problems if p.detail.get("values", {}).get("field") == "codex_path"]
+                        self.assertTrue(matching, problems)
+                        values = matching[0].detail["values"]
+                        self.assertEqual((values["reason"], values["rule"], values["value"]),
+                                         ("codex", "inside_denied", path))
+                        self.assertEqual(values["path"], str(own / (".codex" if ".codex" in str(folder) else folder.name)))
+                        if path == str(link):
+                            self.assertIn("alias", values)
+                link.unlink()
+
+    def test_codex_save_accepts_standard_package_install_and_keeps_principal_denials(self):
+        s = self.codex_settings()
+        own = self.tmp / "account"
+        packages = own / ".codex" / "packages"
+        target = packages / "standalone" / "v1" / "bin" / "codex"
+        target.parent.mkdir(parents=True)
+        target.write_text("#!/bin/sh\n")
+        (packages / "standalone" / "current").symlink_to("v1", target_is_directory=True)
+        link = own / "codex-link"
+        link.symlink_to(packages / "standalone" / "current" / "bin" / "codex")
+        alias = own / "packages-alias"
+        alias.symlink_to(packages, target_is_directory=True)
+        with as_home(own):
+            for path in (str(target), str(link)):
+                s["providers"]["codex"]["codex_path"] = path
+                self.assertEqual(self.desk.save_settings(s), [])
+                for entry in (own / ".codex", packages, packages / "codex-resources", target, alias):
+                    with self.subTest(path=path, entry=entry):
+                        changed = copy.deepcopy(s)
+                        changed["workers_may_not_read"] = [str(entry)]
+                        self.codex_refusal(changed, "codex_path", path, str(entry))
+
+    def test_codex_package_read_policy_reaches_new_and_legacy_adapters_only(self):
+        from hansa import run
+        s = self.codex_settings()
+        s["providers"]["legacy"] = {"kind": "compatible", "base_url": "http://codex.invalid", "model": "gpt-example"}
+        s["workers_may_not_read"] = [str(self.tmp / "private")]
+        self.desk.write_key("legacy", "placeholder")
+        self.assertEqual(self.desk.save_settings(s), [])
+        for name in ("codex", "legacy", "claude"):
+            env = run.provider_env(self.desk, name, self.desk.settings()["providers"][name])
+            if name == "claude":
+                self.assertNotIn("HANSA_CODEX_READ_POLICY", env)
+            else:
+                self.assertEqual(json.loads(env["HANSA_CODEX_READ_POLICY"]),
+                                 {"home": run.account_home(), "denied": s["workers_may_not_read"]})
+
+    def test_codex_save_refuses_package_links_opening_other_codex_entries(self):
+        s = self.codex_settings()
+        own = self.tmp / "account"
+        codex = own / ".codex"
+        codex.mkdir(parents=True)
+        packages = codex / "packages"
+        with as_home(own):
+            for target in (own, codex, codex / "private", own / ".ssh"):
+                target.mkdir(exist_ok=True)
+                packages.symlink_to(target, target_is_directory=True)
+                s["providers"]["codex"]["codex_path"] = str(packages / "bin" / "codex")
+                self.codex_refusal(s, "codex_path", str(packages), str(codex))
+                packages.unlink()
+
+    def test_codex_package_policy_keeps_another_builtin_aliased_by_codex_closed(self):
+        from contrib.codex.tests.codexkit import shim
+        from hansa import run
+        own = self.tmp / "account"
+        secret = own / ".cursor"  # a worker built-in beyond the check's shorter list
+        packages = secret / "packages"
+        packages.mkdir(parents=True)
+        (own / ".codex").symlink_to(secret, target_is_directory=True)
+        s = self.codex_settings()
+        s["providers"]["legacy"] = {"kind": "compatible", "base_url": "http://codex.invalid", "model": "gpt-example"}
+        self.desk.write_key("legacy", "placeholder")
+        with as_home(own):
+            self.assertEqual(self.desk.save_settings(s), [])
+            policy = json.loads(run.provider_env(self.desk, "legacy", self.desk.settings()["providers"]["legacy"])[shim.READ_POLICY])
+            self.assertIn(str(secret), policy["denied"])
+            opened, blocked = shim.packages_read(str(packages / "codex"), str(own),
+                                                 run.worker_read_denials(self.desk), policy["denied"])
+            self.assertEqual(opened, [])
+            self.assertEqual(blocked, str(secret))
+
+    def test_codex_package_policy_keeps_desk_state_aliased_by_codex_closed(self):
+        from contrib.codex.tests.codexkit import shim
+        from hansa import run
+        own = self.tmp / "account"
+        own.mkdir()
+        s = self.codex_settings()
+        self.assertEqual(self.desk.save_settings(s), [])
+        with as_home(own):
+            for target in (self.desk.state_dir, self.desk.root):
+                with self.subTest(target=target):
+                    (own / ".codex").symlink_to(target, target_is_directory=True)
+                    policy = json.loads(run.provider_env(self.desk, "codex", self.desk.settings()["providers"]["codex"])[shim.READ_POLICY])
+                    opened, blocked = shim.packages_read(str(own / ".codex" / "packages" / "codex"), str(own),
+                                                         run.worker_read_denials(self.desk), policy["denied"])
+                    self.assertEqual(opened, [])
+                    self.assertEqual(blocked, str(target))
+                    (own / ".codex").unlink()
+
+    def test_codex_packages_stay_closed_in_hansas_shared_worker_and_lane_sandboxes(self):
+        from hansa import run
+        own = self.tmp / "account"
+        packages = own / ".codex" / "packages"
+        packages.mkdir(parents=True)
+        lane_tmp = self.tmp / "lane-tmp"
+        lane_tmp.mkdir()
+        s = self.codex_settings()
+        s["providers"]["codex"]["codex_path"] = str(packages / "codex")
+        s["providers"]["second"] = {**s["providers"]["codex"], "codex_path": str(self.tmp / "other-codex")}
+        with as_home(own):
+            self.assertEqual(self.desk.save_settings(s), [])
+            for name in ("claude", "codex", "second"):
+                p, lane = s["providers"][name], s["lanes"]["a"]
+                # Workers and verifiers share sandbox_settings; every setup and lane check uses srt_settings.
+                worker = run.sandbox_settings(self.desk, lane, name, p, self.repo)["sandbox"]["filesystem"]
+                commands = run.srt_settings(self.desk, lane, name, p, self.repo, str(lane_tmp))["filesystem"]
+                for fs in (worker, commands):
+                    for path in run.full_paths([own / ".codex"]):
+                        self.assertIn(path, fs["denyRead"])
+                    for path in run.full_paths([packages]):
+                        self.assertFalse(any(run._above(grant, path) for grant in fs["allowRead"]))
+
     def test_codex_home_cannot_overlap_desk_repo_or_worktrees(self):
         s = self.codex_settings()
         for fence, words in ((self.desk.root, "desk"), (Path(s["lanes"]["a"]["repo"]), "lane a"),
@@ -22824,6 +22959,8 @@ def save():'''))
         self.assertIn(str(run.CODEX_ADAPTER), argv)
         self.assertEqual({k: env[k] for k in env if k.startswith("HANSA_CODEX_")},
                          {"HANSA_CODEX_RUN": "1", "HANSA_CODEX_BIN": p["codex_path"],
+                          "HANSA_CODEX_READ_POLICY": json.dumps({"home": run.account_home(),
+                                                                "denied": self.desk.settings()["workers_may_not_read"]}),
                           "HANSA_CODEX_HOME": p["codex_home"], "HANSA_CODEX_SRT": run.srt_bin(),
                           "HANSA_CODEX_WEB_SEARCH": p["web_search"],
                           "HANSA_CODEX_DISABLE": " ".join(p["disabled_features"]),
@@ -48758,8 +48895,8 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         check(!has("HTTP", c), "a Codex card speaks of HTTP");
         check(!more("compatible").open && !visible(box("compatible", "T.caFile"), c), "the rarer Codex fields are not folded");
         const help = find(el => el.attrs["data-codex-help"] === "", c);
-        for (const part of zh ? ["单独的目录", "程序的完整路径", "专用的主目录", "登录一次", "其他服务商", "读不到这个主目录"]
-          : ["folder of its own", "program's full path", "home folder of its own", "log in there once", "workers on other providers", "by itself"])
+        for (const part of zh ? ["标准安装", "~/.local/bin/codex", "~/.codex/packages", "程序的完整路径", "专用的主目录", "登录一次", "其他服务商", "读不到这个主目录"]
+          : ["standard install", "~/.local/bin/codex", "~/.codex/packages", "program's full path", "home folder of its own", "log in there once", "workers on other providers", "by itself"])
           check(visibleText(part, help), "Codex help misses: " + part);
         const command = () => find(el => el.attrs["data-codex-login"] === "", c).textContent;
         check(command().startsWith("CODEX_HOME=<") && command().endsWith(" login"), "login command before the paths: " + command());
@@ -48799,6 +48936,20 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         check(find(el => el.tag === "option" && el.value === "live", card("compatible")).attrs.selected !== undefined, "the reloaded card lost its web search");
         check(find(el => el.tag === "textarea", card("compatible")).textContent === "apps\nhooks\nplugins", "the reloaded card lost its features");
         check(has(zh ? "Codex（OpenAI" : "Codex (OpenAI", find(el => el.className === "tag", card("compatible"))), "the reloaded card's tag");
+      } else if (ask === "settings-fix-codex-builtin-problem") {
+        fill(); change(box("compatible", "T.codexPath"), given.codexBuiltinPath);
+        settingsPostReply = given.codexRefusal; await run("saveSettings()");
+        const program = box("compatible", "T.codexPath");
+        check(program.attrs["aria-invalid"] === "true", "the refused program is not marked");
+        const said = program.attrs["aria-describedby"].split(/\s+/).map(id => ids["#" + id]).filter(el => el && !el.hidden).map(el => el.textContent).join(" ");
+        for (const part of [run("T.codexPath"), given.codexBuiltinPath, given.codexBuiltinDenied,
+                            zh ? "工作智能体不能读" : "which workers may not read"])
+          check(said.includes(part), "the built-in refusal misses: " + part);
+        check(!zh || !/which workers|inside or equals|same folder as/.test(said), "the Chinese page shows the server's English");
+        check(box("compatible", "T.codexHome").attrs["aria-invalid"] !== "true", "the program's refusal marked the home");
+        const link = find(el => el.tag === "button" && el.textContent.startsWith("compatible · " + run("T.codexPath")));
+        check(link, "the problem list does not name the program"); await link.click();
+        check(document.activeElement === program, "the problem does not lead to the program");
       } else if (ask === "settings-fix-codex-problem") {
         fill(); settingsPostReply = given.codexRefusal; await run("saveSettings()");
         const home = box("compatible", "T.codexHome");
@@ -51720,7 +51871,18 @@ else if (ask === "task-steps")'''))
                                             "codex_path": "/opt/codex tools/bin/codex", "codex_home": "/opt/codex-home",
                                             "ca_file": "", "web_search": "disabled", "disabled_features": ["not a name"]}
             s["workers_may_not_read"] = ["/opt/codex-home/inner"]
-            problems = [p for p in validate(s, self.desk.root, page=True) if p.startswith("provider compatible:")]
+            if scenario == "codex-builtin-problem":
+                own = self.tmp / "account"
+                own.mkdir()
+                link = own / "codex-link"
+                link.symlink_to(own / ".codex" / "other" / "codex")
+                s["providers"]["compatible"].update(codex_path=str(link), disabled_features=[])
+                s["workers_may_not_read"] = []
+                replies.update(codexBuiltinPath=str(link), codexBuiltinDenied=str(own / ".codex"))
+                with as_home(own):
+                    problems = [p for p in validate(s, self.desk.root, page=True) if p.startswith("provider compatible:")]
+            else:
+                problems = [p for p in validate(s, self.desk.root, page=True) if p.startswith("provider compatible:")]
             self.assertTrue(problems)
             replies["codexRefusal"] = {"ok": False, "problems": problems, "problem_details": [p.detail for p in problems]}
         harness = self.tmp / "settings-fixes-page.js"
@@ -51819,6 +51981,9 @@ else if (ask === "task-steps")'''))
 
     def test_a_refused_codex_field_shows_its_problem_at_the_field(self):
         self.run_settings_fix_scenario("codex-problem")
+
+    def test_codex_builtin_program_refusal_shows_at_its_field_in_both_languages(self):
+        self.run_settings_fix_scenario("codex-builtin-problem")
 
     def test_the_coordinator_is_not_offered_a_codex_provider(self):
         self.run_settings_fix_scenario("codex-coordinator")

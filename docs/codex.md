@@ -5,12 +5,14 @@ hansa can run a worker with OpenAI's Codex command line instead of Claude Code, 
 
 ## Setting it up
 
-1. Install Codex in a folder of its own, outside `~/.codex` and every folder workers may not read.
+1. Install Codex. Its standard install under `~/.codex/packages` works, including a link such as
+   `~/.local/bin/codex`. Other installs must be outside folders workers may not read.
 2. On the page (Settings, Providers), add a provider of the kind Codex: its Codex program and Codex home as full
    paths, and as its model the Codex model to run. "More Codex settings" holds the optional certificate file, web
    search and the Codex features turned off. Put the provider in a lane's providers. It has no address and no key,
    and cannot be the coordinator's provider.
-3. Log in once with Codex's own login on that home: `CODEX_HOME=<Codex home> <Codex program> login`. The page and
+3. Give this provider a home folder of its own, outside `~/.codex`, the desk and the lanes' repositories, and log
+   in once there: `CODEX_HOME=<Codex home> <Codex program> login`. The page and
    `hansa explain provider NAME` give the command. Then `hansa ping NAME`.
 
 hansa starts the adapter itself for such a provider and passes its settings in the run's environment: no
@@ -19,6 +21,14 @@ nothing needs adding to what workers may not read. A lost login rests the provid
 `hansa ping NAME` answers. Providers on one Codex home share its usage rests, across providers and desks. A
 task's `--model` is not used on a Codex provider, the provider's model is; the task's or provider's effort is
 passed on to Codex.
+
+For a program resolving under the account's `~/.codex/packages`, only that provider's worker runs and provider
+checks may read that folder, as named and with links resolved. It stays read-only. Every other entry in
+`~/.codex` stays closed, including the account's login, settings, rules, instructions, skills, memories,
+sessions, history and logs. The provider still uses its separate home and login. The principal's no-read entries
+always win, including an entry for packages or anything inside it. Claude workers and verifiers, Codex providers
+whose program is elsewhere, and lane setups and checks get no package exception. The page refuses other
+built-in no-read locations on save, including a program reached through a link.
 
 ## Desks set up the old way
 

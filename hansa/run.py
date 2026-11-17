@@ -37,7 +37,7 @@ from pathlib import Path
 from . import account, after, build, installed, installed_text, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, HOME_STARTS, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
                    refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, claude_bin,
-                   WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems)
+                   WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems, old_codex_provider)
 from .desk import lane_env as checked_env
 from .srt_output import protected
 
@@ -1859,6 +1859,16 @@ def provider_env(desk: Desk, name: str, p: dict, run: bool = True) -> dict:
     # the run's work was lost). The cost: a rejected key takes about a minute longer to fail.
     # check_provider, which must answer at once, sets 0.
     env["CLAUDE_CODE_MAX_RETRIES"] = "8"
+    if p["kind"] == "codex" or old_codex_provider(p):
+        # Internal context for the adapter's package exception, also on provider checks (which have no
+        # worker sandbox). Preserve the saved entries: a built-in denial must never hide the principal's.
+        own = account_home()
+        packages = os.path.join(own, ".codex", "packages")
+        # Keep another denial's identity when a link makes it equal the resolved .codex deny.
+        aliases = [x for x in [*worker_read_denials(desk, account_codex=False), *full_paths([desk.root])]
+                   if _above(x, packages) or _above(packages, x)]
+        env["HANSA_CODEX_READ_POLICY"] = json.dumps({"home": own,
+                                                   "denied": [*desk.settings().get("workers_may_not_read", []), *aliases]})
     if p["kind"] == "subscription":
         if p.get("config_dir"):
             env["CLAUDE_CONFIG_DIR"] = p["config_dir"]
@@ -2905,15 +2915,19 @@ def worker_home_denials() -> list:
                                if f not in HOME_STARTS[0][1] or os.path.exists(home / f))]
 
 
-def worker_read_denials(desk: Desk) -> list:
-    """The read fence shared by worker sandboxes and file content admission."""
+def worker_read_denials(desk: Desk, *, account_codex: bool = True) -> list:
+    """The read fence shared by worker sandboxes and file content admission. account_codex=False omits only
+    that built-in's source entry, before resolving and deduplicating: the adapter may exempt packages from
+    it, but never from a different rule that resolves to the same path."""
     providers = desk.settings()["providers"]
     homes = [config_home(desk, n, p) for n, p in providers.items()
              if isinstance(p, dict) and isinstance(p.get("config_dir", ""), str)]
     homes += [Path(p["codex_home"]) for p in providers.values()
               if isinstance(p, dict) and p.get("kind") == "codex"]
+    home_denials = [x for x in worker_home_denials()
+                   if account_codex or str(x) != os.path.join(account_home(), ".codex")]
     return full_paths([*desk_private(desk), *(h for h in homes if h.is_absolute()),
-                       *worker_home_denials(), *no_read(desk)[0], *session_private(desk),
+                       *home_denials, *no_read(desk)[0], *session_private(desk),
                        *other_desks_hidden(desk)])
 
 
