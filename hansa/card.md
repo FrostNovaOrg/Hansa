@@ -221,8 +221,9 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   build.sh"`): `hansa merge` refuses a change touching one until `hansa verify <id>` holds, and
   nothing, including `--despite-check`, bypasses this. More: `hansa help release-files`.
 - Ask: `hansa release L [TARGET] "<note>"`. A word the principal keeps from going out, in the release or watch command
-  or the outgoing commits, refuses it with the places found: take them out of the history (a task) or
-  of the command, or ask the principal. The same words refuse a title at `hansa add` and a task at
+  or the outgoing commits, refuses it with the places found: take it out of the command, or ask the
+  principal to except the entry for the lane or remove it on the page; a task does not help, the old
+  commit still goes out. The same words refuse a title at `hansa add` and a task at
   `hansa merge`. More: `hansa help forbidden-words`.
   Entries may be `re:PATTERN` Python patterns; the principal can except entries by lane on the page; `hansa explain lane L` gives only the count, and the mailbox rule still applies.
 - It waits for the principal's yes on the page, unless they ticked that target to go out without

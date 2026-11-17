@@ -717,13 +717,14 @@ def mailbox_refusal(hits: list, tid: str = "") -> str:
     reason = "a mailbox does not use a reserved example domain and is not on the principal's allowlist"
     if any(h.get("kind") not in ("mailbox", "pattern_limit") for h in hits):
         reason += "; the change also holds words the principal keeps from going out"
-    retry = (f'Replace it with an example address in hansa retry {tid} --fresh "..." '
-             f"(a retry that continues from {tid} keeps its commits)" if tid else
-             "Replace it with an example address in the outgoing history")
-    return (f"{reason}\n{hits_text(hits)}\n{retry} (example.com, example.org, example.net, or a domain ending in "
-            ".invalid, .test or .example), or, if the project needs the address, ask the principal to add it or "
-            "its domain to the allowlist on the page (hansa ask). "
-            "More: hansa help forbidden-words")
+    remedy = (f'Replace it with an example address in hansa retry {tid} --fresh "..." '
+              f"(a retry that continues from {tid} keeps its commits) "
+              "(example.com, example.org, example.net, or a domain ending in .invalid, .test or .example), or, "
+              "if the project needs the address, ask the principal to add it or its domain to the allowlist "
+              "on the page (hansa ask). " if tid else
+              "A task does not help: the commits that hold the mailbox still go out. "
+              "Ask the principal to add the address or its domain to the allowlist on the page (hansa ask). ")
+    return f"{reason}\n{hits_text(hits)}\n{remedy}More: hansa help forbidden-words"
 
 
 def title_hits(title: str, words: list, detailed: bool = False) -> list:
