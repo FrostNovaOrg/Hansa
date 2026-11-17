@@ -33,6 +33,9 @@ from pathlib import Path
 
 PLACEHOLDER = "http://codex.invalid"  # the Codex provider's base URL (a `compatible` provider): a Codex worker run
 RUN_SETTING = "HANSA_CODEX_RUN"  # exactly "1": hansa selected this adapter and supplied the provider's settings
+# Internal context from hansa, not an adapter setting: preserve the principal's entries even when a built-in
+# denies the same path. Checks have no worker sandbox from which to learn them.
+READ_POLICY = "HANSA_CODEX_READ_POLICY"
 # What the sandbox lets through besides the lane's list: what a ChatGPT login and Codex's API need
 CODEX_HOSTS = ("chatgpt.com", "auth.openai.com", "api.openai.com")
 DEFAULT_MODEL = "gpt-6.1-sol"
@@ -83,7 +86,7 @@ DROP_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", 
              "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
              "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CONFIG_DIR", "CLAUDE_ENV_FILE", "CLAUDE_CODE_MAX_RETRIES",
              "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CODEX_HOME", "CODEX_CA_CERTIFICATE", NO_WATCHDOG, PAUSE_AFTER_START,
-             STATUS_TIMEOUT_SETTING, RUN_SETTING, *SETTINGS)
+             STATUS_TIMEOUT_SETTING, RUN_SETTING, READ_POLICY, *SETTINGS)
 COUNTED_ITEMS = ("command_execution", "file_change")  # what counts against --max-turns
 STOP_GRACE = 3  # seconds between SIGTERM and SIGKILL; hansa waits 10 on a stop, 5 on a sweep
 POLL = 0.2  # seconds between looks at Codex's log, while it writes nothing new
@@ -261,6 +264,34 @@ def under(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip("/") + "/")
 
 
+def packages_read(codex_bin: str, account_home: str, deny_read=(), principal_denied=()) -> tuple:
+    """(read-only package grants, blocking entry). Only a program resolving into the account's packages
+    needs this exception. Keep the enclosing .codex deny; no other deny may be overridden, including one
+    inside packages (allowRead would override it too). Do not assume anything about packages' contents."""
+    if not codex_bin or not account_home:
+        return [], ""
+    codex = os.path.join(account_home, ".codex")
+    packages = both([os.path.join(codex, "packages")])
+    if not under(os.path.realpath(codex_bin), os.path.realpath(packages[0])):
+        return [], ""
+    codex_target, package_target = os.path.realpath(codex), os.path.realpath(packages[0])
+    if (under(codex_target, package_target)
+            or (under(package_target, codex_target) and not under(package_target, os.path.join(codex_target, "packages")))):
+        return [], codex  # a packages link must not open .codex itself or a different entry there
+    if any(c in p for p in packages for c in "*?[]"):
+        return [], ""  # srt would read the grant as a pattern; the enclosing deny still refuses the program
+    enclosing = both([codex])
+    for d in [*principal_denied, *(d for d in deny_read or [] if d not in enclosing)]:
+        if any(under(p, x) or under(x, p) for p in packages for x in both([d])):
+            return [], str(d)
+    return packages, ""
+
+
+def path_description(path: str) -> str:
+    target = os.path.realpath(path)
+    return path if target == path else f"{path}; resolves to {target}"
+
+
 def git_folders(wt: str):
     """(the worktree's .git, its own git folder, the repository's common one), read as files (no git runs here);
     (None, None, None) without a .git, the folders None when it leads nowhere readable. A main checkout's own
@@ -405,7 +436,8 @@ def home_scope_problem(codex_home: str, account_home: str, wt: str = "") -> str:
     return ""
 
 
-def sandbox_problem(fs: dict, wt: str, codex_home: str, codex_bin: str, ca: str = "") -> str:
+def sandbox_problem(fs: dict, wt: str, codex_home: str, codex_bin: str, ca: str = "",
+                    account_home: str = "", principal_denied=()) -> str:
     """Why srt with these settings (its filesystem part) is not the boundary hansa means; '' when it is. Codex
     runs with its own sandbox off, so srt keeps it out of git's data (hansa commits, never the worker), the
     project folders at the top, what in the Codex home later runs read, and the no-read list. macOS also holds
@@ -430,10 +462,11 @@ def sandbox_problem(fs: dict, wt: str, codex_home: str, codex_bin: str, ca: str 
             continue  # still given to srt, but Linux drops them; hansa holds nested settings at commit
         if d not in deny_write:
             return f"srt's settings do not deny writing {d}"
-    return paths_problem(fs, wt, codex_home, codex_bin, ca)
+    return paths_problem(fs, wt, codex_home, codex_bin, ca, account_home, principal_denied)
 
 
-def paths_problem(fs: dict, wt: str, codex_home: str, codex_bin: str, ca: str = "") -> str:
+def paths_problem(fs: dict, wt: str, codex_home: str, codex_bin: str, ca: str = "",
+                  account_home: str = "", principal_denied=()) -> str:
     """What a worker run and a check share of the pre-run check: HOME_DENY in the Codex home denied; codex, its
     home and the certificate file readable (srt would refuse codex the read), the home outside `wt`. '' when
     none."""
@@ -443,14 +476,22 @@ def paths_problem(fs: dict, wt: str, codex_home: str, codex_bin: str, ca: str = 
             return f"srt's settings do not deny writing {d}"
     if ca and not os.path.isfile(ca):
         return f"{CA_SETTING} ({ca}) is not a file; set it to Codex's certificate file, or empty for none"
+    packages, blocked = packages_read(codex_bin, account_home, fs.get("denyRead"), principal_denied)
+    if blocked:
+        return (f"HANSA_CODEX_BIN ({path_description(codex_bin)}) needs the packages folder, which overlaps "
+                f"{blocked}, which workers may not read; put it elsewhere")
+    opened = packages and all(p in (fs.get("allowRead") or []) for p in packages)
+    enclosing = both([os.path.join(account_home, ".codex")]) if account_home else []
     for what, p in (("HANSA_CODEX_HOME", codex_home), ("HANSA_CODEX_BIN", codex_bin), (CA_SETTING, ca)):
         if not p:
             continue
         for d in fs.get("denyRead") or []:
-            if any(under(x, str(d)) for x in both([p])):
+            if what == "HANSA_CODEX_BIN" and opened and d in enclosing:
+                continue
+            if any(under(x, y) for x in both([p]) for y in both([d])):
                 above = (" (the shim opens the Codex home itself to a Codex run, never a folder above it)"
                          if p == codex_home else "")
-                return f"{what} ({p}) is under {d}, which the sandbox may not read{above}; put it elsewhere"
+                return f"{what} ({path_description(p)}) is under {d}, which the sandbox may not read{above}; put it elsewhere"
     if any(under(x, w) for x in both([codex_home]) for w in both([wt])):
         return f"HANSA_CODEX_HOME ({codex_home}) is in the worktree"
     return ""
@@ -473,12 +514,13 @@ def own_git_write(wt: str) -> list:
     return [own]
 
 
-def srt_settings(box: dict, wt: str, tmp: str, codex_home: str) -> dict:
+def srt_settings(box: dict, wt: str, tmp: str, codex_home: str, codex_bin: str = "",
+                 account_home: str = "", principal_denied=()) -> dict:
     """srt's settings for the Codex run, from the sandbox hansa gave Claude Code in --settings: writes in the
     worktree, its own git folder (own_git_write), its temporary folder, the lane's write list and
     HANSA_CODEX_HOME; git's data, the top project folders and HOME_DENY in the Codex home never written, nested
     project folders denied by globs on macOS (on Linux hansa holds them at commit); the no-read list never read,
-    but for the Codex home and what is inside it (home_read_open), and what
+    but for the Codex home and what is inside it (home_read_open), this program's packages (packages_read), and what
     hansa re-allows in it (allowRead: the worktree, the run's temporary folder); the lane's network list and
     CODEX_HOSTS. (hansa's srt_settings needs its desk.)"""
     sb = box.get("sandbox") or {}
@@ -487,11 +529,13 @@ def srt_settings(box: dict, wt: str, tmp: str, codex_home: str) -> dict:
     network = {"allowedDomains": hosts, "deniedDomains": []}  # srt refuses settings without deniedDomains
     if net.get("allowLocalBinding"):
         network["allowLocalBinding"] = True
+    packages = packages_read(codex_bin, account_home, fs.get("denyRead"), principal_denied)[0]
     return {"network": network, "filesystem": {
         "allowWrite": both([wt, *own_git_write(wt), tmp, codex_home]) + [x for x in fs.get("allowWrite") or [] if x],
         "denyRead": home_read_open(fs.get("denyRead"), codex_home)[0],
-        "allowRead": [x for x in fs.get("allowRead") or [] if x],
-        "denyWrite": list(dict.fromkeys([*(fs.get("denyWrite") or []), *config_deny(wt), *home_deny(codex_home)]))}}
+        "allowRead": list(dict.fromkeys([*(x for x in fs.get("allowRead") or [] if x), *packages])),
+        "denyWrite": list(dict.fromkeys([*(fs.get("denyWrite") or []), *config_deny(wt), *home_deny(codex_home),
+                                         *(both([os.path.join(account_home, ".codex")]) if packages else []), *packages]))}}
 
 
 def check_deny_read(home: str, cwd: str) -> list:
@@ -505,14 +549,18 @@ def check_deny_read(home: str, cwd: str) -> list:
     return both(paths)
 
 
-def check_settings(folder: str, codex_home: str, deny_read: list) -> dict:
+def check_settings(folder: str, codex_home: str, deny_read: list, codex_bin: str = "",
+                   account_home: str = "", principal_denied=()) -> dict:
     """srt's settings for a provider check: writes in its own new folder and the Codex home alone (Codex keeps its
     login there, and a refreshed token not written back would end the login), HOME_DENY in the home never; no
-    reads of deny_read but for the Codex home (home_read_open); the network, CODEX_HOSTS alone."""
+    reads of deny_read but for the Codex home (home_read_open) and this program's packages (packages_read);
+    the network, CODEX_HOSTS alone."""
+    packages = packages_read(codex_bin, account_home, deny_read, principal_denied)[0]
     return {"network": {"allowedDomains": list(CODEX_HOSTS), "deniedDomains": []}, "filesystem": {
         "allowWrite": both([folder, codex_home]),
         "denyRead": home_read_open(deny_read, codex_home)[0],
-        "denyWrite": home_deny(codex_home)}}
+        "allowRead": packages,
+        "denyWrite": [*home_deny(codex_home), *(both([os.path.join(account_home, ".codex")]) if packages else []), *packages]}}
 
 
 def toml_string(s: str) -> str:
@@ -922,12 +970,21 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
         if Run.mine:
             shutil.rmtree(Run.mine, ignore_errors=True)
         return emit(answer("error_during_execution", f"hansa-codex-shim: {why}", sid, model=model))
+    try:
+        policy = json.loads(env.get(READ_POLICY, "{}"))
+        account_home = policy.get("home", env.get("HOME") or "")
+        principal_denied = policy.get("denied", [])
+        if (not isinstance(account_home, str) or not isinstance(principal_denied, list)
+                or not all(isinstance(p, str) and p.startswith("/") for p in principal_denied)):
+            raise ValueError("invalid paths")
+    except (ValueError, AttributeError, TypeError):
+        return failed("invalid read policy from hansa")
     for what, v in (("HANSA_CODEX_BIN", codex), ("HANSA_CODEX_HOME", home), ("srt (HANSA_CODEX_SRT)", srt)):
         if not v:
             if env.get(RUN_SETTING) == "1":
                 return failed(f"{what} is not set; set it in the provider's settings on the page")
             return failed(f"{what} is not set (settings file: {conf.source})")
-    why = home_scope_problem(home, env.get("HOME") or "", "" if check else os.getcwd())
+    why = home_scope_problem(home, account_home, "" if check else os.getcwd())
     if why:
         return failed(why)
     if effort not in EFFORT_VALUES:
@@ -942,9 +999,9 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
             Run.mine = mine = wt = os.path.realpath(tempfile.mkdtemp(prefix="codex-check-", dir=tmp))
         except OSError as e:
             return failed(str(e))
-        deny_read = check_deny_read(env.get("HOME") or "", os.getcwd())
-        box_srt = check_settings(mine, home, deny_read)
-        why = paths_problem(box_srt["filesystem"], wt, home, codex, ca)
+        deny_read = check_deny_read(account_home, os.getcwd())
+        box_srt = check_settings(mine, home, deny_read, codex, account_home, principal_denied)
+        why = paths_problem(box_srt["filesystem"], wt, home, codex, ca, account_home, principal_denied)
     else:
         wt = os.getcwd()
         try:
@@ -954,8 +1011,8 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
         if not (box.get("sandbox") or {}).get("enabled"):
             return failed("no sandbox in the --settings hansa gave; Codex runs only in one")
         deny_read = (box["sandbox"].get("filesystem") or {}).get("denyRead")
-        box_srt = srt_settings(box, wt, tmp, home)
-        why = sandbox_problem(box_srt["filesystem"], wt, home, codex, ca)
+        box_srt = srt_settings(box, wt, tmp, home, codex, account_home, principal_denied)
+        why = sandbox_problem(box_srt["filesystem"], wt, home, codex, ca, account_home, principal_denied)
     why = why or home_problem(home)
     if why:
         return failed(why)

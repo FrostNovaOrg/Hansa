@@ -1229,6 +1229,17 @@ def codex_problems(name: str, pv: dict, s: dict, root=None) -> list:
     # Use the whole saved list, including hansa hide's additions and entries a run might leave out.
     denied = s.get("workers_may_not_read", [])
     denied = [x for x in denied if isinstance(x, str) and x.startswith("/")] if isinstance(denied, list) else []
+    own = _plain(account_home())
+    packages = os.path.join(own, ".codex", "packages")
+    program = paths.get("codex_path", "")
+    package_target, program_target = resolved(packages), resolved(program) if program else ""
+    packaged = bool(package_target and program_target and _above(package_target, program_target))
+    codex_target = resolved(os.path.join(own, ".codex"))
+    # A packages symlink cannot turn the exception into a grant over the enclosing .codex or a sibling.
+    package_scope = bool(codex_target and package_target and not _above(package_target, codex_target)
+                         and (not package_target.startswith(codex_target.rstrip("/") + "/")
+                              or package_target == os.path.join(codex_target, "packages")
+                              or package_target.startswith(os.path.join(codex_target, "packages") + "/")))
     for entry in denied:
         # Both directions mean equal; exactly one means strictly inside, in either direction.
         if home and _above(home, entry) != _above(entry, home):
@@ -1241,6 +1252,21 @@ def codex_problems(name: str, pv: dict, s: dict, root=None) -> list:
             if _above(entry, paths[field]):
                 problem(field, f"{pv[field]} is inside or equals {entry}, which workers may not read", entry, "inside_denied",
                         value=pv[field], path=entry)
+            elif field == "codex_path" and packaged and _overlaps(entry, packages):
+                problem(field, f"{pv[field]}'s packages folder overlaps {entry}, which workers may not read", entry, "overlaps",
+                        value=pv[field], path=entry, place="denied")
+        if field == "codex_path":
+            # The adapter opens only packages for a program resolving there. Every other built-in stays
+            # closed, including a different secret reached by a packages symlink.
+            for entry in [os.path.join(own, ".claude"), *(os.path.join(own, n) for n in home_secrets())]:
+                if packaged and package_scope and entry == os.path.join(own, ".codex"):
+                    continue
+                if _above(entry, program):
+                    problem(field, f"{pv[field]} is inside or equals {entry}, which workers may not read", entry, "inside_denied",
+                            value=pv[field], path=entry)
+                elif packaged and _overlaps(entry, packages):
+                    problem(field, f"{pv[field]}'s packages folder overlaps {entry}, which workers may not read", entry, "overlaps",
+                            value=pv[field], path=entry, place="denied")
     return problems
 
 
