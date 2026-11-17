@@ -180,6 +180,9 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - Settings history shows `changed (values withheld)` for the alert command; `hansa explain` omits its value. The principal still views and edits it on the page.
 - `hansa release` says nothing is new only when it does not refuse, says a replaced code lapses only if it existed,
   and names the command holding a forbidden word. Its help covers several remotes and the watch command.
+- A release refused for a forbidden word or a mailbox in commits going out no longer suggests a new task, which
+  cannot help: it says to ask the principal to except the word's entry for the lane or remove it, or to add the
+  address or its domain to the mailbox allowlist.
 - `hansa release` errors say what to do, for `--fixed` on a request, a removed lane or target,
   and `release yes` without a release number, which counts no try.
 - A Bark entry with an invalid saved encryption key says so, with the fix.
@@ -230,6 +233,9 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 - A coordinator that handles a post and then stops on a permission dialog still alerts after the waiting time.
 - Work waiting for review still alerts after a session or server restart, from whichever session watches it.
   A queued or running verification suspends that wait; the review status line appears only while the coordinator is idle.
+- Finished work left waiting for review while the coordinator is idle gives one alert for the stretch, not one per task,
+  naming how many tasks wait and the oldest. Another comes only once none over the minutes still waits (merged, closed,
+  cancelled or sent back) and a task passes them again. See `hansa help alerts`.
 - Alerts and status describe a failed request the principal typed as that request failing at its time, with advice to type it again.
   Login, billing and other errors only the principal can fix give that remedy first.
 - After reposting work, an API-error alert waits for the turn it started to finish, or for the time allowed for it to start.
@@ -410,6 +416,10 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 ### Documentation
 
 - The coordinator's card lists goal, decision and ping commands, `add --goal`/`--after`, `ask --closed` and `lane brief L none`.
+- The card says to read each note of a “holds, with notes” verdict before merging and to send the task back when one
+  reports something that worked before and no longer does, or part of the task not done; to warn tasks queued behind
+  a failure they will meet too; and to find out how the code or an outside tool behaves, with a task that only looks
+  or `scout`, before designing a change.
 - Getting started covers `hansa init` on an empty project, stopping a server from the menu, the Claude Code version
   `hansa doctor` installs and an npm lane's cache; encrypted Bark pushes carry release codes; the Chinese guide uses the page's names.
 - `hansa help TOPIC` prints the docs' links as the topic or file to read.
