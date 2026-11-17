@@ -543,7 +543,8 @@ const T = ZH ? {
   providers:"模型服务商", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
   codex:"Codex（OpenAI 的命令行工具）", codexPath:"Codex 程序（完整路径）", codexHome:"Codex 主目录（完整路径）",
   oldCodex:(name, kind) => `${name} 通过旧方式使用 Codex；在本页为它选择类型 ${kind}，即可替换虚构的地址和密钥。更多：docs/codex.md。`,
-  codexHomeNote:"存放 Codex 登录信息的目录，专给它用。", codexInstall:"Codex 的标准安装可用，包括 ~/.local/bin/codex 指向 ~/.codex/packages 内程序的链接。在上方填写程序的完整路径。其他安装须在工作智能体不能读的目录之外。",
+  codexHomeNote:"存放 Codex 登录信息的目录，专给它用（建议 ~/codex-home）。", codexInstall:"Codex 的标准安装可用，包括 ~/.local/bin/codex 指向 ~/.codex/packages 内程序的链接。在上方填写程序的完整路径。其他安装须在工作智能体不能读的目录之外。",
+  codexFoundRefused:(path, why) => `找到 Codex 程序 ${path}，但不能使用：${why}`,
   codexLogin:"给 Codex 一个专用的主目录（不在 ~/.codex、工作台目录和工作线仓库里），并在那里登录一次：", codexProgramHere:"<Codex 程序>", codexHomeHere:"<Codex 主目录>",
   codexHomeKept:"hansa 会自动让其他服务商上的工作智能体读不到这个主目录，只有这家服务商的 Codex 运行才会打开它。",
   codexMore:"更多 Codex 设置", caFile:"证书文件（可选，完整路径）", caFileNote:"Codex 校验 TLS 连接所用的证书。", webSearch:"网页搜索", webSearchNote:"Codex 自带的网页搜索。",
@@ -744,7 +745,8 @@ const T = ZH ? {
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
   codex:"Codex (OpenAI's command line)", codexPath:"Codex program (full path)", codexHome:"Codex home (full path)",
   oldCodex:(name, kind) => `${name} reaches Codex the old way; choosing the kind ${kind} for it on this page replaces the made-up address and key. More: docs/codex.md`,
-  codexHomeNote:"The folder that holds Codex's login, a folder of its own.", codexInstall:"Codex's standard install works, including ~/.local/bin/codex linked into ~/.codex/packages. Give its program's full path above. Other installs must be outside folders workers may not read.",
+  codexHomeNote:"The folder that holds Codex's login, a folder of its own (suggested: ~/codex-home).", codexInstall:"Codex's standard install works, including ~/.local/bin/codex linked into ~/.codex/packages. Give its program's full path above. Other installs must be outside folders workers may not read.",
+  codexFoundRefused:(path, why) => `Found Codex at ${path}, but it cannot be used: ${why}`,
   codexLogin:"Give Codex a home folder of its own, outside ~/.codex, the desk and the lanes' repositories, and log in there once:", codexProgramHere:"<Codex program>", codexHomeHere:"<Codex home>",
   codexHomeKept:"hansa keeps this home from workers on other providers by itself: only this provider's Codex runs open it.",
   codexMore:"More Codex settings", caFile:"Certificate file (optional, full path)", caFileNote:"The certificates Codex checks TLS connections against.", webSearch:"Web search", webSearchNote:"Codex's own web search.",
@@ -920,6 +922,7 @@ Object.assign(T, ZH ? {
   builtInTitle:"始终不让工作智能体读的（内置）",
   builtInCount:(n, here, ex) => `本系统内置 ${n} 处主文件夹下的位置，这台机器上有 ${here} 处${ex ? `，比如 ${ex}` : ""}。这些不用你再列，下面的框空着也照样挡住。`,
   builtInOpen:n => `展开完整列表（${n} 处，这台机器上有的排在前面）`, builtInHere:"本机有",
+  builtInPackages:"例外：程序安装在 ~/.codex/packages 内的 Codex 服务商，其自己的运行可只读该程序目录；~/.codex 内其余部分仍然关闭。",
   builtInCodex:"本工作台 Codex 服务商的主目录也始终不让工作智能体读（只有该服务商自己的 Codex 运行会打开）：",
   builtInElse:"不在这个列表里、也始终不让它们读的：工作台的密钥、状态、笔记和卡片（CLAUDE.md）；工作台里除它自己的工作树以外的部分，以及其他运行的临时文件夹；~/.claude 和每个服务商的 Claude Code 文件夹；为协调员会话记下的文件夹里的 Claude Code 文件；这个账号上的其他工作台。",
   releaseApproval:"发布前要不要问你", autoRelease:"不用问你就执行的发布目标", autoReleaseHint:"勾上：提出发布后可以不用问你就执行。不勾：每次等你点头。",
@@ -1014,6 +1017,7 @@ Object.assign(T, ZH ? {
   builtInTitle:"Always kept from workers (built in)",
   builtInCount:(n, here, ex) => `${n} places under the home folder are built in for this system, ${here} of them on this machine${ex ? `, such as ${ex}` : ""}. You need not list them: they are closed even with the box below empty.`,
   builtInOpen:n => `Show the whole list (${n}, those on this machine first)`, builtInHere:"on this machine",
+  builtInPackages:"Exception: a Codex provider's own runs may read its program folder ~/.codex/packages when installed there, read-only; everything else in ~/.codex stays closed.",
   builtInCodex:"The homes of this desk's Codex providers are kept from workers too (only that provider's own Codex runs open one):",
   builtInElse:"Also always closed to them, though not on this list: the desk's keys, state, notes and card (CLAUDE.md); the rest of the desk but their own worktree, and the other runs' temporary folders; ~/.claude and every provider's Claude Code folder; the Claude Code files of the folder recorded for the coordinator's session; and the other desks on this account.",
   releaseApproval:"Asking you before a release", autoRelease:"Targets that go out without asking you", autoReleaseHint:"Ticked: a release can run without asking you. Unticked: each one waits for your yes.",
@@ -2257,6 +2261,11 @@ const pushProblem = problem => {
 };
 // The English strings stay available for old pages, unknown codes and field navigation.
 const settingsProblemSources = new Map();
+function codexRuleText(v) {
+  const why = Object.hasOwn(T.validationCodex, v.rule || "") && T.validationCodex[v.rule](v);
+  const alias = Array.isArray(v.alias) ? T.validationCodexAlias(...v.alias) : "";
+  return why && (alias ? why.replace(/[.。]$/, "") + alias + (ZH ? "。" : ".") : why);
+}
 function settingsReplyProblems(reply) {
   settingsProblemSources.clear();
   const labels = {cool_minutes:T.cooldown, concurrency:T.concurrency, disk_floor:T.diskFloor,
@@ -2274,10 +2283,9 @@ function settingsReplyProblems(reply) {
       field_rule:() => {
         const label = labels[v.field], rule = T.validationRules[v.reason];
         // A Codex field's rule names paths and folders; a rule this page does not know keeps the server's words.
-        const codex = v.reason === "codex" && Object.hasOwn(T.validationCodex, v.rule || "") && T.validationCodex[v.rule](v);
+        const codex = v.reason === "codex" && codexRuleText(v);
         if (label && codex) {
-          const alias = Array.isArray(v.alias) ? T.validationCodexAlias(...v.alias) : "";
-          return `${v.provider} · ${label}${ZH ? "：" : ": "}${alias ? codex.replace(/[.。]$/, "") + alias + (ZH ? "。" : ".") : codex}`;
+          return `${v.provider} · ${label}${ZH ? "：" : ": "}${codex}`;
         }
         if (label && v.reason === "codex" && problem.startsWith(`provider ${v.provider}: ${v.field} `))
           return `${v.provider} · ${label}${ZH ? "：" : ": "}${problem.slice(`provider ${v.provider}: ${v.field} `.length)}`;
@@ -2385,6 +2393,7 @@ Object.assign(T, ZH ? {
 let settingsBaseline = null, settingsLoading = null, settingsSaving = false, settingsGroup = "providers", settingsEpoch = 0;
 let settingsMessage = "", settingsProblems = [], KEY_DRAFTS = {}, newProviderName = "", newPriceName = "";
 let settingsDefaults = {};
+let CODEX_SUGGESTION = null, SAVED_CODEX = new Set(), CODEX_CHOSEN = new Set();
 let settingsRebase = "", keyProblemProvider = "";
 let settingsPending = "save", settingsFailure = "", fieldRecords = [];
 let settingsForm, settingsSaveButton, settingsDiscardButton, settingsBadge, settingsSaveState;
@@ -2535,7 +2544,7 @@ function builtInPart() {
     CODEX_HOMES_NO_READ.length ? h("div", {"data-codex-homes":""}, h("p", {}, T.builtInCodex),
       h("ul", {class:"built-in-codex"}, CODEX_HOMES_NO_READ.map(x =>
         h("li", {}, h("code", {class:"mono"}, x.path), " · ", x.provider)))) : null,
-    h("p", {class:"field-note"}, T.builtInElse));
+    h("p", {class:"field-note"}, T.builtInPackages), h("p", {class:"field-note"}, T.builtInElse));
 }
 const hiddenByCoordinator = () => Object.entries(S.workers_may_not_read_added || {}).filter(([p]) => (S.workers_may_not_read || []).includes(p));
 async function loadSettings(problems, keepKeys = false, background = false) {
@@ -2545,6 +2554,9 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   if (background && (epoch !== settingsEpoch || settingsSaving || settingsDirty() || JSON.stringify(S) !== before || newProviderName || newPriceName)) return;
   S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; BUILT_IN_NO_READ = r.built_in_no_read || []; CODEX_HOMES_NO_READ = r.codex_homes_no_read || []; NO_READ_STOP = r.no_read_stop || "";
   settingsDefaults = r.settings_defaults || {};
+  CODEX_SUGGESTION = r.codex_suggestion || null;
+  SAVED_CODEX = new Set(Object.keys(S.providers).filter(name => S.providers[name].kind === "codex"));
+  CODEX_CHOSEN = new Set();
   CREDIT_RESTS = r.provider_credit || {}; CREDIT_MESSAGES = r.provider_credit_messages || {};
   MODEL_MESSAGES = r.provider_model_messages || {};
   OLD_CODEX_PROVIDERS = r.old_codex_providers || [];
@@ -3049,16 +3061,23 @@ function setProviderKind(name, p, from, kind) {
   for (const key of keep) if (!(key in p) && key in aside) { p[key] = aside[key]; delete aside[key]; }
   if (kind === "codex") {
     for (const key of ["codex_path", "codex_home"]) if (!(key in p)) p[key] = "";
+    if (!SETTINGS_LOCKED && !SAVED_CODEX.has(name) && CODEX_SUGGESTION) {
+      CODEX_CHOSEN.add(name);
+      for (const key of ["codex_path", "codex_home"]) if (!p[key] && CODEX_SUGGESTION[key]) p[key] = CODEX_SUGGESTION[key];
+    }
     for (const [key, value] of Object.entries(codexDefaults())) if (!(key in p)) p[key] = JSON.parse(JSON.stringify(value));
   }
 }
 const shellWord = x => /^[A-Za-z0-9_\/.,:@%+=-]+$/.test(x) ? x : "'" + x.replace(/'/g, "'\\''") + "'";
 /* The fields of a Codex provider's card: its program and home, how to set them up, and the rest folded. */
 function codexFields(name, p) {
+  const refusal = h("p", {class:"field-note", "data-codex-found-refused":""});
   const command = h("code", {class:"mono", "data-codex-login":""});
   const showCommand = () => {
     const path = (p.codex_path || "").trim(), home = (p.codex_home || "").trim();
-    command.textContent = `CODEX_HOME=${path && home ? shellWord(home) : T.codexHomeHere} ${path && home ? shellWord(path) : T.codexProgramHere} login`;
+    command.textContent = `CODEX_HOME=${home ? shellWord(home) : T.codexHomeHere} ${path ? shellWord(path) : T.codexProgramHere} login`;
+    refusal.hidden = !!path || SETTINGS_LOCKED || !CODEX_CHOSEN.has(name) || !CODEX_SUGGESTION?.problem;
+    refusal.textContent = refusal.hidden ? "" : T.codexFoundRefused(CODEX_SUGGESTION.found, codexRuleText(CODEX_SUGGESTION.problem.values));
   };
   showCommand();
   const program = bind(p, "codex_path"), home = bind(p, "codex_home");
@@ -3076,6 +3095,7 @@ function codexFields(name, p) {
       field(T.codexFeatures, features, T.codexFeaturesNote(codexDefaults().disabled_features.join(" ")), "", true)));
   return [field(T.codexPath, program, "", "", true), field(T.codexHome, home, T.codexHomeNote, "", true),
     h("div", {class:"field wide codex-help", "data-codex-help":""}, h("p", {class:"field-note"}, T.codexInstall),
+      refusal,
       h("p", {class:"field-note"}, T.codexLogin), h("pre", {class:"mono"}, command),
       h("p", {class:"field-note", "data-codex-kept":""}, T.codexHomeKept)),
     h("div", {class:"field wide"}, more)];

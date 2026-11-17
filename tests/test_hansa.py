@@ -22184,6 +22184,166 @@ def save():'''))
                         changed["workers_may_not_read"] = [str(entry)]
                         self.codex_refusal(changed, "codex_path", path, str(entry))
 
+    def test_codex_detection_uses_server_env_path_and_local_bin_without_opening_codex(self):
+        from hansa.desk import codex_suggestion, program
+        own = self.tmp / "server-account"
+        tools = own / "path-bin"
+        local = own / ".local" / "bin" / "codex"
+        target = own / ".codex" / "packages" / "v1" / "codex"
+        override = own / "override" / "codex"
+        for path in (target, tools / "codex", override):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#!/bin/sh\nexit 99\n")
+            path.chmod(0o755)
+        local.parent.mkdir(parents=True)
+        local.symlink_to(target)
+        env = {"PATH": str(tools), "HANSA_CODEX_BIN": str(override)}
+        s = self.desk.settings()
+        with as_home(own), unittest.mock.patch("builtins.open", side_effect=AssertionError("detection opened a file")), \
+                unittest.mock.patch("io.open", side_effect=AssertionError("detection opened a file")), \
+                unittest.mock.patch("subprocess.run", side_effect=AssertionError("detection ran a program")), \
+                unittest.mock.patch("os.listdir", side_effect=AssertionError("detection scanned a folder")):
+            self.assertEqual(program("codex", env), str(override))
+            env["HANSA_CODEX_BIN"] = str(own / "missing")
+            self.assertEqual(program("codex", env), str(tools / "codex"))
+            env["PATH"] = str(own / "empty-path")
+            suggestion = codex_suggestion(s, env=env)
+            self.assertEqual(suggestion, {"codex_path": str(local), "codex_home": str(own / "codex-home")})
+            s["workers_may_not_read"] = [str(target.parent / "private")]
+            refused = codex_suggestion(s, env=env)
+            self.assertEqual((refused["codex_path"], refused["problem"]["values"]["rule"]), ("", "overlaps"))
+            s["workers_may_not_read"] = []
+            target.chmod(0o644)
+            self.assertEqual(codex_suggestion(s, env=env)["codex_path"], "")
+            target.unlink()
+            target.mkdir()
+            self.assertEqual(program("codex", env), "")  # an executable directory is not a program
+            self.assertFalse((own / "codex-home").exists())
+
+    def test_codex_detection_refuses_the_same_paths_as_save_and_keeps_existing_login(self):
+        from hansa.desk import codex_suggestion
+        own = self.tmp / "server-account"
+        home = own / "codex-home"
+        home.mkdir(parents=True)
+        auth = home / "auth.json"
+        auth.write_text("existing login")
+        hidden = own / ".ssh" / "codex"
+        hidden.parent.mkdir()
+        hidden.write_text("#!/bin/sh\n")
+        hidden.chmod(0o755)
+        s = self.codex_settings()
+        before, rev = self.desk.settings_path.read_bytes(), self.desk.settings_rev()
+        with as_home(own):
+            suggestion = codex_suggestion(s, self.desk.root, {"PATH": "", "HANSA_CODEX_BIN": str(hidden)})
+            self.assertEqual((suggestion["codex_path"], suggestion["found"], suggestion["codex_home"]),
+                             ("", str(hidden), str(home)))
+            s["providers"]["codex"]["codex_path"] = str(hidden)
+            [refusal] = [p for p in self.desk.save_settings(s) if p.detail["values"].get("field") == "codex_path"]
+            for key in ("rule", "value", "path"):
+                self.assertEqual(suggestion["problem"]["values"][key], refusal.detail["values"][key])
+        self.assertEqual(auth.read_text(), "existing login")
+        self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.settings_rev()), (before, rev))
+
+    def test_codex_save_refuses_programs_in_desk_other_desk_and_provider_homes(self):
+        from hansa.desk import desks_file
+        s = self.codex_settings()
+        other = self.tmp / "another-desk"
+        (other / "tasks").mkdir(parents=True)
+        write_json(other / "settings.json", {})
+        desks_file().parent.mkdir(parents=True, exist_ok=True)
+        write_json(desks_file(), [{"desk": str(self.desk.root)}, {"desk": str(other)}])
+        second = self.tmp / "second-login"
+        s["providers"]["second"] = {**s["providers"]["codex"], "codex_home": str(second)}
+        s["providers"]["claude"]["config_dir"] = str(self.tmp / "claude-login")
+        before = self.desk.settings_path.read_bytes()
+        for i, folder in enumerate((self.desk.state_dir, self.desk.secrets_dir, other, second,
+                                    Path(s["providers"]["claude"]["config_dir"]))):
+            folder.mkdir(parents=True, exist_ok=True)
+            alias = self.tmp / f"denied-program-link-{i}"
+            alias.symlink_to(folder, target_is_directory=True)
+            for path in (folder / "codex", alias / "codex"):
+                with self.subTest(path=path):
+                    s["providers"]["codex"]["codex_path"] = str(path)
+                    problems = self.desk.save_settings(s)
+                    matching = [p for p in problems if p.detail.get("values", {}).get("field") == "codex_path"]
+                    self.assertTrue(matching, problems)
+                    self.assertTrue(any(p.detail["values"]["rule"] == "inside_denied" for p in matching))
+                    self.assertTrue(any(str(folder) in str(p) or str(self.desk.root) in str(p) for p in matching))
+        self.assertEqual(self.desk.settings_path.read_bytes(), before)
+
+    def test_codex_detection_refuses_packages_aliasing_desk_state(self):
+        from hansa.desk import codex_suggestion
+        own = self.tmp / "server-account"
+        packages = own / ".codex" / "packages"
+        packages.parent.mkdir(parents=True)
+        packages.symlink_to(self.desk.state_dir, target_is_directory=True)
+        target = packages / "codex"
+        target.write_text("#!/bin/sh\n")
+        target.chmod(0o755)
+        with as_home(own):
+            suggestion = codex_suggestion(self.desk.settings(), self.desk.root,
+                                          {"PATH": "", "HANSA_CODEX_BIN": str(target)})
+        self.assertEqual((suggestion["codex_path"], suggestion["found"]), ("", str(target)))
+        self.assertEqual(suggestion["problem"]["values"]["rule"], "inside_denied")
+
+    def test_settings_answer_codex_suggestion_uses_server_paths_without_saving(self):
+        own = self.tmp / "server-account"
+        local = own / ".local" / "bin" / "codex"
+        local.parent.mkdir(parents=True)
+        local.write_text("#!/bin/sh\nexit 99\n")
+        local.chmod(0o755)
+        before, rev = self.desk.settings_path.read_bytes(), self.desk.settings_rev()
+        with as_home(own, PATH="", HANSA_CODEX_BIN=""):
+            public = public_settings(self.desk)
+        self.assertEqual(public["codex_suggestion"],
+                         {"codex_path": str(local), "codex_home": str(own / "codex-home")})
+        self.assertNotIn("codex_suggestion", public["settings"])
+        self.assertEqual((self.desk.settings_path.read_bytes(), self.desk.settings_rev()), (before, rev))
+        self.assertFalse((own / "codex-home").exists())
+
+    def test_codex_detection_reuses_settings_home_name_lookups(self):
+        from hansa.desk import _one_look, built_in_no_read, codex_suggestion
+        own = self.tmp / "server-account"
+        local = own / ".local" / "bin" / "codex"
+        local.parent.mkdir(parents=True)
+        local.write_text("#!/bin/sh\n")
+        local.chmod(0o755)
+
+        @_one_look
+        def load():
+            built_in_no_read()
+            return codex_suggestion({"providers": {}, "lanes": {}}, env={"PATH": ""})
+
+        with as_home(own), unittest.mock.patch("os.stat", wraps=os.stat) as stat_call, \
+                unittest.mock.patch("os.lstat", wraps=os.lstat) as lstat_call:
+            self.assertEqual(load()["codex_path"], str(local))
+        for name in (".ssh", ".aws", ".netrc"):
+            calls = [c for c in [*stat_call.call_args_list, *lstat_call.call_args_list] if str(c.args[0]) == str(own / name)]
+            self.assertEqual(len(calls), 1, (name, calls))  # the page's existing summary lookup only
+
+    def test_codex_detected_executable_keeps_aliased_and_missing_builtin_paths_closed(self):
+        from hansa.desk import codex_suggestion
+        own = self.tmp / "server-account"
+        packages = own / ".codex" / "packages"
+        binary = packages / "v1" / "codex"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        s = self.codex_settings()
+        s["providers"]["codex"]["codex_path"] = str(binary)
+        with as_home(own):
+            for name, target, rule in ((".ssh", binary.parent, "inside_denied"),
+                                       (".ssh", packages / "missing", "overlaps"),
+                                       (".config", packages, "overlaps")):
+                with self.subTest(name=name, target=target):
+                    alias = own / name
+                    alias.symlink_to(target, target_is_directory=True)
+                    suggestion = codex_suggestion(s, self.desk.root, {"PATH": "", "HANSA_CODEX_BIN": str(binary)})
+                    self.assertEqual(suggestion["codex_path"], "")
+                    self.assertEqual(suggestion["problem"]["values"]["rule"], rule)
+                    self.codex_refusal(s, "codex_path", str(own / name))
+                    alias.unlink()
+
     def test_codex_package_read_policy_reaches_new_and_legacy_adapters_only(self):
         from hansa import run
         s = self.codex_settings()
@@ -48715,6 +48875,9 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
       for (const text of zh ? ["4 处", "这台机器上有 2 处", "~/.ssh、~/.gnupg", "工作台的密钥", "~/.claude"]
                             : ["4 places", "2 of them on this machine", "~/.ssh, ~/.gnupg", "desk's keys", "~/.claude"])
         check(visibleText(text, panel), "built-in summary missing: " + text);
+      for (const text of zh ? ["~/.codex/packages", "自己的运行", "只读", "其余部分仍然关闭"]
+                            : ["~/.codex/packages", "own runs", "read-only", "everything else in ~/.codex stays closed"])
+        check(visibleText(text, panel), "the Codex package exception misses: " + text);
       check(!visibleText("~/.aws", panel), "an absent path shown as an example or unfolded");
       const list = find(el => el.tag === "details" && el.className === "built-in-list", part);
       check(list && !list.attrs.open, "built-in list not folded");
@@ -48892,8 +49055,63 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
           "the typed key is not pending before the switch");
       }
       if (ask === "settings-fix-codex-aside") change(box("compatible", "T.endpoint"), "https://typed.example");
+      if (ask === "settings-fix-codex-detect-typed") run('S.providers.compatible.codex_path = "/typed/codex_path"');
+      const postsBeforeCodex = settingsPostCount;
       choose(kindBox("compatible"), "codex");
-      if (ask === "settings-fix-codex-key") {
+      if (ask.startsWith("settings-fix-codex-detect-")) {
+        const mode = ask.slice("settings-fix-codex-detect-".length);
+        const suggestion = given["/api/settings"].codex_suggestion;
+        const path = () => box("compatible", "T.codexPath").value;
+        const home = () => box("compatible", "T.codexHome").value;
+        const c = card("compatible");
+        const refusal = () => find(el => el.attrs["data-codex-found-refused"] === "", card("compatible"));
+        const login = () => find(el => el.attrs["data-codex-login"] === "", card("compatible")).textContent;
+        check(settingsPostCount === postsBeforeCodex, "choosing Codex saved the draft");
+        if (["legacy", "locked", "saved"].includes(mode)) {
+          check(path() === "" && home() === "", "an older server, locked page or saved provider filled paths");
+          check(refusal().hidden && !refusal().textContent, "an ineligible card shows a detection error");
+          if (mode === "locked") check(box("compatible", "T.codexPath").readOnly, "outside settings are editable");
+          if (mode === "saved") {
+            choose(kindBox("compatible"), "compatible"); choose(kindBox("compatible"), "codex");
+            check(path() === "" && home() === "", "switching a saved Codex provider filled paths");
+          }
+        } else {
+          check(home() === suggestion.codex_home && home().startsWith("/"), "the server's absolute separate home was not filled");
+          for (const part of ["~/codex-home", zh ? "专给它用" : "folder of its own"])
+            check(visibleText(part, c), "the proposed home's help misses: " + part);
+          check(login().includes(home()), "the login command does not use the proposed home");
+          check(visibleText(zh ? "登录一次" : "log in there once", c), "the remaining login step disappeared");
+          if (mode === "refused") {
+            check(path() === "" && !refusal().hidden, "the refused program was filled or its reason hidden");
+            for (const part of [suggestion.found, suggestion.problem.values.path,
+                               zh ? "找到 Codex" : "Found Codex", zh ? "工作智能体不能读" : "which workers may not read"])
+              check(refusal().textContent.includes(part), "detection refusal misses: " + part);
+            check(!/[\r\n]/.test(refusal().textContent), "the detection refusal has multiple lines");
+            check(!zh || !/inside or equals|which workers|same folder as/.test(refusal().textContent), "Chinese detection shows English refusal");
+            change(box("compatible", "T.codexPath"), "/typed/codex");
+            check(refusal().hidden, "the refusal stayed after entering a program");
+          } else if (mode === "missing") {
+            check(path() === "" && refusal().hidden, "missing Codex filled a program or showed an error");
+            check(visibleText(zh ? "标准安装" : "standard install", c), "the existing install help disappeared");
+          } else if (mode === "typed") {
+            check(path() === "/typed/codex_path", "choosing Codex overwrote an existing program");
+            run('S.providers.other.codex_home = "/typed/codex_home"');
+            choose(kindBox("other"), "codex");
+            check(box("other", "T.codexHome").value === "/typed/codex_home"
+              && box("other", "T.codexPath").value === suggestion.codex_path, "existing home or empty program was not preserved/filled");
+            for (const field of ["codex_path", "codex_home"]) {
+              run(`S.providers.compatible.${field} = '/typed/${field}'`);
+              choose(kindBox("compatible"), "compatible"); choose(kindBox("compatible"), "codex");
+              check(run(`S.providers.compatible.${field}`) === '/typed/' + field, "switching overwrote text in " + field);
+            }
+          } else {
+            check(path() === suggestion.codex_path && path().includes("/.local/bin/codex"), "the program link's spelling was lost");
+            await run("saveSettings()");
+            const sent = apiPosts.findLast(p => p.path === "/api/settings").body.settings.providers.compatible;
+            check(sent.codex_path === suggestion.codex_path && sent.codex_home === suggestion.codex_home, "Save did not send the proposed literal paths");
+          }
+        }
+      } else if (ask === "settings-fix-codex-key") {
         check(!run("Object.hasOwn(KEY_DRAFTS, 'compatible')"), "the Codex provider keeps its unsaved key in the draft");
         check(!run("settingsSaveState.textContent").includes(run("T.keyPending")), "the page still says a key is unsaved");
         check(run("KEY_DRAFTS.other") === undefined, "another provider's drafts changed");
@@ -51909,6 +52127,7 @@ else if (ask === "task-steps")'''))
                                              "base_url": "http://codex.invalid/"}
             self.assertEqual(self.desk.save_settings(s), [])
         public = public_settings(self.desk)
+        public.pop("codex_suggestion", None)  # existing scenarios also exercise replies from an older server
         public["settings"]["cool_minutes"] = 37
         public["settings"]["coordinator"].pop("model", None)
         public["settings"]["coordinator_alert"] = {}
@@ -51926,7 +52145,29 @@ else if (ask === "task-steps")'''))
                       "t-no-runs": {"tokens": 10, "usd": 0, "runs": 0, "turns": 7}}}}
         replies = {"/api/settings": public, "/api/status": views.status(self.desk), "/api/events": [],
                    "/api/cost": report}
-        if scenario.startswith("codex-"):
+        if scenario.startswith("codex-detect-"):
+            from hansa.desk import codex_suggestion
+            mode = scenario.removeprefix("codex-detect-")
+            own = self.tmp / "server-account"
+            target = own / ".codex" / ("other" if mode in ("refused", "locked") else "packages") / "v1" / "codex"
+            target.parent.mkdir(parents=True)
+            target.write_text("#!/bin/sh\nexit 99\n")
+            target.chmod(0o755)
+            link = own / ".local" / "bin" / "codex"
+            link.parent.mkdir(parents=True)
+            if mode != "missing":
+                link.symlink_to(target)
+            with as_home(own):
+                public["codex_suggestion"] = codex_suggestion(public["settings"], self.desk.root, {"PATH": ""})
+            if mode == "saved":
+                public["settings"]["providers"]["compatible"] = {"kind": "codex", "model": "example-model",
+                    "codex_path": "", "codex_home": "", "ca_file": "", "web_search": "disabled", "disabled_features": []}
+            if mode == "legacy":
+                public.pop("codex_suggestion")
+            if mode == "locked":
+                public["from_outside"] = True
+                public["settings"]["settings_from_outside"] = False
+        elif scenario.startswith("codex-"):
             # What the settings answer to the card the scenario fills in: a home inside a folder workers may not read,
             # and a feature name they refuse, in the server's own words.
             s = copy.deepcopy(public["settings"])
@@ -52035,6 +52276,27 @@ else if (ask === "task-steps")'''))
 
     def test_the_kind_codex_shows_its_own_fields_and_help_and_no_key(self):
         self.run_settings_fix_scenario("codex-card")
+
+    def test_codex_page_fills_server_program_and_home_only_until_save(self):
+        self.run_settings_fix_scenario("codex-detect-found")
+
+    def test_codex_page_explains_detected_program_refusal_in_both_languages(self):
+        self.run_settings_fix_scenario("codex-detect-refused")
+
+    def test_codex_page_missing_program_keeps_install_help_and_proposes_home(self):
+        self.run_settings_fix_scenario("codex-detect-missing")
+
+    def test_codex_page_preserves_typed_program_and_home(self):
+        self.run_settings_fix_scenario("codex-detect-typed")
+
+    def test_codex_page_does_not_fill_previously_saved_codex_provider(self):
+        self.run_settings_fix_scenario("codex-detect-saved")
+
+    def test_codex_page_does_not_fill_paths_from_an_older_server(self):
+        self.run_settings_fix_scenario("codex-detect-legacy")
+
+    def test_codex_page_does_not_fill_or_show_detection_refusal_when_locked(self):
+        self.run_settings_fix_scenario("codex-detect-locked")
 
     def test_the_old_codex_provider_card_says_how_to_change_it_in_both_languages(self):
         self.run_settings_fix_scenario("old-codex")

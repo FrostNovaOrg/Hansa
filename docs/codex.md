@@ -11,8 +11,15 @@ hansa can run a worker with OpenAI's Codex command line instead of Claude Code, 
    paths, and as its model the Codex model to run. "More Codex settings" holds the optional certificate file, web
    search and the Codex features turned off. Put the provider in a lane's providers. It has no address and no key,
    and cannot be the coordinator's provider.
+   Choosing Codex fills empty program and home fields with paths on the machine running `hansa serve`:
+   the program found through `HANSA_CODEX_BIN`, `PATH`, then `~/.local/bin/codex` (keeping links as found),
+   and `~/codex-home` expanded to a full path. A program that save would refuse is left blank with the
+   refusal's reason. Existing text and providers already saved as Codex are left alone; an older server
+   or a page where settings cannot be changed fills nothing. Review the paths and save to keep them.
 3. Give this provider a home folder of its own, outside `~/.codex`, the desk and the lanes' repositories, and log
-   in once there: `CODEX_HOME=<Codex home> <Codex program> login`. The page and
+   in once there: `CODEX_HOME=<Codex home> <Codex program> login`. The suggested separate home is `~/codex-home`;
+   an existing login there can be reused. Detecting paths creates no folder, reads no login and runs no program.
+   The page and
    `hansa explain provider NAME` give the command. Then `hansa ping NAME`.
 
 hansa starts the adapter itself for such a provider and passes its settings in the run's environment: no
@@ -28,7 +35,8 @@ checks may read that folder, as named and with links resolved. It stays read-onl
 sessions, history and logs. The provider still uses its separate home and login. The principal's no-read entries
 always win, including an entry for packages or anything inside it. Claude workers and verifiers, Codex providers
 whose program is elsewhere, and lane setups and checks get no package exception. The page refuses other
-built-in no-read locations on save, including a program reached through a link.
+built-in no-read locations on save, including a program reached through a link, the desk's own folders,
+other hidden desks and other providers' homes. These checks prevent saving a program that its runs cannot read.
 
 ## Desks set up the old way
 
