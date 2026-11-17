@@ -59327,13 +59327,13 @@ else:
 
     def test_review_alert_counts_overdue_tasks_and_names_the_oldest_in_both_languages(self):
         from hansa import alert
-        for ended in (False, True):
-            with self.subTest(ended=ended):
-                self.coordinator_desk(f"review-text-{ended}", window_min=0, review_min=3)
+        for ended, count in ((False, 1), (True, 1), (False, 2), (True, 2)):
+            with self.subTest(ended=ended, count=count):
+                self.coordinator_desk(f"review-text-{ended}-{count}", window_min=0, review_min=3)
                 at = time.time()
                 tids = [self.coordinator_task_ended(title) for title in ("Newer", "Oldest", "Not overdue")]
                 watch = notify.Watch(4242)
-                for tid, minutes in zip(tids, (4, 6, 1)):
+                for tid, minutes in zip(tids, (4 if count == 2 else 1, 6, 1)):
                     self.desk.update(tid, finished=at - minutes * 60)
                     if ended:
                         watch.restore({tid: at - minutes * 60})
@@ -59343,13 +59343,24 @@ else:
                 with unittest.mock.patch.object(alert, "time", unittest.mock.Mock(wraps=time, time=lambda: at)):
                     self.assertEqual(alert.from_follower(self.desk, self.WHO, {"case": case, **fields}), "queued")
                 [(en, zh)] = self.queued_texts("coordinator")
-                self.assertIn("2 tasks have waited for review, the oldest: t0002 for 6 min", en)
-                self.assertIn("since " + ("it ended" if ended else "hansa posted it there") + ": Oldest", en)
-                self.assertTrue(en.endswith("ask the coordinator in that session to review them"), en)
-                self.assertIn("2 个任务待审，最早的是 t0002", zh)
-                self.assertIn(("结束" if ended else "Hansa 发到那里") + "后已等了 6 分钟", zh)
-                self.assertIn("「Oldest」", zh)
-                self.assertTrue(zh.endswith("在那个会话里让协调员审阅 这些任务"), zh)
+                since_en = "it ended" if ended else "hansa posted it there"
+                since_zh = "结束" if ended else " Hansa 发到那里"
+                expected_en = {
+                    1: ("the coordinator's session pid 4242 (desk-4242) is idle while t0002 has waited for review "
+                        f"for 6 min since {since_en}: Oldest · next: ask the coordinator in that session to review t0002"),
+                    2: ("the coordinator's session pid 4242 (desk-4242) is idle while 2 tasks have waited for review, "
+                        f"the oldest: t0002 for 6 min since {since_en}: Oldest · next: ask the coordinator in that "
+                        "session to review them"),
+                }
+                expected_zh = {
+                    1: ("协调员的会话 pid 4242 (desk-4242) 空闲，但 t0002 "
+                        f"自{since_zh}后已等了 6 分钟待审：「Oldest」 · 下一步：在那个会话里让协调员审阅 t0002"),
+                    2: ("协调员的会话 pid 4242 (desk-4242) 空闲，但有 2 个任务待审，最早的 t0002 "
+                        f"自{since_zh}后已等了 6 分钟：「Oldest」 · 下一步：在那个会话里让协调员审阅这些任务"),
+                }
+                self.assertEqual(en, expected_en[count])
+                self.assertEqual(zh, expected_zh[count])
+                self.assertEqual(zh.count("待审"), 1)
                 self.assertNotIn("Not overdue", en)
                 self.assertNotIn("Newer", en)
                 self.assertEqual(alert.queued(self.desk)[0]["level"], "urgent")

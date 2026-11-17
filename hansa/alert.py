@@ -1172,10 +1172,11 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
                     + ("" if count == 1 else f", the oldest: {tid}")
                     + f" for {_mins(t - posted)} min since {'it ended' if ended else 'hansa posted it there'}: {title}"
                     + " · next: ask the coordinator in that session to review " + (tid if count == 1 else "them"))
-            text_zh = (f"协调员的会话 {who_zh} 空闲，但 "
-                       + (tid if count == 1 else f"有 {count} 个任务待审，最早的是 {tid}")
-                       + f" 自{'结束' if ended else ' Hansa 发到那里'}后已等了 {_mins(t - posted)} 分钟待审：「{title}」"
-                       + " · 下一步：在那个会话里让协调员审阅 " + (tid if count == 1 else "这些任务"))
+            text_zh = (f"协调员的会话 {who_zh} 空闲，但"
+                       + (f" {tid}" if count == 1 else f"有 {count} 个任务待审，最早的 {tid}")
+                       + f" 自{'结束' if ended else ' Hansa 发到那里'}后已等了 {_mins(t - posted)} 分钟"
+                       + ("待审" if count == 1 else "") + f"：「{title}」"
+                       + " · 下一步：在那个会话里让协调员审阅" + (f" {tid}" if count == 1 else "这些任务"))
             queued = add(desk, "coordinator", text, zh=text_zh)
             if queued:
                 state["told"] = True
