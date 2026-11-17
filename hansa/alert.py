@@ -66,7 +66,8 @@ The `coordinator` alert has four cases, each after the minutes the principal set
     waits on its window  `claude agents --json` lists a live follower's session as `waiting` (a permission dialog or a
                          question) window_min after something was posted to it: once per stretch of waiting
     work sits untouched  a task posted to the session has waited review_min for review, and the session is `idle` at
-                         a lookup after that: once for that task; hansa does not post it again, and the alert's
+                         a lookup after that: once per stretch across the desk while any task over the minutes
+                         still waits, naming the count and oldest; hansa does not post it again, and the alert's
                          next step is to ask the coordinator in that session to review it
     its turns fail       API errors keep ending the session's turns (its Stop and StopFailure hooks' record): after
                          turn_min (default 30), or at once for one only the principal can cure (case `turn`, urgent);
@@ -1063,12 +1064,70 @@ def reviews_file(desk: Desk) -> Path:
     return desk.state_dir / "coordinator-review.json"
 
 
+def review_state(desk: Desk, waiting=None) -> dict:
+    """Shared review stretch, under the desk lock: wait times and rounds, and whether it alerted.
+    Followers supply their posted times, or ended times on a fresh start. Retain the earliest across followers.
+    Reconcile on every feed, even without a new alert: a stretch ends when no task over the minutes remains.
+    The round includes verification, whose verdict starts a new wait even when the parent's finish is unchanged.
+    Keep this on disk so a restart or another follower cannot repeat the same news.
+    """
+    from . import notify
+    with desk.lock():
+        try:
+            old = read_json(reviews_file(desk), {})
+        except ValueError:
+            old = {}
+        old = old if isinstance(old, dict) else {}
+        previous = old.get("waiting", {})
+        previous = {k: v for k, v in (previous.items() if isinstance(previous, dict) else ())
+                    if notify.TASK_ID.match(k) and isinstance(v, dict) and _at(v.get("posted"))}
+        told = bool(old.get("told"))
+        if "waiting" not in old:  # before stretches: {task: finished}
+            previous = {k: {"posted": v, "round": [v, None, None], "ended": True}
+                        for k, v in old.items() if notify.TASK_ID.match(k) and _at(v)}
+            told = bool(previous)
+        current = dict(previous)
+        for tid, v in (waiting.items() if isinstance(waiting, dict) else ()):
+            if notify.TASK_ID.match(tid) and isinstance(v, dict) and _at(v.get("posted")):
+                current.setdefault(tid, {})
+        kept, continuing = {}, False
+        minutes = session_minutes(desk)["review"]
+        for tid, v in current.items():
+            if not notify.waits_review(desk, tid):
+                continue
+            m = desk.meta(tid)
+            vid = m.get("verify")
+            try:
+                verified = desk.meta(vid).get("finished") if vid else None
+            except SystemExit:
+                verified = None
+            round_ = [m.get("finished"), vid, verified]
+            ended = max((at for at in (m.get("finished"), verified) if _at(at)), default=0)
+            if "waiting" not in old and isinstance(v, dict) and v.get("round", [None])[0] == m.get("finished"):
+                v = {**v, "round": round_, "posted": ended}
+            candidates = [v] if isinstance(v, dict) and v.get("round") == round_ else []
+            if candidates and _at(v.get("posted")) and v["posted"] >= ended and (
+                    not minutes or time.time() - v["posted"] >= minutes * 60):
+                continuing = True
+            if isinstance(waiting, dict) and isinstance(waiting.get(tid), dict):
+                candidates.append(waiting[tid])
+            candidates = [v for v in candidates if _at(v.get("posted")) and v["posted"] >= ended]
+            if candidates:
+                first = min(candidates, key=lambda x: x["posted"])
+                kept[tid] = {"posted": first["posted"], "round": round_, **({"ended": True} if first.get("ended") else {})}
+        if not continuing:
+            told = False
+        state = {"waiting": kept, "told": told}
+        if state != old:
+            write_json(reviews_file(desk), state)
+        return state
+
+
 def from_follower(desk: Desk, me: dict, req: dict) -> str:
     """A follower's case of the `coordinator` alert (notify.Watch), queued in words: the session (its pid, and its name
-    when known), the case, and what waits. The third case goes once per task's round across the desk, however many
-    followers watch it (a task that records no session is every follower's): reviews_file keeps {task: its round's
-    finished} for those alerted that still wait for review. Returns "queued", "told" (another follower's alert went
-    for it), or "" when nothing was queued."""
+    when known), the case, and what waits. The third case goes once per stretch across the desk, however many
+    followers watch it (review_state). Returns "queued", "told" (the stretch already alerted), or "" when nothing
+    was queued."""
     from . import notify
     sess = me.get("session") if isinstance(me.get("session"), dict) else {}
     who = notify.who(sess.get("pid"), str(me.get("name") or "")[:80])
@@ -1092,35 +1151,36 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
         text_zh = (f"协调员的会话 {who_zh} 已在窗口上等了 {_mins(t - since)} 分钟（权限对话框或提问），"
                    f"无法处理 Hansa 发来的消息：从 {time.strftime('%H:%M', time.localtime(posted))} 起共 {count} 件，"
                    f"最早的是：{_short(req.get('oldest') or '')} · 请在那个会话里回答")
-    elif req.get("case") == "review" and notify.TASK_ID.match(str(req.get("task") or "")):
-        tid = req["task"]
-        try:
-            m = desk.meta(tid)
-        except SystemExit:
-            return ""
-        title = m.get("title", "")
-        posted = req["posted"] if _at(req.get("posted")) else t
-        ended = bool(req.get("ended"))  # a follower started afresh: it waits since it ended (notify.Watch.restore)
-        text = (f"the coordinator's session {who} is idle while {tid} has waited for review for {_mins(t - posted)} "
-                f"min since {'it ended' if ended else 'hansa posted it there'}: {title} · next: ask the coordinator in "
-                f"that session to review {tid}")
-        text_zh = (f"协调员的会话 {who_zh} 空闲，但 {tid} 自{'结束' if ended else ' Hansa 发到那里'}后已等了 "
-                   f"{_mins(t - posted)} 分钟待审：「{title}」 · 下一步：在那个会话里让协调员审阅 {tid}")
+    elif req.get("case") == "review":
+        waiting = req.get("reviews")
+        if not isinstance(waiting, dict):  # a follower upgrading from the per-task protocol
+            waiting = {req["task"]: req} if notify.TASK_ID.match(str(req.get("task") or "")) else {}
         with desk.lock():
-            try:
-                told = read_json(reviews_file(desk), {})
-            except ValueError:  # not UTF-8: a hand edit; hansa writes it whole
-                told = {}
-            told = {k: v for k, v in (told.items() if isinstance(told, dict) else ())
-                    if notify.waits_review(desk, k)}  # merged, closed or queued again: forgotten
-            round_ = m.get("finished")
-            if tid in told and told[tid] == round_:
+            state = review_state(desk, waiting)
+            waiting = {k: state["waiting"][k] for k in waiting if k in state["waiting"]}
+            if not waiting:
+                return ""
+            if state["told"]:
                 return "told"
+            tid, oldest = min(waiting.items(), key=lambda x: (x[1]["posted"], x[0]))
+            posted, ended = oldest["posted"], oldest.get("ended")
+            title = desk.meta(tid).get("title", "")
+            count = len(waiting)
+            subject = tid if count == 1 else f"{count} tasks"
+            text = (f"the coordinator's session {who} is idle while {subject} "
+                    f"{'has' if count == 1 else 'have'} waited for review"
+                    + ("" if count == 1 else f", the oldest: {tid}")
+                    + f" for {_mins(t - posted)} min since {'it ended' if ended else 'hansa posted it there'}: {title}"
+                    + " · next: ask the coordinator in that session to review " + (tid if count == 1 else "them"))
+            text_zh = (f"协调员的会话 {who_zh} 空闲，但"
+                       + (f" {tid}" if count == 1 else f"有 {count} 个任务待审，最早的 {tid}")
+                       + f" 自{'结束' if ended else ' Hansa 发到那里'}后已等了 {_mins(t - posted)} 分钟"
+                       + ("待审" if count == 1 else "") + f"：「{title}」"
+                       + " · 下一步：在那个会话里让协调员审阅" + (f" {tid}" if count == 1 else "这些任务"))
             queued = add(desk, "coordinator", text, zh=text_zh)
             if queued:
-                told[tid] = round_
-            desk.state_dir.mkdir(mode=0o700, exist_ok=True)
-            write_json(reviews_file(desk), told)
+                state["told"] = True
+                write_json(reviews_file(desk), state)
         return "queued" if queued else ""
     elif req.get("case") == "turn":
         text, text_zh = turn_text(req, who, who_zh, t)

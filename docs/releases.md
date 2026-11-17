@@ -811,13 +811,18 @@ the minutes the principal sets on the page (Settings, Alerts: whole minutes from
   waiting. Only `waiting` alerts: `busy`, `idle`, `shell`, a status hansa does not know, or no answer sends nothing,
   and a lookup that fails is written in the follower's log.
 - **Posted work sits untouched** (120 minutes): a task hansa posted to the session has waited that long for review
-  (done, not merged or closed), and the session is `idle` at a lookup after that. Once per task across the desk,
-  however many followers watch it (a task that records no session goes to each); its next round may alert again.
+  (done, not merged or closed), and the session is `idle` at a lookup after that. Once per stretch across the desk,
+  however many followers watch it (a task that records no session goes to each). A stretch begins at that lookup
+  and lasts while at least one task over the minutes still waits, including tasks that pass the minutes later.
+  The alert names the task; when several wait, it gives their count and the oldest task's ID, title and since when.
+  Another can come only after none over the minutes remains (merged, closed, cancelled or sent back), and a task
+  passes the minutes again.
   hansa does not post it again; the alert's next step is to ask the coordinator in that session to review it. A task
   does not wait for review while a verification of it is queued or running,
   whoever asked for it; its verdict's post starts the wait again. A follower started afresh (the session quit and
   opened again, a reboot, `hansa up`) takes the tasks that already wait for review and would be posted to its
   session, as waiting since they ended (or their verification did): the alert says `since it ended`.
+  What was alerted survives restarts; starting a follower again does not repeat an open stretch's alert.
 - **Its turns fail** (30 minutes, `turn_min`): API errors keep ending the session's turns (case `turn`).
   Errors only the principal can fix alert at once. After an alert, a normal turn
   sends one quiet recovery notice (case `turn_ok`, passive). This also works with push addresses alone.

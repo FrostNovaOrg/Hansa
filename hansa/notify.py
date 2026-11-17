@@ -666,12 +666,15 @@ def handle(desk: Desk, req: dict) -> dict:
             _write_record(desk, key, {**rec, "seen": now()})  # else nothing changed but seen, and it is recent
         if op == "seen":
             return {}
+        from .alert import review_state
+        # All followers share the review stretch; keep it current even between status lookups.
+        review_state(desk, req.get("review"))
         out = {"pos": pos, "items": items, **_server(desk), "srt_ran": _srt_ran(desk)}
         if req.get("minutes"):  # what the follower watches its session for (Watch, Turns); it asks once a minute
             from .alert import chinese, session_minutes
             out["coordinator_alert"] = session_minutes(desk)
             out["turns"], out["alert_zh"] = turns_of(desk, (me.get("session") or {}).get("pid")), chinese(desk)
-        if isinstance(req.get("review"), list):  # of the tasks it posted waiting for review, those that still do
+        if isinstance(req.get("review"), (list, dict)):  # of the tasks it posted, those that still wait
             out["review"] = [x for x in req["review"] if waits_review(desk, x)]
         return out
     if op == "alert":  # a case of the principal's coordinator alert the follower found (Watch): queued here
@@ -873,7 +876,8 @@ class Watch:
                 from the first lookup that saw it waiting, or from the post when no lookup came between. Alerted once
                 per stretch of waiting
         review  a task posted to it has waited `review` minutes for review since, and the session is `idle` at a
-                lookup after that: alerted once for that task; hansa does not post it again. A follower started
+                lookup after that: one alert with the count and oldest, once per stretch across the desk while any
+                task over those minutes still waits; hansa does not post it again. A follower started
                 afresh takes the tasks that wait for review and would be posted to it from the desk (restore), as
                 waiting since they ended
     Any other status ends a stretch of waiting and sends nothing; one other than `busy` (`idle`, `shell`, one hansa
@@ -926,8 +930,8 @@ class Watch:
             self.first, self.count, self.oldest = t, 0, line
         self.count += len(lines)
         self.last, self.last_count, self.last_line = t, len(lines), line
-        for tid in reviews:  # the wait counts from its latest post; told stays told
-            self.reviews[tid] = {**{k: v for k, v in self.reviews.get(tid, {}).items() if k != "ended"}, "posted": t}
+        for tid in reviews:  # a verdict's post starts the task's wait again
+            self.reviews[tid] = {"posted": t}
 
     def restore(self, waiting) -> None:
         """What the desk gave a follower started afresh: {task: when it ended} for the tasks that wait for review and
@@ -1006,11 +1010,12 @@ class Watch:
             else:  # finished: what was posted before was not missed
                 self.first, self.count, self.oldest = 0.0, 0, ""
         if status == "idle" and review:
-            for tid, v in sorted(self.reviews.items()):
-                if not v.get("told") and at - v["posted"] >= review * 60:
+            waiting = {k: v for k, v in sorted(self.reviews.items(), key=lambda x: (x[1]["posted"], x[0]))
+                       if at - v["posted"] >= review * 60}
+            if waiting and any(not v.get("told") for v in waiting.values()):
+                for v in waiting.values():
                     v["told"] = at
-                    out.append(("review", {"task": tid, "posted": v["posted"],
-                                           **({"ended": True} if v.get("ended") else {})}))
+                out.append(("review", {"reviews": waiting}))
         return out
 
     def holds(self, t: float, minutes: dict, last_post=None, pending: bool = False) -> dict:
@@ -1348,7 +1353,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
             try:
                 asked = time.time() - minutes_at >= LOOK_EVERY
                 r = ask({"op": "feed", "me": me, "pos": pos, "done": done, **({"minutes": True} if asked else {}),
-                         **({"review": sorted(watch.reviews)} if watch.reviews else {})})
+                         **({"review": watch.reviews} if watch.reviews else {})})
                 errors = 0
                 if asked:
                     minutes, minutes_at = r.get("coordinator_alert") or {}, time.time()
@@ -1414,7 +1419,7 @@ def follow(desk: Desk, key: str, sess: dict, sock: str, nonce: str, name: str = 
                 try:
                     r = ask({"op": "alert", "me": me, "case": case, **fields})
                     _say(f"the principal's coordinator alert ({case}) " + (
-                        "is queued" if r.get("queued") else "went already: another follower alerted of this task"
+                        "is queued" if r.get("queued") else "went already: this stretch was alerted"
                         if r.get("told") else "was not queued: no alert channel is set up"))
                 except Exception as e:  # noqa: BLE001 - told is told: no retry, as for any alert
                     _say(f"could not queue the principal's coordinator alert ({case}): {e}")

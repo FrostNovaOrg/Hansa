@@ -36324,8 +36324,8 @@ def save():'''))
                     # Each phase may be the first time the session is found idle.
                     probe = notify.Watch(sess["pid"], watch.state())
                     cases = probe.saw(at + 120, "idle", 0, 1)
-                    self.assertEqual([(case, fields["task"]) for case, fields in cases],
-                                     [("review", tid)] if expected else [])
+                    self.assertEqual([(case, list(fields["reviews"])) for case, fields in cases],
+                                     [("review", [tid])] if expected else [])
                     notify._write_record(self.desk, me["key"],
                                          {**me, "seen": time.time(), "coordinator": probe.holds(at + 120, minutes)})
                     lines = alert.coordinator_lines(self.desk, self.desk.settings(), at + 120)
@@ -56301,6 +56301,7 @@ else:
                                  ("review", "has waited for review", "分钟待审")):
                 with self.subTest(language=language, coordinator=case):
                     write_json(alert.reviews_file(self.desk), {})
+                    self.desk.update(tid, state="done", finished=time.time() - 180)
                     check("coordinator", lambda: alert.from_follower(self.desk, me, {
                         "case": case, "since": time.time() - 120, "posted": time.time() - 120,
                         "count": 1, "oldest": tid, "task": tid}), en, zh, "urgent", language)
@@ -59170,8 +59171,7 @@ else:
             log = self.follow_on_a_clock(8, at={0.5: lambda: self.coordinator_task_ended("Add a")}, also=[4343])[0]
             self.assertEqual(len(self.coordinator_alerts()), 1, (self.coordinator_alerts(), log))
             self.assertIn("is idle while t0001 has waited for review for 3 min", self.coordinator_alerts()[0])
-            self.assertIn("the principal's coordinator alert (review) went already: another follower alerted of this "
-                          "task", log)
+            self.assertIn("the principal's coordinator alert (review) went already: this stretch was alerted", log)
             self.assertEqual((len(posted()), len(posted(str(self.tmp / "inbox-desk-16-1.sock")))), (1, 1))
 
         def row17():
@@ -59290,6 +59290,26 @@ else:
             self.assertEqual(self.coordinator_alerts(), [])
             self.assertNotIn(unheard, self.status_at(t + 12 * 3600))
 
+    def test_unreviewed_tasks_alert_once_as_more_pass_the_minutes(self):
+        from hansa import alert
+        out = self.coordinator_desk("review-stretch", window_min=0, review_min=3)
+        self.agents_say({"4242": "idle"})
+        self.follow_on_a_clock(12, at={
+            0.5: lambda: [self.coordinator_task_ended("Oldest work"), self.coordinator_task_ended("More work")],
+            5: lambda: self.coordinator_task_ended("Later work")})
+        alerts = self.coordinator_alerts()
+        self.assertEqual(len(alerts), 1, alerts)
+        self.assertIn("2 tasks have waited for review", alerts[0])
+        self.assertIn("the oldest: t0001", alerts[0])
+        self.assertIn("since hansa posted it there: Oldest work", alerts[0])
+        self.assertNotIn("Later work", alerts[0])
+        sent_at = max(x["at"] for x in alert.queued(self.desk)) + 1
+        with unittest.mock.patch.object(alert, "time", unittest.mock.Mock(wraps=time, time=lambda: sent_at)):
+            self.assertTrue(alert.send_due(self.desk, gather=0)["ok"])
+        [sent] = self.alerted(out)
+        self.assertEqual((sent["kind"], sent["level"]), ("coordinator", "urgent"))
+        self.assertIn(alerts[0], sent["text"])
+
     def test_a_done_task_unreviewed_for_long_alerts_from_a_follower_started_afresh(self):
         self.coordinator_desk("review-afresh", window_min=0, review_min=3)
         self.agents_say({"4242": "idle"})
@@ -59304,6 +59324,151 @@ else:
         with self.subTest("another follower started afresh: told is told"):
             self.follow_on_a_clock(4, start=t0 + 600)
             self.assertEqual(len(self.coordinator_alerts()), 1)
+
+    def test_review_alert_counts_overdue_tasks_and_names_the_oldest_in_both_languages(self):
+        from hansa import alert
+        for ended, count in ((False, 1), (True, 1), (False, 2), (True, 2)):
+            with self.subTest(ended=ended, count=count):
+                self.coordinator_desk(f"review-text-{ended}-{count}", window_min=0, review_min=3)
+                at = time.time()
+                tids = [self.coordinator_task_ended(title) for title in ("Newer", "Oldest", "Not overdue")]
+                watch = notify.Watch(4242)
+                for tid, minutes in zip(tids, (4 if count == 2 else 1, 6, 1)):
+                    self.desk.update(tid, finished=at - minutes * 60)
+                    if ended:
+                        watch.restore({tid: at - minutes * 60})
+                    else:
+                        watch.posted(at - minutes * 60, [tid], [tid])
+                [(case, fields)] = watch.saw(at, "idle", 0, 3)
+                with unittest.mock.patch.object(alert, "time", unittest.mock.Mock(wraps=time, time=lambda: at)):
+                    self.assertEqual(alert.from_follower(self.desk, self.WHO, {"case": case, **fields}), "queued")
+                [(en, zh)] = self.queued_texts("coordinator")
+                since_en = "it ended" if ended else "hansa posted it there"
+                since_zh = "结束" if ended else " Hansa 发到那里"
+                expected_en = {
+                    1: ("the coordinator's session pid 4242 (desk-4242) is idle while t0002 has waited for review "
+                        f"for 6 min since {since_en}: Oldest · next: ask the coordinator in that session to review t0002"),
+                    2: ("the coordinator's session pid 4242 (desk-4242) is idle while 2 tasks have waited for review, "
+                        f"the oldest: t0002 for 6 min since {since_en}: Oldest · next: ask the coordinator in that "
+                        "session to review them"),
+                }
+                expected_zh = {
+                    1: ("协调员的会话 pid 4242 (desk-4242) 空闲，但 t0002 "
+                        f"自{since_zh}后已等了 6 分钟待审：「Oldest」 · 下一步：在那个会话里让协调员审阅 t0002"),
+                    2: ("协调员的会话 pid 4242 (desk-4242) 空闲，但有 2 个任务待审，最早的 t0002 "
+                        f"自{since_zh}后已等了 6 分钟：「Oldest」 · 下一步：在那个会话里让协调员审阅这些任务"),
+                }
+                self.assertEqual(en, expected_en[count])
+                self.assertEqual(zh, expected_zh[count])
+                self.assertEqual(zh.count("待审"), 1)
+                self.assertNotIn("Not overdue", en)
+                self.assertNotIn("Newer", en)
+                self.assertEqual(alert.queued(self.desk)[0]["level"], "urgent")
+
+    def test_review_stretch_alerts_again_only_after_all_overdue_work_is_cleared(self):
+        for state, error in (("merged", None), ("cancelled", "closed without merging"),
+                             ("cancelled", "cancelled"), ("queued", None)):
+            with self.subTest(state=state, error=error):
+                self.coordinator_desk(f"review-cleared-{state}-{error}", window_min=0, review_min=3)
+                self.agents_say({"4242": "idle"})
+                tids = []
+                self.follow_on_a_clock(13, at={
+                    0.5: lambda: tids.append(self.coordinator_task_ended("First stretch")),
+                    5: lambda: tids.append(self.coordinator_task_ended("Still under the minutes")),
+                    6: lambda: self.desk.update(tids[0], state=state, error=error)})
+                alerts = self.coordinator_alerts()
+                self.assertEqual(len(alerts), 2, alerts)
+                self.assertIn("First stretch", alerts[0])
+                self.assertIn("Still under the minutes", alerts[1])
+
+    def test_review_stretch_outlives_the_tasks_that_first_alerted(self):
+        self.coordinator_desk("review-replaced", window_min=0, review_min=3)
+        self.agents_say({"4242": "idle"})
+        tids = []
+        self.follow_on_a_clock(19, at={
+            0.5: lambda: tids.append(self.coordinator_task_ended("First")),
+            5: lambda: tids.append(self.coordinator_task_ended("Second")),
+            9: lambda: self.desk.update(tids[0], state="merged"),
+            10: lambda: tids.append(self.coordinator_task_ended("Third")),
+            14: lambda: self.desk.update(tids[1], state="cancelled")})
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+
+    def test_review_stretch_survives_fresh_and_code_restarts_with_later_tasks(self):
+        for code in (False, True):
+            with self.subTest(code=code):
+                self.coordinator_desk(f"review-restart-{code}", window_min=0, review_min=3)
+                self.agents_say({"4242": "idle"})
+                _, end, carried = self.follow_on_a_clock(6, restart_at=5 if code else None, at={
+                    0.5: lambda: self.coordinator_task_ended("Already alerted")})
+                self.assertEqual(len(self.coordinator_alerts()), 1)
+                self.follow_on_a_clock(9, start=end, resume=carried, at={
+                    0.5: lambda: self.coordinator_task_ended("After restart")})
+                self.assertEqual(len(self.coordinator_alerts()), 1)
+
+    def test_several_followers_share_one_review_stretch_as_tasks_join(self):
+        self.coordinator_desk("review-followers", window_min=0, review_min=3)
+        self.agents_say({"4242": "idle", "4343": "idle"})
+        self.follow_on_a_clock(12, also=[4343], at={
+            0.5: lambda: [self.coordinator_task_ended("First"), self.coordinator_task_ended("Second")],
+            5: lambda: self.coordinator_task_ended("Third")})
+        alerts = self.coordinator_alerts()
+        self.assertEqual(len(alerts), 1, alerts)
+        self.assertIn("2 tasks", alerts[0])
+
+    def test_review_stretch_adopts_the_old_per_task_record_on_upgrade(self):
+        from hansa import alert
+        self.coordinator_desk("review-upgrade", window_min=0, review_min=3)
+        self.agents_say({"4242": "idle"})
+        tids = []
+        _, end, _ = self.follow_on_a_clock(6, at={
+            0.5: lambda: tids.append(self.coordinator_task_ended("Before upgrade"))})
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        write_json(alert.reviews_file(self.desk), {tids[0]: self.desk.meta(tids[0])["finished"]})
+        self.follow_on_a_clock(9, start=end, at={0.5: lambda: self.coordinator_task_ended("After upgrade")})
+        self.assertEqual(len(self.coordinator_alerts()), 1)
+        self.assertTrue(read_json(alert.reviews_file(self.desk))["told"])
+
+    def test_review_stretch_cleared_while_the_follower_was_down_alerts_anew(self):
+        self.coordinator_desk("review-down", window_min=0, review_min=3)
+        self.agents_say({"4242": "idle"})
+        tids = []
+        _, end, _ = self.follow_on_a_clock(6, at={
+            0.5: lambda: tids.append(self.coordinator_task_ended("Before shutdown"))})
+        self.desk.update(tids[0], state="merged")
+        tid = self.coordinator_task_ended("After shutdown")
+        self.desk.update(tid, finished=end + 60)
+        self.follow_on_a_clock(4, start=end + 600)
+        alerts = self.coordinator_alerts()
+        self.assertEqual(len(alerts), 2, alerts)
+        self.assertIn("After shutdown", alerts[1])
+
+    def test_review_after_verification_alerts_only_without_an_open_stretch(self):
+        for another in (False, True):
+            with self.subTest(another=another):
+                self.coordinator_desk(f"review-verdict-{another}", window_min=0, review_min=3)
+                self.agents_say({"4242": "idle"})
+                tids = []
+
+                def finished():
+                    tids.append(self.coordinator_task_ended("Review again"))
+                    if another:
+                        self.coordinator_task_ended("Still waiting")
+
+                def verify():
+                    vid = self.desk.new_task("Verify", kind="verify", parent=tids[0], lane="a")
+                    self.desk.update(tids[0], verify=vid)
+                    tids.append(vid)
+
+                def verdict():
+                    self.desk.update(tids[1], state="done", verdict="holds", finished=time.time())
+                    self.desk.event("task_finished", task=tids[1], state="done")
+
+                self.follow_on_a_clock(15, at={0.5: finished, 5: verify,
+                                              6: lambda: self.desk.update(tids[1], state="running"), 8: verdict})
+                alerts = self.coordinator_alerts()
+                self.assertEqual(len(alerts), 1 if another else 2, alerts)
+                if not another:
+                    self.assertIn("t0001 has waited for review for 3 min", alerts[1])
 
     def test_the_review_status_line_holds_only_while_the_session_is_idle(self):
         self.coordinator_desk("review-status", window_min=0, review_min=3)
@@ -59800,6 +59965,7 @@ else:
         with self.subTest("work waits for review"):
             write_json(alert.queue_file(self.desk), [])
             tid = self.coordinator_task_ended("修复登录按钮")
+            self.desk.update(tid, finished=time.time() - 7400)
             self.assertEqual(alert.from_follower(self.desk, self.WHO, {"case": "review", "task": tid,
                                                                        "posted": time.time() - 7300}), "queued")
             [(en, zh)] = self.queued_texts("coordinator")
