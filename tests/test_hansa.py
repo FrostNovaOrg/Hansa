@@ -42616,6 +42616,32 @@ def save():'''))
         self.assertEqual(release.get(self.desk, 5)["void"], "replaced by release #6")
         self.assertEqual(len(notify.items_for(self.desk, self.events("release_void"), {"key": "k", "session": None})), 4)
 
+    def test_release_word_refusal_points_to_the_principals_lane_exception_or_removal(self):
+        self.with_release("true")
+        self.forbid("falcon")
+        self.commit_in_repo("notes.txt", "the falcon plan\n")
+        self.commit_in_repo("notes.txt", "public plan\n")  # a later task cannot remove the old commit
+        said = self.refused("release", "a")
+        self.assertIn("notes.txt: the falcon plan", said)
+        for remedy in ("A task does not help", "commits that hold the words still go out", "principal",
+                       "hansa ask", "except the entry for lane a", "remove it on the page"):
+            self.assertIn(remedy, said)
+        self.assertNotIn("hansa add", said)
+        self.assertNotIn("out of the history", said)
+
+    def test_release_mailbox_refusal_points_to_the_principals_allowlist(self):
+        self.with_release("true")
+        self.assertTrue(self.page_save(lambda s: s.update(release_mailboxes=True))["ok"])
+        self.commit_in_repo("contacts.txt", "a@unreserved.hansa\n")
+        self.commit_in_repo("contacts.txt", "a@example.com\n")  # replacing it leaves the old commit outgoing
+        said = self.refused("release", "a")
+        self.assertIn("contacts.txt: a@unreserved.hansa", said)
+        for remedy in ("A task does not help", "commits that hold the mailbox still go out", "principal",
+                       "add the address or its domain", "allowlist on the page", "hansa ask"):
+            self.assertIn(remedy, said)
+        self.assertNotIn("Replace it with an example address", said)
+        self.assertNotIn("out of the history", said)
+
     def test_words_the_principal_keeps_from_going_out_refuse_a_release(self):
         from hansa import release
         self.with_release("true")
@@ -42656,11 +42682,10 @@ def save():'''))
         self.assertIn(f'{head[:10]} docs/contacts.md: a@unreserved.hansa  ("a@unreserved.hansa")', said)
         self.assertIn("a mailbox does not use a reserved example domain", said)
         self.assertNotIn("holds words the principal keeps from going out", said)
-        self.assertIn("Replace it with an example address", said)
-        self.assertIn("ask the principal", said)
+        self.assertNotIn("Replace it with an example address", said)
+        self.assertIn("Ask the principal", said)
         self.assertNotIn("test file", said)
-        for remedy in ("example.com", "example.org", "example.net", ".invalid", ".test", ".example",
-                       "allowlist on the page (hansa ask)"):
+        for remedy in ("add the address or its domain", "allowlist on the page (hansa ask)"):
             self.assertIn(remedy, said)
         self.assertIn("a mailbox does not use a reserved example domain", self.hansa("release"))
         r = release.get(self.desk, 1)
@@ -45916,6 +45941,8 @@ def save():'''))
         self.with_release("./deploy --to staging-7")
         said = self.refused("release", "a")
         self.assertIn("release command: ./deploy --to staging-7", said)
+        self.assertIn("Take them out of the release command", said)
+        self.assertEqual([h["where"] for h in release.releases(self.desk)[-1]["hits"]], ["release command"])
         # one added to the command after the yes stops it before it runs
         self.with_release("./deploy --to prod")
         self.hansa("release", "a")
@@ -46112,8 +46139,10 @@ def save():'''))
         self.commit_in_repo("history.txt", "zebra\n")
         told = self.refused("release", "a", "public")
         self.assertIn("history.txt: zebra", told)
-        remedy = told.split("Take them out", 1)[1]
-        self.assertIn("history of main", remedy)
+        remedy = told.split("A task does not help", 1)[1]
+        self.assertIn("commits that hold the words still go out", remedy)
+        self.assertIn("except the entry for lane a", remedy)
+        self.assertIn("remove it on the page", remedy)
         self.assertNotIn("release command", remedy)
         self.assertNotIn("watch command", remedy)
 
@@ -46123,6 +46152,7 @@ def save():'''))
         self.assertTrue(self.page_save(lambda s: s.update(release_forbidden=["Falcon"]))["ok"])
         told = self.refused("release", "a", "public")
         self.assertIn("watch command: echo falcon watch", told)
+        self.assertIn("Take them out of the watch command", told)
         r = release.releases(self.desk)[-1]
         self.assertEqual(r["state"], "forbidden")
         self.assertEqual([(h["where"], h["commit"]) for h in r["hits"]], [("watch command", "")])

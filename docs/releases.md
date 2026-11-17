@@ -375,7 +375,9 @@ No new merges since the last run means no waiting line.
 
 A release, and the steps before it, look for the words the principal keeps
 from going out (listed on the page): the word scan. By the time a release finds a forbidden word, the word is on the base
-branch: taking it out takes another task, and the history still holds it.
+branch: a task that takes it out does not help, since the commit that added it still goes out.
+Only the principal can let it through, by excepting the entry for the lane or removing it on the page;
+for a mailbox, by adding the address or its domain to the allowlist on the page.
 So hansa looks for the same words, matched the same way (any case, within
 one line, in text read as UTF-8), earlier:
 
@@ -456,12 +458,14 @@ Each entry may have at most 254 characters. Duplicates are refused ignoring
 case, naming both entry numbers. The page drops blank lines before saving;
 an empty entry sent by other means is refused.
 Strings that look like addresses and are not, such as `git@github.com` in a clone URL or `logo@2x.png`, go on the allowlist like an address.
-No command changes the rule or allowlist: on a refusal, which names each
-mailbox, commit, file and line (at most 20 hits), the coordinator replaces
-the address with an example one in a fresh retry, or, if the project needs
-it, asks the principal to add the address or its domain to the allowlist on
-the page (`hansa ask`). `hansa explain` says whether the rule is on and lists
-the first 20 allowlist entries, then says how many more are on the page.
+No command changes the rule or allowlist. A refusal names each mailbox,
+commit, file and line (at most 20 hits). Before a merge, the coordinator can
+replace the address with an example one in a fresh retry. At release, the
+old commit still goes out, so ask the principal to add the address or its
+domain to the allowlist on the page (`hansa ask`). The principal can also
+allow an address the project needs before a merge. `hansa explain` says
+whether the rule is on and lists the first 20 allowlist entries, then says
+how many more are on the page.
 An allowlist change makes earlier scans unusable, whether an
 entry was added or removed.
 
