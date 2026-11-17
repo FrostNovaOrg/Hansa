@@ -125,7 +125,9 @@ More: `hansa help inbox`.
 Say what to change, where, and how the worker can check it (a command, a file to look at). Keep one
 task to one goal, say what done looks like and what to report, and size it so one worker can finish
 it in one go; split anything bigger. Ask only for what the goal needs: extra demands cost turns.
-Check its facts and the names it quotes before you queue it: `hansa help writing-tasks`.
+Check its facts and the names it quotes before you queue it: `hansa help writing-tasks`. When you
+do not know how the code or an outside tool behaves, do not design from memory: queue a task that
+only looks and reports (or ask `scout`), and write the change from what it found.
 - A worker needs no allowed commands: it may run any command inside its sandbox. What a lane's allow
   list adds for workers and verifiers is Claude Code's web tools. More: `hansa help web-tools`.
 - Workers change files only in their worktree, their temporary folder and the lane's write list,
@@ -153,13 +155,15 @@ network call is usually the sandbox doing its job: fix the task (ask for less, l
 the setup) or the lane, never by switching the sandbox off. Claude Code refuses a `bash -c "..."` it
 cannot check, such as one that runs `rm`: workers are told to put such a line in a script file in
 their temporary folder and run it with `sh`; ask for it that way. A failed check: send the task back
-with `hansa retry`; `hansa diff NEW --new` then shows what the follow-up added. A check that "could
-not run" never ran: the machine could not start `srt`, and the task is not judged on it (one that
-failed printing nothing usually could not start either); `hansa explain server` says how to fix it,
-then `hansa merge <id> --recheck`. Merge with `--despite-check` only when the failure is not the
-task's doing and cannot be run again, and say why. If the setup failed, the worker never started:
-`hansa show` has the setup's last lines; fix it with `hansa lane set L setup "<command>"`, then
-retry. More: `hansa help check-output`.
+with `hansa retry`; `hansa diff NEW --new` then shows what the follow-up added. When a task fails on
+something the tasks queued behind it will meet too (the same test, the same function), tell their
+workers before they start: in the lane's standing instructions (`hansa lane brief L`), or cancel
+them and add them again with the warning. A check that "could not run" never ran: the machine could
+not start `srt`, and the task is not judged on it (one that failed printing nothing usually could
+not start either); `hansa explain server` says how to fix it, then `hansa merge <id> --recheck`.
+Merge with `--despite-check` only when the failure is not the task's doing and cannot be run again,
+and say why. If the setup failed, the worker never started: `hansa show` has the setup's last
+lines; fix it with `hansa lane set L setup "<command>"`, then retry. More: `hansa help check-output`.
 
 ## Checking before you merge
 When you know at queue time that you want verification, use `hansa add` or `hansa retry` with `--verify` (or `--verify-lane`, `--verify-effort`, `--verify-note`): hansa queues it after a passing check, or with no check, and posts its verdict without a turn between them.
@@ -171,8 +175,9 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   names say. Its verdict ("holds", "holds, with notes", "does not hold", "unsure") shows in
   `hansa show <id>`; hansa will not merge
   while it runs, nor after "does not hold" unless you say `--despite-check`.
-  "Holds, with notes" counts as "holds"; its verification's report lists the rare-state gaps under "Notes".
-  Notes go to `hansa gaps`, to be marked.
+  "Holds, with notes" counts as "holds", but read each note in its report first: one saying that
+  something worked before the change and no longer does, or that part of what the task asked is not
+  done, is a defect: send the task back naming it; the other notes go to `hansa gaps`, to be marked.
 - Verifying the same task again goes on in the earlier verification's conversation (same lane, provider
   and model, not Codex; never a worker's). `--lane L` gives a fresh look, on another lane of the same repository:
   another model sees other things than the same model, but may judge more strictly and send more work

@@ -59973,6 +59973,24 @@ else:
         self.assertIn("keeps ending its turns with an API error", line)
         self.assertIn("ran out of credit", line)
 
+    def test_the_card_says_to_read_notes_warn_queued_tasks_and_find_out_before_designing(self):
+        """Each in its own section: a note that something broke is sent back, not marked for later; a failure
+        the queued tasks will meet goes to their workers first; what is not known is looked up by a task."""
+        text = (Path(__file__).resolve().parent.parent / "hansa" / "card.md").read_text()
+        section = {s.split("\n", 1)[0]: " ".join(s.split()) for s in text.split("\n## ")}
+        merge = section["Checking before you merge"]
+        self.assertIn('"Holds, with notes" counts as "holds"', merge)
+        self.assertIn("read each note in its report first", merge)
+        self.assertIn("worked before the change and no longer does", merge)
+        self.assertIn("send the task back naming it; the other notes go to `hansa gaps`", merge)
+        result = section["Reading the result"]
+        self.assertIn("the tasks queued behind it will meet too", result)
+        self.assertIn("`hansa lane brief L`", result)
+        self.assertIn("cancel them and add them again with the warning", result)
+        writing = section["Writing a task"]
+        self.assertIn("do not design from memory", writing)
+        self.assertIn("a task that only looks and reports (or ask `scout`)", writing)
+
     def test_status_shows_the_coordinator_alert_minutes_with_the_alert_settings(self):
         self.assertNotIn("Coordinator alerts after", self.hansa_out("status"))  # no alert channel: none goes out
         self.alert_fake()
