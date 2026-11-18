@@ -190,12 +190,16 @@ def _top_up_provider(desk: Desk, name: str) -> dict:
     with desk.lock():
         if name not in desk.settings()["providers"]:
             return {"ok": False, "problems": ["no such provider"]}
-        if (desk.provider_state().get(name) or {}).get("credit_since"):
-            from .rests import record
+        states = desk.provider_state()
+        if (states.get(name) or {}).get("credit_since"):
+            from .rests import record, same_login
             record(desk, name, credit_since=0, credit_cleared=time.time())
-            desk.set_provider_state(name, credit_since=0, credit_plan="", cool_until=0, reason="", rest_how="",
-                                    rest_minutes=None)
-            desk.event("provider_topped_up", provider=name, by="page")
+            # the desk's other entries on the same connection rested with it (run.rest_provider): back with it
+            others = [n for n in same_login(desk, desk.settings(), name) if (states.get(n) or {}).get("credit_since")]
+            for n in [name, *others]:
+                desk.set_provider_state(n, credit_since=0, credit_plan="", cool_until=0, reason="", rest_how="",
+                                        rest_minutes=None)
+            desk.event("provider_topped_up", provider=name, by="page", **({"providers": [name, *others]} if others else {}))
     desk.ready_news()
     return {"ok": True}
 

@@ -3409,6 +3409,14 @@ class Desk:
                    {"providers": {provider: {"key": value.strip()}}}, by)
             self.set_provider_state(provider, cool_until=0, credit_since=0, credit_plan="", model_since=0, model_unknown="",
                                     reason="", rest_how="", rest_minutes=None)
+            # the entries that use this key through `connection` rested with it for its credit, login or key: back
+            # too (their own unknown-model and usage rests stay)
+            states = self.provider_state()
+            for n in connection_users(self.settings(), provider):
+                st = states.get(n) or {}
+                if st.get("credit_since") or str(st.get("reason", "")).startswith(("not logged in", "key rejected")):
+                    self.set_provider_state(n, cool_until=0, credit_since=0, credit_plan="", reason="", rest_how="",
+                                            rest_minutes=None)
             failed = self.scrub(value.strip(), provider)
         self.event("key_set", provider=provider, by=by)
         self.ready_news()

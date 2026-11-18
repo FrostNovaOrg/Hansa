@@ -280,7 +280,7 @@ lane, or waits for one.
   or a key provider's exact endpoint and key, hold new runs until the same time. Codex rests never share
   with other provider kinds. `show` and `status` say when another desk found the limit. Different folders
   or keys do not share rests; expired rests are ignored. Providers on one desk sharing that login also
-  share usage rests.
+  share usage rests, and rest together when the connection itself is the problem (below).
   A good `hansa ping NAME` or page check ends a shared usage rest when the checked provider has the
   same configured model as the one that found the limit. Other desks become ready on their next
   provider read, including the desk that recorded the limit. A good check of a different model frees
@@ -313,6 +313,24 @@ or save a new key. The coordinator cannot end it, even with `hansa ping`.
 A **Topped up** confirmation clears that login's credit rest on every desk on the account.
 Saving a different key lets this desk use that key; it leaves the old login's shared rest in place.
 The task moves to the lane's next provider without using a try; if all rest, it waits.
+
+**One connection, one rest.** Provider entries of a desk on the same connection (the same login as for shared
+usage rests above: a subscription's Claude Code folder, a Codex home, or an endpoint and key, whether an entry
+names another under `connection` or was written with the same values) rest together when the connection itself
+is the problem:
+
+| what happened to one entry | its desk's other entries on the same connection | other desks on the account |
+|---|---|---|
+| usage limit | rest until the same time, as before | rest until the same time, as before |
+| out of credit (or a plan to upgrade) | rest at once, for the same reason; one credit alert names them all; a **Topped up** on any of them, or a new key saved for the entry whose key they use, brings them back | rest too, as before; a **Topped up** on any desk ends it for all |
+| lost login, or key rejected | rest too; a good `hansa ping` or page check of any of them, or a new key saved for the entry whose key they use, brings them back; the coordinator is told once, in one line naming them | not shared |
+| the provider does not know this entry's model | do not rest | not shared |
+| endpoint unreachable | do not rest | not shared |
+
+A task waiting for one of them moves to the lane's next ready provider without using a try, as for any rest.
+An entry written the old way with its own copy of the key keeps resting after a new key is saved for another
+entry: its key is still the old one. An entry added while the others already rest for credit does not take
+that rest; it rests on its own first such error.
 Once per credit rest, hansa posts a line to the coordinator and runs the principal's alert command,
 if set, and sends to enabled push addresses. `status`, `show`, `explain provider P`, and the provider's page row
 say why and since when.
@@ -329,7 +347,8 @@ it also sends the principal an urgent `model` alert through the alert command or
 naming the provider and model and asking them to change its model in settings for a Codex provider, or its model
 or key on the page (**Settings, Providers**) for other kinds.
 Like a credit alert, the queued notice still sends if the rest ends before delivery. Only the desk recording
-the rest alerts; unknown-model rests stay local rather than sharing across desks on the account.
+the rest alerts; unknown-model rests stay local rather than sharing across desks on the account, or with other
+entries on the same connection: each entry has its own model.
 A task's own `--model` choice, when used by a subscription provider, fails
 immediately with the model reason, without using a try or resting the provider. Other HTTP 400 errors
 keep their usual behavior. This hold prevents every queued task failing on the same configuration;

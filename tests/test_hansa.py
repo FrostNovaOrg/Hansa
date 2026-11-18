@@ -21680,7 +21680,9 @@ def save():'''))
         from hansa import run
         self.net_lane("limit", 1, FAKE_LIMIT_TEXT="insufficient_quota")
         s = self.desk.settings()
-        s["providers"]["spare"] = {"kind": "subscription", "model": "opus", "effort": ""}
+        # a login of its own: on claude's login it would be out of credit with it (one connection)
+        s["providers"]["spare"] = {"kind": "subscription", "model": "opus", "effort": "",
+                                   "config_dir": str(self.tmp / "spare-login")}
         s["lanes"]["a"]["providers"] = ["claude", "spare"]
         self.assertEqual(self.desk.save_settings(s), [])
         m = self.settle(Dispatcher(self.desk), self.desk.new_task("Add hello.txt"))
@@ -22147,6 +22149,160 @@ def save():'''))
         base = self.hansa("explain", "provider", "kimi")
         self.assertIn("also used by: kimi-two", base)
         self.assertNotIn("also used by", self.hansa("explain", "provider", "claude"))
+
+    def one_connection(self):
+        """kimi, kimi-two through `connection`, kimi-old written the old way with kimi's endpoint and key (the same
+        connection), and apart with an endpoint and key of its own; lane a runs on all four."""
+        s = self.connection_settings()
+        s["providers"]["kimi-old"] = {"kind": "compatible", "base_url": "https://api.example.test/anthropic",
+                                      "model": "k2-old", "effort": ""}
+        s["providers"]["apart"] = {"kind": "compatible", "base_url": "https://api.example.test/anthropic",
+                                   "model": "k2", "effort": ""}
+        s["lanes"]["a"]["providers"] = ["kimi", "kimi-two", "kimi-old", "apart"]
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("kimi-old", "sk-kimi-connection-key")
+        self.desk.write_key("apart", "sk-apart-connection-key")
+        return self.desk.settings()
+
+    def resting(self, *names):
+        s = self.desk.settings()
+        return {n: provider_problem(self.desk, s, n) for n in names}
+
+    def test_entries_on_one_connection_rest_together_out_of_credit_with_one_alert(self):
+        from hansa import alert, notify, run
+        from hansa.web import _top_up_provider
+        s = self.one_connection()
+        self.assertTrue(self.page_save(lambda s: s.update(alert={"command": "cat > /dev/null"}))["ok"])
+        same = ("kimi", "kimi-two", "kimi-old")
+        run.rest_provider(self.desk, s, "kimi-two", "credit", run.CREDIT_LOW)
+        said = self.resting(*same, "apart")
+        for n in same:
+            self.assertIn("topped up", said[n])
+        self.assertEqual(said["apart"], "")
+        since = {self.desk.provider_state()[n]["credit_since"] for n in same}
+        self.assertEqual(len(since), 1)  # at once, for the same reason
+        run.rest_provider(self.desk, s, "kimi", "credit", run.CREDIT_LOW)  # another run on it meets it too
+        [event] = self.events("provider_credit")
+        self.assertEqual(sorted(event["providers"]), sorted(same))
+        [queued] = alert.queued(self.desk)  # one alert for the connection, naming its entries
+        for n in same:
+            self.assertIn(n, queued["text"])
+        self.assertEqual(len(notify.items_for(self.desk, self.events("provider_credit"), {})), 1)
+        # the principal's top-up on any of them brings all back
+        self.assertEqual(_top_up_provider(self.desk, "kimi-old"), {"ok": True})
+        self.assertEqual(set(self.resting(*same).values()), {""})
+        # a new key saved for the connection brings back the entries that use it; kimi-old keeps the old key
+        run.rest_provider(self.desk, s, "kimi", "credit", run.CREDIT_LOW)
+        self.desk.write_key("kimi", "sk-kimi-new-connection-key")
+        said = self.resting(*same)
+        self.assertEqual((said["kimi"], said["kimi-two"]), ("", ""))
+        self.assertIn("topped up", said["kimi-old"])
+
+    def test_entries_on_one_connection_rest_together_for_a_lost_login_or_rejected_key(self):
+        from hansa import run
+        s = self.one_connection()
+        same = ("kimi", "kimi-two", "kimi-old")
+        s["lanes"]["a"]["providers"] = list(same)  # a task waits only when none of its lane is ready
+        self.assertEqual(self.desk.save_settings(s), [])
+        tid = self.desk.new_task("Add hello.txt", lane="a")
+        for kind, why in (("login", "not logged in (Please run /login)"), ("key", "key rejected (HTTP 401)")):
+            with self.subTest(kind=kind):
+                before = len(self.events("provider_rested"))
+                run.rest_provider(self.desk, s, "kimi", kind, why)
+                said = self.resting(*same, "apart")
+                for n in same:
+                    self.assertTrue(said[n].startswith(why), said)
+                self.assertEqual(said["apart"], "")
+                for n in same:  # the coordinator is told once, in a line naming them
+                    run.provider_rest_news(self.desk, s, n)
+                told = self.events("provider_rested")[before:]
+                self.assertEqual(len(told), 1, told)
+                self.assertEqual(sorted(told[0]["providers"]), sorted(same))
+                self.assertIn(tid, told[0]["tasks"])
+
+                def answer(argv, **kwargs):
+                    return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "result", "result": "OK"}), "")
+                with unittest.mock.patch.object(run.subprocess, "run", answer):  # a good ping of any of them
+                    self.assertTrue(run.check_provider(self.desk, "kimi-old")["ok"])
+                self.assertEqual(set(self.resting(*same).values()), {""})
+                run.rest_provider(self.desk, s, "kimi-two", kind, why)
+                self.desk.write_key("kimi", f"sk-kimi-after-{kind}-key")  # or a new key saved for the connection
+                said = self.resting(*same)
+                self.assertEqual((said["kimi"], said["kimi-two"]), ("", ""))
+                self.desk.write_key("kimi-old", f"sk-kimi-after-{kind}-key")
+                self.desk.write_key("kimi", "sk-kimi-connection-key")
+                self.desk.write_key("kimi-old", "sk-kimi-connection-key")
+
+    def test_entries_on_one_connection_keep_their_own_model_usage_and_outage_rests(self):
+        from hansa import rests, run
+        s = self.one_connection()
+        # the provider does not know this entry's model: only this entry rests
+        run.rest_provider(self.desk, s, "kimi-two", "model", "", model="k3")
+        said = self.resting("kimi", "kimi-two", "kimi-old")
+        self.assertIn("k3", said["kimi-two"])
+        self.assertEqual((said["kimi"], said["kimi-old"]), ("", ""))
+        self.desk.set_provider_state("kimi-two", model_since=0, model_unknown="", reason="", rest_how="")
+        # a usage limit: shared on the login, as before
+        run.rest_provider(self.desk, s, "kimi", "quota", "usage limit reached")
+        for n in ("kimi-two", "kimi-old"):
+            self.assertIn("resting", self.resting(n)[n])
+        self.assertEqual(self.resting("apart")["apart"], "")
+        rests.record(self.desk, "kimi", checked=True)  # its end, for the rows below
+        self.desk.set_provider_state("kimi", cool_until=0, reason="", rest_how="")
+        # an unreachable endpoint: this entry alone, as before
+        self.desk.set_provider_state("kimi-old", unreachable_since=time.time(), unreachable_reason="ECONNRESET")
+        self.assertIn("unreachable", self.resting("kimi-old")["kimi-old"])
+        self.assertNotIn("unreachable", self.resting("kimi")["kimi"])
+        # a task waiting for a resting entry starts on the lane's next ready provider, using no try
+        self.desk.set_provider_state("kimi-old", unreachable_since=0, unreachable_reason="")
+        run.rest_provider(self.desk, s, "kimi", "credit", run.CREDIT_LOW)
+        ready = [n for n in s["lanes"]["a"]["providers"] if not provider_problem(self.desk, s, n)]
+        self.assertEqual(ready, ["apart"])
+
+    def test_the_coordinator_starts_on_an_entry_with_connection(self):
+        from hansa import cli
+        s = self.connection_settings()
+        s["coordinator"]["provider"] = "kimi-two"
+        self.assertEqual(self.desk.save_settings(s), [])
+        started = cli.coordinator_desk(self.desk, os.getuid(), talk=False)
+        self.assertEqual(started["model"], s["coordinator"].get("model") or "k3")
+        self.assertEqual((started["env"]["ANTHROPIC_BASE_URL"], started["env"]["ANTHROPIC_AUTH_TOKEN"]),
+                         ("https://api.example.test/anthropic", "sk-kimi-connection-key"))
+
+    def test_shared_rests_reach_an_entry_with_connection(self):
+        from hansa import rests, run
+        s = self.connection_settings()
+        self.assertEqual(self.desk.save_settings(s), [])
+        other = init_desk(self.tmp / "other-connection-desk", str(self.repo), "a")
+        t = other.settings()
+        t["providers"]["kimi"] = dict(s["providers"]["kimi"])
+        self.assertEqual(other.save_settings(t), [])
+        other.write_key("kimi", "sk-kimi-connection-key")
+        until = run.rest_provider(other, other.settings(), "kimi", "quota", "usage limit reached")
+        self.assertTrue(rests.read())
+        st = self.desk.provider_state()  # settings that hold an entry with connection are read
+        self.assertEqual(st["kimi-two"]["cool_until"], until)
+        self.assertIn("another desk", provider_problem(self.desk, self.desk.settings(), "kimi-two"))
+
+    def test_an_entry_with_connection_needs_no_key_file_of_its_own(self):
+        from hansa import run
+        s = self.connection_settings()
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.assertFalse(self.desk.key_file("kimi-two").exists())
+        self.assertEqual(run.provider_problem(self.desk, self.desk.settings(), "kimi-two"), "")
+        self.desk.write_key("kimi", "")
+        self.assertEqual(run.provider_problem(self.desk, self.desk.settings(), "kimi-two"), "no key")
+
+    def test_the_coordinators_records_through_a_subscription_connection_are_its_logins(self):
+        from hansa import cost
+        login = self.tmp / "subscription-login"
+        s = self.desk.settings()
+        s["providers"]["claude"] = {"kind": "subscription", "model": "opus", "effort": "", "config_dir": str(login)}
+        s["providers"]["claude-two"] = {"connection": "claude", "model": "sonnet"}
+        s["coordinator"]["provider"] = "claude-two"
+        self.assertEqual(self.desk.save_settings(s), [])
+        dirs = dict(cost.coordinator_dirs(self.desk))
+        self.assertEqual(dirs["claude-two"], login / "projects" / cost.slug(self.desk.root))
 
     def test_every_codex_refusal_gives_the_page_a_rule_it_words_in_both_languages(self):
         # The page words a refused Codex field from its rule and values (validationCodex), not from the English sentence.
