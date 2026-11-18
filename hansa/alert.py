@@ -424,8 +424,9 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
             zh=f"你的待办 #{fields.get('id')}：{a.get('text', '')}")
     elif kind == "provider_credit":
         at = time.strftime('%H:%M', time.localtime(fields.get("since") or time.time()))
-        add(desk, "credit", fields["text"],
-            zh=f"服务商 {fields.get('provider')}：" + (f"套餐无法使用它，需要升级（{fields['plan']}），自 {at} 起休息，等你在网页上确认已升级"
+        others = [str(n) for n in fields.get("providers") or [] if n != fields.get("provider")]
+        add(desk, "credit", fields["text"],  # one alert for the connection, naming its entries (run.rest_provider)
+            zh=f"服务商 {fields.get('provider')}" + (f"（以及同一连接上的 {'、'.join(others)}）" if others else "") + "：" + (f"套餐无法使用它，需要升级（{fields['plan']}），自 {at} 起休息，等你在网页上确认已升级"
                                                      if fields.get("plan") else f"余额不足，自 {at} 起休息，等你在网页上确认充值"))
     elif kind == "provider_model":
         from .run import model_change_text

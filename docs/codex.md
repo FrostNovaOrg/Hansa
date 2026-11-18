@@ -29,7 +29,8 @@ hansa can run a worker with OpenAI's Codex command line instead of Claude Code, 
 hansa starts the adapter itself for such a provider and passes its settings in the run's environment: no
 `HANSA_CLAUDE`, no `codex.env`. It keeps the Codex home from every run but that provider's own Codex runs, so
 nothing needs adding to what workers may not read. A lost login rests the provider until it is logged in again and
-`hansa ping NAME` answers. Providers on one Codex home share its usage rests, across providers and desks. A
+`hansa ping NAME` answers. Providers on one Codex home share its usage rests, across providers and desks; on one desk they also rest
+together for its lost login or its credit (see [Tasks](tasks.md)). A
 task's `--model` is not used on a Codex provider, the provider's model is; the task's or provider's effort is
 passed on to Codex.
 

@@ -31,6 +31,19 @@ def login(desk, name, p):
     return fingerprint([p.get("base_url"), desk.read_key(owner)]) if desk.has_key(owner) else ""
 
 
+def same_login(desk, s, name) -> list:
+    """The other entries of this desk on the same connection as `name`: the same login fingerprint (login), so an
+    entry with `connection` and one written the old way with the same login alike. [] when it has none."""
+    def of(n, p):
+        try:
+            return login(desk, n, p) if isinstance(p, dict) else ""
+        except (KeyError, TypeError, AttributeError, OSError, ValueError):
+            return ""  # a hand-edited entry that validate refuses shares nothing
+    provs = connected_providers(s)
+    key = of(name, provs.get(name))
+    return [n for n, p in sorted(provs.items()) if key and n != name and of(n, p) == key]
+
+
 def read():
     try:
         entries = read_json(rests_file(), {})
@@ -105,7 +118,7 @@ def include(desk, states):
             if own_provider or st.get("quota_checked") == fingerprint([key, since]):
                 until = 0
             if own_desk:
-                credit = 0  # credit sharing and its page-only top-up rules are unchanged
+                credit = 0  # this desk already rests its entries on this login itself (run.rest_provider)
             if credit or until > time.time():
                 if not st.get("credit_since") and (credit or until > st.get("cool_until", 0)):
                     st.update(credit_since=credit, cool_until=until, shared_rest=True,

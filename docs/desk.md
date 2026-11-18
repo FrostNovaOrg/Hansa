@@ -832,7 +832,12 @@ names that entry and holds only `connection`, `model`, `effort` and `note`. Runs
 checks (`hansa ping`), the coordinator and the rests' login use the named entry's
 `kind`, endpoint (`base_url`), login folder (`config_dir`), Codex program and home
 and its other Codex fields, and its key in `secrets/<that name>.key`. The entry
-keeps its own name, model, effort, rest state and `.hansa/claude-{name}` folder.
+keeps its own name, model, effort and rest state. Through a key connection
+(`compatible`) or a Codex one it keeps its own `.hansa/claude-{name}` folder;
+through a subscription connection it has none: it shares the named entry's login
+folder (its `config_dir`, else `~/.claude`), where its session records go too.
+Entries on one connection rest together when the connection itself is the
+problem (out of credit, a lost login, a rejected key): see [Tasks](tasks.md).
 Only one level: the named entry must have no `connection` of its own. Saving is
 refused when an entry names itself or a missing entry, also holds a connection
 field, or is named by others and removed; a key saved for it is refused (save it
@@ -865,6 +870,7 @@ Status tab keeps one row per entry. In `settings.json` the entries read:
   "kimi-fast": {"connection": "kimi", "model": "k2-turbo", "effort": "low"}
 }
 ```
+
 Blank rest minutes use 30; blank coordinator-alert minutes and compaction
 thresholds also use their defaults, shown beside each field. A price's input and
 output rates have no default and must be filled in. Mailbox allow-list lines

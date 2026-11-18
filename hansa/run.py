@@ -1341,7 +1341,7 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
     a credit rest for a plan that cannot use the provider (plan: an adapter's plan_upgrade) keeps its words;
     usage limits use their reset time and a minute (at most REST_CAP), else cool_minutes, and callers announce
     those timed rests with provider_rest_news after saving the task's final state or the completed provider check."""
-    from .rests import record
+    from .rests import record, same_login
     with desk.lock():
         st = desk.provider_state().get(name) or {}
         if st.get("credit_since"):
@@ -1359,19 +1359,31 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
             return None
         if st.get("model_since") and kind != "credit":
             return None  # another failing run cannot put a time limit on this rest
+        # Credit, a lost login and a rejected key belong to the connection: the desk's other entries on it
+        # (rests.same_login) rest with this one, and one line names them all.
+        states = desk.provider_state()
         if kind == "credit":
             upgrade = desk.redact(why) if plan else ""
-            desk.set_provider_state(name, credit_since=t, cool_until=0, reason=desk.redact(why), credit_plan=upgrade,
-                                    rest_how="credit", rest_minutes=None, unreachable_since=0, unreachable_reason="")
+            others = [n for n in same_login(desk, s, name) if not (states.get(n) or {}).get("credit_since")]
+            for n in [name, *others]:
+                desk.set_provider_state(n, credit_since=t, cool_until=0, reason=desk.redact(why), credit_plan=upgrade,
+                                        rest_how="credit", rest_minutes=None, unreachable_since=0, unreachable_reason="")
             record(desk, name, credit_since=t, cool_until=0)
-            line = (f"provider {name}: {upgrade or 'credit balance too low'} at "
-                    f"{time.strftime('%H:%M', time.localtime(t))}; it rests until you say on the page that "
-                    + ("its plan is upgraded" if upgrade else "it is topped up"))
-            desk.event("provider_credit", provider=name, since=t, text=line, **({"plan": upgrade} if upgrade else {}))
+            also = f" (and {', '.join(others)}, on the same connection)" if others else ""
+            line = (f"provider {name}{also}: {upgrade or 'credit balance too low'} at "
+                    f"{time.strftime('%H:%M', time.localtime(t))}; {'they rest' if others else 'it rests'} until you "
+                    f"say on the page that {'one of them' if others else 'it'} "
+                    + ("has its plan upgraded" if upgrade and others else "its plan is upgraded" if upgrade
+                       else "is topped up"))
+            desk.event("provider_credit", provider=name, since=t, text=line, **({"plan": upgrade} if upgrade else {}),
+                       **({"providers": [name, *others]} if others else {}))
             return None
         if kind != "quota":
             until = t + 60 * KEY_REST_MINUTES
-            desk.set_provider_state(name, cool_until=until, reason=why, rest_how="", rest_minutes=None)
+            others = [n for n in same_login(desk, s, name)
+                      if not ((states.get(n) or {}).get("credit_since") or (states.get(n) or {}).get("model_since"))]
+            for n in [name, *others]:
+                desk.set_provider_state(n, cool_until=until, reason=why, rest_how="", rest_minutes=None)
             return until
         # A tiny request can succeed while real work still exceeds the limit. Keep this guard
         # for that next rest, including other tasks finishing into it, until it ends or is checked.
@@ -1395,6 +1407,22 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
         return until
 
 
+def login_rest(st: dict) -> bool:
+    """A rest for a lost login or a rejected key (rest_provider), which the connection's other entries share."""
+    reason = str(st.get("reason", ""))
+    return not st.get("credit_since") and reason.startswith(("not logged in", "key rejected"))
+
+
+def clear_login_rests(desk: Desk, s: dict, name: str) -> None:
+    """A good check of `name` ends the lost-login or rejected-key rest of the desk's other entries on its
+    connection (rests.same_login)."""
+    from .rests import same_login
+    states = desk.provider_state()
+    for n in same_login(desk, s, name):
+        if login_rest(states.get(n) or {}):
+            desk.set_provider_state(n, cool_until=0, reason="", rest_how="", rest_minutes=None)
+
+
 def provider_rest_news(desk: Desk, s: dict, name: str) -> None:
     """Tell the coordinator when a timed rest leaves tasks without a provider. Keep the reason on disk so
     another rest after the fixed interval or a server restart stays quiet until a run finishes."""
@@ -1405,6 +1433,14 @@ def provider_rest_news(desk: Desk, s: dict, name: str) -> None:
         if st.get("credit_since") or st.get("model_since") or st.get("cool_until", 0) <= time.time() or not why \
                 or st.get("rest_notice_reason") == why:
             return
+        from .rests import same_login
+        states = desk.provider_state()
+        # the desk's other entries on its connection resting for the same reason (a lost login, a rejected key:
+        # rest_provider) are told in this one line, and stay quiet after it
+        group = [name, *(n for n in same_login(desk, s, name)
+                         if desk.redact((states.get(n) or {}).get("reason") or "") == why
+                         and (states.get(n) or {}).get("cool_until", 0) > time.time()
+                         and (states.get(n) or {}).get("rest_notice_reason") != why)]
         tasks = desk.tasks()
         queued = [m for m in tasks if m["state"] == "queued"]
         if not queued:
@@ -1415,7 +1451,7 @@ def provider_rest_news(desk: Desk, s: dict, name: str) -> None:
         for m in queued:
             detail = waiting_detail(desk, s, m, busy, looks)
             if detail["waiting_code"] == "lanes" and any(
-                    r["code"] == "providers" and any(p["values"]["provider"] == name and p["code"] == "rest"
+                    r["code"] == "providers" and any(p["values"]["provider"] in group and p["code"] == "rest"
                                                      for p in r["values"]["providers"])
                     for r in detail["waiting_values"]["reasons"]):
                 waiting.append(m["id"])
@@ -1423,14 +1459,17 @@ def provider_rest_news(desk: Desk, s: dict, name: str) -> None:
             return
         until = st["cool_until"]
         how = rest_text(st)
-        line = (f"provider {name}: resting until {time.strftime('%m-%d %H:%M', time.localtime(until))} ({why})"
+        also = f" (and {', '.join(group[1:])}, on the same connection)" if group[1:] else ""
+        line = (f"provider {name}{also}: resting until {time.strftime('%m-%d %H:%M', time.localtime(until))} ({why})"
                 + (f": {how}" if how else "") + " · waiting: " + ", ".join(waiting[:5])
                 + (f" (+{len(waiting) - 5} more)" if len(waiting) > 5 else "")
                 # a task still running on it returns to the queue later, and no second post names it
-                + (f" · tasks still running on {name} may join them: hansa status"
-                   if any(m["state"] == "running" and m.get("provider") == name for m in tasks) else ""))
-        desk.event("provider_rested", provider=name, reason=why, until=until, tasks=waiting, text=line)
-        desk.set_provider_state(name, rest_notice_reason=why)
+                + (f" · tasks still running on {' or '.join(group)} may join them: hansa status"
+                   if any(m["state"] == "running" and m.get("provider") in group for m in tasks) else ""))
+        desk.event("provider_rested", provider=name, reason=why, until=until, tasks=waiting, text=line,
+                   **({"providers": group} if group[1:] else {}))
+        for n in group:
+            desk.set_provider_state(n, rest_notice_reason=why)
 
 
 def credit_text(st: dict) -> str:
@@ -8324,6 +8363,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
                                     model_since=0, model_unknown="",
                                     unreachable_since=0, unreachable_reason="", quota_probe_ok=probe_ok,
                                     quota_probe_blocked=False)
+            clear_login_rests(desk, s, name)
         elif kind and not quota_probe:
             desk.set_provider_state(name, unreachable_since=0, unreachable_reason="")
             rest_provider(desk, s, name, kind, detail, f"{run.get('result') or ''}\n{r.stderr}", model=p["model"],
