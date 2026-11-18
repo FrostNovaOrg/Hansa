@@ -29,7 +29,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import account, notify, release, session_value, up
-from .desk import Desk, event_record, read_json, write_json
+from .desk import Desk, event_record, provider_entry, read_json, write_json
 
 TOKEN_FIELDS = ("in", "out", "cache_read", "cache_write")
 # Bound the CLI's calendar conversion and chart size; revisit if longer windows are needed.
@@ -134,7 +134,7 @@ def coordinator_dirs(desk: Desk) -> list:
     co = s["coordinator"]["provider"]
     homes = {}
     for name in sorted(sorted(s["providers"]), key=lambda n: n != co):  # a shared home goes by the coordinator's
-        p = s["providers"][name]
+        p = provider_entry(s, name)
         if p.get("kind") == "compatible":
             home = desk.state_dir / f"claude-{name}"
         else:

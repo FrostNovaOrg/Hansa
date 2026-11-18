@@ -35,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import account, after, build, installed, installed_text, session_vars, without_session
-from .desk import (DENY_AT, HANSA_IDENTITY, HOME_STARTS, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, home_secrets, identity_problem,
+from .desk import (DENY_AT, HANSA_IDENTITY, HOME_STARTS, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, connected_providers, key_name, provider_entry, home_secrets, identity_problem,
                    refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, claude_bin,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems, old_codex_provider)
 from .desk import lane_env as checked_env
@@ -1020,7 +1020,7 @@ def sandbox_retry(desk: Desk, s: dict) -> list:
             try:
                 pname = next((x for x in lane.get("providers", []) if x in s["providers"]), "")
                 wt = desk.worktrees_dir / ln
-                p = s["providers"].get(pname)
+                p = provider_entry(s, pname)
                 if not p or not wt.is_dir():
                     continue
                 check_git_file(desk, wt)  # the sandbox's settings ask git in the worktree
@@ -1349,8 +1349,8 @@ def rest_provider(desk: Desk, s: dict, name: str, kind: str, why: str, text: str
         t = time.time()
         if kind == "model":
             if not st.get("model_since"):
-                model = model or s["providers"][name]["model"]
-                reason = model_text(model, codex=s["providers"][name]["kind"] == "codex")
+                model = model or provider_entry(s, name)["model"]
+                reason = model_text(model, codex=provider_entry(s, name)["kind"] == "codex")
                 desk.set_provider_state(name, model_since=t, model_unknown=model, cool_until=0,
                                         reason=reason, rest_how="model", rest_minutes=None,
                                         unreachable_since=0, unreachable_reason="")
@@ -1566,7 +1566,7 @@ def provider_program(p: dict, claude: str = "") -> str:
 
 def provider_problem(desk: Desk, s: dict, name: str) -> str:
     """Why this provider cannot take work right now; '' when it can."""
-    p = s["providers"].get(name)
+    p = provider_entry(s, name)
     if not p:
         return "not in settings"
     if "kind" not in p:  # a hand-edited file must still let ping and waiting reasons explain the problem
@@ -1581,7 +1581,7 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
     if p["kind"] == "compatible":
         if not p.get("base_url"):
             return "no endpoint address"
-        if not desk.has_key(name):
+        if not desk.has_key(key_name(name, p)):
             return "no key"
     if p["kind"] == "codex" and (str(st.get("reason", "")).startswith("not logged in") or
             st.get("cool_until", 0) > time.time() and str(st.get("reason", "")).startswith("key rejected")):
@@ -1826,7 +1826,7 @@ def progress_of(desk: Desk, m: dict) -> dict:
             and m.get("setup_ran") and not (desk.state_dir / "runs" / m["id"] / "setup.log.done").exists()):
         return {"replies": 0, "idle_min": None, "note": "",
                 "setup_min": max(0, int((time.time() - (m.get("started") or time.time())) // 60))}
-    p = desk.settings()["providers"].get(m.get("provider") or "")
+    p = provider_entry(desk.settings(), m.get("provider") or "")
     home = config_home(desk, m["provider"], p) if p else None
     sid = own_session(desk, m)
     texts, replies, last, _ = _record(home, sid) if home else ([], 0, None, {})
@@ -1890,7 +1890,7 @@ def provider_env(desk: Desk, name: str, p: dict, run: bool = True) -> dict:
             return env
         env.update({
             "ANTHROPIC_BASE_URL": p["base_url"],
-            "ANTHROPIC_AUTH_TOKEN": desk.read_key(name),
+            "ANTHROPIC_AUTH_TOKEN": desk.read_key(key_name(name, p)),
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         })
         for v in MODEL_VARS:
@@ -2594,7 +2594,7 @@ def write_list(desk: Desk, lane: dict) -> tuple:
     s = desk.settings()
     kept = kept_from_workers(s, desk.root)[0]
     for x in given:
-        said = write_problems([x], lane.get("repo"), desk.root, s["providers"], kept, lane.get("env"),
+        said = write_problems([x], lane.get("repo"), desk.root, connected_providers(s), kept, lane.get("env"),
                               other_envs(s["lanes"], lane), lanes=s["lanes"])
         if said:
             left.append(f"left out of this run: {said[0].removeprefix('write cannot include ')} "
@@ -2923,7 +2923,7 @@ def worker_read_denials(desk: Desk, *, account_codex: bool = True) -> list:
     """The read fence shared by worker sandboxes and file content admission. account_codex=False omits only
     that built-in's source entry, before resolving and deduplicating: the adapter may exempt packages from
     it, but never from a different rule that resolves to the same path."""
-    providers = desk.settings()["providers"]
+    providers = connected_providers(desk.settings())
     homes = [config_home(desk, n, p) for n, p in providers.items()
              if isinstance(p, dict) and isinstance(p.get("config_dir", ""), str)]
     homes += [Path(p["codex_home"]) for p in providers.values()
@@ -4646,7 +4646,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
     if tid in getattr(desk, "_bench_removing", ()):
         return None  # Finish the earlier run's folder cleanup before reusing the task.
     try:  # what the machine or the lane lacks holds the task, before anything of it is changed (start_hold)
-        provider_program(desk.settings()["providers"][pname])
+        provider_program(provider_entry(desk.settings(), pname))
     except RuntimeError as e:
         raise LaneCannotStart(str(e), "claude") from None
     repo = (desk.settings()["lanes"].get(lane_name) or {}).get("repo") or ""
@@ -4667,7 +4667,7 @@ def start(desk: Desk, tid: str, lane_name: str, pname: str):
         return None
     no_read(desk)  # before anything is prepared: an entry that cannot be applied fails the run (not_started)
     s = desk.settings()
-    lane, p = s["lanes"][lane_name], s["providers"][pname]
+    lane, p = s["lanes"][lane_name], provider_entry(s, pname)
     wt, base = prepare(desk, lane_name, lane, meta)
     meta = desk.meta(tid)
     model = (meta.get("model") if p["kind"] == "subscription" else "") or p["model"]  # other providers: their own
@@ -4866,7 +4866,7 @@ def resume(desk: Desk, tid: str):
         return None
     s = desk.settings()
     lane_name, pname = meta.get("lane") or "", meta.get("provider") or ""
-    lane, p = s["lanes"].get(lane_name), s["providers"].get(pname)
+    lane, p = s["lanes"].get(lane_name), provider_entry(s, pname)
     raw = desk.state_dir / "runs" / tid
     run = read_json(raw / "run.json", {}) or {}
     sid, tmp = own_session(desk, meta), meta.get("worker_tmp") or ""
@@ -4924,7 +4924,7 @@ def wrap_up(desk: Desk, tid: str):
         return None
     s = desk.settings()
     lane_name, pname = meta.get("lane") or "", meta.get("provider") or ""
-    lane, p = s["lanes"].get(lane_name), s["providers"].get(pname)
+    lane, p = s["lanes"].get(lane_name), provider_entry(s, pname)
     sid, tmp = own_session(desk, meta), meta.get("worker_tmp") or ""
     if not (lane and p and sid and tmp and os.path.isdir(tmp) and (raw / RESUME_ARGV).is_file()
             and meta.get("worktree")) or (meta.get("setup_ran") and not (raw / "setup.log.done").exists()):
@@ -5262,7 +5262,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     result = (run.get("result") or "") if wrote or not wu else ""  # a failed continuation's words are no report
     report = result
     stopped = meta.get("timed_out") or run.get("subtype") == "error_max_turns" or bool(wu)
-    p = desk.settings()["providers"].get(meta.get("provider"))
+    p = provider_entry(desk.settings(), meta.get("provider"))
     home = config_home(desk, meta["provider"], p) if p else None
     resumed = meta.get("resumed") or {}
     sid = own_session(desk, meta)  # of a follow-up that went on in its parent's conversation: its own rows only
@@ -5387,7 +5387,7 @@ def finish(desk: Desk, tid: str, returncode) -> dict:
     attempts = list(meta.get("attempts", []))
     if setup:
         fields["setup_exit"] = int(setup.group(1))
-    subscription = (desk.settings()["providers"].get(meta.get("provider")) or {}).get("kind") == "subscription"
+    subscription = (provider_entry(desk.settings(), meta.get("provider")) or {}).get("kind") == "subscription"
     codex = (p or {}).get("kind") == "codex"
     # what the continuation after the ceiling met (a limit, a dropped connection, a refusal) rests no provider and
     # queues nothing again: the task ends as one stopped at the ceiling
@@ -5601,7 +5601,7 @@ def keep_lost_run(desk: Desk, m: dict) -> dict:
     if any(x.get("launch", x.get("session_id")) == launch  # records made before launch was kept: their session
            for x in [*(m.get("attempts") or []), *(m.get("earlier_runs") or [])] if isinstance(x, dict)):
         return {}
-    p = desk.settings()["providers"].get(m.get("provider") or "")
+    p = provider_entry(desk.settings(), m.get("provider") or "")
     resumed = m.get("resumed") or {}
     usage = read_detail(desk, m["id"], "usage", {}, lambda: usage_from_record(
         config_home(desk, m["provider"], p), own_session(desk, m), resumed.get("rows", 0))) if p else {}
@@ -5629,7 +5629,7 @@ def start_check(desk: Desk, tid: str, lane_name: str, lane: dict):
         if meta.get("cancel"):
             return None
         wt, pname = Path(meta.get("worktree") or desk.worktrees_dir / lane_name), meta.get("provider", "")
-        srt, settings, tmp, own = in_srt(desk, tid, "check", lane, pname, desk.settings()["providers"].get(pname) or {}, wt)
+        srt, settings, tmp, own = in_srt(desk, tid, "check", lane, pname, provider_entry(desk.settings(), pname) or {}, wt)
         env = {**base_env(), "HANSA_TASK": tid, "HANSA_RUN": run_mark(desk, tid), "TERM": "dumb", "TMPDIR": tmp,
                "CLAUDE_CODE_TMPDIR": tmp}
         desk.change(tid, lambda x: {"launch": token, "check_started": now(), "check_command": lane["check"],
@@ -6286,7 +6286,7 @@ def start_merge_check(desk: Desk, tid: str, lane_name: str, lane: dict):
                                    **merge_result_lane(m, lane_name)})
             return None
         pname = m.get("provider", "")
-        p = desk.settings()["providers"].get(pname) or {}
+        p = provider_entry(desk.settings(), pname) or {}
         srt, settings, tmp, own = in_srt(desk, tid, "check", lane, pname, p, wt)
         argv = ["/bin/sh", "-c", CHECK_SCRIPT, token, in_sandbox(desk, lane, command), str(raw / "merge-check.exit"), tmp, srt,
                 settings, own]
@@ -6665,7 +6665,7 @@ def start_try(desk: Desk, lane_name: str, lane: dict):
             raise RuntimeError(git_file_changed(desk, tid, e)) from None
         s = desk.settings()
         pname = (lane.get("providers") or [""])[0]  # the sandbox of the lane's first provider, as a task's
-        p = s["providers"].get(pname) or {}
+        p = provider_entry(s, pname) or {}
         token, args, tmps = f"hansa-try-{lane_name}-{uuid.uuid4().hex[:8]}", [], []
         steps = {"setup": lane.get("setup", ""),
                  **({"merge_check": merge_command(lane)} if t.get("merge") else {"check": lane.get("check", "")})}
@@ -7165,7 +7165,7 @@ class Dispatcher:
                 if m["state"] != "running" or m.get("phase") or not m.get("pid") or m.get("sandbox_failed") \
                         or not sid or sid in self.sandbox_seen or m.get("cancel"):
                     continue
-                p = s["providers"].get(m.get("provider") or "")
+                p = provider_entry(s, m.get("provider") or "")
                 if not p:
                     continue
                 line, settled = sandbox_start_failure(config_home(self.desk, m["provider"], p), own_session(self.desk, m))
@@ -7775,7 +7775,7 @@ class Dispatcher:
                     except LaneCannotStart as e:  # held, not failed: it starts once the cause is gone
                         # Missing Claude holds the lanes that depend on it; Codex starts its own adapter.
                         shared = sorted(n for n, lane in s["lanes"].items() if not lane.get("merge_lane")
-                                        and all(s["providers"].get(p, {}).get("kind") != "codex" for p in lane.get("providers", []))) \
+                                        and all((provider_entry(s, p) or {}).get("kind") != "codex" for p in lane.get("providers", []))) \
                             if e.cause == "claude" else ()
                         start_hold(desk, m["id"], ln, e, shared)
                         waits.clear()  # looked at again with what was just held
@@ -8246,7 +8246,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
     rest_ended (quota, login, model) or rest_kept (credit), separately from the model detail."""
     from .page_messages import annotate, provider
     s = desk.settings()
-    p = s["providers"].get(name)
+    p = provider_entry(s, name)
     if not p:
         return annotate({"ok": False, "detail": "not in settings"}, ("detail",))
     prob = provider_problem(desk, s, name)
@@ -8256,7 +8256,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
     tmp = desk.state_dir / "check"
     tmp.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    stamp = (key_stamp(desk, name), json.dumps(p, sort_keys=True))
+    stamp = (key_stamp(desk, key_name(name, p)), json.dumps(p, sort_keys=True))
     kind = ""
     try:
         # no tools: a model behind a compatible endpoint often calls one before it answers, and one turn ends there
@@ -8292,7 +8292,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
     result = {"ok": ok, "detail": detail, "at": now(), "seconds": round(time.time() - t0, 1)}
     with desk.lock():  # keys and settings are saved under this lock too, so nothing lands in between
         s = desk.settings()
-        if (key_stamp(desk, name), json.dumps(s["providers"].get(name), sort_keys=True)) != stamp:
+        if (key_stamp(desk, key_name(name, p)), json.dumps(provider_entry(s, name), sort_keys=True)) != stamp:
             changed = "settings" if p["kind"] == "codex" else "key or settings"
             return annotate({**result, "ok": False, "detail": f"the provider's {changed} changed while this check "
                                                             "ran, so it says nothing about them now; check again"},

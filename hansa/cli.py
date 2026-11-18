@@ -21,7 +21,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from . import account, after, alert, build, cost, gaps, goals, history, installed_text, notes, notify, plugin, release, session_vars, up, views, without_session
-from .desk import (EFFORTS, Desk, SettingsError, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
+from .desk import (EFFORTS, Desk, connected_providers, provider_entry, SettingsError, validate, allow_fix, default_lane, default_settings, deny_parts, no_read_parts, stop_text, home_secrets, identity_problem, json_text,
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
@@ -2033,10 +2033,10 @@ def cmd_cost(a):
 
 def cmd_ping(a):
     desk = Desk.find(a.desk)
-    providers = desk.settings()["providers"]
+    providers = connected_providers(desk.settings())
     names = [a.provider] if a.provider else sorted(providers)
     # the program the recorded hansa serve start runs its workers through, which need not be this shell's
-    uses_claude = any(providers.get(n, {}).get("kind") != "codex" for n in names)
+    uses_claude = any((providers.get(n) or {}).get("kind") != "codex" for n in names)
     served, mine = (up.recorded_program(desk), program("claude")) if uses_claude else ("", "")
     if served and served != mine:
         print(f"pinging with {served}, the program the recorded hansa serve start uses; "
@@ -2465,7 +2465,7 @@ def coordinator_desk(desk: Desk, by: int, talk: bool = True) -> dict:
             raise SystemExit(desk.redact(f"hansa: {up.running_text(found)}"))
     s = desk.settings()
     co = s["coordinator"]
-    p = s["providers"][co["provider"]]
+    p = provider_entry(s, co["provider"])
     if p["kind"] == "codex":  # also refuse a hand-edited file before preparing a Claude Code session
         raise SystemExit(f"hansa: coordinator provider {co['provider']} is codex; the coordinator's session is Claude Code")
     card_said = bring_card(desk, starting=True)

@@ -845,6 +845,9 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             continue
         if {"key", "api_key", "token"} & set(pv):
             p.append(rule(f"{at}: keys are not kept in settings; use the key box on the page", "providers", "key", provider=name))
+        if "connection" in pv:
+            p += connection_problems(name, pv, provs, before)
+            continue
         fields = set(CODEX_FIELDS) if pv.get("kind") == "codex" else {"config_dir", "base_url"}
         extra = set(pv) - {"kind", "model", "effort", "note", "key", "api_key", "token"} - fields
         if extra:
@@ -944,7 +947,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
             p += [f"{at}: repo cannot be {ln['repo']}: it is {d} or inside it, which the principal keeps workers "
                   "from reading (the web page, Settings)" for d in kept if _above(d, ln["repo"])][:1]
         env = ln.get("env", {})
-        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, provs, kept, env,
+        p += [f"{at}: {x}" for x in write_problems(ln.get("write", []), ln.get("repo"), root, connected_providers(s), kept, env,
                                                    other_envs(lanes, ln), lanes=lanes)]
         if not isinstance(env, dict):
             p.append(f"{at}: env must be an object")
@@ -977,7 +980,7 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
     else:
         if co.get("provider") not in provs:
             p.append(rule("coordinator: unknown provider", "provider", "provider", scope="coordinator"))
-        elif isinstance(provs[co["provider"]], dict) and provs[co["provider"]].get("kind") == "codex":
+        elif isinstance(provider_entry(s, co["provider"]), dict) and provider_entry(s, co["provider"]).get("kind") == "codex":
             p.append(rule(f"coordinator: provider {co['provider']} is codex; the coordinator's session is Claude Code",
                           "provider", "kind", scope="coordinator", provider=co["provider"]))
         if co.get("effort", "") not in EFFORTS:
@@ -998,6 +1001,50 @@ def validate(s: dict, root=None, page: bool = False, before: dict | None = None,
                 elif not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0 or not _finite_number(v):
                     p.append(SettingsProblem(f"price {model}: {k} must be a finite number, 0 or more; use a smaller price if too large",
                                              "price_number", model=model, field=k, min=0))
+    return p
+
+
+def connection_problems(name: str, pv: dict, provs: dict, before: dict | None = None) -> list:
+    """An entry with `connection`: it names another entry that has no `connection` of its own (one level only), and
+    holds nothing else of a connection. before: the saved settings, to say an entry it names cannot be removed."""
+    def rule(text, reason, **values):
+        return SettingsProblem(text, "field_rule", field="connection", reason=reason, provider=name, **values)
+
+    at, c, p = f"provider {name}", pv.get("connection"), []
+    if not isinstance(c, str) or not NAME.match(c):
+        p.append(rule(f"{at}: connection must be the name of another provider entry", "connection_name"))
+    elif c == name:
+        p.append(rule(f"{at}: connection names {name} itself; name another entry whose connection it uses",
+                      "connection_self"))
+    elif c not in provs:
+        saved = before.get("providers") if isinstance(before, dict) else None
+        if isinstance(saved, dict) and c in saved:
+            users = connection_users({"providers": provs}, c)
+            p.append(rule(f"provider {c} cannot be removed while {', '.join(users)} use its connection; "
+                          f"remove {'them' if len(users) > 1 else 'it'} first or give it its own connection",
+                          "connection_removed", connection=c, users=users))
+        else:
+            p.append(rule(f"{at}: connection names {c}, which is not a provider entry", "connection_missing",
+                          connection=c))
+    elif not isinstance(provs[c], dict):
+        pass  # that entry's own problem says it
+    elif "connection" in provs[c]:
+        p.append(rule(f"{at}: connection names {c}, which uses {provs[c].get('connection')}'s connection itself; "
+                      f"name an entry with a connection of its own (one level only)", "connection_chain", connection=c))
+    held = [f for f in CONNECTION_FIELDS if f in pv]
+    if held:
+        p.append(rule(f"{at}: {', '.join(held)} belong to the connection, which it takes from "
+                      f"{c if isinstance(c, str) else 'the entry it names'}; an entry with connection holds only "
+                      "model, effort and note", "connection_fields", fields=held))
+    extra = sorted(set(pv) - set(CONNECTION_OWN) - set(CONNECTION_FIELDS) - {"key", "api_key", "token"})
+    if extra:
+        p.append(SettingsProblem(f"{at}: unknown field(s): {', '.join(extra)}", "field_rule", field="providers",
+                                 reason="unknown_fields", provider=name, fields=extra))
+    if not isinstance(pv.get("model"), str) or not pv.get("model", "").strip():
+        p.append(SettingsProblem(f"{at}: model is required", "field_rule", field="model", reason="required", provider=name))
+    if pv.get("effort", "") not in EFFORTS:
+        p.append(SettingsProblem(f"{at}: effort must be one of {', '.join(e or '(blank)' for e in EFFORTS)}", "field_rule",
+                                 field="effort", reason="effort", provider=name, choices=[e for e in EFFORTS if e]))
     return p
 
 
@@ -1286,7 +1333,7 @@ def codex_problems(name: str, pv: dict, s: dict, root=None) -> list:
         program_denied += [str(root), str(desks_file().parent),
                            *(d for d in other_desks(root) if not any(_above(d, r) for r in repos)),
                            *holding_desks_parts(root, repos)]
-    for n, provider in (s.get("providers") or {}).items():
+    for n, provider in connected_providers(s).items():
         if not isinstance(provider, dict):
             continue
         if provider.get("kind") == "codex":
@@ -1507,6 +1554,46 @@ def _as_written(path: str, f: str, why: str) -> str:
     if not u or fold(u) == fold(_plain(f)) or _plain(resolved(u) or "/") != u:  # the same name; or u is the link
         return why
     return f"it would open {u} (the same folder as {f}){why[len(pre):]}"
+
+
+# What describes a provider's connection; an entry with `connection` takes these (and the key) from the entry it
+# names, and holds only CONNECTION_OWN itself.
+CONNECTION_FIELDS = ("kind", "base_url", "config_dir", *CODEX_FIELDS)
+CONNECTION_OWN = ("connection", "model", "effort", "note")
+
+
+def provider_entry(s: dict, name: str):
+    """The provider entry as runs and checks use it. An entry with `connection` gets the named entry's connection
+    fields with its own model, effort and note (and keeps `connection`, which names the entry holding its key: key_name).
+    Any other entry, or one whose connection is not valid (validate refuses it), as written; None when not there."""
+    provs = s.get("providers") if isinstance(s, dict) and isinstance(s.get("providers"), dict) else {}
+    p = provs.get(name)
+    if not isinstance(p, dict) or "connection" not in p:
+        return p
+    base = provs.get(p["connection"]) if isinstance(p["connection"], str) else None
+    if not isinstance(base, dict) or "connection" in base or p["connection"] == name:
+        return p
+    return {**{k: copy.deepcopy(v) for k, v in base.items() if k in CONNECTION_FIELDS},
+            **{k: p[k] for k in CONNECTION_OWN if k in p}}
+
+
+def connected_providers(s: dict) -> dict:
+    """Every provider entry by name, as provider_entry gives it."""
+    provs = s.get("providers") if isinstance(s, dict) and isinstance(s.get("providers"), dict) else {}
+    return {n: provider_entry(s, n) for n in provs}
+
+
+def key_name(name: str, p) -> str:
+    """Whose secrets/<name>.key a provider's runs use: the entry its `connection` names, else its own. p: its entry,
+    as written or as provider_entry gives it."""
+    c = p.get("connection") if isinstance(p, dict) else None
+    return c if isinstance(c, str) and c else name
+
+
+def connection_users(s: dict, name: str) -> list:
+    """The entries whose `connection` names this one."""
+    provs = s.get("providers") if isinstance(s, dict) and isinstance(s.get("providers"), dict) else {}
+    return sorted(n for n, p in provs.items() if isinstance(p, dict) and p.get("connection") == name and n != name)
 
 
 def claude_home(state_dir, name: str, p: dict) -> Path:
@@ -3299,7 +3386,11 @@ class Desk:
 
     def write_key(self, provider: str, value: str, by: str = "") -> None:
         from .history import record
-        if self.settings()["providers"].get(provider, {}).get("kind") == "codex":
+        entry = self.settings()["providers"].get(provider, {})
+        if isinstance(entry, dict) and "connection" in entry and value.strip():  # clearing an old own file stays possible
+            raise ValueError(f"provider {provider}: uses the connection of {entry['connection']}, whose key it runs with; "
+                             f"save the key for {entry['connection']}")
+        if (provider_entry(self.settings(), provider) or {}).get("kind") == "codex":
             raise ValueError(f"provider {provider}: codex has no key")
         f = self.key_file(provider)
         self.secrets_dir.mkdir(mode=0o700, exist_ok=True)
@@ -3695,8 +3786,8 @@ def public_settings(desk: Desk) -> dict:
                                          if n in s["providers"] and st.get("credit_since")},
             "provider_credit": {n: credit_text(st) for n, st in desk.provider_state().items()
                                 if n in s["providers"] and st.get("credit_since")},
-            "provider_model_messages": {n: provider(model_text(st["model_unknown"], codex=s["providers"][n].get("kind") == "codex"),
-                                                    st, n, codex=s["providers"][n].get("kind") == "codex")
+            "provider_model_messages": {n: provider(model_text(st["model_unknown"], codex=connected_providers(s)[n].get("kind") == "codex"),
+                                                    st, n, codex=connected_providers(s)[n].get("kind") == "codex")
                                         for n, st in desk.provider_state().items()
                                         if n in s["providers"] and st.get("model_since") and not st.get("credit_since")},
             "deny_skipped": not_kept, "deny_stops": stops, "no_read_stop": stop_text(stops),
