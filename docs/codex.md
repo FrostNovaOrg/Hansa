@@ -22,6 +22,9 @@ hansa can run a worker with OpenAI's Codex command line instead of Claude Code, 
    Plain `codex login` uses Codex's default home (`~/.codex`) and does not log in this provider.
    The page and `hansa explain provider NAME` give the command. If Ping finds no login, the page gives the same
    command beside the button and in Status, in the page's language. Then `hansa ping NAME`.
+4. For a second Codex model on the same program and home, use **Add a model** under that provider's card: a
+   name, the model and an effort. The new entry runs with the card's Codex program, home and login; no second
+   provider and no second login are needed. Put its name in a lane's providers as any other.
 
 hansa starts the adapter itself for such a provider and passes its settings in the run's environment: no
 `HANSA_CLAUDE`, no `codex.env`. It keeps the Codex home from every run but that provider's own Codex runs, so

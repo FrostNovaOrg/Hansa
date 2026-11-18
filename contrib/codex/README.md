@@ -47,6 +47,8 @@ folders.
    as Codex stay as they are. The paths become settings only on Save. Detection does not create the home or
    read its login; if that home already holds a login, reuse it. Older servers and pages where settings cannot
    be changed offer no paths.
+   For another Codex model on the same program and home, use **Add a model** under the provider's card (a name,
+   the model and an effort): it runs with that card's program, home and login.
 3. **Log in once, with Codex's own login on that home:** `CODEX_HOME=<Codex home> <Codex program> login`. The
    page and `hansa explain provider NAME` give the command with the provider's paths. Then `hansa ping NAME`.
 
