@@ -49514,6 +49514,169 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         check(option && option.disabled && option.textContent.includes("Claude Code"), "a Codex provider is offered to the coordinator");
         check(select.kids.find(o => o.value === "other") && !select.kids.find(o => o.value === "other").disabled, "other providers are not offered");
       } else throw new Error("unknown codex scenario: " + ask);
+    } else if (ask.startsWith("settings-fix-models-")) {
+      // One card per connection, a row per model on it (an entry whose connection names the card), as the principal
+      // sees and uses them: the rows' boxes, Add a model, the join choice, Own connection, Remove, Save.
+      const zh = process.argv[4] === "zh";
+      run('showSettingsGroup("providers")');
+      const panel = () => run("settingsPanels.providers");
+      const all = (attr, root) => { const out = []; walk(root, el => { if (attr in el.attrs) out.push(el.attrs[attr]); }); return out; };
+      const cards = () => all("data-provider-card", panel()), rows = name => all("data-model-row", card(name));
+      const card = name => find(el => el.attrs["data-provider-card"] === name, panel());
+      const row = name => find(el => el.attrs["data-model-row"] === name, panel());
+      const labelled = (root, label) => { const l = find(el => el.tag === "label" && el.textContent === run(label), root);
+        check(l, "no field " + label); return ids["#" + l.attrs.for]; };
+      const choose = (select, value) => { check(select, "select missing"); select.value = value; select.on.change({target:select}); };
+      const button = (text, root) => find(el => el.tag === "button" && el.textContent === text, root);
+      const addRow = name => find(el => el.attrs["data-add-model"] === name, panel());
+      const addBox = (name, attr) => find(el => attr in el.attrs, addRow(name));
+      const joinOf = name => find(el => el.tag === "select" && "data-join-connection" in el.attrs, card(name));
+      const sorted = x => Array.isArray(x) ? x.map(sorted) : x && typeof x === "object"
+        ? Object.fromEntries(Object.keys(x).sort().map(k => [k, sorted(x[k])])) : x;
+      const same = (a, b) => JSON.stringify(sorted(a)) === JSON.stringify(sorted(b));
+      const before = JSON.parse(JSON.stringify(given["/api/settings"].settings.providers));
+      // no connection field, key box or join choice inside any row
+      const bare = name => rows(name).every(r => !find(el => el.tag === "input" && el.type === "password", row(r))
+        && !find(el => el.tag === "select" && el.kids.some(o => o.value === "subscription"), row(r))
+        && !find(el => "data-join-connection" in el.attrs, row(r))
+        && !find(el => el.tag === "label" && [run("T.endpoint"), run("T.codexHome"), run("T.loginDir")].includes(el.textContent), row(r)));
+      if (ask === "settings-fix-models-none") {
+        check(same(cards(), Object.keys(before)), "not one card per entry: " + cards());
+        for (const name of cards()) {
+          check(same(rows(name), [name]), "card " + name + " rows: " + rows(name));
+          check(labelled(row(name), "T.model").value === before[name].model, "the row lacks its model");
+          labelled(row(name), "T.effort");
+          check(button(run("T.check"), row(name)) && button(run("T.remove"), row(name)), "the row lacks Ping or Remove");
+          check(button(run("T.addModel"), addRow(name)), "no Add a model under " + name);
+          const join = joinOf(name);
+          check(join && join.kids[0].value === "" && join.kids[0].textContent === run("T.ownConnectionChoice")
+            && same(join.kids.slice(1).map(o => o.value), Object.keys(before).filter(n => n !== name)), "join choice of " + name);
+          check(bare(name), "a connection field in a row of " + name);
+        }
+        check(!run("settingsDirty()"), "showing the cards changed the draft");
+        await run("saveSettings()");
+        check(JSON.stringify(posted.settings.providers) === JSON.stringify(before), "saving changed the providers");
+      } else if (ask === "settings-fix-models-kinds") {
+        for (const [name, its] of [["compatible", ["compatible", "fast"]], ["claude", ["claude", "claude-fast"]], ["cx", ["cx", "cx-mini"]]]) {
+          check(same(rows(name), its), "rows of " + name + ": " + rows(name));
+          check(bare(name), "a connection field in a row of " + name);
+          check(!joinOf(name), "a card its rows use offers to join another: " + name);
+        }
+        check(!["fast", "claude-fast", "cx-mini"].some(n => cards().includes(n)), "a row shows as a card: " + cards());
+        check(labelled(row("cx-mini"), "T.model").value === "gpt-mini"
+          && labelled(row("cx-mini"), "T.effort").kids.find(o => "selected" in o.attrs)?.value === "medium", "a row's model or effort not shown");
+        change(number(), "41"); await run("saveSettings()");
+        check(posted.settings.cool_minutes === 41, "the other change was not saved");
+        for (const name of ["fast", "claude-fast", "cx-mini"])
+          check(JSON.stringify(posted.settings.providers[name]) === JSON.stringify(before[name]), "a row changed on save: " + name);
+        run('showSettingsGroup("coordinator")');
+        const select = find(el => el.tag === "select" && el._settingMeta?.matches("coordinator: provider"), run("settingsPanels.coordinator"));
+        check(select.kids.find(o => o.value === "cx-mini")?.disabled && !select.kids.find(o => o.value === "fast")?.disabled,
+          "a row on a Codex card is offered to the coordinator");
+      } else if (ask === "settings-fix-models-edit") {
+        change(labelled(row("fast"), "T.model"), "fast-model-2"); choose(labelled(row("fast"), "T.effort"), "high");
+        await run("saveSettings()");
+        const expected = JSON.parse(JSON.stringify(before)); expected.fast.model = "fast-model-2"; expected.fast.effort = "high";
+        check(JSON.stringify(posted.settings.providers) === JSON.stringify(expected), "more than the row's model and effort changed: "
+          + JSON.stringify(posted.settings.providers));
+      } else if (ask === "settings-fix-models-card") {
+        check(find(el => el.tag === "input" && el.type === "password", card("compatible"))
+          && all("type", card("compatible")).filter(t => t === "password").length === 1, "not one key box in the card");
+        change(labelled(card("compatible"), "T.endpoint"), "https://changed.example/anthropic");
+        change(labelled(card("cx"), "T.codexHome"), "/opt/other-codex-home");
+        change(find(el => el.tag === "input" && el.type === "password", card("compatible")), "sk-example-card");
+        await button(run("T.saveKey"), card("compatible")).click();
+        check(keyPosts.length === 1 && keyPosts[0].provider === "compatible", "the key went elsewhere: " + JSON.stringify(keyPosts.map(p => p.provider)));
+        await run("saveSettings()");
+        const expected = JSON.parse(JSON.stringify(before));
+        expected.compatible.base_url = "https://changed.example/anthropic"; expected.cx.codex_home = "/opt/other-codex-home";
+        check(JSON.stringify(posted.settings.providers) === JSON.stringify(expected), "the card's change is not one change: "
+          + JSON.stringify(posted.settings.providers));
+      } else if (ask === "settings-fix-models-rest") {
+        const message = run("messageText(MODEL_MESSAGES.fast)");
+        check(message && message.includes("fast-model"), "no rest for the row: " + message);
+        check(row("fast").textContent.includes(message), "the rest is not at its row");
+        check(!row("compatible").textContent.includes(message) && !card("claude").textContent.includes(message), "the rest shows at another row");
+        check(!zh || !/does not know|rests until/.test(message), "the Chinese page shows the server's English: " + message);
+      } else if (ask === "settings-fix-models-name") {
+        for (const value of ["Bad Name", "claude", "fast"]) {
+          for (const save of [false, true]) {
+            await run("loadSettings()");
+            change(addBox("compatible", "data-new-model-name"), value); change(addBox("compatible", "data-new-model-model"), "m2");
+            document.activeElement = document.body;
+            const posts = settingsPostCount;
+            if (save) await run("saveSettings()"); else await button(run("T.addModel"), addRow("compatible")).click();
+            check(settingsPostCount === posts, "a refused name was saved");
+            const error = ids["#new-model-compatible-error"], box = addBox("compatible", "data-new-model-name");
+            check(error && !error.hidden && error.textContent === run("T.invalidName") && addRow("compatible").contains(error),
+              "the refusal is not at the row's name field: " + value);
+            check(box.attrs["aria-invalid"] === "true" && document.activeElement === box && box.value === value, "the name field not marked and focused");
+            check(ids["#new-model-compatible-note"].textContent === run("T.nameRule"), "the rule is not under the field");
+            check(ids["#new-provider-error"].hidden && ids["#new-model-claude-error"].hidden, "the refusal shows at another name field");
+            check(!run("S.providers['Bad Name']") && same(rows("compatible"), ["compatible", "fast"]), "a refused row was added");
+          }
+        }
+        await run("loadSettings()");
+        change(addBox("compatible", "data-new-model-name"), "fast-two"); change(addBox("compatible", "data-new-model-model"), "k2-mini");
+        choose(addBox("compatible", "data-new-model-effort"), "low");
+        await button(run("T.addModel"), addRow("compatible")).click();
+        check(JSON.stringify(run("S.providers['fast-two']")) === JSON.stringify({connection:"compatible", model:"k2-mini", effort:"low"}),
+          "the new row: " + JSON.stringify(run("S.providers['fast-two']")));
+        check(same(rows("compatible"), ["compatible", "fast", "fast-two"]), "the new row is not in the card");
+        change(addBox("claude", "data-new-model-name"), "claude-three"); change(addBox("claude", "data-new-model-model"), "haiku");
+        check(run("settingsDirty()"), "a typed row is not unsaved");
+        await run("saveSettings()");
+        check(JSON.stringify(posted.settings.providers["fast-two"]) === JSON.stringify({connection:"compatible", model:"k2-mini", effort:"low"})
+          && JSON.stringify(posted.settings.providers["claude-three"]) === JSON.stringify({connection:"claude", model:"haiku", effort:""}),
+          "Save lost a new row: " + JSON.stringify(posted.settings.providers));
+      } else if (ask === "settings-fix-models-join") {
+        check(!joinOf("compatible"), "a card its rows use offers to join another");
+        const note = card("other").textContent;
+        check(note.includes(run("T.joinKeyNote")), "no note on the key of a joined card");
+        for (const word of zh ? ["清除密钥", "secrets", "不再使用"] : ["Clear key", "secrets", "no longer used"]) check(note.includes(word), "join note lacks " + word);
+        choose(joinOf("other"), "compatible");
+        check(same(rows("compatible"), ["compatible", "fast", "other"]) && !cards().includes("other") && bare("compatible"), "the joined card is not a row there");
+        await run("saveSettings()");
+        check(JSON.stringify(posted.settings.providers.other) === JSON.stringify({connection:"compatible", model:before.other.model, effort:before.other.effort}),
+          "the joined entry kept its connection: " + JSON.stringify(posted.settings.providers.other));
+        await button(run("T.ownConnection"), row("fast")).click();
+        check(cards().includes("fast") && same(rows("fast"), ["fast"]) && !rows("compatible").includes("fast"), "the row is not a card of its own");
+        check(card("fast").textContent.includes(run("T.splitKeyNote")), "no word that the key must be saved again");
+        await button(run("T.ownConnection"), row("cx-mini")).click();
+        check(!card("cx-mini").textContent.includes(run("T.splitKeyNote")), "a Codex card is told to save a key");
+        await run("saveSettings()");
+        check(same(posted.settings.providers.fast, {kind:"compatible", base_url:before.compatible.base_url, model:before.fast.model, effort:before.fast.effort}),
+          "the copied connection: " + JSON.stringify(posted.settings.providers.fast));
+        const {model, effort, connection, ...codex} = before.cx;
+        check(same(posted.settings.providers["cx-mini"], {...codex, model:"gpt-mini", effort:"medium"}), "the copied Codex connection: "
+          + JSON.stringify(posted.settings.providers["cx-mini"]));
+      } else if (ask === "settings-fix-models-remove") {
+        await button(run("T.remove"), row("compatible")).click();
+        check(run("!!S.providers.compatible"), "a card its rows use was removed");
+        const said = run('settingsProblems.join(" ")');
+        for (const word of zh ? ["compatible", "fast", "连接"] : ["compatible", "fast", "connection"]) check(said.includes(word), "the refusal lacks " + word + ": " + said);
+        const error = ids["#remove-error-compatible"];
+        check(error && !error.hidden && error.textContent.includes("fast") && row("compatible").contains(error), "the refusal is not at the Remove pressed");
+        check(document.activeElement === button(run("T.remove"), row("compatible")), "the Remove refused is not focused");
+        run('S.lanes.a.providers = ["claude-fast"]; renderSettings([])');
+        await button(run("T.remove"), row("claude-fast")).click();
+        check(run("!!S.providers['claude-fast']") && !ids["#remove-error-claude-fast"].hidden
+          && ids["#remove-error-claude-fast"].textContent === run('T.providerUsedByLanes("claude-fast", "a")'), "a lane's row was removed or not said at its row");
+        await button(run("T.remove"), row("fast")).click();
+        check(run("!S.providers.fast"), "a row alone was not removed");
+        await button(run("T.remove"), row("compatible")).click();
+        check(run("!S.providers.compatible"), "the card was not removed once no row used it");
+        settingsPostReply = given.connectionRemoved; await run("saveSettings()");
+        const server = run('settingsProblems.join(" ")');
+        check(server.includes("fast") && server.includes("compatible") && (!zh || !server.includes("cannot be removed")), "the server's refusal: " + server);
+      } else if (ask === "settings-fix-models-outside") {
+        check(run("SETTINGS_LOCKED") && same(rows("compatible"), ["compatible", "fast"]) && same(rows("claude"), ["claude", "claude-fast"]), "the cards and rows differ outside");
+        check(labelled(row("fast"), "T.model").value === "fast-model" && labelled(row("fast"), "T.model").readOnly, "a row's model is not shown read-only");
+        check(labelled(row("fast"), "T.effort").disabled && joinOf("other").disabled, "a choice is open outside");
+        for (const text of ["T.addModel", "T.ownConnection", "T.remove", "T.check"])
+          check(descendants(panel(), "button").filter(b => b.textContent === run(text)).every(b => b.disabled), text + " is open outside");
+        check(addBox("compatible", "data-new-model-name").readOnly, "Add a model's name is open outside");
+      } else throw new Error("unknown models scenario: " + ask);
     } else if (ask === "settings-fix-turns") {
       await run("loadCost()");
       const rows = descendants(ids["#tab-cost"], "tr");
@@ -52382,8 +52545,35 @@ else if (ask === "task-steps")'''))
             s["providers"]["compatible"] = {"kind": "compatible", "model": "example-model", "effort": "",
                                              "base_url": "http://codex.invalid/"}
             self.assertEqual(self.desk.save_settings(s), [])
+        if scenario.startswith("models-"):
+            # Saved as the desk keeps them: a compatible card, and unless "none", rows on it and on the subscription card.
+            s = self.desk.settings()
+            s["providers"]["compatible"] = {"kind": "compatible", "model": "example-model", "effort": "",
+                                             "base_url": "https://example.org"}
+            if scenario != "models-none":
+                s["providers"]["fast"] = {"connection": "compatible", "model": "fast-model", "effort": "low"}
+                s["providers"]["claude-fast"] = {"connection": "claude", "model": "sonnet", "effort": "high"}
+            self.assertEqual(self.desk.save_settings(s), [])
+            if scenario == "models-rest":
+                self.desk.set_provider_state("fast", model_since=time.time(), model_unknown="fast-model")
         public = public_settings(self.desk)
         public.pop("codex_suggestion", None)  # existing scenarios also exercise replies from an older server
+        if scenario.startswith("models-") and scenario != "models-none":
+            # a Codex card and a row on it (the page's reply only: the Codex program and home need not exist here)
+            public["settings"]["providers"]["cx"] = {
+                "kind": "codex", "model": "gpt-example", "effort": "", "codex_path": "/opt/codex/bin/codex",
+                "codex_home": "/opt/codex-home", "ca_file": "", "web_search": "disabled", "disabled_features": ["apps"]}
+            public["settings"]["providers"]["cx-mini"] = {"connection": "cx", "model": "gpt-mini", "effort": "medium"}
+        if scenario == "models-remove":
+            saved = self.desk.settings()
+            s = copy.deepcopy(saved)
+            del s["providers"]["compatible"]
+            problems = [p for p in validate(s, self.desk.root, page=True, before=saved)
+                        if p.detail["values"].get("reason") == "connection_removed"]
+            self.assertTrue(problems)
+        if scenario == "models-outside":
+            public["from_outside"] = True
+            public["settings"]["settings_from_outside"] = False
         public["settings"]["cool_minutes"] = 37
         public["settings"]["coordinator"].pop("model", None)
         public["settings"]["coordinator_alert"] = {}
@@ -52445,6 +52635,8 @@ else if (ask === "task-steps")'''))
                 problems = [p for p in validate(s, self.desk.root, page=True) if p.startswith("provider compatible:")]
             self.assertTrue(problems)
             replies["codexRefusal"] = {"ok": False, "problems": problems, "problem_details": [p.detail for p in problems]}
+        if scenario == "models-remove":
+            replies["connectionRemoved"] = {"ok": False, "problems": problems, "problem_details": [p.detail for p in problems]}
         harness = self.tmp / "settings-fixes-page.js"
         harness.write_text(self.PAGE_HARNESS)
         page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
@@ -52457,6 +52649,35 @@ else if (ask === "task-steps")'''))
 
     def test_stale_saves_reload_and_keep_the_changed_top_level_draft_and_keys(self):
         self.run_settings_fix_scenario("stale")
+
+    # A provider's connection filled in once, with several models on it (Settings, Providers): one card per entry without
+    # `connection`, a row per entry on it.
+    def test_with_no_connection_entries_each_card_shows_its_own_model_row_add_a_model_and_the_join_choice(self):
+        self.run_settings_fix_scenario("models-none")
+
+    def test_rows_on_compatible_subscription_and_codex_cards_stay_intact_when_other_settings_save(self):
+        self.run_settings_fix_scenario("models-kinds")
+
+    def test_changing_a_rows_model_and_effort_saves_only_that_entrys_model_and_effort(self):
+        self.run_settings_fix_scenario("models-edit")
+
+    def test_a_cards_endpoint_codex_home_and_key_are_one_change_for_all_its_rows(self):
+        self.run_settings_fix_scenario("models-card")
+
+    def test_a_rows_rest_for_an_unknown_model_shows_at_that_row_in_the_pages_words(self):
+        self.run_settings_fix_scenario("models-rest")
+
+    def test_add_a_model_refuses_a_bad_or_taken_name_at_its_field_and_adds_only_connection_model_and_effort(self):
+        self.run_settings_fix_scenario("models-name")
+
+    def test_a_card_joins_another_and_a_row_gets_a_copy_of_the_connection_of_its_own(self):
+        self.run_settings_fix_scenario("models-join")
+
+    def test_removing_a_card_its_rows_use_is_refused_at_its_remove_naming_them_and_the_servers_refusal_is_translated(self):
+        self.run_settings_fix_scenario("models-remove")
+
+    def test_cards_and_rows_show_read_only_from_outside(self):
+        self.run_settings_fix_scenario("models-outside")
 
     def test_stale_reload_shows_the_new_copys_problems_with_the_notice(self):
         self.run_settings_fix_scenario("stale-problems")

@@ -136,6 +136,12 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .settings-group .row > input:not([type=checkbox]) { flex:1; min-width:140px; }
 .settings-group .row > button { flex:none; }
 .add-row { margin-top:18px; padding-top:18px; border-top:1px dashed var(--line); }
+.model-list { margin-top:20px; }
+.model-list > h3 { font-size:13px; margin:0 0 4px; }
+.model-row { padding:12px 0; border-top:1px solid var(--line); }
+.model-row-head { display:flex; flex-wrap:wrap; gap:6px 9px; align-items:center; margin-bottom:10px; }
+.model-row-head .card-actions { margin-left:auto; display:flex; flex-wrap:wrap; gap:6px; }
+.model-list .add-row .row > input, .model-list .add-row .row > select { flex:1 1 9em; padding:9px 11px; border-radius:7px; }
 .password-control { position:relative; flex:1; min-width:160px; }
 .password-control input { width:100%; padding:9px 44px 9px 11px; min-width:0; }
 .password-control button { position:absolute; top:4px; right:4px; width:32px; min-height:32px; padding:0; border:0; color:var(--muted); background:transparent; }
@@ -344,6 +350,7 @@ td .task-detail { min-width:200px; }
   .settings-group .lane { padding:12px; }
   .settings-group .card-head { gap:6px; margin-bottom:6px; }
   .settings-group .card-actions button { font-size:12px; padding:6px 8px; min-height:32px; }
+  .model-row-head .card-actions { margin-left:0; }
   .form-fields, .settings-group .facts { grid-template-columns:minmax(0,1fr); }
   .settings-footer { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px 8px; padding:8px; bottom:8px; }
   .settings-footer .save-state { grid-column:1 / -1; font-size:11px; }
@@ -912,6 +919,10 @@ Object.assign(T, ZH ? {
   nameRule:"只能用小写字母、数字和 '-'，最多 32 个字符，以字母或数字开头，且不能与已有的服务商重名。", invalidModel:"模型名称不能为空或重复。",
   providerUsedByCoordinator:name => `不能移除 ${name}：协调员正在使用它。请先为协调员选择另一家服务商。`,
   providerUsedByLanes:(name, lanes) => `不能移除 ${name}：工作线 ${lanes} 正在使用它。工作线由协调员更换服务商，请先让协调员将这些工作线移到另一家服务商。`,
+  providerUsedByModels:(name, rows) => `不能移除 ${name}：${rows} 使用它的连接。请先删除它们，或给它们单独的连接。`,
+  models:"模型", addModel:"加一个模型", joinConnection:"使用哪家的连接", ownConnectionChoice:"自己的", ownConnection:"单独连接",
+  joinKeyNote:"选另一家后，这家成为那张卡片下的一个模型，保存时它自己的连接信息从设置中移除。之前为它保存的密钥仍留在工作台的 secrets 中，但不再使用；要删除它，请先点“清除密钥”再选择。",
+  splitKeyNote:"这家现在有了自己的连接（从原卡片复制），但密钥没有复制：请为它重新保存密钥。",
   defaultMinutes:n => `留空使用默认值 ${n} 分钟。`, defaultTokens:n => `留空使用默认值 ${n} token。`,
   compactIdleWarning:"警告：空闲压缩阈值大于或等于工作压缩阈值，空闲时不会触发压缩。",
   historyKeySet:"已设置（密钥不显示）", historyKeyCleared:"已清除（密钥不显示）",
@@ -1007,6 +1018,10 @@ Object.assign(T, ZH ? {
   nameRule:"Use lowercase letters, digits and '-': at most 32 characters, starting with a letter or digit, and not the name of a provider already here.", invalidModel:"Enter a unique, non-empty model name.",
   providerUsedByCoordinator:name => `Cannot remove ${name}: the coordinator uses it. Choose another provider for the coordinator first.`,
   providerUsedByLanes:(name, lanes) => `Cannot remove ${name}: lanes ${lanes} use it. The coordinator moves lanes to another provider; ask the coordinator to do that first.`,
+  providerUsedByModels:(name, rows) => `Cannot remove ${name}: ${rows} use its connection. Remove them first, or give them their own connection.`,
+  models:"Models", addModel:"Add a model", joinConnection:"Uses the connection of", ownConnectionChoice:"its own", ownConnection:"Own connection",
+  joinKeyNote:"Choosing another provider makes this one a model under it: on save its own connection fields leave the settings. A key saved for it before stays in the desk's secrets and is no longer used; Clear key before choosing removes it.",
+  splitKeyNote:"This provider now has a connection of its own, copied from its card; the key is not copied: save the key for it again.",
   defaultMinutes:n => `Blank uses the default, ${n} minutes.`, defaultTokens:n => `Blank uses the default, ${n} tokens.`,
   compactIdleWarning:"Warning: the idle compaction threshold is at or above the working threshold, so compaction will not happen when idle.",
   historyKeySet:"set (values withheld)", historyKeyCleared:"cleared (values withheld)",
@@ -2276,7 +2291,7 @@ function settingsReplyProblems(reply) {
     workers_may_not_read:T.protectedPaths, releases_without_asking:T.autoRelease, release_direct:T.directPolicy,
     release_mailboxes:T.mailboxTitle, settings_from_outside:T.outsideTitle, release_forbidden:T.forbiddenWords, release_forbidden_except:T.exceptionsTitle,
     alert_language:T.alertLanguage, alert:T.alertCommandTitle, coordinator_alert:T.alertTiming,
-    kind:T.kind, model:T.model, effort:T.effort, base_url:T.endpoint, config_dir:T.loginDir,
+    kind:T.kind, model:T.model, effort:T.effort, base_url:T.endpoint, config_dir:T.loginDir, connection:T.joinConnection,
     codex_path:T.codexPath, codex_home:T.codexHome, ca_file:T.caFile, web_search:T.webSearch, disabled_features:T.codexFeatures,
     ...Object.fromEntries(Object.entries(MINUTES_LABELS).map(([k, v]) => [k, T[v]]))};
   const prices = {in:T.in, out:T.out, cache_read:T.cacheRead, cache_write:T.cacheWrite, cache_write_1h:T.cacheWrite1h};
@@ -2284,6 +2299,8 @@ function settingsReplyProblems(reply) {
     const detail = reply.problem_details?.[i], v = detail?.values || {};
     const messages = {
       field_rule:() => {
+        // A card's entry removed while rows use its connection: the words of the page's own refusal of that Remove.
+        if (v.reason === "connection_removed" && Array.isArray(v.users)) return T.providerUsedByModels(v.connection, v.users.join(", "));
         const label = labels[v.field], rule = T.validationRules[v.reason];
         // A Codex field's rule names paths and folders; a rule this page does not know keeps the server's words.
         const codex = v.reason === "codex" && codexRuleText(v);
@@ -2444,13 +2461,13 @@ function groupDirty(key) {
   if (!S || settingsBaseline === null) return false;
   const base = JSON.parse(settingsBaseline);
   return (GROUP_KEYS[key] || []).some(k => settingText(S[k]) !== settingText(base[k]))
-    || (key === "providers" && (Object.values(KEY_DRAFTS).some(Boolean) || !!newProviderName))
+    || (key === "providers" && (Object.values(KEY_DRAFTS).some(Boolean) || !!newProviderName || modelDraftPending()))
     || (key === "prices" && !!newPriceName)
     || (key === "alerts" && pushDraftDirty());
 }
 function settingsDirty() {
   return !!S && ((settingsBaseline !== null && settingText(S) !== settingsBaseline)
-    || Object.values(KEY_DRAFTS).some(value => value !== "") || !!newProviderName || !!newPriceName || pushDraftDirty());
+    || Object.values(KEY_DRAFTS).some(value => value !== "") || !!newProviderName || !!newPriceName || modelDraftPending() || pushDraftDirty());
 }
 function refreshSettingsState() {
   // Push drafts go with Save settings; the separate key note is for providers only.
@@ -2505,7 +2522,7 @@ async function loadDispatch() {
 }
 function ensureSettings() {
   const dispatch = loadDispatch();
-  if (S && (settingsDirty() || settingsSaving || newProviderName || newPriceName)) return dispatch;
+  if (S && (settingsDirty() || settingsSaving || newProviderName || newPriceName || modelDraftPending())) return dispatch;
   if (!settingsLoading) settingsLoading = loadSettings(undefined, false, !!S).catch(e => {
     // Never loaded: with nothing to show, an answer not from hansa serve still says so here and offers a reload.
     if (!S && e?.notFromServe) $("#tab-settings").replaceChildren(h("div", {class:"notice", role:"alert", "data-load-failed":""}, ...loadFailed(e)));
@@ -2554,7 +2571,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   const before = background ? JSON.stringify(S) : null, epoch = settingsEpoch;
   const [r, ev] = await Promise.all([api("/api/settings"), api("/api/events?event=lane_command_changed,lane_network_changed,lane_write_changed,lane_allow_changed&n=20")]);
   // A clean page may refresh on return, but a reply must never replace edits begun while it was in flight.
-  if (background && (epoch !== settingsEpoch || settingsSaving || settingsDirty() || JSON.stringify(S) !== before || newProviderName || newPriceName)) return;
+  if (background && (epoch !== settingsEpoch || settingsSaving || settingsDirty() || JSON.stringify(S) !== before || newProviderName || newPriceName || modelDraftPending())) return;
   S = r.settings; DISK_FREE = r.disk_free; KEYS = r.keys; REV = r.rev; LANE_CMDS = ev; DENY_SKIPPED = r.deny_skipped || []; BUILT_IN_NO_READ = r.built_in_no_read || []; CODEX_HOMES_NO_READ = r.codex_homes_no_read || []; NO_READ_STOP = r.no_read_stop || "";
   settingsDefaults = r.settings_defaults || {};
   CODEX_SUGGESTION = r.codex_suggestion || null;
@@ -2577,7 +2594,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
   if (!r.alert_language_saved) S.alert_language = ZH ? "zh" : "en";
   if (!keepKeys) { KEY_DRAFTS = {}; PUSH_DRAFTS = {}; PUSH_NEW = emptyPush(); }
   newProviderName = ""; newPriceName = ""; settingsMessage = ""; settingsFailure = ""; settingsRebase = ""; keyProblemProvider = "";
-  PROVIDER_ASIDE = {};
+  PROVIDER_ASIDE = {}; MODEL_DRAFTS = {}; JOIN_ASIDE = {}; SPLIT_KEY = new Set(); REMOVE_PROBLEMS = {};
   settingsBaseline = settingText(S);
   forbiddenSeenEntries = new Set(S.release_forbidden || []);
   settingsEpoch++;
@@ -2586,10 +2603,14 @@ async function loadSettings(problems, keepKeys = false, background = false) {
 async function saveSettings() {
   if (settingsSaving || !S || SETTINGS_LOCKED) return;
   const pendingNames = ["provider", "price"].filter(kind => (kind === "provider" ? newProviderName : newPriceName) !== "");
-  const nameProblems = pendingNames.map(settingsNameProblem).filter(Boolean);
+  nameProblemAt = new Set();
+  const nameProblems = [...pendingNames.map(settingsNameProblem),
+    ...pendingModelProblems(newProviderName ? [newProviderName.trim()] : [])].filter(Boolean);
   if (nameProblems.length) { settingsFailure = "save"; renderSettings(nameProblems); focusProblem(nameProblems[0]); return; }
   for (const kind of pendingNames) addSettingsName(kind);
-  if (pendingNames.length) renderSettings([]);
+  const pendingModels = modelDraftPending();
+  addModelRows();
+  if (pendingNames.length || pendingModels) renderSettings([]);
   settingsEpoch++;
   settingsPending = "save"; settingsSaving = true; settingsMessage = ""; settingsRebase = ""; settingsFailure = ""; keyProblemProvider = ""; refreshSettingsState();
   let saved = false;
@@ -2613,7 +2634,7 @@ async function saveSettings() {
       const draft = JSON.parse(JSON.stringify(S)), base = JSON.parse(settingsBaseline), seen = forbiddenSeenEntries;
       const keys = [...new Set([...Object.keys(base), ...Object.keys(draft)])].sort();
       const changed = keys.filter(k => settingText(draft[k]) !== settingText(base[k]));
-      const providerName = newProviderName, priceName = newPriceName;
+      const providerName = newProviderName, priceName = newPriceName, modelDrafts = MODEL_DRAFTS, joinAside = JOIN_ASIDE, splitKey = SPLIT_KEY;
       await loadSettings(undefined, true);
       const elsewhere = [...new Set([...Object.keys(base), ...Object.keys(S)])].sort()
         .filter(k => settingText(S[k]) !== settingText(base[k]));
@@ -2621,7 +2642,7 @@ async function saveSettings() {
         if (Object.hasOwn(draft, k)) S[k] = draft[k]; else delete S[k];
       }
       forbiddenSeenEntries = new Set([...forbiddenSeenEntries, ...seen]);
-      newProviderName = providerName; newPriceName = priceName;
+      newProviderName = providerName; newPriceName = priceName; MODEL_DRAFTS = modelDrafts; JOIN_ASIDE = joinAside; SPLIT_KEY = splitKey;
       const groupNames = keys => [...new Set(keys.map(k => SETTINGS_GROUPS.find(([name]) =>
         (GROUP_KEYS[name] || []).includes(k) || name === "lanes" && ["lanes", "concurrency", "disk_floor"].includes(k))?.[1]
         || T.general))].join(", ") || T.none;
@@ -3040,10 +3061,82 @@ function editedBarkSecret(before, value) {
       && displayed[displayed.length - 1 - end] === value[value.length - 1 - end]) end++;
   return before.slice(0, start) + value.slice(start, value.length - end) + before.slice(before.length - end);
 }
+/* A new provider entry's name: the rule under its field, and not a name already here or about to be added (taken). */
+const providerNameProblem = (name, taken = []) =>
+  !/^[a-z0-9][a-z0-9-]{0,31}$/.test(name.trim()) || S.providers[name.trim()] || taken.includes(name.trim()) ? T.invalidName : "";
+// Where a refused new name was typed: "provider" (Add provider) or "model:<card>" (that card's Add a model), so the
+// refusal shows at that field and not at every name field.
+let nameProblemAt = new Set();
 function settingsNameProblem(kind) {
-  const name = (kind === "provider" ? newProviderName : newPriceName).trim();
-  return kind === "provider" ? (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name) || S.providers[name] ? T.invalidName : "")
-    : (!name || S.prices[name] ? T.invalidModel : "");
+  if (kind === "provider") {
+    const problem = providerNameProblem(newProviderName);
+    if (problem) nameProblemAt.add("provider");
+    return problem;
+  }
+  const name = newPriceName.trim();
+  return !name || S.prices[name] ? T.invalidModel : "";
+}
+/* ---------- one card per connection, a row per model on it ----------
+   An entry with `connection` names the entry whose connection (kind, endpoint, login folder, Codex fields, key) it
+   runs with, and holds only model, effort and note (desk.py provider_entry). The page shows each entry without one as a
+   card, and every entry naming it as a row in that card's Models; an entry whose connection names no such card is
+   shown as a card of its own, with its choice. */
+let MODEL_DRAFTS = {}, JOIN_ASIDE = {}, SPLIT_KEY = new Set(), REMOVE_PROBLEMS = {};
+const CONNECTION_OWN = ["model", "effort", "note"];
+const connectionFields = () => ["kind", "base_url", "config_dir", ...kindFields("codex")];
+function connectionCard(name) {
+  const c = S.providers[name]?.connection;
+  return typeof c === "string" && c !== name && S.providers[c] && typeof S.providers[c] === "object"
+    && !("connection" in S.providers[c]) ? c : name;
+}
+const connectionUsers = name => Object.keys(S.providers).filter(n => n !== name && S.providers[n]?.connection === name);
+const entryKind = name => S.providers[connectionCard(name)]?.kind;
+const modelDraftPending = () => Object.values(MODEL_DRAFTS).some(d => d.name || d.model || d.effort);
+/* Join a card to another: it keeps its name, model, effort and note; its connection fields wait aside until the next
+   load (giving it its own connection again before saving brings them back) and leave the settings on save. */
+function joinConnection(name, card) {
+  const p = S.providers[name];
+  if (!card) return giveOwnConnection(name);
+  const aside = {};
+  for (const key of Object.keys(p)) if (!CONNECTION_OWN.includes(key) && key !== "connection") aside[key] = p[key];
+  if (!("connection" in p)) JOIN_ASIDE[name] = aside;
+  S.providers[name] = {connection:card, ...Object.fromEntries(CONNECTION_OWN.filter(k => k in p).map(k => [k, p[k]]))};
+  delete KEY_DRAFTS[name]; delete PROVIDER_ASIDE[name]; delete MODEL_DRAFTS[name]; SPLIT_KEY.delete(name);
+}
+/* A row given a connection of its own: a card with a copy of its card's connection fields (or its own, set aside when
+   it was joined on this page); a key is not copied. */
+function giveOwnConnection(name) {
+  const p = S.providers[name], card = connectionCard(name);
+  const from = card !== name ? S.providers[card] : {kind:"compatible", base_url:""};
+  const own = JOIN_ASIDE[name] || Object.fromEntries(connectionFields().filter(k => k in from).map(k => [k, JSON.parse(JSON.stringify(from[k]))]));
+  S.providers[name] = {...own, ...Object.fromEntries(CONNECTION_OWN.filter(k => k in p).map(k => [k, p[k]]))};
+  delete JOIN_ASIDE[name];
+  if (S.providers[name].kind === "compatible") SPLIT_KEY.add(name);
+}
+/* The new rows typed under the cards, checked as Add provider checks its name; none is added unless all are good. */
+function pendingModelProblems(taken = []) {
+  const problems = [];
+  for (const [card, d] of Object.entries(MODEL_DRAFTS)) {
+    if (!(d.name || d.model || d.effort) || !S.providers[card]) continue;
+    const problem = providerNameProblem(d.name, taken);
+    if (problem) { nameProblemAt.add("model:" + card); problems.push(problem); } else taken.push(d.name.trim());
+  }
+  return problems;
+}
+function addModelRows() {
+  for (const [card, d] of Object.entries(MODEL_DRAFTS)) {
+    if (!(d.name || d.model || d.effort) || !S.providers[card]) continue;
+    S.providers[d.name.trim()] = {connection:card, model:d.model.trim(), effort:d.effort || ""};
+    delete MODEL_DRAFTS[card];
+  }
+}
+function addModel(card) {
+  nameProblemAt = new Set();
+  const d = MODEL_DRAFTS[card] || {name:""}, problem = providerNameProblem(d.name || "");
+  if (problem) { nameProblemAt.add("model:" + card); return problem; }
+  S.providers[d.name.trim()] = {connection:card, model:(d.model || "").trim(), effort:d.effort || ""};
+  delete MODEL_DRAFTS[card];
+  return "";
 }
 /* The label of a provider's kind, wherever the page prints one; an unknown kind as it is. */
 const kindLabel = kind => ({subscription:T.subscription, compatible:T.compatible, codex:T.codex})[kind] || kind || "";
@@ -3104,6 +3197,7 @@ function codexFields(name, p) {
     h("div", {class:"field wide"}, more)];
 }
 function addSettingsName(kind) {
+  if (kind === "provider") nameProblemAt = new Set();
   const problem = settingsNameProblem(kind);
   if (problem) return problem;
   if (kind === "provider") {
@@ -3115,10 +3209,88 @@ function addSettingsName(kind) {
 }
 function removeProvider(name) {
   const lanes = Object.entries(S.lanes).filter(([, lane]) => (lane.providers || []).includes(name)).map(([name]) => name);
+  const users = connectionUsers(name);
   const problems = [S.coordinator.provider === name ? T.providerUsedByCoordinator(name) : "",
-    lanes.length ? T.providerUsedByLanes(name, lanes.join(", ")) : ""].filter(Boolean);
-  if (problems.length) return renderSettings(problems);
-  delete S.providers[name]; delete KEY_DRAFTS[name]; delete PROVIDER_ASIDE[name]; renderSettings([]);
+    lanes.length ? T.providerUsedByLanes(name, lanes.join(", ")) : "",
+    users.length ? T.providerUsedByModels(name, users.join(", ")) : ""].filter(Boolean);
+  // The refusal shows at the Remove pressed, as well as in the list above.
+  REMOVE_PROBLEMS = problems.length ? {[name]:problems} : {};
+  if (problems.length) { renderSettings(problems); return focusProblem(problems[0]); }
+  delete S.providers[name]; delete KEY_DRAFTS[name]; delete PROVIDER_ASIDE[name]; delete MODEL_DRAFTS[name];
+  delete JOIN_ASIDE[name]; SPLIT_KEY.delete(name); renderSettings([]);
+}
+/* A row of a card's Models: an entry's name, its model and effort, its own Ping, rests and Remove. */
+function modelRow(name, card) {
+  const p = S.providers[name];
+  const remove = h("button", {class:"danger", onclick:() => removeProvider(name)}, T.remove);
+  const removeError = h("p", {class:"field-error", id:"remove-error-" + name, hidden:true});
+  fieldRecords.push({control:remove, error:removeError, noteId:"", group:"providers", matches:p => (REMOVE_PROBLEMS[name] || []).includes(p)});
+  return h("div", {class:"model-row", "data-model-row":name},
+    h("div", {class:"model-row-head"}, h("strong", {}, name),
+      h("div", {class:"card-actions"},
+        name !== card ? h("button", {"data-own-connection":"", onclick:() => { giveOwnConnection(name); renderSettings(); }}, T.ownConnection) : null,
+        checkButton(name, null), remove)),
+    removeError,
+    CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, messageText(CREDIT_MESSAGES[name], CREDIT_RESTS[name])),
+      h("button", {disabled:SETTINGS_LOCKED, onclick:() => topUpProvider(name)}, T.toppedUp)) : null,
+    MODEL_MESSAGES[name] ? h("div", {class:"row warn"}, messageText(MODEL_MESSAGES[name])) : null,
+    fields(field(T.model, bind(p, "model")), field(T.effort, pick(p, "effort", EFFORTS))));
+}
+/* Under a card's Models: a name (the rule and refusal of Add provider's), a model and an effort; nothing else. */
+function addModelRow(card) {
+  const d = MODEL_DRAFTS[card] ||= {name:"", model:"", effort:""};
+  const id = "new-model-" + card;
+  const name = h("input", {value:d.name, placeholder:T.newName, "aria-label":`${T.addModel} (${card}) · ${T.providerName}`, maxlength:32,
+    "aria-describedby":id + "-note", "data-new-model-name":"", oninput:e => { d.name = e.target.value; refreshSettingsState(); }});
+  const model = h("input", {value:d.model, placeholder:T.model, "aria-label":`${T.addModel} (${card}) · ${T.model}`, "data-new-model-model":"",
+    oninput:e => { d.model = e.target.value; refreshSettingsState(); }});
+  const effort = h("select", {"aria-label":`${T.addModel} (${card}) · ${T.effort}`, "data-new-model-effort":"",
+    onchange:e => { d.effort = e.target.value; refreshSettingsState(); }},
+    EFFORTS.map(o => h("option", {value:o, selected:(d.effort || "") === o}, o || T.effortDefault)));
+  const error = h("p", {class:"field-error", id:id + "-error", hidden:true});
+  fieldRecords.push({control:name, error, noteId:id + "-note", group:"providers", matches:p => p === T.invalidName && nameProblemAt.has("model:" + card)});
+  return h("div", {class:"add-row", "data-add-model":card},
+    h("div", {class:"row"}, name, model, effort, h("button", {onclick:() => {
+      const problem = addModel(card); renderSettings(problem ? [problem] : []); if (problem) focusProblem(problem);
+    }}, T.addModel)),
+    h("p", {class:"field-note", id:id + "-note"}, T.nameRule), error);
+}
+/* A card: the connection once (kind and its fields, the key, the Codex fields), the choice of joining another card when
+   no row names it, then its Models. */
+function providerCard(name, p) {
+  const saveKey = h("button", {disabled:SETTINGS_LOCKED || !(KEY_DRAFTS[name] || "").trim(),
+    title:SETTINGS_LOCKED ? T.outsideReadOnly : null, onclick:() => saveProviderKey(name)}, T.saveKey);
+  const keyBox = h("input", {type:"password", value:KEY_DRAFTS[name] || "", placeholder:T.keyHint, autocomplete:"off", disabled:SETTINGS_LOCKED,
+    "aria-label":`${name} · ${T.key}`, oninput:e => { KEY_DRAFTS[name] = e.target.value; saveKey.disabled = SETTINGS_LOCKED || !e.target.value.trim(); refreshSettingsState(); }});
+  const kindSel = pick(p, "kind", PROVIDER_KINDS, PROVIDER_KINDS.map(kindLabel)), was = p.kind;
+  kindSel.addEventListener("change", e => { setProviderKind(name, p, was, e.target.value); renderSettings(); });
+  const joined = "connection" in p, users = connectionUsers(name);
+  const others = Object.keys(S.providers).filter(n => n !== name && S.providers[n] && typeof S.providers[n] === "object" && !("connection" in S.providers[n]));
+  const current = joined ? String(p.connection ?? "") : "";
+  const choices = ["", ...others, ...(current && !others.includes(current) ? [current] : [])];
+  const join = h("select", {"data-join-connection":"", onchange:e => { joinConnection(name, e.target.value); renderSettings(); }},
+    choices.map(c => h("option", {value:c, selected:c === current, disabled:!!c && !others.includes(c)}, c || T.ownConnectionChoice)));
+  join._settingMeta = {group:"providers", matches:problem => problem.startsWith(`provider ${name}: connection`)};
+  const rows = [name, ...users];
+  return h("div", {class:"lane", "data-provider-card":name},
+    h("div", {class:"card-head"}, h("strong", {}, name), joined ? null : h("span", {class:"tag"}, kindLabel(p.kind))),
+    OLD_CODEX_PROVIDERS.includes(name) && p.kind === "compatible"
+      ? h("p", {class:"field-note", "data-old-codex":""}, T.oldCodex(name, T.codex)) : null,
+    SPLIT_KEY.has(name) && p.kind === "compatible" && !KEYS[name] ? h("p", {class:"warn", "data-split-key":""}, T.splitKeyNote) : null,
+    fields(...(joined ? [] : [field(T.kind, kindSel), ...(p.kind === "compatible"
+        ? [field(T.endpoint, bind(p, "base_url")), field(T.key,
+            h("div", {}, h("div", {class:"row"}, h("span", {class:"key-status " + (KEYS[name] ? "ok" : "warn")}, icon(KEYS[name] ? "check" : "security"), KEYS[name] ? T.keySet : T.keyMissing), passwordControl(keyBox)),
+              h("div", {class:"row", style:"margin-top:8px"},
+                saveKey,
+                KEYS[name] ? h("button", {disabled:SETTINGS_LOCKED, onclick:() => saveProviderKey(name, true)}, T.clearKey) : null)),
+            h("div", {}, T.keySeparate, h("p", {}, T.keyUse), h("p", {class:"warn"}, T.keyTransport)), "", true,
+            {control:keyBox, group:"providers", matches:() => settingsFailure === "key" && keyProblemProvider === name})]
+        : p.kind === "codex" ? codexFields(name, p)
+        : [field(T.loginDir, bind(p, "config_dir"), "", "", true)])]),
+      users.length || !(others.length || joined) ? null
+        : field(T.joinConnection, join, !joined && p.kind === "compatible" ? T.joinKeyNote : "", "", true)),
+    h("div", {class:"model-list", "data-models":name}, h("h3", {}, T.models),
+      ...rows.map(row => modelRow(row, name)), joined ? null : addModelRow(name)));
 }
 function lockSettingsFields(panel) {
   if (!SETTINGS_LOCKED) return;
@@ -3138,39 +3310,13 @@ function renderSettings(problems = settingsProblems) {
   const newProvNote = h("p", {class:"field-note", id:"new-provider-note", "data-name-rule":""}, T.nameRule);
   const newProvError = h("p", {class:"field-error", id:"new-provider-error", hidden:true});
   newProv.setAttribute("aria-describedby", "new-provider-note");
-  fieldRecords.push({control:newProv, error:newProvError, noteId:"new-provider-note", group:"providers", matches:p => p === T.invalidName});
+  fieldRecords.push({control:newProv, error:newProvError, noteId:"new-provider-note", group:"providers",
+    matches:p => p === T.invalidName && (nameProblemAt.has("provider") || !nameProblemAt.size)});
   const newPrice = h("input", {value:newPriceName, placeholder:"model", "aria-label":T.priceName,
     oninput:e => { newPriceName = e.target.value; refreshSettingsState(); }});
   const groups = {
     providers: [section(T.connection,
-      Object.entries(S.providers).map(([name, p]) => {
-        const saveKey = h("button", {disabled:SETTINGS_LOCKED || !(KEY_DRAFTS[name] || "").trim(),
-          title:SETTINGS_LOCKED ? T.outsideReadOnly : null, onclick:() => saveProviderKey(name)}, T.saveKey);
-        const keyBox = h("input", {type:"password", value:KEY_DRAFTS[name] || "", placeholder:T.keyHint, autocomplete:"off", disabled:SETTINGS_LOCKED,
-          "aria-label":`${name} · ${T.key}`, oninput:e => { KEY_DRAFTS[name] = e.target.value; saveKey.disabled = SETTINGS_LOCKED || !e.target.value.trim(); refreshSettingsState(); }});
-        const kindSel = pick(p, "kind", PROVIDER_KINDS, PROVIDER_KINDS.map(kindLabel)), was = p.kind;
-        kindSel.addEventListener("change", e => { setProviderKind(name, p, was, e.target.value); renderSettings(); });
-        return h("div", {class:"lane"},
-          h("div", {class:"card-head"}, h("strong", {}, name), h("span", {class:"tag"}, kindLabel(p.kind)),
-            h("div", {class:"card-actions"}, checkButton(name, null),
-              h("button", {class:"danger", onclick:() => removeProvider(name)}, T.remove))),
-          OLD_CODEX_PROVIDERS.includes(name) && p.kind === "compatible"
-            ? h("p", {class:"field-note", "data-old-codex":""}, T.oldCodex(name, T.codex)) : null,
-          CREDIT_RESTS[name] ? h("div", {class:"row warn"}, h("span", {}, messageText(CREDIT_MESSAGES[name], CREDIT_RESTS[name])),
-            h("button", {disabled:SETTINGS_LOCKED, onclick:() => topUpProvider(name)}, T.toppedUp)) : null,
-          MODEL_MESSAGES[name] ? h("div", {class:"row warn"}, messageText(MODEL_MESSAGES[name])) : null,
-          fields(field(T.kind, kindSel), field(T.model, bind(p, "model")), field(T.effort, pick(p, "effort", EFFORTS)),
-            ...(p.kind === "compatible"
-              ? [field(T.endpoint, bind(p, "base_url")), field(T.key,
-                  h("div", {}, h("div", {class:"row"}, h("span", {class:"key-status " + (KEYS[name] ? "ok" : "warn")}, icon(KEYS[name] ? "check" : "security"), KEYS[name] ? T.keySet : T.keyMissing), passwordControl(keyBox)),
-                    h("div", {class:"row", style:"margin-top:8px"},
-                      saveKey,
-                      KEYS[name] ? h("button", {disabled:SETTINGS_LOCKED, onclick:() => saveProviderKey(name, true)}, T.clearKey) : null)),
-                  h("div", {}, T.keySeparate, h("p", {}, T.keyUse), h("p", {class:"warn"}, T.keyTransport)), "", true,
-                  {control:keyBox, group:"providers", matches:() => settingsFailure === "key" && keyProblemProvider === name})]
-              : p.kind === "codex" ? codexFields(name, p)
-              : [field(T.loginDir, bind(p, "config_dir"), "", "", true)])));
-      }),
+      Object.entries(S.providers).filter(([name]) => connectionCard(name) === name).map(([name, p]) => providerCard(name, p)),
       h("div", {class:"add-row"}, h("div", {class:"row"}, newProv, h("button", {onclick:() => {
         const problem = addSettingsName("provider"); renderSettings(problem ? [problem] : []); if (problem) focusProblem(problem);
       }}, T.addProvider)), newProvNote, newProvError)),
@@ -3178,8 +3324,8 @@ function renderSettings(problems = settingsProblems) {
     coordinator: [
       section(T.compactTitle, fields(
         field(T.provider, pick(S.coordinator, "provider", Object.keys(S.providers),
-          Object.entries(S.providers).map(([name, p]) => p?.kind === "codex" ? `${name} (${T.coordinatorNoCodex})` : name),
-          Object.values(S.providers).map(p => p?.kind === "codex"))),
+          Object.keys(S.providers).map(name => entryKind(name) === "codex" ? `${name} (${T.coordinatorNoCodex})` : name),
+          Object.keys(S.providers).map(name => entryKind(name) === "codex"))),
         field(T.baseModel, bind(S.coordinator, "model")), field(T.effort, pick(S.coordinator, "effort", EFFORTS)))),
       section(T.contextTitle, fields(
         field(T.compactIdle, bind(S.coordinator_compact, "idle_at", "number"), T.defaultTokens(settingsDefaults.coordinator_compact?.idle_at)),

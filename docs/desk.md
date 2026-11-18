@@ -838,7 +838,26 @@ refused when an entry names itself or a missing entry, also holds a connection
 field, or is named by others and removed; a key saved for it is refused (save it
 for the named entry), and an old key file of its own is ignored, not deleted.
 `hansa explain provider` shows whose connection an entry uses, and which entries
-use one. In `settings.json`, by hand while the page does not show the field yet:
+use one.
+
+The page makes such entries; no hand-editing is needed. Providers shows one card
+per connection (an entry without `connection`): its kind and fields, the key box
+where the kind has a key, the Codex fields and the login note, once. Under it,
+**Models** lists a row per entry on that connection, the card's own entry first,
+then every entry whose `connection` names it: the entry's name (what lanes and
+Status call it), its model and effort, its own Ping, its rest and top-up, and
+Remove. **Add a model** under the list asks a name (the rule and refusal of
+**Add provider**'s, shown at that field), a model and an effort, and adds
+`{"connection": <the card's entry>, "model", "effort"}`; Save adds one typed and
+not yet added. A card no row names offers **Uses the connection of**: choosing
+another card makes the entry a row there, and its connection fields leave the
+settings on save. A key saved for it before stays in the desk's `secrets/` and is
+no longer used; **Clear key** before choosing removes it. A row's **Own
+connection** makes it a card again with a copy of its card's connection fields;
+the key is not copied, and a card of a kind with a key says to save it again.
+Remove refuses a card's entry while rows name it, naming them, at the Remove
+pressed and in the list above; so do the coordinator and lane refusals. The
+Status tab keeps one row per entry. In `settings.json` the entries read:
 
 ```json
 "providers": {
