@@ -826,6 +826,26 @@ Remove refuses a provider used by the coordinator or any lane. Choose another
 provider for the coordinator first; for lanes, ask the coordinator to move the
 named lanes to another provider before removing it. Selects show the draft's
 value even if it no longer matches a known choice.
+
+A provider entry may use another entry's connection: an entry with `connection`
+names that entry and holds only `connection`, `model`, `effort` and `note`. Runs,
+checks (`hansa ping`), the coordinator and the rests' login use the named entry's
+`kind`, endpoint (`base_url`), login folder (`config_dir`), Codex program and home
+and its other Codex fields, and its key in `secrets/<that name>.key`. The entry
+keeps its own name, model, effort, rest state and `.hansa/claude-{name}` folder.
+Only one level: the named entry must have no `connection` of its own. Saving is
+refused when an entry names itself or a missing entry, also holds a connection
+field, or is named by others and removed; a key saved for it is refused (save it
+for the named entry), and an old key file of its own is ignored, not deleted.
+`hansa explain provider` shows whose connection an entry uses, and which entries
+use one. In `settings.json`, by hand while the page does not show the field yet:
+
+```json
+"providers": {
+  "kimi":      {"kind": "compatible", "base_url": "https://api.example.com/anthropic", "model": "k2"},
+  "kimi-fast": {"connection": "kimi", "model": "k2-turbo", "effort": "low"}
+}
+```
 Blank rest minutes use 30; blank coordinator-alert minutes and compaction
 thresholds also use their defaults, shown beside each field. A price's input and
 output rates have no default and must be filled in. Mailbox allow-list lines

@@ -167,7 +167,7 @@ import time
 from pathlib import Path
 
 from . import without_session
-from .desk import Desk, SettingsError, desk_name_problem, now, read_json, write_json
+from .desk import Desk, SettingsError, provider_entry, desk_name_problem, now, read_json, write_json
 
 KINDS = ("release_waiting", "release_ended", "release_stopped", "ask", "server_stuck", "sandbox", "disk", "coordinator", "credit",
          "model", "test")
@@ -431,7 +431,7 @@ def from_event(desk: Desk, kind: str, fields: dict) -> None:
         from .run import model_change_text
         at = time.strftime('%H:%M', time.localtime(fields.get("since") or time.time()))
         provider, model = fields.get("provider"), fields.get("model")
-        codex = desk.settings()["providers"].get(provider, {}).get("kind") == "codex"
+        codex = (provider_entry(desk.settings(), provider) or {}).get("kind") == "codex"
         add(desk, "model", f"provider {provider}: it does not know model {model}; resting since {at} "
                           f"· next: change {model_change_text(codex=codex)}",
             zh=f"服务商 {provider}：不认识模型 {model}，自 {at} 起休息 "

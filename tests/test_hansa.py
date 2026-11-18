@@ -22018,6 +22018,136 @@ def save():'''))
         for word in words:
             self.assertTrue(any(word in p for p in matching), (word, problems))
 
+    def connection_settings(self):
+        """A compatible entry kimi with its key, and kimi-two using kimi's connection with its own model and effort."""
+        s = self.desk.settings()
+        s["providers"]["kimi"] = {"kind": "compatible", "base_url": "https://api.example.test/anthropic", "model": "k2",
+                                  "effort": "low"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        self.desk.write_key("kimi", "sk-kimi-connection-key")
+        s = self.desk.settings()
+        s["providers"]["kimi-two"] = {"connection": "kimi", "model": "k3", "effort": "high", "note": "the bigger one"}
+        return s
+
+    def test_a_connection_entry_names_one_entry_with_a_connection_of_its_own(self):
+        s = self.connection_settings()
+        self.assertEqual(self.desk.save_settings(s), [])  # an entry with no connection of its own: accepted
+        s["providers"]["claude-two"] = {"connection": "claude", "model": "sonnet"}  # a subscription's login
+        self.assertEqual(validate(s, self.desk.root), [])
+        for name, named, words in (("kimi-two", "kimi-two", ["kimi-two", "itself"]),  # itself
+                                   ("kimi-two", "nobody", ["nobody", "not a provider"]),  # a missing entry
+                                   ("kimi-three", "kimi-two", ["kimi-three", "kimi-two", "one level"])):  # a chain
+            with self.subTest(named=named):
+                t = copy.deepcopy(s)
+                t["providers"][name] = {"connection": named, "model": "x"}
+                problems = [str(p) for p in self.desk.save_settings(t)]
+                self.assertTrue(any("connection" in p and all(w in p for w in words) for p in problems), problems)
+        for field, value in (("kind", "compatible"), ("base_url", "https://other.test"), ("config_dir", "/x"),
+                             ("codex_home", "/x")):
+            with self.subTest(field=field):
+                t = copy.deepcopy(s)
+                t["providers"]["kimi-two"][field] = value
+                problems = [str(p) for p in self.desk.save_settings(t)]
+                self.assertTrue(any(field in p and "connection" in p for p in problems), problems)
+        self.assertEqual(self.desk.settings()["providers"]["kimi-two"], s["providers"]["kimi-two"])  # none was saved
+        t = copy.deepcopy(s)
+        del t["providers"]["kimi"]
+        problems = [str(p) for p in self.desk.save_settings(t)]
+        self.assertTrue(any("kimi" in p and "kimi-two" in p and "removed" in p for p in problems), problems)
+        self.assertIn("kimi", self.desk.settings()["providers"])
+        # the key is the connection's entry's: saving one for kimi-two is refused, naming kimi
+        with self.assertRaises(ValueError) as said:
+            self.desk.write_key("kimi-two", "sk-another-key-entirely")
+        self.assertIn("kimi", str(said.exception).replace("kimi-two", ""))
+        self.assertFalse(self.desk.key_file("kimi-two").exists())
+        # a coordinator on such an entry: the named entry's rules (a Codex connection stays refused)
+        t = copy.deepcopy(s)
+        t["coordinator"]["provider"] = "kimi-two"
+        self.assertEqual(validate(t, self.desk.root), [])
+        t = self.codex_settings()
+        t["providers"]["codex-two"] = {"connection": "codex", "model": "gpt-other"}
+        self.assertEqual(validate(t, self.desk.root), [])  # a Codex connection: accepted for an entry
+        t["coordinator"]["provider"] = "codex-two"
+        self.assertTrue(any("coordinator" in str(p) and "codex" in str(p) for p in validate(t, self.desk.root)))
+
+    def test_a_connection_entry_runs_with_the_named_entrys_endpoint_and_key_and_its_own_model(self):
+        from hansa import rests, run
+        from hansa.desk import provider_entry
+        s = self.connection_settings()
+        self.assertEqual(self.desk.save_settings(s), [])
+        own_old = self.desk.key_file("kimi-two")
+        own_old.write_text("sk-old-own-key-from-before\n")  # from before it named kimi: ignored, kept
+        s = self.desk.settings()
+        p = provider_entry(s, "kimi-two")
+        env = run.provider_env(self.desk, "kimi-two", p)
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://api.example.test/anthropic")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "sk-kimi-connection-key")
+        self.assertEqual({env[v] for v in run.MODEL_VARS}, {"k3"})
+        self.assertEqual(Path(env["CLAUDE_CONFIG_DIR"]).name, "claude-kimi-two")  # its own folder
+        self.assertEqual(p["effort"], "high")
+        self.assertEqual(run.provider_problem(self.desk, s, "kimi-two"), "")
+        self.assertEqual(rests.login(self.desk, "kimi-two", p), rests.login(self.desk, "kimi", provider_entry(s, "kimi")))
+        seen = []
+
+        def answer(argv, **kwargs):  # the check's request, and an answer that holds the key it was sent with
+            seen.append((argv, kwargs["env"]))
+            return subprocess.CompletedProcess(argv, 1, "", f"rejected {kwargs['env']['ANTHROPIC_AUTH_TOKEN']}")
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            r = run.check_provider(self.desk, "kimi-two")
+        [(argv, env)] = seen
+        self.assertEqual(argv[argv.index("--model") + 1], "k3")
+        self.assertEqual((env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_AUTH_TOKEN"]),
+                         ("https://api.example.test/anthropic", "sk-kimi-connection-key"))
+        self.assertNotIn("sk-kimi-connection-key", r["detail"])  # shown text holding the key is scrubbed
+        self.assertIn("[key of kimi]", r["detail"])
+        self.assertNotIn("sk-kimi-connection-key", self.desk.redact("a log line sk-kimi-connection-key"))
+        self.assertTrue(own_old.exists())
+        self.hansa("status")  # one row each, without failing on an entry that holds no kind of its own
+        self.assertIn("kimi-two", self.hansa("status"))
+
+    def test_a_codex_connection_entry_runs_the_named_entrys_program_and_home_with_its_own_model(self):
+        from hansa import run
+        from hansa.desk import provider_entry
+        s = self.codex_settings()
+        program = Path(s["providers"]["codex"]["codex_path"])
+        program.parent.mkdir(parents=True, exist_ok=True)
+        program.write_text("#!/bin/sh\n")
+        program.chmod(0o755)
+        s["providers"]["codex-two"] = {"connection": "codex", "model": "gpt-other", "effort": "low"}
+        self.assertEqual(self.desk.save_settings(s), [])
+        s = self.desk.settings()
+        p = provider_entry(s, "codex-two")
+        env = run.provider_env(self.desk, "codex-two", p)
+        self.assertEqual((env["HANSA_CODEX_BIN"], env["HANSA_CODEX_HOME"]),
+                         (str(program), s["providers"]["codex"]["codex_home"]))
+        self.assertEqual(Path(env["CLAUDE_CONFIG_DIR"]).name, "claude-codex-two")
+        self.assertEqual((p["model"], p["effort"]), ("gpt-other", "low"))
+        with self.assertRaises(ValueError):  # Codex has no key, through a connection neither
+            self.desk.write_key("codex-two", "sk-any-key-at-all")
+        seen = []
+
+        def answer(argv, **kwargs):
+            seen.append((argv, kwargs["env"]))
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "result", "result": "OK"}), "")
+        with unittest.mock.patch.object(run.subprocess, "run", answer):
+            self.assertTrue(run.check_provider(self.desk, "codex-two")["ok"])
+        [(argv, env)] = seen
+        self.assertEqual((argv[0], argv[argv.index("--model") + 1]), (str(run.CODEX_ADAPTER), "gpt-other"))
+        self.assertEqual(env["HANSA_CODEX_HOME"], s["providers"]["codex"]["codex_home"])
+        # the worker's read fence keeps the named entry's home closed, as for the entry itself
+        self.assertIn(s["providers"]["codex"]["codex_home"], [str(x) for x in run.worker_read_denials(self.desk)])
+
+    def test_explain_provider_says_whose_connection_an_entry_uses_and_who_uses_one(self):
+        self.assertEqual(self.desk.save_settings(self.connection_settings()), [])
+        two = self.hansa("explain", "provider", "kimi-two")
+        self.assertIn("connection: kimi", two)
+        self.assertIn("https://api.example.test/anthropic", two)
+        self.assertIn("model: k3", two)
+        self.assertIn("present", two)  # kimi's key
+        base = self.hansa("explain", "provider", "kimi")
+        self.assertIn("also used by: kimi-two", base)
+        self.assertNotIn("also used by", self.hansa("explain", "provider", "claude"))
+
     def test_every_codex_refusal_gives_the_page_a_rule_it_words_in_both_languages(self):
         # The page words a refused Codex field from its rule and values (validationCodex), not from the English sentence.
         page = (Path(__file__).resolve().parent.parent / "hansa" / "ui.html").read_text(encoding="utf-8")

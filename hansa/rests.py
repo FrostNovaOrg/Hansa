@@ -5,7 +5,7 @@ import json
 import time
 from pathlib import Path
 
-from .desk import claude_home, read_json, stored, write_json
+from .desk import claude_home, connected_providers, key_name, provider_entry, read_json, stored, write_json
 
 
 def rests_file():
@@ -18,6 +18,8 @@ def fingerprint(value):
 
 
 def login(desk, name, p):
+    """The fingerprint of the login whose usage rests are shared. p: the entry as provider_entry gives it (an entry
+    with `connection` has the named entry's)."""
     if p["kind"] == "subscription":
         return fingerprint(str(claude_home(desk.state_dir, name, p).resolve()))
     if p["kind"] == "codex":
@@ -25,7 +27,8 @@ def login(desk, name, p):
         if not isinstance(home, str) or not home.startswith("/"):
             return ""
         return fingerprint({"codex_home": stored(str(Path(home).resolve()))})
-    return fingerprint([p.get("base_url"), desk.read_key(name)]) if desk.has_key(name) else ""
+    owner = key_name(name, p)
+    return fingerprint([p.get("base_url"), desk.read_key(owner)]) if desk.has_key(owner) else ""
 
 
 def read():
@@ -41,7 +44,7 @@ def record(desk, name, *, checked=False, **fields):
     Return the checked login/rest fingerprint so this provider can ignore that rest even for another model."""
     checked_rest = ""
     try:
-        p = desk.settings()["providers"][name]
+        p = provider_entry(desk.settings(), name)
         key = login(desk, name, p)
         if not key:
             return
@@ -74,7 +77,7 @@ def include(desk, states):
     entries = read()
     if not entries:
         return states
-    for name, p in desk.settings()["providers"].items():
+    for name, p in connected_providers(desk.settings()).items():
         try:
             key = login(desk, name, p)
             entry = entries.get(key)

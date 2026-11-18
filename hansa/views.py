@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from . import SESSION_NAMES, SESSION_PREFIXES, account, alert, alert_push, build, cost, disk, gaps, goals, history, installed, installed_text, memory, notify, plugin, release, up
-from .desk import (DENY_AT, home_secrets, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, allow_fix, refused_rule, web_sites, listed_targets, read_json,
+from .desk import (DENY_AT, home_secrets, desks_list_problem, listed_desks, shared_writes, hidden_note, no_read_unusable, Desk, event_record, no_read_parts, no_read_parts_shown, stop_text, bad_messages, claude_home, connected_providers, connection_users, provider_entry, key_name, allow_fix, refused_rule, web_sites, listed_targets, read_json,
                    release_files_in, merge_targets_problem, work_lane_problem, write_json, PROJECT_FILE, PROJECT_LONG, SettingsError, old_codex_provider)
 from .run import (disk_short, repo_gone_text, session_private, HOLDING_VERDICTS, LINUX_SANDBOX_NOTES, LINUX_TRY_NOTE, output_hints, lane_identity, lane_locale, lane_wait_text, ROUND_QUIET, STUCK_AFTER, add_usage, branch_holds, is_local, lane_occupied, occupied_lane, merge_lane, merge_check_lane, merge_target, last_round,
                   markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, not_looking, oom_lines, own_merge_check, progress_of, standing_verification,
@@ -1155,14 +1155,14 @@ def status(desk: Desk) -> dict:
                        "model_since": pst.get(n, {}).get("model_since", 0),
                        "automatic_check": quota_probe_text(pst.get(n, {}), s),
                        "problem": provider_status_problem(desk, s, n, tasks), "check": pst.get(n, {}).get("check")}
-                      for n, p in sorted(s["providers"].items())],
+                      for n, p in sorted(connected_providers(s).items())],
         "running": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "provider": m.get("provider"),
                      "cancel": bool(m.get("cancel")),
                      "model": m.get("model_asked"), "minutes": _mins(m.get("started")),
                      "limit_min": s["lanes"].get(m.get("lane"), {}).get("timeout_min", 240),
                      "effort": m.get("effort_used", ""), "effort_from": m.get("effort_from"),
                      "effort_said": effort_text(m.get("effort_used", ""), m.get("effort_from"),
-                                                s["providers"].get(m.get("provider") or "")),
+                                                provider_entry(s, m.get("provider") or "")),
                      "checking": m.get("phase") == "checking", "starting": m.get("phase") == "starting",
                      "check_minutes": _mins(m.get("check_started")) if m.get("phase") == "checking" else None,
                      "check_retry": bool(m.get("check_retry")),  # only retries reset the server's timeout start
@@ -1470,7 +1470,7 @@ def limit_wait(desk: Desk, m: dict) -> str:
         return ""
     st = desk.provider_state().get(last["provider"]) or {}
     if st.get("model_since") and not st.get("credit_since"):
-        codex = desk.settings()["providers"].get(last["provider"], {}).get("kind") == "codex"
+        codex = (provider_entry(desk.settings(), last["provider"]) or {}).get("kind") == "codex"
         return f"{last['provider']}: {model_text(st['model_unknown'], codex=codex)}; that return used no try"
     if st.get("credit_since"):
         return (f"{last['provider']}: {credit_text(st)}; it starts when a provider of its lane is ready. "
@@ -1812,7 +1812,7 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         on = a["provider"]  # with its model and effort when they were not those of the run above
         if a.get("model") and (a["provider"], a["model"], a.get("effort", ""), a.get("effort_from")) != (
                 m.get("provider"), m.get("model_asked"), m.get("effort_used", ""), m.get("effort_from")):
-            on = run_text(a, desk.settings()["providers"].get(a["provider"]))
+            on = run_text(a, provider_entry(desk.settings(), a["provider"]))
         out.append(f"{when} run on {on}: {a['error']} ({a['kind']}; no try used)" if a.get("kind") in ("credit", "model", "conversation") else
                    f"{when} try on {on}: {a['error']}" if a.get("kind") not in ("limit", "killed") else
                    f"{when} run on {on}: {a['error']}; what it reported, if anything, is not kept"
@@ -2372,10 +2372,11 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             f"  standing instructions: {brief} ({'set' if brief.is_file() and brief.read_text().strip() else 'empty'};"
             f" read and change them with hansa lane brief {name})"])
     if what == "provider":
-        p = s["providers"].get(name)
+        p = provider_entry(s, name)
         if not p:
             return f"no provider {name}; providers: {', '.join(sorted(s['providers']))}"
         st = desk.provider_state().get(name, {})
+        uses, users = p.get("connection"), connection_users(s, name)
         if p["kind"] == "codex":
             access = [f"  Codex program: {p['codex_path']}", f"  Codex home: {p['codex_home']}",
                       f"  Codex's own login: `{codex_login(p)}`"]
@@ -2383,10 +2384,15 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             access = [f"  login: {p.get('config_dir') or 'the default Claude Code login'}"]
         else:
             access = [f"  endpoint: {p.get('base_url') or 'no endpoint yet'}"
-                      f" · key: {'present' if desk.has_key(name) else 'missing'}"]
+                      f" · key{f' (of {uses})' if uses else ''}: "
+                      f"{'present' if desk.has_key(key_name(name, p)) else 'missing'}"]
         return "\n".join([
             f"provider {name} ({provider_origin(desk, name)})",
             f"  kind: {p['kind']} · model: {p['model']} · effort: {p.get('effort') or 'default'}",
+            *([f"  connection: {uses}'s, which this entry uses with its own model and effort (shown below)"]
+              if uses else []),
+            *([f"  its connection is also used by: {', '.join(users)} (each with its own model and effort)"]
+              if users else []),
             f"  rest after a usage limit: until the reset time the error gives, and a minute; else "
             f"{s.get('cool_minutes', 30)} minutes"
             + " (the desk's cool_minutes)",
@@ -2550,8 +2556,8 @@ def release_settings_line(s: dict) -> str:
 def no_read_lines(desk: Desk, s: dict, name: str, whole: bool = False) -> list:
     """For hansa explain lane: what the lane's workers and verifiers, its setup and its check may not read. The
     built-in list as a count, the principal's own entries whole; whole: the built-in list name by name too."""
-    homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in s["providers"].items() if isinstance(p, dict))
-    codex_homes = dict.fromkeys(p["codex_home"] for p in s["providers"].values() if p.get("kind") == "codex")
+    homes = dict.fromkeys(str(claude_home(desk.state_dir, n, p)) for n, p in connected_providers(s).items() if isinstance(p, dict))
+    codex_homes = dict.fromkeys(p["codex_home"] for p in connected_providers(s).values() if p.get("kind") == "codex")
     kept = no_read_parts(s, desk.root)[0]
     own = session_private(desk)
     names = home_secrets()
