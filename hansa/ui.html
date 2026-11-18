@@ -909,7 +909,7 @@ Object.assign(T, ZH ? {
   pricesIntro:"设置 token 单价，用于成本页估算。金额单位为美元／百万 token。",
   readOnly:"只读", learnMore:"查看完整说明", advanced:"其余各项（只读）", connection:"连接信息",
   keySeparate:"密钥单独保存，不随“保存设置”提交。", keyPending:"有密钥尚未保存，请在模型服务商中单独保存。", keySaved:"密钥已保存。", keyCleared:"密钥已清除。",
-  invalidName:"名称只能包含小写字母、数字和连字符，且不能重复。", invalidModel:"模型名称不能为空或重复。",
+  nameRule:"只能用小写字母、数字和 '-'，最多 32 个字符，以字母或数字开头，且不能与已有的服务商重名。", invalidModel:"模型名称不能为空或重复。",
   providerUsedByCoordinator:name => `不能移除 ${name}：协调员正在使用它。请先为协调员选择另一家服务商。`,
   providerUsedByLanes:(name, lanes) => `不能移除 ${name}：工作线 ${lanes} 正在使用它。工作线由协调员更换服务商，请先让协调员将这些工作线移到另一家服务商。`,
   defaultMinutes:n => `留空使用默认值 ${n} 分钟。`, defaultTokens:n => `留空使用默认值 ${n} token。`,
@@ -1004,7 +1004,7 @@ Object.assign(T, ZH ? {
   pricesIntro:"Token rates for the Cost page. All rates are USD per million tokens.",
   readOnly:"Read only", learnMore:"Full explanation", advanced:"Other fields (read only)", connection:"Connection",
   keySeparate:"Keys are saved separately from Save settings.", keyPending:"Some keys are unsaved. Save them separately under Providers.", keySaved:"Key saved.", keyCleared:"Key cleared.",
-  invalidName:"Use a unique name with lowercase letters, digits and hyphens.", invalidModel:"Enter a unique, non-empty model name.",
+  nameRule:"Use lowercase letters, digits and '-': at most 32 characters, starting with a letter or digit, and not the name of a provider already here.", invalidModel:"Enter a unique, non-empty model name.",
   providerUsedByCoordinator:name => `Cannot remove ${name}: the coordinator uses it. Choose another provider for the coordinator first.`,
   providerUsedByLanes:(name, lanes) => `Cannot remove ${name}: lanes ${lanes} use it. The coordinator moves lanes to another provider; ask the coordinator to do that first.`,
   defaultMinutes:n => `Blank uses the default, ${n} minutes.`, defaultTokens:n => `Blank uses the default, ${n} tokens.`,
@@ -1081,6 +1081,8 @@ Object.assign(T, ZH ? {
   noSessionShort:"No listening session (minutes)", windowShort:"Coordinator waiting for input (minutes)", reviewShort:"Task waiting for review (minutes)", turnShort:"Coordinator's turns failing (minutes)",
   compactTitle:"Coordinator model"
 });
+// The refusal of a new provider's name repeats the rule shown under its field, so the two say the same.
+T.invalidName = (ZH ? "这个名称不能用：" : "This name cannot be used. ") + T.nameRule;
 Object.assign(T, ZH ? {
   staleReloaded:(changed, both) => `设置已在别处修改，页面已重新加载。别处修改的项：${changed}。两边都修改的项（保留你的草稿值）：${both}。草稿和密钥输入仍保留；再次点保存才会保存。`,
   staleReloadFailed:"设置已在别处修改，重新加载失败。草稿和密钥输入仍保留，请再试一次。",
@@ -2585,7 +2587,7 @@ async function saveSettings() {
   if (settingsSaving || !S || SETTINGS_LOCKED) return;
   const pendingNames = ["provider", "price"].filter(kind => (kind === "provider" ? newProviderName : newPriceName) !== "");
   const nameProblems = pendingNames.map(settingsNameProblem).filter(Boolean);
-  if (nameProblems.length) { settingsFailure = "save"; renderSettings(nameProblems); return; }
+  if (nameProblems.length) { settingsFailure = "save"; renderSettings(nameProblems); focusProblem(nameProblems[0]); return; }
   for (const kind of pendingNames) addSettingsName(kind);
   if (pendingNames.length) renderSettings([]);
   settingsEpoch++;
@@ -3132,6 +3134,11 @@ function renderSettings(problems = settingsProblems) {
   exceptionRefreshers = []; fieldRecords = [];
   const newProv = h("input", {value:newProviderName, placeholder:T.newName, "aria-label":T.providerName, maxlength:32,
     oninput:e => { newProviderName = e.target.value; refreshSettingsState(); }});
+  // The name's rule under its field, and its refusal there too (updateFieldErrors fills the error).
+  const newProvNote = h("p", {class:"field-note", id:"new-provider-note", "data-name-rule":""}, T.nameRule);
+  const newProvError = h("p", {class:"field-error", id:"new-provider-error", hidden:true});
+  newProv.setAttribute("aria-describedby", "new-provider-note");
+  fieldRecords.push({control:newProv, error:newProvError, noteId:"new-provider-note", group:"providers", matches:p => p === T.invalidName});
   const newPrice = h("input", {value:newPriceName, placeholder:"model", "aria-label":T.priceName,
     oninput:e => { newPriceName = e.target.value; refreshSettingsState(); }});
   const groups = {
@@ -3164,9 +3171,9 @@ function renderSettings(problems = settingsProblems) {
               : p.kind === "codex" ? codexFields(name, p)
               : [field(T.loginDir, bind(p, "config_dir"), "", "", true)])));
       }),
-      h("div", {class:"row add-row"}, newProv, h("button", {onclick:() => {
-        const problem = addSettingsName("provider"); renderSettings(problem ? [problem] : []);
-      }}, T.addProvider))),
+      h("div", {class:"add-row"}, h("div", {class:"row"}, newProv, h("button", {onclick:() => {
+        const problem = addSettingsName("provider"); renderSettings(problem ? [problem] : []); if (problem) focusProblem(problem);
+      }}, T.addProvider)), newProvNote, newProvError)),
       section(T.cooldown, fields(field(T.cooldown, bind(S, "cool_minutes", "number"), T.defaultMinutes(settingsDefaults.cool_minutes))))],
     coordinator: [
       section(T.compactTitle, fields(
