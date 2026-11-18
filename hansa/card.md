@@ -352,6 +352,9 @@ or ask `scout` when reading is enough; say what you need back.
 - A provider of the kind Codex (OpenAI's command line) has a program and home the principal sets on
   the page, and no key; its lost login is Codex's own (log in, then `hansa ping NAME`); providers on
   one Codex home share usage rests, and a lane's env cannot set `HANSA_CODEX_*`.
+- An entry under providers can use another entry's connection and key with its own model and effort
+  (the principal sets this on the page); entries on one connection rest together for credit, a lost
+  login or a rejected key, and come back together.
 - While a task runs, `hansa status` and `hansa show <id>` say how far it got (replies, minutes idle,
   its last note); Codex counts commands and file changes as replies. Some providers take minutes per reply;
   a task is stuck only when nothing has happened for a long while. Where a run's effort came from:
