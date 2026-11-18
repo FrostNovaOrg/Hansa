@@ -48811,6 +48811,23 @@ else vm.runInContext("loadSettings()", ctx).then(async () => {
         check(run('settingsProblems.includes(' + reason + ')'), "Save lost Add's reason");
         check(find(el => el.tag === "input" && el.attrs["aria-label"] === run(label)).value === value, "invalid name lost");
       }
+    } else if (ask === "settings-fix-provider-name-rule") {
+      const zh = process.argv[4] === "zh", box = () => find(el => el.tag === "input" && el.attrs["aria-label"] === run("T.providerName"));
+      const rule = ids["#new-provider-note"];
+      check(rule && rule.textContent === run("T.nameRule") && box().attrs["aria-describedby"] === "new-provider-note", "no name rule at the field");
+      for (const word of zh ? ["小写字母", "数字", "'-'", "32"] : ["lowercase letters, digits and '-'", "32"])
+        check(rule.textContent.includes(word), "name rule lacks the validation's words: " + rule.textContent);
+    } else if (ask === "settings-fix-provider-name-at-field") {
+      const box = () => find(el => el.tag === "input" && el.attrs["aria-label"] === run("T.providerName"));
+      for (const save of [false, true]) {
+        await run("loadSettings()"); change(box(), "Bad Name"); document.activeElement = document.body;
+        if (save) await run("saveSettings()");
+        else await find(el => el.tag === "button" && el.textContent === run("T.addProvider")).click();
+        const error = ids["#new-provider-error"];
+        check(error && !error.hidden && error.textContent === run("T.invalidName"), "refused name not shown at its field");
+        check(box().parentElement.parentElement.contains(error) && box().attrs["aria-invalid"] === "true", "refusal is away from the name field");
+        check(document.activeElement === box() && box().scrolled, "name field not brought into view and focused");
+      }
     } else if (ask === "settings-fix-mailbox-trim") {
       const label = find(el => el.tag === "label" && el.textContent === run("T.mailboxAllowTitle"));
       const box = label && ids["#" + label.attrs.for];
@@ -52370,6 +52387,12 @@ else if (ask === "task-steps")'''))
 
     def test_save_refuses_invalid_pending_names_with_adds_reason_and_keeps_text(self):
         self.run_settings_fix_scenario("invalid-pending-names")
+
+    def test_the_provider_name_rule_is_under_the_name_field_in_the_validations_words(self):
+        self.run_settings_fix_scenario("provider-name-rule")
+
+    def test_a_refused_provider_name_shows_at_the_name_field_which_gets_focus(self):
+        self.run_settings_fix_scenario("provider-name-at-field")
 
     def test_mailbox_allowlist_trims_line_edges_and_keeps_internal_spaces_for_validation(self):
         self.run_settings_fix_scenario("mailbox-trim")
