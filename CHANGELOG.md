@@ -176,6 +176,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 
 ### Releases and alerts
 
+- When the forbidden words are only in the release or watch command, `hansa release` offers taking them out
+  or asking the principal as alternatives, in one sentence.
 - Shortened alert batches keep each alert's next step when its start stays readable; short alerts use only the room they need, and alerts beyond what fits are counted with a pointer to `hansa status`.
 - Settings history shows `changed (values withheld)` for the alert command; `hansa explain` omits its value. The principal still views and edits it on the page.
 - `hansa release` says nothing is new only when it does not refuse, says a replaced code lapses only if it existed,
@@ -272,6 +274,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 
 ### The web page
 
+- A refused name for a new provider is explained at the name field, which gets the focus; the name's rule
+  is shown under the field before typing.
 - A release whose check after the push still runs reads “sent · check after the push running”.
 - Long words wrap in status pills. On a phone, Stop leads a release's row and the header shows the desk's name.
 - The Failed panel counts every open failure and says how many it lists. The Chinese missing-srt warning names its PATH;
@@ -341,6 +345,16 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 
 ### Providers and usage limits
 
+- A provider entry can name another entry under `connection` to use its endpoint, login or Codex setup and its key,
+  with its own model and effort, so one connection serves several models. `hansa explain provider` shows whose
+  connection an entry uses. See [the desk guide](docs/desk.md).
+- On the page (**Settings, Providers**) a connection is filled in once and holds several models, each a row with
+  its own name, effort, Ping and Remove, added with **Add a model**. An existing provider can be joined to another's
+  connection with **Uses the connection of**, and a row can be given a connection of its own again with **Own connection**.
+- Entries on one connection (the same login as for shared usage rests) rest together when it is out of credit,
+  loses its login or has its key rejected; one alert, or one line to the coordinator, names them all. A top-up,
+  a good ping or a new key for the connection brings them all back. An unknown model still rests only its own entry.
+  See [Tasks](docs/tasks.md).
 - A provider resting because it does not know its configured model sends an urgent alert saying how to fix it.
 - Rests recorded by older versions end by themselves once expired; a lane saved without a provider list does not hold dispatch.
 - A successful `hansa ping` says which rest it ended (usage limit, lost login, unknown model) or that a credit rest stays.
@@ -429,6 +443,9 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
 
 ### Codex, a provider of its own kind
 
+- When Ping finds no login for a Codex provider, the page shows the login command for that provider's home and
+  program, beside the button and in Status, in the page's language. The setup guide says a plain `codex login`
+  uses Codex's default home and does not log in the provider.
 - Settings offers the provider kind Codex, with its own fields: the Codex program and home, its model and
   more Codex settings. hansa starts and checks such a provider itself, with no `HANSA_CLAUDE` or `codex.env`,
   and runs its workers on macOS and Linux. [Codex](docs/codex.md) covers setup; the
