@@ -545,7 +545,7 @@ const T = ZH ? {
   oldCodex:(name, kind) => `${name} 通过旧方式使用 Codex；在本页为它选择类型 ${kind}，即可替换虚构的地址和密钥。更多：docs/codex.md。`,
   codexHomeNote:"存放 Codex 登录信息的目录，专给它用（建议 ~/codex-home）。", codexInstall:"Codex 的标准安装可用，包括 ~/.local/bin/codex 指向 ~/.codex/packages 内程序的链接。在上方填写程序的完整路径。其他安装须在工作智能体不能读的目录之外。",
   codexFoundRefused:(path, why) => `找到 Codex 程序 ${path}，但不能使用：${why}`,
-  codexLogin:"给 Codex 一个专用的主目录（不在 ~/.codex、工作台目录和工作线仓库里），并在那里登录一次：", codexProgramHere:"<Codex 程序>", codexHomeHere:"<Codex 主目录>",
+  codexLogin:"直接运行 codex login 会登录到 Codex 自己的默认主目录，不算这家服务商的登录。给 Codex 一个专用的主目录（不在 ~/.codex、工作台目录和工作线仓库里），并在那里登录一次：", codexProgramHere:"<Codex 程序>", codexHomeHere:"<Codex 主目录>",
   codexHomeKept:"hansa 会自动让其他服务商上的工作智能体读不到这个主目录，只有这家服务商的 Codex 运行才会打开它。",
   codexMore:"更多 Codex 设置", caFile:"证书文件（可选，完整路径）", caFileNote:"Codex 校验 TLS 连接所用的证书。", webSearch:"网页搜索", webSearchNote:"Codex 自带的网页搜索。",
   webSearchModes:["关闭（disabled）", "缓存（cached）", "实时（live）"], codexFeatures:"关闭的功能", codexFeaturesNote:d => `每行一个，或用空格分隔。默认：${d}`,
@@ -747,7 +747,7 @@ const T = ZH ? {
   oldCodex:(name, kind) => `${name} reaches Codex the old way; choosing the kind ${kind} for it on this page replaces the made-up address and key. More: docs/codex.md`,
   codexHomeNote:"The folder that holds Codex's login, a folder of its own (suggested: ~/codex-home).", codexInstall:"Codex's standard install works, including ~/.local/bin/codex linked into ~/.codex/packages. Give its program's full path above. Other installs must be outside folders workers may not read.",
   codexFoundRefused:(path, why) => `Found Codex at ${path}, but it cannot be used: ${why}`,
-  codexLogin:"Give Codex a home folder of its own, outside ~/.codex, the desk and the lanes' repositories, and log in there once:", codexProgramHere:"<Codex program>", codexHomeHere:"<Codex home>",
+  codexLogin:"Plain codex login uses Codex's default home and does not log in this provider. Give Codex a home folder of its own, outside ~/.codex, the desk and the lanes' repositories, and log in there once:", codexProgramHere:"<Codex program>", codexHomeHere:"<Codex home>",
   codexHomeKept:"hansa keeps this home from workers on other providers by itself: only this provider's Codex runs open it.",
   codexMore:"More Codex settings", caFile:"Certificate file (optional, full path)", caFileNote:"The certificates Codex checks TLS connections against.", webSearch:"Web search", webSearchNote:"Codex's own web search.",
   webSearchModes:["disabled", "cached", "live"], codexFeatures:"Features turned off", codexFeaturesNote:d => `One per line or separated by spaces. Default: ${d}`,
@@ -1597,6 +1597,7 @@ const serverMessagesZh = {
   cancelled:() => "已取消", cancelled_before_start:() => "开始前已取消",
   missing_provider:() => "设置中没有这家服务商", no_endpoint:() => "没有接口地址", no_key:() => "没有密钥",
   credit_low:() => "余额不足", no_answer:() => "没有收到答复", not_logged_in:() => "尚未登录；请运行 /login",
+  codex_not_logged_in:v => "尚未登录" + (v.status ? `（HTTP ${v.status}）` : "") + (v.detail ? `；程序报告：“${v.detail}”` : ""),
   provider_quota:v => `用量已达上限（${v.said}）${v.detail ? `；程序报告：“${v.detail}”` : ""}`,
   provider_key:v => `密钥被拒绝（${v.said}）${v.detail ? `；程序报告：“${v.detail}”` : ""}`,
   provider_timeout:v => `${v.seconds} 秒内没有收到答复`,
@@ -2170,7 +2171,7 @@ function checkButton(name, after) {
       err(new Error(outsideRefusal(r))); return;
     }
     if (after) return after(r);
-    b.disabled = SETTINGS_LOCKED; b.textContent = r ? `${T.check}: ${r.ok ? "OK" : "✗"} ${fieldText(r, "detail")}` : T.check;
+    b.disabled = SETTINGS_LOCKED; b.textContent = r ? `${T.check}: ${r.ok ? "OK" : "✗"} ${r.detail_message?.code === "provider_login" ? messageText(r.detail_message) : fieldText(r, "detail")}` : T.check;
     b.className = r && r.ok ? "ok" : "bad"; }}, T.check);
   return b;
 }

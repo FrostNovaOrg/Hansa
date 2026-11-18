@@ -22066,6 +22066,70 @@ def save():'''))
         self.assertEqual(homes, [{"provider": "cx", "path": "~/codex-home"},
                                  {"provider": "outside", "path": str(self.tmp / "other-home")}])
 
+    def codex_login_check(self, status=None, said=""):
+        from hansa import run
+        s = self.codex_settings()
+        p = s["providers"]["codex"]
+        p.update(codex_path=str(self.tmp / "codex tools" / "codex"), codex_home=str(self.tmp / "codex home"))
+        program = Path(p["codex_path"])
+        program.parent.mkdir(exist_ok=True)
+        program.write_text("#!/bin/sh\n")
+        program.chmod(0o755)
+        self.assertEqual(self.desk.save_settings(s), [])
+        adapter = {"is_error": True, "result": "not logged in" + (json.dumps({"message": said}) if said else ""),
+                   "api_error_status": status}
+        answer = subprocess.CompletedProcess([], 1, json.dumps(adapter), "")
+        with unittest.mock.patch.object(run.subprocess, "run", return_value=answer):
+            return run.check_provider(self.desk, "codex")
+
+    def test_codex_login_check_carries_the_status_login_remedy(self):
+        from hansa import run
+        for status, said in ((None, ""), (401, ""), (403, ""), (401, "fixture auth detail")):
+            with self.subTest(status=status, said=said):
+                result = self.codex_login_check(status, said)
+                reason = "not logged in" + (f" (HTTP {status})" if status else "")
+                reason += f": {said}" if said else ""
+                self.assertEqual((result["ok"], result["detail"]), (False, reason))
+                self.assertEqual(self.desk.provider_state()["codex"]["reason"], reason)
+                with unittest.mock.patch("hansa.cli.check_provider", return_value=result):
+                    self.assertEqual(self.hansa("ping", "codex"), f"codex: NOT ok - {reason}\n")
+                message = result["detail_message"]
+                self.assertEqual(message["code"], "provider_login")
+                self.assertEqual(message["text"], provider_problem(self.desk, self.desk.settings(), "codex"))
+                self.assertEqual(message["values"]["login"],
+                                 f"`{run.codex_login(self.desk.settings()['providers']['codex'])}`")
+
+    def test_codex_login_ping_and_status_read_in_the_page_language(self):
+        from hansa import run
+        for status, said in ((None, ""), (401, ""), (403, ""), (401, "fixture auth detail")):
+            result = self.codex_login_check(status, said)
+            command = run.codex_login(self.desk.settings()["providers"]["codex"])
+            for language in ("zh", "en"):
+                with self.subTest(status=status, said=said, language=language):
+                    shown = self.message_page(check=result, language=language)
+                    for where in ("check", "status"):
+                        self.assertIn(command, shown[where])
+                        self.assertIn("hansa ping codex", shown[where])
+                        if language == "zh":
+                            self.assertIn("尚未登录", shown[where])
+                            self.assertNotIn("not logged in", shown[where])
+                            self.assertNotIn("/login", shown[where])
+                        else:
+                            self.assertIn("not logged in", shown[where])
+                        if status:
+                            self.assertIn(f"HTTP {status}", shown[where])
+                        if said:
+                            self.assertIn(said, shown[where])
+
+    def test_codex_login_note_explains_the_default_home_in_both_languages(self):
+        self.codex_login_check()
+        for language, words in (("en", ("codex login", "Codex's default home", "does not log in this provider")),
+                                ("zh", ("codex login", "Codex 自己的默认主目录", "不算这家服务商的登录"))):
+            with self.subTest(language=language):
+                text = self.message_page(language=language)["providers"]
+                for word in words:
+                    self.assertIn(word, text)
+
     def test_codex_rest_messages_name_no_key_and_keep_the_login_command(self):
         from hansa import page_messages, run as hansa_run
         s = self.codex_settings()

@@ -19,8 +19,9 @@ hansa can run a worker with OpenAI's Codex command line instead of Claude Code, 
 3. Give this provider a home folder of its own, outside `~/.codex`, the desk and the lanes' repositories, and log
    in once there: `CODEX_HOME=<Codex home> <Codex program> login`. The suggested separate home is `~/codex-home`;
    an existing login there can be reused. Detecting paths creates no folder, reads no login and runs no program.
-   The page and
-   `hansa explain provider NAME` give the command. Then `hansa ping NAME`.
+   Plain `codex login` uses Codex's default home (`~/.codex`) and does not log in this provider.
+   The page and `hansa explain provider NAME` give the command. If Ping finds no login, the page gives the same
+   command beside the button and in Status, in the page's language. Then `hansa ping NAME`.
 
 hansa starts the adapter itself for such a provider and passes its settings in the run's environment: no
 `HANSA_CLAUDE`, no `codex.env`. It keeps the Codex home from every run but that provider's own Codex runs, so

@@ -1544,6 +1544,10 @@ def codex_login(p: dict) -> str:
     return f"CODEX_HOME={shlex.quote(p['codex_home'])} {shlex.quote(p['codex_path'])} login"
 
 
+def codex_login_problem(p: dict, name: str, reason: str) -> str:
+    return f"{reason}; log in with `{codex_login(p)}`, then `hansa ping {name}` brings it back"
+
+
 def codex_problem(p: dict) -> str:
     """Installation checks belong here, not in the rules for saving provider settings."""
     for label, path in (("Codex adapter", CODEX_ADAPTER), ("Codex program", p["codex_path"])):
@@ -1583,7 +1587,7 @@ def provider_problem(desk: Desk, s: dict, name: str) -> str:
             st.get("cool_until", 0) > time.time() and str(st.get("reason", "")).startswith("key rejected")):
         # An earlier rest can carry old key wording; keep its deadline when the provider's kind changes.
         reason = st["reason"].replace("key rejected", "login rejected", 1)
-        return f"{reason}; log in with `{codex_login(p)}`, then `hansa ping {name}` brings it back"
+        return codex_login_problem(p, name, reason)
     if st.get("cool_until", 0) > time.time():
         if str(st.get("reason", "")).startswith("key rejected"):
             return f"{st['reason']}; saving a new key brings it back"
@@ -8240,7 +8244,7 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
     (the program a recorded hansa serve start runs), else through this process's; Codex always uses its adapter.
     A good answer names any
     rest_ended (quota, login, model) or rest_kept (credit), separately from the model detail."""
-    from .page_messages import annotate
+    from .page_messages import annotate, provider
     s = desk.settings()
     p = s["providers"].get(name)
     if not p:
@@ -8307,6 +8311,10 @@ def check_provider(desk: Desk, name: str, timeout: int = 90, claude: str = "", *
                 elif str(st.get("reason", "")).startswith("not logged in"):
                     result["rest_ended"] = "login"
         result = annotate(result, ("detail",))
+        if p["kind"] == "codex" and kind == "login":
+            # The page gets the Status row's remedy; terminal output and the stored reason keep detail.
+            result["detail_message"] = provider(codex_login_problem(p, name, detail), {"reason": detail}, name,
+                                                codex=True)
         desk.set_provider_state(name, check=result)
         if ok and not st.get("credit_since"):
             from .rests import record

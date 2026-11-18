@@ -68,8 +68,10 @@ PREFIXES = {
 }
 
 
-def describe(text: str) -> dict:
+def describe(text: str, *, codex: bool = False) -> dict:
     text = text or ""
+    if codex and (match := re.fullmatch(r"not logged in(?: \(HTTP (?P<status>\d+)\))?(?:: (?P<detail>.*))?", text)):
+        return message("codex_not_logged_in", text, **match.groupdict())
     if text in EXACT:
         return message(EXACT[text], text)
     for prefix, code in PREFIXES.items():
@@ -98,15 +100,15 @@ def describe(text: str) -> dict:
     return message("unknown", text)
 
 
-def annotate(record: dict, fields=("error", "why")) -> dict:
-    return {**record, **{key + "_message": describe(record[key]) for key in fields if record.get(key)}}
+def annotate(record: dict, fields=("error", "why"), *, codex: bool = False) -> dict:
+    return {**record, **{key + "_message": describe(record[key], codex=codex) for key in fields if record.get(key)}}
 
 
 def provider(text: str, state: dict, name: str, *, codex: bool = False) -> dict:
     """The rest's timestamps and policy are already recorded, so do not parse its sentence.
     codex: the provider is of kind codex, which has no key, so the page's words name none."""
     import time
-    values = {"provider": name, "reason": describe(state.get("reason", ""))}
+    values = {"provider": name, "reason": describe(state.get("reason", ""), codex=codex)}
     if state.get("credit_since"):
         return message("provider_credit", text, since=state["credit_since"], shared=bool(state.get("shared_rest")),
                        plan=state.get("credit_plan") or "")
@@ -163,7 +165,7 @@ def status(desk, s: dict, st: dict) -> dict:
         row["problem_message"] = provider(row["problem"], states.get(row["name"], {}), row["name"],
                                           codex=row.get("kind") == "codex")
         if row["check"]:
-            row["check"] = annotate(row["check"], ("detail",))
+            row["check"] = annotate(row["check"], ("detail",), codex=row.get("kind") == "codex")
     low = st["disk"]["low"]
     if low:
         fl = disk.floor(s)
