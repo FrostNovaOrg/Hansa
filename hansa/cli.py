@@ -1809,15 +1809,16 @@ def cmd_release(a):
                    "refused: what goes out holds words the principal keeps from going out (the web page, Settings)")
         commands = [where for where in ("release command", "watch command")
                     if any(h["where"] == where for h in r["hits"])]
-        command_remedy = ("Take them out of " + " and ".join("the " + where for where in commands) + ". "
-                          if commands else "")
         commit_remedy = ("A task does not help: the commits that hold the words still go out. "
                          if any(h["commit"] for h in r["hits"]) else "")
+        remedy = f"{commit_remedy}Ask"
+        if commands:
+            command_remedy = "Take them out of " + " and ".join("the " + where for where in commands)
+            remedy = f"{command_remedy}. {remedy}" if commit_remedy else f"{command_remedy}, or ask"
         raise SystemExit(desk.redact(
             f"hansa: {head}\n{refusal}, so nothing waits for the principal and nothing runs:\n"
             f"{release.hits_text(r['hits'])}\n"
-            f"{command_remedy}{commit_remedy}"
-            f"Ask the principal with hansa ask to except the entry for lane {a.lane} or remove it on the page. "
+            f"{remedy} the principal with hansa ask to except the entry for lane {a.lane} or remove it on the page. "
             f"{see_more('forbidden-words')}"))
     heard = notify.hears(desk)
     after = ("hansa tells this session when it is answered and when it ends" if heard else

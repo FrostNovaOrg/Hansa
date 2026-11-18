@@ -45941,7 +45941,7 @@ def save():'''))
         self.with_release("./deploy --to staging-7")
         said = self.refused("release", "a")
         self.assertIn("release command: ./deploy --to staging-7", said)
-        self.assertIn("Take them out of the release command", said)
+        self.assertIn("Take them out of the release command, or ask the principal", said)
         self.assertNotIn("A task does not help", said)
         self.assertNotIn("still go out", said)
         self.assertEqual([h["where"] for h in release.releases(self.desk)[-1]["hits"]], ["release command"])
@@ -46129,16 +46129,11 @@ def save():'''))
                            "echo zebra" if "release command" in commands else "true", "--watch",
                            "echo zebra" if "watch command" in commands else "true")
                 told = self.refused("release", "a", "public")
-                remedy = told.split("Take them out", 1)[1]
-                for command in ("release command", "watch command"):
-                    if command in commands:
-                        self.assertIn(command + ": echo zebra", told)
-                        self.assertIn("the " + command, remedy)
-                    else:
-                        self.assertNotIn(command, remedy)
-                self.assertIn("principal with hansa ask", remedy)
-                self.assertIn("except the entry for lane a", remedy)
-                self.assertIn("remove it on the page", remedy)
+                for command in commands:
+                    self.assertIn(command + ": echo zebra", told)
+                places = " and ".join("the " + command for command in commands)
+                self.assertIn(f"Take them out of {places}, or ask the principal with hansa ask "
+                              "to except the entry for lane a or remove it on the page", told)
                 self.assertNotIn("A task does not help", told)
                 self.assertNotIn("still go out", told)
         self.hansa("lane", "target", "a", "public", "true", "--watch", "true")
@@ -46146,11 +46141,11 @@ def save():'''))
         told = self.refused("release", "a", "public")
         self.assertIn("history.txt: zebra", told)
         remedy = told.split("A task does not help", 1)[1]
-        self.assertIn("commits that hold the words still go out", remedy)
+        commit_advice = "commits that hold the words still go out. Ask the principal with hansa ask"
+        self.assertIn(commit_advice, remedy)
         self.assertIn("except the entry for lane a", remedy)
         self.assertIn("remove it on the page", remedy)
-        self.assertNotIn("release command", remedy)
-        self.assertNotIn("watch command", remedy)
+        self.assertNotIn("Take them out of", told)
         for command in ("release command", "watch command"):
             with self.subTest(mixed=command):
                 self.hansa("lane", "target", "a", "public",
@@ -46159,10 +46154,8 @@ def save():'''))
                 told = self.refused("release", "a", "public")
                 self.assertIn("history.txt: zebra", told)
                 self.assertIn(command + ": echo zebra", told)
-                self.assertIn("Take them out of the " + command, told)
-                self.assertIn("A task does not help", told)
-                self.assertIn("commits that hold the words still go out", told)
-                self.assertIn("principal with hansa ask", told)
+                self.assertIn(f"Take them out of the {command}. A task does not help", told)
+                self.assertIn(commit_advice, told)
                 self.assertIn("except the entry for lane a", told)
                 self.assertIn("remove it on the page", told)
 
@@ -46172,7 +46165,7 @@ def save():'''))
         self.assertTrue(self.page_save(lambda s: s.update(release_forbidden=["Falcon"]))["ok"])
         told = self.refused("release", "a", "public")
         self.assertIn("watch command: echo falcon watch", told)
-        self.assertIn("Take them out of the watch command", told)
+        self.assertIn("Take them out of the watch command, or ask the principal", told)
         self.assertNotIn("A task does not help", told)
         self.assertNotIn("still go out", told)
         r = release.releases(self.desk)[-1]
