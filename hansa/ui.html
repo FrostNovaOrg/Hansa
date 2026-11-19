@@ -917,6 +917,10 @@ Object.assign(T, ZH ? {
   readOnly:"只读", learnMore:"查看完整说明", advanced:"其余各项（只读）", connection:"连接信息",
   keySeparate:"密钥单独保存，不随“保存设置”提交。", keyPending:"有密钥尚未保存，请在模型服务商中单独保存。", keySaved:"密钥已保存。", keyCleared:"密钥已清除。",
   nameRule:"只能用小写字母、数字和 '-'，最多 32 个字符，以字母或数字开头，且不能与已有的服务商重名。", invalidModel:"模型名称不能为空或重复。",
+  providerNameTaken:name => `已有名为“${name}”的服务商。`,
+  providerNameOnCard:name => `“${name}”已是这张卡片下的模型。`,
+  providerNameCanJoin:(name, card, choice) => `“${name}”已有自己的服务商卡片。请在“${name}”的卡片上将“${choice}”选为“${card}”，然后保存。`,
+  providerNameUsedHere:name => `名称“${name}”在此页面上已使用。`,
   providerUsedByCoordinator:name => `不能移除 ${name}：协调员正在使用它。请先为协调员选择另一家服务商。`,
   providerUsedByLanes:(name, lanes) => `不能移除 ${name}：工作线 ${lanes} 正在使用它。工作线由协调员更换服务商，请先让协调员将这些工作线移到另一家服务商。`,
   providerUsedByModels:(name, rows) => `不能移除 ${name}：${rows} 使用它的连接。请先删除它们，或给它们单独的连接。`,
@@ -1016,6 +1020,10 @@ Object.assign(T, ZH ? {
   readOnly:"Read only", learnMore:"Full explanation", advanced:"Other fields (read only)", connection:"Connection",
   keySeparate:"Keys are saved separately from Save settings.", keyPending:"Some keys are unsaved. Save them separately under Providers.", keySaved:"Key saved.", keyCleared:"Key cleared.",
   nameRule:"Use lowercase letters, digits and '-': at most 32 characters, starting with a letter or digit, and not the name of a provider already here.", invalidModel:"Enter a unique, non-empty model name.",
+  providerNameTaken:name => `There is already a provider named “${name}”.`,
+  providerNameOnCard:name => `“${name}” is already a model of this card.`,
+  providerNameCanJoin:(name, card, choice) => `“${name}” is already a provider with its own card. On the “${name}” card, set “${choice}” to “${card}”, then save.`,
+  providerNameUsedHere:name => `The name “${name}” is already used on this page.`,
   providerUsedByCoordinator:name => `Cannot remove ${name}: the coordinator uses it. Choose another provider for the coordinator first.`,
   providerUsedByLanes:(name, lanes) => `Cannot remove ${name}: lanes ${lanes} use it. The coordinator moves lanes to another provider; ask the coordinator to do that first.`,
   providerUsedByModels:(name, rows) => `Cannot remove ${name}: ${rows} use its connection. Remove them first, or give them their own connection.`,
@@ -2603,7 +2611,7 @@ async function loadSettings(problems, keepKeys = false, background = false) {
 async function saveSettings() {
   if (settingsSaving || !S || SETTINGS_LOCKED) return;
   const pendingNames = ["provider", "price"].filter(kind => (kind === "provider" ? newProviderName : newPriceName) !== "");
-  nameProblemAt = new Set();
+  nameProblemAt.clear();
   const nameProblems = [...pendingNames.map(settingsNameProblem),
     ...pendingModelProblems(newProviderName ? [newProviderName.trim()] : [])].filter(Boolean);
   if (nameProblems.length) { settingsFailure = "save"; renderSettings(nameProblems); focusProblem(nameProblems[0]); return; }
@@ -3061,16 +3069,24 @@ function editedBarkSecret(before, value) {
       && displayed[displayed.length - 1 - end] === value[value.length - 1 - end]) end++;
   return before.slice(0, start) + value.slice(start, value.length - end) + before.slice(before.length - end);
 }
-/* A new provider entry's name: the rule under its field, and not a name already here or about to be added (taken). */
-const providerNameProblem = (name, taken = []) =>
-  !/^[a-z0-9][a-z0-9-]{0,31}$/.test(name.trim()) || S.providers[name.trim()] || taken.includes(name.trim()) ? T.invalidName : "";
-// Where a refused new name was typed: "provider" (Add provider) or "model:<card>" (that card's Add a model), so the
-// refusal shows at that field and not at every name field.
-let nameProblemAt = new Set();
+function providerNameProblem(name, card = "", taken = []) {
+  name = name.trim();
+  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) return T.invalidName;
+  if (!S.providers[name]) return taken.includes(name) ? T.providerNameUsedHere(name) : "";
+  if (!Object.hasOwn(S.providers, name)) return T.invalidName;  // Preserve the refusal for inherited names such as constructor.
+  if (card) {
+    const owner = connectionCard(name);
+    if (owner === card) return T.providerNameOnCard(name);
+    if (owner === name && !connectionUsers(name).length) return T.providerNameCanJoin(name, card, T.joinConnection);
+  }
+  return T.providerNameTaken(name);
+}
+// Match each refusal to the field where it was typed, including when a save finds different problems at once.
+const nameProblemAt = new Map();
 function settingsNameProblem(kind) {
   if (kind === "provider") {
     const problem = providerNameProblem(newProviderName);
-    if (problem) nameProblemAt.add("provider");
+    if (problem) nameProblemAt.set("provider", problem);
     return problem;
   }
   const name = newPriceName.trim();
@@ -3118,8 +3134,8 @@ function pendingModelProblems(taken = []) {
   const problems = [];
   for (const [card, d] of Object.entries(MODEL_DRAFTS)) {
     if (!(d.name || d.model || d.effort) || !S.providers[card]) continue;
-    const problem = providerNameProblem(d.name, taken);
-    if (problem) { nameProblemAt.add("model:" + card); problems.push(problem); } else taken.push(d.name.trim());
+    const problem = providerNameProblem(d.name, card, taken);
+    if (problem) { nameProblemAt.set("model:" + card, problem); problems.push(problem); } else taken.push(d.name.trim());
   }
   return problems;
 }
@@ -3131,9 +3147,9 @@ function addModelRows() {
   }
 }
 function addModel(card) {
-  nameProblemAt = new Set();
-  const d = MODEL_DRAFTS[card] || {name:""}, problem = providerNameProblem(d.name || "");
-  if (problem) { nameProblemAt.add("model:" + card); return problem; }
+  nameProblemAt.clear();
+  const d = MODEL_DRAFTS[card] || {name:""}, problem = providerNameProblem(d.name || "", card);
+  if (problem) { nameProblemAt.set("model:" + card, problem); return problem; }
   S.providers[d.name.trim()] = {connection:card, model:(d.model || "").trim(), effort:d.effort || ""};
   delete MODEL_DRAFTS[card];
   return "";
@@ -3197,7 +3213,7 @@ function codexFields(name, p) {
     h("div", {class:"field wide"}, more)];
 }
 function addSettingsName(kind) {
-  if (kind === "provider") nameProblemAt = new Set();
+  if (kind === "provider") nameProblemAt.clear();
   const problem = settingsNameProblem(kind);
   if (problem) return problem;
   if (kind === "provider") {
@@ -3236,7 +3252,7 @@ function modelRow(name, card) {
     MODEL_MESSAGES[name] ? h("div", {class:"row warn"}, messageText(MODEL_MESSAGES[name])) : null,
     fields(field(T.model, bind(p, "model")), field(T.effort, pick(p, "effort", EFFORTS))));
 }
-/* Under a card's Models: a name (the rule and refusal of Add provider's), a model and an effort; nothing else. */
+/* Under a card's Models: a name with its rule and refusal, a model and an effort. */
 function addModelRow(card) {
   const d = MODEL_DRAFTS[card] ||= {name:"", model:"", effort:""};
   const id = "new-model-" + card;
@@ -3248,7 +3264,7 @@ function addModelRow(card) {
     onchange:e => { d.effort = e.target.value; refreshSettingsState(); }},
     EFFORTS.map(o => h("option", {value:o, selected:(d.effort || "") === o}, o || T.effortDefault)));
   const error = h("p", {class:"field-error", id:id + "-error", hidden:true});
-  fieldRecords.push({control:name, error, noteId:id + "-note", group:"providers", matches:p => p === T.invalidName && nameProblemAt.has("model:" + card)});
+  fieldRecords.push({control:name, error, noteId:id + "-note", group:"providers", matches:p => p === nameProblemAt.get("model:" + card)});
   return h("div", {class:"add-row", "data-add-model":card},
     h("div", {class:"row"}, name, model, effort, h("button", {onclick:() => {
       const problem = addModel(card); renderSettings(problem ? [problem] : []); if (problem) focusProblem(problem);
@@ -3311,7 +3327,7 @@ function renderSettings(problems = settingsProblems) {
   const newProvError = h("p", {class:"field-error", id:"new-provider-error", hidden:true});
   newProv.setAttribute("aria-describedby", "new-provider-note");
   fieldRecords.push({control:newProv, error:newProvError, noteId:"new-provider-note", group:"providers",
-    matches:p => p === T.invalidName && (nameProblemAt.has("provider") || !nameProblemAt.size)});
+    matches:p => p === nameProblemAt.get("provider") || (p === T.invalidName && !nameProblemAt.size)});
   const newPrice = h("input", {value:newPriceName, placeholder:"model", "aria-label":T.priceName,
     oninput:e => { newPriceName = e.target.value; refreshSettingsState(); }});
   const groups = {
