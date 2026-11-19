@@ -746,6 +746,30 @@ def title_hits(title: str, words: list, detailed: bool = False) -> list:
     return hits if detailed else [h["word"] for h in hits]
 
 
+def text_hits(text: str, words: list) -> list:
+    """The forbidden words in a task's text or a retry's note, matched as title_hits matches them, by line:
+    [{line_no, line, words}], each word once per line, in order, at most MOST_HITS lines; a pattern-limit hit (as
+    title_hits gives it, with line_no) names a line patterns could not check. Never committed by hansa, so a hit
+    is only a warning."""
+    out = []
+    with PatternScan(words) as scan:
+        no = 0
+        try:
+            for no, line in enumerate((text or "").splitlines(), 1):
+                before = len(scan.hits)
+                scan.line(line, where="text")
+                out.extend({**h, "line_no": no} for h in scan.hits[before:])  # too long for patterns
+                low = line.casefold()
+                found = [w for w, matcher in scan.matchers if scan.search(w, matcher, line, low, where="text")]
+                if found:
+                    out.append({"line_no": no, "line": line.strip()[:300], "words": found})
+                if len(out) >= MOST_HITS:
+                    break
+        except PatternLimit as e:
+            out.append({**e.hit, "line_no": no})
+    return out[:MOST_HITS]
+
+
 def named_files(command: str, files: list) -> list:
     """The changed files the command line names (./deploy.sh, scripts/release.sh, or by its name alone): what
     the release runs is in the change."""

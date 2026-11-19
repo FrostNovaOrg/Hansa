@@ -385,7 +385,16 @@ one line, in text read as UTF-8), earlier:
   word and that it is in `--title` or in the text's first line (the title
   when no `--title` is given), and queue nothing: the title goes into the
   task's commit message and its merge's. The rest of the task's text is
-  not committed and is not looked at.
+  not committed, so a word there does not refuse it: the task is queued,
+  and after the "queued" line `hansa add` warns, naming each line that
+  holds one (`the task's text, line N`, up to 20 lines) with the word as the
+  title's refusal names it. Workers copy what a task quotes into their
+  change, which `hansa merge` then refuses: if the word is only an example,
+  cancel the task and add it again with a neutral one; if the task is about
+  that word (removing it, say), go on. `hansa retry` warns the same way of
+  its note (`the note, line N`). Text from `--file PATH` or `--file -` is
+  looked at the same way; `--verify-note` and `--attach` files are not. An
+  entry excepted for the task's lane is not warned of, as for the title.
 - `hansa merge` refuses a task whose commits that the
   base branch does not hold yet hold one: in a message, an added line (a
   merge commit's: what it adds beyond its parents), the name of a file
