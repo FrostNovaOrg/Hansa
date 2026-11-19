@@ -11689,6 +11689,90 @@ def save():'''))
         self.forbid()
         self.assertIn("queued", self.hansa("add", "x", "--title", "Ship the falcon badge"))
 
+    def test_a_forbidden_word_in_a_tasks_text_is_queued_with_a_warning(self):
+        from hansa import release
+        advice = ("Workers copy what a task quotes", "If the word is only an example, cancel",
+                  "with a neutral one", "if the task is about that word (removing it, say), go on")
+
+        def warned(said, tid, *places):
+            queued = said.index(f"{tid} queued")
+            self.assertGreater(said.index("warning: words the principal keeps from going out"), queued)
+            for x in advice + places:
+                self.assertIn(x, said)
+            self.assertIn(f"hansa cancel {tid}", said)
+
+        # title holds one: refused, as before
+        self.forbid("Falcon")
+        self.assertIn('--title holds "Falcon"', self.refused("add", "x", "--title", "the falcon"))
+        self.assertEqual(self.desk.tasks(), [])
+        # title clean, the text holds one: queued, then the warning naming the place
+        said = self.hansa("add", "Fix the badge\nfor project falcon", "--lane", "a")
+        tid = said.split()[0]
+        self.assertEqual(self.desk.meta(tid)["state"], "queued")
+        warned(said, tid, "the task's text, line 2, holds \"Falcon\": \"for project falcon\"", "add it again")
+        # the list shows no more than the title's refusal: only the entry found, not the others
+        self.forbid("Falcon", "Heron")
+        said = self.hansa("add", "Fix the badge\nfor project falcon")
+        self.assertNotIn("Heron", said)
+        # excepted for the task's lane: no warning; with no lane, the title's rule (no lane's exceptions)
+        self.hansa("lane", "add", "e", "--like", "a")
+        self.assertEqual(self.page_save(lambda s: s.update(
+            release_forbidden_except=[{"entry": "Falcon", "lanes": ["e"]}])), {"ok": True, "problems": []})
+        self.assertNotIn("warning", self.hansa("add", "Fix the badge\nfor project falcon", "--lane", "e"))
+        self.assertIn("warning", self.hansa("add", "Fix the badge\nfor project falcon", "--lane", "a"))
+        self.assertIn("warning", self.hansa("add", "Fix the badge\nfor project falcon"))
+        self.assertEqual((release.title_hits("falcon", release.lane_words(self.desk.settings(), "e")),
+                          release.title_hits("falcon", release.lane_words(self.desk.settings(), None))),
+                         ([], ["Falcon"]))
+        # re: patterns, applied as the title's check applies them (any case, within a line)
+        self.assertTrue(self.page_save(lambda s: s.update(release_forbidden_except=[]))["ok"])
+        self.forbid(r"re:\bticket-\d+\b")
+        said = self.hansa("add", "Fix the badge\nas in TICKET-42 here")
+        warned(said, said.split()[0], r'line 2, holds "re:\bticket-\d+\b"'.replace("\\", "\\\\"))
+        self.assertNotIn("warning", self.hansa("add", "Fix the badge\nas in ticket-x"))
+        # --file PATH and --file -
+        self.forbid("Falcon")
+        f = self.tmp / "task.md"
+        f.write_text("Fix the badge\n\nsee falcon\n")
+        said = self.hansa("add", "--file", str(f))
+        warned(said, said.split()[0], "the task's text, line 3")
+        with unittest.mock.patch("sys.stdin", io.StringIO("Fix the badge\nfalcon\n")):
+            said = self.hansa("add", "--file", "-")
+        warned(said, said.split()[0], "the task's text, line 2")
+        # --verify-note and --attach files are not looked at
+        att = self.tmp / "att.txt"
+        att.write_text("falcon\n")
+        self.assertNotIn("warning", self.hansa("add", "Fix the badge", "--attach", str(att),
+                                               "--verify", "--verify-note", "check falcon"))
+        # several places: each named, up to the number the scan shows
+        lines = "\n".join(f"falcon {i}" for i in range(1, release.MOST_HITS + 6))
+        said = self.hansa("add", "Fix the badge\n" + lines)
+        self.assertIn(f"line {release.MOST_HITS + 1}, holds", said)
+        self.assertNotIn(f"line {release.MOST_HITS + 2}, holds", said)
+        self.assertEqual(said.count(", holds "), release.MOST_HITS)
+        # a clean text: nothing said
+        self.assertNotIn("warning", self.hansa("add", "Fix the badge"))
+
+    def test_a_forbidden_word_in_a_retrys_note_is_queued_with_a_warning(self):
+        tid = self.done_with()
+        self.forbid("Falcon")
+        said = self.hansa("retry", tid, "--fresh", "Rename it\nto falcon")
+        t2 = self.desk.meta(tid)["replaced_by"]
+        self.assertGreater(said.index("warning: words the principal keeps"), said.index(f"{t2} queued"))
+        for x in ('the note, line 2, holds "Falcon": "to falcon"', "Workers copy what a task quotes",
+                  f"cancel {t2} (hansa cancel {t2})", f"send {tid} back again with a neutral one",
+                  "go on"):
+            self.assertIn(x, said)
+        self.hansa("cancel", t2)  # a follow-up cancelled before it starts restores the task it followed
+        note = self.tmp / "note.md"
+        note.write_text("Rename it\n\nto FALCON\n")
+        self.assertIn("the note, line 3, holds", self.hansa("retry", tid, "--fresh", "--file", str(note)))
+        t3 = self.desk.meta(tid)["replaced_by"]
+        self.hansa("cancel", t3)
+        # the task's own text (carried into the follow-up) is not looked at again: only the note
+        self.forbid("hello")  # "Add hello.txt", the done task's text
+        self.assertNotIn("warning", self.hansa("retry", tid, "--fresh", "Make it longer"))
+
     def test_a_task_adding_a_line_with_a_forbidden_word_is_not_merged_and_hansa_says_where(self):
         tid = self.done_with(env={"FAKE_WRITE": "the Falcon plan"})
         tip = self.git_out("rev-parse", "main")

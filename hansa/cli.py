@@ -646,7 +646,7 @@ def _waits(desk: Desk, tid: str, *, all_reasons: bool = False) -> str:
 def _title_allowed(desk: Desk, s: dict, title: str | None, text: str, lane: str) -> None:
     """Refuse, before anything is queued, a title that holds one of the principal's forbidden words: hansa puts it
     in the task's commit message and its merge's. With no --title it is the text's first line, cut at 80
-    characters, as new_task makes it; the rest of the text is never committed and not looked at."""
+    characters, as new_task makes it; the rest of the text is never committed (_text_warning only warns of it)."""
     given = desk.redact(title or "")
     title = given or (desk.redact(text.strip()).splitlines() or [""])[0][:80]
     hits = release.title_hits(title, release.lane_words(s, lane), detailed=True)
@@ -662,6 +662,29 @@ def _title_allowed(desk: Desk, s: dict, title: str | None, text: str, lane: str)
             f"keeps from going out, and the title goes into the task's commit message and its merge's: "
             f"{json.dumps(title, ensure_ascii=False)}. Nothing was queued: give another --title, or ask the principal "
             f"about the words (hansa ask). {see_more('forbidden-words')}"))
+
+
+def _text_warning(desk: Desk, s: dict, text: str, lane: str | None, place: str, tid: str, again: str) -> str:
+    """A warning, after a task is queued, when its text (or a retry's note) holds one of the principal's forbidden
+    words: hansa does not commit it, but workers copy what a task quotes into their change, which hansa merge then
+    refuses. The same words and matching as the title's check (_title_allowed), shown as much as it shows."""
+    hits = release.text_hits(desk.redact(text), release.lane_words(s, lane or ""))
+    if not hits:
+        return ""
+    out = []
+    for h in hits:
+        if h.get("kind") == "pattern_limit":
+            out.append(f"{place}, line {h['line_no']}, could not be checked against \"{h['word']}\": "
+                       f"{json.dumps(h['line'], ensure_ascii=False)}; {release.pattern_limit_text(h)}")
+        else:
+            out.append(f"{place}, line {h['line_no']}, holds "
+                       f"{', '.join(json.dumps(w, ensure_ascii=False) for w in h['words'])}: "
+                       f"{json.dumps(h['line'], ensure_ascii=False)}")
+    return desk.redact(
+        "warning: words the principal keeps from going out:\n" + "\n".join("  " + x for x in out)
+        + f"\nWorkers copy what a task quotes into their change, and hansa merge refuses a change that holds such a "
+          f"word. If the word is only an example, cancel {tid} (hansa cancel {tid}) and {again}; "
+          f"if the task is about that word (removing it, say), go on. {see_more('forbidden-words')}")
 
 
 def cmd_add(a):
@@ -706,6 +729,9 @@ def _add(desk: Desk, a, text: str) -> None:
           + _verification_follows(verification)
           + (f". {_queued_wait(desk, tid, verification)}; hansa show {tid} says where it is" if not down and notify.hears_of(desk, tid)
              else f". Follow it with: hansa show {tid}") + _waits(desk, tid, all_reasons=True))
+    warning = _text_warning(desk, s, text, a.lane, "the task's text", tid, "add it again with a neutral one")
+    if warning:
+        print(warning)
     if down:
         print("hansa serve is not running; next: " + notify._up_hint(desk, str(Path.cwd())))
 
@@ -1309,6 +1335,10 @@ def _retry(desk: Desk, a) -> None:
                                                       f", with the current {base} merged into its branch when it starts "
                                                       f"(a conflict is left for the worker to settle)" if a.update else "")
           + (f". {_queued_wait(desk, tid, opts)}" if notify.hears_of(desk, tid) else "") + _waits(desk, tid))
+    warning = _text_warning(desk, desk.settings(), note, lane, "the note", tid,
+                            f"send {a.id} back again with a neutral one (hansa retry {a.id} \"...\")")
+    if warning:
+        print(warning)
 
 
 NOTE_FILE = "note.md"  # beside a follow-up's task.md: the note it was sent back with, on its own (empty: none)

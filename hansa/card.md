@@ -242,7 +242,9 @@ hansa merges into a lane's base branch and stops there. Sending it out waits for
   or the outgoing commits, refuses it with the places found: take it out of the command, or ask the
   principal to except the entry for the lane or remove it on the page; a task does not help, the old
   commit still goes out. The same words refuse a title at `hansa add` and a task at
-  `hansa merge`. More: `hansa help forbidden-words`.
+  `hansa merge`. In a task's text or a retry's note they do not refuse it: it is queued with a warning, since
+  workers copy what a task quotes; cancel and add it again with a neutral word, unless the task is about that word.
+  More: `hansa help forbidden-words`.
   Entries may be `re:PATTERN` Python patterns; the principal can except entries by lane on the page; `hansa explain lane L` gives only the count, and the mailbox rule still applies.
 - It waits for the principal's yes on the page, unless they ticked that target to go out without
   asking. While the desk is paused only a release they said yes to runs.
