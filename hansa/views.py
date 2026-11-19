@@ -1890,7 +1890,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
         if held:
             out.append(f"BRANCH CHANGED: {held}. hansa verifies, merges and continues only from that commit, and "
                        f"refuses to while the branch does not hold it")
-    out += pictures.lines(desk, m)
+    if page_messages is None:  # the page shows the pictures themselves, and not what was left out (ui.html)
+        out += pictures.lines(desk, m)
     if m.get("leaked"):
         out.append(f"KEY IN THE CHANGE: it holds the key of {', '.join(m['leaked'])}, so hansa will not merge it")
     if m.get("markers"):

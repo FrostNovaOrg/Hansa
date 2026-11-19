@@ -264,6 +264,20 @@ The Chinese labels use the same review, to-do and token price terms as the other
 See [Goals and product decisions](tasks.md#goals-and-product-decisions) for what
 the counts and evidence mean.
 
+Task details show the [pictures a run kept](tasks.md#pictures-a-run-keeps) under the report
+("Pictures"), and a verified task's verification's at its verification step ("What the verifier saw");
+a goal's chain gives their count, which opens the task's details. The "left out" lines stay in
+`hansa show`. `GET /api/picture?task=ID&n=N` answers picture N (from 0) of the task's recorded
+`pictures`, with the usual bearer token, from outside too: the kept bytes with the recorded kind as
+`Content-Type`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`,
+`Content-Disposition: inline` with the kept name and `Cache-Control: private, no-store`. Other parameters
+are ignored. An unknown task or number, or a file that is gone, is no longer a regular file of one link
+in the task's `pictures/` (opened without following a link), or no longer has the recorded size or
+kind in its first bytes answers 404 `no such picture`. The page fetches each picture when its details
+open, with the token in the `Authorization` header as for its other calls, and shows it from memory
+(an object URL); the token is never put in an address. The page has no content security policy of
+its own, so none was widened.
+
 The read-only `/api/goals` route requires the usual bearer token. It returns an
 array combining each `goal list --all --json` record (including `counts`) with
 its `goal show G --json` record, including cost. It shares one full events-file

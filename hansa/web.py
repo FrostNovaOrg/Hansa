@@ -22,7 +22,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from . import alert, cost, disk, gaps, goals, history, notes, release, views
+from . import alert, cost, disk, gaps, goals, history, notes, pictures, release, views
 from .desk import Desk, KeyScrubError, SettingsError, event_record, lane_warnings, public_settings, read_json
 from .run import check_provider
 
@@ -222,7 +222,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             """A request from outside this machine, while the principal's switch is off."""
             return from_outside(self.headers) and desk.settings().get("settings_from_outside") is not True
 
-        def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", *, conditional=False):
+        def _send(self, code: int, body, ctype: str = "application/json; charset=utf-8", *, conditional=False,
+                  headers=None):
             self.answering = True
             data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
             # Weak validators cover either content coding. Only the public shell may be stored;
@@ -232,7 +233,7 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if tag and any(t.strip().removeprefix("W/") in ("*", tag[2:])
                            for t in self.headers.get("If-None-Match", "").split(",")):
                 code = 304
-            compressed = code != 304 and _accepts_gzip(self.headers.get("Accept-Encoding", ""))
+            compressed = code != 304 and not headers and _accepts_gzip(self.headers.get("Accept-Encoding", ""))
             if compressed:
                 data = gzip.compress(data, mtime=0)
             self.send_response(code)
@@ -242,7 +243,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             if compressed:
                 self.send_header("Content-Encoding", "gzip")
             self.send_header("Vary", "Accept-Encoding")
-            self.send_header("Cache-Control", "private, no-cache" if tag and ctype.startswith("text/html") else "no-store")
+            self.send_header("Cache-Control", "private, no-cache" if tag and ctype.startswith("text/html")
+                             else "private, no-store" if headers else "no-store")
             if tag:
                 self.send_header("ETag", tag)
             if getattr(self, "close_connection", False):
@@ -251,6 +253,8 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
             # On every answer of hansa serve's own: the page tells them by it from what a proxy in front answers
             # (a sign-in page, a redirect, a 401 or 403); a proxy may replace Server.
             self.send_header("X-Hansa-Serve", "1")
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             if code != 304:
                 self.wfile.write(data)
@@ -364,7 +368,24 @@ def start_web(desk: Desk, host: str = "127.0.0.1", port: int = 8765):
                 if not re.fullmatch(r"t\d+", tid) or not (desk.tasks_dir / tid / "meta.json").is_file():
                     return self._send(404, {"error": "no such task"})
                 return self._send(200, views.task_page(desk, tid))
+            if url.path == "/api/picture":  # one kept picture of one task (hansa/pictures.py), by its number only
+                return self._picture(q.get("task", [""])[0], q.get("n", [""])[0])
             return self._send(404, {"error": "not found"})
+
+        def _picture(self, tid: str, n: str):
+            """The bytes of picture n (from 0) of the task's record, as the page shows them; a picture opened by
+            itself may do nothing (no script, no sniffing, a sandbox), and no shared cache keeps it. The name sent is
+            the kept one, from the record. Anything else, including a file that no longer is what the record says,
+            is the same not-found answer."""
+            found = (pictures.kept_bytes(desk, tid, int(n)) if re.fullmatch(r"t[0-9]{1,9}", tid)
+                     and re.fullmatch(r"[0-9]{1,4}", n) and (desk.tasks_dir / tid / "meta.json").is_file() else None)
+            if not found:
+                return self._send(404, {"error": "no such picture"})
+            data, kind, name = found
+            return self._send(200, data, pictures.MIME[kind], headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; sandbox",
+                "Content-Disposition": f'inline; filename="{name}"'})
 
         def do_POST(self):
             self.answering = False
