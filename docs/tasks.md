@@ -294,7 +294,10 @@ lane, or waits for one.
   Workers, setups and checks cannot read that folder. If the file is missing, unreadable or damaged,
   each desk uses its own rests as before.
 - **A refusal is not a limit.** A provider that refuses one task (its content filter) does not rest: that
-  task alone moves to the lane's next provider.
+  task alone moves to the lane's next provider. hansa's runs (workers, verifiers, their continuations and
+  `hansa ping`) never change model when the provider's safety check flags a request: Claude Code's switch to
+  another model is off (`switchModelsOnFlag: false`, `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`), so the
+  flagged run ends with an error instead of finishing on another model.
 - **Every try costs, and counts.** When a task goes back to the queue for another try (a usage limit, a
   dropped connection, a provider that refused it), that run's tokens, turns and worth are kept on the
   task's record of its tries; a run an earlier `hansa serve` started and lost track of is read from its session record
