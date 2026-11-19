@@ -5626,6 +5626,54 @@ def open_blocked_todo(desk: Desk, tid: str) -> None:
         desk.event("blocked_todo_not_opened", task=tid, error=desk.redact(f"{type(e).__name__}: {e}")[:300])
 
 
+def blocked_todo(desk: Desk, m: dict) -> dict:
+    """The to-do hansa opened for a blocked task or verification (open_blocked_todo); {} while none is opened."""
+    n = (m.get("blocked") or {}).get("todo")
+    return next((a for a in desk.asks() if a.get("id") == n), {}) if n else {}
+
+
+def blocked_held(desk: Desk, m: dict) -> bool:
+    """Whether a task or verification a safety check stopped (block) is held for the principal: its to-do is open,
+    or none could be opened yet. Only the coordinator's hansa ask --close ends that: hansa never closes it."""
+    return bool(m.get("blocked")) and not blocked_todo(desk, m).get("closed")
+
+
+def blocked_outcome(desk: Desk, m: dict) -> str:
+    """What the principal decided, as the coordinator recorded it when it closed the to-do; '' while it is open."""
+    a = blocked_todo(desk, m)
+    return " ".join(str(a.get("reason") or a.get("answer") or "none recorded").split()) if a.get("closed") else ""
+
+
+def blocked_next(desk: Desk, m: dict) -> str:
+    """What to do with a blocked task or verification now: tell the principal while it is held, then what they
+    decided (hansa retry or close; for a verification, verify its task again or close it)."""
+    tid, todo = m["id"], (m.get("blocked") or {}).get("todo")
+    if blocked_held(desk, m):
+        return (f"tell the principal about to-do #{todo}, then close it with what they say: hansa ask --close {todo} "
+                "\"<outcome>\"" if todo else "tell the principal; hansa opens a to-do for them at its next round")
+    if m.get("state") != "blocked" or m.get("closed"):
+        return ""
+    if m.get("kind") == "verify":
+        return f"hansa verify {m.get('parent')} · hansa close {tid}"
+    return f"hansa retry {tid} \"...\" · hansa close {tid}"
+
+
+def blocked_line(desk: Desk, m: dict) -> str:
+    """A blocked task or verification in one line, for the post to the coordinator's session and hansa wait: hansa's
+    own words, the to-do, what to do; nothing of the run."""
+    tid, todo = m["id"], (m.get("blocked") or {}).get("todo")
+    who = f"{tid}, the verification of {m.get('parent')}," if m.get("kind") == "verify" else tid
+    head = f"{who} blocked: its provider's safety check stopped it"
+    if blocked_held(desk, m):
+        return head + (f" · to-do #{todo} is open for the principal: tell them" if todo else
+                       " · a to-do for the principal opens at hansa serve's next round: tell them") \
+            + " · do not retry it or look for its output"
+    closed = f" · closed: {m['closed']}" if m.get("closed") else ""
+    nxt = blocked_next(desk, m)
+    return (head + f" · to-do #{todo} closed: {blocked_outcome(desk, m)}" + closed
+            + (f" · next: {nxt}" if nxt else ""))
+
+
 def finish(desk: Desk, tid: str, returncode) -> dict:
     if safety_stopped(read_json(desk.state_dir / "runs" / tid / "run.json", {}) or {}):
         return block(desk, tid, returncode)  # before anything else reads the result

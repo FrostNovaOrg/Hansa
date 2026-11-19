@@ -1010,6 +1010,7 @@ def timeline(desk: Desk, *, at: float | None = None) -> dict:
 
 def desks() -> dict:
     """The account's desks, counts only; no status side effects or private text in the result."""
+    from .run import blocked_held
     problem = desks_list_problem()
     rows = []
     for root, _ in listed_desks(include_missing=True) if not problem else []:
@@ -1037,6 +1038,8 @@ def desks() -> dict:
                        review=sum(m.get("state") == "done" and m.get("kind") != "verify" for m in tasks),
                        releases=sum(r.get("state") == "waiting" for r in release.releases(desk)),
                        todos=sum(not a.get("closed") for a in desk.asks()))
+            held = sum(m.get("state") == "blocked" and blocked_held(desk, m) for m in tasks)
+            row.update({"blocked": held} if held else {})
         except (OSError, UnicodeError, SettingsError):
             row.clear()
             row.update(desk=str(root), problem="folder cannot be read as a desk")
@@ -1055,7 +1058,8 @@ def desks_text(st: dict) -> str:
         blocks.append(f"desk {row['desk_name']} ({row['desk']})\n  server: {server}; hansa {row['version'] or 'unknown'}\n"
                       f"  page: {row['address'] or 'no address: not started'}\n"
                       f"  tasks: {row['running']} running, {row['waiting']} waiting, {row['review']} waiting for review\n"
-                      f"  principal: {row['releases']} releases, {row['todos']} to-dos waiting")
+                      f"  principal: {row['releases']} releases, {row['todos']} to-dos waiting"
+                      + (f"; {row['blocked']} blocked task(s) waiting for them" if row.get("blocked") else ""))
     return st["problem"] or "\n\n".join(blocks) or "No desks listed. Make one with: hansa init DIR"
 
 
@@ -1067,6 +1071,13 @@ def status(desk: Desk) -> dict:
     running = [m for m in tasks if m["state"] == "running"]
     merging = [m for m in tasks if m["state"] == "merging"]
     failed = [m for m in tasks if m["state"] == "failed" and not m.get("closed")]
+    from .run import blocked_held, blocked_next, blocked_outcome
+    held_blocked = [m for m in tasks if m["state"] == "blocked" and blocked_held(desk, m)]
+    decided = [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "state": "blocked",
+                "error": f"blocked by its provider's safety check; to-do #{(m.get('blocked') or {}).get('todo')} "
+                         f"closed: {blocked_outcome(desk, m)}",
+                "todo": (m.get("blocked") or {}).get("todo"), "next": blocked_next(desk, m)}
+               for m in tasks if m["state"] == "blocked" and not m.get("closed") and not blocked_held(desk, m)]
     tried = tried_lanes(desk)
     busy = {occupied_lane(m) for m in tasks if lane_occupied(m)} | tried
     held = sandbox_held(desk)
@@ -1197,12 +1208,17 @@ def status(desk: Desk) -> dict:
                     or f"exit {(m.get('merge_check_result') or {}).get('exit')}"}
                    for m in tasks if m["state"] == "done" and m.get("kind") != "verify"],
         # failed work not put away (hansa close): the latest five, and how many there are in all
+        # and blocked work whose to-do the coordinator closed, with what to do next (run.blocked_next)
         "failed": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", "")}
-                   for m in failed][-5:],
-        "failed_count": len(failed),
-        # blocked runs (run.block): held for the principal, with hansa's sentence only
-        "blocked": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "error": m.get("error", ""),
-                     "todo": (m.get("blocked") or {}).get("todo")} for m in tasks if m["state"] == "blocked"][-5:],
+                   for m in failed][-5:] + decided[-5:],
+        "failed_count": len(failed) + len(decided),
+        # blocked runs (run.block) held for the principal: who, since when and the to-do, nothing of the run
+        "blocked": [{"id": m["id"], "title": m["title"], "lane": m.get("lane"), "kind": m.get("kind") or "work",
+                     **({"parent": m.get("parent")} if m.get("kind") == "verify" else {}),
+                     "since": (m.get("blocked") or {}).get("at") or m.get("finished"), "state": "blocked",
+                     "reason": (m.get("blocked") or {}).get("reason", "safety"),
+                     "action": (m.get("blocked") or {}).get("action", "human_review"),
+                     "todo": (m.get("blocked") or {}).get("todo")} for m in held_blocked],
         "asks": [{**a, "note": ask_note(a, ready)} for a in desk.asks() if not a.get("closed")],
         # the open releases (hansa release) and the latest that ended: the page asks the principal about each waiting one
         "releases": release.page_rows(desk, s, tasks),
@@ -1240,7 +1256,8 @@ def _ask_block(a: dict, goal_titles: dict) -> list:
         head.append(f"closed {when(a['closed'])}" + (" by the coordinator" if a.get("closed_by") == "coordinator" else ""))
     else:
         head.append("work waits on it" if a.get("holds") else "work goes on")
-    head.append(f"asked {when(a.get('created'))}" + (f" by {a['by']}" if a.get("by") else ""))
+    head.append(f"opened by hansa {when(a.get('created'))} for {a['task']} (its provider's safety check stopped it)"
+                if a.get("task") else f"asked {when(a.get('created'))}" + (f" by {a['by']}" if a.get("by") else ""))
     if a.get("goal"):
         title = goal_titles.get(a["goal"])
         head.append(f"goal {a['goal']}" + (f" ({title})" if title else ""))
@@ -1400,12 +1417,17 @@ def status_text(st: dict) -> str:
                 + (f"; holds conflict markers in {', '.join(m['markers'])}: cannot be merged"
                    if m.get("markers") else "")
                 + "]" for m in st["review"]]
-    if st.get("blocked"):
-        out.append("blocked (latest; a to-do is open for the principal for each):")
-        out += [f"  {m['id']} {m['lane']}: {m['error']}" for m in st["blocked"]]
+    if st.get("blocked"):  # run.block: the principal's; nothing of the run
+        out.append("blocked, waiting for the principal (its provider's safety check stopped it):")
+        out += [f"  {m['id']}" + (f", the verification of {m['parent']}," if m.get("parent") else "")
+                + f" {m['title']} · since " + (time.strftime("%Y-%m-%d %H:%M", time.localtime(m["since"]))
+                                               if m.get("since") else "?")
+                + (f" · to-do #{m['todo']}" if m.get("todo") else " · to-do not opened yet") for m in st["blocked"]]
     if st["failed"]:
-        out.append("failed (latest):")
-        out += [f"  {m['id']} {m['lane']}: {m['error']}" for m in st["failed"]]
+        out.append("ended, waiting for you (latest):" if any(m.get("state") == "blocked" for m in st["failed"])
+                   else "failed (latest):")
+        out += [f"  {m['id']} {m['lane']}: {m['error']}" + (f"; next: {m['next']}" if m.get("next") else "")
+                for m in st["failed"]]
         more = st.get("failed_count", 0) - len(st["failed"])
         if more > 0:
             out.append(f"  ... and {more} more failed, not closed (hansa close ID puts one away)")
@@ -1617,6 +1639,8 @@ def check_output_text(desk: Desk, tid: str) -> str:
     ended, the file with its whole output and that file's size, and its last CHECK_LOG_TAIL lines, keys removed.
     The first line says what follows; --check-log and --merge-check-log print one of them whole."""
     m = desk.meta(tid)
+    if m.get("blocked"):  # the same short text as hansa show (run.block)
+        return blocked_show_text(desk, m)
     logs = _check_logs(desk, m)
     if not logs:
         return _no_check_text(m)
@@ -1646,6 +1670,8 @@ def check_log_text(desk: Desk, tid: str, merge: bool = False) -> str:
     """hansa show ID --check-log / --merge-check-log: the whole output of the task's last check, or of its last
     merge check, keys removed, under a first line that says which it is and how long."""
     m = desk.meta(tid)
+    if m.get("blocked"):  # the same short text as hansa show (run.block)
+        return blocked_show_text(desk, m)
     what = "merge check" if merge else "check"
     logs = [x for x in _check_logs(desk, m) if x[0] == what]
     if not logs:
@@ -1662,6 +1688,8 @@ def check_log_text(desk: Desk, tid: str, merge: bool = False) -> str:
 def report_text(desk: Desk, tid: str) -> str:
     """hansa show ID --report: the report alone, whole; for a verification, its verdict first."""
     m = desk.meta(tid)
+    if m.get("blocked"):  # the same short text as hansa show (run.block)
+        return blocked_show_text(desk, m)
     report = report_of(desk, tid)
     out = []
     if m.get("kind") == "verify" and (m.get("state") == "done" or m.get("verdict")):
@@ -1693,8 +1721,82 @@ def run_text(m: dict, provider: dict | None) -> str:
     return f"{m['provider']}" + (f" ({said})" if said else "")  # none yet: a task that never started
 
 
+# What a blocked task's or verification's record (run.block) gives a view or the page: hansa's own fields, none of
+# its run's (report, notes, last call, denials, check, changes, pictures) and nothing of why it was stopped
+BLOCKED_FIELDS = ("id", "title", "state", "kind", "parent", "lane", "provider", "model_asked", "goal", "created",
+                  "started", "finished", "error", "replaced_by", "ended_as", "closed", "verdict", "left_running_count")
+BLOCKED_SENTENCE = ("Its provider's safety check stopped the run; hansa set the run's output aside, out of this "
+                    "session's reach on purpose.")
+
+
+def blocked_record(m: dict) -> dict:
+    """A blocked record with hansa's own fields only (BLOCKED_FIELDS), and of its blocked part what, who and the
+    to-do."""
+    b = m.get("blocked") or {}
+    return {**{k: m[k] for k in BLOCKED_FIELDS if k in m},
+            "blocked": {k: b[k] for k in ("reason", "action", "provider", "model", "at", "todo") if k in b}}
+
+
+def blocked_no_commit(m: dict) -> str:
+    """hansa diff, and hansa git naming its branch, for a blocked task or verification: run.block kept no commit."""
+    return (f"{m['id']} has no commit to show: its provider's safety check stopped its run, and hansa kept nothing of "
+            f"that run in git (hansa show {m['id']})")
+
+
+def blocked_show_text(desk: Desk, m: dict, page_messages=None) -> str:
+    """hansa show for a blocked task or verification, the same in every form (--report, --full, --check ...): who,
+    when, the task's own text, hansa's sentence, the to-do and what to do. Nothing of the run, nor why."""
+    from .run import blocked_held, blocked_next, blocked_outcome
+    tid, b = m["id"], m.get("blocked") or {}
+    at = b.get("at") or m.get("finished")
+    on = ", ".join(x for x in (b.get("model") or m.get("model_asked") or "",) if x)
+    head = (f"{tid} · {m['state']} · lane {m.get('lane') or 'any'} · {b.get('provider') or m.get('provider') or '?'}"
+            + (f" ({on})" if on else "")
+            + (f" · stopped {time.strftime('%Y-%m-%d %H:%M', time.localtime(at))}" if at else ""))
+    out = [head, f"title: {m['title']}"]
+    if m.get("kind") == "verify":
+        out.append(f"verification of: {m.get('parent')}")
+    out += task_text_lines(desk, m, full=True)
+    out.append(f"meaning: {BLOCKED_SENTENCE}")
+    if m.get("left_running_count"):  # how many only (run.block)
+        out.append(f"left running, stopped by hansa when the task ended: {m['left_running_count']} process(es)")
+    todo = b.get("todo")
+    if blocked_held(desk, m):
+        out.append(f"to-do: #{todo}, open for the principal" if todo else
+                   "to-do: not opened yet; hansa opens one for the principal at its next round")
+    else:
+        out.append(f"to-do: #{todo}, closed: {blocked_outcome(desk, m)}")
+    if m.get("replaced_by"):
+        out.append(f"replaced by: {m['replaced_by']}")
+    if m.get("closed"):
+        out.append(m["closed"])
+    nxt = blocked_next(desk, m)
+    if nxt:
+        out.append("next: " + nxt)
+    if page_messages is not None:
+        page_messages["parts"] = list(out)
+    return "\n".join(out)
+
+
+def verification_blocked_line(desk: Desk, m: dict) -> str:
+    """For a task whose latest verification is blocked (run.block): that it is, and its to-do; nothing of it."""
+    from .run import blocked_held, blocked_outcome
+    v = desk.meta(m["verify"]) if m.get("verify") else {}
+    if not v.get("blocked"):
+        return ""
+    todo = (v.get("blocked") or {}).get("todo")
+    return (f"its verification {v['id']} is blocked: its provider's safety check stopped it; "
+            + ((f"to-do #{todo} is open for the principal" if todo else "a to-do for the principal opens at hansa "
+                "serve's next round") if blocked_held(desk, v) else f"to-do #{todo} closed: {blocked_outcome(desk, v)}"))
+
+
 def task_page(desk: Desk, tid: str) -> dict:
     from . import page_messages
+    if desk.meta(tid).get("blocked"):  # hansa's own fields and words only (run.block)
+        messages = {}
+        text = blocked_show_text(desk, desk.meta(tid), page_messages=messages)
+        return {"meta": {**blocked_record(desk.meta(tid)), "attempts": [], "earlier_runs": []}, "text": text,
+                "text_parts": messages["parts"]}
     meta = page_messages.annotate(desk.meta(tid))
     for key in ("attempts", "earlier_runs"):
         meta[key] = [page_messages.annotate(r) for r in meta.get(key, [])]
@@ -1707,6 +1809,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
     """hansa show. full: the whole text and report. heard: whether the session it is for hears from hansa
     (default: the session this command runs in)."""
     from .page_messages import describe, message
+    if desk.meta(tid).get("blocked"):  # run.block: hansa's own words only, nothing of the run
+        return blocked_show_text(desk, desk.meta(tid), page_messages)
     m = as_closed_now(desk.meta(tid))
     m["markers"] = markers_of(desk, m)
     d = desk.tasks_dir / tid
@@ -1985,7 +2089,9 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
     if v:
         out.append(f"verification (a worker ran the change): {_verification_line(v)}"
                    + (f"; on lane {v['lane']}" if v["lane"] and v["lane"] != m.get("lane") else "")
-                   + ("" if v["state"] in ("queued", "running") else f"; hansa show {v['task']} says what it ran"))
+                   + ("" if v["state"] in ("queued", "running", "blocked") else f"; hansa show {v['task']} says what it ran"))
+    if verification_blocked_line(desk, m):
+        out.append(verification_blocked_line(desk, m))
     if verifying and (m.get("state") == "done" or m.get("verdict")):  # kept after it closes with its task
         out.append(f"verdict: {m.get('verdict') or 'none given'}{after_ceiling(m)}")
         out += [x for x in (rethink_text(desk, m),) if x]
@@ -2055,10 +2161,10 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
             nxt = {}
     if cancelling:
         nxt["running"] = f"wait for it to stop: {notify.wait_step(desk, tid, heard)}"
-    if m["state"] == "blocked":  # run.block: held for the principal
-        todo = (m.get("blocked") or {}).get("todo")
-        nxt = {"blocked": f"wait for the principal: to-do #{todo} (hansa ask) is theirs" if todo else
-               "wait for the principal: hansa opens a to-do for them"}
+    held_by = desk.meta(m["verify"]) if m.get("verify") and not verifying else {}
+    from .run import blocked_held, blocked_next
+    if m["state"] == "done" and held_by.get("state") == "blocked" and blocked_held(desk, held_by):
+        nxt["done"] = blocked_next(desk, held_by) + f" (hansa merge {tid} and hansa verify {tid} wait for it)"
     if m["state"] in nxt:
         out.append("next: " + nxt[m["state"]])
     if page_messages is not None:
@@ -2694,6 +2800,8 @@ def diff_text(desk: Desk, tid: str, stat_only: bool = False, paths=(), new: bool
     # Reject absolute paths and traversal before git so these mistakes get the same useful explanation.
     if any(Path(p).is_absolute() or ".." in Path(p).parts for p in paths):
         return "hansa: diff paths are given relative to the repository, without '..'"
+    if m.get("blocked"):  # run.block left no commit of it anywhere in git
+        return blocked_no_commit(m)
     if not m.get("head") or not m.get("worktree"):
         return f"{tid} has no changes recorded yet (state: {m['state']})"
     wt = Path(m["worktree"])

@@ -25,7 +25,7 @@ from .desk import (EFFORTS, Desk, connected_providers, provider_entry, SettingsE
                    lane_targets, merge_targets_problem, release_files_in, merge_message, message_fallback, MESSAGE_FIELDS, message_problem, now, own_title, title_forms, program, read_json, refused_rule, resolved, write_json,
                    argv_rules_problem, rules_problem, path_rule_problem, desk_paths_problem, lane_repos, other_desks, holding_desks_parts, listed_overlaps, _above, path_spellings, pattern_path_problem, run_homes,
                    PROJECT_INTRO, NAME, answer_name, compact_settings, work_lane_problem, write_text, mkdir_private)
-from .run import (HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, branch_holds, check_provider, close_verification, conflict_advice,
+from .run import (HOLDING_VERDICTS, repo_gone_text, VERIFY_TASK, Dispatcher, base_moved, blocked_held, blocked_line, blocked_next, branch_holds, check_provider, close_verification, conflict_advice,
                   conflict_places, conflicted_files, finish_merge_check, rounds_of, git, identity_env, keys_in_change, lane_holder,
                   lane_identity, lane_occupied, occupied_lane, merge_lane, merge_check_lane,
                   MARKERS_ON_PURPOSE, beat, markers_in_change, markers_text, merge_check_ahead, merge_command, merge_minutes, merge_needs_check, merge_target,
@@ -844,6 +844,13 @@ def cmd_git(a):
     why = git_refused(args)
     if why:
         raise SystemExit(f"hansa git: {why}. Nothing was run")
+    for tid in dict.fromkeys(re.findall(r"(?<![\w.-])task/(t\d+)(?![\w])", " ".join(args))):
+        try:
+            named = desk.meta(tid)
+        except SystemExit:
+            continue
+        if named.get("blocked"):  # run.block kept no commit of it: hansa's sentence, not git's error
+            raise SystemExit(f"hansa git: {views.blocked_no_commit(named)}; nothing was run")
     cwd = Path(ln["repo"])
     if where:
         cwd = desk.worktrees_dir / a.lane
@@ -1028,19 +1035,44 @@ def _refuse_replaced(desk: Desk, m: dict) -> None:
         raise SystemExit(f"hansa: {m['id']} was replaced by {latest}; use {latest} instead")
 
 
-def _refuse_blocked(m: dict) -> None:
-    """A blocked task or verification (run.block) is held for the principal: no command takes it on."""
-    if m.get("state") == "blocked":
-        todo = (m.get("blocked") or {}).get("todo")
-        raise SystemExit(f"hansa: {m['id']} is blocked: its provider's safety check stopped it, and a to-do"
-                         f"{f' (#{todo})' if todo else ''} is open for the principal; nothing was changed")
+def _blocked_held_text(desk: Desk, m: dict) -> str:
+    """Why a blocked task or verification held for the principal (run.blocked_held) is not acted on, and what to do."""
+    return (f"{m['id']} is held for the principal (its provider's safety check stopped it): "
+            f"{blocked_next(desk, m)}; nothing was changed")
+
+
+def _refuse_blocked(desk: Desk, m: dict, what: str = "") -> None:
+    """A blocked task or verification (run.block) is never merged, verified or cancelled; while it is held for the
+    principal, nothing acts on it; once the coordinator has closed its to-do, it may be retried or closed."""
+    if m.get("state") != "blocked":
+        return
+    if what in ("merge", "verify", "cancel"):
+        nxt = blocked_next(desk, m) or f"hansa show {m['id']}"
+        said = (f"{m['id']} has ended, blocked (its provider's safety check stopped it), and cancel stops queued, "
+                "running or merging work" if what == "cancel" else
+                f"only a finished task can be {'merged' if what == 'merge' else 'verified'}; {m['id']} is blocked, "
+                "not done (its provider's safety check stopped it)")
+        raise SystemExit(f"hansa: {said}; instead: {nxt}; nothing was changed")
+    if blocked_held(desk, m):
+        raise SystemExit("hansa: " + _blocked_held_text(desk, m))
+
+
+def _refuse_verification_held(desk: Desk, m: dict, doing: str) -> None:
+    """A task whose latest verification is blocked and held for the principal is not merged or verified again."""
+    v = desk.meta(m["verify"]) if m.get("verify") else {}
+    if v.get("state") == "blocked" and blocked_held(desk, v):
+        todo = (v.get("blocked") or {}).get("todo")
+        raise SystemExit(f"hansa: {m['id']}'s verification {v['id']} is held for the principal: its provider's safety "
+                         f"check stopped it" + (f", and to-do #{todo} is theirs" if todo else "")
+                         + f"; {doing} waits until the coordinator closes that to-do with what they say"
+                         + (f" (hansa ask --close {todo} \"<outcome>\")" if todo else "") + "; nothing was changed")
 
 
 def _mergeable(desk: Desk, a):
     """Everything that must hold before a merge; says why not and exits when something does not."""
     m = desk.meta(a.id)
     _refuse_replaced(desk, m)
-    _refuse_blocked(m)
+    _refuse_blocked(desk, m, "merge")
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {a.id} is a verification of {m.get('parent')}; it is never merged. "
                          f"Read it, then merge or send back {m.get('parent')}")
@@ -1050,6 +1082,7 @@ def _mergeable(desk: Desk, a):
                          f"(hansa cancel {a.id} stops it)")
     if m["state"] != "done":
         raise SystemExit(f"hansa: only a finished task can be merged; {a.id} is {m['state']}")
+    _refuse_verification_held(desk, m, f"merging {a.id}")
     lane = desk.settings()["lanes"].get(m["lane"])
     if not lane:
         raise SystemExit(f"hansa: lane {m['lane']} is no longer in settings")
@@ -1146,7 +1179,7 @@ def _retry(desk: Desk, a) -> None:
     if a.max_turns is not None and a.max_turns < 1:
         raise SystemExit("hansa: --max-turns must be 1 or more; nothing was queued")
     m = desk.meta(a.id)
-    _refuse_blocked(m)
+    _refuse_blocked(desk, m, "retry")
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {a.id} is a verification; send back the task it checked: hansa retry {m.get('parent')} \"...\"")
     if m.get("restored_parent"):
@@ -1161,6 +1194,13 @@ def _retry(desk: Desk, a) -> None:
     if a.update and a.fresh:
         raise SystemExit("hansa: --update continues from the earlier task and --fresh starts from the base; "
                          "choose one. Nothing was queued")
+    blocked = m["state"] == "blocked"  # the principal decided (its to-do is closed): it starts over, from the base
+    if blocked and a.update:
+        raise SystemExit(f"hansa: {a.id} was blocked, so a follow-up to it starts over from the base in a new "
+                         f"conversation and --update is not for it; hansa retry {a.id} \"...\" does that. "
+                         "Nothing was queued")
+    if blocked:
+        a.fresh = True
     lanes = desk.settings()["lanes"]
     own = lanes.get(m.get("lane"))
     lane = a.lane if a.lane is not None else m.get("lane", "")
@@ -1204,23 +1244,31 @@ def _retry(desk: Desk, a) -> None:
                              f"A retry from its commits keeps the key in its history; --fresh is needed: "
                              f"hansa retry {a.id} --fresh \"...\"")
     note = (_text(a) if a.file else " ".join(a.note)).strip()
-    text = (_follow_up_start(desk, m) + f"\nFollow-up to {a.id} ({m['state']})."
-            + (f" What to change: {note}" if note else ""))
-    report = desk.tasks_dir / a.id / "result.md"
-    if not report.exists() or not report.read_text(encoding="utf-8").strip():
-        report = desk.tasks_dir / earlier["id"] / "result.md"
-    if report.exists() and report.read_text(encoding="utf-8").strip():
-        text += "\nThe earlier task's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
-    verification = standing_verification(desk, m)
-    if verification is None and earlier is not m:
-        verification = standing_verification(desk, earlier)
-    vid = verification["id"] if verification else None
-    # a blocked verification's report is hansa's own lines only, and no text of a blocked run goes on (run.block)
-    vreport = desk.tasks_dir / vid / "result.md" if vid and verification.get("state") != "blocked" else None
-    if vreport and vreport.exists() and vreport.read_text(encoding="utf-8").strip():
-        verdict = desk.meta(vid).get("verdict") or "none"
-        text += (f"\n\nThe report of {vid}, the verification of the earlier task (a worker who ran the change "
-                 f"to see whether it holds; its verdict: {verdict}):\n" + vreport.read_text(encoding="utf-8").strip())
+    if blocked:  # its own text as queued (the coordinator's) and the note only: nothing of the stopped run
+        text = ((desk.tasks_dir / a.id / "task.md").read_text(encoding="utf-8").strip()
+                + f"\n\n---\nFollow-up to {a.id}, which its provider's safety check stopped: nothing of that run is "
+                  "carried, and you start over from the base branch." + (f" What to change: {note}" if note else ""))
+    else:
+        text = (_follow_up_start(desk, m) + f"\nFollow-up to {a.id} ({m['state']})."
+                + (f" What to change: {note}" if note else ""))
+        report = desk.tasks_dir / a.id / "result.md"
+        if not report.exists() or not report.read_text(encoding="utf-8").strip():
+            report = desk.tasks_dir / earlier["id"] / "result.md"
+        if earlier.get("blocked") or (report.parent.name == a.id and m.get("blocked")):
+            report = None  # a blocked run's report is hansa's lines only, and never carried (run.block)
+        if report and report.exists() and report.read_text(encoding="utf-8").strip():
+            text += "\nThe earlier task's report:\n" + report.read_text(encoding="utf-8").strip()[-6000:]
+        verification = standing_verification(desk, m)
+        if verification is None and earlier is not m:
+            verification = standing_verification(desk, earlier)
+        vid = verification["id"] if verification else None
+        # a blocked verification's report is hansa's own lines only, and no text of a blocked run goes on (run.block)
+        vreport = (desk.tasks_dir / vid / "result.md" if vid and verification.get("state") != "blocked"
+                   and not verification.get("blocked") else None)
+        if vreport and vreport.exists() and vreport.read_text(encoding="utf-8").strip():
+            verdict = desk.meta(vid).get("verdict") or "none"
+            text += (f"\n\nThe report of {vid}, the verification of the earlier task (a worker who ran the change "
+                     f"to see whether it holds; its verdict: {verdict}):\n" + vreport.read_text(encoding="utf-8").strip())
     opts = {"lane": lane, "effort": a.effort or m.get("effort", ""), "model": a.model or m.get("model", ""),
             "max_turns": a.max_turns if a.max_turns is not None else m.get("max_turns", 0),
             "parent": a.id, "title": f"{own_title(m['title'])} (retry of {a.id})",
@@ -1240,7 +1288,7 @@ def _retry(desk: Desk, a) -> None:
         opts["fresh"] = True
     tid = desk.new_task(text, attach=a.attach, attachments_from=a.id, **opts)
     write_text(desk.tasks_dir / tid / NOTE_FILE, desk.redact(note) + "\n")  # later rounds quote it
-    if m["state"] in ("done", "failed", "cancelled"):  # one replacement carries unmerged work on
+    if m["state"] in ("done", "failed", "cancelled", "blocked"):  # one replacement carries unmerged work on
         desk.update(a.id, state="replaced", replaced_by=tid, ended_as=m["state"])
         close_verification(desk, m, f"closed: {a.id} was replaced by {tid}")
     if a.model:
@@ -1299,13 +1347,13 @@ def cmd_cancel(a):
     with desk.lock():  # the state read here is the state changed here
         m = desk.meta(a.id)
         _refuse_replaced(desk, m)
-        _refuse_blocked(m)
+        _refuse_blocked(desk, m, "cancel")
         if m["state"] == "queued":
             if (m.get("parent") and m.get("kind") != "verify" and not m.get("started")
                     and not m.get("attempts") and not m.get("head")):
                 parent = desk.meta(m["parent"])
                 if (parent["state"] == "replaced" and parent.get("replaced_by") == a.id
-                        and parent.get("ended_as") in ("done", "failed", "cancelled")):
+                        and parent.get("ended_as") in ("done", "failed", "cancelled", "blocked")):
                     restored = parent
             desk.update(a.id, state="cancelled", error="cancelled before it started", finished=now(), cancel_by=by,
                         **({"restored_parent": restored["id"]} if restored else {}))
@@ -1364,11 +1412,15 @@ def cmd_close(a):
     with desk.lock():
         m = desk.meta(a.id)
         _refuse_replaced(desk, m)
-        _refuse_blocked(m)
-        if m["state"] not in ("done", "failed"):
+        _refuse_blocked(desk, m, "close")
+        if m["state"] not in ("done", "failed", "blocked"):
             raise SystemExit(f"hansa: {a.id} is {m['state']}; only finished or failed tasks or verifications can be "
                              "closed; nothing was changed")
-        if m.get("kind") == "verify":  # a failed one stays failed, with its error, as a done one stays done
+        if m["state"] == "blocked":  # the principal decided: it stays blocked, closed, and what was set aside stays
+            if m.get("closed"):
+                raise SystemExit(f"hansa: {a.id} is closed already ({m['closed']}); nothing was changed")
+            desk.update(a.id, closed=f"closed: {a.id} was closed with hansa close", cancel_by=by)
+        elif m.get("kind") == "verify":  # a failed one stays failed, with its error, as a done one stays done
             desk.update(a.id, closed=m.get("closed") or f"closed: {a.id} was closed with hansa close")
         else:  # closed as finished work is; a failed task keeps why it failed beside that (hansa show)
             desk.update(a.id, state="cancelled", error="closed without merging", cancel_by=by,
@@ -1382,6 +1434,12 @@ def cmd_close(a):
                     dependencies = [d for d in after.pending(task, tasks) if d["latest"] == a.id]
                     if dependencies:
                         waiting.append(f"{task['id']} stays queued; {after.waiting(task, dependencies)}")
+    if m["state"] == "blocked":
+        desk.event("blocked_closed", task=a.id)
+        print(f"{a.id} closed; it stays blocked, and what hansa set aside of its run stays where it is")
+        for line in waiting:
+            print(line)
+        return
     had = f"{a.id} had failed; it is now closed" if m["state"] == "failed" else ""
     if m.get("kind") == "verify":
         if not m.get("closed"):
@@ -1418,12 +1476,13 @@ def queue_verification(desk: Desk, tid: str, *, lane="", effort="", note="", ses
     """Build a verification for the command or server. The caller holds desk.lock()."""
     m = desk.meta(tid)
     _refuse_replaced(desk, m)
-    _refuse_blocked(m)
+    _refuse_blocked(desk, m, "verify")
     if m.get("kind") == "verify":
         raise SystemExit(f"hansa: {tid} is itself a verification; verify the task it checks ({m.get('parent')})")
     if m["state"] != "done" or not m.get("commits"):
         raise SystemExit(f"hansa: only a finished task with changes can be verified; {tid} is {m['state']}"
                          + ("" if m.get("commits") else ", with nothing to merge"))
+    _refuse_verification_held(desk, m, f"verifying {tid} again")
     v = views.verification(desk, m, latest=True)
     if v and v["state"] in ("queued", "running"):
         raise SystemExit(f"hansa: {v['task']} is already verifying {tid}")
@@ -1644,6 +1703,9 @@ def cmd_wait(a):
             break
         time.sleep(a.every)
     for m in ended:
+        if m["state"] == "blocked":  # hansa's own words and the to-do only (run.block)
+            print(blocked_line(desk, m))
+            continue
         mc = m.get("merge_check_result") or {}
         verdict = f" · verdict: {m['verdict']}" if m.get("kind") == "verify" and m.get("verdict") else ""
         print(f"{m['id']} {m['state']}: {m['title']}{verdict}  (hansa show {m['id']})"
@@ -1651,8 +1713,7 @@ def cmd_wait(a):
                  f"\n  its merge check did not pass, so nothing was merged: "
                  + (mc.get("note") or f"the check failed (exit {mc.get('exit')})")
                  if m["state"] == "done" and mc and not mc.get("ok") else
-                 "\n  merged after its merge check passed" if m["state"] == "merged" and mc.get("ok") else
-                 f"\n  {m.get('error') or ''}" if m["state"] == "blocked" else ""))
+                 "\n  merged after its merge check passed" if m["state"] == "merged" and mc.get("ok") else ""))
     still = [desk.meta(t) for t in watch if live(t)]
     if not ended:
         print(f"no task finished in {a.timeout:g} min")
@@ -4031,8 +4092,9 @@ def main(argv=None):
                      "retry of it is new work on top. A follow-up cancelled before it started gives the earlier task "
                      "back as it was. Its own lane must still be on the desk and, when recorded, on the "
                      "repository where it ran; otherwise give the work again with hansa add --lane L. "
-                     "A blocked task (its provider's safety check stopped it) is not sent back: a to-do is open "
-                     "for the principal.")
+                     "A blocked task (its provider's safety check stopped it) is not sent back while its to-do is "
+                     "open for the principal; once the coordinator has closed it with what they said, a follow-up "
+                     "starts over from the base in a new conversation, given the task's text and the note only.")
     p.add_argument("--lane", metavar="L", help="queue the follow-up on this work lane on the same repository "
                    "and base branch as the task's own lane, for example when that lane is busy; the task's "
                    "start, text, effort and model are carried as usual")

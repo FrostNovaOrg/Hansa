@@ -247,6 +247,11 @@ def latest_tasks(tasks: list, gid: str) -> list:
     return [m for m in linked if m.get("kind") == "verify" or m["state"] == "merged" or m["id"] not in parents]
 
 
+def blocked_held(desk: Desk, m: dict) -> bool:
+    from .run import blocked_held as held
+    return held(desk, m)
+
+
 def summaries(desk: Desk, tasks: list | None = None, *, all_: bool = False, evidence: bool = False,
               context: dict | None = None) -> list:
     tasks = desk.tasks() if tasks is None else tasks
@@ -263,8 +268,10 @@ def summaries(desk: Desk, tasks: list | None = None, *, all_: bool = False, evid
             "active": sum(m["state"] in ("queued", "running") for m in work),
             "review": sum(m["state"] in ("done", "merging") for m in work),
             "merged": sum(m["state"] == "merged" for m in work),
-            "failed": sum(m["state"] == "failed" for m in work),
-            **({"blocked": n} if (n := sum(m["state"] == "blocked" for m in work)) else {}),
+            # a blocked one is the principal's while held (run.blocked_held), then an ended one as a failed one is
+            "failed": sum(m["state"] == "failed" or (m["state"] == "blocked" and not blocked_held(desk, m))
+                          for m in work),
+            **({"blocked": n} if (n := sum(m["state"] == "blocked" and blocked_held(desk, m) for m in work)) else {}),
             "todos": sum(a.get("goal") == g["id"] and not a.get("closed") for a in asks)}})
         if evidence:
             chains = [task_evidence(desk, m, context) for m in work]
@@ -283,7 +290,8 @@ def summary_text(g: dict) -> str:
     return (f"{g['id']} {one_line(g['title'])}: {c['active']} queued/running, {c['review']} waiting for review, "
             f"{c['merged']} merged, "
             + (f"{c['missing']} merged missing evidence, {c['released']} released, " if "missing" in c else "")
-            + f"{c['failed']} failed, " + (f"{c['blocked']} blocked, " if c.get("blocked") else "")
+            + f"{c['failed']} failed, "
+            + (f"{c['blocked']} blocked (waiting for the principal), " if c.get("blocked") else "")
             + f"{c['todos']} open to-dos"
             + (f"; {g['state']}: {one_line(g['outcome'])}" if g["state"] != "open" else ""))
 
@@ -459,6 +467,14 @@ def show_text(desk: Desk, gid: str, *, all_: bool = False) -> str:
     closed = {m["id"] for m in tasks if m.get("closed") or
               (m["state"] == "cancelled" and m.get("error") == "closed without merging")}
     decisions = g["decisions"]
+    by_id = {m["id"]: m for m in tasks}
+
+    def held_text(tid: str) -> str:  # a blocked one held for the principal (run.blocked_held): its to-do
+        m = by_id.get(tid) or {}
+        if m.get("state") != "blocked" or not blocked_held(desk, m):
+            return ""
+        todo = (m.get("blocked") or {}).get("todo")
+        return f" (waiting for the principal: to-do #{todo})" if todo else " (waiting for the principal)"
     out = [f"{gid} {g['title']} [{g['state']}]", f"created: {_when(g['created'])}",
            f"session: {g.get('session') or '(none)'}", f"why: {g['why'] or '(none)'}"]
     if g["state"] != "open":
@@ -477,7 +493,7 @@ def show_text(desk: Desk, gid: str, *, all_: bool = False) -> str:
         if any(m is f for f in folded):
             continue
         rounds = m["rounds"]
-        out += [f"{m['id']} {m['state']}{' (closed)' if m['id'] in closed else ''} · "
+        out += [f"{m['id']} {m['state']}{' (closed)' if m['id'] in closed else ''}{held_text(m['id'])} · "
                 f"{rounds} round{'s' if rounds != 1 else ''} · {one_line(m['title'])}",
                 f"  check: {m['check']}", f"  verification: {m['verification']}"
                 + (f" ({m['verification_task']})" if m["verification_task"] else ""), f"  merge: {m['merge']}"]
@@ -487,7 +503,7 @@ def show_text(desk: Desk, gid: str, *, all_: bool = False) -> str:
     if folded:
         out += [f"{len(folded)} older merged or closed task{'s' if len(folded) != 1 else ''} not listed "
                 f"(hansa goal show {gid} --all lists them)"]
-    out += [f"{v['id']} {v['state']}{' (closed)' if v['id'] in closed else ''} · "
+    out += [f"{v['id']} {v['state']}{' (closed)' if v['id'] in closed else ''}{held_text(v['id'])} · "
             f"1 round · {one_line(v['title'])} · verification of {v['parent']}"
             for v in reversed(g["verifications"])]
     c = g["cost"]

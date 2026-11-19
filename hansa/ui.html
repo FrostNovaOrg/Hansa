@@ -527,13 +527,13 @@ const T = ZH ? {
   serveCodeWarning:"后台代码", unreachedWarning:"协调员未收到", alertFailedWarning:"提醒失败",
   serverStuck:(pid, m) => `后台（pid ${pid}）已 ${m} 分钟没跑完一轮：在忙或卡住了`,
   lanes:"工作线", lane:"工作线", now:"现在", free:"空闲",
-  queued:"排队中", waiting:"在等", review:"做完待审", failed:"失败（最近）", failedShown:(n, all) => `显示最近的 ${n} 个，共 ${all} 个`, minutes:"分钟",
+  queued:"排队中", waiting:"在等", review:"做完待审", blockedHeld:"已拦下，等负责人决定", blockedNote:"服务商的安全检查停止了这些运行；工作台把它们的输出放到了一边，每件都有一条待办。", blockedTodo:"待办", blockedNoTodo:"尚未开出", failed:"失败（最近）", failedShown:(n, all) => `显示最近的 ${n} 个，共 ${all} 个`, minutes:"分钟",
   waitReasons:{
     paused:() => "派发任务已暂停", no_lanes:() => "设置中没有工作线", no_work_lanes:() => "设置中没有接任务的工作线", slot:v => v.concurrency == null ? "等待空位" : `等待空位（${v.running}/${v.concurrency} 正在运行；hansa concurrency）`,
     after:v => v.dependencies.map(d => {
       const name = d.latest + (d.latest !== d.task ? `（${d.task} 的最新后续任务）` : "");
       const why = d.why === "closed without merging" ? "已关闭，尚未合并" :
-        ({failed:"失败，尚未合并", cancelled:"已取消，尚未合并", blocked:"已被服务商的安全检查拦下，有一条待办等你处理", missing:"任务或后续记录缺失", replaced:"后续记录缺失", elsewhere:"合并到了其他仓库或基础分支"}[d.state] || d.why);
+        ({failed:"失败，尚未合并", cancelled:"已取消，尚未合并", blocked:"已被服务商的安全检查拦下，由负责人决定如何处理", missing:"任务或后续记录缺失", replaced:"后续记录缺失", elsewhere:"合并到了其他仓库或基础分支"}[d.state] || d.why);
       return d.held ? `暂缓：${name} ${why}；hansa cancel ${v.task}` + (d.state === "blocked" ? "" : `，或 hansa retry ${d.latest}`)
         : `等待 ${name} 合并到 ${v.base}`;
     }).join("；"),
@@ -737,7 +737,7 @@ const T = ZH ? {
   serveCodeWarning:"Server code", unreachedWarning:"Coordinator unreached", alertFailedWarning:"Alert failed",
   serverStuck:(pid, m) => `hansa serve (pid ${pid}) has not finished a round for ${m} min: busy or stuck`,
   lanes:"Lanes", lane:"Lane", now:"Now", free:"free",
-  queued:"Queued", waiting:"waiting", review:"Waiting for review", failed:"Failed (latest)", failedShown:(n, all) => `The latest ${n} of ${all} are shown.`, minutes:"min",
+  queued:"Queued", waiting:"waiting", review:"Waiting for review", blockedHeld:"Blocked, waiting for the principal", blockedNote:"Their provider's safety check stopped these runs; hansa set their output aside. Each has a to-do.", blockedTodo:"To-do", blockedNoTodo:"not opened yet", failed:"Failed (latest)", failedShown:(n, all) => `The latest ${n} of ${all} are shown.`, minutes:"min",
   waitReasons:{
     paused:() => "dispatch is paused", no_lanes:() => "no lanes in settings", no_work_lanes:() => "no lanes that take work in settings", slot:v => v.concurrency == null ? "waiting for a free slot" : `waits for a free slot (${v.running} of ${v.concurrency} running; hansa concurrency)`,
     after:(v, render, text) => text,
@@ -2120,6 +2120,10 @@ async function renderStatus(force) {
           : [h("span", {class: {holds:"ok", "does not hold":"bad"}[m.verify.verdict] || "warn"}, T["v_" + m.verify.verdict] || T.v_none),
              m.verify.verdict === "holds, with notes" ? [" · ", taskLink(m.verify.task)] : null],
         m.denied ? h("span", {class:"warn"}, m.denied) : "0"]))) : emptyState(T.review, T.none, "security")),
+    (st.blocked || []).length ? dashboardPanel(T.blockedHeld, "error", st.blocked.length,
+      h("p", {class:"field-note"}, T.blockedNote),
+      table([T.task, T.lane, T.titleCol, T.blockedTodo],
+      st.blocked.map(m => [taskLink(m.id), m.lane, m.title, m.todo ? "#" + m.todo : T.blockedNoTodo]))) : null,
     st.failed.length ? dashboardPanel(T.failed, "error", Math.max(st.failed_count ?? 0, st.failed.length),
       (st.failed_count ?? 0) > st.failed.length ? h("p", {class:"field-note"}, T.failedShown(st.failed.length, st.failed_count)) : null,
       table([T.task, T.lane, T.titleCol, T.error],

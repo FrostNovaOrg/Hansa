@@ -195,6 +195,9 @@ def task_line(desk: Desk, m: dict) -> str:
     """A task that ended, as it is now, in one line with the next command."""
     tid, st = m["id"], m["state"]
     from .views import after_ceiling
+    if st == "blocked":  # hansa's own words and the to-do only, nothing of the run (run.block)
+        from .run import blocked_line
+        return blocked_line(desk, m)
     if m.get("kind") == "verify":
         head = (f"{tid}, the verification of {m.get('parent')}, ended: "
                 + (f"verdict: {m['verdict']}{after_ceiling(m)}" if m.get("verdict") else f"{st}, without a verdict"))
