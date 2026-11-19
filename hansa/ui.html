@@ -226,6 +226,19 @@ td .task-detail { min-width:200px; }
 .task-step > time, .task-step > small, .task-step > span { display:block; }
 .task-step[aria-current=step] { border-color:var(--link); background:var(--tint); }
 .task-relations { margin:0 0 8px; }
+/* Pictures a run kept (/api/picture): small ones that wrap, a large one inside the page that fits the screen */
+.task-pictures h4 { margin:12px 0 6px; font:600 12px/1.6 system-ui,sans-serif; }
+.task-pictures ul { display:flex; flex-wrap:wrap; gap:8px; list-style:none; padding:0; margin:0; }
+.task-pictures li { width:128px; max-width:100%; min-width:0; }
+.task-pictures button { display:block; width:128px; max-width:100%; height:96px; padding:0; border:1px solid var(--line); border-radius:6px; background:var(--tint); overflow:hidden; cursor:zoom-in; }
+.task-pictures img { display:block; width:100%; height:100%; object-fit:cover; }
+.task-pictures small { display:block; overflow-wrap:anywhere; }
+.task-step .task-pictures li, .task-step .task-pictures button { width:96px; }
+.task-step .task-pictures button { height:72px; }
+dialog.picture-view { max-width:100vw; max-height:100vh; width:auto; padding:8px; border:0; border-radius:8px; background:var(--bg); color:var(--fg); box-sizing:border-box; cursor:zoom-out; }
+dialog.picture-view::backdrop { background:rgba(0,0,0,.7); }
+dialog.picture-view img { display:block; max-width:calc(100vw - 16px); max-height:calc(100vh - 64px); object-fit:contain; margin:0 auto; }
+dialog.picture-view p { margin:6px 0 0; display:flex; justify-content:space-between; gap:8px; overflow-wrap:anywhere; }
 @media (max-width:640px) {
   .task-steps { flex-wrap:wrap; overflow-x:visible; }
   .task-step { flex:1 1 140px; }
@@ -545,6 +558,7 @@ const T = ZH ? {
   taskSteps:"任务步骤", taskQueued:"排队", taskRun:n => `运行 ${n}`, taskLaneCheck:"工作线检查", taskVerification:"核验", taskMergeCheck:"合并检查", taskMerged:"已合并",
   taskRunning:"进行中", taskCompleted:"已完成", taskFailed:"失败", taskCancelled:"已取消", taskWait:"等待", taskFirstResult:"首次结果",
   taskMinutes:n => `${n} 分钟`, taskSeconds:n => `${n} 秒`, taskExit:n => `退出码 ${n}`, taskVerifies:"核验任务", taskReplaces:"接替任务", taskVerificationUnavailable:"核验记录不可用",
+  pictures:"图片", verifierSaw:"核验者看到的", pictureCount:n => `${n} 张图片`, pictureMissing:"图片无法加载", pictureClose:"关闭",
   asks:"待办", todos:"待办", todosIntro:"仅展示。请在对话中回复，由协调员记录结果并关闭；所有事项永久保留。",
   todoWhat:"待办内容", todoWork:"工作", todoLoading:"正在加载待办…", todoPage:(p, n, total) => `第 ${p} / ${n} 页 · 共 ${total} 件待办`, todoWhy:"为何只有你能做", todoHolds:"工作等待此事", todoContinues:"工作继续", todoSince:"提出时间", todoOutcome:"结果", todoClosed:"关闭时间", todoOpen:"未完成", todoDone:"已关闭", principalDetails:"详情",
   providers:"模型服务商", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
@@ -747,6 +761,7 @@ const T = ZH ? {
   taskSteps:"Task steps", taskQueued:"Queued", taskRun:n => `Run ${n}`, taskLaneCheck:"Lane check", taskVerification:"Verification", taskMergeCheck:"Merge check", taskMerged:"Merged",
   taskRunning:"running", taskCompleted:"completed", taskFailed:"failed", taskCancelled:"cancelled", taskWait:"Wait", taskFirstResult:"First result", notKnown:"not known",
   taskMinutes:n => `${n} min`, taskSeconds:n => `${n} s`, taskExit:n => `exit ${n}`, taskVerifies:"Verifies", taskReplaces:"Replaces", taskVerificationUnavailable:"Verification record unavailable",
+  pictures:"Pictures", verifierSaw:"What the verifier saw", pictureCount:n => `${n} picture${n === 1 ? "" : "s"}`, pictureMissing:"picture could not be loaded", pictureClose:"Close",
   asks:"To-dos", todos:"To-dos", todosIntro:"Read-only. Answer in the conversation; the coordinator records the outcome and closes each item. Every item is kept.",
   todoWhat:"What", todoWork:"Work", todoLoading:"Loading to-dos…", todoPage:(p, n, total) => `Page ${p} of ${n} · ${total} to-dos`, todoWhy:"Why only you", todoHolds:"Work waits", todoContinues:"Work goes on", todoSince:"Since", todoOutcome:"Outcome", todoClosed:"Closed at", todoOpen:"Open", todoDone:"Closed", principalDetails:"Details",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
@@ -1343,10 +1358,12 @@ function notFromServe() {
 const reloadButton = () => h("button", {type:"button", onclick:() => location.reload()}, T.reloadPage);
 const loadFailed = (e, failed, retry) => e?.notFromServe ? [h("p", {class:"bad"}, e.message), reloadButton()]
   : [h("p", {class:"bad"}, failed), h("button", {onclick:retry}, T.retry)];
+// The key travels in the Authorization header of every call, never in an address (pictures too: pictureUrl).
+const apiOptions = () => ({credentials:"same-origin", mode:"same-origin", redirect:"manual", cache:"no-store", headers:{Authorization:"Bearer " + pageToken}});
 async function api(path, body) {
   // The origin's own cookies travel: a sign-in proxy keeps its session in one. hansa serve takes no cookie as a key.
   // A redirect stays visible (an opaque redirect) instead of being followed.
-  const opt = {credentials:"same-origin", mode:"same-origin", redirect:"manual", cache:"no-store", headers:{Authorization:"Bearer " + pageToken}};
+  const opt = apiOptions();
   const conditional = body === undefined && (path === "/api/status" || path === "/api/goals" || path.startsWith("/api/history?") || path === "/api/events" || path.startsWith("/api/events?"));
   const previous = conditional ? pollReplies.get(path) : null;
   if (previous) opt.headers["If-None-Match"] = previous.etag;
@@ -1531,7 +1548,7 @@ function taskSteps(m, v, ancestry) {
       elapsed(record?.started, record?.finished || (running ? Date.now() / 1000 : null)),
       record ? T["v_" + verdict] || T.v_none : T.taskVerificationUnavailable,
       holds ? "ok" : verdict === "does not hold" || record?.state === "failed" ? "bad" : "warn", running,
-      own ? null : taskLink(m.verify, ancestry)));
+      own ? null : [taskLink(m.verify, ancestry), record ? pictureList(record.id, record.pictures, T.verifierSaw) : null]));
   }
   const mc = m.merge_check, mr = m.merge_check_result;
   if ((mc && !mc.plain) || (mr && !mr.waited)) {
@@ -1560,7 +1577,8 @@ function taskLink(id, ancestry = []) {
       try { v = (await api("/api/task?id=" + encodeURIComponent(m.verify))).meta; } catch (_) { /* Keep the task's text available. */ }
     }
     box.replaceChildren(...shown([taskSteps(m, v, path),
-      m.parent ? h("div", {class:"task-relations"}, m.kind === "verify" ? T.taskVerifies : T.taskReplaces, " ", taskLink(m.parent, path)) : null, text]));
+      m.parent ? h("div", {class:"task-relations"}, m.kind === "verify" ? T.taskVerifies : T.taskReplaces, " ", taskLink(m.parent, path)) : null, text,
+      pictureList(m.id || id, m.pictures, T.pictures)]));
   };
   if (open) load().catch(err);
   const btn = h("button", {class:"link", "data-status-focus":JSON.stringify(["task", ...path]), "aria-expanded":String(open), "aria-controls":box.id, onclick: () => {
@@ -1570,6 +1588,45 @@ function taskLink(id, ancestry = []) {
     btn.setAttribute("aria-expanded", String(open));
   }}, id);
   return [btn, box];
+}
+/* Pictures a run kept (hansa/pictures.py): fetched as the page's other calls are, with the key in the header, when
+   the fold that shows them opens, and shown from memory (an object URL), never from an address holding the key. */
+const pictureBlobs = new Map();  // "task/n": the promise of its object URL, kept while the page is open
+function pictureUrl(tid, n) {
+  const key = tid + "/" + n;
+  if (!pictureBlobs.has(key)) pictureBlobs.set(key, (async () => {
+    let r;
+    try { r = await fetch(`/api/picture?task=${encodeURIComponent(tid)}&n=${n}`, apiOptions()); }
+    catch (e) { if (e?.name !== "TypeError") throw e; throw new Error(T.serveUnreachedRead); }
+    if (r.type === "opaqueredirect" || !r.headers?.get("X-Hansa-Serve")) throw notFromServe();
+    if (r.status === 403) { pageRefused = true; throw new Error(T.forbidden); }
+    if (r.status !== 200 || !/^image\/(png|jpeg|webp)$/.test(r.headers.get("Content-Type") || "")) throw new Error(T.pictureMissing);
+    return URL.createObjectURL(await r.blob());
+  })().catch(e => { pictureBlobs.delete(key); throw e; }));
+  return pictureBlobs.get(key);
+}
+// A run's pictures under a heading, each a button that shows it large; nothing when there are none.
+function pictureList(tid, list, heading) {
+  if (!Array.isArray(list) || !list.length) return null;
+  return h("div", {class:"task-pictures", "data-pictures":tid}, h("h4", {}, heading), h("ul", {}, list.map((p, n) => {
+    const name = String(p?.name || ""), img = h("img", {alt:name});
+    const button = h("button", {type:"button", disabled:true, onclick:() => pictureView(img.src, name, button)}, img);
+    const item = h("li", {}, button, h("small", {}, name));
+    pictureUrl(tid, n).then(url => { img.src = url; button.disabled = false; })
+      .catch(e => item.replaceChildren(h("small", {class:"bad"}, name, ": ", e.message || T.pictureMissing)));
+    return item;
+  })));
+}
+// The picture large, inside the page: a click or tap anywhere on it, Escape or Close closes it, and focus goes back.
+function pictureView(src, name, from) {
+  const close = () => { view.close?.(); view.remove(); from?.focus(); };
+  const view = h("dialog", {class:"picture-view", "aria-label":name, onclick:close,
+    oncancel:e => { e.preventDefault(); close(); }}, h("img", {src, alt:name}),
+    h("p", {}, h("span", {}, name), h("button", {type:"button", class:"link"}, T.pictureClose)));
+  document.body.append(view);
+  if (view.showModal) view.showModal(); else view.setAttribute("open", "");
+  view.querySelector("button")?.focus();
+  return view;
 }
 // English is the server's unchanged sentence. Unknown codes (including nested ones)
 // keep that sentence too, so an older page remains useful after a server upgrade.
@@ -3502,7 +3559,10 @@ function goalDetail(g) {
         c.releases.length ? c.releases.map(r => h("p", {}, T.goalReleases(c.releases.length), " #", r.id, ": ", r.target, " · ",
           T.goalReleaseStates[r.state] || r.state)) : h("p", {}, T.releases, ": ", T.goalNone),
         c.missing !== null ? h("p", {class:c.missing.length ? "goal-missing warn notice" : "muted"},
-          T.goalMissing, ": ", c.missing.length ? c.missing.join("; ") : T.goalNothing) : null, box);
+          T.goalMissing, ": ", c.missing.length ? c.missing.join("; ") : T.goalNothing) : null,
+        c.pictures || c.verification_pictures ? h("p", {}, h("button", {class:"link", "data-goal-pictures":c.id,
+          "aria-controls":box.id, onclick:() => { if (button.getAttribute("aria-expanded") !== "true") button.click(); }},
+          T.pictureCount((c.pictures || 0) + (c.verification_pictures || 0)))) : null, box);
     }) : h("p", {class:"muted"}, T.goalNone),
     g.verifications.map(v => h("p", {}, v.id, " · ", T.taskStates[v.state] || v.state, " · ", v.title,
       " · ", T.goalVerificationOf, " ", v.parent, " · ", T["v_" + (v.verdict || "none")] || v.verdict))),

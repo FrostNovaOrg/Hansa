@@ -276,6 +276,55 @@ def take(desk, tid: str, tmp: str, run: int) -> None:
         pass
 
 
+MIME = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
+_KEPT_NAME = re.compile(rf"[A-Za-z0-9_-][A-Za-z0-9._-]{{0,{NAME_MOST - 1}}}")  # as safe_name makes them
+
+
+def kept_bytes(desk, tid: str, n: int):
+    """For the page (web.py, /api/picture): (bytes, kind, name) of picture n (from 0) of the task's record, or None
+    when there is no such picture or the file no longer is what the record says: gone, not a regular file in the
+    task's pictures folder (a link, a hard link, a folder, put there since), of another size, or first bytes of
+    another kind. The folder and the file are opened without following a link, and nothing is read before fstat
+    says the file is the one recorded; then at most its recorded size and one byte."""
+    try:
+        recs = desk.meta(tid).get("pictures") or []
+    except (SystemExit, OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(recs, list) or not 0 <= n < len(recs) or not isinstance(recs[n], dict):
+        return None
+    name, kind, size = recs[n].get("name"), recs[n].get("kind"), recs[n].get("bytes")
+    if not (isinstance(name, str) and _KEPT_NAME.fullmatch(name) and kind in MIME
+            and type(size) is int and 0 < size <= LIMIT):
+        return None
+    fds = []
+    try:
+        fds.append(os.open(kept_dir(desk, tid), _FLAGS | getattr(os, "O_DIRECTORY", 0)))
+        fds.append(os.open(name, _FLAGS | os.O_NONBLOCK, dir_fd=fds[0]))
+        st = os.fstat(fds[1])
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size != size:
+            return None
+        def upto(want: int) -> bytes:
+            chunks, got = [], 0
+            while got < want:
+                chunk = os.read(fds[1], want - got)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                got += len(chunk)
+            return b"".join(chunks)
+
+        data = upto(min(12, size))
+        if kind_of(data) != kind:
+            return None  # the first bytes say another kind, or none: nothing more is read
+        data += upto(size + 1 - len(data))
+        return (data, kind, name) if len(data) == size else None
+    except OSError:
+        return None
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 

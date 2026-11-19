@@ -405,7 +405,9 @@ def task_evidence(desk: Desk, m: dict, context: dict) -> dict:
             "verification_task": v["id"] if v else None, "merge": merge, "merge_commit": m.get("merge_commit"),
             "merge_checked": merge_checked, "despite_check": bool(marks.get("despite_check")),
             "merge_not_checked": bool(marks.get("merge_not_checked")), "missing": missing,
-            "releases": task_releases(m, context)}
+            "releases": task_releases(m, context),
+            # how many pictures the task and its standing verification kept, for the page (hansa/pictures.py)
+            "pictures": len(m.get("pictures") or []), "verification_pictures": len((v or {}).get("pictures") or [])}
 
 
 def show(desk: Desk, gid: str, *, tasks: list | None = None, context: dict | None = None) -> dict:

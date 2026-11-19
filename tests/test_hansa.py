@@ -7927,6 +7927,208 @@ def save():'''))
         self.assertEqual([p["name"] for p in m["pictures"]], ["before.jpg"], "its own list")
         self.assertEqual(len(self.desk.meta("t0001")["pictures"]), 2)
 
+    # -- the page's route to one kept picture (web.py, /api/picture; pictures.kept_bytes) --------------------------
+    def kept_picture_task(self):
+        """t0001 with three kept pictures: a.png, b.jpg, c.webp (numbers 0, 1, 2)."""
+        _, folder = self.picture_run()
+        for name, data in (("a.png", self.PNG), ("b.jpg", self.JPEG), ("c.webp", self.WEBP)):
+            (folder / name).write_bytes(data)
+        self.end_picture_run()
+        return {"Authorization": "Bearer " + self.desk.web_token()}
+
+    def no_picture(self, path, auth, **kw):
+        code, body, headers = self.web_request(path, headers=auth, **kw)
+        self.assertEqual((code, body), (404, {"error": "no such picture"}), path)
+        self.assertNotIn(str(self.desk.tasks_dir), json.dumps(body))
+
+    def test_web_picture_answers_the_kept_bytes_with_headers_that_let_it_do_nothing(self):
+        auth = self.kept_picture_task()
+        for n, data, ctype, name in ((0, self.PNG, "image/png", "a.png"), (1, self.JPEG, "image/jpeg", "b.jpg"),
+                                     (2, self.WEBP, "image/webp", "c.webp")):
+            with self.subTest(n=n):
+                code, body, headers = self.web_request(f"/api/picture?task=t0001&n={n}",
+                                                       headers={**auth, "Accept-Encoding": "gzip"})
+                self.assertEqual((code, body), (200, data))
+                self.assertEqual(headers["Content-Type"], ctype)
+                self.assertEqual(headers["Content-Length"], str(len(data)))
+                self.assertNotIn("Content-Encoding", headers)
+                self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+                self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
+                self.assertIn("sandbox", headers["Content-Security-Policy"])
+                self.assertEqual(headers["Content-Disposition"], f'inline; filename="{name}"')
+                self.assertIn("private", headers["Cache-Control"])
+                self.assertIn("no-store", headers["Cache-Control"])
+                self.assertEqual(headers["X-Hansa-Serve"], "1")
+
+    def test_web_picture_needs_the_pages_key_as_every_api_route(self):
+        self.kept_picture_task()
+        token = self.desk.web_token()
+        for headers, query in (({}, ""), ({"Authorization": "Bearer wrong"}, ""), ({}, "&t=" + token),
+                               ({"Cookie": "hansa_t=" + token}, "")):
+            with self.subTest(headers=headers, query=query):
+                self.assertEqual(self.web_request("/api/picture?task=t0001&n=0" + query, headers=headers)[:2],
+                                 self.web_request("/api/goals" + query.replace("&", "?"), headers=headers)[:2])
+                self.assertEqual(self.web_request("/api/picture?task=t0001&n=0" + query, headers=headers)[0], 403)
+        self.assertEqual(self.web_request("/api/picture?task=t0001&n=0", headers={"Authorization": "Bearer " + token})[:2],
+                         (200, self.PNG))
+
+    def test_web_picture_unknown_task_or_number_is_not_found(self):
+        auth = self.kept_picture_task()
+        self.hansa("add", "No pictures")
+        for query in ("task=t0009&n=0", "task=t0002&n=0", "task=t0001&n=3", "task=t0001&n=-1", "task=t0001&n=1.0",
+                      "task=t0001&n=a", "task=t0001&n=", "task=t0001", "n=0", "task=t0001&n=" + "0" * 400 + "1",
+                      "task=t0001&n=" + "9" * 400, "task=../t0001&n=0", "task=t0001/pictures&n=0",
+                      "task=t0001&n=%EF%BC%91", "task=t0001&n=+1", "task=t0001&n=0x1"):
+            with self.subTest(query=query):
+                self.no_picture("/api/picture?" + query, auth)
+
+    def test_web_picture_whose_file_changed_since_is_not_found_and_nothing_is_followed(self):
+        auth = self.kept_picture_task()
+        d = self.desk.tasks_dir / "t0001" / "pictures"
+        outside = self.tmp / "outside.png"
+        outside.write_bytes(self.PNG)
+        (d / "a.png").unlink()
+        (d / "a.png").symlink_to(outside)  # a link put there since: same size, same first bytes
+        self.no_picture("/api/picture?task=t0001&n=0", auth)
+        (d / "a.png").unlink()
+        self.no_picture("/api/picture?task=t0001&n=0", auth)  # gone
+        os.link(outside, d / "a.png")  # a hard link to a file elsewhere
+        self.no_picture("/api/picture?task=t0001&n=0", auth)
+        (d / "a.png").unlink()
+        (d / "a.png").mkdir()
+        self.no_picture("/api/picture?task=t0001&n=0", auth)
+        (d / "b.jpg").write_bytes(self.JPEG + b"x")  # another size
+        self.no_picture("/api/picture?task=t0001&n=1", auth)
+        (d / "c.webp").write_bytes(self.PNG[:len(self.WEBP)].ljust(len(self.WEBP), b"\0"))  # other first bytes
+        self.no_picture("/api/picture?task=t0001&n=2", auth)
+        # the folder itself replaced by a link to one that holds the same files
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "c.webp").write_bytes(self.WEBP)
+        shutil.rmtree(d)
+        d.symlink_to(elsewhere)
+        self.no_picture("/api/picture?task=t0001&n=2", auth)
+        # a record that names a path, as no kept record does
+        d.unlink()
+        d.mkdir()
+        (d / "c.webp").write_bytes(self.WEBP)
+        self.assertEqual(self.web_request("/api/picture?task=t0001&n=2", headers=auth)[:2], (200, self.WEBP))
+        self.desk.update("t0001", pictures=[{"name": "../../meta.json", "bytes": 10, "kind": "png", "run": 1},
+                                            {"name": str(outside), "bytes": len(self.PNG), "kind": "png", "run": 1}])
+        self.no_picture("/api/picture?task=t0001&n=0", auth)
+        self.no_picture("/api/picture?task=t0001&n=1", auth)
+
+    def test_web_picture_ignores_other_parameters_reads_from_outside_and_refuses_what_reads_refuse(self):
+        from hansa import web
+        auth = self.kept_picture_task()
+        for extra in ("&name=../../x", "&path=/etc/passwd", "&name=b.jpg&n=1", "&task=t0002"):
+            with self.subTest(extra=extra):
+                self.assertEqual(self.web_request("/api/picture?task=t0001&n=0" + extra, headers=auth)[:2],
+                                 (200, self.PNG))
+        for outside in ({"Host": "hansa.example.com"}, {"X-Forwarded-For": "203.0.113.9"}):
+            with self.subTest(outside=outside):
+                self.assertTrue(web.from_outside({"Host": "127.0.0.1:8765", **outside}))
+                self.assertEqual(self.web_request("/api/picture?task=t0001&n=0", headers={**auth, **outside})[:2],
+                                 (200, self.PNG))
+        post = {**auth, "X-Hansa": "1"}
+        self.assertEqual(self.web_request("/api/picture?task=t0001&n=0", method="POST", headers=post, data=b"{}")[:2],
+                         self.web_request("/api/goals", method="POST", headers=post, data=b"{}")[:2])
+        with unittest.mock.patch.object(web.http.server, "ThreadingHTTPServer") as server, \
+                unittest.mock.patch.object(web.threading, "Thread"):
+            start_web(self.desk, "127.0.0.1", 0)
+        handler = server.call_args.args[1]
+        for method in ("HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"):  # http.server answers 501 for each route
+            self.assertFalse(hasattr(handler, "do_" + method), method)
+
+    def test_task_page_text_leaves_the_pictures_lines_to_hansa_show(self):
+        self.kept_picture_task()
+        _, folder = self.picture_run()
+        (folder / "notes.txt").write_bytes(b"text")
+        self.end_picture_run()
+        page = views.task_page(self.desk, "t0001")
+        self.assertEqual([p["name"] for p in page["meta"]["pictures"]], ["a.png", "b.jpg", "c.webp"])
+        self.assertNotIn("left out", page["text"])
+        self.assertNotIn(str(self.desk.tasks_dir / "t0001" / "pictures"), page["text"])
+        self.assertIn("pictures left out: not a picture", self.hansa("show", "t0001"))
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_page_shows_a_tasks_and_its_verifications_pictures_from_memory_when_the_fold_opens(self):
+        from hansa import goals, web
+        vid = self.goal_with_pictures()
+        self.hansa("add", "Plain task")  # t0003, no pictures
+        self.hansa("add", "Gone picture")  # t0004: its record names one the route no longer answers
+        self.desk.update("t0004", pictures=[{"name": "lost.png", "bytes": 10, "kind": "png", "run": 1}])
+        given = {"goalRows": goals.page_list(self.desk),
+                 "pictures": {"t0001/0": "image/png", "t0001/1": "image/jpeg", "t0001/2": "image/webp",
+                              f"{vid}/0": "image/webp"},
+                 "pagePreferences": {"session": {"hansa.token": "example-page-key"}},
+                 **{f"/api/task?id={t}": views.task_page(self.desk, t) for t in ("t0001", vid, "t0003", "t0004")}}
+        harness = self.tmp / "pictures-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                r = subprocess.run(["node", str(harness), str(web.UI), "pictures", language], input=json.dumps(given),
+                                   capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                out = json.loads(r.stdout)
+                en = language == "en"
+                self.assertEqual(out["count"], "4 pictures" if en else "4 张图片")
+                self.assertEqual(out["beforeOpen"], 0, "pictures load when their fold opens, not with the page")
+                self.assertTrue(out["foldOpen"])
+                self.assertEqual(out["foldButton"], "true")
+                task, seen = sorted(out["lists"], key=lambda x: x["task"] != "t0001")
+                self.assertEqual(task["heading"], "Pictures" if en else "图片")
+                self.assertEqual(task["alts"], ["a.png", "b.jpg", "c.webp"])
+                self.assertEqual(task["names"], ["a.png", "b.jpg", "c.webp"])
+                self.assertTrue(task["afterReport"], "under the report")
+                self.assertTrue(all(s.startswith("blob:") for s in task["srcs"]), task["srcs"])
+                self.assertEqual((seen["task"], seen["step"], seen["alts"]), (vid, "verification", ["seen.webp"]))
+                self.assertEqual(seen["heading"], "What the verifier saw" if en else "核验者看到的")
+                self.assertEqual(sorted(x["path"] for x in out["requests"]),
+                                 sorted(["/api/picture?task=t0001&n=0", "/api/picture?task=t0001&n=1",
+                                         "/api/picture?task=t0001&n=2", f"/api/picture?task={vid}&n=0"]))
+                token = "Bearer example-page-key"
+                for x in out["requests"]:
+                    self.assertEqual((x["auth"], x["cache"], x["mode"], x["redirect"]),
+                                     (token, "no-store", "same-origin", "manual"))
+                    self.assertNotIn("example-page-key", x["path"])
+                self.assertTrue(out["thumbEnabled"])
+                self.assertEqual((out["view"]["alt"], out["view"]["label"], out["view"]["open"]), ("b.jpg", "b.jpg", True))
+                self.assertTrue(out["view"]["src"].startswith("blob:"))
+                self.assertEqual(out["view"]["focused"], "button")
+                self.assertIn("Close" if en else "关闭", out["view"]["text"])
+                self.assertEqual(out["escape"], {"closed": True, "focusBack": True})
+                self.assertTrue(out["clickCloses"])
+                self.assertEqual(out["reread"], 0)
+                self.assertEqual(out["none"], {"headings": 0, "text": True})
+                self.assertEqual(len(out["missing"]), 1)
+                self.assertIn("lost.png", out["missing"][0]["text"])
+                self.assertEqual(out["missing"][0]["tone"], "bad")
+                css = out["css"]
+                self.assertRegex(css, r"\.task-pictures ul \{[^}]*flex-wrap:wrap")
+                self.assertRegex(css, r"\.task-pictures li \{[^}]*max-width:100%")
+                self.assertRegex(css, r"dialog\.picture-view img \{[^}]*max-width:calc\(100vw")
+                self.assertRegex(css, r"dialog\.picture-view img \{[^}]*max-height:calc\(100vh")
+
+    def goal_with_pictures(self):
+        """Goal g1 whose chain is t0001 with three kept pictures and a verification that holds with one."""
+        self.hansa("goal", "add", "Show pictures")
+        self.kept_picture_task()
+        self.desk.update("t0001", goal="g1")
+        vid = self.desk.new_task("Verify t0001", kind="verify", parent="t0001")
+        self.desk.update("t0001", verify=vid)
+        _, folder = self.picture_run(vid)
+        (folder / "seen.webp").write_bytes(self.WEBP)
+        self.end_picture_run(vid)
+        self.desk.update(vid, state="done", verdict="holds")
+        return vid
+
+    def test_goal_chains_count_the_pictures_of_the_task_and_its_verification(self):
+        from hansa import goals
+        self.goal_with_pictures()
+        [chain] = goals.page_list(self.desk)[0]["chains"]
+        self.assertEqual((chain["id"], chain["pictures"], chain["verification_pictures"]), ("t0001", 3, 1))
+
     def test_attachments_refuse_builtin_notes_logins_and_provider_folders(self):
         from hansa import run
         home = self.tmp / "home"
@@ -47532,6 +47734,12 @@ const serveAnswer = async (path, options) => {
   if (foreignAnswer) return {...foreignReply(foreignAnswer), foreign:true};
   if (serverErrorPaths.some(p => path.startsWith(p))) return {status:500, json:async () => ({error:"example server failure"})};
   if (refuseToken) return {status:403, json:async () => { throw new Error("a 403 says Open the address, as text"); }};
+  if (path.startsWith("/api/picture?")) {  // given.pictures: {"task/n": its Content-Type}
+    const q = new URLSearchParams(path.split("?")[1]), kind = (given.pictures || {})[q.get("task") + "/" + q.get("n")];
+    if (!kind) return {status:404, json:async () => ({error:"no such picture"})};
+    return {status:200, headers:{get:name => name.toLowerCase() === "content-type" ? kind : null},
+      blob:async () => ({type:kind, from:path})};
+  }
   if (options && options.method === "POST" && path === "/api/settings") {
     posted = JSON.parse(options.body); settingsPostCount++;
     if (settingsPostGate) await settingsPostGate;
@@ -48602,6 +48810,53 @@ else if (ask === "page-time-language") (async () => {
   const lane = descendants(ids["#status-lanes"], "time")[0];
   console.log(JSON.stringify({date:event?.textContent, start:lane?.textContent,
     language:document.documentElement.attrs.lang}));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "pictures") (async () => {
+  // A goal's chain with pictures (given.goalRows, real /api/task replies, given.pictures): what its count opens,
+  // the pictures of the task and of its verification, the large view, and a task with none.
+  const run = code => vm.runInContext(code, ctx), flush = async () => { for (let i = 0; i < 9; i++) await new Promise(r => setImmediate(r)); };
+  const pictureGets = () => apiRequests.filter(r => r.path.startsWith("/api/picture"));
+  const find = (root, f) => { let found; walk(root, el => { if (!found && f(el)) found = el; }); return found; };
+  const out = {};
+  ctx.givenGoalRows = given.goalRows;
+  run('goalsRows = givenGoalRows; goalSelected = "g1"; renderGoals();');
+  const count = find(ids["#tab-goals"], el => el.attrs["data-goal-pictures"]);
+  out.count = count?.textContent; out.beforeOpen = pictureGets().length;
+  await count.click(); await flush();
+  const fold = ids["#" + count.attrs["aria-controls"]];
+  out.foldOpen = !fold.hidden;
+  out.foldButton = find(ids["#tab-goals"], el => el.attrs["aria-controls"] === fold.id && el !== count)?.attrs["aria-expanded"];
+  const lists = []; walk(fold, el => { if (el.attrs["data-pictures"]) lists.push(el); });
+  out.lists = lists.map(l => ({task:l.attrs["data-pictures"], heading:descendants(l, "h4")[0].textContent,
+    alts:descendants(l, "img").map(i => i.attrs.alt), srcs:descendants(l, "img").map(i => i.src),
+    names:descendants(l, "small").map(x => x.textContent), step:l.parentElement?.attrs["data-task-step"] || "",
+    afterReport:l.parentElement === fold && fold.kids.indexOf(l) > fold.kids.findIndex(k => k.tag === "pre")}));
+  out.requests = pictureGets().map(r => ({path:r.path, auth:r.headers.Authorization, cache:r.cache, mode:r.mode, redirect:r.redirect}));
+  const thumb = descendants(lists.find(l => l.attrs["data-pictures"] === "t0001"), "button")[1];
+  out.thumbEnabled = !thumb.disabled; thumb.focus();
+  await thumb.click();
+  const dialog = document.body.kids.find(k => k.tag === "dialog");
+  out.view = {alt:descendants(dialog, "img")[0].attrs.alt, src:descendants(dialog, "img")[0].attrs.src,
+    open:"open" in dialog.attrs, label:dialog.attrs["aria-label"], focused:document.activeElement?.tag, text:dialog.textContent};
+  dialog.on.cancel({preventDefault() {}});  // Escape
+  out.escape = {closed:!document.body.kids.includes(dialog), focusBack:document.activeElement === thumb};
+  await thumb.click();
+  const again = document.body.kids.find(k => k.tag === "dialog");
+  await descendants(again, "img")[0].click();
+  out.clickCloses = !document.body.kids.includes(again);
+  // closing and opening the fold again reads nothing again
+  const reads = pictureGets().length; await count.click(); await flush();
+  const foldButton = find(ids["#tab-goals"], el => el.attrs["aria-controls"] === fold.id && el !== count);
+  await foldButton.click(); await foldButton.click(); await flush();
+  out.reread = pictureGets().length - reads;
+  const [none, noneBox] = run('taskLink("t0003")'); ids["#tab-status"].append(none, noneBox);
+  await none.click(); await flush();
+  out.none = {headings:descendants(noneBox, "h4").length, text:noneBox.textContent.includes("Plain task")};
+  const [gone, goneBox] = run('taskLink("t0004")'); ids["#tab-status"].append(gone, goneBox);
+  await gone.click(); await flush();
+  out.missing = descendants(find(goneBox, el => el.attrs["data-pictures"]), "small").map(x => ({text:x.textContent, tone:x.className}));
+  out.css = page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"));
+  console.log(JSON.stringify(out));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
 else if (ask === "task-steps") (async () => {
   const flush = () => new Promise(resolve => setImmediate(resolve));
