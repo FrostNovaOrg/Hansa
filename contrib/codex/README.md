@@ -194,7 +194,8 @@ codex's stderr, and classed on the whole text, so that hansa's own readings take
 | a usage limit, spend cap, quota, 429 | quota, with Codex's reset time when given | requeues; the provider rests until the reset, or for its configured rest when no time is given |
 | workspace out of credits, or the plan requires an upgrade to use Codex | credit | requeues without using a try; the provider rests until the principal confirms a top-up on the page |
 | model at capacity, high demand | overloaded (529) | tries once more |
-| `content_filter` | refused | the lane's next provider |
+| the provider's safety check stopped the run: `reason: content_filter`; a final error saying `flagged for possible cybersecurity risk`, `flagged for possible biological risk`, `flagged as potentially violating our usage policy` or `blocked due to a misalignment policy violation`; an event's `codex_error_info` of `cyber_policy`, `bio_policy`, `invalid_prompt` or `misalignment_policy_violation` | a safety stop (`stop_reason: content_filter`), in the adapter's own words | ends the task blocked, for the principal |
+| `model rerouted:` (the provider moved the request to another model) | a safety stop; the adapter stops Codex at once and uses nothing it said after | ends the task blocked, for the principal |
 | a dropped stream, idle timeout | connection dropped | tries once more on the same provider |
 | refused, reset or timed-out connection; `workspace routing discovery failed`; a 5xx | connection error, server error | tries once more |
 | a token that cannot be refreshed, 401, 403, not logged in | login | rests the provider until it is logged in again and `hansa ping NAME` answers; the rest gives the login command |

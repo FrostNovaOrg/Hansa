@@ -34783,6 +34783,15 @@ def save():'''))
                                  "to this request, which appears to violate our Usage Policy (MARK)"}),
         ("content filtering notice", {"subtype": "success", "is_error": True,
                                       "result": "API Error: Output blocked by content filtering policy MARK"}),
+        # Claude Code on another provider's Anthropic-style address, its request refused with an HTTP 400
+        ("kimi 400, its body", {"subtype": "success", "is_error": True, "terminal_reason": "api_error",
+                                "api_error_status": 400, "result": 'API Error: 400 {"error":{"type":"content_filter",'
+                                '"message":"The request was rejected because it was considered high risk"}} MARK'}),
+        ("kimi 400, its message", {"subtype": "success", "is_error": True, "terminal_reason": "api_error",
+                                   "api_error_status": 400, "result": "API Error: 400 The request was rejected "
+                                   "because it was considered high risk MARK"}),
+        ("deepseek 400", {"subtype": "success", "is_error": True, "terminal_reason": "api_error",
+                          "api_error_status": 400, "result": "API Error: 400 Content Exists Risk MARK"}),
     ]
 
     def test_which_results_the_safety_check_stopped(self):
@@ -34800,6 +34809,17 @@ def save():'''))
                                            "appears to violate our Usage Policy"},
               {"is_error": True, "stop_reason": "end_turn", "result": "safeguards"},
               {"is_error": True, "subtype": "error_max_turns"}]
+        e400 = {"subtype": "success", "is_error": True, "terminal_reason": "api_error", "api_error_status": 400}
+        no += [{**e400, "result": f"API Error: 400 {said}"} for said in (  # any other 400: as before
+            '{"error":{"type":"invalid_request_error","message":"Invalid request"}}',
+            "prompt is too long: 250000 tokens > 200000 maximum", "Model Not Exist", "unknown model kimi-x",
+            "content_filtering is on", "considered risky")]
+        for said in ("API Error: 400 content_filter", "API Error: 400 considered high risk",
+                     "API Error: 400 Content Exists Risk"):
+            no += [{**e400, "api_error_status": status, "result": said} for status in (403, 500, None)]
+            no += [{**e400, "is_error": False, "result": said},
+                   {**e400, "result": "The tests failed.\n" + said},
+                   {**e400, "result": "I read Kimi's docs: " + said}]
         for r in no:
             with self.subTest(r):
                 self.assertFalse(run.safety_stopped(r))

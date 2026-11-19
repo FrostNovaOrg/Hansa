@@ -281,6 +281,10 @@ SAFETY_NOTICE = re.compile(r"(?:API Error: )?(?:[^\n]{1,200}?'s safeguards flagg
                            r"|[^\n]{1,200}? can't help with this\. Start a new session to continue\."
                            r"|Claude Code is unable to respond to this request, which appears to violate our Usage Policy"
                            r"|Output blocked by content filtering policy)")
+# or, on an error with api_error_status 400 (Claude Code on another provider's Anthropic-style address), that
+# provider's words for such a stop after "API Error: 400": Kimi's (content_filter, considered high risk) and DeepSeek's
+SAFETY_400 = re.compile(r"API Error: 400\b(?=.*?(?:\bcontent_filter\b|considered high risk|Content Exists Risk))",
+                        re.I | re.S)
 BASE_ENV = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR")
 RUN_TMP_VARS = ("TMPDIR", "CLAUDE_CODE_TMPDIR")  # hansa's for each run (make_worker_tmp, in_srt), not a lane's
 GIT_ID = {"GIT_AUTHOR_NAME": "hansa", "GIT_AUTHOR_EMAIL": "hansa@localhost",
@@ -5217,7 +5221,11 @@ def safety_stopped(run) -> bool:
     if run.get("stop_reason") in SAFETY_STOPS:
         return True
     said = run.get("result")
-    return run.get("is_error") is True and isinstance(said, str) and bool(SAFETY_NOTICE.match(said.strip()))
+    if run.get("is_error") is not True or not isinstance(said, str):
+        return False
+    if SAFETY_NOTICE.match(said.strip()):
+        return True
+    return str(run.get("api_error_status")) == "400" and bool(SAFETY_400.match(said.strip()))
 
 
 def unusable_reason(run: dict, err: str, subscription: bool = False, *, codex: bool = False):

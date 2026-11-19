@@ -1,0 +1,7 @@
+{"type": "thread.started", "thread_id": "0199f3a2-0000-7000-8000-000000000112"}
+{"type": "turn.started"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "Reading the scanner. RUNTEXT-7f3a"}}
+{"type": "item.completed", "item": {"id": "item_1", "type": "error", "message": "model rerouted: gpt-6.1-sol -> gpt-6-mini (HighRiskCyberActivity)"}}
+{"type": "item.completed", "item": {"id": "item_2", "type": "command_execution", "command": "bash -lc 'cat AFTER-REROUTE-1'", "aggregated_output": "AFTER-REROUTE-1", "exit_code": 0, "status": "completed"}}
+{"type": "item.completed", "item": {"id": "item_3", "type": "agent_message", "text": "Finished on the other model. AFTER-REROUTE-1"}}
+{"type": "turn.completed", "usage": {"input_tokens": 900, "cached_input_tokens": 0, "output_tokens": 90}}

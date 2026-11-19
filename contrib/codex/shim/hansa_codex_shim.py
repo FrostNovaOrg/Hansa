@@ -718,6 +718,15 @@ OVERLOADED_TEXT = re.compile(r"Selected model is at capacity|We[’']re currentl
 REFUSAL_TEXT = re.compile(r"stream disconnected before completion: Incomplete response returned, reason: "
                           r"content_filter", re.I)
 DROPPED_TEXT = re.compile(r"stream disconnected before completion: ", re.I)  # with any other reason
+# The provider's safety check stopped the run: its message in the final error, or its code in codex_error_info (any
+# event that has one), or the provider moving the request to another model (an item "model rerouted: A -> B (...)",
+# Codex 0.102.0 on), which is not an error to Codex: the shim stops Codex there. Each answered as a safety stop.
+SAFETY_TEXT = re.compile(r"flagged for possible (?:cybersecurity|biological) risk|"
+                         r"flagged as potentially violating our usage policy|"
+                         r"blocked due to a misalignment policy violation", re.I)
+SAFETY_CODES = ("cyber_policy", "bio_policy", "invalid_prompt", "misalignment_policy_violation")
+REROUTED = "model rerouted:"
+SAFETY_SAID = "Codex: the provider's safety check stopped the run ({})"
 # The login failed: not retried; the provider cannot be used until someone signs in again
 LOGIN_FAILED_TEXT = re.compile(r"Your access token could not be refreshed|unexpected status 401 Unauthorized", re.I)
 # One of those: another run on the same Codex home refreshed at the same instant (Codex refreshes only when the
@@ -800,6 +809,8 @@ def classify(text: str, home: str = "", codex: str = "codex") -> dict:
     would Claude's. Classed on the whole text; only what is shown is cut."""
     whole = " ".join(str(text).split())
     said = one_line(whole)
+    if m := SAFETY_TEXT.search(whole):  # only the phrase, never the rest of Codex's message
+        return {"result": SAFETY_SAID.format(m.group(0)), "stop_reason": "content_filter"}
     if REFUSAL_TEXT.search(whole):
         return {"result": f"Codex: the provider refused the request (content_filter): {said}",
                 "stop_reason": "content_filter"}
@@ -838,6 +849,23 @@ def classify(text: str, home: str = "", codex: str = "codex") -> dict:
     if CONNECT_WORDS.search(whole):
         return {"result": f"API Error: Connection error (Codex: {said})"}
     return {"result": f"Codex failed: {said or 'no message'}"}
+
+
+def error_info(ev, depth: int = 0):
+    """The code of the last codex_error_info anywhere in an event ("cyber_policy"; a variant with data,
+    {"http_connection_failed": {...}}, by its name), or None when it has none."""
+    found = None
+    if depth > 8:
+        return None
+    items = ev.items() if isinstance(ev, dict) else enumerate(ev) if isinstance(ev, list) else ()
+    for k, v in items:
+        if k == "codex_error_info" and isinstance(v, str):
+            found = v
+        elif k == "codex_error_info" and isinstance(v, dict) and len(v) == 1:
+            found = next(iter(v))
+        elif isinstance(v, (dict, list)):
+            found = error_info(v, depth + 1) or found
+    return found
 
 
 def answer(subtype: str, result: str, sid: str, turns: int = 0, model: str = "", usage=None, **extra) -> dict:
@@ -1070,12 +1098,13 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
     seen, said, errors, failure, usage, thread, done, over = set(), "", [], None, None, "", False, False
     progress = Progress(env.get("CLAUDE_CONFIG_DIR", "") if not check else "", sid)
     retries, warnings = [], []
+    info, rerouted = None, False  # the last codex_error_info's code; the provider moved the request to another model
     partial = b""
     offset = 0
 
     def read_events(ended, stopping=False):
-        nonlocal partial, said, failure, usage, thread, done, over, offset
-        if jsonl.closed:
+        nonlocal partial, said, failure, usage, thread, done, over, offset, info, rerouted
+        if jsonl.closed or rerouted:  # nothing after the reroute is read
             return False
         chunk = os.pread(jsonl.fileno(), os.fstat(jsonl.fileno()).st_size - offset, offset)
         offset += len(chunk)
@@ -1092,6 +1121,11 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
             if not isinstance(ev, dict):
                 continue
             t, item = ev.get("type"), ev.get("item") if isinstance(ev.get("item"), dict) else {}
+            if not (t == "error" and RETRY.match(str(ev.get("message") or ""))):  # not a retried attempt's code
+                info = error_info(ev) or info
+            if str(item.get("message") or "").startswith(REROUTED):
+                rerouted = True
+                break
             if t == "thread.started":
                 thread = str(ev.get("thread_id") or "")
             elif t in ("item.started", "item.completed") and item.get("type") in COUNTED_ITEMS:
@@ -1118,14 +1152,21 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
                     break
         return bool(chunk)
 
+    def rerouted_answer(extra):  # Codex's output after the reroute, its last message included, is not used
+        return answer("error_during_execution", SAFETY_SAID.format("the request was moved to another model; "
+                      "hansa-codex-shim stopped Codex"), sid, len(seen), model, usage, stop_reason="content_filter",
+                      **extra)
+
     def on_signal(sig, _frame):  # hansa's ceiling, or a cancel: srt, codex and their commands go too
         for s in STOP_SIGNALS:
             signal.signal(s, signal.SIG_IGN)  # another stop must not restart the three-second grace
         if Run.proc is not None:
             stop_tree(Run.proc.pid, Run.proc, seen=Run.seen)
         read_events(ended=True, stopping=True)  # include events written just before or during the stop
-        if seen or said or usage:
-            extra = {"codex_thread_id": thread} if thread else {}
+        extra = {"codex_thread_id": thread} if thread else {}
+        if rerouted:
+            emit(rerouted_answer(extra))
+        elif seen or said or usage:
             emit(answer("error_during_execution", said, sid, len(seen), model, usage, **extra))
         shutil.rmtree(mine, ignore_errors=True)
         os._exit(128 + sig)
@@ -1160,7 +1201,7 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
         unmasked()
     looked, ended = 0.0, False
     # Complete lines as they arrive; a partial last one is kept until its newline does
-    while not (ended or over):
+    while not (ended or over or rerouted):
         if time.time() - looked > 2:
             looked = time.time()
             Run.seen = descendants(proc.pid, dict(Run.seen))
@@ -1171,7 +1212,7 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
             changed = read_events(ended)
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, was_reading)
-        if over:
+        if over or rerouted:
             stop_tree(proc.pid, proc, seen=Run.seen)
         if not changed and not ended:
             time.sleep(POLL)
@@ -1181,12 +1222,15 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
         dog.kill()
         dog.wait()
     jsonl.close()
+    extra = {"codex_thread_id": thread} if thread else {}
+    if rerouted:
+        shutil.rmtree(mine, ignore_errors=True)
+        return emit(rerouted_answer(extra))
     try:
         report = Path(last).read_text(encoding="utf-8").strip() or said
     except OSError:
         report = said
     shutil.rmtree(mine, ignore_errors=True)
-    extra = {"codex_thread_id": thread} if thread else {}
     warnings = list(dict.fromkeys(warnings))
     warned = "".join(f"\n\nCodex warned: {one_line(w)}" for w in warnings)
     if warnings:
@@ -1213,6 +1257,8 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
         text = RETRY.match(retries[-1]).group(1)
     text = text or f"codex ended (exit {code}) without finishing its turn"
     classified = classify(text, home, codex)
+    if info in SAFETY_CODES and classified.get("stop_reason") != "content_filter":
+        classified = {"result": SAFETY_SAID.format(info), "stop_reason": "content_filter"}
     if REFRESH_USED_TEXT.search(text):  # another run's refresh at the same instant, or a login that is gone
         try:
             limit = float(env.get(STATUS_TIMEOUT_SETTING) or STATUS_TIMEOUT)
@@ -1226,6 +1272,8 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
                               f"good; run the task again: {one_line(text)})"}
         else:
             classified["result"] += f" (codex login status: {how})"
+    if classified["result"].startswith(SAFETY_SAID.format("")[:-2]):
+        warned = ""  # the shim's own words alone
     return emit(answer("error_during_execution", classified.pop("result") + warned.replace("\n\n", " · "), sid,
                        len(seen), model, usage, **classified, **extra))
 
