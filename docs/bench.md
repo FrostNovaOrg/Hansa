@@ -68,6 +68,11 @@ Provisioning masks `user@<bench uid>.service`: the bench needs no systemd user
 manager, whose delayed shutdown would otherwise leave processes after SSH logout.
 Build and rebuild allow one hour, including the first cloud-image download; their
 initial Lima start may use that hour. Other calls retain their 900-second cap.
+The downloaded system image is kept between rebuilds in the desk's `.hansa/bench-image/`
+(rebuild makes everything else fresh), and each build checks it by computing its sha512 against
+the recipe's digest; a file that does not match is removed and downloaded again. With no kept
+image, a matching copy in the account's own Lima cache is copied in instead of a download.
+A failed download says so in one sentence: run `hansa bench rebuild` again.
 `/work`, `/out`, `/tmp` and `/dev/shm` share a 4 GiB disk limit, including the
 snapshot and filesystem overhead. Further writes fail with "No space left on device".
 A separate fixed-size ext4 image bounds peak disk growth while leaving the VM root

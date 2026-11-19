@@ -29,6 +29,10 @@ class BenchSelftestTest(unittest.TestCase):
     setUp = test_7.BenchManagementTest.setUp
     command = test_7.BenchManagementTest.command
     run_command = test_7.BenchManagementTest.run_command
+    URL = test_7.BenchManagementTest.URL  # Lima's faked image download, as in test_7
+    recipe_image = test_7.BenchManagementTest.recipe_image
+    lima_start = test_7.BenchManagementTest.lima_start
+    fake_image = test_7.BenchManagementTest.fake_image
 
     def unrelated_clock_calls(self):
         errors = []

@@ -1,6 +1,8 @@
 """Management through the CLI and page, with fake Lima/SSH and no network."""
 import contextlib
+import hashlib
 import io
+import os
 import json
 from pathlib import Path
 import subprocess
@@ -11,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from hansa import cli, web
-from hansa.bench import vm
+from hansa.bench import image, vm
 from hansa.desk import Desk, default_settings, validate
 from tests.bench.test_6 import KEY
 
@@ -31,6 +33,31 @@ class BenchManagementTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.desk = desk_at(temporary.name)
         self.calls, self.fail_action, self.status = [], "", "Stopped"
+        # Lima's download, faked: the recipe names IMAGE's bytes; a start without them in the private cache downloads.
+        self.cache = Path(temporary.name) / "account-cache"  # the account's own cache folder, never the real one
+        self.cache.mkdir()
+        self.image, self.downloads, self.download_breaks = b"guest image bytes", 0, False
+
+    URL = "https://images.example/debian-arm64.qcow2"
+
+    def recipe_image(self, recipe=None):
+        return self.URL, hashlib.sha512(self.image).hexdigest()
+
+    def lima_start(self, private, options):
+        entry = image.lima_entry(private / "Library" / "Caches", self.URL)
+        data, digest = entry / "data", entry / "sha512.digest"
+        if not (data.is_file() and digest.read_text() == "sha512:" + hashlib.sha512(self.image).hexdigest()):
+            if self.download_breaks:
+                options["stderr"].write(b"\n".join(b"progress line %d " % i + b"x" * 300 for i in range(20)) +
+                                        b'\nlevel=fatal msg="failed to download \\"' + self.URL.encode() +
+                                        b'\\": unexpected EOF"\n')
+                entry.mkdir(parents=True, exist_ok=True)
+                (entry / "data.tmp").write_bytes(self.image[:5])
+                raise subprocess.CalledProcessError(1, ["limactl"])
+            entry.mkdir(parents=True, exist_ok=True)
+            data.write_bytes(self.image)
+            digest.write_text("sha512:" + hashlib.sha512(self.image).hexdigest())
+            self.downloads += 1
 
     def run_command(self, command, **options):
         self.calls.append(command)
@@ -44,6 +71,8 @@ class BenchManagementTest(unittest.TestCase):
             (private / "submission").chmod(0o600)
             (private / "submission.pub").write_text(KEY)
         elif command[1] == "start":
+            if "--name=" + vm.INSTANCE in command:
+                self.lima_start(private, options)
             (private / "lima" / vm.INSTANCE).mkdir(exist_ok=True)
             self.status = "Running"
         elif command[1] == "stop":
@@ -60,10 +89,17 @@ class BenchManagementTest(unittest.TestCase):
             output = (KEY + " fixture-comment\n").encode()
         return subprocess.CompletedProcess(command, 0, output)
 
+    @contextlib.contextmanager
+    def fake_image(self):
+        with patch.object(image, "account_cache", return_value=self.cache), \
+                patch.object(image, "recipe_image", side_effect=self.recipe_image):
+            yield
+
     def command(self, action, *args):
         initialize = vm.VM.__init__
         factory = lambda machine, private: initialize(machine, private, run=self.run_command, clock=lambda: 0)
         with patch.object(vm.VM, "__init__", factory), patch.object(vm.sys, "platform", "darwin"), \
+                (self.fake_image() if hasattr(self, "cache") else contextlib.nullcontext()), \
                 patch.object(cli, "_as_desk_account"), patch.object(cli.notify, "session_here", return_value=False), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             cli.main(["--desk", str(self.desk.root), "bench", action, *args])
@@ -257,3 +293,182 @@ class BenchManagementTest(unittest.TestCase):
         self.command("rebuild")
         with self.assertRaisesRegex(SystemExit, "selftest"):
             self.command("on")
+
+
+    # The guest's system image is kept between rebuilds, in .hansa/bench-image/, checked against the recipe.
+
+    def kept(self):
+        folder = image.kept_dir(self.desk)
+        return {p.name: p.read_bytes() for p in folder.iterdir()} if folder.is_dir() else {}
+
+    def kept_name(self):
+        return "sha512-" + hashlib.sha512(self.image).hexdigest()
+
+    def test_image_downloaded_once_then_kept_across_rebuilds(self):
+        self.command("build")
+        self.assertEqual((self.downloads, self.kept()), (1, {self.kept_name(): self.image}))
+        folder = image.kept_dir(self.desk)
+        self.assertEqual((folder.parent, oct(folder.stat().st_mode & 0o777)), (self.desk.state_dir, "0o700"))
+        self.assertEqual(oct((folder / self.kept_name()).stat().st_mode & 0o777), "0o600")
+        (self.desk.state_dir / "bench" / "marker").write_text("old")
+        out = self.command("rebuild")
+        self.assertEqual(self.downloads, 1)  # no second download
+        self.assertFalse((self.desk.state_dir / "bench" / "marker").exists())  # the rest is fresh
+        self.assertEqual(sum(c[0] == "ssh-keygen" for c in self.calls), 2)
+        self.assertEqual(self.kept(), {self.kept_name(): self.image})
+        self.assertNotIn("already on this machine", out)
+        self.assertEqual(self.desk.settings()["bench"]["build"], "ready")
+
+    def account_entry(self):
+        return image.lima_entry(self.cache, self.URL)
+
+    def test_good_copy_in_the_accounts_lima_cache_is_copied_not_downloaded(self):
+        entry = self.account_entry()
+        self.assertEqual(entry.name, hashlib.sha256(self.URL.encode()).hexdigest())
+        entry.mkdir(parents=True)
+        (entry / "data").write_bytes(self.image)
+        out = self.command("rebuild")
+        self.assertEqual(self.downloads, 0)
+        self.assertIn("used the system image already on this machine", out)
+        self.assertEqual(self.kept(), {self.kept_name(): self.image})
+        kept = image.kept_dir(self.desk) / self.kept_name()
+        self.assertFalse(kept.is_symlink())
+        self.assertNotEqual(kept.stat().st_ino, (entry / "data").stat().st_ino)  # a copy, not a link or a move
+        self.assertEqual((entry / "data").read_bytes(), self.image)
+
+    def test_other_things_in_the_accounts_lima_cache_are_ignored_and_left(self):
+        other = Path(self.cache) / "elsewhere"
+        other.write_bytes(self.image)
+        for kind in ("changed", "link", "folder"):
+            with self.subTest(kind=kind):
+                entry = self.account_entry()
+                entry.mkdir(parents=True, exist_ok=True)
+                data = entry / "data"
+                if kind == "changed":
+                    data.write_bytes(b"G" + self.image[1:])
+                elif kind == "link":
+                    data.symlink_to(other)
+                else:
+                    data.mkdir()
+                    (data / "inside").write_bytes(self.image)
+                downloads = self.downloads
+                out = self.command("rebuild")
+                self.assertEqual(self.downloads, downloads + 1)
+                self.assertNotIn("already on this machine", out)
+                self.assertEqual((data.is_symlink(), data.is_dir(), data.is_file()),
+                                 (kind == "link", kind == "folder", kind != "folder"))
+                if kind == "changed":
+                    self.assertEqual(data.read_bytes(), b"G" + self.image[1:])
+                if kind == "folder":
+                    self.assertEqual((data / "inside").read_bytes(), self.image)
+                self.assertEqual(self.kept(), {self.kept_name(): self.image})
+                image.kept_dir(self.desk).joinpath(self.kept_name()).unlink()
+                if kind == "folder":
+                    (data / "inside").unlink()
+                    data.rmdir()
+                else:
+                    data.unlink()
+        self.assertEqual(other.read_bytes(), self.image)
+
+    def test_unusable_kept_image_is_removed_and_downloaded_again(self):
+        target = self.desk.state_dir / "outside"
+        for kind in ("changed byte", "truncated", "link", "folder", "group-readable"):
+            with self.subTest(kind=kind):
+                self.command("rebuild")
+                kept = image.kept_dir(self.desk) / self.kept_name()
+                kept.unlink()
+                if kind == "changed byte":
+                    kept.write_bytes(self.image[:-1] + b"X")
+                elif kind == "truncated":
+                    kept.write_bytes(self.image[:4])
+                elif kind == "link":
+                    target.write_bytes(self.image)
+                    kept.symlink_to(target)
+                elif kind == "folder":
+                    kept.mkdir()
+                else:
+                    kept.write_bytes(self.image)
+                if not kept.is_dir():
+                    os.chmod(kept, 0o640 if kind == "group-readable" else 0o600, follow_symlinks=False)
+                downloads = self.downloads
+                self.command("rebuild")
+                self.assertEqual(self.downloads, downloads + 1)
+                self.assertEqual(self.kept(), {self.kept_name(): self.image})
+                self.assertFalse(kept.is_symlink())
+        self.assertEqual(target.read_bytes(), self.image)  # a link's target is not touched
+
+    def test_broken_download_says_so_keeps_nothing_and_starts_again(self):
+        self.download_breaks = True
+        with self.assertRaises(SystemExit) as caught:
+            self.command("rebuild")
+        shown = str(caught.exception)
+        self.assertTrue(shown.startswith("hansa bench: The bench's system image could not be downloaded; "
+                                         "run hansa bench rebuild again"), shown)
+        self.assertIn("is kept", shown.splitlines()[0])
+        lima = shown.splitlines()[1:]
+        self.assertTrue(lima[0].startswith("Lima: "), shown)
+        self.assertLessEqual(len(lima), 3)
+        self.assertTrue(all(len(line) <= 210 for line in lima), shown)
+        self.assertIn("unexpected EOF", lima[-1])
+        self.assertEqual(self.kept(), {})
+        bench = self.desk.settings()["bench"]
+        self.assertEqual(bench["build"], "failed")
+        self.assertTrue(bench["failure"].startswith(image.DOWNLOAD_FAILED))
+        status = self.command("status")
+        self.assertTrue(status.startswith("bench: off; " + image.DOWNLOAD_FAILED + " {"), status)
+        self.assertNotIn(image.DOWNLOAD_FAILED, self.command("status", "--json").split('"failure"')[0])
+        self.download_breaks = False
+        self.command("rebuild")
+        self.assertEqual((self.downloads, self.kept()), (1, {self.kept_name(): self.image}))
+        self.assertNotIn(image.DOWNLOAD_FAILED, self.command("status"))
+
+    def test_other_failures_are_not_called_a_download_failure(self):
+        self.fail_action = "sh"
+        with self.assertRaises(SystemExit) as caught:
+            self.command("rebuild")
+        self.assertNotIn("could not be downloaded", str(caught.exception))
+        self.assertNotIn("could not be downloaded", self.command("status"))
+        self.assertEqual(self.kept(), {self.kept_name(): self.image})  # downloaded before provisioning failed
+
+    def test_new_recipe_image_replaces_the_old_once_in_place(self):
+        self.command("build")
+        old = self.kept_name()
+        self.image = b"next guest image"
+        self.download_breaks = True
+        with self.assertRaises(SystemExit):
+            self.command("rebuild")
+        self.assertEqual(set(self.kept()), {old})  # kept until the new one is in place
+        self.download_breaks = False
+        self.command("rebuild")
+        self.assertEqual((self.downloads, self.kept()), (2, {self.kept_name(): self.image}))
+
+    def test_check_uses_hansas_own_sha512_on_real_files(self):
+        root = Path(tempfile.mkdtemp(dir=self.desk.root))
+        digest = hashlib.sha512(self.image).hexdigest()
+        good = root / "good"
+        good.write_bytes(self.image)
+        good.chmod(0o600)
+        self.assertTrue(image._copy_checked(good, root / "copy", digest))
+        self.assertEqual((root / "copy").read_bytes(), self.image)
+        changed = root / "changed"
+        changed.write_bytes(self.image[:3] + bytes([self.image[3] ^ 1]) + self.image[4:])
+        link = root / "link"
+        link.symlink_to(good)
+        for source in (changed, link, root / "missing", root):
+            with self.subTest(source=source.name):
+                self.assertFalse(image._copy_checked(source, root / "out", digest))
+                self.assertFalse(os.path.lexists(root / "out"))  # nothing unusable is left
+        # A digest file beside the bytes is not believed: hansa hashes them itself.
+        (root / "sha512.digest").write_text("sha512:" + digest)
+        self.assertFalse(image._copy_checked(changed, root / "out", digest))
+        self.assertTrue(image._kept_ok(good))
+        self.assertFalse(image._kept_ok(link))
+        with patch.object(image.os, "getuid", return_value=good.stat().st_uid + 1):
+            self.assertFalse(image._kept_ok(good))  # not the account's
+            self.assertFalse(image._copy_checked(good, root / "out", digest))
+            self.assertFalse(os.path.lexists(root / "out"))
+        self.assertTrue(image._copy_checked(good, root / "out", digest, own=False) is True)
+
+    def test_recipe_names_a_sha512_digest(self):
+        location, digest = image.recipe_image()
+        self.assertTrue(location.startswith("https://") and len(digest) == 128)
