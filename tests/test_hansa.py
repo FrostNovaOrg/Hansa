@@ -22558,6 +22558,78 @@ def save():'''))
                 self.assertEqual(seen, {tid: ("1", False), vid: ("1", False)})  # a task and a verification
         self.assertNotIn("CLAUDE_CODE_DISABLE_AUTO_MEMORY", cli.coordinator_desk(self.desk, os.getuid())["env"])
 
+    def test_no_run_switches_model_on_a_flag_whatever_the_repository_or_the_lanes_env_says(self):
+        from hansa import cli, run
+        var = "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"
+        (self.repo / ".claude").mkdir(exist_ok=True)
+        (self.repo / ".claude" / "settings.json").write_text(json.dumps({"switchModelsOnFlag": True}))
+        subprocess.run(["git", "add", ".claude/settings.json"], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "switch on"],
+                       cwd=self.repo, check=True)
+        s = self.desk.settings()
+        s["providers"]["mimo"] = {"kind": "compatible", "model": "mimo-x", "effort": "", "base_url": "https://example.invalid"}
+        s["lanes"]["a"]["env"] = {var: "0"}
+        self.assertTrue([x for x in self.desk.save_settings(s) if var in str(x)])  # refused on saving
+        s["lanes"]["a"]["env"] = {var: "0", "FROM_LANE_ENV": "lane value"}
+        write_json(self.desk.settings_path, s)  # and saved around the check, it is still left out of the run
+        self.desk.write_key("mimo", "sk-test-switch-0001")
+        popen = subprocess.Popen
+
+        def switches(argv, env):
+            return json.loads(argv[argv.index("--settings") + 1]).get("switchModelsOnFlag"), env.get(var)
+
+        for prov in ("claude", "mimo"):
+            for kind in ("worker", "verification", "resume", "resume of an older saved command", "wrap_up"):
+                with self.subTest(provider=prov, kind=kind):
+                    launches = []
+
+                    def launch(argv, **kwargs):
+                        if not kwargs.get("start_new_session"):
+                            return popen(argv, **kwargs)
+                        launches.append((list(argv), dict(kwargs["env"])))
+                        proc = popen(["/usr/bin/true"], **kwargs)  # the real launch site, nothing of the run started
+                        proc.wait(timeout=30)
+                        return proc
+                    tid = self.desk.new_task(f"Switch fixture {kind}", lane="a",
+                                             kind="verify" if kind == "verification" else "work")
+                    self.addCleanup(run.remove_sandbox_tmp, self.desk, tid)
+                    with unittest.mock.patch.object(subprocess, "Popen", side_effect=launch):
+                        self.assertIsNotNone(run.start(self.desk, tid, "a", prov))
+                        saved = self.desk.raw_dir(tid) / run.RESUME_ARGV
+                        if kind == "resume of an older saved command":  # saved before hansa set the switch
+                            argv = json.loads(saved.read_text())
+                            at = argv.index("--settings") + 1
+                            argv[at] = json.dumps({k: v for k, v in json.loads(argv[at]).items()
+                                                   if k != "switchModelsOnFlag"})
+                            saved.write_text(json.dumps(argv))
+                        if kind.startswith("resume"):
+                            write_json(self.desk.raw_dir(tid) / "run.json", {"subtype": "success"})
+                            with unittest.mock.patch.object(run, "read_detail", return_value=["leftover command"]):
+                                self.assertIsNotNone(run.resume(self.desk, tid))
+                        elif kind == "wrap_up":
+                            write_json(self.desk.raw_dir(tid) / "run.json", {"subtype": "error_max_turns"})
+                            self.assertIsNotNone(run.wrap_up(self.desk, tid))
+                    self.assertEqual(len(launches), 1 if kind in ("worker", "verification") else 2)
+                    for argv, env in launches:
+                        self.assertEqual(switches(argv, env), (False, "1"))
+                        self.assertIn("project,local", argv)  # the repository's settings come after --settings
+                        self.assertNotIn("--fallback-model", argv)
+                        lane_file = Path(env["CLAUDE_ENV_FILE"]).read_text()
+                        self.assertIn("FROM_LANE_ENV", lane_file)
+                        self.assertNotIn(var, lane_file)
+                    self.assertTrue(any(var in line for line in self.desk.meta(tid)["env_left_out"]))
+            with self.subTest(provider=prov, kind="ping"):
+                seen = []
+
+                def answer(argv, **kwargs):
+                    seen.append(switches(argv, kwargs["env"]))
+                    return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "result", "result": "OK"}), "")
+                with unittest.mock.patch.object(run.subprocess, "run", answer):
+                    self.assertTrue(run.check_provider(self.desk, prov)["ok"])
+                self.assertEqual(seen, [(False, "1")])
+        # the coordinator's own session keeps Claude Code's default: its model is the principal's choice
+        self.assertNotIn(var, cli.coordinator_desk(self.desk, os.getuid())["env"])
+
     def test_a_providers_rest_uses_the_desks_cool_minutes_and_names_it(self):
         from hansa import run
         for minutes in (30, 45):

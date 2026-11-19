@@ -150,6 +150,14 @@ KILLED_EXITS = (-9, 137)
 KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # where a provider's key reaches Claude Code
 MODEL_VARS = ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
               "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL")
+# When the provider's safety check flags a request, Claude Code by default runs it again on another model and stays
+# there, and the run can end as an ordinary success. No run hansa starts (worker, verifier, their continuations, a
+# provider check; not the coordinator's own session) does: the flagged request ends the run as an error. Both
+# switches, the setting in the --settings object (isolated: above a repository's own settings) and the variable
+# (provider_env; Claude Code 2.1.312 and later read it). A lane's env cannot set it: its CLAUDE_ names are refused
+# (desk.RUN_ENV_PREFIXES), and it reaches only the commands in the sandbox (env_file), not Claude Code.
+NO_MODEL_SWITCH = {"switchModelsOnFlag": False}
+NO_MODEL_SWITCH_ENV = {"CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1"}
 # Every variable provider_env sets for the provider itself; the rest of its environment is the caller's
 PROVIDER_VARS = ("CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
                  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", *MODEL_VARS)
@@ -1897,6 +1905,7 @@ def provider_env(desk: Desk, name: str, p: dict, run: bool = True) -> dict:
     env["TERM"] = "dumb"
     if run:
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+        env.update(NO_MODEL_SWITCH_ENV)  # with switchModelsOnFlag in isolated: a flagged run ends, on its own model
     # 8 tries, with waits that double: Claude Code rides out a network drop of a minute or two inside
     # the run (its retries continue the same conversation; with 3 it gave up after about 20 seconds and
     # the run's work was lost). The cost: a rejected key takes about a minute longer to fail.
@@ -1942,15 +1951,24 @@ def isolated(cwd, settings: dict | None = None) -> list:
     plugins, hooks or CLAUDE.md of the user it runs as, no MCP servers but those hansa gives it, and no
     CLAUDE.md or .claude/rules from the folders above the checkout (the desk's card, the coordinator's, among them,
     and the copy of it hansa notify on puts in a session's folder that holds the desk).
-    `settings` go into the same --settings object (a worker's sandbox, say). Auto memory is off: --settings
-    comes before the repository's project and local settings, so a repository cannot turn it back on."""
+    `settings` go into the same --settings object (a worker's sandbox, say). Auto memory is off, and so is
+    the switch to another model after the provider's safety check flags a request (switchModelsOnFlag): --settings
+    comes before the repository's project and local settings, so a repository cannot turn either back on."""
     above = []
     for d in dict.fromkeys([*Path(cwd).parents, *Path(cwd).resolve().parents]):
         above += [str(d / "CLAUDE.md"), str(d / "CLAUDE.local.md"), str(d / ".claude" / "CLAUDE.md"),
                   str(d / ".claude" / "rules" / "**")]
     return ["--setting-sources", "project,local", "--strict-mcp-config",
             "--settings", json.dumps({"claudeMdExcludes": above, **(settings or {}),
-                                     "autoMemoryEnabled": False})]
+                                     "autoMemoryEnabled": False, **NO_MODEL_SWITCH})]
+
+
+def no_model_switch(argv: list) -> list:
+    """A worker's saved command (RESUME_ARGV) as resume and wrap_up run it: its --settings object with
+    NO_MODEL_SWITCH, so a run whose command was saved before hansa set it does not switch models either."""
+    at = argv.index("--settings") + 1
+    argv[at] = json.dumps({**json.loads(argv[at]), **NO_MODEL_SWITCH})
+    return argv
 
 
 def full_paths(paths) -> list:
@@ -4926,7 +4944,7 @@ def resume(desk: Desk, tid: str):
     wt = Path(meta["worktree"])
     try:
         check_git_file(desk, wt)
-        argv = json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8"))
+        argv = no_model_switch(json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8")))
         argv[argv.index("--session-id")] = "--resume"
     except (GitFileChanged, OSError, ValueError):  # finish says what happened
         return None
@@ -4978,7 +4996,7 @@ def wrap_up(desk: Desk, tid: str):
     wt = Path(meta["worktree"])
     try:
         check_git_file(desk, wt)
-        argv = json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8"))
+        argv = no_model_switch(json.loads((raw / RESUME_ARGV).read_text(encoding="utf-8")))
         argv[argv.index("--session-id")] = "--resume"
         turns = int(argv[argv.index("--max-turns") + 1])  # the ceiling of turns the run had
         argv[argv.index("--max-turns") + 1] = str(WRAP_UP_TURNS)  # counted from this call (RESUME_FACTS 4)
