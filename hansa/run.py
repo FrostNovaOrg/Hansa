@@ -353,7 +353,7 @@ on branch task/{tid}, a copy of that task's branch made for this check; nothing 
   stop background work within the command that started it, or wait for it there.
 - For visible changes, take your own pictures of what you saw and save them in `HANSA_PICTURES_DIR`.
   Use PNG, JPEG or WebP, up to 8 per run and 2 MiB each. Keep private data and credentials out.
-- Before the verdict line, give `Not looked at:` its own line after a blank line or a heading for a short list.
+- After the notes, before the verdict line, give `Not looked at:` its own line after a blank line or a heading for a short list.
   In plain words, say what you did not see or try that someone might assume you did (width, language, browser,
   state, page opened from outside). If there is nothing to list, write `Not looked at: nothing I know of`.
 {long}- Stop or wait for any background work you started before you write your report: your last

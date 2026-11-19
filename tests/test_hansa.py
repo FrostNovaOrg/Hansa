@@ -38577,21 +38577,29 @@ def save():'''))
 
     def test_verification_gaps_stop_at_not_looked_at(self):
         tid = None
-        for heading, unchecked in (
-            ("Notes:", "\nNot looked at:\n- Phone width"),
-            ("## Notes", "\nNot looked at: nothing I know of"),
-            ("## Notes", "\n## Not looked at:\n- Phone width"),
-            ("## Notes", "\nNot looked at:\n- Phone width"),
-            ("Notes:", "Not looked at: phone"),
+        gap = "- A gap."
+        for before, expected, after in (
+            ("Notes:", [gap], "\nNot looked at:\n- Phone width"),
+            ("## Notes", [gap], "\nNot looked at: nothing I know of"),
+            ("## Notes", [gap], "\n## Not looked at:\n- Phone width"),
+            ("## Notes", [gap], "\nNot looked at:\n- Phone width"),
+            ("Notes:", [gap], "Not looked at: phone"),
+            ("Not looked at:\n- Phone width\n\n## Notes", [gap], ""),
+            ("## Notes", [f"{gap}\n  Not looked at: phone", "- Another gap."], ""),
+            ("## Notes", [gap], "\n**Not looked at**:\n- Phone width"),
+            ("## Notes", [gap], "\n__Not looked at__:\n- Phone width"),
         ):
-            report = f"{heading}\n- A gap.\n{unchecked}"
+            report = "\n".join([before, *expected, after]).rstrip()
             with self.subTest(report=report):
                 tid, vid = self.gaps_verification(report, tid=tid)
                 listed = self.hansa("gaps")
-                self.assertIn(f"{vid}.1  {tid}  - A gap.", listed)
                 notes = self.desk.meta(vid)["verification_notes"]
-                self.assertEqual([n["text"] for n in notes], ["- A gap."], listed)
-                self.assertIn(unchecked.strip(), self.hansa("show", vid, "--report"))
+                self.assertEqual([n["text"] for n in notes], expected, listed)
+                for i, note in enumerate(expected, 1):
+                    self.assertIn(f"{vid}.{i}  {tid}  {note.splitlines()[0]}", listed)
+                    self.assertIn(note, self.hansa("gaps", "show", f"{vid}.{i}"))
+                if after:
+                    self.assertIn(after.strip(), self.hansa("show", vid, "--report"))
 
     def test_verification_gaps_recognize_formatted_not_looked_at_outside_code(self):
         from hansa.gaps import split_notes
