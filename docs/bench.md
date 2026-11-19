@@ -30,12 +30,13 @@ require exclusive access while disabled; rebuilding changes the generation and i
 `off` records disabled settings even during a hand-in; the broker then cancels and
 stops. Temporary management lock contention delays the broker until a later poll.
 `on` and serve require complete passing acceptance for the current recipe and generation.
-After an upgrade that changes the bench recipe, turn the bench off, run
-`hansa bench rebuild`, then run `hansa bench selftest` before turning it back on.
+If the recipe has changed since the bench was built, run `hansa bench off`,
+`hansa bench rebuild`, `hansa bench selftest`, then `hansa bench on`.
 The recipe covers guest files, including the provisioned package list, and the
 host broker, channel, snapshot, VM, probes and selftest.
-Serve treats stale or incomplete acceptance as off and reports the reason once;
-`status` also reports why an enabled bench is not in use. Selftest checks local
+Serve treats stale or incomplete acceptance as off and reports the reason once.
+`hansa bench status` reports why an enabled bench cannot accept hand-ins.
+`hansa status` also reports when an enabled bench needs a rebuild. Selftest checks local
 HTTP, headless Chromium, a terminal and tmux. To catch missing CJK fonts, it asks
 Fontconfig for a font covering representative Simplified Chinese, Traditional Chinese,
 Japanese and Korean glyphs. It checks sandbox filesystem and network restrictions,

@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import re
 import sys
 import threading
 import time
@@ -27,19 +28,61 @@ class BenchIntegrationTest(unittest.TestCase):
                                                   for n, f in selftest.mandatory().items()}))
         write_json(self.desk.settings_path, settings)
 
-    def test_status_reports_enabled_bench_with_stale_recipe(self):
-        from hansa.bench.manage import acceptance_problem
+    def assert_rebuild_instructions(self, message):
+        self.assertIn("recipe changed since the bench was built", message)
+        self.assertEqual(re.findall(r"\bhansa bench (off|rebuild|selftest|on)\b", message),
+                         ["off", "rebuild", "selftest", "on"])
+
+    def test_bench_status_reports_rebuild_or_missing_selftest(self):
         settings = self.desk.settings()
-        settings["bench"].update(enabled=True, recipe="stale")
-        write_json(self.desk.settings_path, settings)
-        for args in ([], ["--json"]):
+        current = dict(settings["bench"], enabled=True, acceptance=None)
+        for bench in (dict(current, recipe="stale"), current):
+            settings["bench"] = bench
+            write_json(self.desk.settings_path, settings)
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                cli.main(["--desk", str(self.desk.root), "bench", "status", *args])
-            if args:
-                self.assertEqual(json.loads(out.getvalue()), settings["bench"])
-            else:
-                self.assertEqual(out.getvalue().split("; ", 1)[0],
-                                 "bench: on, not in use: " + acceptance_problem(settings["bench"]))
+                cli.main(["--desk", str(self.desk.root), "bench", "status"])
+            with self.subTest(recipe=bench["recipe"]):
+                message = out.getvalue().split("; ", 1)[0]
+                self.assertTrue(message.startswith("bench: on, not in use: "))
+                if bench["recipe"] == "stale":
+                    self.assert_rebuild_instructions(message)
+                else:
+                    self.assertIn("bench needs a passing selftest for the current build", message)
+                    self.assertNotIn("hansa bench rebuild", message)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                cli.main(["--desk", str(self.desk.root), "bench", "status", "--json"])
+            self.assertEqual(json.loads(out.getvalue()), bench)
+
+    def test_status_reports_enabled_bench_with_stale_recipe(self):
+        settings = self.desk.settings()
+        current = dict(settings["bench"], enabled=True, acceptance=None)
+        for bench in (dict(current, recipe="stale"), current):
+            settings["bench"] = bench
+            write_json(self.desk.settings_path, settings)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                cli.main(["--desk", str(self.desk.root), "status"])
+            with self.subTest(recipe=bench["recipe"]):
+                if bench["recipe"] == "stale":
+                    self.assert_rebuild_instructions(out.getvalue())
+                else:
+                    self.assertNotIn("hansa bench rebuild", out.getvalue())
+
+    def test_selftest_reports_rebuild_or_requires_disabled_build(self):
+        settings = self.desk.settings()
+        current = dict(settings["bench"], enabled=True, acceptance=None)
+        for bench in (dict(current, recipe="stale"), dict(current, recipe="stale", enabled=False), current):
+            with self.subTest(recipe=bench["recipe"], enabled=bench["enabled"]):
+                settings["bench"] = bench
+                write_json(self.desk.settings_path, settings)
+                with patch("hansa.bench.manage.managed_vm") as machine, self.assertRaises(SystemExit) as error:
+                    cli.main(["--desk", str(self.desk.root), "bench", "selftest"])
+                machine.assert_not_called()
+                message = str(error.exception)
+                if bench["recipe"] == "stale":
+                    self.assert_rebuild_instructions(message)
+                else:
+                    self.assertIn("selftest requires a disabled, current ready build", message)
+                    self.assertNotIn("hansa bench rebuild", message)
 
     def test_serve_rechecks_acceptance_and_reports_once(self):
         import copy
@@ -63,7 +106,13 @@ class BenchIntegrationTest(unittest.TestCase):
                     factory.assert_not_called()
                     self.assertTrue(self.desk._bench_off)
                     if existing: self.assertEqual([c.args[0] for c in self.desk._bench.poll.call_args_list], [False, False])
-                    self.assertEqual(out.getvalue().count("selftest"), 1)
+                    message = out.getvalue()
+                    self.assertEqual(message.count("hansa serve: bench is off for this round"), 1)
+                    if block["recipe"] == "stale":
+                        self.assert_rebuild_instructions(message)
+                    else:
+                        self.assertIn("bench needs a passing selftest for the current build", message)
+                        self.assertNotIn("hansa bench rebuild", message)
         settings["bench"] = good; write_json(self.desk.settings_path, settings)
         self.dispatch.tick()
         self.assertFalse(self.desk._bench_off)
