@@ -668,7 +668,9 @@ New verifications keep each top-level list item under the last Notes heading
 (any level), including sub-items, as `VID.N`, with the checked task, title and
 time. A plain `Notes:` line (bold `**Notes:**` too) also starts the notes when
 no Notes heading follows it: its list ends at the next heading or at the next
-non-list line at the left margin, such as `VERDICT: ...`. Missing or unlisted
+non-list line at the left margin, such as `VERDICT: ...`.
+After a Notes section starts, a `Not looked at:` line at the left margin
+outside a code fence ends it, even when the label is bold. Missing or unlisted
 Notes keeps one report pointer. Other verdicts and past verifications add
 nothing. `hansa gaps` lists unmarked notes oldest first (160-character
 previews); `--all` includes marks and reasons. `hansa gaps show ID` prints one

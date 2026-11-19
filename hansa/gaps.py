@@ -13,11 +13,12 @@ def split_notes(report: str) -> list[str]:
     A section starts at a Notes heading of any level or, after the last such heading,
     at a plain ``Notes:`` line (bold ``**Notes:**`` too).  A plain line's list runs to
     the next heading or to the next non-list line at the left margin, such as a
-    ``VERDICT:`` line. A ``Not looked at:`` line outside a fence ends the search for
-    notes, since it lists what the verifier did not check.
+    ``VERDICT:`` line. After a Notes section starts, an unindented ``Not looked at:``
+    line outside a fence ends the search for notes (bold labels too).
     """
     lines = report.splitlines()
     headings, visible = [], []
+    plain = section = None
     fence = ""
     for i, line in enumerate(lines):
         marker = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
@@ -30,22 +31,27 @@ def split_notes(report: str) -> list[str]:
             fence = marker[1]
             visible.append(False)
             continue
-        if re.match(r"^ {0,3}(?:#{1,6}\s*)?(?:\*\*|__)?Not looked at:", line, re.I):
+        if (plain is not None or section is not None) and re.match(
+                r"^(?:#{1,6}\s*)?(?P<bold>\*\*|__)?Not looked at(?P=bold)?:", line, re.I):
             lines = lines[:i]
             break
         visible.append(True)
+        if re.fullmatch(r" {0,3}(?:\*\*|__)?Notes:(?:\*\*|__)?\s*", line, re.I):
+            plain = i
         atx = re.match(r"^ {0,3}(#{1,6})(?:\s+(.*?)\s*|\s*)$", line)
         if atx:
             title = re.sub(r"\s+#+\s*$", "", atx[2] or "").strip()
-            headings.append((i, i + 1, len(atx[1]), title))
+            heading = (i, i + 1, len(atx[1]), title)
         elif i and visible[i - 1] and lines[i - 1].strip() and re.fullmatch(r" {0,3}(=+|-+)\s*", line):
-            headings.append((i - 1, i + 1, 1 if line.lstrip().startswith("=") else 2, lines[i - 1].strip()))
-    plain = [i for i, line in enumerate(lines) if visible[i]
-             and re.fullmatch(r" {0,3}(?:\*\*|__)?Notes:(?:\*\*|__)?\s*", line, re.I)]
-    section = next((h for h in reversed(headings) if h[3].casefold() == "notes"), None)
+            heading = (i - 1, i + 1, 1 if line.lstrip().startswith("=") else 2, lines[i - 1].strip())
+        else:
+            continue
+        headings.append(heading)
+        if heading[3].casefold() == "notes":
+            section = heading
     heading_lines = {h[0] for h in headings}
-    if plain and (section is None or plain[-1] > section[0]):
-        start, end = plain[-1] + 1, len(lines)
+    if plain is not None and (section is None or plain > section[0]):
+        start, end = plain + 1, len(lines)
         for i in range(start, len(lines)):
             line = lines[i]
             if not line.strip():
