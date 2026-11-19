@@ -266,6 +266,8 @@ dialog.picture-view p { margin:6px 0 0; display:flex; justify-content:space-betw
 .release-card { background:var(--input); }
 .release-card > .mono, .release-card > .principal-details > .mono { padding:8px 10px; background:var(--surface); border-radius:6px; margin:7px 0; }
 .release-card > .muted { font-size:12px; margin-top:8px; }
+.release-pictures { display:flex; flex-wrap:wrap; gap:4px 12px; margin-top:8px; overflow-wrap:anywhere; }
+.release-pictures > span { min-width:0; }
 .event-list { max-height:400px; overflow:auto; }
 .event-row { display:grid; grid-template-columns:160px minmax(0,1fr); gap:5px 16px; padding:12px 0; border-top:1px solid var(--line); }
 .event-row:first-child { border-top:0; padding-top:0; }
@@ -558,7 +560,7 @@ const T = ZH ? {
   taskSteps:"任务步骤", taskQueued:"排队", taskRun:n => `运行 ${n}`, taskLaneCheck:"工作线检查", taskVerification:"核验", taskMergeCheck:"合并检查", taskMerged:"已合并",
   taskRunning:"进行中", taskCompleted:"已完成", taskFailed:"失败", taskCancelled:"已取消", taskWait:"等待", taskFirstResult:"首次结果",
   taskMinutes:n => `${n} 分钟`, taskSeconds:n => `${n} 秒`, taskExit:n => `退出码 ${n}`, taskVerifies:"核验任务", taskReplaces:"接替任务", taskVerificationUnavailable:"核验记录不可用",
-  pictures:"图片", verifierSaw:"核验者看到的", pictureCount:n => `${n} 张图片`, pictureMissing:"图片无法加载", pictureClose:"关闭",
+  pictures:"图片", verifierSaw:"核验者看到的", pictureCount:n => `${n} 张图片`, picturesMore:n => `另有 ${n} 个任务`, pictureMissing:"图片无法加载", pictureClose:"关闭",
   asks:"待办", todos:"待办", todosIntro:"仅展示。请在对话中回复，由协调员记录结果并关闭；所有事项永久保留。",
   todoWhat:"待办内容", todoWork:"工作", todoLoading:"正在加载待办…", todoPage:(p, n, total) => `第 ${p} / ${n} 页 · 共 ${total} 件待办`, todoWhy:"为何只有你能做", todoHolds:"工作等待此事", todoContinues:"工作继续", todoSince:"提出时间", todoOutcome:"结果", todoClosed:"关闭时间", todoOpen:"未完成", todoDone:"已关闭", principalDetails:"详情",
   providers:"模型服务商", kind:"类型", subscription:"订阅", compatible:"兼容接口", model:"模型", effort:"思考强度",
@@ -761,7 +763,7 @@ const T = ZH ? {
   taskSteps:"Task steps", taskQueued:"Queued", taskRun:n => `Run ${n}`, taskLaneCheck:"Lane check", taskVerification:"Verification", taskMergeCheck:"Merge check", taskMerged:"Merged",
   taskRunning:"running", taskCompleted:"completed", taskFailed:"failed", taskCancelled:"cancelled", taskWait:"Wait", taskFirstResult:"First result", notKnown:"not known",
   taskMinutes:n => `${n} min`, taskSeconds:n => `${n} s`, taskExit:n => `exit ${n}`, taskVerifies:"Verifies", taskReplaces:"Replaces", taskVerificationUnavailable:"Verification record unavailable",
-  pictures:"Pictures", verifierSaw:"What the verifier saw", pictureCount:n => `${n} picture${n === 1 ? "" : "s"}`, pictureMissing:"picture could not be loaded", pictureClose:"Close",
+  pictures:"Pictures", verifierSaw:"What the verifier saw", pictureCount:n => `${n} picture${n === 1 ? "" : "s"}`, picturesMore:n => `and ${n} more`, pictureMissing:"picture could not be loaded", pictureClose:"Close",
   asks:"To-dos", todos:"To-dos", todosIntro:"Read-only. Answer in the conversation; the coordinator records the outcome and closes each item. Every item is kept.",
   todoWhat:"What", todoWork:"Work", todoLoading:"Loading to-dos…", todoPage:(p, n, total) => `Page ${p} of ${n} · ${total} to-dos`, todoWhy:"Why only you", todoHolds:"Work waits", todoContinues:"Work goes on", todoSince:"Since", todoOutcome:"Outcome", todoClosed:"Closed at", todoOpen:"Open", todoDone:"Closed", principalDetails:"Details",
   providers:"Providers", kind:"Kind", subscription:"subscription", compatible:"compatible endpoint", model:"Model", effort:"Effort",
@@ -2166,9 +2168,23 @@ function releaseBlock(r) {
     r.code ? h("div", {class:"muted"}, (ZH && r.code_zh) || r.code) : null,
     h("div", {class:"muted"}, T.releaseCommits(r.count, r.since_release, r.remote_counts), " · ", T.releaseChecked(r.checked ?? r.count, (r.commits || []).length)),
     principalList(`release:${r.id}:commits`, T.releaseCommits(r.count, r.since_release, r.remote_counts), (r.commits || []).map(c => h("div", {}, `${c.sha.slice(0, 10)} ${c.subject}`))),
+    releasePictures(r),
     h("div", {class:"muted"}, T.releaseFiles(r.files_count)),
     principalList(`release:${r.id}:files`, T.releaseFiles(r.files_count), (r.files || []).map(f => named.has(f)
       ? h("div", {class:"warn"}, h("strong", {}, f), T.releaseNamed) : h("div", {}, f))));
+}
+// The tasks this release sends that kept pictures (theirs or their verification's; release.picture_tasks, from
+// records): each count opens the task's details, where its pictures load, as a goal's count does.
+function releasePictures(r) {
+  const list = r.picture_tasks || [];
+  if (!list.length) return null;
+  const links = list.map(t => [t, ...taskLink(t.id)]);
+  const more = (r.picture_tasks_count || 0) - list.length;
+  return [h("div", {class:"release-pictures", "data-release-pictures":r.id}, h("strong", {}, T.pictures + ": "),
+    links.map(([t, button, box]) => h("span", {}, button, " ", t.title, " · ", h("button", {class:"link", "data-release-picture":t.id,
+      "aria-controls":box.id, onclick:() => { if (button.getAttribute("aria-expanded") !== "true") button.click(); }},
+      T.pictureCount(t.pictures)))),
+    more > 0 ? h("span", {class:"muted"}, T.picturesMore(more)) : null), links.map(([, , box]) => box)];
 }
 function principalList(key, label, lines, list = h("div", {class:"mono", style:"max-height:14em;overflow:auto"}, lines)) {
   return lines.length > 5 ? h("details", {class:"principal-details", "data-principal-fold":key, open:principalOpen.has(key)},

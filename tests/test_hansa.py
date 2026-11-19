@@ -8129,6 +8129,139 @@ def save():'''))
         [chain] = goals.page_list(self.desk)[0]["chains"]
         self.assertEqual((chain["id"], chain["pictures"], chain["verification_pictures"]), ("t0001", 3, 1))
 
+    def release_with_pictures(self, extra=0):
+        """Waiting release #1 that sends t0001 (three pictures of its own), t0002 (none of its own, its verification
+        one), t0003 (none) and one direct commit; t0004 (pictures) landed but is not sent. extra: more tasks with a
+        picture each that it sends. Each sent task's merge commit is a recorded commit of the release."""
+        from hansa import release
+        vid = self.goal_with_pictures()  # t0001 with three, its verification one
+        self.hansa("add", "Second task with a verification that saw something")
+        second = sorted((m["id"] for m in self.desk.tasks() if m.get("kind") != "verify"), key=lambda t: int(t[1:]))[-1]
+        sv = self.desk.new_task("Verify " + second, kind="verify", parent=second)
+        self.desk.update(second, verify=sv)
+        self.desk.update(sv, state="done", verdict="holds",
+                         pictures=[{"name": "v.png", "bytes": len(self.PNG), "kind": "png", "run": 1}])
+        plain = self.desk.new_task("Plain task")
+        unsent = self.desk.new_task("Landed before")
+        self.desk.update(unsent, pictures=[{"name": "old.png", "bytes": 10, "kind": "png", "run": 1}])
+        more = [self.desk.new_task(f"Extra task {i} " + "with a long title " * 6) for i in range(extra)]
+        for t in more:
+            self.desk.update(t, pictures=[{"name": "x.png", "bytes": 10, "kind": "png", "run": 1}])
+        sha = {t: f"{n:040x}" for n, t in enumerate(["t0001", second, plain, unsent, *more], 1)}
+        for t, c in sha.items():
+            self.desk.update(t, state="merged", merged=1700000000, merge_commit=c)
+        sent = [t for t in sha if t != unsent]
+        commits = [{"sha": sha[t], "subject": f"Merge: {t}"} for t in reversed(sent)] + [
+            {"sha": "d" * 40, "subject": "Change made on the base by hand"}]
+        release._write(self.desk, [{"id": 1, "lane": "gone", "target": "", "repo": str(self.tmp), "base": "main",
+                                    "commit": commits[0]["sha"], "command": "git push", "state": "waiting",
+                                    "asked": 1700000100, "count": len(commits), "commits": commits,
+                                    "direct": commits[-1:], "direct_count": 1, "files": [], "files_count": 0},
+                                   {"id": 2, "lane": "gone", "target": "", "repo": str(self.tmp), "base": "main",
+                                    "commit": "d" * 40, "command": "git push", "state": "waiting",
+                                    "asked": 1700000200, "count": 1, "commits": commits[-1:], "files": [],
+                                    "files_count": 0}])
+        return vid, second, sv, plain, unsent, more
+
+    def test_release_rows_name_the_tasks_they_send_that_kept_pictures_from_records_only(self):
+        from hansa import pictures, release, views, web
+        vid, second, sv, plain, unsent, _ = self.release_with_pictures()
+        shutil.rmtree(self.desk.tasks_dir / "t0001" / "pictures")  # a file gone since: the count is the record's
+        with unittest.mock.patch.object(pictures, "kept_bytes", side_effect=AssertionError("a file was read")), \
+                unittest.mock.patch.object(release, "_git_bytes", side_effect=AssertionError("git was read")):
+            rows = {r["id"]: r for r in release.page_rows(self.desk, self.desk.settings())}
+        self.assertEqual(rows[1]["picture_tasks"], [
+            {"id": "t0001", "title": "Show the page", "pictures": 4},
+            {"id": second, "title": "Second task with a verification that saw something", "pictures": 1}])
+        self.assertEqual(rows[1]["picture_tasks_count"], 2)
+        self.assertNotIn(plain, json.dumps(rows[1]["picture_tasks"]))
+        self.assertNotIn(unsent, json.dumps(rows[1]["picture_tasks"]))
+        self.assertEqual((rows[2]["picture_tasks"], rows[2]["picture_tasks_count"]), ([], 0))  # a direct commit only
+        # the same from outside, as the other read parts
+        auth = {"Authorization": "Bearer " + self.desk.web_token()}
+        for outside in ({}, {"Host": "hansa.example.com"}, {"X-Forwarded-For": "203.0.113.9"}):
+            with self.subTest(outside=outside):
+                code, body, _ = self.web_request("/api/status", headers={**auth, **outside})
+                self.assertEqual(code, 200)
+                [shown] = [r for r in body["releases"] if r["id"] == 1]
+                self.assertEqual([(t["id"], t["pictures"]) for t in shown["picture_tasks"]], [("t0001", 4), (second, 1)])
+        # nothing else of the release changes
+        self.assertNotIn("picture", release.show_text(self.desk, release.get(self.desk, 1)).lower())
+
+    def test_release_rows_name_ten_tasks_with_pictures_and_count_the_rest(self):
+        from hansa import release
+        *_, more = self.release_with_pictures(extra=10)
+        [row] = [r for r in release.page_rows(self.desk, self.desk.settings()) if r["id"] == 1]
+        self.assertEqual(len(row["picture_tasks"]), 10)
+        self.assertEqual(row["picture_tasks_count"], 12)
+        self.assertEqual(row["picture_tasks"][0]["id"], "t0001")
+        cut = row["picture_tasks"][-1]["title"]
+        self.assertLessEqual(len(cut), release.PICTURE_TITLE)
+        self.assertTrue(cut.endswith("…") and cut.startswith("Extra task"), cut)
+
+    def test_page_release_card_names_the_tasks_with_pictures_and_each_count_opens_them(self):
+        from hansa import release, web
+        vid, second, sv, plain, unsent, more = self.release_with_pictures(extra=10)
+        self.desk.update(more[0], pictures=[{"name": "lost.png", "bytes": 10, "kind": "png", "run": 1}])
+        rows = sorted(release.page_rows(self.desk, self.desk.settings()), key=lambda r: r["id"])
+        given = {"releaseRows": rows, "open": "t0001",
+                 "pictures": {"t0001/0": "image/png", "t0001/1": "image/jpeg", "t0001/2": "image/webp",
+                              f"{vid}/0": "image/webp"},
+                 "pagePreferences": {"session": {"hansa.token": "example-page-key"}},
+                 **{f"/api/task?id={t}": views.task_page(self.desk, t) for t in ("t0001", vid)}}
+        harness = self.tmp / "release-pictures-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                r = subprocess.run(["node", str(harness), str(web.UI), "release-pictures", language],
+                                   input=json.dumps(given), capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                out = json.loads(r.stdout)
+                en = language == "en"
+                card, direct = out["cards"]
+                self.assertIsNone(direct, "a release of a direct commit only: no line")
+                self.assertTrue(card["text"].startswith("Pictures: " if en else "图片: "), card["text"])
+                self.assertEqual([c["task"] for c in card["counts"]], ["t0001", second, *more[:8]])
+                self.assertEqual(card["counts"][0]["text"], "4 pictures" if en else "4 张图片")
+                self.assertEqual(card["counts"][1]["text"], "1 picture" if en else "1 张图片")
+                self.assertIn("Second task with a verification", card["text"])
+                self.assertIn("…", card["text"])
+                self.assertTrue(card["text"].endswith("and 2 more" if en else "另有 2 个任务"), card["text"])
+                self.assertNotIn(plain, card["text"])
+                self.assertNotIn("Change made on the base by hand", card["text"])
+                self.assertTrue(card["afterCommits"])
+                self.assertEqual(out["beforeOpen"], 0, "pictures load when a count opens them, not with the card")
+                self.assertTrue(out["foldOpen"])
+                self.assertEqual(out["foldButton"], "true")
+                self.assertEqual(sorted((l["task"], tuple(l["alts"])) for l in out["lists"]),
+                                 sorted([("t0001", ("a.png", "b.jpg", "c.webp")), (vid, ("seen.webp",))]))
+                self.assertTrue(all(s.startswith("blob:") for l in out["lists"] for s in l["srcs"]))
+                for x in out["requests"]:
+                    self.assertEqual(x["auth"], "Bearer example-page-key")
+                    self.assertNotIn("example-page-key", x["path"])
+                self.assertRegex(out["css"], r"\.release-pictures \{[^}]*flex-wrap:wrap")
+
+    def test_page_release_card_count_of_a_gone_picture_opens_what_the_fold_shows(self):
+        from hansa import release, web
+        vid, *_ = self.release_with_pictures()
+        shutil.rmtree(self.desk.tasks_dir / "t0001" / "pictures")
+        rows = sorted(release.page_rows(self.desk, self.desk.settings()), key=lambda r: r["id"])
+        given = {"releaseRows": rows[:1], "open": "t0001", "pictures": {f"{vid}/0": "image/webp"},
+                 "pagePreferences": {"session": {"hansa.token": "example-page-key"}},
+                 **{f"/api/task?id={t}": views.task_page(self.desk, t) for t in ("t0001", vid)}}
+        harness = self.tmp / "release-pictures-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                r = subprocess.run(["node", str(harness), str(web.UI), "release-pictures", language],
+                                   input=json.dumps(given), capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                out = json.loads(r.stdout)
+                self.assertEqual(out["cards"][0]["counts"][0]["text"], "4 pictures" if language == "en" else "4 张图片")
+                [own] = [l for l in out["lists"] if l["task"] == "t0001"]
+                self.assertEqual(len(own["missing"]), 3)
+                self.assertIn("a.png", own["missing"][0])
+
     def test_attachments_refuse_builtin_notes_logins_and_provider_folders(self):
         from hansa import run
         home = self.tmp / "home"
@@ -48927,6 +49060,36 @@ else if (ask === "pictures") (async () => {
   const [gone, goneBox] = run('taskLink("t0004")'); ids["#tab-status"].append(gone, goneBox);
   await gone.click(); await flush();
   out.missing = descendants(find(goneBox, el => el.attrs["data-pictures"]), "small").map(x => ({text:x.textContent, tone:x.className}));
+  out.css = page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"));
+  console.log(JSON.stringify(out));
+})().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
+else if (ask === "release-pictures") (async () => {
+  // Release cards (given.releaseRows, as release.page_rows makes them) with real /api/task replies and given.pictures:
+  // each card's "Pictures:" line, what a count opens, and what loads then.
+  const run = code => vm.runInContext(code, ctx), flush = async () => { for (let i = 0; i < 9; i++) await new Promise(r => setImmediate(r)); };
+  const pictureGets = () => apiRequests.filter(r => r.path.startsWith("/api/picture"));
+  const find = (root, f) => { let found; walk(root, el => { if (!found && f(el)) found = el; }); return found; };
+  const out = {cards:[]};
+  ctx.givenReleaseRows = given.releaseRows;
+  const cards = run("givenReleaseRows.map(releaseBlock)");
+  for (const card of cards) {
+    ids["#tab-status"].append(card);
+    const line = find(card, el => el.attrs["data-release-pictures"]);
+    out.cards.push(line ? {text:line.textContent, counts:descendants(line, "button").filter(b => b.attrs["data-release-picture"])
+      .map(b => ({task:b.attrs["data-release-picture"], text:b.textContent, controls:b.attrs["aria-controls"]})),
+      afterCommits:card.kids.indexOf(line) > card.kids.findIndex(k => (k.textContent || "").includes("Change"))} : null);
+  }
+  out.beforeOpen = pictureGets().length;
+  const open = given.open;
+  const count = find(cards[0], el => el.attrs["data-release-picture"] === open);
+  await count.click(); await flush();
+  const fold = ids["#" + count.attrs["aria-controls"]];
+  out.foldOpen = !fold.hidden && cards[0].kids.includes(fold);
+  out.foldButton = find(cards[0], el => el.attrs["aria-controls"] === fold.id && el !== count)?.attrs["aria-expanded"];
+  const lists = []; walk(fold, el => { if (el.attrs["data-pictures"]) lists.push(el); });
+  out.lists = lists.map(l => ({task:l.attrs["data-pictures"], alts:descendants(l, "img").map(i => i.attrs.alt),
+    srcs:descendants(l, "img").map(i => i.src), missing:descendants(l, "small").filter(x => x.className === "bad").map(x => x.textContent)}));
+  out.requests = pictureGets().map(r => ({path:r.path, auth:r.headers.Authorization}));
   out.css = page.slice(page.indexOf("<style>") + 7, page.indexOf("</style>"));
   console.log(JSON.stringify(out));
 })().catch(e => { console.error(String(e && e.stack || e)); process.exit(1); });
