@@ -70,6 +70,8 @@ flowchart LR
 
 一条工作线可以用 Claude Code 的登录、任何兼容 Anthropic API 的接口（比如 DeepSeek 或 Kimi 的），还可以通过 [`contrib/codex`（英文）](contrib/codex/README.md) 用 Codex 的命令行。可以让一家模型写改动、另一家来核验；某家服务商的用量到了上限，任务会转给下一家。所有服务商的费用在网页上汇总在一处，`hansa cost --by provider` 还能按服务商分开看。
 
+维护者的建议见[模型选择](docs/zh-CN/models.md)。
+
 ## 它做过什么
 
 Hansa 本身就是用 Hansa 开发的。下面的数字来自一个工作台截至 2026 年 11 月 2 日的 60 天，你的数字会不一样。
@@ -99,7 +101,7 @@ Hansa 运行的是你自己安装的 Claude Code，用你自己的账号或密�
 
 ## 文档
 
-用 Hansa 不需要读它的代码。[上手指南](docs/zh-CN/getting-started.md)、[概念](docs/zh-CN/concepts.md)、[工作台怎么运转](docs/zh-CN/principles.md)和[推送服务](docs/zh-CN/push-services.md)已有中文版，其余文档目前是英文。
+用 Hansa 不需要读它的代码。[上手指南](docs/zh-CN/getting-started.md)、[概念](docs/zh-CN/concepts.md)、[模型选择](docs/zh-CN/models.md)、[工作台怎么运转](docs/zh-CN/principles.md)和[推送服务](docs/zh-CN/push-services.md)已有中文版，其余文档目前是英文。
 
 ### 从这里开始
 
@@ -108,6 +110,7 @@ Hansa 运行的是你自己安装的 Claude Code，用你自己的账号或密�
 | [上手指南](docs/zh-CN/getting-started.md) | 安装、登录、新建工作台、经 SSH 打开网页、完成第一件任务 |
 | [SETUP.md（英文）](SETUP.md) | 写给智能体的安装说明，它会用你的语言陪你装好：对 Claude Code 说“读 SETUP.md，和我一起装好 Hansa” |
 | [概念](docs/zh-CN/concepts.md) | 关键术语、工作怎么流转、工作台的文件、macOS 与 Linux、限制、命令、升级 |
+| [模型选择](docs/zh-CN/models.md) | 给协调员、工作智能体和核验智能体的模型与推理强度建议 |
 | [工作台怎么运转](docs/zh-CN/principles.md) | Hansa 的运行规则、由什么来执行，以及各自防范的问题 |
 | [推送服务](docs/zh-CN/push-services.md) | 把提醒发到手机和群聊：Bark、ntfy、Telegram、Slack、企业微信、钉钉、飞书等 |
 
