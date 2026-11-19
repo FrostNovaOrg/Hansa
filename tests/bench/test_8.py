@@ -213,6 +213,7 @@ class BenchBrokerTest(unittest.TestCase):
         self.assertEqual((result["status"], report["result"]["exit"], report["stdout"]),
                          ("failed", 7, self.output.decode()))
         name = report["artifacts"]["evidence.txt"]
+        self.assertRegex(name, r"\Abench-[0-9a-f]{32}\.txt\Z")
         self.assertEqual((worker.directories[0][0] / name).read_text(), "evidence")
         self.assertEqual(self.b.used[worker.run], 8)
         self.bad = True

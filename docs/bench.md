@@ -30,17 +30,22 @@ require exclusive access while disabled; rebuilding changes the generation and i
 `off` records disabled settings even during a hand-in; the broker then cancels and
 stops. Temporary management lock contention delays the broker until a later poll.
 `on` and serve require complete passing acceptance for the current recipe and generation.
-An upgrade that changes the bench's code needs a rebuild and a new selftest;
-the recipe covers guest files and the host broker, channel, snapshot, VM, probes and selftest.
+After an upgrade that changes the bench recipe, turn the bench off, run
+`hansa bench rebuild`, then run `hansa bench selftest` before turning it back on.
+The recipe covers guest files, including the provisioned package list, and the
+host broker, channel, snapshot, VM, probes and selftest.
 Serve treats stale or incomplete acceptance as off and reports the reason once;
-`status` also reports why an enabled bench is not in use. The
-selftest checks local HTTP, headless Chromium, a terminal and tmux, sandbox filesystem
-and network restrictions, account restrictions, the firewall's UID rules and detached
+`status` also reports why an enabled bench is not in use. Selftest checks local
+HTTP, headless Chromium, a terminal and tmux. To catch missing CJK fonts, it asks
+Fontconfig for a font covering representative Simplified Chinese, Traditional Chinese,
+Japanese and Korean glyphs. It checks sandbox filesystem and network restrictions,
+account restrictions, the firewall's UID rules and detached
 descendant cleanup after completion, timeout, disconnect and gateway death. It also
 checks disk, output and artifact limits, malformed requests, DHCP renewal, SSH host
 keys, queue cancellation, restart cleanup, idle stop and memory return.
-Missing evidence is incomplete. Selftest runs shipped code while disabled,
-records every probe and timing across two boots, and requires confirmed VM stop.
+Missing evidence is incomplete. Selftest runs shipped code while disabled and
+records 23 probes with timings on each of two boots. The 49 results also include
+boot identity, lifecycle and confirmed VM stop.
 Failed or incomplete results keep up to 4 KiB of evidence, with stored provider keys
 redacted before the cut; artifacts retain names and sizes, never bytes. Survivor
 evidence includes each process's PID and command name.
@@ -92,8 +97,11 @@ result, stdout, stderr and an artifact-name mapping. Artifacts appear there
 automatically under broker-chosen names. There is no fetch command. These files
 last only for the worker run; include findings in the report before ending.
 
-Artifacts have no extensions; the report's artifact mapping gives each original
-name. To view an image, first copy it to a name with its extension.
+Each artifact receives a random `bench-<hex>` name. The guest basename's final
+extension is kept in lowercase if it is `.png`, `.jpg`, `.jpeg`, `.webp`, `.txt`,
+`.log`, `.json`, `.html`, `.csv` or `.pdf`. Other extensions and names with no
+extension, including `.png` on its own, use the bare random name. The report's
+artifact mapping gives each original name.
 
 Each hand-in starts fresh with only its own loopback. Downloads, host dependencies,
 host environment and caches are unavailable. Git data, credentials and agent
@@ -119,9 +127,10 @@ the whole tree atomic. The mutation test advances mtime explicitly and also runs
 with a simulated clock that never ticks, so it tests the metadata guard without
 depending on the host clock advancing. Keep that fixture while seals use timestamps.
 
-The guest has Debian 13, Python 3.13, git, headless Chromium, tmux and only DejaVu
-fonts, so pages render with different fonts than on a Mac. The copy has no git
-data; make a fresh repository if a command needs one.
+The guest has Debian 13, Python 3.13, git, headless Chromium, tmux, DejaVu and
+WenQuanYi Micro Hei. WenQuanYi Micro Hei supplies Simplified and Traditional Chinese,
+Japanese and Korean glyphs. Pages can render with different fonts than on a Mac.
+The copy has no git data; make a fresh repository if a command needs one.
 
 One request runs, four wait, and each worker may have one outstanding request;
 excess requests receive `busy`. Total time defaults to 300 seconds (maximum 900),

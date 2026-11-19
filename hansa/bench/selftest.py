@@ -17,7 +17,8 @@ from types import SimpleNamespace
 from . import archive, probes
 from .vm import INSTANCE
 
-NAMES = ('disk_limit', 'sandbox', 'sandbox-again', 'account', 'edge-control', 'root-edge', 'bench-edge', 'inspect', 'dhcp',
+NAMES = ('disk_limit', 'sandbox', 'sandbox-again', 'cjk-font', 'account', 'edge-control',
+         'root-edge', 'bench-edge', 'inspect', 'dhcp',
          'descendant-normal', 'descendant-timeout', 'descendant-disconnect', 'descendant-gateway-death',
          'caps-output', 'caps-file', 'caps-total', 'caps-count', 'caps-links', 'header-cap', 'unknown-field', 'tar-cap', 'inspect-final')
 

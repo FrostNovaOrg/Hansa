@@ -164,7 +164,8 @@ class BenchRecipeTest(unittest.TestCase):
         self.assertLess(calls.index(["useradd", "-m", "-s", "/bin/sh", "bench"]), calls.index(mask))
         self.assertEqual((root / "etc/ssh/sshd_config").read_text(), "# existing Lima admin configuration\n")
         self.assertIn(["apt-get", "install", "-y", "--no-install-recommends", "bubblewrap", "nftables", "tmux",
-                       "chromium", "fonts-dejavu-core", "git", "python3", "openssh-server", "e2fsprogs"], calls)
+                       "chromium", "fontconfig", "fonts-dejavu-core", "fonts-wqy-microhei", "git", "python3",
+                       "openssh-server", "e2fsprogs"], calls)
         match = (root / "etc/ssh/sshd_config.d/50-bench.conf").read_text().splitlines()
         self.assertEqual((match[0], match[-1]), ("Match User bench", "Match all"))
         options = dict(line.strip().split(" ", 1) for line in match[1:-1])
