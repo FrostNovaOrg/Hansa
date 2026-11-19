@@ -3171,6 +3171,7 @@ def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
     for name in ("setup", "check"):
         (desk.state_dir / "runs" / tid / f"{name}-sandbox.json").unlink(missing_ok=True)
     (desk.state_dir / "runs" / tid / "lane-env.sh").unlink(missing_ok=True)  # the ended worker's (env_file)
+    (desk.state_dir / "runs" / tid / GIT_AT_START).unlink(missing_ok=True)  # its run's start (note_git_at_start)
     m = desk.meta(tid)
     if m.get("worker_tmp"):  # the pictures the run left for the principal, before its folder goes (hansa/pictures.py)
         pictures.take(desk, tid, m["worker_tmp"], next(
@@ -4332,7 +4333,29 @@ def prepare(desk: Desk, lane_name: str, lane: dict, meta: dict):
         "commit": wgit(desk, wt, "rev-parse", "HEAD"),
         "source": "earlier task's commit" if meta.get("start_from") else "base",
         "why": (restart or {}).get("why", "")})
+    note_git_at_start(desk, wt, tid)
     return wt, base
+
+
+# What a run's git was at its start, in its raw folder: what a blocked end (block) compares the end with
+GIT_AT_START = "git-at-start.json"
+
+
+def note_git_at_start(desk: Desk, wt: Path, tid: str) -> None:
+    """Keep every ref of the lane's repository and the length of the worktree's HEAD log as the run starts, for
+    _made_by_run; removed at the run's end (remove_sandbox_tmp)."""
+    refs = {}
+    for line in wgit(desk, wt, "for-each-ref", "--format=%(objectname) %(refname)").splitlines():
+        sha, _, name = line.partition(" ")
+        refs[name] = sha
+    try:
+        size = (own_git_folder(desk, wt) / "logs" / "HEAD").stat().st_size
+    except OSError:
+        size = 0
+    try:
+        write_json(desk.raw_dir(tid) / GIT_AT_START, {"refs": refs, "head_log": size})
+    except OSError:  # then a blocked end clears only what HEAD and the task's branches hold, as before
+        (desk.state_dir / "runs" / tid / GIT_AT_START).unlink(missing_ok=True)
 
 
 def with_setup(desk: Desk, tid: str, argv: list, lane: dict, pname: str, p: dict, wt: Path) -> list:
@@ -5419,16 +5442,128 @@ RUN_GIT_FILES = ("ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "MERGE_MODE", "MERGE_M
 RUN_GIT_FOLDERS = ("rebase-merge", "rebase-apply", "sequencer", "NOTES_MERGE_WORKTREE", "refs/bisect", "logs/refs/bisect")
 
 
+# A line of the HEAD log that moves HEAD to a commit already there (a checkout, a reset, a fast-forward, the start or
+# end of a rebase, a pull) rather than to one made here
+MOVED_ONLY = re.compile(rb"(?i)^(?:checkout:|reset:|pull|[^:\t]*\((?:start|finish|abort)\)|.*fast-forward)")
+
+
+def _made_by_run(desk: Desk, wt: Path, origin: str, keep: str, at_start) -> set:
+    """The commits the stopped run made in its worktree (a commit, merge, cherry-pick, revert or rebase's pick, on
+    any branch or none): those the worktree's HEAD log names since its start (note_git_at_start) and that neither
+    `origin` nor the base holds. Empty without a record of its start, or when the log is shorter than it was then."""
+    if not isinstance(at_start, dict) or not isinstance(at_start.get("head_log"), int):
+        return set()
+    try:
+        data = (own_git_folder(desk, wt) / "logs" / "HEAD").read_bytes()
+    except OSError:
+        return set()
+    if at_start["head_log"] > len(data):
+        return set()
+    found = []
+    for line in data[at_start["head_log"]:].splitlines():
+        head, _, said = line.partition(b"\t")
+        parts = head.split(b" ", 2)
+        if len(parts) > 1 and OID.fullmatch(parts[1].decode("ascii", "replace")) and not MOVED_ONLY.match(said):
+            found.append(parts[1].decode())
+    found = list(dict.fromkeys(found))
+    if not found:
+        return set()
+    held = [origin]
+    try:
+        held.append(wgit(desk, wt, "rev-parse", "-q", "--verify", f"{keep}^{{commit}}"))
+    except GitFileChanged:
+        raise
+    except RuntimeError:  # no base branch here: origin alone
+        pass
+    made = set()
+    for i in range(0, len(found), 100):
+        made |= set(found[i:i + 100]) & set(wgit(desk, wt, "rev-list", *found[i:i + 100], "--not", *held).split())
+    return made
+
+
+def _refs_made(desk: Desk, wt: Path, tid: str, keep: str, at_start, made: set) -> list:
+    """The refs the stopped run made or moved (the refs now against those at its start, note_git_at_start) that hold a
+    commit it made (_made_by_run): not the task's own branches, the base or the stash, which are cleared as they were.
+    A ref it made on a commit already there holds nothing of the run, and stays: another lane may have made it."""
+    if not made or not isinstance(at_start, dict) or not isinstance(at_start.get("refs"), dict):
+        return []
+    skip = {*_tries_of(desk, wt, tid), keep, "refs/stash"}
+    changed = []
+    for line in wgit(desk, wt, "for-each-ref", "--format=%(objectname) %(refname)").splitlines():
+        sha, _, name = line.partition(" ")
+        if name not in skip and at_start["refs"].get(name) != sha:
+            changed.append(name)
+    if not changed:
+        return []
+    listed, holding = sorted(made), set()
+    for i in range(0, len(listed), 100):
+        holding |= set(wgit(desk, wt, "for-each-ref", "--format=%(refname)",
+                            *(f"--contains={c}" for c in listed[i:i + 100])).split())
+    return [r for r in changed if r in holding]
+
+
+def _head_back(desk: Desk, wt: Path, branch: str) -> bool:
+    """A stopped run that left HEAD off its branch (a rebase or bisect half done, a detached HEAD, another branch):
+    what git keeps of the rebase, bisect, merge, cherry-pick or revert under way removed (RUN_GIT_FILES and
+    RUN_GIT_FOLDERS), and HEAD naming `branch` again; the worktree's files stay as they are, for the patch. False when
+    HEAD names the branch already, or holds neither a commit id nor a branch (check_head then says so)."""
+    folder = own_git_folder(desk, wt)
+    text, _ = _plain_text(folder / "HEAD")
+    if text is None or text == f"ref: refs/heads/{branch}" or not (
+            OID.fullmatch(text) or re.fullmatch(r"ref: refs/heads/[^\s\0]+", text)):
+        return False
+    for name in RUN_GIT_FILES:
+        (folder / name).unlink(missing_ok=True)
+    for name in RUN_GIT_FOLDERS:
+        shutil.rmtree(folder / name, ignore_errors=True)
+    wgit(desk, wt, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+    return True
+
+
+def _quiet_left_running_events(desk: Desk, tid: str) -> None:
+    """The task's left_running_stopped events written with command lines (sweep, at a ceiling before the stop): each
+    rewritten in place, under the log's lock (append_event), to its process ids and their count, padded with spaces
+    to its own length so that no reader's place in the log moves."""
+    try:
+        fh = open(desk.events_path, "r+b")
+    except OSError:
+        return
+    with fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        found, at = [], 0
+        for line in iter(fh.readline, b""):
+            if b'"left_running_stopped"' in line and tid.encode() in line:
+                found.append((at, line.rstrip(b"\n")))
+            at += len(line)
+        for at, line in found:
+            e = event_record(line)
+            if not e or e.get("event") != "left_running_stopped" or e.get("task") != tid \
+                    or not isinstance(e.get("processes"), list):
+                continue
+            pids = [str(p).split(" ", 1)[0] for p in e["processes"]]
+            if pids == e["processes"]:
+                continue
+            for new in ({**e, "processes": pids, "count": len(pids)}, {**e, "processes": [], "count": len(pids)},
+                        {"ts": e.get("ts"), "event": e["event"], "task": tid}):
+                data = json.dumps(new, ensure_ascii=False).encode()
+                if len(data) <= len(line):
+                    fh.seek(at)
+                    fh.write(data + b" " * (len(line) - len(data)))
+                    break
+        fh.flush()
+
+
 def _tries_of(desk: Desk, wt: Path, tid: str) -> list:
     """The task's own branches: task/<id> and those prepare kept its earlier tries under (task/<id>-try...)."""
     out = wgit(desk, wt, "for-each-ref", "--format=%(refname)", f"refs/heads/task/{tid}", f"refs/heads/task/{tid}-try*")
     return [r for r in out.splitlines() if r == f"refs/heads/task/{tid}" or r.startswith(f"refs/heads/task/{tid}-try")]
 
 
-def _clear_run_git(desk: Desk, wt: Path, tid: str, origin: str, keep: str) -> list:
+def _clear_run_git(desk: Desk, wt: Path, tid: str, origin: str, keep: str, made=frozenset()) -> list:
     """After a blocked end: leave nothing in the lane's repository that names or holds what the task's runs made since
-    `origin` (where its first try began): the worktree detached and clean at origin; task/<id> and its earlier tries'
-    branches, and any other ref holding those commits, removed (but `keep`, the lane's base, and the stash, which
+    `origin` (where its first try began), and the commits `made` (_made_by_run: off its branches too): the worktree
+    detached and clean at origin; task/<id> and its earlier tries' branches, and any other ref holding those commits,
+    removed (but `keep`, the lane's base, and the stash, which
     other lanes share: then a line says so);
     the stash entries made on those branches dropped; notes on those commits removed, the notes ref's history with
     them; the files and folders git keeps of a commit, merge or rebase in the worktree's folder (RUN_GIT_FILES)
@@ -5436,7 +5571,7 @@ def _clear_run_git(desk: Desk, wt: Path, tid: str, origin: str, keep: str) -> li
     until git's own clean-up: other lanes write to it at the same time. Lines saying what could not be done."""
     problems = []
     tries = _tries_of(desk, wt, tid)
-    own = set(wgit(desk, wt, "rev-list", "HEAD", *tries, "--not", origin).split())
+    own = set(wgit(desk, wt, "rev-list", "HEAD", *tries, "--not", origin).split()) | set(made)
     # the stash entries made on the task's branches, newest first so that the numbers below stay right
     entries = wgit(desk, wt, "log", "-g", "--format=%gd%x00%gs", "refs/stash").splitlines() \
         if wgit(desk, wt, "for-each-ref", "refs/stash") else []
@@ -5507,6 +5642,9 @@ def block(desk: Desk, tid: str, returncode) -> dict:
     # what it left running, then its own folders: the pictures before the temporary folder goes (remove_sandbox_tmp)
     sweep(desk, tid, quiet=True)
     left = desk.meta(tid).get("left_running") or []  # what was stopped, as recorded before the stop: its own words
+    if any(isinstance(x, dict) and x.get("command") for x in left):  # and in the log then (a ceiling's sweep)
+        _quiet_left_running_events(desk, tid)
+    at_start = read_json(raw / GIT_AT_START, None)  # before remove_sandbox_tmp removes it
     if left and folder is not None:
         try:
             write_json(folder / "left-running.json", left)
@@ -5555,11 +5693,18 @@ def block(desk: Desk, tid: str, returncode) -> dict:
         try:
             lane = desk.settings()["lanes"].get(meta.get("lane"), {})
             check_git_file(desk, wt, lane.get("repo"))
-            check_head(desk, wt, meta.get("branch") or f"task/{tid}")
+            branch, keep = meta.get("branch") or f"task/{tid}", f"refs/heads/{lane.get('base') or 'main'}"
+            made = _made_by_run(desk, wt, origin, keep, at_start)  # before HEAD moves
+            off = _head_back(desk, wt, branch)
+            check_head(desk, wt, branch)
             if folder is not None:
                 patches = [("changes.patch", start, None)] + [
                     (f"earlier-{r.rsplit('/', 1)[-1]}.patch", origin, r) for r in _tries_of(desk, wt, tid)
                     if r != f"refs/heads/task/{tid}"] + ([("earlier-tries.patch", origin, start)] if origin != start else [])
+                if off and f"refs/heads/{branch}" in _tries_of(desk, wt, tid):  # its commits HEAD was not on
+                    patches.append(("branch.patch", start, f"refs/heads/{branch}"))
+                patches += [(f"other-ref-{i}.patch", origin, r) for i, r in
+                            enumerate(_refs_made(desk, wt, tid, keep, at_start, made), 1)]
                 for name, since, upto in patches:
                     try:
                         if upto is None:
@@ -5568,14 +5713,12 @@ def block(desk: Desk, tid: str, returncode) -> dict:
                             write_bytes(folder / name, wgit(desk, wt, "diff", "--binary", "--no-ext-diff",
                                                             "--no-textconv", since, upto).encode() + b"\n")
                             os.chmod(folder / name, 0o600)
-                    except (RuntimeError, OSError) as e:
+                    except (RuntimeError, OSError):  # git's words may quote the run's: hansa's own only
                         (folder / name).unlink(missing_ok=True)
-                        problems.append(f"{name} could not be kept ({git_first_line(e)}), so hansa removed what it "
-                                        "held")
-            problems += _clear_run_git(desk, wt, tid, origin, f"refs/heads/{lane.get('base') or 'main'}")
-        except (RuntimeError, OSError) as e:
-            problems.append(f"its worktree could not be cleared ({git_first_line(e)}); the lane's next task removes "
-                            "what is left there")
+                        problems.append(f"{name} could not be kept, so hansa removed what it held")
+            problems += _clear_run_git(desk, wt, tid, origin, keep, made)
+        except (RuntimeError, OSError):  # git's words, and a changed git file's, may quote the run's: hansa's own only
+            problems.append("its worktree could not be cleared; the lane's next task removes what is left there")
     note = "; ".join(problems)
     fields = {"state": "blocked", "phase": "", "error": BLOCKED_ERROR, "finished": now(), "exit": returncode,
               "pid": None, "pid_start": "", "usage": usage, "session_id": meta.get("session_id", ""),
