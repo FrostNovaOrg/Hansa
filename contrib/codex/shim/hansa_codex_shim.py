@@ -113,6 +113,12 @@ GIT_OWN_DENY = ("HEAD", "logs", "commondir", "gitdir", "config.worktree", *GIT_O
 # here document". Claude Code sets it to $TMPDIR/zsh for its own commands; Codex's get it in the shim's folder
 # there, through its environment and shell_environment_policy.set.
 ZSH_PREFIX = "TMPPREFIX"
+# What hansa gives a run for its commands, not for Codex: its folder for pictures to keep (hansa/pictures.py) and its
+# bench's folder and epoch. They reach Codex in its environment, and its commands as far as its
+# shell_environment_policy lets them: with --ignore-user-config that is Codex's default (everything but names holding
+# KEY, SECRET or TOKEN), which passes them, but a default of `inherit = "core"` would not. So they are set by
+# shell_environment_policy.set too, as TMPPREFIX is, which reaches every command whatever the policy inherits.
+COMMAND_VARS = ("HANSA_PICTURES_DIR", "HANSA_BENCH_DIR", "HANSA_BENCH_EPOCH")
 REPO = Path(__file__).resolve().parent.parent
 CODEX_ENV = REPO / "codex.env"  # the settings, for a worker: hansa gives it a clean environment
 OLD_ENV = REPO / "trial.env"  # its older name: read when there is no codex.env, so that an older desk keeps working
@@ -572,14 +578,16 @@ def toml_string(s: str) -> str:
 
 def codex_argv(codex: str, wt: str, model: str, effort: str, system: str, last: str,
                web_search: str = WEB_SEARCH_VALUES[0], disable=DEFAULT_DISABLE, zsh_prefix: str = "",
-               no_repo: bool = False) -> list:
-    """codex exec's command line; `no_repo` (a check, whose folder is no git repository): --skip-git-repo-check."""
+               no_repo: bool = False, commands_env=None) -> list:
+    """codex exec's command line; `no_repo` (a check, whose folder is no git repository): --skip-git-repo-check.
+    `commands_env`: variables set in every command Codex runs (COMMAND_VARS)."""
     return [codex, "exec", "--json", *ISOLATION_FLAGS, *(("--skip-git-repo-check",) if no_repo else ()),
             "-C", wt, "-m", model,
             "-c", f"model_reasoning_effort={toml_string(effort)}",
             "-c", f"developer_instructions={toml_string(system)}",
             # set reaches every command whatever the policy inherits (all, core or none)
             *(("-c", f"shell_environment_policy.set.{ZSH_PREFIX}={toml_string(zsh_prefix)}") if zsh_prefix else ()),
+            *(x for k, v in (commands_env or {}).items() for x in ("-c", f"shell_environment_policy.set.{k}={toml_string(v)}")),
             *(x for c in FIXED_CONFIG for x in ("-c", c)),
             "-c", "check_for_update_on_startup=false",
             "-c", f"web_search={toml_string(web_search)}",
@@ -1054,7 +1062,8 @@ def _run_codex(argv: list, env: dict, conf: dict, check: bool, files: ExitStack)
     zsh_prefix = cenv[ZSH_PREFIX] = os.path.join(mine, "zsh")  # in TMPDIR, which srt lets the run write
     command = [srt, "--settings", str(sfile), "--", "/bin/sh", "-c", INNER, "hansa-codex", lane_env, home, ca,
                *codex_argv(codex, wt, model, effort, a.get("--append-system-prompt") or "", last, *web,
-                          zsh_prefix=zsh_prefix, no_repo=check)]
+                          zsh_prefix=zsh_prefix, no_repo=check,
+                          commands_env={k: cenv[k] for k in COMMAND_VARS if cenv.get(k) and not check})]
 
     # Codex's stdout is a temporary file, never a pipe: a write to a regular file does not fail with EAGAIN,
     # whoever sets O_NONBLOCK on it (codex's print panics on that when a pipe is full). The shim follows the file.

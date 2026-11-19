@@ -1633,6 +1633,10 @@ asking (its plan and findings; how it keeps them short is at the end of
 and the closed files stay closed.
 The principal can read these files in [Notes on the web page](#notes-on-the-web-page),
 including archived files on request; that view never edits or archives them.
+Pictures a worker or a verifier kept for the principal are in `tasks/<id>/pictures/`:
+the coordinator's session may read them (its Read tool is denied only `secrets/` and
+`.hansa/`), and no worker or verifier may, as for the rest of `tasks/`. See
+[Pictures a run keeps](tasks.md#pictures-a-run-keeps).
 
 The project's own rules (how it builds, what may never go out, who decides what)
 go in the desk's `notes/PROJECT.md`. The card imports it with a line of its own,
@@ -1669,6 +1673,7 @@ Enter on what looks like an empty box: it may send the guess as if they wrote it
 | Server output from `hansa up` | `.hansa/serve.log`, `serve.log.1` | the log rotates on the next start when over 20 MB; one backup |
 | A release's output | `.hansa/releases/<id>.log` | whatever its command prints; kept |
 | A running task's output | `.hansa/runs/<id>/` | moved into `tasks/<id>/` when it ends |
+| Pictures a run kept for the principal | `tasks/<id>/pictures/` (mode 0700), one folder per task or verification | at most 8 pictures of at most 2 MB each per run, so up to 16 MB a run; kept, never trimmed; grows with every run that leaves some (see [Pictures a run keeps](tasks.md#pictures-a-run-keeps)) |
 | Each lane's worktree | `worktrees/<lane>/` | the repository's checkout, and what builds leave in it (see [Free space](#free-space)) |
 | A worker run's temporary folder | `/tmp/hansa-<id>-...` | what the worker's commands put there; removed when the run ends |
 | A lane command's TMPDIR, on Linux | `.hansa/tmp/hansa-check-...` | what a setup's, check's, merge check's or try's build writes there; removed when the command ends |

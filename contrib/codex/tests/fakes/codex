@@ -53,7 +53,8 @@ record = {"argv": argv, "stdin": stdin, "pid": os.getpid(), "cwd": os.getcwd(),
                                 "links": s.st_nlink} for fd in (1, 2) for s in [os.fstat(fd)]},
           "env": {k: os.environ.get(k) for k in ("CODEX_HOME", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "TMPDIR",
                                                   "HANSA_CODEX_BIN", "HANSA_CODEX_RUN", "HANSA_CODEX_READ_POLICY", "FROM_LANE_ENV", "CLAUDE_ENV_FILE",
-                                                  "CODEX_CA_CERTIFICATE", "TMPPREFIX")}}
+                                                  "CODEX_CA_CERTIFICATE", "TMPPREFIX", "HANSA_PICTURES_DIR",
+                                                  "HANSA_BENCH_DIR", "HANSA_BENCH_EPOCH")}}
 
 
 def save():

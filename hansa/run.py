@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from . import account, after, build, installed, installed_text, session_vars, without_session
+from . import account, after, build, installed, installed_text, pictures, session_vars, without_session
 from .desk import (DENY_AT, HANSA_IDENTITY, HOME_STARTS, event_record, desk_paths_problem, pattern_path_problem, run_homes, no_read_parts, stop_text, other_envs, Desk, account_home, claude_home, connected_providers, key_name, provider_entry, home_secrets, identity_problem,
                    refused_rule, argv_rules_problem, path_rule_problem, pattern_chars, kept_from_workers, desks_file, desks_list_problem, other_desks, holding_desks_parts, path_spellings, deny_split, lane_repos, _above, now, merge_message, message_fallback, parse_identity, claude_bin,
                    WRITE_FILE, copy_file, read_json, resolved, task_message, update_message, work_lane_problem, write_bytes, write_json, write_text, write_problems, old_codex_provider)
@@ -3142,6 +3142,9 @@ def remove_sandbox_tmp(desk: Desk, tid: str) -> None:
         (desk.state_dir / "runs" / tid / f"{name}-sandbox.json").unlink(missing_ok=True)
     (desk.state_dir / "runs" / tid / "lane-env.sh").unlink(missing_ok=True)  # the ended worker's (env_file)
     m = desk.meta(tid)
+    if m.get("worker_tmp"):  # the pictures the run left for the principal, before its folder goes (hansa/pictures.py)
+        pictures.take(desk, tid, m["worker_tmp"], next(
+            (i for i, r in enumerate(m.get("worker_tmps") or [], 1) if r.get("path") == m["worker_tmp"]), 0))
     for t in [*m.get("sandbox_tmp", []), *([m["worker_tmp"]] if m.get("worker_tmp") else [])]:
         shutil.rmtree(t, ignore_errors=True)
     gone = {t: not os.path.lexists(t) for t in [m.get("worker_tmp")] if t}
@@ -3163,6 +3166,10 @@ def make_worker_tmp(desk: Desk, tid: str) -> str:
     mark = run_mark(desk, tid)  # the run's HANSA_RUN, given with its folder (worker_env)
     desk.change(tid, lambda x: {"worker_tmp": tmp, "worker_tmps": [*(x.get("worker_tmps") or []),
                                                                    {"path": tmp, "removed": None, "mark": mark}]})
+    # the folder for pictures to show the principal (hansa/pictures.py), in the per-user folder Claude Code would make
+    # (commands_tmp), where the worker's commands may write; made now, so that it is there for any provider
+    Path(commands_tmp(tmp)).mkdir(mode=0o700, exist_ok=True)
+    Path(pictures.folder(tmp)).mkdir(mode=0o700)
     attachments = desk.meta(tid).get("attachments", [])
     if attachments:
         folder = Path(tmp) / "attach"
@@ -4853,7 +4860,7 @@ def worker_env(desk: Desk, tid: str, lane_name: str, lane: dict, pname: str, p: 
     bench = None if getattr(desk, "_bench_off", False) or not bench_ok else getattr(desk, "_bench", None)
     extra = bench.register(tid, lane, tmp, wt) if bench and desk.settings()["bench"]["enabled"] else {}
     return {**provider_env(desk, pname, p), **env_file(desk, tid, lane), **bash_limits(lane), **extra, "HANSA_TASK": tid,
-            "HANSA_RUN": tmp_mark(desk, tid, tmp), "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
+            "HANSA_RUN": tmp_mark(desk, tid, tmp), pictures.ENV: pictures.folder(tmp), "CLAUDE_CODE_TMPDIR": tmp, "TMPDIR": tmp,  # the server's TMPDIR is not the run's (make_worker_tmp)
             "GIT_AUTHOR_NAME": f"hansa worker {lane_name}", "GIT_AUTHOR_EMAIL": "hansa@localhost",
             "GIT_COMMITTER_NAME": f"hansa worker {lane_name}", "GIT_COMMITTER_EMAIL": "hansa@localhost"}
 

@@ -503,6 +503,41 @@ temporary `attach/`, named in its instructions by full path. `hansa show ID` lis
 To keep private data closed, folders, missing files, worker read denials (following links) and files
 holding provider keys are refused. Limits: 20 files, 20 MB total, distinct names, including inherited files.
 
+## Pictures a run keeps
+
+Every worker and verifier run gets a folder for pictures to show the principal, named to its
+commands in `HANSA_PICTURES_DIR` (for Claude Code workers and, through the adapter, Codex workers).
+It is in the run's temporary folder, in the per-user folder that is its commands' `TMPDIR`. When the
+run ends, however it ends (done, failed, stopped at a ceiling, cancelled), hansa takes what passes out
+of it before the temporary folder is removed, and keeps it in the task's folder,
+`tasks/<id>/pictures/`, where the coordinator can read it and workers cannot.
+
+| What lies in the folder | What hansa does |
+|---|---|
+| A regular file whose bytes begin as PNG, JPEG or WebP, at most 2 MB, named `.png`, `.jpg`, `.jpeg` or `.webp` (any case) | kept under its own name made safe: letters, digits, `-`, `_` and `.` only (others become `-`), at most 80 characters, the extension lower-cased; two that come out the same get `-2`, `-3` |
+| The same, with bytes of another of the three kinds than its extension says | kept under the extension its bytes say |
+| Anything else (SVG, HTML, a script, text, PDF), whatever its name | left out: not a picture |
+| A file over 2 MB | left out: too large |
+| More than 8 that pass | the first 8 by name kept; the rest left out: more than 8 |
+| A link, a hard link to a file elsewhere (more links than names in the folder), a FIFO, a device, a folder or what is in it | never followed or read; left out: not a plain file |
+| A file that changes or vanishes while hansa reads it | left out: changed while hansa read it |
+| A picture whose bytes hold a key the desk knows | left out: holds a key |
+| Nothing, or no folder, or something else in its place | nothing kept, nothing said |
+
+The task's record lists what was kept (`pictures`: name, bytes, kind, run) and what was left out and why.
+`hansa show ID` prints the list with the folder's path, the "left out" lines (so the coordinator can tell the
+worker next time), and for a task that was verified the verifications' pictures too. A follow-up
+(`hansa retry`) keeps its own list; its `hansa show` gives the earlier task's only as
+`earlier: tNNN has N`. When the desk's volume is under its [floor of free space](desk.md#free-space), or
+the copy fails, nothing of that run is kept and `hansa show` says so in one line. A run's outcome, its commit,
+its check and its verdict never depend on its pictures.
+
+The folder was the worker's, so hansa treats every name and byte in it as hostile: it opens the folder and each
+file without following a link, reads a file only once it has checked that what it opened is the regular file it
+looked at, reads at most 2 MB and one byte, starts no program, and copies the bytes as they are, never decoding
+or re-encoding them. The key check finds a key only as text in the file's bytes: a key drawn in a picture, or in
+a compressed part of one, is not found. Nothing removes a task's folder today, so kept pictures stay with it.
+
 ## Writing a task a verification can judge
 
 A verification judges a change against the task's text, so most rounds of sending work back start in
