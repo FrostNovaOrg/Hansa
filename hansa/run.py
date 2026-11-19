@@ -4009,9 +4009,18 @@ def sweep(desk: Desk, tid: str, *, run: dict | None = None) -> list:
     except (OSError, ValueError, IndexError):
         pass
     keep = servers | {os.getppid()}
+    ended = set()  # (pid, start) seen ended once: it stays so
 
     def running(p, start):
-        return alive(p, start) and _state(p) != "Z"
+        # A zombie reaped between alive() and _state() reads as running (its start and state both unreadable), so
+        # one look can say running after an earlier one said ended; the earlier answer stands, else what was
+        # stopped could be left out of the list (left_running) when its new parent reaps it during the last look.
+        if (p, start) in ended:
+            return False
+        if alive(p, start) and _state(p) != "Z":
+            return True
+        ended.add((p, start))
+        return False
     m = desk.meta(tid)
     run = m if run is None else run
     seen = {p: st for p, st in run_recorded(m).items() if p not in keep}
@@ -4031,7 +4040,8 @@ def sweep(desk: Desk, tid: str, *, run: dict | None = None) -> list:
         if ours and not keep & set(members):
             members = [(p, _args(p), s2) for p, s2 in members.items()]
             stop_group(g)
-            in_groups += [x for x in members if not running(x[0], x[2])]
+            # a second look settles one its parent reaped during the first (running)
+            in_groups += [x for x in members if not running(x[0], x[2]) or not running(x[0], x[2])]
     done = {x[0] for x in in_groups}
     found = [(p, _args(p), st) for p, st in seen.items() if st and p not in done and running(p, st)]
     folders = [*(r["path"] for r in m.get("worker_tmps") or [] if r.get("path")), *(m.get("run_folders") or [])]
