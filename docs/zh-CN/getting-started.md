@@ -128,8 +128,11 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=y
 
 用空格键选择工作台，按 `s` 启动，按 Enter 打开协调员，或按 `w` 查看网页地址。先按 Ctrl+B、再按 D 可以离开协调员会话；Ctrl+C 退出网页连接。在你选择操作前，什么都不会启动。按 `q` 退出菜单，正在进行的工作会继续运行；按 `x` 再按 `y` 停止该工作台的服务。
 
-在服务器上安装 tmux，这样 SSH 断开后，`hansa up` 启动的协调员也能继续运行。
-重新连接时，用它打印的 attach 命令，包括其中的 `-L` 或 `-S`。`hansa status` 会说明会话情况；如果会话已停止，`hansa up` 会把它重新启动，接着原来的对话继续。
+在服务器上安装 tmux，让会话在断开连接后继续运行。用 `hansa status` 查看会话状态。
+会话停止后，`hansa up` 会恢复原来的对话。用它打印的 attach 命令重新连接，保留其中的 `-L` 或 `-S`。
+
+要从 Claude 应用访问协调员，在协调员的终端里输入 [`/remote-control`](../desk.md#from-the-desktop-app-or-another-device)（英文说明）。
+让会话继续在 tmux 里运行。
 
 网页端口最初是 8765，可以用 `hansa status`、`hansa explain server`，或查看服务器上的 `.hansa/web-port` 来确认实际端口。
 如果实际端口是 **8766**，在你自己的电脑上运行：

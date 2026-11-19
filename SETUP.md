@@ -137,6 +137,7 @@ and Enter opens its coordinator
 To reach the coordinator, they use the `attach:` command `hansa up` prints. They answer yes to Claude Code's
 folder-trust question. Ctrl+B then D leaves the coordinator running in the background. Without tmux only the server
 starts; see [Create and start the desk](docs/getting-started.md#create-and-start-the-desk).
+For access from the Claude app or another device, point them to [Claude Code's Remote Control](docs/desk.md#from-the-desktop-app-or-another-device).
 
 Once the server runs, do step 4's `hansa --desk ~/shop-desk lane try a` and show its result.
 `hansa --desk ~/shop-desk status` shows what the desk is doing.

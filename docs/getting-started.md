@@ -174,9 +174,11 @@ Space selects desks, `s` starts them, Enter opens a coordinator, `w` gives its p
 Ctrl+B, D detaches from a coordinator; Ctrl+C leaves the page. Nothing starts until you
 choose. `q` quits, leaving work running; `x`, then `y`, stops the desk's server.
 
-Install tmux on the server; `hansa up` keeps the coordinator open after disconnects.
-Reconnect using its printed attach command (including `-L` or `-S`). `hansa status`
-describes the session; `hansa up` brings back a stopped one, continuing its conversation.
+Install tmux on the server so sessions survive disconnects. Check `hansa status`.
+`hansa up` resumes a stopped session. Use its printed attach command (keep `-L`/`-S`).
+
+Type [`/remote-control`](desk.md#from-the-desktop-app-or-another-device) in the terminal for Claude app access.
+Keep it in tmux.
 
 Find the page's port (initially 8765) through `hansa status`,
 `hansa explain server`, or `.hansa/web-port`.
