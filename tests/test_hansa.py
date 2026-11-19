@@ -7511,7 +7511,7 @@ def save():'''))
         d = self.desk.tasks_dir / tid / "pictures"
         return {p.name: p.read_bytes() for p in d.iterdir()} if d.is_dir() else {}
 
-    def left_out(self, m):
+    def picture_left_out(self, m):
         return {x["why"]: x["count"] for x in m.get("pictures_left_out") or []}
 
     def test_pictures_folder_is_made_for_every_run_and_named_to_its_commands(self):
@@ -7560,7 +7560,7 @@ def save():'''))
             (folder / name).write_bytes(data)
         m = self.end_picture_run()
         self.assertEqual(self.kept_pictures(), {})
-        self.assertEqual(self.left_out(m), {"not a picture": 7})
+        self.assertEqual(self.picture_left_out(m), {"not a picture": 7})
         self.assertIn("pictures left out: not a picture: 7 files (run 1)", self.hansa("show", "t0001"))
 
     def test_pictures_larger_than_2_mb_are_left_out(self):
@@ -7569,7 +7569,7 @@ def save():'''))
         (folder / "edge.png").write_bytes(self.PNG + b"\x00" * (2 * 1024 * 1024 - len(self.PNG)))
         m = self.end_picture_run()
         self.assertEqual(set(self.kept_pictures()), {"edge.png"})
-        self.assertEqual(self.left_out(m), {"too large": 1})
+        self.assertEqual(self.picture_left_out(m), {"too large": 1})
 
     def test_pictures_past_the_eighth_by_name_are_left_out(self):
         _, folder = self.picture_run()
@@ -7577,7 +7577,7 @@ def save():'''))
             (folder / f"p{i:02}.png").write_bytes(self.PNG + bytes([i]))
         m = self.end_picture_run()
         self.assertEqual(sorted(self.kept_pictures()), [f"p{i:02}.png" for i in range(8)])
-        self.assertEqual(self.left_out(m), {"more than 8": 2})
+        self.assertEqual(self.picture_left_out(m), {"more than 8": 2})
 
     def test_pictures_links_fifos_and_folders_are_never_read(self):
         from hansa import pictures
@@ -7597,7 +7597,7 @@ def save():'''))
             m = self.end_picture_run()
         self.assertEqual(sorted(opened), ["own-too.png", "own.png"], "no link, FIFO or folder is opened")
         self.assertEqual(set(self.kept_pictures()), {"own.png", "own-too.png"})
-        self.assertEqual(self.left_out(m), {"not a plain file": 4})
+        self.assertEqual(self.picture_left_out(m), {"not a plain file": 4})
         self.assertEqual(outside.read_bytes(), self.PNG + b"outside")
 
     def test_pictures_folder_replaced_by_a_link_or_a_file_or_missing_keeps_and_says_nothing(self):
@@ -7643,7 +7643,7 @@ def save():'''))
         with unittest.mock.patch.object(pictures, "_read", look):
             m = self.end_picture_run()
         self.assertEqual(set(self.kept_pictures()), {"c-stays.png"})
-        self.assertEqual(self.left_out(m), {"changed while hansa read it": 2})
+        self.assertEqual(self.picture_left_out(m), {"changed while hansa read it": 2})
         self.assertEqual(m.get("worker_tmp"), "", "the run's end went on")
 
     def test_pictures_holding_a_key_are_left_out(self):
@@ -7654,7 +7654,7 @@ def save():'''))
         (folder / "fine.png").write_bytes(self.PNG)
         m = self.end_picture_run()
         self.assertEqual(set(self.kept_pictures()), {"fine.png"})
-        self.assertEqual(self.left_out(m), {"holds a key": 1})
+        self.assertEqual(self.picture_left_out(m), {"holds a key": 1})
         self.assertNotIn(key, json.dumps(m))
 
     def test_pictures_are_not_kept_under_the_desks_floor_or_when_the_copy_fails(self):
