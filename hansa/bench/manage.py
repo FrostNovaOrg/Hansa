@@ -12,7 +12,8 @@ import tarfile
 import tempfile
 
 from ..desk import Desk
-from .vm import INSTANCE, VM
+from . import image
+from .vm import INSTANCE, VM, LimaCalledProcessError, LimaTimeoutExpired
 
 RECIPE = Path(__file__).resolve().parents[2] / "contrib/bench"
 FILES = [RECIPE / n for n in ("lima.yaml", "provision.sh", "edge.nft", "sysctl.conf")]
@@ -75,10 +76,38 @@ def managed_vm(desk, private):
     return machine
 
 
-def build(machine, deadline):
+class DownloadFailed(RuntimeError):
+    """Lima could not download the guest's system image: the plain sentence, then Lima's last lines."""
+
+
+def _short(stderr, lines=3, width=200):
+    text = stderr.decode("utf-8", errors="replace").splitlines()
+    return "\n".join(line.strip()[:width] for line in [l for l in text if l.strip()][-lines:])
+
+
+def start(desk, machine, deadline):
+    """Lima's first start, with the image hansa keeps between rebuilds (see image.py)."""
+    seeded = image.seed(desk, machine.private)
+    if seeded == "copied":
+        print("hansa bench: used the system image already on this machine (the account's Lima cache); no download")
+    try:
+        machine._call(["limactl", "start", "--tty=false", "--name=" + INSTANCE, str(RECIPE / "lima.yaml")],
+                      deadline, limit=3600)
+    except (LimaCalledProcessError, LimaTimeoutExpired) as error:
+        try:
+            kept = image.keep(desk, machine.private)
+        except (OSError, ValueError):
+            kept = False
+        if not seeded and not kept and (b"failed to download" in error.stderr or isinstance(error, LimaTimeoutExpired)):
+            raise DownloadFailed(image.DOWNLOAD_FAILED + "\nLima: " + _short(error.stderr)) from error
+        raise
+    image.keep(desk, machine.private)
+
+
+def build(machine, deadline, desk):
     """Upload only shipped files and the public submission key through Lima admin."""
     machine.prepare(deadline)
-    machine._call(["limactl", "start", "--tty=false", "--name=" + INSTANCE, str(RECIPE / "lima.yaml")], deadline, limit=3600)
+    start(desk, machine, deadline)
     admin = ["limactl", "shell", INSTANCE, "sudo", "-n", "--"]
     bundle = "/var/lib/hansa-bench-bundle"
     machine._call(admin + ["install", "-d", "-m", "0700", bundle], deadline)
@@ -120,10 +149,11 @@ def command(a):
                         shutil.rmtree(private)
                         machine = managed_vm(desk, private)
                         bench["recipe"] = recipe_hash()
-                        build(machine, deadline)
+                        build(machine, deadline, desk)
                         bench["build"] = "ready"
                     except BaseException as error:
-                        bench.update(build="failed", failure=desk.redact(f"{type(error).__name__}: {error}"))
+                        bench.update(build="failed", failure=desk.redact(
+                            str(error) if isinstance(error, DownloadFailed) else f"{type(error).__name__}: {error}"))
                         if machine is not None:
                             try:
                                 machine.stop(machine.clock() + 30)
@@ -169,8 +199,12 @@ def command(a):
         problem = ""
         if action == "status" and not getattr(a, "json", False) and bench["enabled"]:
             problem = acceptance_problem(bench)
+        shown = ""
+        if (action == "status" and not getattr(a, "json", False) and bench["build"] == "failed"
+                and bench["failure"].startswith(image.DOWNLOAD_FAILED)):
+            shown = " " + image.DOWNLOAD_FAILED
         print(json.dumps(bench, sort_keys=True) if getattr(a, "json", False) else
               "bench: " + ("on" if bench["enabled"] else "off") +
-              (", not in use: " + problem if problem else "") + "; " + json.dumps(bench, sort_keys=True))
+              (", not in use: " + problem if problem else "") + ";" + shown + " " + json.dumps(bench, sort_keys=True))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         raise SystemExit("hansa bench: " + desk.redact(str(error))) from None

@@ -1670,6 +1670,7 @@ Enter on what looks like an empty box: it may send the guess as if they wrote it
 | A release's output | `.hansa/releases/<id>.log` | whatever its command prints; kept |
 | A running task's output | `.hansa/runs/<id>/` | moved into `tasks/<id>/` when it ends |
 | Each lane's worktree | `worktrees/<lane>/` | the repository's checkout, and what builds leave in it (see [Free space](#free-space)) |
+| The bench's system image | `.hansa/bench-image/` | about 340 MB: one image, the one the [bench](bench.md) recipe names; kept between rebuilds, replaced when the recipe names another |
 | A worker run's temporary folder | `/tmp/hansa-<id>-...` | what the worker's commands put there; removed when the run ends |
 | A lane command's TMPDIR, on Linux | `.hansa/tmp/hansa-check-...` | what a setup's, check's, merge check's or try's build writes there; removed when the command ends |
 
