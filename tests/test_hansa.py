@@ -7758,6 +7758,96 @@ def save():'''))
         self.assertEqual(self.picture_left_out(m), {"changed while hansa read it": 2})
         self.assertEqual(m.get("worker_tmp"), "", "the run's end went on")
 
+    def swap_at_open(self, folder, swaps):
+        """Patches the os.open pictures._read calls so that, for a name in swaps, swaps[name]() runs on the folder
+        just before the real open: after hansa's look at the name, before its open. Gives the (dev, ino) of every
+        file hansa opened in the folder."""
+        from hansa import pictures
+        real_open, opened = os.open, []
+
+        def open_after_swap(path, flags, *a, **k):
+            if k.get("dir_fd") is not None and path in swaps:
+                swaps.pop(path)()
+            fd = real_open(path, flags, *a, **k)
+            if k.get("dir_fd") is not None:
+                st = os.fstat(fd)
+                opened.append((st.st_dev, st.st_ino))
+            return fd
+        return unittest.mock.patch.object(pictures.os, "open", open_after_swap), opened
+
+    def test_pictures_swapped_for_a_symbolic_link_after_the_look_are_not_followed(self):
+        _, folder = self.picture_run()
+        outside = self.tmp / "outside.png"
+        outside.write_bytes(self.PNG + b"outside")
+        (folder / "a.png").write_bytes(self.PNG + b"a")
+        (folder / "b.png").write_bytes(self.PNG + b"b")
+
+        def to_link():
+            (folder / "a.png").unlink()
+            (folder / "a.png").symlink_to(outside)
+        patch, opened = self.swap_at_open(folder, {"a.png": to_link})
+        with patch:
+            m = self.end_picture_run()
+        st = outside.stat()
+        self.assertNotIn((st.st_dev, st.st_ino), opened, "the link's target is never opened")
+        self.assertEqual(self.kept_pictures(), {"b.png": self.PNG + b"b"})
+        self.assertEqual(self.picture_left_out(m), {"changed while hansa read it": 1})
+
+    def test_pictures_swapped_for_another_file_after_the_look_are_not_read(self):
+        for tid, how in (("t0001", "hard link"), ("t0002", "other file"), ("t0003", "fifo")):
+            with self.subTest(how=how):
+                _, folder = self.picture_run(tid)
+                outside = self.tmp / f"outside-{how}.png"
+                outside.write_bytes(self.PNG + b"outside")
+                (folder / "own.png").write_bytes(self.PNG + b"own")
+                if how == "hard link":  # two names in the folder, as many links as one elsewhere and one here
+                    os.link(folder / "own.png", folder / "own-too.png")
+                else:  # one link, as the file moved in has
+                    (folder / "own-too.png").write_bytes(self.PNG + b"own")
+
+                def swap():
+                    (folder / "own.png").unlink()
+                    if how == "hard link":
+                        os.link(outside, folder / "own.png")
+                    elif how == "other file":
+                        os.rename(outside, folder / "own.png")
+                    else:
+                        os.mkfifo(folder / "own.png")
+                st = outside.stat()
+                patch, opened = self.swap_at_open(folder, {"own.png": swap})
+                real_read, read = os.read, []
+
+                def reading(fd, n):
+                    f = os.fstat(fd)
+                    read.append((f.st_dev, f.st_ino))
+                    return real_read(fd, n)
+                with patch, unittest.mock.patch.object(os, "read", reading):
+                    m = self.end_picture_run(tid)
+                self.assertNotIn((st.st_dev, st.st_ino), read, "the other file is never read")
+                self.assertEqual(self.kept_pictures(tid), {"own-too.png": self.PNG + b"own"})
+                self.assertEqual(self.picture_left_out(m), {"changed while hansa read it": 1})
+
+    def test_pictures_changed_in_place_while_read_are_left_out(self):
+        from hansa import pictures
+        _, folder = self.picture_run()
+        (folder / "a.png").write_bytes(self.PNG + b"first")
+        (folder / "b.png").write_bytes(self.PNG + b"b")
+        target = (folder / "a.png").stat()
+        real_read = os.read
+
+        def rewriting(fd, n):  # same size, other bytes, once the first are read: only the times say so
+            data = real_read(fd, n)
+            f = os.fstat(fd)
+            if (f.st_dev, f.st_ino) == (target.st_dev, target.st_ino) and data:
+                with open(folder / "a.png", "r+b") as w:
+                    w.write(self.PNG + b"other")
+                os.utime(folder / "a.png", ns=(target.st_atime_ns, target.st_mtime_ns + 10 ** 9))
+            return data
+        with unittest.mock.patch.object(pictures.os, "read", rewriting):
+            m = self.end_picture_run()
+        self.assertEqual(self.kept_pictures(), {"b.png": self.PNG + b"b"})
+        self.assertEqual(self.picture_left_out(m), {"changed while hansa read it": 1})
+
     def test_pictures_holding_a_key_are_left_out(self):
         key = "sk-picture-key-0123456789"
         self.desk.write_key("claude", key)
