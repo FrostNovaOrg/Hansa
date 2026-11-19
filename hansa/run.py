@@ -313,6 +313,8 @@ on branch task/{tid}, which was made for this task.
   line. To see a file as it was before your changes: `git show HEAD:path`.
 - A later command cannot stop a background process an earlier one started (kill is refused):
   stop background work within the command that started it, or wait for it there.
+- Before changing a message, a name or a behaviour, search the tests for it and run the ones
+  that mention it.
 - In tests you write: wait for the thing itself (a file, a line, a state), not a fixed few seconds,
   and give any time limit seconds of room; check what the code does and the words that matter,
   not whole sentences; skip a test the sandbox cannot run (one that binds a local port, say) with
@@ -6620,8 +6622,9 @@ def unverified_note(desk: Desk, m: dict) -> str:
             f"({', '.join(x['id'] for x in earlier)}) has a verification that holds")
 
 
-RETHINK = ("This task has not held {n} times. Before sending it back again, rethink it: make it smaller, ask for "
-           "less, or start again from the base.")
+RETHINK = ("This task has not held {n} times. Before sending it back again, first reread what the task asked "
+           "(it may ask for too much or get a fact wrong), then rethink it: make it smaller, ask for less, "
+           "or start again from the base.")
 
 
 def rounds_of(desk: Desk, m: dict) -> list:

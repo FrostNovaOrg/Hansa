@@ -71,9 +71,10 @@ Authority: the card asks the coordinator to write tasks this way.
 ## 7. Stop a rework loop
 
 After verification rejects a task a second time for the same kind of reason,
-the coordinator stops the rework loop: make it smaller, ask for less, or start
-again from the base. This guards against rework costing more than the change
-is worth.
+the coordinator first rereads what the task asked (it may ask for too much or
+get a fact wrong), then rethinks it by making it smaller, asking for less, or
+starting again from the base. This guards against rework costing more than the
+change is worth.
 
 Authority: the card asks for this; hansa prompts after repeated failed verdicts.
 

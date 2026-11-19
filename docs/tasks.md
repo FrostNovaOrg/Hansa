@@ -902,7 +902,8 @@ oldest first, and how many of them a verification found do not hold. When a
 verification of a follow-up finds that it does not hold, and that is the second
 such verdict in its rounds or more, `hansa show` and what the coordinator is
 told add: "This task has not held N times. Before sending it back again,
-rethink it: make it smaller, ask for less, or start again from the base."
+first reread what the task asked (it may ask for too much or get a fact wrong),
+then rethink it: make it smaller, ask for less, or start again from the base."
 
 The worker is told that hansa runs the lane's check after it ends, with the
 command, so it runs only the tests related to its change. A verification is
