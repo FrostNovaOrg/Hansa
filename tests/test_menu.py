@@ -158,6 +158,26 @@ class MenuTest(unittest.TestCase):
         self.assertFalse(run.call_args.kwargs["capture_output"])
         self.assertFalse(self.calls.exists())
 
+    def test_a_coordinator_in_the_desktop_app_is_not_offered_a_start_or_an_attach(self):
+        for entrypoint, desktop in (("claude-desktop", True), ("cli", False), (None, False)):
+            write_json(self.first.state_dir / "coordinator-start.json",
+                       {"kind": "notify", "argv": ["claude"], "folder": str(self.tmp), "session": {"pid": 0},
+                        **({"entrypoint": entrypoint} if entrypoint else {})})
+            with patch.object(menu.notify, "names", return_value=[]):
+                row = self.state()["desks"][0]
+            row["server"] = "up"
+            self.assertEqual(row["desktop"], desktop)
+            for lang, app, start in (("en", "Claude desktop app", "Press s to open its coordinator."),
+                                     ("zh", "Claude 桌面应用", "按 s 打开协调员。")):
+                with self.subTest(entrypoint=entrypoint, lang=lang):
+                    gone = menu.guide(row, lang)
+                    self.assertEqual(app in gone[0], desktop)
+                    self.assertEqual(start in gone, not desktop)
+                    self.assertEqual(app in menu.command(row, "\r", lang)[2], desktop)
+                    runs = {**row, "coordinator": True}
+                    self.assertEqual(app in menu.guide(runs, lang)[0], desktop)
+                    self.assertEqual(app in menu.command(runs, "\r", lang)[2], desktop)
+
     def test_pause_resume_and_web_use_the_full_saved_command_and_ssh_port(self):
         row = self.state()["desks"][0]
         argv, _, _ = menu.command(row, "p", "en")

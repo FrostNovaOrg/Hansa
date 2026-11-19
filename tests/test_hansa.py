@@ -5350,6 +5350,118 @@ class CoordinatorUpTest(unittest.TestCase):
         write_json(desk.state_dir / "coordinator.json", {})
         self.assertIn("before hansa recorded its start", up.coordinator_line(desk))
 
+    # -- a coordinator's session in the Claude desktop app (CLAUDE_CODE_ENTRYPOINT claude-desktop) -------------------
+    APP = "/Users/p/Library/Application Support/Claude/claude-code/2.1/abc/claude.app/Contents/MacOS/claude"
+
+    def start_record(self, entrypoint=None, folder=None, session=None, **fields):
+        """A notify record written by the test, of the app's claude (or a terminal's), with this entrypoint."""
+        rec = {"kind": "notify", "argv": [self.APP if entrypoint == "claude-desktop" else "claude", "--x"],
+               "folder": str(folder or self.own_folder()), "session": session or {"pid": 0},
+               **({"entrypoint": entrypoint} if entrypoint else {}), **fields}
+        write_json(self.desk.state_dir / "coordinator-start.json", rec)
+        return rec
+
+    def test_notify_on_records_the_sessions_entrypoint_when_it_has_one(self):
+        for value in ("cli", "claude-desktop", "sdk-ts", None):
+            with self.subTest(entrypoint=value):
+                os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
+                said, rec, _ = self.notify_on(["claude"], **({"CLAUDE_CODE_ENTRYPOINT": value} if value else {}))
+                self.assertEqual(rec["kind"], "notify")
+                self.assertEqual(rec.get("entrypoint"), value)
+                desktop = value == "claude-desktop"
+                self.assertEqual("After a restart, hansa up starts this session again in" in said, not desktop)
+                self.assertEqual(said.count("This session runs in the Claude desktop app"), int(desktop))
+                if desktop:  # after what it printed before: the statement last, once
+                    self.assertIn("hansa up does not start this session again", said)
+                    self.assertTrue(said.rstrip().endswith("run the coordinator in a terminal with hansa coordinator."))
+                    self.assertNotIn("until hansa up starts it again", said)
+                    self.assertIn("Of hansa's rules it has none", said)
+                else:
+                    self.assertIn("until hansa up starts it again", said)
+        # in the desk's own folder: the rules of the desk's settings file
+        said, rec, _ = self.notify_on(["claude"], str(self.desk.root), CLAUDE_CODE_ENTRYPOINT="claude-desktop")
+        self.assertIn("Of hansa's rules it has those the desk's .claude/settings.json gives", said)
+        # a record it cannot keep keeps the entrypoint all the same
+        (self.desk.state_dir / "coordinator-start.json").unlink()
+        said, rec, _ = self.notify_on(None, CLAUDE_CODE_ENTRYPOINT="claude-desktop")
+        self.assertEqual((rec["kind"], rec["entrypoint"]), ("unrecorded", "claude-desktop"))
+        self.assertIn("This session runs in the Claude desktop app", said)
+
+    def test_up_starts_no_session_of_the_desktop_app_and_says_how_to_bring_it_back(self):
+        from hansa import up
+        folder = self.own_folder()
+        for entrypoint in ("cli", None, "sdk-ts"):  # as before: started again in tmux
+            with self.subTest(entrypoint=entrypoint):
+                self.start_record(entrypoint)
+                said, calls, ok = self.coordinator_up()
+                self.assertTrue(ok)
+                self.assertTrue(calls)
+                self.assertIn("coordinator started in tmux", said)
+        self.start_record("claude-desktop")
+        said, calls, ok = self.coordinator_up()
+        self.assertEqual((calls, ok), ([], False))
+        for words in ("Claude desktop app", "hansa cannot start", "nothing started", f"its folder is {folder}",
+                      "hansa notify on"):
+            self.assertIn(words, said)
+        for words in ("tmux", "attach", self.APP):
+            self.assertNotIn(words, said)
+        # hansa serve is started as before, and up fails as when no coordinator could be started
+        with unittest.mock.patch.object(up, "server_up", return_value=True) as served, \
+                unittest.mock.patch.object(up.subprocess, "run", side_effect=AssertionError("no tmux")), \
+                unittest.mock.patch.object(notify, "names", return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(up.desk_up(self.desk))
+        served.assert_called_once()
+        # while it hears from hansa, or still runs: nothing to start, as before
+        said, calls, ok = self.coordinator_up(hearing=["pid 42 (desk-b)"])
+        self.assertEqual((calls, ok), ([], True))
+        here = {"pid": os.getpid(), "start": hansa.run.proc_start(os.getpid())}
+        self.start_record("claude-desktop", session=here)
+        said, calls, ok = self.coordinator_up()
+        self.assertEqual((calls, ok), ([], True))
+        self.assertIn("still runs", said)
+
+    def test_texts_on_the_coordinators_session_say_what_is_true_in_the_desktop_app(self):
+        from hansa import up
+        folder = self.own_folder()
+        for entrypoint in ("claude-desktop", "cli", None):
+            desktop = entrypoint == "claude-desktop"
+            with self.subTest(entrypoint=entrypoint):
+                rec = self.start_record(entrypoint, session=self.SESS)
+                self.assertEqual(up.in_desktop(up.read_coordinator(self.desk)), desktop)
+                line = up.coordinator_line(self.desk)
+                self.assertEqual("in tmux" in line, not desktop)
+                self.assertEqual("Claude desktop app" in line, desktop)
+                turns = up.turn_line(self.desk, self.SESS, "p")
+                self.assertEqual("hansa up gives it Stop and StopFailure hooks" in turns, not desktop)
+                if desktop:
+                    self.assertIn("not recorded: it runs in the Claude desktop app", turns)
+                    self.assertIn(f"its folder is {folder}", line)
+                hand = up.by_hand(up.restart_plan(self.desk, rec))
+                self.assertEqual(hand.startswith("cd "), not desktop)
+                self.assertEqual("open the Claude desktop app" in hand, desktop)
+                ruled = up.unruled(self.desk, rec)
+                self.assertEqual("until hansa up starts it again" in ruled, not desktop)
+                for words in ("Claude desktop app", "cannot start it again or attach to it", "Stop and StopFailure",
+                              "rules it has none", "mod", "--autocompact", "daily clear", "in a terminal with hansa coordinator"):
+                    self.assertEqual(words in ruled, desktop, words)
+                header = up.copy_text(self.desk, self.copy_of(folder)).split("\n\n", 1)[0]
+                self.assertEqual("until `hansa up` starts it" in header, not desktop)
+                self.assertEqual("It runs in the Claude desktop app" in header, desktop)
+                explained = self.say("explain", "notify")
+                self.assertEqual("This session runs in the Claude desktop app" in explained, desktop)
+        # hansa coordinator while the recorded session runs: where to reach it
+        found = {"pid": 7, "name": "", "attach": ""}
+        self.assertIn("go to the terminal it runs in", up.running_text(found))
+        said = up.running_text({**found, "desktop": True})
+        self.assertIn("It runs in the Claude desktop app: go to it there", said)
+        self.assertNotIn("terminal", said)
+        for entrypoint in ("claude-desktop", "cli"):
+            self.start_record(entrypoint, session={"pid": 99999, "start": "x"})
+            with unittest.mock.patch.object(up, "still_runs", return_value=99999), \
+                    unittest.mock.patch.object(notify, "live_records", return_value=[]):
+                self.assertEqual(up.running_coordinator(self.desk)["desktop"], entrypoint == "claude-desktop")
+
 
 class LauncherTest(unittest.TestCase):
     def setUp(self):
@@ -60600,6 +60712,30 @@ else:
         """The (English, Chinese) of each queued alert of this kind."""
         from hansa import alert
         return [(x["translations"]["en"], x["translations"]["zh"]) for x in alert.queued(self.desk) if x["kind"] == kind]
+
+    def test_alerts_send_a_session_of_the_desktop_app_back_to_the_app_not_to_hansa_up(self):
+        from hansa import alert
+        self.coordinator_desk("desktop")
+        items = [{"at": time.time() - 900, "line": "t0001 done: Add a"}]
+        up_en, up_zh = "run hansa up in a terminal", "运行 hansa up"
+        app_en, app_zh = "in the Claude desktop app", "Claude 桌面应用"
+        for entrypoint, desktop in (("claude-desktop", True), ("cli", False), (None, False)):
+            write_json(self.desk.state_dir / "coordinator-start.json",
+                       {"kind": "notify", "argv": ["claude"], "folder": str(self.tmp), "session": {"pid": 0},
+                        **({"entrypoint": entrypoint} if entrypoint else {})})
+            with self.subTest(entrypoint=entrypoint), \
+                    unittest.mock.patch.object(notify, "records", return_value=[{**self.WHO, "seen": 100}]), \
+                    unittest.mock.patch.object(notify, "gone", return_value=True):
+                en = alert.unheard_text(self.desk, items, time.time())
+                zh = alert.unheard_text(self.desk, items, time.time(), zh=True)
+                self.assertEqual((app_en in en, app_zh in zh), (desktop, desktop))
+                self.assertEqual((up_en in en, up_zh in zh), (not desktop, not desktop))
+                write_json(alert.queue_file(self.desk), [])
+                self.assertEqual(alert.from_follower(self.desk, self.WHO, {"case": "inbox", "since": time.time() - 700}),
+                                 "queued")
+                [(en, zh)] = self.queued_texts("coordinator")
+                self.assertEqual((app_en in en, app_zh in zh), (desktop, desktop))
+                self.assertEqual((up_en in en, up_zh in zh), (not desktop, not desktop))
 
     def test_alerts_about_the_coordinators_session_say_what_the_principal_can_do(self):
         from hansa import alert

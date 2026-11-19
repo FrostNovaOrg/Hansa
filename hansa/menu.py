@@ -38,6 +38,8 @@ WORDS = {
     "enter": ("Press Enter for its coordinator; or on this machine: {attach}",
               "按回车进入协调员；或在本机运行：{attach}"),
     "open_session": ("Press s to open its coordinator.", "按 s 打开协调员。"),
+    "open_desktop": ("Its coordinator's session ran in the Claude desktop app: open it there again; s starts only "
+                     "the server.", "协调员的会话在 Claude 桌面应用里：请在那里重新打开它；按 s 只启动后台。"),
     "started": ("{desk}: started; {attach}", "{desk}：已启动；{attach}"),
     "not_started": ("{desk}: not started; see the lines above.", "{desk}：未启动；请看上面的输出。"),
     "empty": ("No desks listed. hansa init makes and lists a desk. q quits.",
@@ -52,6 +54,8 @@ WORDS = {
     "return": ("Press any key to return to the menu.", "按任意键返回菜单。"),
     "session": ("The coordinator's session is not open. Press s to start it.", "协调员未打开。按 s 启动。"),
     "no_tmux": ("Its coordinator is not in tmux; Enter cannot reach it.", "协调员不在 tmux 中，回车无法进入。"),
+    "in_desktop": ("Its coordinator runs in the Claude desktop app; Enter cannot reach it.",
+                   "协调员在 Claude 桌面应用里运行，回车无法进入。"),
     "install_tmux": ("tmux is missing; install it to enter the session.", "找不到 tmux；安装后才能进入协调员。"),
     "leave_tmux": ("Leave tmux first (Ctrl+B, then D), then run: ", "请先离开 tmux（Ctrl+B，再按 D），然后运行："),
     "detach": ("Inside, press Ctrl+B, then D to return; the coordinator keeps running.",
@@ -82,8 +86,9 @@ def rows():
         if not row.get("problem"):
             desk = Desk(row["desk"])
             try:
-                row.update(coordinator=bool(notify.names(desk) or up.still_runs(up.read_coordinator(desk))),
-                           paused=desk.paused() is not None)
+                rec = up.read_coordinator(desk)
+                row.update(coordinator=bool(notify.names(desk) or up.still_runs(rec)),
+                           desktop=up.in_desktop(rec), paused=desk.paused() is not None)
             except (OSError, UnicodeError):
                 row["problem"] = "folder cannot be read as a desk"
     return state
@@ -108,10 +113,10 @@ def guide(row, lang):
     if row["server"] == "gone":
         return [words(lang, "start")]
     if not row["coordinator"]:
-        return [words(lang, "open_session")]
+        return [words(lang, "open_desktop" if row.get("desktop") else "open_session")]
     attach = attachment(Desk(row["desk"]), dict(os.environ))[3]
     return ([words(lang, "enter", attach=attach), words(lang, "detach")] if attach
-            else [words(lang, "no_tmux")])
+            else [words(lang, "in_desktop" if row.get("desktop") else "no_tmux")])
 
 
 def command(row, key, lang):
@@ -128,10 +133,10 @@ def command(row, key, lang):
         note = words(lang, "tunnel", port=views.web_address(desk)[1]) if env.get("SSH_CONNECTION") else ""
         return base + ["web"], env, note
     if not row["coordinator"]:
-        return [], env, words(lang, "session")
+        return [], env, words(lang, "open_desktop" if row.get("desktop") else "session")
     tmux, server, session, attach = attachment(desk, env)
     if not server or not session:
-        return [], env, words(lang, "no_tmux")
+        return [], env, words(lang, "in_desktop" if row.get("desktop") else "no_tmux")
     if not tmux:
         return [], env, words(lang, "install_tmux")
     if os.environ.get("TMUX"):

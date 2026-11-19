@@ -1300,6 +1300,21 @@ refused.
 - Both save the session's process: its pid with its start time, as hansa tells
   sessions apart.
 
+`hansa notify on` also keeps the session's `CLAUDE_CODE_ENTRYPOINT` in the
+record (`entrypoint`; a record made before has none). `claude-desktop` is a
+session in the Code tab of the Claude desktop app, which starts its own copy of
+claude itself. There, hansa's posts reach the session and `hansa status` reads
+its status as for a terminal one, but hansa cannot start it again, attach to
+it, or give it launch words: it has no turn records (no `Stop` and
+`StopFailure` hooks), none of hansa's rules but those of the desk's own
+`.claude/settings.json` when its folder is the desk, and not the mod,
+`--autocompact` or the daily clear. `hansa notify on` says so in it once;
+`hansa status`, `hansa explain notify`, the card's copy, the menu and the
+alerts say so too. Once it is gone, `hansa up` starts the server as before but
+no coordinator, and exits 1 saying to open the session again in the app (its
+folder) and run `hansa notify on` in it if hansa does not post to it. To have
+all of the above, run the coordinator in a terminal with `hansa coordinator`.
+
 The record excludes keys hansa knows when saving and the session's identity;
 see the [redaction limits](releases.md#push-addresses-and-services).
 The words that pick a conversation or give an inbox are left out with their

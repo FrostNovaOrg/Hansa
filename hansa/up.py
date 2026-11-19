@@ -550,6 +550,8 @@ def turn_line(desk: Desk, sess: dict, name: str) -> str:
     mine = notify.same(rec.get("session"), sess)
     written = isinstance(pid, int) and (turns_dir(desk) / f"{pid}.json").is_file()
     head = f"turns of {name}: "
+    if mine and in_desktop(rec):
+        return head + "not recorded: it runs in the Claude desktop app, where hansa cannot give it Stop and StopFailure hooks"
     if mine and rec.get("kind") == "coordinator":
         words = [x for x in rec.get("words") or [] if isinstance(x, str)]
         if has_settings(words):
@@ -744,12 +746,14 @@ def running_coordinator(desk: Desk) -> dict:
         launch = rec.get("env") if isinstance(rec.get("env"), dict) else {}
         tmux = program("tmux") or program("tmux", env=launch) or "tmux"
         attach = attach_command(tmux, server, session, {k: v for k, v in launch.items() if k == "TMUX_TMPDIR"})
-    return {"pid": sess.get("pid"), "name": name, "attach": attach}
+    return {"pid": sess.get("pid"), "name": name, "attach": attach,
+            "desktop": notify.same(rec.get("session"), sess) and in_desktop(rec)}
 
 
 def running_text(found: dict) -> str:
     """What hansa coordinator says when the desk's coordinator already runs (running_coordinator's)."""
     reach = (f"Reach it with: {found['attach']}" if found["attach"] else
+             "It runs in the Claude desktop app: go to it there." if found.get("desktop") else
              "It does not run in tmux: go to the terminal it runs in.")
     return (f"the desk's coordinator already runs: {notify.who(found['pid'], found['name'])}. hansa posts to that "
             "session; a second one would work beside it, and hansa would post to both. Nothing was started; once it "
@@ -771,6 +775,39 @@ def read_coordinator(desk: Desk) -> dict:
     return rec if isinstance(rec, dict) else {}
 
 
+DESKTOP = "claude-desktop"  # CLAUDE_CODE_ENTRYPOINT in a session of the Claude desktop app's Code tab ("cli": a terminal)
+
+
+def in_desktop(rec: dict) -> bool:
+    """Whether a coordinator's start record (read_coordinator's) is of a session in the Claude desktop app, by the
+    entrypoint hansa notify on recorded. The app starts its own copy of claude: hansa cannot start such a session
+    again, attach to it, or give it hooks, rules or its mod. An older record has no entrypoint: not one."""
+    return isinstance(rec, dict) and rec.get("entrypoint") == DESKTOP
+
+
+def desktop_text(desk: Desk, rec: dict) -> str:
+    """What a session in the Claude desktop app (in_desktop) lacks: for hansa notify on and hansa explain notify."""
+    from .cli import desk_spellings
+    rules = ("those the desk's .claude/settings.json gives, as its folder is the desk"
+             if rec.get("folder") in desk_spellings(desk) else "none, as its folder is not the desk")
+    return ("This session runs in the Claude desktop app: hansa cannot start it again or attach to it, and cannot give "
+            "it the Stop and StopFailure hooks there, so its turns are not recorded. Of hansa's rules it has "
+            f"{rules}; hansa's mod, --autocompact and the daily clear are not in it. To have all of them, run the "
+            "coordinator in a terminal with hansa coordinator.")
+
+
+def desktop_lines(desk: Desk) -> list:
+    """For hansa explain notify: desktop_text when the recorded session runs in the Claude desktop app."""
+    rec = read_coordinator(desk)
+    return [desktop_text(desk, rec)] if in_desktop(rec) else []
+
+
+def desktop_step(folder) -> str:
+    """How the principal brings back a session in the Claude desktop app that is gone: hansa up cannot."""
+    return (f"open the Claude desktop app and the session there again (its folder is {folder}); if hansa does not post "
+            "to it, run hansa notify on in it")
+
+
 def _keep(desk: Desk, rec: dict, why: str = "", unread: bool = False) -> str:
     """Write the coordinator's start record ('' then), or, when why says it cannot be kept, a record of only that
     and the session, so hansa up starts no older one. A session that could be read before keeps its record when
@@ -778,7 +815,8 @@ def _keep(desk: Desk, rec: dict, why: str = "", unread: bool = False) -> str:
     old = read_coordinator(desk)
     if why and unread and old.get("kind") == "notify" and notify.same(old.get("session"), rec["session"]):
         return why
-    rec = {"kind": "unrecorded", "why": why, "session": rec["session"]} if why else rec
+    rec = {"kind": "unrecorded", "why": why, "session": rec["session"],
+           **({"entrypoint": rec["entrypoint"]} if "entrypoint" in rec else {})} if why else rec
     try:
         desk.state_dir.mkdir(mode=0o700, exist_ok=True)
         write_json(desk.state_dir / COORDINATOR_START, {**rec, "at": now()})
@@ -821,14 +859,15 @@ def record_coordinator(desk: Desk, clear: str, words: list) -> str:
 
 
 def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None, rules: list = None,
-                   settings: str = None, sid: str = "") -> str:
+                   settings: str = None, sid: str = "", entrypoint: str = "") -> str:
     """How a session hansa did not start began, for hansa up: its claude's exact arguments and folder, read from
     its process unless given (notify-launch gives its own), tmux, and the launch settings of this command's
     environment, which it has from the session. rules: the deny rules notify-launch starts it with (launch_rules),
     kept in the record, which so says the session has them, and left out of its arguments; settings: the --settings
     with the Stop and StopFailure hooks notify-launch gave it (turn_hooks), kept and left out the same way. sid: the
     session's id, as Claude Code gives it to a command run in the session (hansa notify on); else the conversation
-    is the one its words pick. '' when recorded, else why not."""
+    is the one its words pick. entrypoint: the session's CLAUDE_CODE_ENTRYPOINT (hansa notify on), kept when given:
+    "claude-desktop" for the Claude desktop app (in_desktop). '' when recorded, else why not."""
     argv = proc_args(sess["pid"]) if argv is None else argv
     folder = proc_cwd(sess["pid"]) if folder is None else folder
     words = without_settings(without_rules(unpicked(argv[1:]), rules or []), settings) if argv else []
@@ -838,7 +877,8 @@ def record_session(desk: Desk, sess: dict, argv: list = None, folder: str = None
     rec = {"kind": "notify", "hansa": hansa_command(), "argv": argv and [argv[0], *words],
            "folder": folder, "tmux": record_tmux(), "env": env, "session": sess,
            **({"launch_rules": rules} if rules is not None else {}),
-           **({"launch_settings": settings, "turn_hooks": True} if isinstance(settings, str) else {}), **conv}
+           **({"launch_settings": settings, "turn_hooks": True} if isinstance(settings, str) else {}),
+           **({"entrypoint": entrypoint} if entrypoint else {}), **conv}
     if not argv:
         return _keep(desk, rec, "the arguments of its claude process cannot be read", unread=True)
     if not folder or not os.path.isdir(folder):
@@ -865,7 +905,7 @@ def restart_plan(desk: Desk, rec: dict, conv: dict = None) -> dict:
     if rec.get("kind") == "notify" and argv and isinstance(rec.get("folder"), str):
         claude = [argv[0], *resumed(argv[1:], pick_words(conv))]
         return {"cmd": [hansa, *desk_words, LAUNCHER, *claude], "hand": claude, "folder": rec["folder"],
-                "words": argv[1:], "kind": "notify", "conversation": conv}
+                "words": argv[1:], "kind": "notify", "conversation": conv, "desktop": in_desktop(rec)}
     cmd = [hansa_command(), *desk_words, "coordinator"]  # a new desk's first start, so nothing to continue
     return {"cmd": cmd, "hand": cmd, "folder": str(desk.root), "words": [], "kind": "", "conversation": {"how": "new"}}
 
@@ -924,6 +964,8 @@ def _followers(desk: Desk) -> bool:
 
 
 def by_hand(plan: dict) -> str:
+    if plan.get("desktop"):  # the app starts its own claude: no command does
+        return desktop_step(plan["folder"])
     then = ", then hansa notify on in it" if plan["kind"] == "notify" else ""
     return shlex.join(["cd", plan["folder"]]) + " && " + shlex.join(plan["hand"]) + then
 
@@ -961,14 +1003,21 @@ def notify_on_line(desk: Desk, card: bool | None = None) -> str:
     rules = rec.get("launch_rules") if rec.get("kind") == "notify" and notify.same(rec.get("session"), sess) \
         and isinstance(rec.get("launch_rules"), list) else None
     settings = rec.get("launch_settings") if rules is not None and isinstance(rec.get("launch_settings"), str) else None
-    why = record_session(desk, sess, rules=rules, settings=settings, sid=session_value("CLAUDE_CODE_SESSION_ID"))
+    why = record_session(desk, sess, rules=rules, settings=settings, sid=session_value("CLAUDE_CODE_SESSION_ID"),
+                         entrypoint=session_value("CLAUDE_CODE_ENTRYPOINT"))
     rec = read_coordinator(desk)
     kept = rec.get("kind") == "notify" and notify.same(rec.get("session"), sess)
+    desktop = in_desktop(rec) and notify.same(rec.get("session"), sess)
     if why and not kept:
-        return f"hansa up will not start this session again after a restart: {why}; nothing was recorded."
+        return "\n".join([f"hansa up will not start this session again after a restart: {why}; nothing was recorded.",
+                          *([desktop_text(desk, rec)] if desktop else [])])
     then = f"{why}, so nothing new was recorded. " if why else ""
     placed = place_card(desk, rec)
     placed["removed"] = removed + placed["removed"]
+    if desktop:
+        return "\n".join([f"{then}After a restart, hansa up does not start this session again: it runs in the Claude "
+                          "desktop app, which hansa cannot start.", *card_lines(desk, rec, placed),
+                          desktop_text(desk, rec)])
     return "\n".join([f"{then}After a restart, hansa up starts this session again {restart_line(desk, rec)}.",
                       *([] if isinstance(rec.get("launch_rules"), list) else [unruled(desk, rec)]),
                       *card_lines(desk, rec, placed)])
@@ -983,9 +1032,12 @@ UNRULED = ("This session has none of the deny rules hansa coordinator gives its 
 
 
 def unruled(desk: Desk, rec: dict) -> str:
-    """UNRULED; for a session started in the desk's own folder, which loads the desk's .claude/settings.json, the
-    deny rules it has from there (cli.permissions) and those hansa up adds."""
+    """UNRULED (desktop_text for a session in the Claude desktop app); for a session started in the desk's own
+    folder, which loads the desk's .claude/settings.json, the deny rules it has from there (cli.permissions) and
+    those hansa up adds."""
     from .cli import desk_spellings, permissions
+    if in_desktop(rec):  # hansa up never starts it: it has no more rules to come
+        return desktop_text(desk, rec)
     if rec.get("folder") not in desk_spellings(desk):
         return UNRULED
     deny, r = permissions(desk)["deny"], str(desk.root).lstrip("/")
@@ -1135,6 +1187,21 @@ def exclude_copy(top: str, path: Path) -> str:
     return f"hansa added it to {detail}, so git in {top} leaves it out."
 
 
+def copy_rules(desk: Desk) -> str:
+    """The card copy's paragraph on the rules the recorded session has, by how it starts."""
+    if in_desktop(read_coordinator(desk)):  # its copy is in a folder outside the desk: no desk settings there
+        return ("> It runs in the Claude desktop app, which `hansa up` cannot start, so it has none of the rules "
+                "`hansa coordinator` gives its session, no turn records (hansa cannot give it `Stop` and "
+                "`StopFailure` hooks there), and not the mod, `--autocompact` or the daily clear; to have them, run the "
+                "coordinator in a terminal with `hansa coordinator`. The card's rules still hold.\n>\n")
+    return ("> Started by `hansa up`, it has these of the rules `hansa coordinator` gives its session: no pushing or "
+            "publishing from its shell, no reading of the desk's `secrets/` and `.hansa/` or of the logins and keys "
+            "under the home folder, no editing of the desk's files but `notes/` and `worktrees/`. Started otherwise and recorded "
+            "with `hansa notify on`, it has none of them until `hansa up` starts it. In both cases it is not denied "
+            "Read on the principal's list of what workers may not read, nor Edit in the lanes' repositories: the "
+            "card's rules still hold.\n>\n")
+
+
 def copy_text(desk: Desk, path: Path) -> str:
     """The copy of the card: hansa's header, then hansa's own card (card.md, the one hansa brings the desk's to; never
     the desk's CLAUDE.md as it stands, which may be older or edited). An import line in it (@notes/PROJECT.md) names
@@ -1154,12 +1221,7 @@ def copy_text(desk: Desk, path: Path) -> str:
               "reviewer, operator) and the coordinator's mod are not in it, but for hansa's status line when `hansa up` "
               "started it: where the card says to ask a helper, "
               "make a task.\n>\n"
-              "> Started by `hansa up`, it has these of the rules `hansa coordinator` gives its session: no pushing or "
-              "publishing from its shell, no reading of the desk's `secrets/` and `.hansa/` or of the logins and keys "
-              "under the home folder, no editing of the desk's files but `notes/` and `worktrees/`. Started otherwise and recorded "
-              "with `hansa notify on`, it has none of them until `hansa up` starts it. In both cases it is not denied "
-              "Read on the principal's list of what workers may not read, nor Edit in the lanes' repositories: the "
-              "card's rules still hold.\n>\n"
+              + copy_rules(desk) +
               "> This card is for the session that coordinates that desk: the one hansa posts its notices to. "
               "Any other session started in this folder or below it, such as a worker a script starts or a session "
               "for other work, is not that session: ignore this card.\n\n")
@@ -1363,6 +1425,9 @@ def coordinator_line(desk: Desk) -> str:
         if none_yet(desk):
             return f"hansa up starts no coordinator's session: {NONE_YET}. {TO_RECORD_FIRST}"
         return f"hansa up starts no coordinator's session: {NOT_YET}. {TO_RECORD}"
+    if in_desktop(rec):
+        return (f"hansa up does not start the coordinator's session again: it ran in the Claude desktop app, which "
+                f"hansa cannot start; {desktop_step(rec.get('folder'))}")
     if rec.get("kind") == "unrecorded":
         return f"hansa up cannot start the coordinator's session again: its last start was not recorded ({rec.get('why')})"
     plan = restart_plan(desk, rec)
@@ -1402,6 +1467,10 @@ def coordinator_up(desk: Desk) -> bool:
         print(f"coordinator: its session pid {pid} still runs but does not hear from hansa; nothing started. "
               "Run hansa notify on in it")
         return True
+    if in_desktop(rec):
+        print(f"coordinator: its session ran in the Claude desktop app, which hansa cannot start; nothing started. "
+              f"To bring it back, {desktop_step(rec.get('folder'))}")
+        return False
     if rec.get("kind") == "unrecorded":
         print(f"coordinator: its last start was not recorded ({rec.get('why')}); nothing started. Start it yourself, "
               "then run hansa notify on in it")

@@ -145,7 +145,7 @@ That folder is removed when the command ends, and what a stopped
 or killed hansa serve left there is swept when it starts (sweep_runs): secrets/ is closed to the coordinator, workers,
 verifiers, so a leftover that holds the alert's text is never theirs to read. Text is in the saved alert_language;
 English wording is unchanged when there is no target description. Each problem alert ends with a next step the
-principal can take on a phone ("next:", TELL_COORDINATOR, HANSA_UP): a diagnosis command only as the coordinator's to
+principal can take on a phone ("next:", TELL_COORDINATOR, HANSA_UP or OPEN_DESKTOP): a diagnosis command only as the coordinator's to
 run, a command for the principal only saying where. Chinese texts say hansa's own words in Chinese, with a task's title
 and a program's own message as they are, quoted 「…」. A release alert puts its target's description,
 kept as it was when asked, after the request, code and instructions, or the result.
@@ -193,6 +193,16 @@ UNHEARD_EVERY = 10.0  # seconds between its looks at whether any session hears f
 TELL_COORDINATOR = ("tell the coordinator; it can find the cause with hansa explain server",
                     "告诉协调员；它可以用 hansa explain server 查明原因")
 HANSA_UP = ("run hansa up in a terminal on the desk's machine", "在工作台所在机器的终端里运行 hansa up")
+# HANSA_UP's place for a coordinator's session in the Claude desktop app (up.in_desktop), which hansa up cannot start
+OPEN_DESKTOP = ("open the coordinator's session again in the Claude desktop app on the desk's machine",
+                "在工作台所在机器的 Claude 桌面应用里重新打开协调员的会话")
+
+
+def up_step(desk: Desk) -> tuple:
+    """The step that brings the coordinator's session back, (English, Chinese): HANSA_UP, or OPEN_DESKTOP when its
+    recorded session runs in the Claude desktop app."""
+    from . import up
+    return OPEN_DESKTOP if up.in_desktop(up.read_coordinator(desk)) else HANSA_UP
 
 
 def queue_file(desk: Desk) -> Path:
@@ -976,10 +986,10 @@ def unheard_text(desk: Desk, items: list, t: float, zh: bool = False) -> str:
     else:
         who = "这个工作台还没有会话接收过" if zh else "none has on this desk yet"
     if zh:
-        step = "在那个会话里让协调员运行 hansa notify on" if runs else HANSA_UP[1]
+        step = "在那个会话里让协调员运行 hansa notify on" if runs else up_step(desk)[1]
         return (f"协调员未收到：没有会话接收 Hansa 的消息（{who}）· {len(items)} 件事在等协调员，"
                 f"最早的已等 {_mins(t - items[0]['at'])} 分钟：{_what_zh(desk, items[0])} · 下一步：{step}")
-    step = "ask the coordinator in that session to run hansa notify on" if runs else HANSA_UP[0]
+    step = "ask the coordinator in that session to run hansa notify on" if runs else up_step(desk)[0]
     return (f"the coordinator's session cannot be reached: no session hears from hansa ({who}) · {len(items)} "
             f"thing(s) wait for the coordinator, the oldest for {_mins(t - items[0]['at'])} min: {items[0]['line']}"
             f" · next: {step}")
@@ -1138,9 +1148,9 @@ def from_follower(desk: Desk, me: dict, req: dict) -> str:
         since = req["since"] if _at(req.get("since")) else t
         text = (f"the coordinator's session {who} cannot be reached: its inbox refuses posts for "
                 f"{_mins(t - since)} min · hansa keeps the lines and tries again · next: if it lasts, quit that session, "
-                f"then {HANSA_UP[0]}")
+                f"then {up_step(desk)[0]}")
         text_zh = (f"协调员未收到：会话 {who_zh} 的收件箱已拒收 {_mins(t - since)} 分钟 · Hansa 保留消息并重试"
-                   f" · 下一步：如果一直这样，请退出那个会话，再{HANSA_UP[1]}")
+                   f" · 下一步：如果一直这样，请退出那个会话，再{up_step(desk)[1]}")
     elif req.get("case") == "window":
         since = req["since"] if _at(req.get("since")) else t
         posted = req["posted"] if _at(req.get("posted")) and req["posted"] else since  # the first thing's post
