@@ -1,0 +1,5 @@
+{"type": "thread.started", "thread_id": "0199f3a2-0000-7000-8000-000000000107"}
+{"type": "turn.started"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "Reading the scanner. RUNTEXT-7f3a"}}
+{"type": "error", "message": "unexpected status 400 Bad Request: RUNTEXT-7f3a", "codex_error_info": "bio_policy"}
+{"type": "turn.failed", "error": {"message": "unexpected status 400 Bad Request: RUNTEXT-7f3a", "codex_error_info": "bio_policy"}}

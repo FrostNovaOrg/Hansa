@@ -1,0 +1,5 @@
+{"type": "thread.started", "thread_id": "0199f3a2-0000-7000-8000-000000000103"}
+{"type": "turn.started"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "Reading the scanner. RUNTEXT-7f3a"}}
+{"type": "error", "message": "Invalid prompt: your prompt was flagged as potentially violating our usage policy. RUNTEXT-7f3a"}
+{"fake": "exit", "code": 1}

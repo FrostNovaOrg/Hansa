@@ -1,0 +1,6 @@
+{"type": "thread.started", "thread_id": "0199f3a2-0000-7000-8000-000000000111"}
+{"type": "turn.started"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "Reading the scanner. RUNTEXT-7f3a"}}
+{"type": "error", "message": "Reconnecting... 1/5 (unexpected status 400: RUNTEXT-7f3a)", "codex_error_info": "cyber_policy"}
+{"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "Done."}}
+{"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 5}}
