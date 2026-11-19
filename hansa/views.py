@@ -1923,6 +1923,8 @@ def show_text(desk: Desk, tid: str, full: bool = False, heard=None, page_message
                else "not removed yet")
         out.append(f"temporary folder{f' of run {i + 1} of {len(tmps)}' if len(tmps) > 1 else ''}: "
                    f"{r.get('path')} ({how})")
+    if m.get("left_running_count") and not m.get("left_running"):  # a blocked run's (run.block): how many only
+        out.append(f"left running, stopped by hansa when the task ended: {m['left_running_count']} process(es)")
     if m.get("left_running"):
         out.append(f"left running, stopped by hansa when the task ended ({len(m['left_running'])}):")
         out += [f"  pid {x['pid']}: {x['command']}" for x in m["left_running"]]

@@ -230,12 +230,30 @@ def safety_stop(at, sid):
         r.write(json.dumps({"uuid": "s-" + mark, "sessionId": sid, "type": "assistant", "message": {
             "id": "s1", "model": "mimo-x", "content": [{"type": "text", "text": "Notes: " + mark}],
             "usage": {"input_tokens": 30, "output_tokens": 3}}}) + "\n")
+        if said.get("bg"):  # "bg": work it started in the background, still running as it ends
+            use = {"type": "tool_use", "id": "ub", "name": "Bash", "input": {
+                "description": "Run the full test suite", "run_in_background": True, "command": "python3 -m unittest"}}
+            text, result = BG_BASH("bk7s2a")
+            r.write(json.dumps({"type": "assistant", "message": {"id": "s2", "content": [use]}}) + "\n")
+            r.write(json.dumps({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "ub", "content": [{"type": "text", "text": text}]}]},
+                "toolUseResult": result}) + "\n")
     open(os.path.join(home, "projects", "-work", sid, "subagents", "agent-1.jsonl"), "w").write(mark + "\n")
     os.makedirs(os.path.join(home, "progress"), exist_ok=True)
     open(os.path.join(home, "progress", sid + ".json"), "w").write(json.dumps({"note": mark}))
     open("committed.txt", "w").write("committed " + mark + "\n")
     subprocess.run(["git", "add", "committed.txt"], check=True)
     subprocess.run(["git", "commit", "-q", "-m", "commit " + mark], check=True)
+    if said.get("git"):  # "git": a stash, a note, a branch and a tag on its commit, and a message left in git's folder
+        open("stashed.txt", "w").write("stashed " + mark + "\n")
+        subprocess.run(["git", "stash", "push", "-q", "-u", "-m", "stash " + mark], check=True)
+        subprocess.run(["git", "notes", "add", "-m", "note " + mark], check=True)
+        subprocess.run(["git", "branch", "side-" + mark], check=True)
+        subprocess.run(["git", "tag", "-a", "tag-" + mark, "-m", "tag " + mark], check=True)
+        gitdir = subprocess.run(["git", "rev-parse", "--git-dir"], check=True, capture_output=True,
+                                text=True).stdout.strip()
+        open(os.path.join(gitdir, "MERGE_MSG"), "w").write("merge " + mark + "\n")
+        subprocess.run(["git", "update-ref", "ORIG_HEAD", "HEAD"], check=True)
     open("README.md", "a").write("changed " + mark + "\n")
     open("new-" + mark + ".txt", "w").write("new " + mark + "\n")
     if os.environ.get("HANSA_PICTURES_DIR"):
@@ -34615,7 +34633,7 @@ def save():'''))
         self.desk.write_key("mimo", "sk-test-safety-01")
         return f
 
-    def blocked_run(self, d, kind: str, how: str, shape: dict) -> tuple:
+    def blocked_run(self, d, kind: str, how: str, shape: dict, more=None) -> tuple:
         """One run of a task (kind work) or a verification of a finished task, stopped by the safety check on its
         first start, on a start hansa made after a dropped connection (restart), in the resume after background
         work, or in the continuation after the time ceiling (wrapup). (its meta, its marker, the verified task)."""
@@ -34626,7 +34644,7 @@ def save():'''))
                  "wrapup": {"FAKE_CEILING": str(self.tmp / ("ceiling-" + mark))}}[how]
         f = self.safety_lane("start" if how in ("start", "restart") else "resume", extra)
         f.write_text(json.dumps({"at": "start" if how in ("start", "restart") else "resume", "shape": shape,
-                                 "mark": mark}))
+                                 "mark": mark, "git": True, **(more or {})}))
         parent = None
         if kind == "verify":
             parent = self.desk.new_task("Fix the badge", lane="a")
@@ -34648,6 +34666,28 @@ def save():'''))
                 time.sleep(0.1)
             self.desk.update(tid, started=time.time() - 60 * 241)
         return self.settle(d, tid), mark, parent
+
+    def assert_no_git_trace(self, mark: str, tid: str, commit=None) -> None:
+        """Nothing in the lane's repository (its worktree's folder included) names or holds what the stopped run made:
+        no ref of the task's, no ref, reflog, stash, note or file of git's (ORIG_HEAD, COMMIT_EDITMSG, MERGE_MSG ...)
+        that names a commit or object holding the marker, or `commit` (an earlier try's), or holds the marker."""
+        refs = sh_out("git", "for-each-ref", "--format=%(refname)", cwd=self.repo).split()
+        self.assertEqual([r for r in refs if r.startswith(f"refs/heads/task/{tid}")], [])
+        self.assertNotIn(mark, " ".join(refs))
+        self.assertNotIn(mark, sh_out("git", "log", "-g", "-p", "--format=%H %gs %B", "refs/stash", cwd=self.repo)
+                         if "refs/stash" in refs else "")
+        named = set()
+        for f in (self.repo / ".git").rglob("*"):
+            if f.is_file() and "objects" not in f.relative_to(self.repo / ".git").parts[:1]:
+                data = f.read_bytes()
+                self.assertNotIn(mark.encode(), data, f)
+                named |= {(x.decode(), f) for x in re.findall(rb"\b[0-9a-f]{40}\b", data)}
+        for sha, f in sorted(named):
+            self.assertNotEqual(sha, commit, f)
+            kind = subprocess.run(["git", "cat-file", "-t", sha], cwd=self.repo, capture_output=True, text=True).stdout
+            said = subprocess.run(["git", "show", "--format=%B", sha] if kind.strip() == "commit" else
+                                  ["git", "cat-file", "-p", sha], cwd=self.repo, capture_output=True).stdout
+            self.assertNotIn(mark.encode(), said, (sha, f))
 
     def assert_blocked(self, m, mark, how, parent=None, shape=None):
         from hansa import run
@@ -34690,7 +34730,9 @@ def save():'''))
         # the worktree is clean, on the commit the run started from
         wt = self.desk.worktrees_dir / "a"
         self.assertEqual(sh_out("git", "status", "--porcelain", cwd=wt), "")
-        self.assertEqual(sh_out("git", "rev-parse", "HEAD", cwd=wt), m["run_start"]["commit"])
+        origin = next((a["run_start"] for a in m.get("attempts") or [] if a.get("run_start")), m["run_start"])["commit"]
+        self.assertEqual(sh_out("git", "rev-parse", "HEAD", cwd=wt), origin)
+        self.assert_no_git_trace(mark, tid, m["run_start"]["commit"] if m["run_start"]["commit"] != origin else None)
         # what it wrote, its changes and its conversation record: set aside, only where hansa reads
         folder = self.desk.state_dir / "blocked" / tid
         self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
@@ -34703,8 +34745,13 @@ def save():'''))
         self.assertTrue((folder / "conversation" / f"progress-{m['session_id']}.json").is_file())
         again = self.tmp / ("applied-" + mark)
         sh("git", "clone", "-q", str(self.repo), str(again), cwd=self.tmp)
-        sh("git", "checkout", "-q", m["run_start"]["commit"], cwd=again)
+        sh("git", "checkout", "-q", origin, cwd=again)
+        if m["run_start"]["commit"] != origin:  # the earlier try's work (a task's restart), then the stopped run's
+            sh("git", "apply", "--binary", str(folder / "earlier-tries.patch"), cwd=again)
+            self.assertIn("half done", (again / "partial.txt").read_text())
         sh("git", "apply", "--binary", str(folder / "changes.patch"), cwd=again)
+        self.assertEqual((how == "restart" and not parent, (folder / "earlier-tries.patch").exists()),
+                         (how == "restart" and not parent,) * 2)
         for name in ("committed.txt", "README.md", f"new-{mark}.txt"):
             self.assertIn(mark, (again / name).read_text())
         self.assertFalse(m.get("pictures"))
@@ -34721,9 +34768,11 @@ def save():'''))
         cases = [("work", "start", s) for _, s in self.SAFETY_SHAPES] + [
             (kind, how, next(shapes)[1]) for how in ("restart", "resume", "wrapup") for kind in ("work", "verify")] + [
             ("verify", "start", next(shapes)[1])]
+        marks = []
         for kind, how, shape in cases:
             with self.subTest(kind=kind, how=how, shape=shape):
                 m, mark, parent = self.blocked_run(d, kind, how, shape)
+                marks.append((mark, m["id"]))
                 self.assert_blocked(m, mark, how, parent, shape)
         # nothing takes a blocked run again, a restarted server included; the lane takes its next task, clean
         blocked = [x for x in self.desk.tasks() if x["state"] == "blocked"]
@@ -34738,6 +34787,8 @@ def save():'''))
         m = self.settle(d, self.desk.new_task("Add hello.txt"))
         self.assertEqual((m["state"], m["provider"], m.get("leftovers")), ("done", "mimo", None), m)
         self.assertEqual(m["files"], ["hello.txt"])
+        for mark, tid in marks:  # and after the lane's next task, still nothing of theirs in git
+            self.assert_no_git_trace(mark, tid)
 
     def test_every_shape_is_blocked_on_a_restart_in_the_resume_and_in_the_continuation(self):
         d = Dispatcher(self.desk)
@@ -34746,6 +34797,111 @@ def save():'''))
                 with self.subTest(how=how, shape=name):
                     m, mark, parent = self.blocked_run(d, "work", how, shape)
                     self.assert_blocked(m, mark, how, parent, shape)
+
+    def test_a_first_run_stopped_with_background_work_left_is_not_resumed(self):
+        # the stop is the first run's own end: resume() must not go on in that conversation (its guard), whatever
+        # finish would make of the resumed run's end
+        d = Dispatcher(self.desk)
+        for name, shape in (("refusal", {"subtype": "success", "is_error": False, "stop_reason": "refusal",
+                                         "result": "MARK"}),
+                            ("notice", self.SAFETY_SHAPES[6][1])):
+            with self.subTest(name):
+                m, mark, _ = self.blocked_run(d, "work", "start", shape, more={"bg": True})
+                self.assertEqual(m["state"], "blocked", m)
+                self.assertEqual([e for e in self.events("task_resumed") if e["task"] == m["id"]], [])
+                self.assertFalse(m.get("resumed"))
+
+    def test_a_first_run_stopped_at_the_turn_ceiling_is_not_continued_to_write_its_report(self):
+        # the stopped run's answer is at its ceiling of turns: wrap_up() must not go on in that conversation
+        d = Dispatcher(self.desk)
+        for name, shape in (("refusal", {"subtype": "error_max_turns", "is_error": False, "stop_reason": "refusal",
+                                         "result": "MARK"}),
+                            ("notice", {**self.SAFETY_SHAPES[6][1], "subtype": "error_max_turns"})):
+            with self.subTest(name):
+                m, mark, _ = self.blocked_run(d, "work", "start", shape)
+                self.assertEqual(m["state"], "blocked", m)
+                self.assertEqual([e for e in self.events("task_wrap_up") if e["task"] == m["id"]], [])
+                self.assertFalse(m.get("wrap_up"))
+
+    def test_what_a_blocked_run_left_running_is_counted_on_its_record_and_set_aside(self):
+        from hansa import run
+        m, mark, _ = self.blocked_run(Dispatcher(self.desk), "work", "wrapup", self.SAFETY_SHAPES[0][1])
+        self.assertEqual(m["state"], "blocked", m)
+        self.assertEqual(m["left_running"], [])
+        self.assertGreaterEqual(m["left_running_count"], 1, m)
+        kept = json.loads((self.desk.state_dir / "blocked" / m["id"] / "left-running.json").read_text())
+        self.assertIn("time.sleep(120)", " ".join(x["command"] for x in kept))
+        shown = self.hansa("show", m["id"])
+        self.assertIn(f"stopped by hansa when the task ended: {m['left_running_count']} process(es)", shown)
+        self.assertNotIn("sleep", shown)
+        self.assertNotIn("sleep", json.dumps(self.desk.meta(m["id"])))
+
+    def test_a_blocked_end_records_no_command_line_of_what_it_stopped(self):
+        from hansa import run
+        mark = "MARK" + uuid.uuid4().hex[:12]
+        tid = self.desk.new_task("Fix the badge")
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", mark], start_new_session=True)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        time.sleep(0.3)
+        self.desk.update(tid, state="running", lane="a", provider="claude", started=time.time() - 5,
+                         started_procs={str(child.pid): run.proc_start(child.pid)})
+        m = run.block(self.desk, tid, None)
+        self.assertEqual(m["state"], "blocked")
+        child.wait(timeout=20)
+        [ev] = [e for e in self.events("left_running_stopped") if e["task"] == tid]
+        self.assertNotIn(mark, self.desk.events_path.read_text())
+        self.assertEqual(ev["processes"], [str(child.pid)])
+
+    def test_the_lanes_next_task_clears_what_a_blocked_run_left_without_keeping_it(self):
+        d = Dispatcher(self.desk)
+        m, mark, _ = self.blocked_run(d, "work", "start", self.SAFETY_SHAPES[0][1])
+        wt = self.desk.worktrees_dir / "a"
+        (wt / f"left-{mark}.txt").write_text(f"left {mark}\n")  # as if hansa could not clear it then
+        n = self.settle(d, self.desk.new_task("Add hello.txt"))
+        self.assertEqual((n["state"], n.get("leftovers")), ("done", None), n)
+        self.assertFalse((wt / f"left-{mark}.txt").exists())
+        self.assert_no_git_trace(mark, m["id"])
+
+    def test_a_follow_up_is_not_given_a_blocked_verifications_report(self):
+        mark = "MARK" + uuid.uuid4().hex[:12]
+        tid = self.desk.new_task("Add hello.txt")
+        m = self.settle(Dispatcher(self.desk), tid)
+        self.assertEqual(m["state"], "done", m)
+        vid = self.desk.new_task("Verify it", kind="verify", parent=tid, lane="a")
+        self.desk.update(vid, state="blocked", verdict="", finished=time.time())
+        (self.desk.tasks_dir / vid / "result.md").write_text(f"report {mark}\n")
+        self.desk.update(tid, verify=vid)
+        new = self.hansa("retry", tid, "Carry on").split()[0]
+        text = (self.desk.tasks_dir / new / "task.md").read_text()
+        self.assertNotIn(mark, text)
+        self.assertNotIn(f"The report of {vid}", text)
+
+    def test_the_end_repair_records_a_blocked_end_whose_event_was_lost(self):
+        tid = self.desk.new_task("Fix the badge")
+        self.desk.update(tid, state="blocked", error="stopped", provider="claude", finished=time.time(),
+                         blocked={"reason": "safety", "action": "human_review", "todo": 1})
+        Dispatcher(self.desk).recover_ends()
+        [ev] = [e for e in self.events("task_finished") if e["task"] == tid]
+        self.assertEqual(ev["state"], "blocked")
+
+    def test_a_follow_up_never_goes_on_in_a_blocked_tasks_conversation(self):
+        from hansa import run
+        m, _, _ = self.blocked_run(Dispatcher(self.desk), "work", "start", self.SAFETY_SHAPES[0][1])
+        tid = self.desk.new_task("Carry on", parent=m["id"], lane="a", start_from=m["run_start"]["commit"])
+        said = run.continuation(self.desk, self.desk.meta(tid), "a", "mimo",
+                                self.desk.settings()["providers"]["mimo"], "mimo-x")
+        self.assertEqual(said, {"new": "the earlier task is blocked: its provider's safety check stopped it"})
+
+    def test_cost_counts_a_blocked_runs_usage_and_goals_count_it(self):
+        from hansa import goals
+        self.hansa("goal", "add", "Export reports")
+        m, _, _ = self.blocked_run(Dispatcher(self.desk), "work", "start", self.SAFETY_SHAPES[0][1])
+        self.assertEqual(m["usage"]["mimo-x"]["in"], 30)
+        self.assertEqual(sum(r["in"] for r in cost.report(self.desk, 1)["rows"] if r["task"] == m["id"]), 30)
+        self.desk.update(m["id"], goal="g1")
+        [g] = goals.summaries(self.desk)
+        self.assertEqual((g["counts"]["blocked"], g["counts"]["failed"]), (1, 0))
+        self.assertIn("1 blocked", goals.summary_text(g))
 
     def test_a_blocked_run_whose_folder_or_todo_cannot_be_made_is_blocked_all_the_same(self):
         from hansa import run

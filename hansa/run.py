@@ -5381,19 +5381,80 @@ def _save_changes(desk: Desk, wt: Path, start: str, out: Path) -> None:
             raise RuntimeError(f"git diff failed: {r.stderr.decode('utf-8', 'replace').strip()[:300]}")
 
 
-def _clear_worktree(desk: Desk, wt: Path, branch: str, start: str) -> None:
-    """Put the worktree and its branch back to `start`, where the run began, with nothing left in it, and let git
-    forget the run's own commits (its branch's and HEAD's reflog entries no ref reaches any more)."""
-    check_head(desk, wt, branch)
-    wgit(desk, wt, "reset", "-q", "--hard", start)
+# What git keeps in a worktree's own folder that can name or hold what a run made (a commit, its message): removed at
+# a blocked end (_clear_run_git), with the folders a merge, rebase, cherry-pick, revert or bisect leaves half done
+RUN_GIT_FILES = ("ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "MERGE_MODE", "MERGE_MSG", "MERGE_AUTOSTASH",
+                 "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "AUTO_MERGE", "COMMIT_EDITMSG", "SQUASH_MSG",
+                 "TAG_EDITMSG", "NOTES_EDITMSG", "NOTES_MERGE_PARTIAL", "NOTES_MERGE_REF", "BISECT_LOG", "BISECT_START",
+                 "BISECT_EXPECTED_REV", "BISECT_ANCESTORS_OK", "BISECT_NAMES", "BISECT_TERMS", "BISECT_RUN",
+                 "BISECT_HEAD")
+RUN_GIT_FOLDERS = ("rebase-merge", "rebase-apply", "sequencer", "NOTES_MERGE_WORKTREE", "refs/bisect", "logs/refs/bisect")
+
+
+def _tries_of(desk: Desk, wt: Path, tid: str) -> list:
+    """The task's own branches: task/<id> and those prepare kept its earlier tries under (task/<id>-try...)."""
+    out = wgit(desk, wt, "for-each-ref", "--format=%(refname)", f"refs/heads/task/{tid}", f"refs/heads/task/{tid}-try*")
+    return [r for r in out.splitlines() if r == f"refs/heads/task/{tid}" or r.startswith(f"refs/heads/task/{tid}-try")]
+
+
+def _clear_run_git(desk: Desk, wt: Path, tid: str, origin: str, keep: str) -> list:
+    """After a blocked end: leave nothing in the lane's repository that names or holds what the task's runs made since
+    `origin` (where its first try began): the worktree detached and clean at origin; task/<id> and its earlier tries'
+    branches, and any other ref holding those commits, removed (but `keep`, the lane's base, and the stash, which
+    other lanes share: then a line says so);
+    the stash entries made on those branches dropped; notes on those commits removed, the notes ref's history with
+    them; the files and folders git keeps of a commit, merge or rebase in the worktree's folder (RUN_GIT_FILES)
+    removed; the worktree's HEAD reflog without a line naming those commits. Objects no ref names stay in the store
+    until git's own clean-up: other lanes write to it at the same time. Lines saying what could not be done."""
+    problems = []
+    tries = _tries_of(desk, wt, tid)
+    own = set(wgit(desk, wt, "rev-list", "HEAD", *tries, "--not", origin).split())
+    # the stash entries made on the task's branches, newest first so that the numbers below stay right
+    entries = wgit(desk, wt, "log", "-g", "--format=%gd%x00%gs", "refs/stash").splitlines() \
+        if wgit(desk, wt, "for-each-ref", "refs/stash") else []
+    on = re.compile(rf"^(?:WIP on|On) task/{re.escape(tid)}(?:-try[0-9-]*)?: ")
+    for entry in reversed([e.split("\0", 1) for e in entries]):
+        if len(entry) == 2 and on.match(entry[1]):
+            own |= set(wgit(desk, wt, "rev-list", entry[0].replace("refs/stash", "stash"), "--not", origin).split())
+            wgit(desk, wt, "stash", "drop", "-q", entry[0].replace("refs/stash", "stash"))
+    wgit(desk, wt, "checkout", "-q", "-f", "--detach", origin)
     wgit(desk, wt, "clean", "-fdq")
-    for ref in (f"refs/heads/{branch}", "HEAD"):
-        try:
-            wgit(desk, wt, "reflog", "expire", "--expire-unreachable=now", ref)
-        except GitFileChanged:
-            raise
-        except RuntimeError:
-            pass
+    for ref in tries:
+        wgit(desk, wt, "update-ref", "-d", ref)
+    if own:  # any other ref the runs made, or moved onto their commits
+        holding = set()
+        listed = sorted(own)
+        for i in range(0, len(listed), 100):
+            holding |= set(wgit(desk, wt, "for-each-ref", "--format=%(refname)",
+                                *(f"--contains={c}" for c in listed[i:i + 100])).split())
+        for ref in sorted(holding):
+            if ref in (keep, "refs/stash"):  # the base, or a stash entry not made on the task's branches
+                problems.append(f"{ref} holds a commit of the stopped run; hansa left it as it is")
+            else:
+                wgit(desk, wt, "update-ref", "-d", ref)
+        for ref in wgit(desk, wt, "for-each-ref", "--format=%(refname)", "refs/notes").split():
+            noted = [c for c in listed if subprocess.run(
+                ["git", "notes", f"--ref={ref}", "list", c], cwd=str(wt), capture_output=True).returncode == 0]
+            if not noted:
+                continue
+            wgit(desk, wt, "notes", f"--ref={ref}", "remove", "--ignore-missing", *noted)
+            tree = wgit(desk, wt, "rev-parse", f"{ref}^{{tree}}")
+            if wgit(desk, wt, "ls-tree", tree):  # its other notes stay, without the history that held these
+                wgit(desk, wt, "update-ref", ref, wgit(desk, wt, "commit-tree", tree, "-m", "Notes"))
+            else:
+                wgit(desk, wt, "update-ref", "-d", ref)
+    folder = own_git_folder(desk, wt)
+    for name in RUN_GIT_FILES:
+        (folder / name).unlink(missing_ok=True)
+    for name in RUN_GIT_FOLDERS:
+        shutil.rmtree(folder / name, ignore_errors=True)
+    log = folder / "logs" / "HEAD"
+    if own and log.is_file():
+        lines = log.read_bytes().splitlines(keepends=True)
+        kept = [x for x in lines if not set(x.split(b" ", 2)[:2]) & {c.encode() for c in own}]
+        if kept != lines:
+            log.write_bytes(b"".join(kept))
+    return problems
 
 
 def block(desk: Desk, tid: str, returncode) -> dict:
@@ -5417,6 +5478,12 @@ def block(desk: Desk, tid: str, returncode) -> dict:
         _set_aside(desk, Path(src), folder / name if folder is not None else None, problems)
     # what it left running, then its own folders: the pictures before the temporary folder goes (remove_sandbox_tmp)
     sweep(desk, tid, quiet=True)
+    left = desk.meta(tid).get("left_running") or []  # what was stopped, as recorded before the stop: its own words
+    if left and folder is not None:
+        try:
+            write_json(folder / "left-running.json", left)
+        except OSError as e:
+            problems.append(f"left-running.json could not be written ({e.strerror or e}); hansa removed it")
     if meta.get("worker_tmp"):
         aside(pictures.folder(meta["worker_tmp"]), "pictures")
     p = provider_entry(desk.settings(), meta.get("provider") or "")
@@ -5450,27 +5517,41 @@ def block(desk: Desk, tid: str, returncode) -> dict:
             for f in [*home.glob(f"projects/*/{s}.jsonl"), *home.glob(f"projects/*/{s}")]:
                 aside(f, f"conversation/{f.parent.name}/{f.name}")
             aside(home / "progress" / f"{s}.json", f"conversation/progress-{s}.json")  # the Codex adapter's
-    # its changes: kept as a patch, the worktree back to where the run began
+    # its changes, and its earlier tries' (restarted): kept as patches; then nothing of them left in git
     wt = Path(meta["worktree"]) if meta.get("worktree") else None
     start = (meta.get("run_start") or {}).get("commit") or meta.get("start_from") or meta.get("base") or ""
+    first = next((a.get("run_start") for a in meta.get("attempts") or [] if isinstance(a, dict)
+                  and isinstance(a.get("run_start"), dict)), None) or meta.get("run_start") or {}
+    origin = first.get("commit") or start
     if wt is not None and start:
         try:
-            check_git_file(desk, wt, desk.settings()["lanes"].get(meta.get("lane"), {}).get("repo"))
+            lane = desk.settings()["lanes"].get(meta.get("lane"), {})
+            check_git_file(desk, wt, lane.get("repo"))
+            check_head(desk, wt, meta.get("branch") or f"task/{tid}")
             if folder is not None:
-                try:
-                    _save_changes(desk, wt, start, folder / "changes.patch")
-                except (RuntimeError, OSError) as e:
-                    (folder / "changes.patch").unlink(missing_ok=True)
-                    problems.append(f"its changes could not be kept as a patch ({git_first_line(e)}), so hansa "
-                                    "removed them")
-            _clear_worktree(desk, wt, meta.get("branch") or f"task/{tid}", start)
+                patches = [("changes.patch", start, None)] + [
+                    (f"earlier-{r.rsplit('/', 1)[-1]}.patch", origin, r) for r in _tries_of(desk, wt, tid)
+                    if r != f"refs/heads/task/{tid}"] + ([("earlier-tries.patch", origin, start)] if origin != start else [])
+                for name, since, upto in patches:
+                    try:
+                        if upto is None:
+                            _save_changes(desk, wt, since, folder / name)
+                        else:
+                            write_bytes(folder / name, wgit(desk, wt, "diff", "--binary", "--no-ext-diff",
+                                                            "--no-textconv", since, upto).encode() + b"\n")
+                            os.chmod(folder / name, 0o600)
+                    except (RuntimeError, OSError) as e:
+                        (folder / name).unlink(missing_ok=True)
+                        problems.append(f"{name} could not be kept ({git_first_line(e)}), so hansa removed what it "
+                                        "held")
+            problems += _clear_run_git(desk, wt, tid, origin, f"refs/heads/{lane.get('base') or 'main'}")
         except (RuntimeError, OSError) as e:
             problems.append(f"its worktree could not be cleared ({git_first_line(e)}); the lane's next task removes "
                             "what is left there")
     note = "; ".join(problems)
     fields = {"state": "blocked", "phase": "", "error": BLOCKED_ERROR, "finished": now(), "exit": returncode,
               "pid": None, "pid_start": "", "usage": usage, "session_id": meta.get("session_id", ""),
-              "head": "", "commits": 0, "files": [], "stat": "",
+              "head": "", "commits": 0, "files": [], "stat": "", "left_running": [], "left_running_count": len(left),
               "resumed": {k: v for k, v in (meta.get("resumed") or {}).items() if k != "left"} or None,
               "blocked": {"reason": "safety", "action": "human_review", "provider": meta.get("provider", ""),
                           "model": meta.get("model_asked", ""), "at": now(), "todo": None,
