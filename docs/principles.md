@@ -108,4 +108,9 @@ usage. The page shows what waits for the principal, what changed and
 what it cost; the coordinator operates hansa for them. This guards against
 losing track of decisions, changes and spending.
 
+Before you say yes to a release, open the task on Status. Read the report and
+look under **Pictures** to see what changed. If there is a verification, read
+its verdict and look under **What the verifier saw**. Open the verification
+by its task number and read `Not looked at:` in its report for what the verifier did not see or try.
+
 Authority: hansa keeps and displays the records; the card assigns operation to the coordinator.

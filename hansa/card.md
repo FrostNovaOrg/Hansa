@@ -165,6 +165,9 @@ Merge with `--despite-check` only when the failure is not the task's doing and c
 and say why. If the setup failed, the worker never started: `hansa show` has the setup's last
 lines; fix it with `hansa lane set L setup "<command>"`, then retry. More: `hansa help check-output`.
 
+A task or verification may leave pictures. `hansa show <id>` lists them and the principal can open
+them on the page. For a visible change, look at them yourself. If the task left none, ask for them in a retry.
+
 ## Checking before you merge
 When you know at queue time that you want verification, use `hansa add` or `hansa retry` with `--verify` (or `--verify-lane`, `--verify-effort`, `--verify-note`): hansa queues it after a passing check, or with no check, and posts its verdict without a turn between them.
 The lane's check runs on every changed task; `hansa diff <id> --stat` shows the changes:
@@ -178,6 +181,7 @@ The lane's check runs on every changed task; `hansa diff <id> --stat` shows the 
   "Holds, with notes" counts as "holds", but read each note in its report first: one saying that
   something worked before the change and no longer does, or that part of what the task asked is not
   done, is a defect: send the task back naming it; the other notes go to `hansa gaps`, to be marked.
+  Pass on what matters from the verifier's `Not looked at:` list in plain words for the principal.
 - Verifying the same task again goes on in the earlier verification's conversation (same lane, provider
   and model, not Codex; never a worker's). `--lane L` gives a fresh look, on another lane of the same repository:
   another model sees other things than the same model, but may judge more strictly and send more work
@@ -210,6 +214,7 @@ More: `hansa help merge-check`.
 
 ## Releasing
 hansa merges into a lane's base branch and stops there. Sending it out waits for the principal:
+- For changes people will see, ask the principal to look at the pictures before approving the release.
 - A lane whose release goes to a public repository should have an `identity` set, on the lane or in
   the repository's own config, and usually leaves `{task}` out of its message forms. More: `hansa
   help commits`.

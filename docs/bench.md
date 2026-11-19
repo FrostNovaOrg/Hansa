@@ -101,7 +101,8 @@ editing source: copying happens when admitted. Read the reply's `result`; when
 it includes `report`, read that JSON file in the same folder. It holds the guest
 result, stdout, stderr and an artifact-name mapping. Artifacts appear there
 automatically under broker-chosen names. There is no fetch command. These files
-last only for the worker run; include findings in the report before ending.
+last only for the worker run. Include findings in the report and copy screenshots
+you want to keep into `HANSA_PICTURES_DIR`. See [Pictures a run keeps](tasks.md#pictures-a-run-keeps).
 
 Each artifact receives a random `bench-<hex>` name. The guest basename's final
 extension is kept in lowercase if it is `.png`, `.jpg`, `.jpeg`, `.webp`, `.txt`,

@@ -13,7 +13,8 @@ def split_notes(report: str) -> list[str]:
     A section starts at a Notes heading of any level or, after the last such heading,
     at a plain ``Notes:`` line (bold ``**Notes:**`` too).  A plain line's list runs to
     the next heading or to the next non-list line at the left margin, such as a
-    ``VERDICT:`` line.
+    ``VERDICT:`` line. A ``Not looked at:`` line outside a fence ends the search for
+    notes, since it lists what the verifier did not check.
     """
     lines = report.splitlines()
     headings, visible = [], []
@@ -29,6 +30,9 @@ def split_notes(report: str) -> list[str]:
             fence = marker[1]
             visible.append(False)
             continue
+        if re.match(r"^ {0,3}(?:#{1,6}\s*)?(?:\*\*|__)?Not looked at:", line, re.I):
+            lines = lines[:i]
+            break
         visible.append(True)
         atx = re.match(r"^ {0,3}(#{1,6})(?:\s+(.*?)\s*|\s*)$", line)
         if atx:

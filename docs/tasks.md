@@ -515,16 +515,21 @@ run ends, however it ends (done, failed, stopped at a ceiling, cancelled), hansa
 of it before the temporary folder is removed, and keeps it in the task's folder,
 `tasks/<id>/pictures/`, where the coordinator can read it and workers cannot.
 
+Leave pictures when a change alters what someone sees. Name each for what it shows and cover
+desktop and phone widths and each language where they apply. Verifiers take their own pictures
+of what they saw. Keep keys, tokens, passwords and people's private data out of every picture.
+
 | What lies in the folder | What hansa does |
 |---|---|
-| A regular file whose bytes begin as PNG, JPEG or WebP, at most 2 MB, named `.png`, `.jpg`, `.jpeg` or `.webp` (any case) | kept under its own name made safe: letters, digits, `-`, `_` and `.` only (others become `-`), at most 80 characters, the extension lower-cased; two that come out the same get `-2`, `-3` |
+| A regular file whose bytes begin as PNG, JPEG or WebP, at most 2 MiB (2,097,152 bytes), named `.png`, `.jpg`, `.jpeg` or `.webp` (any case) | kept under its own name made safe: letters, digits, `-`, `_` and `.` only (others become `-`), at most 80 characters, the extension lower-cased; two that come out the same get `-2`, `-3` |
 | The same, with bytes of another of the three kinds than its extension says | kept under the extension its bytes say |
 | Anything else (SVG, HTML, a script, text, PDF), whatever its name | left out: not a picture |
-| A file over 2 MB | left out: too large |
-| More than 8 that pass | the first 8 by name kept; the rest left out: more than 8 |
-| A link, a hard link to a file elsewhere (more links than names in the folder), a FIFO, a device, a folder or what is in it | never followed or read; left out: not a plain file |
+| A file over 2 MiB | left out: too large |
+| More than 8 that pass in one run | the first 8 by name kept; the rest left out: more than 8 |
+| More than 1,000 names in the folder | only the first 1,000 by name are looked at; the rest are left out unread |
+| A link, a hard link to a file elsewhere (more links than names in the folder), a FIFO, a device or a folder | never followed or read; left out: not a plain file |
 | A file that changes or vanishes while hansa reads it | left out: changed while hansa read it |
-| A picture whose bytes hold a key the desk knows | left out: holds a key |
+| A picture whose bytes hold a key the desk knows, or that hansa cannot check against the desk's keys | left out: holds a key |
 | Nothing, or no folder, or something else in its place | nothing kept, nothing said |
 
 The task's record lists what was kept (`pictures`: name, bytes, kind, run) and what was left out and why.
@@ -535,11 +540,14 @@ worker next time), and for a task that was verified the verifications' pictures 
 the copy fails, nothing of that run is kept and `hansa show` says so in one line. A run's outcome, its commit,
 its check and its verdict never depend on its pictures.
 
+On the page, open the task to see **Pictures** under its report and **What the verifier saw**
+at its verification step, if those runs left pictures. Open a picture for a larger view.
+
 The folder was the worker's, so hansa treats every name and byte in it as hostile: it opens the folder and each
 file without following a link, reads a file only once it has checked that what it opened is the regular file it
-looked at, reads at most 2 MB and one byte, starts no program, and copies the bytes as they are, never decoding
-or re-encoding them. The key check finds a key only as text in the file's bytes: a key drawn in a picture, or in
-a compressed part of one, is not found. Nothing removes a task's folder today, so kept pictures stay with it.
+looked at, reads at most 2 MiB and one byte, starts no program, and copies the bytes as they are, never decoding
+or re-encoding them. The key check looks for known keys as text in the file's bytes. Hansa cannot read a key drawn
+in a picture or stored in a compressed part of the file. Kept pictures stay with the task.
 
 ## Writing a task a verification can judge
 
@@ -623,6 +631,12 @@ with the reason, so you can run `hansa verify` yourself. Hansa never merges by i
 When these options lead to a verification, the review alert starts when the verification ends by
 itself. After a verification is cancelled, no review alert fires; the task shows in `hansa status`.
 A verification queued by hand leaves the review alert unchanged for tasks queued without these options.
+
+Just before the verdict, the verifier writes `Not looked at:` followed by a line or short list in
+plain words. It names what someone might assume the verifier saw or tried, such as a phone width,
+a language, a browser, a state or opening the page from outside. If there is nothing to list, the
+line reads `Not looked at: nothing I know of`. Put the line after a blank line. Give a bulleted list
+its own heading at the same level as any `Notes` heading.
 
 A verification ends with `VERDICT: holds`, `VERDICT: holds, with notes`,
 `VERDICT: does not hold` or `VERDICT: unsure`.
