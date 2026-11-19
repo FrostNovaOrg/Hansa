@@ -577,7 +577,8 @@ Hansa stops and lists each leftover once, before it commits and before the
 lane's check, including when a restarted server finishes the run.
 
 TERM first, KILL 5 seconds later to what still runs; `hansa show` lists what
-was stopped, with its group or alone, and the event log has it. What can still
+was stopped, with its group or alone, and the event log has it. Once hansa has seen a process end, it is
+listed, even when its new parent reaps it while hansa looks again. What can still
 escape: a process started and moved out of every marker (`env -i`, another
 folder, a session of its own) and out of the worktree between two rounds,
 whose parent ended before the next round.

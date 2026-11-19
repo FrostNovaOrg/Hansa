@@ -14218,6 +14218,46 @@ def save():'''))
                 self.assertEqual([x["pid"] for x in self.desk.meta(tid)["left_running"]], [pid])
                 self.assertFalse(run.alive(pid))
 
+    def test_a_leftover_its_new_parent_reaps_while_the_sweep_looks_is_still_listed(self):
+        # What a run leaves is reparented: once stopped it waits as a zombie until its new parent reaps it, at any
+        # moment. Reaped between alive() and _state(), one look reads it as running (its start and state are both
+        # unreadable then); an earlier look that saw it ended stands, whichever look the reaping falls in.
+        from hansa import run
+        pid, start = 2 ** 31 - 2, "start-of-the-leftover"  # no process: the kernel's answers are told below
+        real_kill, real_alive, real_state = os.kill, run.alive, run._state
+        for reaped_in in range(1, 5):  # the look after the polite signal during which it is reaped
+            with self.subTest(reaped_in=reaped_in):
+                now, looks = ["running"], [0]
+
+                def kill(p, sig):
+                    if p != pid:
+                        return real_kill(p, sig)
+                    if sig and now[0] == "running":
+                        now[0] = "zombie"
+
+                def alive(p, st=""):
+                    if p != pid:
+                        return real_alive(p, st)
+                    if now[0] == "reaping":
+                        now[0] = "gone"
+                    elif now[0] == "zombie":
+                        looks[0] += 1
+                        if looks[0] == reaped_in:
+                            now[0] = "reaping"  # kill(pid, 0) answered; its start can no longer be read
+                    return now[0] != "gone"
+
+                def state(p):
+                    return real_state(p) if p != pid else {"running": "S", "zombie": "Z"}.get(now[0], "")
+                tid = self.desk.new_task("Add hello.txt")
+                self.desk.update(tid, started_procs={str(pid): start})
+                with unittest.mock.patch.object(run.os, "kill", kill), \
+                        unittest.mock.patch.object(run, "alive", alive), \
+                        unittest.mock.patch.object(run, "_state", state):
+                    stopped = run.sweep(self.desk, tid)
+                self.assertNotEqual(now[0], "running")  # it was signalled
+                self.assertEqual([x["pid"] for x in stopped], [pid])
+                self.assertEqual([x["pid"] for x in self.desk.meta(tid)["left_running"]], [pid])
+
     def test_a_recorded_process_whose_number_went_to_another_is_not_stopped(self):
         from hansa import run
         bare = {k: v for k, v in os.environ.items() if k not in ("HANSA_TASK", "HANSA_RUN")}
