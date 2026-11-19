@@ -302,6 +302,31 @@ lane, or waits for one.
   `hansa ping`) never change model when the provider's safety check flags a request: Claude Code's switch to
   another model is off (`switchModelsOnFlag: false`, `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`), so the
   flagged run ends with an error instead of finishing on another model.
+- **A blocked task waits for the principal, then for what they said.** The principal decides what happens
+  to it, outside hansa; the coordinator tells them, then closes the to-do with their words
+  (`hansa ask --close N "<outcome>"`). Nothing else closes that to-do: not hansa, not a retry or a close.
+  While it is open, the task is *held*:
+  - `hansa show B`, in every form (`--report`, `--full`, `--check`, `--check-log`, `--merge-check-log`), and the
+    page's task view give the same short text: id, title, lane, provider and model, when it stopped, the task's
+    own text as queued, one sentence that the safety check stopped it and its output is set aside on purpose,
+    the to-do's number and `next:`. Never its report, notes, last call, denials, check, changes or pictures,
+    nor why it was stopped. Once the to-do is closed, the same with its outcome.
+  - `hansa diff B`, and `hansa git L ...` naming `task/B`, say there is no commit of that run.
+  - `hansa retry B` and `hansa close B` are refused while it is held. Once the to-do is closed, `hansa retry B
+    "..."` (with `--lane` too) always starts over from the base in a new conversation, given the task's text and
+    the note only (`--update` is refused), and `hansa close B` closes it; it stays `blocked`, and what was set
+    aside stays.
+  - `hansa verify B` and `hansa merge B` are refused (it is not done), and `hansa cancel B` (it has ended).
+  - `hansa wait B` returns at once with one line, the same line hansa posts to the coordinator's session when
+    it stops: `tB blocked: its provider's safety check stopped it · to-do #N is open for the principal: tell
+    them · do not retry it or look for its output`.
+  - `hansa status` lists it under "blocked, waiting for the principal" (in `--json`: `state: "blocked"`,
+    `reason: "safety"`, `action: "human_review"`, `todo: N`); once the to-do is closed, with the ended tasks
+    waiting for the coordinator, with `next:`. `hansa goal list`, `hansa goal show` and `hansa desks` count it
+    apart from failed work while it is held. `hansa ask` marks its to-do as opened by hansa.
+  - A task whose verification is blocked: `hansa show T` says so, with the to-do; `hansa merge T` (even with
+    `--despite-check`) and `hansa verify T` wait until that to-do is closed. `hansa retry T` works as ever, and
+    neither a follow-up nor a later verification is given any text of a blocked run.
 - **Every try costs, and counts.** When a task goes back to the queue for another try (a usage limit, a
   dropped connection, a provider that refused it), that run's tokens, turns and worth are kept on the
   task's record of its tries; a run an earlier `hansa serve` started and lost track of is read from its session record

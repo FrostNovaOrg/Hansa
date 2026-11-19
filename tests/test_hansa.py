@@ -29883,7 +29883,8 @@ def save():'''))
                       "this task becomes replaced unless it is merged", retry)
         for words in ("a second retry of it is refused", "A merged task stays merged",
                       "cancelled before it started gives the earlier task back",
-                      "A blocked task (its provider's safety check stopped it) is not sent back"):
+                      "A blocked task (its provider's safety check stopped it) is not sent back while its to-do is",
+                      "starts over from the base in a new conversation"):
             self.assertIn(words, retry)
         self.assertNotIn("attempt", retry)
         self.assertIn("a verification by another model", " ".join(self.hansa("help", "verify").split()))
@@ -30659,7 +30660,7 @@ def save():'''))
         self.assertTrue(text.startswith("export FINE=1\n"), text)
         self.assertNotIn("export UID", text)
         self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
-        f.unlink()
+        f.unlink(missing_ok=True)  # the safety check stops once (it is renamed then)
         run.env_file(self.desk, tid, s["lanes"]["a"])
         self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
         r = subprocess.run(["/bin/sh", "-c", f". {shlex.quote(str(f))} && echo ran"], capture_output=True, text=True)
@@ -35122,30 +35123,258 @@ def save():'''))
         self.assertIn(f".hansa/blocked/{tid}/", todo["text"])
         self.assertEqual(m["blocked"]["todo"], todo["id"])
 
-    def test_commands_refuse_a_blocked_task_and_views_show_hansas_sentence_only(self):
-        from hansa import run
-        f = self.safety_lane("start", {})
-        f.write_text(json.dumps({"at": "start", "shape": self.SAFETY_SHAPES[2][1], "mark": "MARKcmd"}))
-        tid = self.desk.new_task("Fix the badge")
-        m = self.settle(Dispatcher(self.desk), tid)
-        self.assertEqual(m["state"], "blocked")
-        for args in (("merge", tid), ("verify", tid), ("retry", tid, "again"), ("cancel", tid), ("close", tid)):
-            with self.subTest(args=args):
-                said = self.refused(*args)
-                self.assertIn(f"{tid} is blocked", said)
-                self.assertIn("safety check", said)
-                self.assertIn("nothing was changed", said)
+    # What every command and view does with a blocked task or verification (run.block): held for the principal while
+    # its to-do is open, then what the coordinator recorded when it closed it; never anything of the run.
+    def plant_marks(self, tid: str, mark: str) -> None:
+        """As if the stopped run's text had reached the task's record and folder (it does not: run.block): its report,
+        check output, denials and changes; no command may show any of it."""
+        (self.desk.tasks_dir / tid / "result.md").write_text(f"report {mark}\n")
+        (self.desk.tasks_dir / tid / "check.log").write_text(f"check {mark}\n")
+        self.desk.update(tid, denials=[f"Bash({mark})"], denial_reasons=[mark], files=[f"{mark}.txt"], stat=mark,
+                         note=mark, last_call=mark, check={"ok": False, "command": mark, "note": mark, "tail": [mark],
+                                                           "seconds": 1, "exit": 1})
+
+    def outputs(self, *calls) -> dict:
+        """What each command printed, or the sentence it refused with."""
+        out = {}
+        for args in calls:
+            text = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(text):
+                    main(["--desk", str(self.desk.root), *args])
+                out[args] = text.getvalue()
+            except SystemExit as e:
+                out[args] = text.getvalue() + str(e.code)
+        return out
+
+    def assert_nothing_of(self, marks: list, texts: dict, blocked: str) -> None:
+        """No mark in any text; and hansa show of the blocked one, and its page, show nothing of its run."""
+        for name, text in texts.items():
+            for mark in marks:
+                self.assertNotIn(mark, text, name)
+            if name.startswith(f"show {blocked}") or name == "page":
+                for words in ("report:", "calls the worker had no permission", "changes:", "check (run by hansa"):
+                    self.assertNotIn(words, text, name)
+
+    def test_a_blocked_task_held_for_the_principal_then_as_the_coordinator_recorded(self):
+        from hansa import gaps, run
+        self.hansa("goal", "add", "Export reports")
+        self.assertEqual(up.list_desk(self.desk), "")  # for hansa desks
+        m, mark, _ = self.blocked_run(Dispatcher(self.desk), "work", "start", self.SAFETY_SHAPES[5][1])
+        tid, n = m["id"], m["blocked"]["todo"]
+        self.assertIn(mark, (self.desk.state_dir / "blocked" / tid / "run.json").read_text())  # its detail fields
+        self.desk.update(tid, goal="g1")
+        self.plant_marks(tid, mark)
+        forms = [("show", tid), ("show", tid, "--report"), ("show", tid, "--full"), ("show", tid, "--check"),
+                 ("show", tid, "--check-log"), ("show", tid, "--merge-check-log")]
+        refusals = [("retry", tid, "again"), ("retry", tid, "again", "--lane", "a"), ("verify", tid),
+                    ("verify", tid, "--lane", "a"), ("merge", tid), ("merge", tid, "--despite-check"),
+                    ("close", tid), ("cancel", tid)]
+        reads = [("diff", tid), ("diff", tid, "--stat"), ("git", "a", "log", f"task/{tid}"),
+                 ("git", "a", "diff", f"main..refs/heads/task/{tid}"), ("wait", tid), ("status",),
+                 ("status", "--json"), ("ask",), ("goal", "show", "g1"), ("goal", "list"), ("desks",), ("gaps",),
+                 ("changelog", "a"), ("cost",)]
+        said = self.outputs(*forms, *refusals, *reads)
+        api = {"page": json.dumps(views.task_page(self.desk, tid)), "status": json.dumps(views.status(self.desk)),
+               "tasks": json.dumps(views.task_list(self.desk)), "post": notify.task_line(self.desk, self.desk.meta(tid))}
+        self.assert_nothing_of([mark], {" ".join(k): v for k, v in said.items()} | api, tid)
+        # hansa show, in every form: the same short text
+        shown = said[forms[0]]
+        for form in forms:
+            self.assertEqual(said[form], shown, form)
+        for words in (tid, "Fix the badge", "blocked", "lane a", "mimo (mimo-x)", "safety check stopped",
+                      "set the run's output aside", "on purpose", f"to-do: #{n}, open",
+                      f'next: tell the principal about to-do #{n}, then close it with what they say: hansa ask --close'):
+            self.assertIn(words, shown)
+        self.assertNotIn(run.BLOCKED_REPORT.splitlines()[1], shown)
+        # no commit of that run
+        for args in reads[:4]:
+            self.assertIn(f"{tid} has no commit to show", said[args], args)
+            self.assertNotIn("fatal", said[args], args)
+        # refused: held (retry, close), not done (verify, merge), ended (cancel); one sentence each, what to do instead
+        for args in refusals:
+            text = said[args]
+            self.assertEqual(text.count("\n"), 0, text)
+            self.assertIn("nothing was changed", text, args)
+            self.assertIn(f"to-do #{n}", text, args)
+            self.assertIn({"retry": "held for the principal", "close": "held for the principal",
+                           "verify": "only a finished task can be verified", "merge": "only a finished task can be merged",
+                           "cancel": "has ended"}[args[0]], text, args)
         self.assertEqual(self.desk.meta(tid)["state"], "blocked")
+        self.assertEqual([x["id"] for x in self.desk.tasks()], [tid])
+        line = (f"{tid} blocked: its provider's safety check stopped it · to-do #{n} is open for the principal: tell "
+                "them · do not retry it or look for its output")
+        self.assertEqual(api["post"], line)
+        self.assertEqual(said[("wait", tid)].strip(), line)
+        st = json.loads(said[("status", "--json")])
+        self.assertEqual([{k: b[k] for k in ("id", "state", "reason", "action", "todo")} for b in st["blocked"]],
+                         [{"id": tid, "state": "blocked", "reason": "safety", "action": "human_review", "todo": n}])
+        self.assertEqual(st["failed"], [])
+        self.assertIn(f"blocked, waiting for the principal", said[("status",)])
+        self.assertIn(f"{tid} Fix the badge · since", said[("status",)])
+        self.assertIn(f"· to-do #{n}", said[("status",)])
+        self.assertIn(f"opened by hansa", said[("ask",)])
+        self.assertIn(f"for {tid}", said[("ask",)])
+        self.assertIn(f"{tid} blocked (waiting for the principal: to-do #{n})", said[("goal", "show", "g1")])
+        self.assertIn("0 failed, 1 blocked (waiting for the principal)", said[("goal", "list")])
+        self.assertIn("1 blocked task(s) waiting for them", said[("desks",)])
+        for args in (("gaps",), ("changelog", "a")):
+            self.assertNotIn(tid, said[args])
+        self.assertEqual(gaps.all_notes(self.desk), [])
+        self.assertIn(tid, said[("cost",)]) if "by task" in said[("cost",)] else None
+        page = views.task_page(self.desk, tid)
+        self.assertEqual(set(page["meta"]) - set(views.BLOCKED_FIELDS), {"blocked", "attempts", "earlier_runs"})
+        self.assertNotIn("note", page["meta"]["blocked"])
+        self.assertEqual(page["text"], shown.rstrip("\n"))
+        # nobody but the coordinator closes the to-do: hansa does not, not after its rounds either
+        d = Dispatcher(self.desk)
+        d.tick()
+        self.assertFalse(run.blocked_todo(self.desk, self.desk.meta(tid)).get("closed"))
+        self.hansa("ask", "--close", str(n), "Send it again on lane a")
+        said = self.outputs(*forms, ("retry", tid, "x", "--update"), ("verify", tid), ("merge", tid),
+                            ("cancel", tid), ("wait", tid), ("status",), ("status", "--json"), ("goal", "list"),
+                            ("diff", tid))
+        api = {"page": json.dumps(views.task_page(self.desk, tid)), "post": notify.task_line(self.desk, self.desk.meta(tid))}
+        self.assert_nothing_of([mark], {" ".join(k): v for k, v in said.items()} | api, tid)
+        shown = said[forms[0]]
+        for form in forms:
+            self.assertEqual(said[form], shown, form)
+        self.assertIn(f"to-do: #{n}, closed: Send it again on lane a", shown)
+        self.assertIn(f'next: hansa retry {tid} "..." · hansa close {tid}', shown)
+        self.assertIn("--update is not for it", said[("retry", tid, "x", "--update")])
+        self.assertIn("only a finished task can be verified", said[("verify", tid)])
+        self.assertIn("only a finished task can be merged", said[("merge", tid)])
+        self.assertIn("has ended", said[("cancel", tid)])
+        self.assertIn(f"{tid} has no commit to show", said[("diff", tid)])
+        self.assertIn(f"to-do #{n} closed: Send it again on lane a", said[("wait", tid)])
+        st = json.loads(said[("status", "--json")])
+        self.assertEqual(st["blocked"], [])
+        self.assertEqual([(x["id"], x["state"], x["next"]) for x in st["failed"]],
+                         [(tid, "blocked", f'hansa retry {tid} "..." · hansa close {tid}')])
+        self.assertIn(f'next: hansa retry {tid} "..." · hansa close {tid}', said[("status",)])
+        self.assertIn("1 failed", said[("goal", "list")])
+        self.assertNotIn("blocked (waiting", said[("goal", "list")])
+        # once decided, a retry starts over: a new conversation, from the base, the task's text and the note only
+        posts = len(self.desk.events_path.read_text().splitlines())
+        new = self.hansa("retry", tid, "Keep the badge small").split()[0]
+        n2 = self.desk.meta(new)
+        text = (self.desk.tasks_dir / new / "task.md").read_text()
+        self.assertTrue(text.startswith("Fix the badge"))
+        self.assertIn("What to change: Keep the badge small", text)
+        self.assertNotIn(mark, text)
+        self.assertNotIn("Stopped by the provider's safety check", text)
+        self.assertEqual((n2.get("fresh"), n2.get("start_from"), n2.get("update")), (True, None, None))
+        self.assertEqual((self.desk.meta(tid)["state"], self.desk.meta(tid)["replaced_by"]), ("replaced", new))
+        self.assertIn(f"{tid} has no commit to show", self.hansa("diff", tid))
+        self.assertNotIn(mark, self.hansa("show", tid))
+        self.assertEqual(len([a for a in self.desk.asks() if not a.get("closed")]), 0)  # nothing reopened
+        self.assertEqual([e for e in self.desk.events_path.read_text().splitlines()[posts:]
+                          if '"ask' in e], [])
+
+    def test_a_blocked_task_is_closed_only_once_its_todo_is(self):
+        from hansa import after
+        m, mark, _ = self.blocked_run(Dispatcher(self.desk), "work", "start", self.SAFETY_SHAPES[0][1])
+        tid, n = m["id"], m["blocked"]["todo"]
+        later = self.desk.new_task("Use the badge", after=[tid])
+        self.assertIn("is blocked", after.waiting(self.desk.meta(later), after.pending(self.desk.meta(later),
+                                                                                       self.desk.tasks())))
+        self.assertIn("held for the principal", self.refused("close", tid))
+        self.hansa("ask", "--close", str(n), "Drop it")
+        said = self.hansa("close", tid)
+        self.assertIn(f"{tid} closed; it stays blocked", said)
+        b = self.desk.meta(tid)
+        self.assertEqual((b["state"], b["closed"]), ("blocked", f"closed: {tid} was closed with hansa close"))
+        self.assertTrue((self.desk.state_dir / "blocked" / tid / "run.json").is_file())  # what was set aside stays
+        self.assertIn("closed without merging", after.waiting(self.desk.meta(later),
+                                                              after.pending(self.desk.meta(later), self.desk.tasks())))
+        st = views.status(self.desk)
+        self.assertEqual((st["blocked"], [x["id"] for x in st["failed"]]), ([], []))
         shown = self.hansa("show", tid)
-        self.assertIn("blocked", shown)
-        self.assertIn(run.BLOCKED_ERROR, shown)
-        self.assertIn(f"to-do #{m['blocked']['todo']}", shown)
-        said = views.status_text(views.status(self.desk))
-        self.assertIn(f"{tid} a: {run.BLOCKED_ERROR}", said)
-        self.assertIn(run.BLOCKED_ERROR, self.hansa("wait", tid))
-        self.assertIn(run.BLOCKED_ERROR, notify.task_line(self.desk, self.desk.meta(tid)))
-        for text in (shown, said):
-            self.assertNotIn("MARKcmd", text)
+        self.assertIn(f"closed: {tid} was closed with hansa close", shown)
+        self.assertNotIn("next:", shown)
+        self.assertIn("is closed already", self.refused("close", tid))
+        self.assertIn("has ended", self.refused("cancel", tid))
+
+    def test_a_task_whose_verification_is_blocked(self):
+        from hansa import run
+        d = Dispatcher(self.desk)
+        f = self.safety_lane("start", {})
+        tid = self.desk.new_task("Add hello.txt")
+        t = self.settle(d, tid)
+        self.assertEqual((t["state"], t["provider"]), ("done", "mimo"), t)
+        mark = "MARK" + uuid.uuid4().hex[:12]
+        f.write_text(json.dumps({"at": "start", "shape": self.SAFETY_SHAPES[5][1], "mark": mark, "git": True}))
+        vid = self.hansa("verify", tid).split()[0]
+        v = self.settle(d, vid)
+        self.assertEqual(v["state"], "blocked", v)
+        n = v["blocked"]["todo"]
+        self.plant_marks(vid, mark)
+        held = self.outputs(("show", tid), ("show", tid, "--full"), ("show", vid), ("show", vid, "--report"),
+                            ("merge", tid), ("merge", tid, "--despite-check"), ("verify", tid),
+                            ("verify", tid, "--lane", "a"), ("wait", vid), ("status",))
+        post = notify.task_line(self.desk, self.desk.meta(vid))
+        self.assert_nothing_of([mark], {" ".join(k): x for k, x in held.items()} | {"post": post}, vid)
+        self.assertIn(f"its verification {vid} is blocked: its provider's safety check stopped it; to-do #{n} is open",
+                      held[("show", tid)])
+        self.assertIn(f"next: tell the principal about to-do #{n}", held[("show", tid)])
+        self.assertIn(f"verification of: {tid}", held[("show", vid)])
+        self.assertEqual(held[("show", vid)], held[("show", vid, "--report")])
+        for args in (("merge", tid), ("merge", tid, "--despite-check"), ("verify", tid), ("verify", tid, "--lane", "a")):
+            self.assertIn(f"verification {vid} is held for the principal", held[args], args)
+            self.assertIn(f"to-do #{n}", held[args], args)
+        self.assertEqual(post, f"{vid}, the verification of {tid}, blocked: its provider's safety check stopped it · "
+                               f"to-do #{n} is open for the principal: tell them · do not retry it or look for its output")
+        self.assertIn(f"{vid}, the verification of {tid}, Verify {tid}", held[("status",)])
+        self.assertEqual([x["id"] for x in self.desk.tasks()], [tid, vid])
+        # once its to-do is closed: verified again in a new conversation, given nothing of it
+        self.hansa("ask", "--close", str(n), "Verify it on another provider")
+        self.assertIn(f"to-do #{n} closed: Verify it on another provider", self.hansa("show", tid))
+        f.unlink(missing_ok=True)  # the safety check stops once (it is renamed then)
+        again = self.hansa("verify", tid).split()[0]
+        self.assertNotEqual(again, vid)
+        text = (self.desk.tasks_dir / again / "task.md").read_text()
+        self.assertNotIn(mark, text)
+        self.assertNotIn(vid, text)
+        self.assertEqual(run.earlier_verifications(self.desk, self.desk.meta(again)), [])
+        self.assertIn(f"still verifying {tid}", self.refused("merge", tid))  # the usual rules
+        self.hansa("cancel", again)
+        # a follow-up to the task carries its own report and nothing of the blocked verification
+        new = self.hansa("retry", tid, "Carry on").split()[0]
+        text = (self.desk.tasks_dir / new / "task.md").read_text()
+        self.assertIn("The earlier task's report", text)
+        self.assertNotIn(mark, text)
+        self.assertNotIn(f"The report of {vid}", text)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page's script")
+    def test_the_page_shows_a_blocked_task_with_hansas_words_only(self):
+        m, mark, _ = self.blocked_run(Dispatcher(self.desk), "work", "start", self.SAFETY_SHAPES[5][1])
+        tid, n = m["id"], m["blocked"]["todo"]
+        self.plant_marks(tid, mark)
+        harness = self.tmp / "blocked-page.js"
+        harness.write_text(self.PAGE_HARNESS)
+        page = Path(__file__).resolve().parent.parent / "hansa" / "ui.html"
+        task = views.task_page(self.desk, tid)
+        task["meta"]["id"] = "t0042"  # the harness opens t0042
+        for language, words in (("en", ("Blocked, waiting for the principal", f"#{n}")),
+                                ("zh", ("已拦下，等负责人决定", f"#{n}"))):
+            with self.subTest(language=language):
+                r = subprocess.run(["node", str(harness), str(page), "status", language],
+                                   input=json.dumps({"/api/status": views.status(self.desk)}),
+                                   capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                said = json.loads(r.stdout)
+                for word in (*words, tid, "Fix the badge"):
+                    self.assertIn(word, said)
+                self.assertNotIn(mark, said)
+                r = subprocess.run(["node", str(harness), str(page), "task-steps", language],
+                                   input=json.dumps({"/api/task?id=t0042": task}), capture_output=True, text=True,
+                                   timeout=60, env={**os.environ, "TZ": "UTC"})
+                self.assertEqual(r.returncode, 0, r.stderr)
+                shown = json.loads(r.stdout)
+                for word in ("safety check stopped the run", "Fix the badge", f"to-do: #{n}"):
+                    self.assertIn(word, shown["text"])
+                self.assertNotIn(mark, r.stdout)
+                self.assertNotIn("report:", shown["text"])
 
     def test_a_blocked_verifications_conversation_is_never_gone_on_in(self):
         from hansa import run

@@ -76,9 +76,10 @@ def pending(m: dict, tasks: list) -> list:
                     and (not t.get("merge_base") or t["merge_base"] == target.get("base"))):
                 continue
             state = "elsewhere"
-        why = ("closed without merging" if t.get("error") == "closed without merging" else
+        why = ("closed without merging" if t.get("error") == "closed without merging"
+               or (state == "blocked" and t.get("closed")) else
                {"failed": "failed without merging", "cancelled": "cancelled without merging",
-                "blocked": "is blocked (its provider's safety check stopped it; a to-do is open for the principal)",
+                "blocked": "is blocked (its provider's safety check stopped it; the principal decides what happens to it)",
                 "missing": "task or retry record is missing", "replaced": "replacement is missing",
                 "elsewhere": "merged into another repository or base branch"}.get(state, ""))
         out.append({"task": tid, "latest": latest, "state": state, "why": why, "held": bool(why)})
