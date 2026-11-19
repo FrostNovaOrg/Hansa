@@ -254,6 +254,31 @@ def safety_stop(at, sid):
                                 text=True).stdout.strip()
         open(os.path.join(gitdir, "MERGE_MSG"), "w").write("merge " + mark + "\n")
         subprocess.run(["git", "update-ref", "ORIG_HEAD", "HEAD"], check=True)
+    # "moved": how it leaves HEAD: "rebase" (a rebase onto a branch of its own, stopped by a conflict), "detached"
+    # (a commit on a detached HEAD), "other" (a commit on a branch of its own, checked out), "side" (a commit on a
+    # branch of its own made where the run began, then back on the task's: the branch holds none of HEAD's commits)
+    moved = said.get("moved")
+    if moved == "rebase":
+        subprocess.run(["git", "checkout", "-q", "-b", "onto-" + mark, "HEAD~1"], check=True)
+        open("committed.txt", "w").write("other " + mark + "\n")
+        subprocess.run(["git", "add", "committed.txt"], check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "onto " + mark], check=True)
+        subprocess.run(["git", "checkout", "-q", "-"], check=True)
+        r = subprocess.run(["git", "rebase", "onto-" + mark], capture_output=True)
+        assert r.returncode, "the rebase was meant to stop at a conflict"
+    elif moved in ("detached", "other", "side"):
+        subprocess.run(["git", "checkout", "-q", "--detach"] if moved == "detached" else
+                       ["git", "checkout", "-q", "-b", "moved-" + moved + "-" + mark,
+                        *(["HEAD~1"] if moved == "side" else [])], check=True)
+        open("moved.txt", "w").write("moved " + mark + "\n")
+        subprocess.run(["git", "add", "moved.txt"], check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "moved " + mark], check=True)
+        if moved == "side":
+            subprocess.run(["git", "checkout", "-q", "-"], check=True)
+    elif moved == "garbage":  # "garbage": its words in place of HEAD, which hansa cannot put back
+        gitdir = subprocess.run(["git", "rev-parse", "--git-dir"], check=True, capture_output=True,
+                                text=True).stdout.strip()
+        open(os.path.join(gitdir, "HEAD"), "w").write("words " + mark + "\n")
     open("README.md", "a").write("changed " + mark + "\n")
     open("new-" + mark + ".txt", "w").write("new " + mark + "\n")
     if os.environ.get("HANSA_PICTURES_DIR"):
@@ -35039,6 +35064,13 @@ def save():'''))
         self.assertIn(f"stopped by hansa when the task ended: {m['left_running_count']} process(es)", shown)
         self.assertNotIn("sleep", shown)
         self.assertNotIn("sleep", json.dumps(self.desk.meta(m["id"])))
+        # the log's lines written at the ceiling, before the stop, keep the event with its count only
+        ends = [e for e in self.events("left_running_stopped") if e["task"] == m["id"]]
+        self.assertTrue(ends)
+        self.assertEqual(sum(e.get("count", 0) for e in ends), m["left_running_count"], ends)
+        self.assertEqual([p for e in ends for p in e["processes"] if not p.isdigit()], [], ends)
+        self.assertNotIn("sleep", self.desk.events_path.read_text())
+        self.assertTrue(all(json.loads(x) for x in self.desk.events_path.read_text().splitlines() if x.strip()))
 
     def test_a_blocked_end_records_no_command_line_of_what_it_stopped(self):
         from hansa import run
@@ -35065,6 +35097,51 @@ def save():'''))
         self.assertEqual((n["state"], n.get("leftovers")), ("done", None), n)
         self.assertFalse((wt / f"left-{mark}.txt").exists())
         self.assert_no_git_trace(mark, m["id"])
+
+    def test_a_blocked_run_that_left_head_off_its_branch_is_cleared(self):
+        # a rebase stopped by a conflict, a commit on a detached HEAD, a branch of its own checked out: what git keeps
+        # of the rebase gone, HEAD back, its work in the patches, nothing in git naming it, no note of git's words;
+        # then the lane's next task runs as after any other end
+        d = Dispatcher(self.desk)
+        shape = self.SAFETY_SHAPES[0][1]
+        for moved in ("rebase", "detached", "other"):
+            with self.subTest(moved):
+                m, mark, _ = self.blocked_run(d, "work", "start", shape, more={"moved": moved})
+                self.assert_blocked(m, mark, "start", None, shape)  # no note: nothing failed
+                self.assertEqual([e for e in self.events("blocked_set_aside") if e["task"] == m["id"]], [])
+                own = Path(sh_out("git", "rev-parse", "--absolute-git-dir", cwd=self.desk.worktrees_dir / "a"))
+                for name in ("rebase-merge", "rebase-apply", "ORIG_HEAD", "REBASE_HEAD", "AUTO_MERGE"):
+                    self.assertFalse((own / name).exists(), name)
+                folder = self.desk.state_dir / "blocked" / m["id"]
+                patches = "".join(f.read_text() for f in folder.glob("*.patch"))
+                self.assertIn("committed " + mark, patches)  # the commit on its branch
+                self.assertIn(("other " if moved == "rebase" else "moved ") + mark, patches)  # the one off it
+                n = self.settle(d, self.desk.new_task("Add hello.txt"))
+                self.assertEqual((n["state"], n.get("leftovers"), n["files"]), ("done", None, ["hello.txt"]), n)
+                self.assert_no_git_trace(mark, m["id"])
+
+    def test_a_blocked_end_that_cannot_clear_the_worktree_notes_it_in_hansas_words_only(self):
+        from hansa import run
+        m, mark, _ = self.blocked_run(Dispatcher(self.desk), "work", "start", self.SAFETY_SHAPES[0][1],
+                                      more={"moved": "garbage"})
+        self.assertEqual((m["state"], m["blocked"].get("note")), ("blocked", "its worktree could not be cleared; the "
+                                                                  "lane's next task removes what is left there"), m)
+        [ev] = [e for e in self.events("blocked_set_aside") if e["task"] == m["id"]]
+        self.assertEqual(ev["note"], m["blocked"]["note"])
+        for f in [self.desk.tasks_dir / m["id"] / "meta.json", self.desk.events_path]:
+            self.assertNotIn(mark, f.read_text(), f)
+
+    def test_a_branch_a_blocked_run_made_and_left_is_removed_and_its_commits_kept_in_a_patch(self):
+        # checkout -b where the run began, a commit, back on its branch: the branch holds none of HEAD's commits
+        shape = self.SAFETY_SHAPES[0][1]
+        m, mark, _ = self.blocked_run(Dispatcher(self.desk), "work", "start", shape, more={"moved": "side"})
+        self.assert_blocked(m, mark, "start", None, shape)
+        refs = sh_out("git", "for-each-ref", "--format=%(refname)", cwd=self.repo)
+        self.assertNotIn("moved-side", refs)
+        folder = self.desk.state_dir / "blocked" / m["id"]
+        kept = [f for f in folder.glob("other-ref-*.patch") if "moved.txt" in f.read_text()]
+        self.assertEqual(len(kept), 1, sorted(f.name for f in folder.iterdir()))
+        self.assertIn("moved " + mark, kept[0].read_text())
 
     def test_a_follow_up_is_not_given_a_blocked_verifications_report(self):
         mark = "MARK" + uuid.uuid4().hex[:12]

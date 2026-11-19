@@ -298,7 +298,15 @@ lane, or waits for one.
   its changes (as patches git can apply) and its conversation record go to `.hansa/blocked/<id>/`, which the
   coordinator's session and workers cannot read; no branch or other ref of the lane's repository keeps the
   run's commits. Those commits stay in git's object store, named by nothing, until git's own clean-up removes
-  them: hansa does not prune it, as other lanes write to the same store at the same time. hansa's runs (workers, verifiers, their continuations and
+  them: hansa does not prune it, as other lanes write to the same store at the same time. A run that left HEAD
+  off its branch (a rebase or bisect half done, a detached HEAD, another branch checked out) is cleared the
+  same way: what git keeps of the rebase, bisect, merge or cherry-pick is removed and HEAD put back before
+  the patches are made, and the commits on its branch go in `branch.patch`. A branch or other ref the run
+  made or moved (the refs at its start against those at its end) that holds a commit it made is removed, its
+  changes kept in `other-ref-N.patch`; one it made on a commit already there holds nothing of the run and
+  stays, as another lane may have made it. Command lines of what it left running, written to `events.jsonl` at
+  a ceiling before the stop, are rewritten there to process ids and their count. When clearing fails, the
+  task's record says so in hansa's words only, never git's. hansa's runs (workers, verifiers, their continuations and
   `hansa ping`) never change model when the provider's safety check flags a request: Claude Code's switch to
   another model is off (`switchModelsOnFlag: false`, `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1`), so the
   flagged run ends with an error instead of finishing on another model.
