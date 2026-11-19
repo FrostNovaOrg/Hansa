@@ -2514,7 +2514,7 @@ def explain_text(desk: Desk, what: str = "", name: str = "", whole: bool = False
             "the clear. After any clear the session reads hansa status by itself, and hansa records when; hansa "
             "status says the last clear, and warns when windows passed without one. hansa notify on no longer clears.",
             "  now: " + (", ".join(who) if who else "no session"),
-            *[f"  {x}" for x in up.card_lines(desk, up.read_coordinator(desk))]])
+            *[f"  {x}" for x in [*up.card_lines(desk, up.read_coordinator(desk)), *up.desktop_lines(desk)]]])
     return "\n".join([
         "What you can look up: hansa explain lane <name> | provider <name> | server | notify | history",
         f"lanes: {', '.join(sorted(s['lanes'])) or 'none'} · providers: {', '.join(sorted(s['providers']))}",
