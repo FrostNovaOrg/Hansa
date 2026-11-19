@@ -89,6 +89,8 @@ Codex's command line through [`contrib/codex`](contrib/codex/README.md). One mod
 another check it, and a provider at its usage limit hands its task to the next. The page totals the cost of all of them in one
 place, and `hansa cost --by provider` breaks it down by provider.
 
+See the maintainers' [model suggestions](docs/models.md).
+
 ## What it has done
 
 Hansa is developed with Hansa. These figures come from one desk over the 60 days ending 2 November 2026; yours will differ.
@@ -140,6 +142,7 @@ You do not need to read hansa's code to use it.
 | [Getting started](docs/getting-started.md) | Install, log in, create a desk, reach its page over SSH, finish the first task |
 | [SETUP.md](SETUP.md) | For your Claude Code: say "read SETUP.md and set up Hansa with me" |
 | [Concepts](docs/concepts.md) | Key terms, how work moves, the desk's files, macOS and Linux, limits, commands, upgrading |
+| [Choosing models](docs/models.md) | Suggested models and effort for the coordinator, workers and verifiers |
 | [How a desk is run](docs/principles.md) | The rules for running hansa, what enforces them and what they guard against |
 | [Push services](docs/push-services.md) | Alerts to phones and chats: Bark, ntfy, Telegram, Slack, WeCom, DingTalk, Feishu and more |
 
