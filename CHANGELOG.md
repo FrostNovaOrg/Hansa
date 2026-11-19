@@ -54,6 +54,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
   Workers try changes as their user would and report what a page or command showed before and after.
   They leave alone what the task says to leave.
   Leftover processes are also found by their working folder and stopped before the commit and check.
+- Workers are told to leave pictures of changes people see, at desktop and phone widths and with one per language.
+  Verifiers end their reports by saying what they did not look at.
 - Workers and verifiers have auto memory off, whatever repository settings say; their CLAUDE.md still loads.
 - `hansa add --after T` queues work that starts only after T is merged into its lane's base.
   See [queuing after another task](docs/tasks.md#queuing-after-another-task).
@@ -297,6 +299,8 @@ keeps working; [Codex](docs/codex.md#upgrading) says how to change it.
   Task details show each step, reports, checks and verification. Notes and known gaps are readable.
 - The page shows pictures left by workers and verifiers in the task's details and at its verification step.
   Click a picture to enlarge it. Each of a goal's task chains shows how many pictures it has.
+- The card for a release waiting for your answer names the tasks it sends out that have saved pictures.
+  It shows how many pictures each task has. Click a count to open the pictures.
 - On phones, Status tables scroll sideways inside their own boxes with readable columns; the page itself stays within the screen.
 - Header tabs stay in one scrolling row; at phone width the mark stays visible and the desk name is hidden.
 - The header links to Hansa's repository on GitHub.
