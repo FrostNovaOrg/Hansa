@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
@@ -80,6 +81,39 @@ class DownloadFailed(RuntimeError):
     """Lima could not download the guest's system image: the plain sentence, then Lima's last lines."""
 
 
+class ProvisionFailed(RuntimeError):
+    """provision.sh failed in the guest: the plain sentence(s), then the last lines its step printed."""
+
+
+PROVISION_FAILED = "The guest's installation (contrib/bench/provision.sh) failed"
+# The kernel's own words when it stops a process for lack of memory; nothing else counts as proof.
+OUT_OF_MEMORY = re.compile(r"Out of memory: Kill|oom-kill|invoked oom-killer")
+
+
+def provision_failure(error, lines=20, width=200):
+    """What the coordinator needs from a failed provision.sh: its step, how it ended, its last lines."""
+    step = f"during its step '{error.step}'" if error.step else "before its first step"
+    if isinstance(error, LimaTimeoutExpired):
+        minutes = max(1, round(error.timeout / 60))
+        said = f"{PROVISION_FAILED}: it ran out of time after {minutes} minute{'s' * (minutes != 1)} {step}."
+    else:
+        said = f"{PROVISION_FAILED} with status {error.returncode} {step}."
+    text = error.tail.splitlines()
+    marker = "step: " + error.step if error.step else None
+    starts = [i for i, line in enumerate(text) if marker and line.strip() == marker]
+    if starts:
+        text = text[starts[-1] + 1:]
+    elif marker:
+        text = text[1:]  # The marker fell out of the memory tail: its first line may be cut.
+    if (isinstance(error, LimaCalledProcessError) and error.returncode in (137, -9)
+            and OUT_OF_MEMORY.search("\n".join(text))):
+        said += " The guest ran out of memory: its kernel's out-of-memory line is in what the step printed."
+    shown = [line.strip()[:width] for line in text if line.strip()][-lines:]
+    if not shown:
+        return said + " That step printed nothing."
+    return said + f" The last {len(shown)} line{'s' * (len(shown) != 1)} that step printed:\n" + "\n".join(shown)
+
+
 def _short(stderr, lines=3, width=200):
     text = stderr.decode("utf-8", errors="replace").splitlines()
     return "\n".join(line.strip()[:width] for line in [l for l in text if l.strip()][-lines:])
@@ -117,7 +151,10 @@ def build(machine, deadline, desk):
                 archive.add(path, arcname=path.name, recursive=False)
         stream.seek(0)
         machine._call(admin + ["tar", "-xf", "-", "-C", bundle], deadline, stdin=stream)
-    machine._call(admin + ["sh", bundle + "/provision.sh"], deadline)
+    try:
+        machine._call(admin + ["sh", bundle + "/provision.sh"], deadline, merged=True)
+    except (LimaCalledProcessError, LimaTimeoutExpired) as error:
+        raise ProvisionFailed(provision_failure(error)) from error
     key = machine._call(admin + ["cat", "/etc/ssh/ssh_host_ed25519_key.pub"], deadline,
                         stdout=subprocess.PIPE).stdout.decode().split()
     machine.pin(" ".join(key[:2]))
@@ -153,7 +190,7 @@ def command(a):
                         bench["build"] = "ready"
                     except BaseException as error:
                         bench.update(build="failed", failure=desk.redact(
-                            str(error) if isinstance(error, DownloadFailed) else f"{type(error).__name__}: {error}"))
+                            str(error) if isinstance(error, (DownloadFailed, ProvisionFailed)) else f"{type(error).__name__}: {error}"))
                         if machine is not None:
                             try:
                                 machine.stop(machine.clock() + 30)
@@ -199,12 +236,16 @@ def command(a):
         problem = ""
         if action == "status" and not getattr(a, "json", False) and bench["enabled"]:
             problem = acceptance_problem(bench)
-        shown = ""
-        if (action == "status" and not getattr(a, "json", False) and bench["build"] == "failed"
-                and bench["failure"].startswith(image.DOWNLOAD_FAILED)):
-            shown = " " + image.DOWNLOAD_FAILED
+        shown, after = "", ""
+        if action == "status" and not getattr(a, "json", False) and bench["build"] == "failed":
+            if bench["failure"].startswith(image.DOWNLOAD_FAILED):
+                shown = " " + image.DOWNLOAD_FAILED
+            elif bench["failure"].startswith(PROVISION_FAILED):
+                # The sentences first, the step's last lines below the record, as rebuild printed them.
+                said, _, lines = bench["failure"].split("; stop: ")[0].partition("\n")
+                shown, after = " " + said, ("\n" + lines if lines else "")
         print(json.dumps(bench, sort_keys=True) if getattr(a, "json", False) else
               "bench: " + ("on" if bench["enabled"] else "off") +
-              (", not in use: " + problem if problem else "") + ";" + shown + " " + json.dumps(bench, sort_keys=True))
+              (", not in use: " + problem if problem else "") + ";" + shown + " " + json.dumps(bench, sort_keys=True) + after)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         raise SystemExit("hansa bench: " + desk.redact(str(error))) from None

@@ -73,6 +73,16 @@ The downloaded system image is kept between rebuilds in the desk's `.hansa/bench
 the recipe's digest; a file that does not match is removed and downloaded again. With no kept
 image, a matching copy in the account's own Lima cache is copied in instead of a download.
 A failed download says so in one sentence: run `hansa bench rebuild` again.
+
+When the guest's installation (`contrib/bench/provision.sh`) fails, `hansa bench rebuild`
+and `hansa bench status` say so in one sentence: whether it exited with a status or ran out
+of hansa's time (in minutes), and which of its steps was running. provision.sh prints a plain
+marker before each step (`step: update package lists`, `step: install packages (chromium,
+fonts and tools)`, `step: make the slots disk`, ...). Below that sentence come the last 20
+lines that step printed, stdout and stderr together, each cut to 200 characters, with stored
+keys replaced. A run killed with status 137 says the guest ran out of memory only when the
+kernel's own out-of-memory line is among what the step printed; otherwise it gives no reason.
+The output is held in memory only; the build's record keeps the sentence and those lines.
 `/work`, `/out`, `/tmp` and `/dev/shm` share a 4 GiB disk limit, including the
 snapshot and filesystem overhead. Further writes fail with "No space left on device".
 A separate fixed-size ext4 image bounds peak disk growth while leaving the VM root

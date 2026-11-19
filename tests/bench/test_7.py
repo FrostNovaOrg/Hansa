@@ -242,7 +242,8 @@ class BenchManagementTest(unittest.TestCase):
         bench = self.desk.settings()["bench"]
         self.assertEqual((bench["enabled"], bench["generation"], bench["build"], bench["acceptance"]),
                          (False, 1, "failed", None))
-        self.assertIn("CalledProcessError", bench["failure"])
+        self.assertTrue(bench["failure"].startswith("The guest's installation (contrib/bench/provision.sh) failed "
+                                                    "with status 1 before its first step."), bench["failure"])
         self.assertEqual(self.status, "Stopped")
         history = (self.desk.state_dir / "settings-history.jsonl").read_text()
         self.assertIn('"bench.build"', history)
@@ -432,6 +433,101 @@ class BenchManagementTest(unittest.TestCase):
         self.assertNotIn("could not be downloaded", str(caught.exception))
         self.assertNotIn("could not be downloaded", self.command("status"))
         self.assertEqual(self.kept(), {self.kept_name(): self.image})  # downloaded before provisioning failed
+
+    # provision.sh failing in the guest: which step, how it ended, and the last lines that step printed.
+
+    def provisioning_fails(self, printed, error):
+        key = "fixture-secret-" + "k" * 15
+        self.desk.secrets_dir.mkdir(exist_ok=True)
+        self.desk.key_file("fixture").write_text(key)
+        run = self.run_command
+        def provision(command, **options):
+            if command[-1].endswith("/provision.sh"):
+                self.assertIs(options["stdout"], options["stderr"])  # stdout and stderr together, in order
+                options["stdout"].write(printed.replace("KEY", key).encode())
+                raise error(command)
+            return run(command, **options)
+        with patch.object(self, "run_command", side_effect=provision), self.assertRaises(SystemExit) as caught:
+            self.command("rebuild")
+        shown = str(caught.exception)
+        failure = self.desk.settings()["bench"]["failure"]
+        status = self.command("status")
+        for text in (shown, failure, status, (self.desk.state_dir / "settings-history.jsonl").read_text()):
+            self.assertNotIn(key[-15:], text)
+        self.assertEqual(self.desk.settings()["bench"]["build"], "failed")
+        return shown, failure, status
+
+    APT = ("step: check the bundle\nstep: update package lists\nHit:1 http://deb.debian.org/debian trixie InRelease\n"
+           "step: install packages (chromium, fonts and tools)\n" +
+           "".join(f"Get:{i} http://deb.debian.org/debian trixie/main chromium-common {'x' * 300}\n" for i in range(40)) +
+           "token KEY in a line\nE: Failed to fetch chromium_131.deb  Connection timed out\n")
+
+    def check_lines(self, text, last):
+        said, lines = text.split("\n", 1)[0], text.split("\n")[1:]
+        self.assertIn("during its step 'install packages (chromium, fonts and tools)'", said)
+        self.assertIn("The last 20 lines that step printed:", said)
+        self.assertEqual(len(lines), 20, text)
+        self.assertTrue(all(len(line) <= 200 for line in lines), text)
+        self.assertIn("[key of fixture]", lines[-2])
+        self.assertEqual(lines[-1], last)
+        self.assertFalse(any("step:" in line or "Hit:1" in line for line in lines))
+
+    def test_provisioning_failure_names_step_status_and_last_lines(self):
+        shown, failure, status = self.provisioning_fails(self.APT, lambda c: subprocess.CalledProcessError(100, c))
+        self.assertTrue(shown.startswith("hansa bench: The guest's installation (contrib/bench/provision.sh) "
+                                         "failed with status 100 during its step"), shown)
+        self.check_lines(shown.removeprefix("hansa bench: "), "E: Failed to fetch chromium_131.deb  Connection timed out")
+        self.check_lines(failure, "E: Failed to fetch chromium_131.deb  Connection timed out")
+        self.assertNotIn("memory", failure)
+        first, *lines = status.rstrip("\n").split("\n")
+        self.assertTrue(first.startswith("bench: off; The guest's installation (contrib/bench/provision.sh) failed "
+                                         "with status 100 during its step 'install packages"), status)
+        self.assertEqual(lines, failure.split("\n")[1:])
+        self.assertNotIn("installation", self.command("status", "--json").split('"failure"')[0])
+
+    def test_provisioning_timeout_says_it_ran_out_of_time(self):
+        shown, failure, status = self.provisioning_fails(
+            self.APT, lambda c: subprocess.TimeoutExpired(c, 899.99))
+        for text in (shown.removeprefix("hansa bench: "), failure):
+            self.assertTrue(text.startswith("The guest's installation (contrib/bench/provision.sh) failed: it ran out "
+                                            "of time after 15 minutes during its step 'install packages"), text)
+            self.check_lines(text, "E: Failed to fetch chromium_131.deb  Connection timed out")
+        self.assertIn("ran out of time after 15 minutes", status.split("\n")[0])
+
+    def test_provisioning_killed_names_memory_only_from_the_kernels_line(self):
+        oom = "[  181.2] Out of memory: Killed process 2211 (apt-get) total-vm:912000kB"
+        shown, failure, status = self.provisioning_fails(
+            self.APT + oom + "\nKilled\n", lambda c: subprocess.CalledProcessError(137, c))
+        said = failure.split("\n")[0]
+        self.assertIn("with status 137 during its step 'install packages", said)
+        self.assertIn("The guest ran out of memory", said)
+        self.assertIn("The guest ran out of memory", status.split("\n")[0])
+        self.assertEqual(failure.split("\n")[-2:], [oom, "Killed"])
+        shown, failure, status = self.provisioning_fails(self.APT + "Killed\n",
+                                                         lambda c: subprocess.CalledProcessError(137, c))
+        self.assertIn("with status 137 during its step 'install packages", failure)
+        self.assertNotIn("memory", failure + shown + status)  # killed, reason unknown: no guess
+
+    def test_provisioning_step_known_after_its_marker_leaves_the_memory_tail(self):
+        flood = "step: make the slots disk\n" + "".join(f"mke2fs line {i} " + "y" * 100 + "\n" for i in range(1000))
+        _, failure, _ = self.provisioning_fails(flood + "mkfs.ext4: No space left\n",
+                                                lambda c: subprocess.CalledProcessError(1, c))
+        self.assertIn("with status 1 during its step 'make the slots disk'.", failure)
+        self.assertEqual(failure.split("\n")[-1], "mkfs.ext4: No space left")
+        self.assertEqual(len(failure.split("\n")), 21)
+
+    def test_provisioning_that_passes_is_as_before(self):
+        self.command("rebuild")
+        self.assertEqual(self.desk.settings()["bench"]["build"], "ready")
+        self.assertNotIn("installation", self.command("status"))
+
+    def test_provision_marks_each_step_plainly(self):
+        from hansa.bench.manage import RECIPE
+        steps = [l for l in (RECIPE / "provision.sh").read_text().splitlines() if l.startswith("echo 'step: ")]
+        self.assertIn("echo 'step: update package lists'", steps)
+        self.assertIn("echo 'step: install packages (chromium, fonts and tools)'", steps)
+        self.assertIn("echo 'step: make the slots disk'", steps)
+        self.assertTrue(all(len(l) < 80 for l in steps))
 
     def test_new_recipe_image_replaces_the_old_once_in_place(self):
         self.command("build")
